@@ -44,6 +44,7 @@ from skyrl_gym.metrics import aggregate_for_environment
 
 
 BATCH_ERROR_METRIC_PREFIX = "generate/errors/"
+ROUTE_COVERAGE_METRIC_PREFIX = "nemotron_ultra/coverage/"
 _NUM_TRIALS_METRIC = "generate/num_trials"
 _NUM_FAILED_INSTANCES_METRIC = "generate/num_failed_instances"
 _NUM_FAILED_TRAJECTORIES_METRIC = "generate/num_failed_trajectories"
@@ -995,7 +996,9 @@ def concatenate_trajectory_batches(
     # the per-group counters have to be carried across or the archives are written unobserved.
     for output in trajectory_batches:
         for name, value in (output.get("rollout_metrics") or {}).items():
-            if name.startswith((RETENTION_METRIC_PREFIX, IDENTITY_AWARE_REWARD_METRIC_PREFIX)) or name in {
+            if name.startswith(
+                (RETENTION_METRIC_PREFIX, IDENTITY_AWARE_REWARD_METRIC_PREFIX, ROUTE_COVERAGE_METRIC_PREFIX)
+            ) or name in {
                 LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
                 LITERAL_BRIDGE_CORRELATED_TURNS_METRIC,
             }:

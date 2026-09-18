@@ -19,7 +19,14 @@ class _Instrument:
 class _Status:
     configured: bool = False
     queued_records: int = 0
+    queued_bytes: int = 0
     lost_records: int = 0
+    export_attempts: int = 0
+    export_failures: int = 0
+    export_retries: int = 0
+    rejected_records: int = 0
+    last_success_time_seconds: float | None = None
+    oldest_queued_record_age_seconds: float | None = None
 
 
 _instrument = _Instrument()
@@ -48,6 +55,10 @@ def event(name: str, fields: Mapping[str, object], *, attributes: Mapping[str, s
 
 def runtime_status() -> _Status:
     return _status
+
+
+def record_runtime_health() -> None:
+    pass
 
 
 def shutdown(timeout: float = 5.0) -> None:

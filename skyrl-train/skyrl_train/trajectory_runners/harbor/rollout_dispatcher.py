@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import time
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from typing import Any, List, Optional
@@ -23,6 +24,10 @@ from skyrl_train.trajectory_runners.base import (
     propagate_teacher_routes,
 )
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec, ProcessPoolResources
+from skyrl_train.trajectory_runners.harbor.observability import (
+    record_dispatch_group,
+    record_dispatcher_heartbeat,
+)
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
 from skyrl_train.tokenizer import create_tokenizer
@@ -142,6 +147,10 @@ class RolloutCoordinator:
         executor_workers: int,
     ):
         configure_worker_process()
+        from skyrl_train.telemetry import HARBOR_COORDINATOR_ROLE, process_telemetry
+
+        self._process_telemetry = process_telemetry(HARBOR_COORDINATOR_ROLE)
+        self._process_telemetry.__enter__()
         # Each actor process gets its own FD monitor (per-process daemon thread),
         # mirroring the entrypoint behavior.
         try:
@@ -197,8 +206,17 @@ class RolloutCoordinator:
         _log().info(f"[RolloutCoordinator {self._shard_idx}] startup complete")
 
     async def shutdown(self) -> None:
-        await self._runner.shutdown()
-        _log().info(f"[RolloutCoordinator {self._shard_idx}] shutdown complete")
+        try:
+            await self._runner.shutdown()
+            _log().info(f"[RolloutCoordinator {self._shard_idx}] shutdown complete")
+        except BaseException as error:
+            self._process_telemetry.__exit__(type(error), error, error.__traceback__)
+            self._process_telemetry = None
+            raise
+        finally:
+            if self._process_telemetry is not None:
+                self._process_telemetry.__exit__(None, None, None)
+                self._process_telemetry = None
 
     async def run_shard(self, sub_batch: TrajectoryRequestBatch, global_step: Optional[int]) -> TrajectoryBatch:
         """Run one group's generation locally and return the TrajectoryBatch.
@@ -282,6 +300,7 @@ class RolloutDispatcher:
         # Eval reserves shard 0. Training continues on the other shards while
         # evaluation uses shard 0's dedicated orchestrator.
         self._eval_session_active = False
+        self._heartbeat_task: asyncio.Task | None = None
 
         _log().info(
             f"[RolloutDispatcher] configured num_coordinators={self._num_coordinators}, "
@@ -362,6 +381,13 @@ class RolloutDispatcher:
                 await asyncio.sleep(2)
 
         _log().info(f"[RolloutDispatcher] {self._num_coordinators} coordinators started")
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            await asyncio.sleep(30)
+            loop = asyncio.get_running_loop()
+            record_dispatcher_heartbeat(self._actor_pending_rpcs, self._actor_last_progress, loop.time())
 
     def set_trajectory_sink(self, sink: TrajectorySink) -> None:
         """Attach the trainer-owned sink used to retain each returned batch.
@@ -416,6 +442,8 @@ class RolloutDispatcher:
         return result
 
     async def _run_group(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
+        started = time.perf_counter()
+        outcome = "failure"
         metadata = input_batch.get("batch_metadata")
         training_phase = metadata.training_phase if metadata is not None else "train"
         async with self._routing_condition:
@@ -465,13 +493,26 @@ class RolloutDispatcher:
                         f"{self._coordinator_rpc_timeout:g} seconds"
                     ) from error
                 self._actor_last_progress[coordinator_index] = loop.time()
+                outcome = "success"
                 return output
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except RolloutCoordinatorRPCTimeoutError:
+            outcome = "timeout"
+            raise
         finally:
             async with self._routing_condition:
                 self._actor_pending_rpcs[coordinator_index] -= 1
                 if self._actor_pending_rpcs[coordinator_index] == 0:
                     self._actor_last_progress[coordinator_index] = None
                 self._routing_condition.notify_all()
+            record_dispatch_group(time.perf_counter() - started, outcome)
+            record_dispatcher_heartbeat(
+                self._actor_pending_rpcs,
+                self._actor_last_progress,
+                asyncio.get_running_loop().time(),
+            )
 
     @staticmethod
     def _select_request_rows(input_batch: TrajectoryRequestBatch, indices: list[int]) -> TrajectoryRequestBatch:
@@ -505,6 +546,10 @@ class RolloutDispatcher:
                 output[key] = [values[index] for index in order]  # type: ignore[literal-required]
 
     async def shutdown(self) -> None:
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
+            await asyncio.gather(self._heartbeat_task, return_exceptions=True)
+            self._heartbeat_task = None
         if self._actors:
             try:
                 await asyncio.gather(*[a.shutdown.remote() for a in self._actors], return_exceptions=True)

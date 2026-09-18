@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from typing import Any
 
 from loguru import logger
@@ -45,6 +46,19 @@ def grade_genrm_group(
     judge: OpenAIJudge,
     config: dict[str, Any],
 ) -> tuple[list[float], dict[str, float]]:
+    cohort_started = time.perf_counter()
+    observer = getattr(judge, "observer", None)
+    fallback_count = 0
+    fallback_lock = Lock()
+
+    def observe(method: str, **kwargs: Any) -> None:
+        if observer is None:
+            return
+        try:
+            getattr(observer, method)(**kwargs)
+        except Exception:
+            logger.warning("GenRM telemetry observer failed", exc_info=True)
+
     default_score = float(config.get("default_score", 3.0))
     default_ranking = float(config.get("default_ranking", 3.5))
     pairs = generate_comparison_pairs("circular", len(response_objects))
@@ -53,6 +67,7 @@ def grade_genrm_group(
         raise ValueError("max_concurrent_comparisons must be at least 1")
 
     def compare(pair: tuple[int, int]) -> tuple[float, float, float]:
+        nonlocal fallback_count
         first, second = pair
         metadata = {
             "response_1": extract_output_text(response_objects[first]),
@@ -61,6 +76,7 @@ def grade_genrm_group(
         }
         attempts = int(config.get("genrm_parse_retries", 1)) + 1
         for attempt in range(attempts):
+            output: str | None = None
             try:
                 output = judge.generate_response(
                     conversation_history,
@@ -72,12 +88,36 @@ def grade_genrm_group(
                 return parse_genrm_output(output, default_score, default_ranking, raise_on_fail=True)
             except Exception as error:
                 logger.warning("GenRM comparison attempt {} failed: {}", attempt + 1, error)
+                outcome = "parse_retry" if output is not None else "comparison_retry"
                 if attempt + 1 < attempts:
+                    observe("parse", outcome=outcome, attempt=attempt + 1)
                     time.sleep(float(config.get("genrm_parse_retry_sleep_seconds", 0.2)))
+                else:
+                    outcome = "parse_fallback" if output is not None else "comparison_fallback"
+                    observe("parse", outcome=outcome, attempt=attempt + 1)
+                    with fallback_lock:
+                        fallback_count += 1
         return default_score, default_score, default_ranking
 
+    def compare_observed(pair: tuple[int, int], submitted_at: float) -> tuple[float, float, float]:
+        started = time.perf_counter()
+        outcome = "success"
+        try:
+            return compare(pair)
+        except BaseException:
+            outcome = "failure"
+            raise
+        finally:
+            observe(
+                "executor",
+                queue_seconds=started - submitted_at,
+                duration_seconds=time.perf_counter() - started,
+                outcome=outcome,
+            )
+
     with ThreadPoolExecutor(max_workers=min(max_workers, len(pairs))) as executor:
-        comparisons = list(executor.map(compare, pairs))
+        futures = [executor.submit(compare_observed, pair, time.perf_counter()) for pair in pairs]
+        comparisons = [future.result() for future in futures]
     metadata = [(first, second, 0) for first, second in pairs]
     rewards, metrics, _, _ = aggregate_scores(
         comparison_results=comparisons,
@@ -90,5 +130,10 @@ def grade_genrm_group(
         top_percentile=float(config.get("top_percentile", 0.2)),
         group_reasoning_length_penalty_coeff=float(config.get("group_reasoning_length_penalty_coeff", 0.1)),
         group_answer_length_penalty_coeff=float(config["group_answer_length_penalty_coeff"]),
+    )
+    observe(
+        "cohort",
+        duration_seconds=time.perf_counter() - cohort_started,
+        outcome="defaulted" if fallback_count else "success",
     )
     return rewards, metrics

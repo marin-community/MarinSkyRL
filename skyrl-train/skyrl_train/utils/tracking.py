@@ -25,6 +25,7 @@ from omegaconf import DictConfig, OmegaConf
 import pprint
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+from skyrl_train.telemetry import record_tracker_metrics
 
 
 @ray.remote
@@ -178,6 +179,9 @@ class Tracking:
             logger.warning("Ray is not initialized, skipping distributed wandb logging")
 
     def log(self, data, step, commit=False):
+        # Rigging owns the bounded Finelog exporter lifecycle. Forward the same
+        # finite numeric values as the user-selected tracker backends.
+        record_tracker_metrics(data, step)
         for logger_name, logger_instance in self.logger.items():
             if logger_name == "wandb":
                 logger_instance.log(data=data, step=step, commit=commit)

@@ -1,8 +1,14 @@
+import asyncio
 import contextlib
+import functools
+import math
+import numbers
 import os
 import socket
+import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections import defaultdict
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -26,6 +32,7 @@ DRIVER_ROLE = "driver"
 TRAINER_ROLE = "trainer"
 CONTROLLER_ROLE = "controller"
 WORKER_ROLE = "worker"
+HARBOR_COORDINATOR_ROLE = "harbor_coordinator"
 SHUTDOWN_TIMEOUT_SECONDS = 2.0
 
 
@@ -41,6 +48,24 @@ policy_step = telemetry.gauge("policy_step", unit="{step}")
 rollout_queue_depth = telemetry.gauge("rollout_queue_depth", unit="{item}")
 rollout_capacity = telemetry.gauge("rollout_capacity", unit="{item}")
 rollout_staleness = telemetry.histogram("rollout_staleness_steps", unit="{step}")
+tracker_metric = telemetry.gauge("tracker_metric", unit="1")
+generation_group_duration = telemetry.histogram("generation_group_duration_seconds", unit="s")
+generation_groups = telemetry.counter("generation_groups", unit="{group}")
+generation_active_groups = telemetry.gauge("generation_active_groups", unit="{group}")
+admission_groups = telemetry.counter("admission_groups", unit="{group}")
+executor_queue_delay = telemetry.histogram("executor_queue_delay_seconds", unit="s")
+executor_duration = telemetry.histogram("executor_duration_seconds", unit="s")
+executor_work = telemetry.gauge("executor_work", unit="{item}")
+executor_cancellations = telemetry.counter("executor_cancellations", unit="{item}")
+judge_request_duration = telemetry.histogram("judge_request_duration_seconds", unit="s")
+judge_requests = telemetry.counter("judge_requests", unit="{request}")
+judge_parse_events = telemetry.counter("judge_parse_events", unit="{event}")
+judge_cohort_duration = telemetry.histogram("judge_cohort_duration_seconds", unit="s")
+telemetry_smoke = telemetry.gauge("telemetry_smoke", unit="1")
+
+_generation_active: defaultdict[str, int] = defaultdict(int)
+_executor_counts: defaultdict[str, dict[str, int]] = defaultdict(lambda: {"queued": 0, "active": 0})
+_executor_lock = threading.Lock()
 
 
 class _BackgroundCollector(Protocol):
@@ -262,6 +287,165 @@ def record_rollout_buffer(depth: int, queue_capacity: int) -> None:
     rollout_capacity.set(queue_capacity, attributes=attributes)
 
 
+def record_tracker_metrics(data: Mapping[str, object], step: int) -> int:
+    """Forward finite numeric trainer metrics into the process Finelog stream."""
+    emitted = 0
+    for name, raw_value in data.items():
+        if isinstance(raw_value, bool) or not isinstance(raw_value, numbers.Real):
+            continue
+        value = float(raw_value)
+        if not math.isfinite(value):
+            continue
+        tracker_metric.set(value, attributes={"metric": str(name), "step": str(step), "role": TRAINER_ROLE})
+        emitted += 1
+    if emitted:
+        record_telemetry_health()
+    return emitted
+
+
+def generation_route(env_extras: Sequence[Mapping[str, object]] | None) -> str:
+    """Classify a generation group without placing row identities in metric labels."""
+    routes: set[str] = set()
+    for extras in env_extras or ():
+        extra_info = extras.get("extra_info")
+        ultra = extra_info.get("nemotron_ultra") if isinstance(extra_info, Mapping) else None
+        route = ultra.get("route") if isinstance(ultra, Mapping) else None
+        routes.add("harbor" if route == "terminal_bench" else "gym")
+    if not routes:
+        return "unknown"
+    return next(iter(routes)) if len(routes) == 1 else "mixed"
+
+
+@contextlib.contextmanager
+def generation_group(route: str) -> Iterator[None]:
+    started = time.perf_counter()
+    outcome = "success"
+    _generation_active[route] += 1
+    generation_active_groups.set(_generation_active[route], attributes={"route": route})
+    try:
+        yield
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    except BaseException:
+        outcome = "failure"
+        raise
+    finally:
+        _generation_active[route] -= 1
+        generation_active_groups.set(_generation_active[route], attributes={"route": route})
+        attributes = {"route": route, "outcome": outcome}
+        generation_groups.add(1, attributes=attributes)
+        generation_group_duration.record(time.perf_counter() - started, attributes=attributes)
+
+
+def record_admission(
+    *,
+    inspected: int,
+    admitted: int,
+    retried: int,
+    discarded: int,
+    reasons: Mapping[str, int],
+) -> None:
+    for outcome, count in (
+        ("inspected", inspected),
+        ("admitted", admitted),
+        ("retried", retried),
+        ("discarded", discarded),
+    ):
+        if count:
+            admission_groups.add(count, attributes={"outcome": outcome, "reason": "none"})
+    for reason, count in reasons.items():
+        if count:
+            admission_groups.add(count, attributes={"outcome": "rejected", "reason": str(reason)})
+
+
+def _publish_executor_counts(work_kind: str) -> None:
+    counts = _executor_counts[work_kind]
+    for state in ("queued", "active"):
+        executor_work.set(counts[state], attributes={"work_kind": work_kind, "state": state})
+
+
+async def run_in_executor_observed(
+    executor,
+    work_kind: str,
+    func: Callable,
+    /,
+    *args,
+    **kwargs,
+):
+    """Run synchronous work while separating pool queue delay from execution time."""
+    submitted = time.perf_counter()
+    with _executor_lock:
+        _executor_counts[work_kind]["queued"] += 1
+        _publish_executor_counts(work_kind)
+
+    def invoke():
+        started = time.perf_counter()
+        with _executor_lock:
+            _executor_counts[work_kind]["queued"] -= 1
+            _executor_counts[work_kind]["active"] += 1
+            _publish_executor_counts(work_kind)
+        executor_queue_delay.record(started - submitted, attributes={"work_kind": work_kind})
+        outcome = "success"
+        try:
+            return func(*args, **kwargs)
+        except BaseException:
+            outcome = "failure"
+            raise
+        finally:
+            executor_duration.record(
+                time.perf_counter() - started,
+                attributes={"work_kind": work_kind, "outcome": outcome},
+            )
+            with _executor_lock:
+                _executor_counts[work_kind]["active"] -= 1
+                _publish_executor_counts(work_kind)
+
+    future = asyncio.get_running_loop().run_in_executor(executor, functools.partial(invoke))
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        executor_cancellations.add(1, attributes={"work_kind": work_kind})
+        raise
+
+
+class JudgeTelemetryObserver:
+    """Duck-typed observer injected into the dependency-light skyrl-gym judge."""
+
+    def request(self, *, duration_seconds: float, status: str, attempt: int, will_retry: bool) -> None:
+        attributes = {
+            "status": status,
+            "attempt": str(attempt),
+            "will_retry": str(will_retry).lower(),
+            "subsystem": "judge",
+        }
+        judge_request_duration.record(duration_seconds, attributes=attributes)
+        judge_requests.add(1, attributes=attributes)
+
+    def parse(self, *, outcome: str, attempt: int) -> None:
+        judge_parse_events.add(
+            1,
+            attributes={"outcome": outcome, "attempt": str(attempt), "subsystem": "judge"},
+        )
+
+    def cohort(self, *, duration_seconds: float, outcome: str) -> None:
+        judge_cohort_duration.record(
+            duration_seconds,
+            attributes={"outcome": outcome, "subsystem": "judge"},
+        )
+
+    def executor(self, *, queue_seconds: float, duration_seconds: float, outcome: str) -> None:
+        attributes = {"work_kind": "judge", "subsystem": "judge"}
+        executor_queue_delay.record(queue_seconds, attributes=attributes)
+        executor_duration.record(duration_seconds, attributes={**attributes, "outcome": outcome})
+
+
+def record_telemetry_health() -> None:
+    record = getattr(telemetry, "record_runtime_health", None)
+    if record is not None:
+        record()
+
+
 class ProcessTelemetry:
     def __init__(self, config: TelemetryConfig, role: str) -> None:
         self._config = config
@@ -285,6 +469,8 @@ class ProcessTelemetry:
         self._configured = telemetry.runtime_status().configured
         if self._configured:
             telemetry.event("lifecycle", {"state": "started"}, attributes={"role": self._role})
+            telemetry_smoke.set(1, attributes={"role": self._role, "state": "started"})
+            record_telemetry_health()
         return self
 
     def collector_or_inert(self, collector: _BackgroundCollector) -> _BackgroundCollector:
@@ -293,6 +479,7 @@ class ProcessTelemetry:
     def __exit__(self, exc_type, exc, traceback) -> bool:
         del exc, traceback
         if self._configured:
+            record_telemetry_health()
             export = telemetry.runtime_status()
             telemetry.event(
                 "terminal",

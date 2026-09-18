@@ -7,7 +7,6 @@ For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_runn
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import json
 from dataclasses import dataclass
@@ -50,6 +49,7 @@ from skyrl_train.trajectory_runners.projections import (
     TrajectoryProjection,
     WholeTrajectoryProjection,
 )
+from skyrl_train.telemetry import JudgeTelemetryObserver, run_in_executor_observed
 
 
 class WholeTrajectoryCollector:
@@ -206,7 +206,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         ultra_config = skyrl_gym_cfg.get("nemotron_ultra", {})
         self.genrm_config = dict(ultra_config.get("genrm", {}))
         genrm_judge = self.genrm_config.get("judge")
-        self.genrm_judge = OpenAIJudge(**dict(genrm_judge)) if genrm_judge is not None else None
+        self.genrm_judge = (
+            OpenAIJudge(**dict(genrm_judge), observer=JudgeTelemetryObserver()) if genrm_judge is not None else None
+        )
 
     def _validate_cfg(self, trajectory_runner_cfg: DictConfig):
         if len(trajectory_runner_cfg.chat_template_kwargs) and trajectory_runner_cfg.batched:
@@ -260,8 +262,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
     async def _run_in_executor_if_available(self, func, *args, **kwargs):
         if (executor := self.env_executor) is not None:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(executor, func, *args, **kwargs)
+            return await run_in_executor_observed(executor, "environment", func, *args, **kwargs)
         else:
             return func(*args, **kwargs)
 
@@ -950,7 +951,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     {},
                 )
                 response_objects.append(response_object(assistant_message, outputs[index].evidence.response or ""))
-            rewards, metrics = await asyncio.to_thread(
+            rewards, metrics = await run_in_executor_observed(
+                None,
+                "judge_cohort",
                 grade_genrm_group,
                 conversation_history=input_batch["prompts"][indices[0]],
                 response_objects=response_objects,

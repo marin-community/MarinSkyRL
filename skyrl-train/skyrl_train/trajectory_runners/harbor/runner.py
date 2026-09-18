@@ -83,6 +83,7 @@ from skyrl_train.trajectory_runners.harbor.identity_aware_reward import (
     IDENTITY_AWARE_SHAPER,
     identity_aware_pass_ratios,
 )
+from skyrl_train.trajectory_runners.harbor.observability import HarborLifecycleObserver, record_harbor_group
 from skyrl_train.trajectory_runners.harbor.truncation_penalty import apply_truncation_penalty, detect_turn_truncation
 
 # Incremental, trial-indexed reader for the shared CLI-agent literal log.
@@ -597,6 +598,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # to keep memory flat; long-tail trials past the window fall back to the
         # earliest retained step (conservative — biases staleness slightly higher).
         self._step_time_history: Deque[Tuple[int, float]] = deque(maxlen=512)
+        self._lifecycle_observer = HarborLifecycleObserver()
 
     def _record_step_time(self) -> None:
         """Append (global_step, now) to the step-time history if the step has advanced."""
@@ -660,6 +662,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         Called once by the trainer before the first run() call.
         """
         self._orchestrator_lock = asyncio.Lock()
+        self._lifecycle_observer.start()
         await self._create_orchestrator()
         logger.info(
             f"HarborTrajectoryRunner startup complete. "
@@ -701,6 +704,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             preserve_partial_logprobs=False,
         )
         self._orchestrator.add_hook(OrchestratorEvent.TRIAL_COMPLETED, rollback_hook)
+        self._register_observability_hooks(self._orchestrator)
 
         await self._orchestrator.start()
         self._orchestrator_started = True
@@ -709,6 +713,21 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             f"n_concurrent_trials={self._n_concurrent_trials}, "
             f"rollback_hook registered for ContextLengthExceededError/AgentTimeoutError"
         )
+
+    def _register_observability_hooks(self, orchestrator: QueueOrchestrator) -> None:
+        for event_name in (
+            "START",
+            "ENVIRONMENT_START",
+            "AGENT_START",
+            "VERIFICATION_START",
+            "VERIFICATION_END",
+            "RESULT_PERSISTENCE_START",
+            "END",
+            "CANCEL",
+        ):
+            event = getattr(OrchestratorEvent, event_name, None)
+            if event is not None:
+                orchestrator.add_hook(event, self._lifecycle_observer)
 
     async def _restart_orchestrator(self) -> bool:
         """Restart the orchestrator after a failure.
@@ -764,6 +783,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         """
         if self._orchestrator_lock is None:
             # startup() was never called
+            await self._lifecycle_observer.stop()
             self._packed_task_materializer.close()
             return
 
@@ -782,6 +802,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                     logger.warning(f"Error during orchestrator shutdown: {e}")
                 finally:
                     self._orchestrator = None
+        await self._lifecycle_observer.stop()
         self._packed_task_materializer.close()
 
     async def start_eval_session(
@@ -867,6 +888,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 preserve_partial_logprobs=False,
             )
             self._eval_orchestrator.add_hook(OrchestratorEvent.TRIAL_COMPLETED, rollback_hook)
+            self._register_observability_hooks(self._eval_orchestrator)
 
             await self._eval_orchestrator.start()
             self._eval_session_active = True
@@ -1057,6 +1079,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         results: List[TrialResult | Exception] = []
         try:
             # Submit all trials and collect futures
+            self._lifecycle_observer.register_submitted(len(trial_configs))
             futures = await active_orchestrator.submit_batch(trial_configs)
 
             # Wait for all trials to complete
@@ -1065,6 +1088,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             results = await asyncio.gather(*futures, return_exceptions=True)
 
         except Exception as orchestrator_error:
+            self._lifecycle_observer.discard_submitted(len(trial_configs))
             # Orchestrator-level failure (not individual trial failures)
             # This indicates something is wrong with the orchestrator itself
             logger.error(
@@ -1091,15 +1115,19 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             try:
                 logger.info(f"Retrying batch of {num_trials} trials with restarted orchestrator")
                 active_orchestrator = self._get_active_orchestrator()  # Refresh reference
+                self._lifecycle_observer.register_submitted(len(trial_configs))
                 futures = await active_orchestrator.submit_batch(trial_configs)
                 results = await asyncio.gather(*futures, return_exceptions=True)
             except Exception as retry_error:
+                self._lifecycle_observer.discard_submitted(len(trial_configs))
                 logger.error(
                     f"Retry after orchestrator restart also failed: {type(retry_error).__name__}: {retry_error}"
                 )
                 return self._create_all_failed_output(
                     trajectory_ids, f"OrchestratorRetryFailure_{type(retry_error).__name__}"
                 )
+
+        record_harbor_group(results)
 
         # Process results into TerminalBenchAgentOutput
         all_outputs: List[TerminalBenchAgentOutput] = []

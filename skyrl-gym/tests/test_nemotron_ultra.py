@@ -217,6 +217,95 @@ def test_judge_retries_transient_service_failure(monkeypatch):
     assert delays == [1.0]
 
 
+def test_judge_observes_success_retry_and_timeout(monkeypatch):
+    observations = []
+
+    class Observer:
+        def request(self, **fields):
+            observations.append(fields)
+
+    class FakeResponse:
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(str(self.status_code), response=self)
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    responses = iter([FakeResponse(429), FakeResponse(200)])
+    monkeypatch.setattr("skyrl_gym.envs.nemotron_ultra.judge.requests.post", lambda *args, **kwargs: next(responses))
+    monkeypatch.setattr("skyrl_gym.envs.nemotron_ultra.judge.time.sleep", lambda _: None)
+    judge = OpenAIJudge(base_url="https://judge.example/v1", model="judge-model", observer=Observer())
+
+    assert judge.generate([{"role": "user", "content": "grade"}]) == "ok"
+    assert [(item["status"], item["attempt"], item["will_retry"]) for item in observations] == [
+        ("http_429", 1, True),
+        ("http_2xx", 2, False),
+    ]
+
+    observations.clear()
+    monkeypatch.setattr(
+        "skyrl_gym.envs.nemotron_ultra.judge.requests.post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(requests.Timeout("slow")),
+    )
+    with pytest.raises(requests.Timeout):
+        judge.generate([{"role": "user", "content": "grade"}])
+    assert len(observations) == 5
+    assert all(item["status"] == "timeout" for item in observations)
+    assert observations[-1]["will_retry"] is False
+
+
+def test_genrm_observes_parse_fallback_and_executor_timing():
+    parse_events = []
+    executor_events = []
+    cohort_events = []
+
+    class Observer:
+        def parse(self, **fields):
+            parse_events.append(fields)
+
+        def executor(self, **fields):
+            executor_events.append(fields)
+
+        def cohort(self, **fields):
+            cohort_events.append(fields)
+
+    class FakeJudge:
+        observer = Observer()
+
+        def generate_response(self, *args, **kwargs):
+            return "not json"
+
+    response_objects = [
+        {"output": [{"type": "message", "content": [{"type": "output_text", "text": f"answer {index}"}]}]}
+        for index in range(2)
+    ]
+    rewards, _ = grade_genrm_group(
+        conversation_history=[{"role": "user", "content": "question"}],
+        response_objects=response_objects,
+        principle="Be correct.",
+        judge=FakeJudge(),
+        config={
+            "genrm_parse_retries": 1,
+            "genrm_parse_retry_sleep_seconds": 0,
+            "max_concurrent_comparisons": 1,
+            "group_answer_length_penalty_coeff": 0.1,
+        },
+    )
+
+    assert len(rewards) == 2
+    assert any(event["outcome"] == "parse_retry" for event in parse_events)
+    assert any(event["outcome"] == "parse_fallback" for event in parse_events)
+    assert len(executor_events) == 2
+    assert all(event["queue_seconds"] >= 0 and event["duration_seconds"] >= 0 for event in executor_events)
+    assert len(cohort_events) == 1
+    assert cohort_events[0]["outcome"] == "defaulted"
+    assert cohort_events[0]["duration_seconds"] >= 0
+
+
 def test_tool_call_reward_requires_the_expected_tool_and_recursive_arguments():
     expected = {
         "type": "function_call",

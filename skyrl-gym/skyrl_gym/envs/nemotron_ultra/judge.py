@@ -40,28 +40,72 @@ def _post_json_with_retry(
     headers: dict[str, str],
     json_body: dict[str, Any],
     timeout: float,
+    observer: Any = None,
 ) -> requests.Response:
-    for attempt in range(_MAX_REQUEST_ATTEMPTS):
+    def observe(*, duration_seconds: float, status: str, attempt: int, will_retry: bool) -> None:
+        if observer is None:
+            return
+        try:
+            observer.request(
+                duration_seconds=duration_seconds,
+                status=status,
+                attempt=attempt,
+                will_retry=will_retry,
+            )
+        except Exception:
+            logger.warning("Judge telemetry observer failed", exc_info=True)
+
+    for attempt_index in range(_MAX_REQUEST_ATTEMPTS):
+        attempt = attempt_index + 1
+        started = time.perf_counter()
         try:
             response = requests.post(url, headers=headers, json=json_body, timeout=timeout)
         except (requests.ConnectionError, requests.Timeout) as error:
-            if attempt == _MAX_REQUEST_ATTEMPTS - 1:
+            will_retry = attempt < _MAX_REQUEST_ATTEMPTS
+            status = "timeout" if isinstance(error, requests.Timeout) else "connection_error"
+            observe(
+                duration_seconds=time.perf_counter() - started,
+                status=status,
+                attempt=attempt,
+                will_retry=will_retry,
+            )
+            if not will_retry:
                 raise
             retry_reason = type(error).__name__
         else:
+            status = (
+                f"http_{response.status_code}"
+                if response.status_code == 429
+                else f"http_{response.status_code // 100}xx"
+            )
             if response.status_code not in _TRANSIENT_STATUS_CODES:
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                finally:
+                    observe(
+                        duration_seconds=time.perf_counter() - started,
+                        status=status,
+                        attempt=attempt,
+                        will_retry=False,
+                    )
                 return response
-            if attempt == _MAX_REQUEST_ATTEMPTS - 1:
+            will_retry = attempt < _MAX_REQUEST_ATTEMPTS
+            observe(
+                duration_seconds=time.perf_counter() - started,
+                status=status,
+                attempt=attempt,
+                will_retry=will_retry,
+            )
+            if not will_retry:
                 response.raise_for_status()
             retry_reason = f"HTTP {response.status_code}"
 
-        delay = _INITIAL_RETRY_DELAY_SECONDS * 2**attempt
+        delay = _INITIAL_RETRY_DELAY_SECONDS * 2**attempt_index
         logger.warning(
             "Judge request failed with %s; retrying in %.1f seconds (attempt %d/%d)",
             retry_reason,
             delay,
-            attempt + 1,
+            attempt,
             _MAX_REQUEST_ATTEMPTS,
         )
         time.sleep(delay)
@@ -78,6 +122,7 @@ class OpenAIJudge:
     timeout_seconds: float = 600.0
     response_transport: GenRMResponseTransport = GenRMResponseTransport.RESPONSES_METADATA
     reasoning_effort: str | None = None
+    observer: Any = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "response_transport", GenRMResponseTransport(self.response_transport))
@@ -128,6 +173,7 @@ class OpenAIJudge:
                 top_p=top_p,
             ),
             timeout=self.timeout_seconds,
+            observer=self.observer,
         )
         body: dict[str, Any] = response.json()
         content = body["choices"][0]["message"].get("content")
@@ -177,6 +223,7 @@ class OpenAIJudge:
                 "top_p": top_p,
             },
             timeout=self.timeout_seconds,
+            observer=self.observer,
         )
         body: dict[str, Any] = response.json()
         for item in reversed(body.get("output", [])):
