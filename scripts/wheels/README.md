@@ -6,6 +6,12 @@ upstream source commit and builds locally instead of downloading an upstream
 wheel compiled for a different Torch version. `native-cu132.txt` pins the build
 environment, including CUDA 13.2.1's NVCC and CCCL packages.
 
+This checks in and tightens the build process first published with the
+[original CUDA 13.2 wheels](https://github.com/marin-community/MarinSkyRL/releases/tag/native-cu132-torch2.13-20260910-6d12d7a0).
+Reproducible here means that the source, dependencies, and build commands are
+pinned. Independent builds are not guaranteed to produce identical bytes, so
+runtime dependencies pin each published wheel by URL and SHA-256.
+
 FlashAttention uses upstream commit
 [`4219765`](https://github.com/Dao-AILab/flash-attention/commit/4219765dfdd8913bfe26134f748dd5ffcedd3c39),
 the merged FA2 and FA4 namespace-coexistence fix. That 2.8.4 source excludes the
