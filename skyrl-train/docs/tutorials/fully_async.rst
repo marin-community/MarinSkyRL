@@ -99,9 +99,10 @@ Following ``examples/fully_async/async_run_gsm8k.sh``, select the packaged entry
     uv run --isolated --extra vllm -m skyrl_train.entrypoints.fully_async \
     ...
 
-The RL config's ``entrypoint`` key names the training loop. A launcher ``--entrypoint`` that contradicts it fails,
-and ``trainer.fully_async`` settings written under ``entrypoint: standard`` are reported as inert when the config is
-parsed, since the synchronous trainer never reads them.
+The RL config's ``entrypoint`` key names the training loop: ``sync`` (the synchronous loop; ``standard`` is its old
+name and still accepted) or ``fully_async``. A launcher ``--entrypoint`` that contradicts it fails, and
+``trainer.fully_async`` settings written under ``entrypoint: sync`` are reported as inert when the config is parsed,
+since the synchronous trainer never reads them.
 
 For fully async specifically, the following are the main knobs to tune:
 

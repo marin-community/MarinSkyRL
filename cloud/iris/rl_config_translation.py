@@ -44,39 +44,57 @@ RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
 
 
 class RLEntrypoint(StrEnum):
-    """Execution modes supported by Iris RL configurations."""
+    """Execution modes supported by Iris RL configurations.
+
+    ``sync`` and ``fully_async`` train on the SkyRL-Gym runner with the synchronous or the fully
+    asynchronous loop; the others select the Harbor and mini-SWE runners or rollout-only runs.
+    """
 
     FULLY_ASYNC = "fully_async"
     GENERATE = "generate"
     MINI_SWE = "mini_swe"
-    STANDARD = "standard"
+    SYNC = "sync"
     TERMINAL_BENCH = "terminal_bench"
     TERMINAL_BENCH_GENERATE = "terminal_bench_generate"
+
+
+# Earlier configs named the synchronous loop after nothing in particular; accept the old name once more.
+DEPRECATED_ENTRYPOINT_NAMES = {"standard": RLEntrypoint.SYNC}
 
 
 RL_ENTRYPOINT_MODULES = {
     RLEntrypoint.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async",
     RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
     RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
-    RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
+    RLEntrypoint.SYNC: STANDARD_TRAINING_ENTRYPOINT,
     RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
     RLEntrypoint.TERMINAL_BENCH_GENERATE: "skyrl_train.entrypoints.terminal_bench_generate",
 }
 
 
-def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
-    """Resolve one supported RL execution mode to its packaged module."""
-    name = RLEntrypoint.STANDARD if value is None else value
+def parse_rl_entrypoint(value: str | None, *, config_path: Path) -> RLEntrypoint:
+    """Name the execution mode a config selects; absent means the synchronous loop."""
+    if value is None:
+        return RLEntrypoint.SYNC
+    if value in DEPRECATED_ENTRYPOINT_NAMES:
+        replacement = DEPRECATED_ENTRYPOINT_NAMES[value]
+        logger.warning(
+            "%s: entrypoint %r is the old name for %r; update the config", config_path, value, replacement.value
+        )
+        return replacement
     try:
-        entrypoint = RLEntrypoint(name)
+        return RLEntrypoint(value)
     except ValueError as error:
         choices = ", ".join(item.value for item in RLEntrypoint)
         raise ValueError(
-            f"{config_path}: entrypoint must be a registered name ({choices}); got {name!r}. "
+            f"{config_path}: entrypoint must be a registered name ({choices}); got {value!r}. "
             "Python module paths are not accepted in RL configs."
         ) from error
 
-    return RL_ENTRYPOINT_MODULES[entrypoint]
+
+def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
+    """Resolve one supported RL execution mode to its packaged module."""
+    return RL_ENTRYPOINT_MODULES[parse_rl_entrypoint(value, config_path=config_path)]
 
 
 class HPCGeometry(Protocol):
@@ -622,7 +640,7 @@ def parse_rl_config(
         logger.warning(
             "%s: entrypoint %s never reads %s; select entrypoint: fully_async or remove them",
             path,
-            raw.get("entrypoint") or RLEntrypoint.STANDARD.value,
+            parse_rl_entrypoint(raw.get("entrypoint"), config_path=path).value,
             ", ".join(inert_settings),
         )
     config_groups = raw.get("config_groups", {})

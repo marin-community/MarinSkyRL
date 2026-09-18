@@ -4,7 +4,7 @@
 # vLLM nodes. Checkpoints are off (ckpt_interval past max_steps). The fixed
 # geometry selects DP-local optimizer shards if checkpointing is enabled; see the
 # smoke config for the checkpoint path.
-entrypoint: standard
+entrypoint: sync
 
 context_budget:
   request_window_tokens: 9216

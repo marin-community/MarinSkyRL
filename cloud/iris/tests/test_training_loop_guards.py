@@ -43,6 +43,15 @@ def test_parsed_config_reports_inert_settings(tmp_path, caplog):
     assert "never reads trainer.fully_async.max_staleness_steps" in caplog.text
 
 
+def test_the_old_entrypoint_name_still_resolves_and_warns(tmp_path, caplog):
+    config = _config_with(tmp_path)
+    raw = yaml.safe_load(config.read_text())
+    raw["entrypoint"] = "standard"
+    config.write_text(yaml.safe_dump(raw, sort_keys=False))
+    assert parse_rl_config(str(config)).entrypoint == STANDARD
+    assert "old name for 'sync'" in caplog.text
+
+
 def test_a_launcher_entrypoint_that_contradicts_the_config_fails(monkeypatch, tmp_path):
     config = _config_with(tmp_path)
     runner = LocalRLRunner(

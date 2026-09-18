@@ -1,5 +1,5 @@
 # Snowball Ultra-style RLVR phase 1 on 64 H100s: 32 learner and 32 rollout GPUs.
-entrypoint: standard
+entrypoint: sync
 
 config_groups:
   terminal_bench_config: terminal_bench
