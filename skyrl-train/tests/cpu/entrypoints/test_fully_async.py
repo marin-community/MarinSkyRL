@@ -3,6 +3,11 @@ from unittest.mock import MagicMock
 from omegaconf import OmegaConf
 
 from skyrl_train.entrypoints import fully_async
+from skyrl_train.entrypoints.main_base import BasePPOExp
+
+
+def test_fully_async_uses_shared_process_lifecycle():
+    assert fully_async.AsyncPPOExp.run is BasePPOExp.run
 
 
 def test_trajectory_runner_uses_resolved_served_model_name(monkeypatch):
