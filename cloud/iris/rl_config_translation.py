@@ -60,11 +60,11 @@ RL_ENTRYPOINT_MODULES = {
 }
 
 
-def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
-    """Resolve one supported RL execution mode to its packaged module."""
+def parse_rl_entrypoint(value: str | None, *, config_path: Path) -> RLEntrypoint:
+    """Parse one supported RL execution mode name; an absent name is the standard entrypoint."""
     name = RLEntrypoint.STANDARD if value is None else value
     try:
-        entrypoint = RLEntrypoint(name)
+        return RLEntrypoint(name)
     except ValueError as error:
         choices = ", ".join(item.value for item in RLEntrypoint)
         raise ValueError(
@@ -72,7 +72,19 @@ def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
             "Python module paths are not accepted in RL configs."
         ) from error
 
-    return RL_ENTRYPOINT_MODULES[entrypoint]
+
+def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
+    """Resolve one supported RL execution mode to its packaged module."""
+    return RL_ENTRYPOINT_MODULES[parse_rl_entrypoint(value, config_path=config_path)]
+
+
+def uses_fully_async_trainer(entrypoint: RLEntrypoint, raw: Mapping[str, Any]) -> bool:
+    """Return whether ``entrypoint`` runs the fully asynchronous trainer for this raw RL config."""
+    if entrypoint is RLEntrypoint.FULLY_ASYNC:
+        return True
+    if entrypoint is RLEntrypoint.TERMINAL_BENCH:
+        return raw.get("trainer", {}).get("placement", {}).get("colocate_all", True) is False
+    return False
 
 
 class HPCGeometry(Protocol):

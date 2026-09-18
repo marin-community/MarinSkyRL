@@ -195,8 +195,8 @@ def test_worker_full_statistic_coverage_clip_bounds_and_nonfinite_counts():
         ("log_ratio_abs_p50", "log_ratio_exact_abs_p50"),
         ("log_ratio_abs_p95", "log_ratio_exact_abs_p95"),
         ("finite_fraction", "log_ratio_exact_finite_fraction"),
-        ("lower_clip_pressure", "log_ratio_lower_clip_pressure"),
-        ("upper_clip_pressure", "log_ratio_upper_clip_pressure"),
+        ("lower_clip_pressure", "log_ratio_exact_lower_clip_pressure"),
+        ("upper_clip_pressure", "log_ratio_exact_upper_clip_pressure"),
     ):
         assert actual[published] == pytest.approx(oracle[key], abs=1e-12)
     assert actual["log_ratio_exact_valid"] == 1
@@ -241,8 +241,8 @@ def test_exact_quantiles_gate_decides_whether_tokens_are_retained():
     assert off["log_ratio_exact_valid"] == 0 and on["log_ratio_exact_valid"] == 1
     assert off["log_ratio_exact_abs_p50"] == 0
     assert on["log_ratio_exact_abs_p50"] == pytest.approx(ratio_statistics(values)["log_ratio_abs_p50"])
-    assert off["log_ratio_upper_clip_pressure"] == 0
-    assert on["log_ratio_upper_clip_pressure"] == pytest.approx(0.5)
+    assert off["log_ratio_exact_upper_clip_pressure"] == 0
+    assert on["log_ratio_exact_upper_clip_pressure"] == pytest.approx(0.5)
     # The ungated accumulator is unaffected by the gate.
     assert off["log_ratio_abs_mean"] == on["log_ratio_abs_mean"]
 

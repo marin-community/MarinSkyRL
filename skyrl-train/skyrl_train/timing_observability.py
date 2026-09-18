@@ -23,6 +23,7 @@ TIMING_PARENTS: dict[str, str | None] = {
     "critic_train": "train_critic_and_policy",
     "policy_train": "train_critic_and_policy",
     "policy_critic_overlap_train": "train_critic_and_policy",
+    "backload_policy_optimizer_to_gpu": "train_critic_and_policy",
     "sync_weights": "step",
     "offload_policy_model_to_cpu": "step",
     "dump_data_batch": "run_training",

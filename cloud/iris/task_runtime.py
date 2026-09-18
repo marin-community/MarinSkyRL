@@ -50,6 +50,8 @@ from marinskyrl.environment_contract import (
     NCCL_DEBUG_INFO_TEMP_FILE_ENV,
     RUN_ID_ENV,
     TELEMETRY_ENDPOINT_ENV,
+    TRAINING_LOOP_ENV,
+    TrainingLoop,
     ensure_debug_artifact_directories,
     ray_cluster_owner_environment,
 )
@@ -678,13 +680,14 @@ def pin_socket_ifname() -> str | None:
     return iface
 
 
-def export_telemetry_environment(run_id: str | None, training_loop: str | None) -> None:
+def export_telemetry_environment(run_id: str | None, training_loop: TrainingLoop | None) -> None:
     resolved = telemetry_environment(run_id=run_id, training_loop=training_loop)
     if not resolved:
         _log("[telemetry] no telemetry environment resolved; MarinSkyRL telemetry stays inert")
         return
     os.environ.update(resolved)
-    _log(f"[telemetry] {resolved[TELEMETRY_ENDPOINT_ENV]} run_id={resolved[RUN_ID_ENV]}")
+    loop = f" training_loop={resolved[TRAINING_LOOP_ENV]}" if TRAINING_LOOP_ENV in resolved else ""
+    _log(f"[telemetry] {resolved[TELEMETRY_ENDPOINT_ENV]} run_id={resolved[RUN_ID_ENV]}{loop}")
 
 
 def training_driver_env(derived_gloo_ifname: str | None) -> dict[str, str]:
@@ -2090,7 +2093,8 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--training-loop",
-        choices=("sync", "async"),
+        type=TrainingLoop,
+        choices=tuple(TrainingLoop),
         default=None,
         help="Which training loop the run uses; telemetry rows carry it so dashboards can tell runs apart.",
     )

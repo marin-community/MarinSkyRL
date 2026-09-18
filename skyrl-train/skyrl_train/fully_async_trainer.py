@@ -995,6 +995,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             {
                                 "started_unix_ms": core_started_unix_ms,
                                 "finished_unix_ms": time.time_ns() // 1_000_000,
+                                "duration_seconds": core_seconds,
                             },
                             attributes={
                                 "role": TRAINER_ROLE,

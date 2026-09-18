@@ -386,6 +386,29 @@ def test_task_command_forwards_driver_liveness_timeout(tmp_path):
     assert options["--driver-liveness-timeout"] == ["600"]
 
 
+@pytest.mark.parametrize(
+    "config, extra, expected",
+    [
+        ("entrypoint: fully_async\n", [], ["async"]),
+        ("entrypoint: standard\n", [], ["sync"]),
+        ("", [], ["sync"]),
+        ("entrypoint: terminal_bench\ntrainer:\n  placement:\n    colocate_all: false\n", [], ["async"]),
+        ("entrypoint: terminal_bench\ntrainer:\n  placement:\n    colocate_all: true\n", [], ["sync"]),
+        ("entrypoint: standard\n", ["--entrypoint", "skyrl_train.entrypoints.fully_async"], ["async"]),
+        ("entrypoint: fully_async\n", ["--entrypoint", "skyrl_train.entrypoints.checkpoint_export"], []),
+    ],
+)
+def test_task_command_marks_the_training_loop_the_launched_entrypoint_runs(tmp_path, config, extra, expected):
+    args = _args(tmp_path, "opencode", extra)
+    Path(args.rl_config).write_text(config + "terminal_bench:\n  harbor:\n    name: opencode\n")
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert options.get("--training-loop", []) == expected
+
+
 def test_task_command_stages_training_and_validation_selectors_on_every_node(tmp_path):
     train_selector = "fixture-org/tasks@immutable::train"
     val_selector = "fixture-org/tasks@immutable::validation"

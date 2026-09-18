@@ -157,7 +157,7 @@ class RolloutObservation:
             {
                 "call_id": self.call_id,
                 "started_unix_ms": self.started_unix_ms,
-                "finished_unix_ms": self.started_unix_ms + round(total * 1000),
+                "finished_unix_ms": time.time_ns() // 1_000_000,
                 "duration_seconds": total,
                 **{f"duration_{name}": duration for name, duration in phases.items() if name != "rollout_call"},
                 "model_awaits_json": json.dumps(self.model_awaits, separators=(",", ":"), allow_nan=False),

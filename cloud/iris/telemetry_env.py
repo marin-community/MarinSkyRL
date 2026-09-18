@@ -11,17 +11,23 @@ from iris.client.client import get_iris_ctx
 from iris.cluster.client.job_info import get_job_info
 from iris.cluster.endpoints import LOG_SERVER_ENDPOINT_NAME, TELEMETRY_ENDPOINT_PATH
 
-from marinskyrl.environment_contract import EXECUTION_UID_ENV, RUN_ID_ENV, TELEMETRY_ENDPOINT_ENV, TRAINING_LOOP_ENV
+from marinskyrl.environment_contract import (
+    EXECUTION_UID_ENV,
+    RUN_ID_ENV,
+    TELEMETRY_ENDPOINT_ENV,
+    TRAINING_LOOP_ENV,
+    TrainingLoop,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def telemetry_environment(*, run_id: str | None = None, training_loop: str | None = None) -> dict[str, str]:
+def telemetry_environment(*, run_id: str | None = None, training_loop: TrainingLoop | None = None) -> dict[str, str]:
     """Return the telemetry variables for this task, or nothing outside a cluster.
 
     Args:
         run_id: Experiment identity.
-        training_loop: ``sync`` or ``async``, the loop the run trains with.
+        training_loop: The loop the run trains with.
     """
     job_info = get_job_info()
     ctx = get_iris_ctx()
@@ -41,7 +47,7 @@ def telemetry_environment(*, run_id: str | None = None, training_loop: str | Non
         EXECUTION_UID_ENV: os.environ.get(EXECUTION_UID_ENV) or f"iris:{job_info.attempt_uid}",
     }
     if loop := training_loop or os.environ.get(TRAINING_LOOP_ENV):
-        resolved[TRAINING_LOOP_ENV] = loop
+        resolved[TRAINING_LOOP_ENV] = TrainingLoop(loop).value
     return resolved
 
 

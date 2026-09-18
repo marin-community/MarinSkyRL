@@ -327,8 +327,8 @@ class LogRatioMonitor:
         }
         metrics.update({f"log_ratio_exact_{exact.get(name, name)}": value for name, value in quantiles.items()})
         finite_count = max(1, quantiles["finite_tokens"])
-        metrics["log_ratio_lower_clip_pressure"] = clip_counts[0].item() / finite_count
-        metrics["log_ratio_upper_clip_pressure"] = clip_counts[1].item() / finite_count
+        metrics["log_ratio_exact_lower_clip_pressure"] = clip_counts[0].item() / finite_count
+        metrics["log_ratio_exact_upper_clip_pressure"] = clip_counts[1].item() / finite_count
         return metrics
 
 

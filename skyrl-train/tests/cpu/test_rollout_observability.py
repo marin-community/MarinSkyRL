@@ -127,14 +127,19 @@ def test_phase_window_preserves_independent_wall_clock_and_failure(records, monk
     assert event["attributes"]["step"] == "7"
 
 
-def test_rollout_call_event_reports_the_tokens_its_caller_recorded(records):
+def test_rollout_call_event_reports_tokens_and_an_independent_wall_clock(records, monkeypatch):
     clock = ManualClock()
+    unix_ns = ManualClock(1_000_000_000)
+    monkeypatch.setattr(rollout.time, "time_ns", unix_ns)
     with rollout.observe_rollout_call(step=3, mode="async", enabled=True, clock=clock) as observation:
         clock.advance(1)
+        unix_ns.advance(-100_000_000)
         observation.response_tokens = 512
     event = records.events[-1]
     assert event["name"] == "rollout_call"
     assert event["body"]["response_tokens"] == 512
+    body = event["body"]
+    assert (body["started_unix_ms"], body["finished_unix_ms"], body["duration_seconds"]) == (1000, 900, 1)
 
 
 @pytest.mark.asyncio

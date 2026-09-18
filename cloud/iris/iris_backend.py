@@ -122,10 +122,12 @@ from marinskyrl.runtime_options import GDNBackend, R3Transport
 from cloud.iris.rl_config_translation import (
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
+    RL_ENTRYPOINT_MODULES,
     format_hydra_arg,
-    RLEntrypoint,
+    parse_rl_entrypoint,
     resolve_rl_entrypoint,
     resolve_rl_config_path,
+    uses_fully_async_trainer,
 )
 from marinskyrl.distillation import LocalInferenceTeacherSpec, compile_distillation_plan
 from cloud.iris.secrets_env import default_secrets_env, load_secrets_env_into_os_environ
@@ -139,6 +141,7 @@ from marinskyrl.environment_contract import (
     DebugMode,
     EnvVarManager,
     EnvVarScope,
+    TrainingLoop,
     wandb_launch_environment,
 )
 from cloud.iris.runtime_environment import (
@@ -1979,11 +1982,16 @@ def load_config_policy_model_revision(rl_config_path: str) -> str | None:
     return revision
 
 
-def load_config_training_loop(rl_config_path: str) -> str:
-    """Return ``async`` for the fully asynchronous entrypoint and ``sync`` otherwise."""
+def load_config_training_loop(rl_config_path: str, entrypoint_module: str | None) -> TrainingLoop | None:
+    """Return the loop the launched entrypoint trains with, or None for an override outside the registered entrypoints."""
     raw = _load_rl_config_yaml(rl_config_path)
-    entrypoint = raw.get("entrypoint")
-    return "async" if entrypoint is not None and RLEntrypoint(entrypoint) is RLEntrypoint.FULLY_ASYNC else "sync"
+    if entrypoint_module is None:
+        entrypoint = parse_rl_entrypoint(raw.get("entrypoint"), config_path=Path(rl_config_path))
+    else:
+        entrypoint = next((name for name, module in RL_ENTRYPOINT_MODULES.items() if module == entrypoint_module), None)
+        if entrypoint is None:
+            return None
+    return TrainingLoop.ASYNC if uses_fully_async_trainer(entrypoint, raw) else TrainingLoop.SYNC
 
 
 def load_config_terminal_bench_data(rl_config_path: str) -> list[str]:
@@ -2302,7 +2310,9 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # The job name is sanitized, so the pod cannot recover the run id.
     if args.run_id:
         controller_cmd.extend(["--run-id", args.run_id])
-    controller_cmd.extend(["--training-loop", load_config_training_loop(args.rl_config)])
+    training_loop = load_config_training_loop(args.rl_config, args.entrypoint)
+    if training_loop is not None:
+        controller_cmd.extend(["--training-loop", training_loop.value])
     controller_cmd.extend(_model_bootstrap_args(args))
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)
