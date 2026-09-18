@@ -895,6 +895,75 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
+@pytest.mark.parametrize(
+    ("second_prompt_ids", "prefix_changed"),
+    [([11, 12, 21, 22, 31, 32], False), ([11, 12, 99, 22, 31, 32], True)],
+)
+async def test_custom_template_multiturn_preserves_backend_tokens_for_behavior_loss(
+    mock_make, mock_tokenizer, mock_env, generator_cfg, mock_env_cfg, second_prompt_ids, prefix_changed
+):
+    generator_cfg.batched = False
+    generator_cfg.use_conversation_multi_turn = True
+    generator_cfg.sampling_params.logprobs = 0
+    generator_cfg.chat_template = {"source": "name", "name_or_path": "qwen2_5_with_generation_tag_simplified"}
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "calculate"}], {})
+    mock_env.step.side_effect = [
+        BaseTextEnvStepOutput(
+            observations=[{"role": "user", "content": "tool result"}], reward=0.25, done=False, metadata={}
+        ),
+        BaseTextEnvStepOutput(observations=[], reward=0.75, done=True, metadata={}),
+    ]
+    model_client = AsyncMock()
+    model_client.generate.side_effect = [
+        {
+            "responses": ["first"],
+            "response_ids": [[21, 22]],
+            "prompt_ids": [[11, 12]],
+            "stop_reasons": ["stop"],
+            "response_logprobs": [[-0.1, -0.2]],
+            "routed_experts": [[[[1, 2]], [[3, 4]]]],
+            "assistant_messages": [{"role": "assistant", "content": "first"}],
+            "token_provenance": "engine",
+        },
+        {
+            "responses": ["second"],
+            "response_ids": [[41]],
+            "prompt_ids": [second_prompt_ids],
+            "stop_reasons": ["stop"],
+            "response_logprobs": [[-0.3]],
+            "routed_experts": [[[[5, 6]]]],
+            "assistant_messages": [{"role": "assistant", "content": "second"}],
+            "token_provenance": "engine",
+        },
+    ]
+    runner = SkyRLGymTrajectoryRunner(
+        trajectory_runner_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=AsyncMock(),
+        tokenizer=mock_tokenizer,
+        model_client=model_client,
+        require_full_token_continuation=True,
+    )
+
+    request = [{"role": "user", "content": "calculate"}]
+    if prefix_changed:
+        with pytest.raises(RuntimeError, match="full TITO requires each rendered prompt"):
+            await runner.agent_loop(request, mock_env_cfg.env_class, {}, max_tokens=8, max_input_length=512)
+        return
+    output = await runner.agent_loop(request, mock_env_cfg.env_class, {}, max_tokens=8, max_input_length=512)
+
+    assert model_client.generate.await_args_list[0].args[0]["chat_completion_params"] == [{}]
+    assert output.evidence.prompt_token_ids == (11, 12)
+    assert output.evidence.response_token_ids == (21, 22, 31, 32, 41)
+    assert output.loss_mask == [1, 1, 0, 0, 1]
+    assert output.evidence.behavior_logprobs == pytest.approx((-0.1, -0.2, 0.0, 0.0, -0.3))
+    assert output.evidence.routed_experts == (((1, 2),), ((3, 4),), ((0, 0),), ((0, 0),), ((5, 6),))
+    assert output.token_provenance == TokenProvenance.ENGINE
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
 async def test_generate_non_batched_single_message_multiturn_aligns_rollout_logprobs(
     mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
 ):
@@ -2064,7 +2133,7 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
     mock_make.return_value = RetokEnv()
 
     # Generator config enabling retokenize path
-    cfg = MagicMock()
+    cfg = get_default_config().generator
     cfg.sampling_params.max_generate_length = 50
     cfg.sampling_params.logprobs = None
     cfg.apply_overlong_filtering = False

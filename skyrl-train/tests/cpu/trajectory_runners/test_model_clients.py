@@ -281,6 +281,114 @@ async def test_http_model_client_normalizes_chat_completion():
 
 
 @pytest.mark.asyncio
+async def test_http_model_client_preserves_exact_chat_tokens_and_logprobs():
+    requests = []
+
+    async def tokenize(request):
+        requests.append(("tokenize", await request.json()))
+        return web.json_response({"tokens": [11, 12]})
+
+    async def complete(request):
+        requests.append(("complete", await request.json()))
+        return web.json_response(
+            {
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "answer"},
+                        "finish_reason": "stop",
+                        "token_ids": [21, 22],
+                        "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+                        "provider_specific_fields": {"routed_experts": [[[1, 2]], [[3, 4]]]},
+                    }
+                ]
+            }
+        )
+
+    app = web.Application()
+    app.router.add_post("/tokenize", tokenize)
+    app.router.add_post("/v1/chat/completions", complete)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+
+    try:
+        client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=MagicMock())
+        output = await client.generate(
+            {
+                "prompts": [[{"role": "user", "content": "question"}]],
+                "session_ids": ["trajectory-1"],
+                "sampling_params": {"temperature": 0.7, "max_generate_length": 256, "logprobs": 0},
+                "chat_completion_params": [{}],
+            }
+        )
+    finally:
+        await runner.cleanup()
+
+    assert requests == [
+        (
+            "tokenize",
+            {
+                "model": "policy",
+                "messages": [{"role": "user", "content": "question"}],
+                "add_generation_prompt": True,
+            },
+        ),
+        (
+            "complete",
+            {
+                "model": "policy",
+                "messages": [{"role": "user", "content": "question"}],
+                "session_id": "trajectory-1",
+                "temperature": 0.7,
+                "max_completion_tokens": 256,
+                "return_token_ids": True,
+                "logprobs": True,
+            },
+        ),
+    ]
+    assert output["prompt_ids"] == [[11, 12]]
+    assert output["response_ids"] == [[21, 22]]
+    assert output["response_logprobs"] == [[-0.1, -0.2]]
+    assert output["routed_experts"] == [[[[1, 2]], [[3, 4]]]]
+    assert output["token_provenance"] == "engine"
+
+
+@pytest.mark.asyncio
+async def test_http_model_client_rejects_exact_chat_response_without_token_ids():
+    async def tokenize(_request):
+        return web.json_response({"tokens": [11, 12]})
+
+    async def complete(_request):
+        return web.json_response(
+            {"choices": [{"message": {"role": "assistant", "content": "answer"}, "finish_reason": "stop"}]}
+        )
+
+    app = web.Application()
+    app.router.add_post("/tokenize", tokenize)
+    app.router.add_post("/v1/chat/completions", complete)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+
+    try:
+        client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=MagicMock())
+        with pytest.raises(RuntimeError, match="did not return exact response token IDs"):
+            await client.generate(
+                {
+                    "prompts": [[{"role": "user", "content": "question"}]],
+                    "sampling_params": {"logprobs": 0},
+                    "chat_completion_params": [{}],
+                }
+            )
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_http_structured_chat_continues_from_sampled_tool_call_tokens():
     served_requests = []
 

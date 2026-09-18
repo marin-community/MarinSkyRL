@@ -66,6 +66,7 @@ class AsyncPPOExp(BasePPOExp):
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
             model_client=model_client,
+            require_full_token_continuation=bool(cfg.get("trainer", {}).get("algorithm", {}).get("tito_full", False)),
         )
         if runner.custom_chat_template is None:
             raise ValueError("the fully asynchronous HTTP entrypoint requires a custom chat template")

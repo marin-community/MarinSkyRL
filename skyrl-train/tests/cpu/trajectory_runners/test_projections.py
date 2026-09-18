@@ -60,6 +60,18 @@ def test_whole_trajectory_projection_preserves_one_sample_per_trajectory():
     assert "trajectory_ids" not in output
 
 
+def test_whole_trajectory_projection_carries_routes_and_sentinel_fills_missing_rows():
+    first = _step([3, 4], [0.0, 1.0])
+    first.evidence = replace(first.evidence, routed_experts=(((1, 2),), ((3, 4),)))
+    second = _step([5], [0.0])
+
+    batch = WholeTrajectoryProjection(_config(), _Tokenizer()).project(
+        [first, second], {"env_classes": None, "sampling_params": {"logprobs": True}}
+    )
+
+    assert batch["rollout_routed_experts"] == [[[[1, 2]], [[3, 4]]], [[[0, 0]]]]
+
+
 def test_whole_trajectory_projection_adapts_masked_scalar_row_to_token_level_rewards():
     failed = _step([0], 0.0)
     failed = replace(

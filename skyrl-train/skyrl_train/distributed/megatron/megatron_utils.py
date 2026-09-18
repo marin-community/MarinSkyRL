@@ -21,15 +21,18 @@
 # limitations under the License.
 
 import gc
+import threading
+
 import torch
 import torch.nn as nn
 from loguru import logger
-from megatron.core.distributed import DistributedDataParallel as DDP
-from megatron.core.transformer.module import Float16Module
-from megatron.core.optimizer import ChainedOptimizer
 from megatron.core import parallel_state as mpu
-from megatron.core.utils import get_attr_wrapped_model
+from megatron.core.distributed import DistributedDataParallel as DDP
+from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.transformer.module import Float16Module
+from megatron.core.utils import get_attr_wrapped_model
+from skyrl_train.utils.context_parallel import shard_dense_sequence_for_context_parallel
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
@@ -127,21 +130,76 @@ def offload_megatron_grads_to_cpu(models):
 
 
 @torch.no_grad()
-def load_megatron_grads_to_gpu(models):
-    for model_chunk in models:
+def load_megatron_grads_to_gpu(models, diagnostic_expected_device=None):
+    # Campaign diagnostic: the setup method pins LOCAL_RANK in its thread, while
+    # CUDA's current device is thread-local. Record the actual backload thread.
+    if diagnostic_expected_device is not None and diagnostic_expected_device >= 0:
+        current_device = torch.cuda.current_device()
+        logger.info(
+            "SNOWBALL_GRAD_BACKLOAD_DEVICE rank={} thread={} expected_device={} current_device={}",
+            torch.distributed.get_rank(),
+            threading.get_ident(),
+            diagnostic_expected_device,
+            current_device,
+        )
+        if current_device != diagnostic_expected_device:
+            raise RuntimeError(
+                f"Megatron grad backload runs on CUDA device {current_device}, expected {diagnostic_expected_device}"
+            )
+    for chunk_index, model_chunk in enumerate(models):
         if isinstance(model_chunk, DDP):
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
-            for buffers in model_chunk_all_buffers:
-                for buffer in buffers:
-                    buffer.grad_data.storage().resize_(buffer.grad_data_size)
-                    buffer.grad_data.zero_()
+            for buffer_kind, buffers in enumerate(model_chunk_all_buffers):
+                for buffer_index, buffer in enumerate(buffers):
+                    grad = buffer.grad_data
+                    storage = grad.storage()
+                    if diagnostic_expected_device is not None and diagnostic_expected_device >= 0:
+                        logger.info(
+                            "SNOWBALL_GRAD_BUFFER_BEFORE rank={} chunk={} kind={} index={} dtype={} shape={} "
+                            "offset={} saved_size={} storage_size={} storage_ptr={} tensor_ptr={} allocated={} reserved={}",
+                            torch.distributed.get_rank(),
+                            chunk_index,
+                            buffer_kind,
+                            buffer_index,
+                            grad.dtype,
+                            tuple(grad.shape),
+                            grad.storage_offset(),
+                            buffer.grad_data_size,
+                            storage.size(),
+                            storage.data_ptr(),
+                            grad.data_ptr(),
+                            torch.cuda.memory_allocated(),
+                            torch.cuda.memory_reserved(),
+                        )
+                    storage.resize_(buffer.grad_data_size)
+                    if diagnostic_expected_device is not None and diagnostic_expected_device >= 0:
+                        logger.info(
+                            "SNOWBALL_GRAD_BUFFER_AFTER rank={} chunk={} kind={} index={} numel={} "
+                            "offset={} storage_size={} storage_ptr={} tensor_ptr={} allocated={} reserved={}",
+                            torch.distributed.get_rank(),
+                            chunk_index,
+                            buffer_kind,
+                            buffer_index,
+                            grad.numel(),
+                            grad.storage_offset(),
+                            storage.size(),
+                            storage.data_ptr(),
+                            grad.data_ptr(),
+                            torch.cuda.memory_allocated(),
+                            torch.cuda.memory_reserved(),
+                        )
+                    grad.zero_()
+                    if diagnostic_expected_device is not None and diagnostic_expected_device >= 0:
+                        torch.cuda.synchronize(diagnostic_expected_device)
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
                 if param.grad is not None:
                     param.grad = param.grad.to(torch.cuda.current_device(), non_blocking=True)
     gc.collect()
+    logger.info("SNOWBALL_GRAD_BACKLOAD_ZEROED rank={}", torch.distributed.get_rank())
     torch.cuda.empty_cache()
+    logger.info("SNOWBALL_GRAD_BACKLOAD_CACHE_CLEARED rank={}", torch.distributed.get_rank())
 
 
 @torch.no_grad()
@@ -516,15 +574,17 @@ def remove_left_padding(
     assert attention_mask.ndim == 2
     assert position_ids.ndim == 2
     cp_size = mpu.get_context_parallel_world_size()
-    assert cp_size == 1, "Context parallel size without seq_pack is not supported"
     batch_size = input_ids.shape[0]
     shape = list(input_ids.shape)  # batch_size, seq_len,...
     seq_lens = attention_mask.sum(dim=1)
     seq_len = seq_lens.max().item()
-    if mpu.get_tensor_model_parallel_world_size() > 1:
-        sp_world_size = mpu.get_tensor_model_parallel_world_size()
-        pad_size = (sp_world_size - seq_len % sp_world_size) % sp_world_size
-        seq_len = seq_len + pad_size
+    # Dense context parallelism uses Megatron's load-balanced causal layout: split
+    # the sequence into 2*CP chunks and give each rank one chunk from either end.
+    # Pad before sharding so every rank receives equal-sized tensors. TP sequence
+    # parallelism imposes its own divisibility requirement on the same dimension.
+    align_size = mpu.get_tensor_model_parallel_world_size() * (2 * cp_size if cp_size > 1 else 1)
+    pad_size = (align_size - seq_len % align_size) % align_size
+    seq_len = seq_len + pad_size
     shape[1] = seq_len
     if pre_process:
         new_input_ids = torch.zeros(dtype=input_ids.dtype, device=input_ids.device, size=shape)
@@ -537,10 +597,18 @@ def remove_left_padding(
             new_input_ids[i, : seq_lens[i]] = input_ids[i, attention_mask[i]]
         new_attention_mask[i, : seq_lens[i]] = attention_mask[i, attention_mask[i]]
         new_position_ids[i, : seq_lens[i]] = position_ids[i, attention_mask[i]]
+    if cp_size > 1:
+        cp_rank = mpu.get_context_parallel_rank()
+        new_attention_mask = shard_dense_sequence_for_context_parallel(
+            new_attention_mask, cp_size=cp_size, cp_rank=cp_rank
+        )
+        new_position_ids = shard_dense_sequence_for_context_parallel(new_position_ids, cp_size=cp_size, cp_rank=cp_rank)
+        if pre_process:
+            new_input_ids = shard_dense_sequence_for_context_parallel(new_input_ids, cp_size=cp_size, cp_rank=cp_rank)
+
     if pre_process:
         return new_input_ids, new_attention_mask, new_position_ids
-    else:
-        return input_ids, new_attention_mask, new_position_ids
+    return input_ids, new_attention_mask, new_position_ids
 
 
 def get_model_config(model):

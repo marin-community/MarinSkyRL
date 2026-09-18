@@ -474,6 +474,7 @@ class BasePPOExp:
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
             pipeline=pipeline,
+            require_full_token_continuation=bool(cfg.trainer.algorithm.get("tito_full", False)),
         )
         return build_nemotron_ultra_trajectory_runner(cfg, tokenizer, gym_runner)
 

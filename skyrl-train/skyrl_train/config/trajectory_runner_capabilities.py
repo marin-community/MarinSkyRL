@@ -178,15 +178,28 @@ def trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRunnerMode) 
             action_tokens=ActionTokenHandling.RETOKENIZED,
         )
     if mode is TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM:
+        sampling_params = cfg.generator.get("sampling_params") or {}
+        exact_chat = (
+            bool(cfg.generator.chat_template.get("name_or_path")) and sampling_params.get("logprobs") is not None
+        )
         return TrajectoryRunnerCapabilities(
-            runner="fully-async SkyRL Gym",
-            sampled_completion=EvidenceFidelity.RETOKENIZED,
-            full_context_continuation=EvidenceFidelity.UNAVAILABLE,
-            action_tokens=ActionTokenHandling.RETOKENIZED,
+            runner="fully-async SkyRL Gym exact chat" if exact_chat else "fully-async SkyRL Gym",
+            sampled_completion=EvidenceFidelity.EXACT if exact_chat else EvidenceFidelity.RETOKENIZED,
+            full_context_continuation=EvidenceFidelity.EXACT if exact_chat else EvidenceFidelity.UNAVAILABLE,
+            action_tokens=ActionTokenHandling.RUNTIME_VALIDATED if exact_chat else ActionTokenHandling.RETOKENIZED,
         )
 
     custom_template = bool(cfg.generator.chat_template.get("name_or_path"))
-    if cfg.generator.use_conversation_multi_turn and custom_template:
+    sampling_params = cfg.generator.get("sampling_params") or {}
+    exact_chat = custom_template and sampling_params.get("logprobs") is not None
+    if cfg.generator.use_conversation_multi_turn and exact_chat:
+        return TrajectoryRunnerCapabilities(
+            runner="SkyRL Gym exact chat",
+            sampled_completion=EvidenceFidelity.EXACT,
+            full_context_continuation=EvidenceFidelity.EXACT,
+            action_tokens=ActionTokenHandling.RUNTIME_VALIDATED,
+        )
+    if cfg.generator.use_conversation_multi_turn and custom_template and not exact_chat:
         return TrajectoryRunnerCapabilities(
             runner="SkyRL Gym custom-template multi-turn",
             sampled_completion=EvidenceFidelity.RETOKENIZED,

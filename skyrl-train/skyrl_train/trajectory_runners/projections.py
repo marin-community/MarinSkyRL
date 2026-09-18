@@ -15,6 +15,7 @@ from skyrl_train.trajectory_runners.types import (
     TrajectoryRequestBatch,
 )
 from skyrl_train.trajectory_runners.trajectory_processing import (
+    _sentinel_routed_experts_row,
     apply_overlong_filtering,
     get_rollout_metrics,
     minimum_captured_global_step,
@@ -92,6 +93,7 @@ class WholeTrajectoryProjection:
             actual_global_step=minimum_captured_global_step(outputs),
         )
         attach_student_topk(batch, outputs, responses, loss_masks)
+        attach_routed_experts(batch, outputs, responses)
         attach_terminal_classifications(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
         return batch
@@ -153,6 +155,7 @@ class StepWiseTrajectoryProjection:
             actual_global_step=minimum_captured_global_step(steps),
         )
         attach_student_topk(batch, steps, responses, loss_masks)
+        attach_routed_experts(batch, steps, responses)
         attach_terminal_classifications(batch, steps)
         _attach_reward_channels(batch, steps, responses)
         return batch
@@ -166,6 +169,25 @@ def attach_terminal_classifications(batch: TrajectoryBatch, outputs: Sequence[Tr
         batch["exception_types"] = exception_types
     if any(error_treatment is not None for error_treatment in error_treatments):
         batch["error_treatments"] = error_treatments
+
+
+def attach_routed_experts(
+    batch: TrajectoryBatch, outputs: Sequence[AgentLoopOutput], responses: Sequence[Sequence[int]]
+) -> None:
+    """Project exact per-token routes; fill missing or masked rows with the same shape."""
+    captured = [output.evidence.routed_experts for output in outputs]
+    template = next((routes[0] for routes in captured if routes), None)
+    if template is None:
+        return
+    sentinel = _sentinel_routed_experts_row(template)
+    result = []
+    for routes, response in zip(captured, responses, strict=True):
+        if routes is not None and len(routes) != len(response):
+            raise ValueError("routed_experts must align with response token IDs")
+        result.append(
+            [sentinel for _ in response] if routes is None else [[list(layer) for layer in token] for token in routes]
+        )
+    batch["rollout_routed_experts"] = result
 
 
 def attach_student_topk(
