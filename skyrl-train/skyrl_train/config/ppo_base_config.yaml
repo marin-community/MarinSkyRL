@@ -368,14 +368,19 @@ generator:
   vllm_attention_backend: null
   weight_sync_backend: "nccl"
   # How weights travel to the engines. "broadcast": trainer rank 0 sends every tensor to every engine.
-  # "expert_block": each expert block is broadcast from the trainer rank that owns it straight into the
-  # engine worker that serves it. Requires a Grug MoE with TP=1 on both sides, equal expert-parallel
-  # degree, node-local engines (inference_engine_node_local) and the TRITON MoE backend in vLLM.
+  # "expert_block": each expert block is broadcast from the Megatron rank that owns it straight into
+  # the live parameter slot of the vLLM worker that serves it. Requires a Grug MoE trained with the
+  # megatron strategy at tensor_model_parallel_size 1 and expert_tensor_parallel_size 1, local async
+  # vLLM engines at TP=1 placed with inference_engine_node_local, the NCCL weight-sync backend and
+  # vLLM's TRITON MoE backend. Trainer and engine expert-parallel degrees may differ, engines may be
+  # pipeline-parallel, and the trainer may be tensor-parallel; anything else is refused at
+  # configuration or preparation time.
   weight_sync_transport: "broadcast"
   expert_block_sync:
     timeout_seconds: 600  # Group creation at startup and each sync's collectives.
     # Qualification gate, not for production: after every sync, replay it and fail unless every
-    # receiver's installed bytes match and every parameter byte was covered.
+    # receiver's installed bytes match, every installable parameter byte was covered and every
+    # trainer rank agrees with its data-parallel peers.
     verify: false
   fuse_weights: false
   r3_transport: "decentral"
@@ -388,8 +393,8 @@ generator:
   inference_engine_data_parallel_size: 1
   inference_engine_decode_context_parallel_size: 1
   inference_engine_mp_backend: false
-  # Opt-in: keep each DP/EP replica on one node and verify its physical GPUs at startup.
-  # Requires non-colocated async vLLM with TP=PP=1 and EP=DP.
+  # Opt-in: keep each pipeline stage of a DP/EP replica on one node and verify its physical GPUs at
+  # startup. Requires non-colocated async vLLM with TP=1 and EP=DP.
   inference_engine_node_local: false
   n_samples_per_prompt: 5
   async_engine: true
