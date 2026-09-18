@@ -87,6 +87,7 @@ RAY_CLUSTER_OWNER_ENV = "SKYRL_RAY_CLUSTER_OWNER"
 NUMA_AFFINITY_ENV = "SKYRL_ENABLE_NUMA_AFFINITY"
 TELEMETRY_ENDPOINT_ENV = "SKYRL_TELEMETRY_ENDPOINT"
 RUN_ID_ENV = "SKYRL_RUN_ID"
+TRAINING_LOOP_ENV = "SKYRL_TRAINING_LOOP"
 EXECUTION_UID_ENV = "SKYRL_EXECUTION_UID"
 DEFAULT_NCCL_TRACE_BUFFER_SIZE = 20_000
 
@@ -196,6 +197,13 @@ ENV_VAR_SPECS = (
     ),
     EnvVarSpec(
         RUN_ID_ENV,
+        "runtime.telemetry",
+        EnvVarSource.EXTERNAL,
+        ALL_RUNTIME_SCOPES,
+    ),
+    # sync or async: which training loop the run uses, so dashboards can tell runs apart.
+    EnvVarSpec(
+        TRAINING_LOOP_ENV,
         "runtime.telemetry",
         EnvVarSource.EXTERNAL,
         ALL_RUNTIME_SCOPES,
@@ -410,6 +418,7 @@ class EnvVarManager:
             NVRTC_HOME_ENV,
             TELEMETRY_ENDPOINT_ENV,
             RUN_ID_ENV,
+            TRAINING_LOOP_ENV,
             EXECUTION_UID_ENV,
         )
         for name in passthrough_names:

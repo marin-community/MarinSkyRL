@@ -158,6 +158,8 @@ class TelemetryConfig:
     run_id: str | None = None
     execution_uid: str | None = None
     serving_job_id: str | None = None
+    # sync or async: the training loop the run uses; dashboards select runs by it.
+    training_loop: str | None = None
 
     @classmethod
     def from_environment(cls) -> "TelemetryConfig":
@@ -170,6 +172,7 @@ class TelemetryConfig:
             run_id=text("SKYRL_RUN_ID"),
             execution_uid=text("SKYRL_EXECUTION_UID") or _iris_execution_uid(),
             serving_job_id=text("SKYRL_SERVING_JOB_ID"),
+            training_loop=text("SKYRL_TRAINING_LOOP"),
         )
 
 
@@ -242,6 +245,8 @@ def _resources(config: TelemetryConfig, role: str) -> dict[str, str]:
     }
     if config.serving_job_id:
         resources["serving_job_id"] = config.serving_job_id
+    if config.training_loop:
+        resources["training_loop"] = config.training_loop
     return resources
 
 

@@ -16,6 +16,7 @@ from marinskyrl.environment_contract import (  # noqa: E402
     EXECUTION_UID_ENV,
     RUN_ID_ENV,
     TELEMETRY_ENDPOINT_ENV,
+    TRAINING_LOOP_ENV,
 )
 from skyrl_train.telemetry import TelemetryConfig  # noqa: E402
 
@@ -86,7 +87,7 @@ def test_telemetry_environment_unreachable_controller_returns_nothing(monkeypatc
 
 def test_telemetry_environment_round_trips_through_trainer_config(monkeypatch) -> None:
     _in_cluster(monkeypatch)
-    exported = telemetry_env.telemetry_environment()
+    exported = telemetry_env.telemetry_environment(training_loop="async")
     for name, value in exported.items():
         monkeypatch.setenv(name, value)
 
@@ -94,3 +95,10 @@ def test_telemetry_environment_round_trips_through_trainer_config(monkeypatch) -
     assert config.endpoint == exported[TELEMETRY_ENDPOINT_ENV]
     assert config.run_id == exported[RUN_ID_ENV]
     assert config.execution_uid == exported[EXECUTION_UID_ENV]
+    assert config.training_loop == exported[TRAINING_LOOP_ENV] == "async"
+
+
+def test_telemetry_environment_omits_an_unknown_training_loop(monkeypatch) -> None:
+    _in_cluster(monkeypatch)
+    monkeypatch.delenv(TRAINING_LOOP_ENV, raising=False)
+    assert TRAINING_LOOP_ENV not in telemetry_env.telemetry_environment()

@@ -123,6 +123,7 @@ from cloud.iris.rl_config_translation import (
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
     format_hydra_arg,
+    RLEntrypoint,
     resolve_rl_entrypoint,
     resolve_rl_config_path,
 )
@@ -1978,6 +1979,13 @@ def load_config_policy_model_revision(rl_config_path: str) -> str | None:
     return revision
 
 
+def load_config_training_loop(rl_config_path: str) -> str:
+    """Return ``async`` for the fully asynchronous entrypoint and ``sync`` otherwise."""
+    raw = _load_rl_config_yaml(rl_config_path)
+    entrypoint = raw.get("entrypoint")
+    return "async" if entrypoint is not None and RLEntrypoint(entrypoint) is RLEntrypoint.FULLY_ASYNC else "sync"
+
+
 def load_config_terminal_bench_data(rl_config_path: str) -> list[str]:
     """Return task datasets used by the mixed Gym/Harbor sidechannel.
 
@@ -2294,6 +2302,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # The job name is sanitized, so the pod cannot recover the run id.
     if args.run_id:
         controller_cmd.extend(["--run-id", args.run_id])
+    controller_cmd.extend(["--training-loop", load_config_training_loop(args.rl_config)])
     controller_cmd.extend(_model_bootstrap_args(args))
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)
