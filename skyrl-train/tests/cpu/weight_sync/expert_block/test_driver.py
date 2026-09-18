@@ -135,12 +135,18 @@ class FakeRanks:
         expected = dict(self.schedule.receiver_bytes)
         if participant in expected:
             report = InstallReport(
-                participant, version, dict(self.schedule.receiver_experts)[participant], expected[participant], 0.1
+                participant,
+                version,
+                dict(self.schedule.receiver_experts)[participant],
+                expected[participant],
+                0.1,
+                expert_seconds=0.07,
+                dense_seconds=0.03,
             )
         else:
             sent = sum(item.entry.nbytes for item in self.schedule.experts if item.root == participant)
             sent += sum(item.source.nbytes for item in self.schedule.dense if item.root == participant)
-            report = InstallReport(participant, version, 0, sent, 0.1)
+            report = InstallReport(participant, version, 0, sent, 0.1, expert_seconds=0.02, dense_seconds=0.08)
         return {**asdict(report), **self.report_changes.get(participant, {})}
 
     def replay_report(self, participant, version):
@@ -220,6 +226,12 @@ def test_prepare_then_sync_accepts_reports_that_match_the_plan(local_store):
     sync = prepared(ranks)
     timings = asyncio.run(sync.sync(3))
     assert timings.receiver_seconds == 0.1
+    # The slowest participant of each phase, whichever side it is on.
+    assert (timings.expert_seconds, timings.dense_seconds) == (0.07, 0.08)
+    assert set(timings.as_metrics()) == {
+        f"expert_block_sync/{name}"
+        for name in ("install_seconds", "policy_seconds", "receiver_seconds", "expert_seconds", "dense_seconds")
+    }
     assert [call for call in ranks.calls if call[1] != "inventory"] == [
         ("policy", "trainer_init"),
         ("engines", "init_transfer_engine"),

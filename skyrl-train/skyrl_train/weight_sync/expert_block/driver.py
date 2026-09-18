@@ -36,9 +36,16 @@ from skyrl_train.weight_sync.expert_block.stream import InstallReport
 
 @dataclass(frozen=True)
 class SyncTimings:
+    """One sync's wall time as the driver saw it, and the slowest participant of each side and phase."""
+
     install_seconds: float
     policy_seconds: float
     receiver_seconds: float
+    expert_seconds: float
+    dense_seconds: float
+
+    def as_metrics(self) -> dict[str, float]:
+        return {f"expert_block_sync/{name}": value for name, value in asdict(self).items()}
 
 
 def plan_from_inventories(policy: list[dict], receivers: list[tuple[dict, object]]) -> tuple[Schedule, dict[str, int]]:
@@ -220,6 +227,8 @@ class ExpertBlockSync:
             install_seconds=time.perf_counter() - started,
             policy_seconds=max(report.seconds for report in policy),
             receiver_seconds=max(report.seconds for report in receivers),
+            expert_seconds=max(report.expert_seconds for report in (*policy, *receivers)),
+            dense_seconds=max(report.dense_seconds for report in (*policy, *receivers)),
         )
 
     async def verify(self, version: int) -> dict[str, float]:

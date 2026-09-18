@@ -38,11 +38,15 @@ def storage_identity(tensors: dict[str, torch.Tensor]) -> dict[str, tuple]:
 
 @dataclass(frozen=True)
 class InstallReport:
+    """What one participant moved in a sync, with the expert and dense phases timed separately."""
+
     participant: int
     version: int
     expert_matrices: int
     wire_bytes: int
     seconds: float
+    expert_seconds: float = 0.0
+    dense_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -128,10 +132,13 @@ class Stream:
         with torch.no_grad():
             return self._run(version)
 
-    def _run(self, version: int) -> InstallReport:
-        started = time.perf_counter()
+    def _sync_device(self) -> None:
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
+
+    def _run(self, version: int) -> InstallReport:
+        self._sync_device()
+        started = time.perf_counter()
         matrices = wire_bytes = 0
         for broadcast in self.schedule.experts:
             if broadcast.root == self.participant:
@@ -147,6 +154,8 @@ class Stream:
                 continue
             matrices += 1
             wire_bytes += broadcast.entry.nbytes
+        self._sync_device()
+        experts_done = time.perf_counter()
         for item in self.schedule.dense:
             if item.root == self.participant:
                 dist.broadcast(dense_source_view(item.source, self.sources), src=0, group=self.groups[item.group])
@@ -162,9 +171,17 @@ class Stream:
                 if not landing.direct:
                     landing.installed.copy_(tensor)
                 wire_bytes += item.source.nbytes
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
-        return InstallReport(self.participant, version, matrices, wire_bytes, time.perf_counter() - started)
+        self._sync_device()
+        finished = time.perf_counter()
+        return InstallReport(
+            self.participant,
+            version,
+            matrices,
+            wire_bytes,
+            finished - started,
+            expert_seconds=experts_done - started,
+            dense_seconds=finished - experts_done,
+        )
 
     def local_group(self) -> tuple[str, tuple[int, ...]] | None:
         for group in self.schedule.groups:

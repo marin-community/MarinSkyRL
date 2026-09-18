@@ -1261,9 +1261,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         await self._drain_policy_event_loops()
         if self._expert_block_sync is not None:
             timings = await self._expert_block_sync.sync(self.global_step)
-            self.all_timings["weight_broadcast"] = timings.install_seconds
-            self.all_timings["expert_block_sync/policy_seconds"] = timings.policy_seconds
-            self.all_timings["expert_block_sync/receiver_seconds"] = timings.receiver_seconds
+            self.all_timings.update(timings.as_metrics())
             if self.cfg.generator.expert_block_sync.verify:
                 self.all_timings.update(await self._expert_block_sync.verify(self.global_step))
             return None
