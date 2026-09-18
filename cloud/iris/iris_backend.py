@@ -1412,7 +1412,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-cache-ttl-days",
         type=int,
-        default=14,
+        default=DEFAULT_STORAGE_TTL_DAYS,
         help="Lifecycle TTL for revision-keyed Hugging Face draft-model mirrors.",
     )
 

@@ -43,7 +43,11 @@ import time
 import uuid
 from typing import Protocol
 from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize
-from cloud.iris.hf_model_cache import CachedHuggingFaceModel, stage_cached_hugging_face_model
+from cloud.iris.hf_model_cache import (
+    CachedHuggingFaceModel,
+    download_hugging_face_snapshot,
+    stage_cached_hugging_face_model,
+)
 from marinskyrl.hf_model import validate_portable_hf_model_files
 from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
@@ -404,57 +408,13 @@ def stage_model(model_path: str, warm_source: str | None = None, revision: str |
     # trust_remote_code modeling files needed by from_pretrained in offline ranks.
     allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.model", "*.py", "*.jinja"]
 
-    # Download in a SUBPROCESS with the offline flags stripped from ITS env. An
-    # in-process os.environ.pop does NOT work here: huggingface_hub snapshots
-    # HF_HUB_OFFLINE into a module CONSTANT at IMPORT time, so clearing the env
-    # var afterward leaves the cached constant True -> snapshot_download raises
-    # OfflineModeIsEnabled. A fresh child process re-reads the (cleaned) env at
-    # its own import. The child inherits HF_HOME/HF_HUB_CACHE, so it populates
-    # the SAME node-local cache the offline ranks then read.
-    child_env = {k: v for k, v in os.environ.items() if k not in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")}
-    child_env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # keep captured stderr bounded
-    code = (
-        "import sys\n"
-        "from huggingface_hub import snapshot_download\n"
-        "p = snapshot_download(sys.argv[1], revision=sys.argv[3] or None, allow_patterns=sys.argv[2].split(','))\n"
-        "print('PRESTAGE_LOCAL_DIR=' + p)\n"
-    )
     _log(f"Pre-staging model on this node (rank {_rank()}/{_num_tasks()}): {model_path}")
-    last_err = ""
-    # A stalled snapshot_download (mid-download socket hang) blocks subprocess.run
-    # forever without a per-attempt timeout. HF resumes the partial `.incomplete`
-    # shard on the next attempt, so a killed-mid-download attempt loses nothing.
-    # 600s comfortably covers a clean ~160 GB pull yet fits several retries inside
-    # the 1800s gang-join budget.
-    PRESTAGE_ATTEMPT_TIMEOUT_S = 600
-    for attempt in range(1, 7):
-        try:
-            proc = subprocess.run(
-                [sys.executable, "-c", code, model_path, ",".join(allow_patterns), revision or ""],
-                env=child_env,
-                capture_output=True,
-                text=True,
-                timeout=PRESTAGE_ATTEMPT_TIMEOUT_S,
-            )
-        except subprocess.TimeoutExpired:
-            last_err = (
-                f"snapshot_download stalled > {PRESTAGE_ATTEMPT_TIMEOUT_S}s "
-                "(mid-download socket hang); killed, retrying (HF resumes the partial shard)"
-            )
-            _log(f"model prestage attempt {attempt}/6 TIMED OUT: {last_err}")
-            time.sleep(min(30, 2**attempt))
-            continue
-        if proc.returncode == 0:
-            local_dir = ""
-            for line in proc.stdout.splitlines():
-                if line.startswith("PRESTAGE_LOCAL_DIR="):
-                    local_dir = line.split("=", 1)[1]
-            _log(f"model pre-staged to node-local HF cache: {local_dir}")
-            return
-        last_err = (proc.stderr or proc.stdout or "")[-800:]
-        _log(f"model prestage attempt {attempt}/6 failed (rc={proc.returncode}): {last_err}")
-        time.sleep(min(30, 2**attempt))
-    raise RuntimeError(f"model prestage failed after 6 attempts for {model_path}: {last_err}")
+    local_dir = download_hugging_face_snapshot(
+        model_path,
+        revision=revision,
+        allow_patterns=tuple(allow_patterns),
+    )
+    _log(f"model pre-staged to node-local HF cache: {local_dir}")
 
 
 def materialize_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
@@ -2127,7 +2087,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--model-cache-ttl-days",
         type=int,
-        default=14,
+        default=None,
         help="Lifecycle TTL for immutable Hugging Face draft-model mirrors.",
     )
     parser.add_argument(
@@ -2268,7 +2228,7 @@ def main() -> None:
     for teacher_model in teacher_model_specs_from_json(args.prestage_teacher_models_json):
         stage_model(teacher_model.path, revision=teacher_model.revision)
     for draft_model in cached_hugging_face_models_from_json(args.prestage_draft_models_json):
-        if args.model_cache_ttl_days <= 0:
+        if args.model_cache_ttl_days is None or args.model_cache_ttl_days <= 0:
             raise ValueError("--model-cache-ttl-days must be positive")
         if not args.model_cache_source_prefix:
             raise ValueError("--model-cache-source-prefix is required when pre-staging draft models")

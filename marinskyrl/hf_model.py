@@ -22,11 +22,16 @@ def normalize_fast_tokenizer_metadata(model_dir: Path) -> bool:
     return True
 
 
-def validate_portable_hf_model_files(names: set[str], source: str) -> None:
-    """Validate the minimum portable Hugging Face model export contract."""
+def validate_hf_model_weights(names: set[str], source: str) -> None:
+    """Validate the config and weights required by an auxiliary Hugging Face model."""
     if "config.json" not in names:
         raise ValueError(f"Model export is missing config.json: {source}")
     if not any(name.endswith((".safetensors", ".bin")) for name in names):
         raise ValueError(f"Model export has no weight shards: {source}")
+
+
+def validate_portable_hf_model_files(names: set[str], source: str) -> None:
+    """Validate the minimum portable Hugging Face model export contract."""
+    validate_hf_model_weights(names, source)
     if not any(name.startswith("tokenizer") or name.endswith(".model") for name in names):
         raise ValueError(f"Model export has no tokenizer files: {source}")
