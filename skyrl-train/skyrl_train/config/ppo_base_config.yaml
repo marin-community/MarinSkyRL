@@ -410,6 +410,8 @@ generator:
   enable_http_endpoint: false
   http_endpoint_host: "127.0.0.1"
   http_endpoint_port: 8000
+  # Deadline for every engine to acknowledge a weight-sync pause or resume.
+  weight_sync_pause_timeout_seconds: 30.0
   max_turns: 1
 
   chat_template:
