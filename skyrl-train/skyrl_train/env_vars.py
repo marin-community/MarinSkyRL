@@ -22,6 +22,5 @@ from marinskyrl.environment_contract import (
     ensure_debug_artifact_directories as ensure_debug_artifact_directories,
     managed_environment_names as managed_environment_names,
     nccl_diagnostics_environment as nccl_diagnostics_environment,
-    temporarily_unset_managed_environment as temporarily_unset_managed_environment,
     write_process_manifest as write_process_manifest,
 )

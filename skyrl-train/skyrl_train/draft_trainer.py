@@ -229,9 +229,7 @@ class DraftTrainer:
                 job = OnlineEagleTrainingJob(
                     step=request.step,
                     capture_dir=str(merged_capture),
-                    draft_model_source=self._initial_model.source_uri,
-                    draft_model_path=self._initial_model.materialized_path,
-                    initial_draft_source_identity=self._initial_model.source_identity,
+                    initial_draft_model=self._initial_model,
                     parent_draft_revision=self._accepted_revision,
                     target_revision=request.target_revision,
                     output_dir=str(candidate_dir),

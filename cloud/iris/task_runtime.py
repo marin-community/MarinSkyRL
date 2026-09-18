@@ -2093,9 +2093,8 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     )
     parser.add_argument(
         "--prestage-draft-model",
-        action="append",
         nargs=3,
-        default=[],
+        default=None,
         metavar=("MODEL_ID", "REVISION", "LOCAL_PATH"),
         help="Immutable Hugging Face draft model to cache and materialize before Ray starts.",
     )
@@ -2134,6 +2133,11 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         "--prestage-model or --model-local-path. Empty disables the override.",
     )
     args, train_argv = parser.parse_known_args(argv)
+    if args.prestage_draft_model is not None:
+        try:
+            args.prestage_draft_model = CachedHuggingFaceModel(*args.prestage_draft_model)
+        except ValueError as error:
+            parser.error(str(error))
     # argparse leaves the `--` separator out of train_argv; strip a leading one
     # if the shell passed it through.
     if train_argv and train_argv[0] == "--":
@@ -2208,13 +2212,14 @@ def main() -> None:
         )
     for teacher_model in args.prestage_teacher_models:
         stage_model(teacher_model.path, revision=teacher_model.revision)
-    for model_id, revision, local_path in args.prestage_draft_model:
+    draft_model = args.prestage_draft_model
+    if draft_model is not None:
         if args.draft_model_cache_ttl_days is None or args.draft_model_cache_ttl_days <= 0:
             raise ValueError("--draft-model-cache-ttl-days must be positive")
         if not args.draft_model_cache_source_prefix:
             raise ValueError("--draft-model-cache-source-prefix is required when pre-staging draft models")
         stage_cached_hugging_face_model(
-            CachedHuggingFaceModel(model_id=model_id, revision=revision, local_path=local_path),
+            draft_model,
             ttl_days=args.draft_model_cache_ttl_days,
             source_prefix=args.draft_model_cache_source_prefix,
         )

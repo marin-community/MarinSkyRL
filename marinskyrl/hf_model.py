@@ -1,4 +1,4 @@
-"""Shared Hugging Face model export contracts."""
+"""Shared Hugging Face model lifecycle utilities."""
 
 import contextlib
 import hashlib
@@ -8,9 +8,11 @@ from pathlib import Path
 
 import huggingface_hub.constants
 
+from marinskyrl.environment_contract import HF_HUB_OFFLINE_ENV, TRANSFORMERS_OFFLINE_ENV
+
 TOKENIZER_CONFIG_NAME = "tokenizer_config.json"
 TOKENIZER_JSON_NAME = "tokenizer.json"
-_OFFLINE_ENVIRONMENT_VARIABLES = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+_OFFLINE_ENVIRONMENT_VARIABLES = (HF_HUB_OFFLINE_ENV, TRANSFORMERS_OFFLINE_ENV)
 
 
 def hugging_face_model_cache_key(model_id: str, revision: str) -> str:

@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Generator
 
+from fsspec.spec import AbstractFileSystem
 from huggingface_hub import snapshot_download
 from rigging.filesystem.cluster_config import marin_temp_bucket
 from rigging.filesystem.distributed_lock import HEARTBEAT_INTERVAL, DistributedLease, LeaseLostError, create_lock
@@ -86,7 +87,7 @@ def _is_cache_complete(marker_uri: str, model_id: str, revision: str) -> bool:
     return True
 
 
-def _upload_snapshot(filesystem, cache_path: str, snapshot: Path) -> None:
+def _upload_snapshot(filesystem: AbstractFileSystem, cache_path: str, snapshot: Path) -> None:
     for local_path in sorted(path for path in snapshot.rglob("*") if path.is_file()):
         relative = local_path.relative_to(snapshot)
         if relative.parts[0] == ".cache":
