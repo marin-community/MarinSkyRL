@@ -113,7 +113,7 @@ ADDITIVE_GENERATOR_FIELDS = {
     "gdn_backend": "torch",
     "inference_engine_node_local": False,
     "weight_sync_transport": "broadcast",
-    "expert_block_sync": {"timeout_seconds": 600},
+    "expert_block_sync": {"timeout_seconds": 600, "verify": False},
 }
 ADDITIVE_MODEL_FIELDS = {
     "source_uri": None,

@@ -151,6 +151,22 @@ class FakeRanks:
             report = InstallReport(participant, version, 0, sent, 0.1)
         return {**asdict(report), **self.report_changes.get(participant, {})}
 
+    def replay_report(self, participant, version):
+        expected = dict(self.schedule.receiver_bytes)
+        compared = expected.get(participant, 0)
+        report = {
+            "participant": participant,
+            "version": version,
+            "compared_bytes": compared,
+            "parameter_bytes": compared,
+            "mismatched_bytes": 0,
+        }
+        return {**report, **self.report_changes.get(("replay", participant), {})}
+
+    def replica_report(self, participant, version):
+        report = {"participant": participant, "version": version, "compared_bytes": 96, "mismatched_bytes": 0}
+        return {**report, **self.report_changes.get(("replicas", participant), {})}
+
     # policy model
     def async_run_ray_method(self, dispatch, method_name, method, *args):
         assert (dispatch, method_name) == ("pass_through", "expert_block_rpc")
@@ -163,6 +179,14 @@ class FakeRanks:
                 replies.append({"participant": trainer.rank, "warmup_seconds": {}})
             elif method == "send_weights":
                 replies.append(self.report(trainer.rank, args[0]["version"]))
+            elif method == "verify":
+                version = args[0]["version"]
+                replies.append(
+                    {
+                        "replay": self.replay_report(trainer.rank, version),
+                        "replicas": self.replica_report(trainer.rank, version),
+                    }
+                )
             else:
                 replies.append(None)
         return [self.reply(value) for value in replies]
@@ -180,6 +204,8 @@ class FakeRanks:
                 )
             elif method == "receive_weights":
                 replies.append(self.report(receiver_participant(len(trainers()), row), args[0]["version"]))
+            elif method == "verify":
+                replies.append(self.replay_report(receiver_participant(len(trainers()), row), args[0]["version"]))
             else:
                 replies.append(None)
         return replies
@@ -255,3 +281,33 @@ def test_prepare_requires_node_local_placement(local_store):
     sync = ExpertBlockSync(policy_model=ranks, inference_engine_client=ranks, timeout_seconds=30)
     with pytest.raises(ValueError, match="inference_engine_node_local"):
         asyncio.run(sync.prepare())
+
+
+def test_the_gate_passes_when_every_replayed_byte_matched_and_every_parameter_byte_was_covered(local_store):
+    ranks = FakeRanks()
+    sync = prepared(ranks)
+    asyncio.run(sync.sync(3))
+    assert "verify_seconds" in asyncio.run(sync.verify(3))
+    assert ranks.calls[-2:] == [("policy", "verify"), ("engines", "verify")]
+
+
+@pytest.mark.parametrize(
+    "kind,offset,change,error",
+    [
+        ("replay", 0, {"mismatched_bytes": 4}, "4 of .* replayed bytes differ"),
+        ("replay", 0, {"parameter_bytes": 999}, "it holds 999 parameter bytes"),
+        ("replay", 0, {"compared_bytes": 1, "parameter_bytes": 1}, "compared 1 bytes"),
+        ("replicas", None, {"mismatched_bytes": 2}, "differs from its data-parallel peers on 2"),
+    ],
+)
+def test_the_gate_fails_on_a_mismatch_or_a_coverage_gap(local_store, kind, offset, change, error):
+    ranks = FakeRanks()
+    sync = prepared(ranks)
+    asyncio.run(sync.sync(3))
+    if offset is None:
+        participant = trainers()[0].rank
+    else:
+        participant = receiver_participant(sync.schedule.trainer_count, receivers()[offset])
+    ranks.report_changes[(kind, participant)] = change
+    with pytest.raises(RuntimeError, match=error):
+        asyncio.run(sync.verify(3))

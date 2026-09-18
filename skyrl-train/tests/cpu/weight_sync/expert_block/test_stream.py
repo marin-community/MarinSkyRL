@@ -16,10 +16,12 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from skyrl_train.weight_sync.expert_block.gate import compare_replicas, replay
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, create_groups, destroy_groups, warm_groups
 from skyrl_train.weight_sync.expert_block.schedule import (
     DenseSlice,
     ExpertEntry,
+    Group,
     ReceiverRank,
     TrainerRank,
     build_schedule,
@@ -200,6 +202,33 @@ def participant_main(rank, topology, port, directory):
             for name in held_dense:
                 expected = torch.tensor(dense_value(name), dtype=torch.bfloat16).to(parameters[name].dtype)
                 assert torch.all(parameters[name] == expected), name
+        # --- The gate: a replay of the same sync matches every installed byte and covers them all ---
+        report = replay(stream, 7)
+        if rank >= trainer_count:
+            assert report.mismatched_bytes == 0
+            assert report.compared_bytes == dict(plan.receiver_bytes)[rank] == report.parameter_bytes
+        # One flipped byte on one receiver's installed slot is found by the next replay, and only there.
+        if rank == trainer_count:
+            slot = parameters[f"model.layers.{held_layers[0]}.mlp.experts.routed_experts.w13_weight"]
+            slot.view(-1).view(torch.uint8)[1] ^= 0xFF
+        report = replay(stream, 7)
+        if rank >= trainer_count:
+            assert report.mismatched_bytes == (1 if rank == trainer_count else 0)
+        # --- Data-parallel peers holding the same parameters are byte-identical, or the gate says which bytes are not ---
+        if rank < trainer_count and topology.trainer_dp == 2:
+            trainer = topology.trainers()[rank]
+            peers = tuple(row.rank for row in topology.trainers() if (row.pp, row.ep) == (trainer.pp, trainer.ep))
+            peer_group = create_groups(
+                rank, (Group(f"peers-{trainer.pp}-{trainer.ep}", peers),), rendezvous, backend="gloo"
+            )
+            replica_groups = dict.fromkeys(sources, next(iter(peer_group.values())))
+            try:
+                assert compare_replicas(sources, replica_groups, rank, 7).mismatched_bytes == 0
+                if trainer.dp == 1:
+                    next(iter(sources.values())).view(-1).view(torch.uint8)[0] ^= 0xFF
+                assert compare_replicas(sources, replica_groups, rank, 7).mismatched_bytes == 1
+            finally:
+                destroy_groups(peer_group)
     finally:
         destroy_groups(groups)
         dist.destroy_process_group()

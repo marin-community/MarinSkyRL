@@ -374,6 +374,9 @@ generator:
   weight_sync_transport: "broadcast"
   expert_block_sync:
     timeout_seconds: 600  # Group creation at startup and each sync's collectives.
+    # Qualification gate, not for production: after every sync, replay it and fail unless every
+    # receiver's installed bytes match and every parameter byte was covered.
+    verify: false
   fuse_weights: false
   r3_transport: "decentral"
   r3_dispatch_put_timeout_seconds: 600

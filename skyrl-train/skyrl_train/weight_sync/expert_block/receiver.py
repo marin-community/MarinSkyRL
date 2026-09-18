@@ -17,6 +17,7 @@ from dataclasses import asdict
 
 import torch
 
+from skyrl_train.weight_sync.expert_block.gate import replay
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, create_groups, destroy_groups, warm_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, from_wire
 from skyrl_train.weight_sync.expert_block.source_views import LAYER_PREFIX, ROUTED_EXPERTS
@@ -149,6 +150,12 @@ class ExpertBlockReceiver:
             raise RuntimeError("Model parameter storage changed since the expert-block receiver was initialised")
         self.last_report = asdict(self.stream.run(update_info["version"]))
         return self.last_report
+
+    def verify(self, update_info: dict) -> dict:
+        """The opt-in gate: replay the sync and count bytes that differ from what was installed."""
+        if self.stream is None:
+            raise RuntimeError("Expert-block receiver is not initialised")
+        return asdict(replay(self.stream, update_info["version"]))
 
     def shutdown(self) -> None:
         destroy_groups(self.groups)

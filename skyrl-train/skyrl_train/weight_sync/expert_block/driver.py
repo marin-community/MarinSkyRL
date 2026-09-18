@@ -17,6 +17,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 import time
 
+from skyrl_train.weight_sync.expert_block.gate import ReplayReport, ReplicaReport
 from skyrl_train.weight_sync.expert_block.groups import RendezvousStore
 from skyrl_train.weight_sync.expert_block.schedule import (
     DenseSlice,
@@ -238,6 +239,44 @@ class ExpertBlockSync:
             policy_seconds=max(report.seconds for report in policy),
             receiver_seconds=max(report.seconds for report in receivers),
         )
+
+    async def verify(self, version: int) -> dict[str, float]:
+        """The opt-in gate: fail unless every receiver's replay matched every installed byte and covered them all."""
+        if self.schedule is None:
+            raise RuntimeError("Expert-block sync is not prepared")
+        if not self.client.generation_paused_event.is_set():
+            raise RuntimeError("The expert-block gate runs only while generation is paused")
+        started = time.perf_counter()
+        update_info = {"version": version}
+        policy_rows, receiver_rows = await asyncio.gather(
+            self._policy("verify", update_info), self.client.expert_block_rpc("verify", update_info)
+        )
+        expected_bytes = dict(self.schedule.receiver_bytes)
+        receivers = [ReplayReport(**row) for row in receiver_rows]
+        if sorted(report.participant for report in receivers) != sorted(expected_bytes):
+            raise RuntimeError("Not every planned receiver reported the gate replay")
+        for report in receivers:
+            if report.version != version or report.mismatched_bytes != 0:
+                raise RuntimeError(
+                    f"Receiver {report.participant}: {report.mismatched_bytes} of {report.compared_bytes} replayed "
+                    f"bytes differ from what it installed for version {version}"
+                )
+            if (
+                report.compared_bytes != expected_bytes[report.participant]
+                or report.compared_bytes != report.parameter_bytes
+            ):
+                raise RuntimeError(
+                    f"Receiver {report.participant} compared {report.compared_bytes} bytes; the schedule assigns "
+                    f"{expected_bytes[report.participant]} and it holds {report.parameter_bytes} parameter bytes"
+                )
+        for row in policy_rows:
+            replicas = ReplicaReport(**row["replicas"])
+            if replicas.version != version or replicas.mismatched_bytes != 0:
+                raise RuntimeError(
+                    f"Trainer rank {replicas.participant} differs from its data-parallel peers on "
+                    f"{replicas.mismatched_bytes} of {replicas.compared_bytes} bytes"
+                )
+        return {"verify_seconds": time.perf_counter() - started}
 
     async def close(self) -> None:
         try:

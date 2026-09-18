@@ -15,6 +15,7 @@ from dataclasses import asdict
 
 import torch
 
+from skyrl_train.weight_sync.expert_block.gate import compare_replicas, replay
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, create_groups, destroy_groups, warm_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, TrainerRank, from_wire, to_wire
 from skyrl_train.weight_sync.expert_block.source_views import local_expert_sources, local_source_slices
@@ -108,6 +109,22 @@ class ExpertBlockSender:
         if storage_identity(self.sources) != self.identity:
             raise RuntimeError("Policy parameter storage changed since the sync was prepared")
         return asdict(self.stream.run(version))
+
+    def verify(self, update_info: dict) -> dict:
+        """The opt-in gate: re-send this rank's blocks, and check its data-parallel peers hold the same bytes."""
+        if self.stream is None:
+            raise RuntimeError("Expert-block sender is not initialised")
+        version = update_info["version"]
+        state = self.parallel_state
+        expert_keys = {item.source_key for item in self.expert_sources.values()}
+        groups = {
+            name: state.get_expert_data_parallel_group() if name in expert_keys else state.get_data_parallel_group()
+            for name in self.sources
+        }
+        return {
+            "replay": asdict(replay(self.stream, version)),
+            "replicas": asdict(compare_replicas(self.sources, groups, self.trainer.rank, version)),
+        }
 
     def shutdown(self) -> None:
         destroy_groups(self.groups)
