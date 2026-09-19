@@ -2337,12 +2337,16 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
 
 
 def test_rollout_metrics_skip_unstepped_episode_metrics():
-    """Episodes skipped before env.step report empty metrics and must not reach aggregators."""
+    """Skipped and failed episodes never step the environment or reach its aggregator."""
     metrics = get_rollout_metrics(
-        responses=[[1, 2], [3, 4, 5]],
-        rewards=[1.0, 0.0],
-        env_classes=["aime", "aime"],
-        env_metrics=[{"acc": True, "over_evaluation_budget": False, "answered_within_evaluation_budget": True}, {}],
+        responses=[[1, 2], [3, 4, 5], [6]],
+        rewards=[1.0, 0.0, 0.0],
+        env_classes=["aime", "aime", "aime"],
+        env_metrics=[
+            {"acc": True, "over_evaluation_budget": False, "answered_within_evaluation_budget": True},
+            {},
+            {"agent_loop_error": 1.0},
+        ],
     )
 
     assert metrics["environment/acc"] == 1.0
