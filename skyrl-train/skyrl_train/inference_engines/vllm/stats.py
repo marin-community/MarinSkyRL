@@ -28,6 +28,7 @@ VLLM_HISTOGRAM_UNITS = {
     "iteration_tokens_total": "{token}",
     "request_time_per_output_token_seconds": "s",
 }
+_MAX_SIGNED_64 = (1 << 63) - 1
 
 
 class IntervalReadMode(StrEnum):
@@ -38,8 +39,8 @@ class IntervalReadMode(StrEnum):
 @dataclass(frozen=True)
 class VLLMHistogramSnapshot:
     name: str
-    buckets: tuple[tuple[float, float], ...]
-    count: float
+    buckets: tuple[tuple[float, int], ...]
+    count: int
     total: float
     unit: str
     attributes: Mapping[str, str] = field(default_factory=dict)
@@ -112,6 +113,7 @@ class VLLMEngineStatsSnapshot:
     interval: VLLMIntervalStats
     attributes: Mapping[str, str] = field(default_factory=dict)
     histograms: tuple[VLLMHistogramSnapshot, ...] = ()
+    sample_sequence: int = 0
 
 
 @dataclass(frozen=True)
@@ -258,13 +260,16 @@ def snapshot_vllm_prometheus_metrics(metrics: Sequence[Any], engine_index: str) 
                     buckets=tuple(
                         sorted(
                             (
-                                (math.inf if bound == "+Inf" else float(bound), float(count))
+                                (
+                                    math.inf if bound == "+Inf" else float(bound),
+                                    _exact_nonnegative_count(count, f"{name} bucket {bound}"),
+                                )
                                 for bound, count in metric.buckets.items()
                             ),
                             key=lambda item: item[0],
                         )
                     ),
-                    count=float(metric.count),
+                    count=_exact_nonnegative_count(metric.count, f"{name} count"),
                     total=float(metric.sum),
                     unit=VLLM_HISTOGRAM_UNITS[name],
                     attributes=attributes,
@@ -294,3 +299,15 @@ def snapshot_vllm_prometheus_metrics(metrics: Sequence[Any], engine_index: str) 
         ),
         histograms=tuple(histograms),
     )
+
+
+def _exact_nonnegative_count(value: Any, field: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a nonnegative signed 64-bit integer")
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{field} must be a nonnegative signed 64-bit integer") from error
+    if result != value or not 0 <= result <= _MAX_SIGNED_64:
+        raise ValueError(f"{field} must be a nonnegative signed 64-bit integer")
+    return result

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from enum import StrEnum
 from typing import Protocol
 
 from loguru import logger
@@ -19,7 +20,20 @@ from skyrl_train.telemetry import TelemetryConfig
 
 
 VLLM_MAX_RECORDS_PER_ENGINE = 512
+VLLM_MAX_HISTOGRAM_BUNDLES_PER_PUBLICATION = 64
+HTTP_BRIDGE_MAX_RECORDS_PER_PUBLICATION = 512
+VLLM_HISTOGRAM_BUNDLE_NAME = "vllm_histogram_bundle"
+VLLM_METRIC_SOURCE = "vllm"
+HTTP_BRIDGE_METRIC_SOURCE = "inference_http_bridge"
 PUBLICATION_LOSS_METRIC = "metric_publication_dropped_records"
+
+
+class VllmHistogramFormat(StrEnum):
+    """Histogram record shapes emitted by the Finelog sink."""
+
+    SCALAR = "scalar"
+    STRUCTURED = "structured"
+    DUAL = "dual"
 
 
 class InferenceMetricsSink(Protocol):
@@ -28,12 +42,14 @@ class InferenceMetricsSink(Protocol):
     def publish(self, snapshot: InferenceStatsSnapshot, step: int) -> None: ...
 
 
-def configured_inference_sinks() -> tuple[InferenceMetricsSink, ...]:
+def configured_inference_sinks(
+    histogram_format: VllmHistogramFormat = VllmHistogramFormat.STRUCTURED,
+) -> tuple[InferenceMetricsSink, ...]:
     """Return the Finelog sink when telemetry is configured and Rigging is installed."""
     if not TelemetryConfig.from_environment().endpoint:
         return ()
     try:
-        return (FinelogInferenceMetricsSink(),)
+        return (FinelogInferenceMetricsSink(histogram_format),)
     except ImportError as error:
         if error.name != "rigging":
             raise
@@ -130,27 +146,52 @@ def format_console_summary(metrics: Mapping[str, float], step: int) -> str:
 class FinelogInferenceMetricsSink:
     """Convert the neutral snapshot to Rigging records at the publishing edge."""
 
-    def __init__(self) -> None:
-        from rigging.telemetry.metrics import MetricSnapshotPublisher  # noqa: PLC0415
+    def __init__(self, histogram_format: VllmHistogramFormat = VllmHistogramFormat.STRUCTURED) -> None:
+        from rigging.telemetry.metrics import (  # noqa: PLC0415
+            CumulativeHistogramBundleSnapshotPublisher,
+            MetricSnapshotPublisher,
+        )
+
+        self._histogram_format = histogram_format
 
         self._publisher = MetricSnapshotPublisher(
             max_records=VLLM_MAX_RECORDS_PER_ENGINE,
-            attributes={"metric_source": "vllm"},
+            attributes={"metric_source": VLLM_METRIC_SOURCE},
+        )
+        self._histogram_publisher = CumulativeHistogramBundleSnapshotPublisher(
+            max_records=VLLM_MAX_HISTOGRAM_BUNDLES_PER_PUBLICATION,
+            attributes={"metric_source": VLLM_METRIC_SOURCE},
         )
         self._bridge_publisher = MetricSnapshotPublisher(
-            max_records=512, attributes={"metric_source": "inference_http_bridge"}
+            max_records=HTTP_BRIDGE_MAX_RECORDS_PER_PUBLICATION,
+            attributes={"metric_source": HTTP_BRIDGE_METRIC_SOURCE},
         )
 
     def publish(self, snapshot: InferenceStatsSnapshot, step: int) -> None:
         from rigging import telemetry  # noqa: PLC0415
-        from rigging.telemetry.metrics import MetricSnapshot  # noqa: PLC0415
+        from rigging.telemetry.metrics import (  # noqa: PLC0415
+            CumulativeHistogramBundleSnapshot,
+            CumulativeHistogramSnapshot,
+            MetricSnapshot,
+            cumulative_histogram_schema,
+            cumulative_histogram_series,
+        )
 
         sample_limit_dropped = 0
         telemetry_lost = 0
+        histogram_bundles = []
         for engine in snapshot.engines:
             records = []
+            structured_histograms = []
             cumulative_base = {**engine.attributes, "engine": engine.engine_id}
             current_base = {**cumulative_base, "step": str(step)}
+            collection_timestamp_ms = int(engine.timestamp * 1_000)
+            publication_id = f"{engine.engine_id}:{collection_timestamp_ms}:{engine.sample_sequence}"
+            publication_attributes = {
+                "histogram_collection_timestamp_ms": str(collection_timestamp_ms),
+                "histogram_publication_id": publication_id,
+                "histogram_sample_sequence": str(engine.sample_sequence),
+            }
             current = engine.current
             for name, value, unit, attributes in (
                 ("num_requests_running", current.running_requests, "{request}", {}),
@@ -221,9 +262,37 @@ class FinelogInferenceMetricsSink:
                     )
                 )
             for histogram in engine.histograms:
-                records.extend(
-                    _histogram_records(histogram, cumulative_base, MetricSnapshot, telemetry.CUMULATIVE_SNAPSHOT)
-                )
+                finite_bounds = tuple(bound for bound, _ in histogram.buckets if math.isfinite(bound))
+                series_attributes = {**histogram.attributes, **cumulative_base}
+                if self._histogram_format in (VllmHistogramFormat.SCALAR, VllmHistogramFormat.DUAL):
+                    dual_attributes = None
+                    if self._histogram_format == VllmHistogramFormat.DUAL:
+                        dual_attributes = {
+                            **publication_attributes,
+                            "histogram_schema": cumulative_histogram_schema(finite_bounds),
+                            "histogram_series": cumulative_histogram_series(series_attributes),
+                        }
+                    records.extend(
+                        _histogram_records(
+                            histogram,
+                            cumulative_base,
+                            MetricSnapshot,
+                            telemetry.CUMULATIVE_SNAPSHOT,
+                            publication_attributes=dual_attributes,
+                        )
+                    )
+                if self._histogram_format in (VllmHistogramFormat.STRUCTURED, VllmHistogramFormat.DUAL):
+                    structured_histograms.append(
+                        CumulativeHistogramSnapshot(
+                            name=histogram.name,
+                            finite_bounds=finite_bounds,
+                            cumulative_counts=tuple(count for _, count in histogram.buckets),
+                            count=histogram.count,
+                            total=histogram.total,
+                            unit=histogram.unit,
+                            attributes=series_attributes,
+                        )
+                    )
             if len(records) > VLLM_MAX_RECORDS_PER_ENGINE:
                 sample_limit_dropped += len(records)
                 logger.warning(
@@ -241,16 +310,25 @@ class FinelogInferenceMetricsSink:
                 )
             elif records:
                 result = self._publisher.publish(records)
-                if result.configured:
-                    sample_limit_dropped += result.sample_limit_dropped_records
-                    telemetry_lost += result.telemetry_lost_records
-                if result.sample_limit_dropped_records or result.telemetry_lost_records:
-                    logger.warning(
-                        "vLLM metric publication lost records: sample_limit={}, telemetry_queue={}",
-                        result.sample_limit_dropped_records,
-                        result.telemetry_lost_records,
+                dropped, lost = _publication_losses(result, "vLLM metric")
+                sample_limit_dropped += dropped
+                telemetry_lost += lost
+            if structured_histograms:
+                histogram_bundles.append(
+                    CumulativeHistogramBundleSnapshot(
+                        name=VLLM_HISTOGRAM_BUNDLE_NAME,
+                        histograms=tuple(structured_histograms),
+                        attributes={**cumulative_base, **publication_attributes},
+                        timestamp_ms=collection_timestamp_ms,
+                        sample_sequence=engine.sample_sequence,
                     )
-        _record_publication_health(telemetry, "vllm", sample_limit_dropped, telemetry_lost)
+                )
+        if histogram_bundles:
+            result = self._histogram_publisher.publish(histogram_bundles)
+            dropped, lost = _publication_losses(result, "vLLM histogram bundle")
+            sample_limit_dropped += dropped
+            telemetry_lost += lost
+        _record_publication_health(telemetry, VLLM_METRIC_SOURCE, sample_limit_dropped, telemetry_lost)
         if snapshot.http_bridge is not None:
             records = []
             for histogram in snapshot.http_bridge.histograms:
@@ -264,17 +342,12 @@ class FinelogInferenceMetricsSink:
                 )
             if records:
                 result = self._bridge_publisher.publish(records)
-                if result.sample_limit_dropped_records or result.telemetry_lost_records:
-                    logger.warning(
-                        "HTTP bridge metric publication lost records: sample_limit={}, telemetry_queue={}",
-                        result.sample_limit_dropped_records,
-                        result.telemetry_lost_records,
-                    )
+                sample_limit_dropped, telemetry_lost = _publication_losses(result, "HTTP bridge metric")
                 _record_publication_health(
                     telemetry,
-                    "inference_http_bridge",
-                    result.sample_limit_dropped_records if result.configured else 0,
-                    result.telemetry_lost_records if result.configured else 0,
+                    HTTP_BRIDGE_METRIC_SOURCE,
+                    sample_limit_dropped,
+                    telemetry_lost,
                 )
 
 
@@ -308,6 +381,25 @@ class _Telemetry(Protocol):
     def gauge(self, name: str, *, unit: str) -> _Gauge: ...
 
 
+class _MetricPublishResult(Protocol):
+    configured: bool
+    sample_limit_dropped_records: int
+    telemetry_lost_records: int
+
+
+def _publication_losses(result: _MetricPublishResult, label: str) -> tuple[int, int]:
+    if result.sample_limit_dropped_records or result.telemetry_lost_records:
+        logger.warning(
+            "{} publication lost records: sample_limit={}, telemetry_queue={}",
+            label,
+            result.sample_limit_dropped_records,
+            result.telemetry_lost_records,
+        )
+    if not result.configured:
+        return 0, 0
+    return result.sample_limit_dropped_records, result.telemetry_lost_records
+
+
 def _metric_batch_is_valid(records: list[_MetricRecord]) -> bool:
     """Mirror Rigging's per-record validation before admitting an engine batch."""
     from rigging.telemetry import serialization  # noqa: PLC0415
@@ -322,7 +414,7 @@ def _metric_batch_is_valid(records: list[_MetricRecord]) -> bool:
             serialization.validate_attributes(
                 {
                     **record.attributes,
-                    "metric_source": "vllm",
+                    "metric_source": VLLM_METRIC_SOURCE,
                     "source_kind": record.source_kind,
                     "source_temporality": record.source_temporality,
                 }
@@ -337,8 +429,11 @@ def _histogram_records(
     base: Mapping[str, str],
     metric_snapshot_type: _MetricRecordFactory,
     cumulative: str,
+    publication_attributes: Mapping[str, str] | None = None,
 ) -> list[_MetricRecord]:
     attributes = {**histogram.attributes, **base}
+    if publication_attributes:
+        attributes = {**attributes, **publication_attributes}
     records = [
         metric_snapshot_type(
             name=f"{histogram.name}_bucket",
