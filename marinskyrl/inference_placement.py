@@ -71,7 +71,7 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
     """Refuse the expert-block weight-sync transport unless every precondition holds.
 
     The transport pairs each Megatron expert matrix with the vLLM worker that serves it and
-    reads every parameter as a whole HF tensor or a run of one, so it needs the megatron
+    reads each HF tensor as one or more runs of one trainer parameter, so it needs the megatron
     strategy at TP=1 and ETP=1, local async vLLM engines at TP=1 placed node-locally, and the
     NCCL weight-sync backend.
     """

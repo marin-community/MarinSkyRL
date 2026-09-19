@@ -97,14 +97,17 @@ def test_only_an_entrypoint_running_the_fully_async_trainer_may_select_expert_bl
 
 
 def test_the_standard_entrypoint_refuses_expert_block_instead_of_syncing_by_broadcast():
-    # BasePPOExp selects RayPPOTrainer, which never reads the transport option.
+    # BasePPOExp selects RayPPOTrainer, which never reads the transport option. The refusal
+    # comes first in trainer setup, so the test skips tokenizer and dataset loading.
+    exp = object.__new__(BasePPOExp)
+    exp.cfg = expert_block_config()
     with pytest.raises(ValueError, match="FullyAsyncRayPPOTrainer"):
-        BasePPOExp(expert_block_config())
+        exp._setup_trainer()
 
 
 def test_the_model_package_imports_before_the_trainer_utilities():
     # The frozen-runtime bootstrap imports the Grug model first; that chain reaches
-    # skyrl_train.utils, which must not pull the weight_sync package back into the models.
+    # skyrl_train.utils and the transport's config validator, and must not cycle.
     subprocess.run(
         [sys.executable, "-c", "from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE"],
         check=True,

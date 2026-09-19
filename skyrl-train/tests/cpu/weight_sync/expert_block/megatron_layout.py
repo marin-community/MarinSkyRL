@@ -25,6 +25,7 @@ PROVIDER = SimpleNamespace(
 )
 # BF16 keeps eight significant bits: 128 + position is exact below this many elements.
 MAX_NUMEL = 128
+ROUTER_BIAS = ".mlp.router.expert_bias"
 
 
 def megatron_shapes(layers, experts, *, last_stage: bool) -> dict[str, tuple[int, ...]]:
@@ -37,6 +38,7 @@ def megatron_shapes(layers, experts, *, last_stage: bool) -> dict[str, tuple[int
             HIDDEN,
         )
         shapes[f"{prefix}.mlp.router.weight"] = (NUM_EXPERTS, HIDDEN)
+        shapes[f"{prefix}.mlp.router.expert_bias"] = (NUM_EXPERTS,)
         shapes[f"{prefix}.mlp.shared_experts.linear_fc1.weight"] = (2 * SHARED_INTERMEDIATE, HIDDEN)
         for expert in experts:
             shapes[f"{prefix}.mlp.experts.linear_fc1.weight{expert}"] = (2 * INTERMEDIATE, HIDDEN)
@@ -48,11 +50,15 @@ def megatron_shapes(layers, experts, *, last_stage: bool) -> dict[str, tuple[int
 
 
 def megatron_parameter(name: str, shape: tuple[int, ...], model_names: list[str]) -> torch.Tensor:
-    """BF16-exact values: the position is the mantissa and the tensor's index in the model the exponent."""
+    """BF16-exact values: the position is the mantissa and the tensor's index in the model the exponent.
+
+    Megatron keeps the router's expert bias in FP32; everything else is BF16.
+    """
     numel = math.prod(shape)
     assert numel <= MAX_NUMEL
     exponent = model_names.index(name) - len(model_names) // 2
-    return ((MAX_NUMEL + torch.arange(numel)) * 2.0**exponent).to(torch.bfloat16).reshape(shape)
+    dtype = torch.float32 if name.endswith(ROUTER_BIAS) else torch.bfloat16
+    return ((MAX_NUMEL + torch.arange(numel)) * 2.0**exponent).to(dtype).reshape(shape)
 
 
 def megatron_parameters(layers, experts, *, last_stage: bool, model_names: list[str]) -> dict[str, torch.Tensor]:
@@ -79,6 +85,8 @@ def conversion_tasks(parameters: dict[str, torch.Tensor]) -> list:
             )
         elif name.endswith("router.weight"):
             kind = mapping("ReplicatedMapping", f"{hf}.mlp.router.weight")
+        elif name.endswith(ROUTER_BIAS):
+            kind = mapping("ReplicatedMapping", f"{hf}.mlp.router.bias")
         elif ".experts.linear_fc1" in name:
             kind = mapping(
                 "GrugStackedGatedExpertMapping",
@@ -116,6 +124,8 @@ def reference_hf(parameters: dict[str, torch.Tensor]) -> tuple[dict[str, torch.T
             dense[f"{hf}.shared_expert.up_proj.weight"] = up
         elif name.endswith("router.weight"):
             dense[f"{hf}.mlp.router.weight"] = weight
+        elif name.endswith(ROUTER_BIAS):
+            dense[f"{hf}.mlp.router.bias"] = weight
         elif name == "decoder.final_layernorm.weight":
             dense["model.norm.weight"] = weight
         else:

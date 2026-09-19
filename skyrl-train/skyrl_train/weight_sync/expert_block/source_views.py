@@ -49,8 +49,6 @@ class ExpertSlice:
     expert: int
     part: str
     source_key: str
-    source_offset: int
-    numel: int
 
 
 @dataclass(frozen=True)
@@ -96,13 +94,12 @@ def local_source_slices(tasks, config, *, pp: int) -> LocalSources:
                 raise ValueError(f"Expert parameter {key} is not a single per-expert matrix")
             expert_id = int(match.group(1))
             if kind == "GrugStackedExpertMapping":
-                expert.append(ExpertSlice(mapping.hf_param, expert_id, "down", key, 0, source.numel()))
+                expert.append(ExpertSlice(mapping.hf_param, expert_id, "down", key))
             else:
                 if source.shape[0] % 2 or set(mapping.hf_param) != {"gate", "up"}:
                     raise ValueError(f"Gated expert parameter {key} is not a complete [gate;up] matrix")
-                half = source.numel() // 2
-                for position, part in enumerate(("gate", "up")):
-                    expert.append(ExpertSlice(mapping.hf_param[part], expert_id, part, key, position * half, half))
+                for part in ("gate", "up"):
+                    expert.append(ExpertSlice(mapping.hf_param[part], expert_id, part, key))
             continue
 
         def add(name, hf_offset, numel, source_offset):
@@ -168,11 +165,7 @@ def local_expert_sources(
             raise ValueError(
                 f"Expert {expert} of layer {layer} ({projection}) is incomplete or split across parameters"
             )
-        first = parts["down" if projection == "fc2" else "gate"]
-        if projection == "fc1" and (
-            first.source_offset != 0 or parts["up"].source_offset != intermediate_size * hidden_size
-        ):
-            raise ValueError(f"Expert {expert} of layer {layer} has reordered or nonadjacent gate/up halves")
+        first = next(iter(parts.values()))
         source = sources[first.source_key]
         shape = (hidden_size, intermediate_size) if projection == "fc2" else (2 * intermediate_size, hidden_size)
         if tuple(source.shape) != shape or source.dtype != torch.bfloat16:
@@ -221,7 +214,7 @@ def dense_source_view(item: DenseSlice, sources: dict[str, torch.Tensor]) -> tor
 
 
 def dense_installed_view(item: DenseSlice, parameters) -> torch.Tensor:
-    """The run of the receiver's installed tensor a slice lands in; the router weight is FP32 here and BF16 on the wire."""
+    """The run of the installed tensor a slice lands in. The router weight is FP32 here, BF16 on the wire."""
     parameter = parameters[item.hf_name]
     if not parameter.is_contiguous():
         raise ValueError(f"Installed parameter {item.hf_name} is not contiguous")

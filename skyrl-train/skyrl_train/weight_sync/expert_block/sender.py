@@ -92,7 +92,7 @@ class ExpertBlockSender:
             raise RuntimeError("Expert-block sender is not initialised")
         version = update_info["version"]
         # Before the first update the weights are whatever was loaded; after one, the
-        # sync must name the update this rank actually finished.
+        # sync must name the update this rank finished.
         completed = self.worker._model_version_step
         if completed is not None and completed != version:
             raise RuntimeError(f"Sync names update {version} but this rank last completed {completed}")
