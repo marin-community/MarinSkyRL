@@ -1,4 +1,4 @@
-"""The trainer-side extraction: a rank's Megatron parameters, sliced as the HF tensors they back."""
+"""``local_source_slices`` turns a rank's Megatron parameters into slices of HF tensors."""
 
 from types import SimpleNamespace
 
@@ -90,7 +90,7 @@ def task(name, weight, kind):
 @pytest.mark.parametrize(
     "bad_task,error",
     [
-        # Trainer tensor parallelism would make each parameter a shard of its HF tensor.
+        # With trainer TP a parameter is only a shard of its HF tensor.
         (
             task(
                 "output_layer.weight", torch.zeros(5, 3, dtype=torch.bfloat16), mapping("AutoMapping", "w", tp_size=2)

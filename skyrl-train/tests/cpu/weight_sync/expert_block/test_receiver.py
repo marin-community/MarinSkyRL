@@ -1,4 +1,4 @@
-"""The receiver refuses models it cannot write into in place, and syncs after its parameters were reallocated."""
+"""The receiver rejects models it cannot write into, and a sync after its parameters were reallocated."""
 
 from types import SimpleNamespace
 

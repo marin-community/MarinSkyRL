@@ -1,12 +1,12 @@
-"""The trainer side of an expert-block sync, held by each Megatron policy worker.
+"""Trainer side of expert-block sync. Each Megatron policy worker holds one.
 
-Method names follow vLLM's ``TrainerWeightTransferEngine`` (``trainer_init``,
-``send_weights``, ``shutdown``). That API drives a rank-0 client and this
-transport sends from every rank, so the class is MarinSkyRL's own.
+Method names follow vLLM's ``TrainerWeightTransferEngine``: ``trainer_init``, ``send_weights``,
+``shutdown``. vLLM's class sends from rank 0 only and this transport sends from every rank, so
+this is a separate class.
 
-Once per run the worker reports what it owns and binds its groups and views to
-the driver's plan. Each sync checks that the parameters are still the storage
-the plan was bound to and that the update named is the one this rank finished.
+Once per run the worker reports what it holds and creates its groups. Before each send it
+checks that its parameters have not been reallocated and that the update being synced is the
+one it just finished.
 """
 
 from dataclasses import asdict
@@ -32,7 +32,7 @@ class ExpertBlockSender:
         self.stream: Stream | None = None
 
     def inventory(self) -> dict:
-        """This rank's coordinates and the expert matrices and dense slices it owns."""
+        """This rank's coordinates, expert matrices and dense slices."""
         state = self.parallel_state
         self.trainer = TrainerRank(
             torch.distributed.get_rank(),
@@ -71,7 +71,7 @@ class ExpertBlockSender:
         }
 
     def trainer_init(self, init_info: dict) -> dict:
-        """Create this rank's groups and resolve every view the plan needs; returns warm-up seconds per group."""
+        """Create this rank's groups and resolve the tensors the schedule needs. Returns the warm-up seconds per group."""
         if self.stream is not None:
             raise RuntimeError("Expert-block sender is already initialised")
         plan = from_wire(Schedule, init_info["schedule"])
@@ -87,16 +87,16 @@ class ExpertBlockSender:
         return {"participant": self.trainer.rank, "warmup_seconds": warm}
 
     def send_weights(self, update_info: dict) -> dict:
-        """Send this rank's blocks for one update; refused unless the weights are that update's."""
+        """Send this rank's weights for one update. Refuses if the rank has not finished that update."""
         if self.stream is None:
             raise RuntimeError("Expert-block sender is not initialised")
         version = update_info["version"]
-        # Before the first update the weights are whatever was loaded; after one, the
-        # sync must name the update this rank finished.
+        # Before the first update the weights are the loaded checkpoint. After that, the sync must
+        # name the update this rank just finished.
         completed = self.worker._model_version_step
         if completed is not None and completed != version:
             raise RuntimeError(f"Sync names update {version} but this rank last completed {completed}")
-        # The parameters are held live, so a ``param.data`` reassignment since preparation shows here.
+        # ``sources`` holds the parameters themselves, so a reassigned ``param.data`` shows up here.
         if storage_identity(self.sources) != self.identity:
             raise RuntimeError("Policy parameter storage changed since the sync was prepared")
         return asdict(self.stream.run(version))

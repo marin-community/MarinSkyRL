@@ -1,11 +1,12 @@
-"""Real gloo broadcasts over the expert-block schedule: every element lands where the HF layout says, and nowhere else.
+"""Run the schedule over real gloo broadcasts and check every element the receivers got.
 
-Every process is one participant. Trainer ranks hold Megatron-layout parameters with
-position-unique values and describe them through conversion tasks, as in production; receivers
-compare what they installed with an independent reference conversion. Two topologies: equal EP
-with one receiver stage and two replicas, and unequal EP with two receiver stages. Each then
-verifies the sync: a replay finds no differing byte, then exactly the one byte flipped on one
-receiver and the one flipped on one data-parallel peer.
+Each process is one participant. Trainer ranks hold Megatron-layout parameters with a value
+unique to each position and describe them with conversion tasks, as in production. Receivers
+compare what they received with an independent reference conversion. There are two topologies:
+equal EP with one receiver stage and two replicas, and unequal EP with two receiver stages.
+
+Each topology then verifies the sync. A replay finds no differing byte, then exactly the one byte
+flipped on one receiver, and the peer comparison finds the one byte flipped on one data-parallel rank.
 """
 
 from dataclasses import dataclass
@@ -36,8 +37,8 @@ from tests.cpu.weight_sync.expert_block.megatron_layout import (
 
 TIMEOUT = 60
 ROUTED_EXPERTS = "mlp.experts.routed_experts"
-# vLLM pads the vocabulary: the receiver's tensor has more rows than the HF tensor. The
-# transport sees the leading HF rows and must leave the padded tail alone.
+# vLLM pads the vocabulary, so the receiver's tensor has more rows than the HF tensor. The
+# transport writes the HF rows and must not touch the padding.
 PADDED_VOCAB = 8
 
 
@@ -114,7 +115,7 @@ UNEQUAL_STAGED = Topology(
 
 
 def trainer_sources(topology, trainer):
-    """A trainer rank's live parameters and what the production extraction says they hold."""
+    """A trainer rank's parameters and the slices the production code extracts from them."""
     local = local_source_slices(conversion_tasks(topology.parameters_of(trainer)), PROVIDER, pp=trainer.pp)
     experts = local_expert_sources(
         local.experts,
@@ -155,7 +156,7 @@ def schedule(topology):
 
 
 def receiver_parameters(topology, receiver, dense):
-    """Zeroed vLLM-layout parameters for one worker: fused expert slots, its stage's dense tensors, a padded LM head."""
+    """Zeroed vLLM-layout parameters for one worker: expert slots, its stage's dense tensors and a padded LM head."""
     per_block = NUM_EXPERTS // topology.receiver_ep
     parameters, maps = {}, {}
     for layer in topology.receiver_layers[receiver.pp]:
@@ -212,7 +213,7 @@ def check_receiver(rank, topology, plan, report, parameters, maps, padded_head, 
     for name in held:
         assert torch.equal(parameters[name], dense[name].to(parameters[name].dtype)), name
         held_bytes += dense[name].numel() * dense[name].element_size()
-    # The wire carries each held tensor once, at the trainer's width.
+    # Each tensor this receiver holds is sent once, in the trainer's dtype.
     assert report.wire_bytes == held_bytes
     if padded_head is not None:
         assert torch.all(padded_head[dense["lm_head.weight"].shape[0] :] == 0), "the padded vocabulary tail was written"

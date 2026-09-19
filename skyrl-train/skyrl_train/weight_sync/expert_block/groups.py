@@ -1,10 +1,9 @@
-"""NCCL groups that span trainer and receiver processes, rendezvoused through one TCP store.
+"""NCCL groups between trainer and receiver processes.
 
-Trainers and receivers have different default process groups, so every sync
-group is a standalone communicator. The driver hosts one ``TCPStore``; each
-participant creates the groups it belongs to, under a per-group prefix, in the
-schedule's order. A four-byte broadcast on each group makes NCCL connect at
-startup instead of during the first sync.
+Trainers and receivers do not share a default process group, so each sync group is a
+standalone communicator. The driver hosts one ``TCPStore``. Each participant creates the
+groups it belongs to, in schedule order, each under its own store prefix. A small
+broadcast on every group makes NCCL connect at startup instead of during the first sync.
 """
 
 from dataclasses import dataclass
@@ -30,7 +29,7 @@ class Rendezvous:
 
 
 class RendezvousStore:
-    """The driver-side store; stays open until every group has been destroyed."""
+    """The driver's TCP store. It stays open until every group is destroyed."""
 
     def __init__(self, namespace: str, *, timeout_seconds: int):
         self.address = ray.util.get_node_ip_address()
@@ -51,7 +50,7 @@ class RendezvousStore:
 def create_groups(
     participant: int, groups: tuple[Group, ...], rendezvous: Rendezvous, *, backend: str = "nccl"
 ) -> dict[str, dist.ProcessGroup]:
-    """Create this participant's communicators; on any failure, destroy the ones already made."""
+    """Create the groups this participant belongs to. If one fails, destroy those already created."""
     client = dist.TCPStore(
         rendezvous.address,
         rendezvous.port,
@@ -82,7 +81,7 @@ def create_groups(
 def warm_groups(
     participant: int, groups: tuple[Group, ...], created: dict[str, dist.ProcessGroup], device
 ) -> dict[str, float]:
-    """Broadcast a known value on every owned group and check it arrived; returns seconds per group."""
+    """Broadcast a known value on each group and check it arrived. Returns the seconds per group."""
     wire = torch.empty(1, dtype=torch.int32, device=device)
     seconds = {}
     for index, group in enumerate(groups):

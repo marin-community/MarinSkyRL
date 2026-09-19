@@ -1,9 +1,9 @@
-"""A tiny Grug model in Megatron's parameter layout, and the HF tensors it must convert to.
+"""A tiny Grug model in Megatron's parameter layout, and the HF tensors it converts to.
 
-Every element is unique to its tensor and position, so a swapped ``[gate;up]`` half, a
-transposed matrix, a wrong expert slot or a misplaced QKV run changes the bytes.
-:func:`reference_hf` converts the layout with plain tensor operations and shares no code with
-the transport's slicing.
+Every element has a value unique to its tensor and position, so swapping ``[gate;up]`` halves,
+transposing a matrix, using the wrong expert slot or misplacing a QKV run changes the bytes.
+``reference_hf`` does the conversion with plain tensor operations and shares no code with the
+transport.
 """
 
 import math
@@ -19,7 +19,7 @@ SHARED_INTERMEDIATE = 2
 HEADS, KV_GROUPS, HEAD_DIM = 4, 2, 2
 QUERIES_PER_GROUP = HEADS // KV_GROUPS
 VOCAB = 5
-# The provider fields the transport reads to split the interleaved QKV parameter.
+# The provider fields the transport reads to split the QKV parameter.
 PROVIDER = SimpleNamespace(
     num_attention_heads=HEADS, num_query_groups=KV_GROUPS, kv_channels=HEAD_DIM, hidden_size=HIDDEN
 )
@@ -29,7 +29,7 @@ ROUTER_BIAS = ".mlp.router.expert_bias"
 
 
 def megatron_shapes(layers, experts, *, last_stage: bool) -> dict[str, tuple[int, ...]]:
-    """Megatron parameter name -> shape for a rank holding ``layers`` and the global ``experts``."""
+    """Megatron parameter name -> shape, for a rank with these layers and global expert ids."""
     shapes = {}
     for layer in layers:
         prefix = f"decoder.layers.{layer}"
@@ -50,9 +50,9 @@ def megatron_shapes(layers, experts, *, last_stage: bool) -> dict[str, tuple[int
 
 
 def megatron_parameter(name: str, shape: tuple[int, ...], model_names: list[str]) -> torch.Tensor:
-    """BF16-exact values: the position is the mantissa and the tensor's index in the model the exponent.
+    """Values that are exact in BF16: the position sets the mantissa and the tensor's index the exponent.
 
-    Megatron keeps the router's expert bias in FP32; everything else is BF16.
+    The router's expert bias is FP32, as in Megatron. Everything else is BF16.
     """
     numel = math.prod(shape)
     assert numel <= MAX_NUMEL
@@ -67,12 +67,12 @@ def megatron_parameters(layers, experts, *, last_stage: bool, model_names: list[
 
 
 def mapping(kind: str, hf_param, tp_size: int = 1):
-    """A stand-in for a Megatron-Bridge mapping: the transport reads its class name, HF name(s) and TP size."""
+    """A stand-in for a Megatron-Bridge mapping. The transport reads its class name, HF names and TP size."""
     return type(kind, (), {"hf_param": hf_param, "tp_size": tp_size})()
 
 
 def conversion_tasks(parameters: dict[str, torch.Tensor]) -> list:
-    """The conversion tasks the Grug bridge produces for these parameters, one mapping kind per parameter type."""
+    """The conversion tasks the Grug bridge produces for these parameters."""
     tasks = []
     for name, weight in parameters.items():
         layer = re.match(r"decoder\.layers\.(\d+)\.", name)
@@ -103,7 +103,7 @@ def conversion_tasks(parameters: dict[str, torch.Tensor]) -> list:
 
 
 def reference_hf(parameters: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], dict[tuple, torch.Tensor]]:
-    """``(dense HF tensors, expert matrices by (projection, layer, expert))`` these Megatron parameters hold."""
+    """Convert Megatron parameters to ``(dense HF tensors, expert matrices by (projection, layer, expert))``."""
     dense, experts = {}, {}
     for name, weight in parameters.items():
         layer = re.match(r"decoder\.layers\.(\d+)\.", name)

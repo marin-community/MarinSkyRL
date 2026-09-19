@@ -1,4 +1,4 @@
-"""The expert-block transport is refused at configuration time unless every precondition holds."""
+"""Config validation rejects ``expert_block`` unless its requirements are met."""
 
 import subprocess
 import sys
@@ -89,17 +89,17 @@ def test_validate_cfg_runs_the_transport_check():
 
 def test_only_an_entrypoint_running_the_fully_async_trainer_may_select_expert_block():
     cfg = expert_block_config()
-    # The fully async trainer is the only one that runs the transport; this must not raise.
+    # Must not raise: the fully async trainer runs the transport.
     validate_expert_block_trainer(cfg, uses_fully_async_trainer=True)
     with pytest.raises(ValueError, match="FullyAsyncRayPPOTrainer"):
         validate_expert_block_trainer(cfg, uses_fully_async_trainer=False)
-    # Broadcast is every trainer's transport.
+    # Must not raise: every trainer supports broadcast.
     validate_expert_block_trainer(example_dummy_config(), uses_fully_async_trainer=False)
 
 
 def test_the_standard_entrypoint_refuses_expert_block_instead_of_syncing_by_broadcast():
-    # BasePPOExp selects RayPPOTrainer, which never reads the transport option. The refusal
-    # comes first in trainer setup, so the test skips tokenizer and dataset loading.
+    # BasePPOExp runs RayPPOTrainer, which ignores the option. The check is the first line of
+    # trainer setup, so the test skips tokenizer and dataset loading.
     exp = object.__new__(BasePPOExp)
     exp.cfg = expert_block_config()
     with pytest.raises(ValueError, match="FullyAsyncRayPPOTrainer"):
@@ -107,8 +107,8 @@ def test_the_standard_entrypoint_refuses_expert_block_instead_of_syncing_by_broa
 
 
 def test_the_model_package_imports_before_the_trainer_utilities():
-    # The frozen-runtime bootstrap imports the Grug model first; that chain reaches
-    # skyrl_train.utils and the transport's config validator, and must not cycle.
+    # The frozen-runtime bootstrap imports the Grug model first. That import reaches
+    # skyrl_train.utils and this validator, and must not be circular.
     subprocess.run(
         [sys.executable, "-c", "from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE"],
         check=True,

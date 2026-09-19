@@ -1,4 +1,4 @@
-"""The expert-block schedule: every slot receives each of its transfers exactly once, from a rank that holds it."""
+"""The schedule sends each transfer once, from a rank that holds it, to the receivers that need it."""
 
 from collections import Counter
 from itertools import product
@@ -36,7 +36,7 @@ def receivers(replicas=2):
 
 
 def entries_of(trainer):
-    """The expert entries a trainer rank holds: its stage's layers, its EP block."""
+    """The expert entries of a trainer rank: the layers of its stage and the experts of its EP block."""
     per_block = NUM_EXPERTS // EP
     result = []
     for layer in LAYERS_BY_PP[trainer.pp]:
@@ -115,7 +115,7 @@ def test_groups_hold_one_root_and_only_the_receivers_of_its_block():
         assert root < schedule.trainer_count
         block = int(group.name.rsplit("-", 1)[1])
         assert members == [receiver_participant(schedule.trainer_count, row) for row in receivers() if row.ep == block]
-    # Trainers not chosen as a root belong to no group at all.
+    # A trainer that is never a root belongs to no group.
     roots = {group.members[0] for group in expert_groups}
     idle = set(range(schedule.trainer_count)) - roots
     assert idle and all(rank not in group.members for rank in idle for group in schedule.groups)
