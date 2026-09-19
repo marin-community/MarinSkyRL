@@ -462,6 +462,11 @@ class _AsyncDataloader:
                     return None
 
 
+def resolve_max_buffered_groups(configured: int | None, num_parallel_generation_workers: int) -> int:
+    """Depth of the completed-group queue; a null config gives one slot per generation worker."""
+    return num_parallel_generation_workers if configured is None else configured
+
+
 class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     # Per-call rollout observations are the highest-volume telemetry here, so they carry
     # their own gate and, like the trainer's, a class-level default.
@@ -518,10 +523,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # cap) workers may wait on the shared queue condition while each still holds ONE
         # completed group, so to fully bound the head-node footprint you should ALSO lower
         # num_parallel_generation_workers toward the engine working set.
-        self.max_buffered_groups = (
-            self.num_parallel_generation_workers
-            if cfg.trainer.fully_async.max_buffered_groups is None
-            else cfg.trainer.fully_async.max_buffered_groups
+        self.max_buffered_groups = resolve_max_buffered_groups(
+            cfg.trainer.fully_async.max_buffered_groups, self.num_parallel_generation_workers
         )
 
         assert (
@@ -692,6 +695,40 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await self._close_distillation_runtime(async_distillation_runtime)
             await super().shutdown()
 
+    def _record_run_configuration(self) -> None:
+        """Publish the resolved loop settings once, so a reader can recompute the run's generation ceiling.
+
+        The settings that bound rollout supply — worker count, buffer depth, staleness allowance, batch
+        shape and the response cap — appear in no other record, so a dashboard cannot derive the ceiling
+        from the per-step series alone.
+        """
+        if not self._training_metrics_enabled:
+            return
+        placement = self.cfg.trainer.placement
+        megatron = self.cfg.trainer.policy.get("megatron_config", {})
+        record_event(
+            "async_run_configuration",
+            {
+                "strategy": self.cfg.trainer.strategy,
+                "policy_nodes": placement.policy_num_nodes,
+                "policy_gpus_per_node": placement.policy_num_gpus_per_node,
+                "policy_tp": megatron.get("tensor_model_parallel_size"),
+                "policy_pp": megatron.get("pipeline_model_parallel_size"),
+                "policy_cp": megatron.get("context_parallel_size"),
+                "policy_ep": megatron.get("expert_model_parallel_size"),
+                "generation_workers": self.num_parallel_generation_workers,
+                "mini_batch_size": self.mini_batch_size,
+                "max_staleness_steps": self.max_staleness_steps,
+                # The depth the completed-group queue is actually built with: a null config
+                # resolves to one slot per generation worker, so the null itself is useless.
+                "max_buffered_groups": self.max_buffered_groups,
+                "train_batch_size": int(self.cfg.trainer.train_batch_size),
+                "n_samples_per_prompt": int(self.cfg.generator.n_samples_per_prompt),
+                "max_generate_length": int(self.cfg.generator.sampling_params.max_generate_length),
+            },
+            attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
+        )
+
     async def train(self):
         """
         Main fully async training loop for PPO
@@ -783,25 +820,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             return
 
         self._log_startup_timings()
-        if self._training_metrics_enabled:
-            placement = self.cfg.trainer.placement
-            megatron = self.cfg.trainer.policy.get("megatron_config", {})
-            record_event(
-                "async_run_configuration",
-                {
-                    "strategy": self.cfg.trainer.strategy,
-                    "policy_nodes": placement.policy_num_nodes,
-                    "policy_gpus_per_node": placement.policy_num_gpus_per_node,
-                    "policy_tp": megatron.get("tensor_model_parallel_size"),
-                    "policy_pp": megatron.get("pipeline_model_parallel_size"),
-                    "policy_cp": megatron.get("context_parallel_size"),
-                    "policy_ep": megatron.get("expert_model_parallel_size"),
-                    "generation_workers": self.num_parallel_generation_workers,
-                    "mini_batch_size": self.mini_batch_size,
-                    "max_staleness_steps": self.max_staleness_steps,
-                },
-                attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
-            )
+        self._record_run_configuration()
 
         # Create initial trainer state for on_train_begin callback
         start_epoch = self.global_step // self.num_steps_per_epoch

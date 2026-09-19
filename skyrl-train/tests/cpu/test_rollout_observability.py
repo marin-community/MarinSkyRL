@@ -10,8 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 import zstandard
+from omegaconf import OmegaConf
 from rigging.telemetry import serialization
 
+from skyrl_train import fully_async_trainer
 from skyrl_train import rollout_observability as rollout
 from skyrl_train.utils import trainer_utils
 from skyrl_train import telemetry as training_telemetry
@@ -560,3 +562,94 @@ async def test_rollout_calls_progress_while_real_exporter_waits_for_http_ack(mon
     terminal = next(row for row in delivered if row["name"] == "terminal")
     assert terminal["body"]["status"] == "completed"
     assert terminal["body"]["export_lost_records"] == 0
+
+
+def _async_loop_trainer(*, max_buffered_groups: int | None, training_metrics: bool) -> SimpleNamespace:
+    """A trainer stand-in carrying only the settings the run-configuration record reads."""
+    workers = 96
+    return SimpleNamespace(
+        _training_metrics_enabled=training_metrics,
+        global_step=0,
+        num_parallel_generation_workers=workers,
+        mini_batch_size=32,
+        max_staleness_steps=1,
+        max_buffered_groups=fully_async_trainer.resolve_max_buffered_groups(max_buffered_groups, workers),
+        cfg=OmegaConf.create(
+            {
+                "trainer": {
+                    "strategy": "fsdp2",
+                    "train_batch_size": 256,
+                    "placement": {"policy_num_nodes": 2, "policy_num_gpus_per_node": 8},
+                    "policy": {},
+                },
+                "generator": {"n_samples_per_prompt": 8, "sampling_params": {"max_generate_length": 4096}},
+            }
+        ),
+    )
+
+
+def _deliver(emit) -> list[dict]:
+    """Run `emit` against the real exporter and return the records the endpoint received."""
+    exporter = training_telemetry.telemetry
+    exporter.shutdown(timeout=0)
+    delivered: list[dict] = []
+
+    def post(session, endpoint, *, data, headers, timeout):
+        if headers.get("Content-Encoding") == "zstd":
+            data = zstandard.ZstdDecompressor().decompress(data)
+        envelope = json.loads(data)
+        delivered.extend(envelope["records"])
+        return SimpleNamespace(
+            status_code=200,
+            headers={},
+            json=lambda: {"batch_id": envelope["batch_id"], "status": "accepted"},
+        )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(exporter.requests.Session, "post", post)
+        owner = training_telemetry.ProcessTelemetry(
+            training_telemetry.TelemetryConfig(
+                endpoint="http://finelog.test/v1/ingest", run_id="config-test", execution_uid="test-attempt"
+            ),
+            role="trainer",
+        )
+        owner.__enter__()
+        try:
+            emit()
+            assert exporter.flush(timeout=5)
+        finally:
+            owner.__exit__(None, None, None)
+    return delivered
+
+
+def test_run_configuration_delivers_the_settings_that_bound_rollout_supply():
+    trainer = _async_loop_trainer(max_buffered_groups=None, training_metrics=True)
+    delivered = _deliver(lambda: fully_async_trainer.FullyAsyncRayPPOTrainer._record_run_configuration(trainer))
+
+    record = next(row for row in delivered if row["name"] == "async_run_configuration")
+    assert record["attributes"]["role"] == "trainer"
+    body = record["body"]
+    assert {key: body[key] for key in ("max_staleness_steps", "generation_workers", "mini_batch_size")} == {
+        "max_staleness_steps": 1,
+        "generation_workers": 96,
+        "mini_batch_size": 32,
+    }
+    assert {key: body[key] for key in ("train_batch_size", "n_samples_per_prompt", "max_generate_length")} == {
+        "train_batch_size": 256,
+        "n_samples_per_prompt": 8,
+        "max_generate_length": 4096,
+    }
+    # A null cap is one slot per generation worker; the panel needs the depth, not the null.
+    assert body["max_buffered_groups"] == 96
+
+    capped = _async_loop_trainer(max_buffered_groups=64, training_metrics=True)
+    capped_delivered = _deliver(lambda: fully_async_trainer.FullyAsyncRayPPOTrainer._record_run_configuration(capped))
+    capped_record = next(row for row in capped_delivered if row["name"] == "async_run_configuration")
+    assert capped_record["body"]["max_buffered_groups"] == 64
+
+
+def test_run_configuration_stays_silent_without_training_metrics():
+    trainer = _async_loop_trainer(max_buffered_groups=None, training_metrics=False)
+    delivered = _deliver(lambda: fully_async_trainer.FullyAsyncRayPPOTrainer._record_run_configuration(trainer))
+
+    assert not [row for row in delivered if row["name"] == "async_run_configuration"]
