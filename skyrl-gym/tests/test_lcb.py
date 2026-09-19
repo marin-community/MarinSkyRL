@@ -1,8 +1,13 @@
 import multiprocessing
+import platform
+import time
+
 import pytest
 import skyrl_gym
 import json
 from omegaconf import DictConfig
+
+from skyrl_gym.envs.lcb.livecodebench import VerifierLimits, lcb_test_results
 
 SECOND_LARGEST_SOLUTION = """```python
 def main():
@@ -155,3 +160,40 @@ print(int(input()))
 
     assert fractional.step(response)["reward"] == 0.5
     assert binary.step(response)["reward"] == 0.0
+
+
+def test_verifier_child_hits_wall_clock_deadline_and_is_reaped():
+    """A wall-clock cap bounds the join window; without it the formula allows (1+1)*50+5 = 105s."""
+    tests = [
+        {"input": "1\n", "output": "1\n", "testtype": "stdin"},
+    ] * 50
+    sleeper = "import time\nprint(int(input()))\ntime.sleep(5)"
+
+    started = time.monotonic()
+    results = lcb_test_results(
+        tests,
+        sleeper,
+        timeout=1,
+        limits=VerifierLimits(total_timeout_seconds=3),
+    )
+    elapsed = time.monotonic() - started
+
+    assert results == [-1] * 50
+    assert elapsed < 15
+    assert multiprocessing.active_children() == []
+
+
+@pytest.mark.skipif(platform.system() == "Darwin", reason="RLIMIT_AS is not enforced on macOS")
+def test_verifier_child_allocating_past_the_memory_cap_scores_zero():
+    tests = [{"input": "1\n", "output": "1\n", "testtype": "stdin"}]
+    bomb = "print(int(input()))\nbytearray(2 * 1024**3)"
+
+    results = lcb_test_results(
+        tests,
+        bomb,
+        timeout=5,
+        limits=VerifierLimits(max_memory_bytes=512 * 1024**2, total_timeout_seconds=60),
+    )
+
+    assert all(result is not True for result in results)
+    assert multiprocessing.active_children() == []

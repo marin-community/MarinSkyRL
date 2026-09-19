@@ -308,7 +308,7 @@ class DatabaseRegistrationCallback(TrainerCallback):
 
         # Try to load Supabase credentials
         try:
-            from skyrl_train.callbacks.database import load_supabase_keys
+            from skyrl_train.callbacks.database.utils import load_supabase_keys
 
             required_keys = ["SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY"]
             if not all(os.environ.get(k) for k in required_keys):
@@ -350,7 +350,7 @@ class DatabaseRegistrationCallback(TrainerCallback):
         from datetime import datetime, timezone
 
         try:
-            from skyrl_train.callbacks.database import register_trained_model
+            from skyrl_train.callbacks.database.utils import register_trained_model
         except ImportError:
             logger.error("DatabaseRegistrationCallback: Cannot import register_trained_model")
             return control

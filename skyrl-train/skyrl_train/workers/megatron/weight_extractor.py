@@ -4,8 +4,8 @@ from collections.abc import Iterator
 
 import torch
 
-from skyrl_train.weight_sync import WeightChunk, WeightExtractor
-from skyrl_train.weight_sync.weight_extractor import weight_sync_dtype
+from skyrl_train.weight_sync.base import WeightChunk
+from skyrl_train.weight_sync.weight_extractor import WeightExtractor, weight_sync_dtype
 
 
 def _mapping_hf_names(mapping) -> set[str]:
