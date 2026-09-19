@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from dataclasses import asdict
 from pathlib import Path
 
@@ -54,7 +55,7 @@ def _metadata() -> dict:
 
 def _run_real(records: dict) -> None:
     import ray
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import hf_hub_download
     from skyrl_train.inference_engines.base import InferenceEngineInput
     from skyrl_train.utils import initialize_ray
     from skyrl_train.weight_sync.expert_block.driver import ExpertBlockSync
@@ -64,7 +65,10 @@ def _run_real(records: dict) -> None:
     from tests.gpu.utils import init_worker_with_type
     from transformers import AutoTokenizer
 
-    model_path = snapshot_download(MODEL_REPO, revision=MODEL_REVISION, local_files_only=True)
+    records["stage"] = "resolve_staged_model"
+    model_path = str(
+        Path(hf_hub_download(MODEL_REPO, "config.json", revision=MODEL_REVISION, local_files_only=True)).parent
+    )
     records["model"] = {"repo": MODEL_REPO, "revision": MODEL_REVISION, "node_local_snapshot": model_path}
     geometry = Geometry(policy_gpus=16, policy_pp=2, policy_ep=8, engines=1, engine_dp=8, engine_pp=1)
     cfg = _config(model_path, world_size=8, pp=geometry.policy_pp, ep=geometry.policy_ep)
@@ -89,6 +93,7 @@ def _run_real(records: dict) -> None:
         "learning_rate": cfg.trainer.policy.optimizer_config.lr,
         "vllm_gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
     }
+    records["stage"] = "initialize_ray"
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     initialize_ray(cfg)
@@ -101,6 +106,7 @@ def _run_real(records: dict) -> None:
         raise RuntimeError("The Ray gang has fewer than 24 GPUs")
     sync = None
     try:
+        records["stage"] = "initialize_receiver_and_policy"
         client = engine_client(cfg, model_path, geometry)
         policy = init_worker_with_type(
             "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=8, num_nodes=2, cfg=cfg
@@ -119,12 +125,14 @@ def _run_real(records: dict) -> None:
             records["receiver_baselines"] = await sync._receivers("experiment_capture_baseline")
             await client.resume_generation()
 
+        records["stage"] = "prepare_initial_dense"
         asyncio.run(prepare())
         score_input = InferenceEngineInput(
             prompt_token_ids=[[1, 17, 29, 5, 11, 3]],
             sampling_params={"temperature": 0.0, "max_tokens": 4, "ignore_eos": True},
         )
         for version in (1, 2):
+            records["stage"] = f"train_update_{version}"
             batch = _padded_batch(pad_token_id)
             batch.metadata["global_step"] = version
             train_started = time.perf_counter()
@@ -144,6 +152,7 @@ def _run_real(records: dict) -> None:
                 else ("bitmap_bucket", "indices_bucket", "bitmap", "indices", "dense")
             )
             for index, encoding in enumerate(order):
+                records["stage"] = f"install_update_{version}_{encoding}"
 
                 async def trial(index=index, encoding=encoding, version=version):
                     if index:
@@ -204,6 +213,7 @@ def _run_real(records: dict) -> None:
             update["advanced_baselines"] = asyncio.run(advance())
             print(f"SPARSE_EXPERT_REAL_UPDATE_PASS version={version} byte_equal=true token_equal=true", flush=True)
         records["complete"] = True
+        records["stage"] = "complete"
     finally:
         if sync is not None:
             asyncio.run(sync.close())
@@ -235,6 +245,9 @@ def main() -> None:
             _run_real(records)
         else:
             raise ValueError(f"Unknown experiment mode: {mode}")
+    except BaseException as error:
+        records["failure"] = {"type": type(error).__name__, "message": str(error), "traceback": traceback.format_exc()}
+        raise
     finally:
         _output_path().write_text(json.dumps(records, indent=2, sort_keys=True, default=str))
 
