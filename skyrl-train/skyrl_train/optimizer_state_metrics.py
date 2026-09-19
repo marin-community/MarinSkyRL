@@ -27,7 +27,7 @@ import time
 from loguru import logger
 import torch
 
-from skyrl_train.telemetry import WORKER_ROLE, record_event
+from skyrl_train.telemetry import WORKER_ROLE, StepKind, record_event
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,35 @@ class OptimizerStatePart:
     master_weights: bool
     decoupled_grad: bool
     settings: Mapping[str, str | bool]
+
+
+# The declared precisions read off one chained component's Megatron config. The
+# names are both the config attribute names and the emitted field names.
+DECLARED_DTYPE_NAMES = ("params_dtype", "main_params_dtype", "main_grads_dtype", "exp_avg_dtype", "exp_avg_sq_dtype")
+
+
+@dataclass(frozen=True)
+class OptimizerComponentSettings:
+    """One chained component's declared precisions and the flags that govern them.
+
+    Field names and declaration order are the emitted `optimizer_state_settings`
+    body byte-for-byte; renaming or reordering one breaks the dashboards keyed to it.
+    """
+
+    component: int
+    optimizer_class: str
+    use_precision_aware_optimizer: bool
+    master_weights: bool
+    use_decoupled_grad: bool
+    store_param_remainders: bool
+    optimizer_cuda_graph: bool
+    grad_reduce_in_fp32: bool
+    average_in_collective: bool
+    params_dtype: str
+    main_params_dtype: str
+    main_grads_dtype: str
+    exp_avg_dtype: str
+    exp_avg_sq_dtype: str
 
 
 @dataclass
@@ -170,29 +199,27 @@ def collect_optimizer_inventory(
     return replace(inventory.summary(), coverage=dict(coverage), complete=complete)
 
 
-def megatron_inventory(model_chunks, optimizer) -> tuple[OptimizerInventory, list[dict]]:
+def megatron_inventory(model_chunks, optimizer) -> tuple[OptimizerInventory, list[OptimizerComponentSettings]]:
     """Adapter for the pinned ordinary-DDP MCore ChainedOptimizer/TE path."""
     parameters = list(dict.fromkeys(parameter for chunk in model_chunks for parameter in chunk.module.parameters()))
     parts, settings = [], []
     for index, component in enumerate(optimizer.chained_optimizers):
         inner = component.optimizer
-        declared = {
-            name: str(getattr(component.config, name))
-            for name in ("params_dtype", "main_params_dtype", "main_grads_dtype", "exp_avg_dtype", "exp_avg_sq_dtype")
-        }
-        actual = {
-            "component": index,
-            "optimizer_class": f"{type(inner).__module__}.{type(inner).__qualname__}",
-            "use_precision_aware_optimizer": bool(component.config.use_precision_aware_optimizer),
-            "master_weights": bool(inner.master_weights),
-            "use_decoupled_grad": bool(inner.use_decoupled_grad),
-            "store_param_remainders": bool(inner.store_param_remainders),
-            "optimizer_cuda_graph": bool(component.config.optimizer_cuda_graph),
-            "grad_reduce_in_fp32": bool(component.ddp_config.grad_reduce_in_fp32),
-            "average_in_collective": bool(component.ddp_config.average_in_collective),
-            **declared,
-        }
-        settings.append(actual)
+        declared = {name: str(getattr(component.config, name)) for name in DECLARED_DTYPE_NAMES}
+        settings.append(
+            OptimizerComponentSettings(
+                component=index,
+                optimizer_class=f"{type(inner).__module__}.{type(inner).__qualname__}",
+                use_precision_aware_optimizer=bool(component.config.use_precision_aware_optimizer),
+                master_weights=bool(inner.master_weights),
+                use_decoupled_grad=bool(inner.use_decoupled_grad),
+                store_param_remainders=bool(inner.store_param_remainders),
+                optimizer_cuda_graph=bool(component.config.optimizer_cuda_graph),
+                grad_reduce_in_fp32=bool(component.ddp_config.grad_reduce_in_fp32),
+                average_in_collective=bool(component.ddp_config.average_in_collective),
+                **declared,
+            )
+        )
         parts.append(
             OptimizerStatePart(
                 parameters=[parameter for group in inner.param_groups for parameter in group["params"]],
@@ -233,7 +260,7 @@ class OptimizerStateObserver:
             "worker_role": "policy",
             "rank": str(self.rank),
             "step": str(step),
-            "step_kind": "global_step",
+            "step_kind": str(StepKind.GLOBAL_STEP),
             "boundary": "after_optimizer_step_before_zero_grad",
             "inventory_version": "1",
         }
@@ -263,8 +290,11 @@ class OptimizerStateObserver:
                 record_event("optimizer_state_storage", fields_row, attributes=attributes)
                 logger.info("OPTIMIZER_STATE_STORAGE {}", json.dumps({**attributes, **fields_row}, sort_keys=True))
             for component in settings:
-                record_event("optimizer_state_settings", component, attributes=attributes)
-                logger.info("OPTIMIZER_STATE_SETTINGS {}", json.dumps({**attributes, **component}, sort_keys=True))
+                fields_component = asdict(component)
+                record_event("optimizer_state_settings", fields_component, attributes=attributes)
+                logger.info(
+                    "OPTIMIZER_STATE_SETTINGS {}", json.dumps({**attributes, **fields_component}, sort_keys=True)
+                )
             # Emit the summary last: a partial export has no complete manifest.
             fields["host_observer_seconds_before_summary"] = time.perf_counter() - started
             record_event("optimizer_state_inventory", fields, attributes=attributes)

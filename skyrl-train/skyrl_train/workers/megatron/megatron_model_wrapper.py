@@ -434,6 +434,8 @@ class MegatronModelWrapper:
             seq_len: Sequence length (tokens) per sample (assumed same across micros after padding).
             micro_batch_size: Micro-batch size per forward pass.
             temperature: Optional temperature for logits scaling.
+            timings: Optional recorder for the forward-backward scheduler span.
+                None measures nothing, like a disabled recorder.
 
         Returns:
             List[dict]: one metrics dict per micro-batch in order.

@@ -16,7 +16,7 @@ from threading import Lock
 import torch
 from loguru import logger
 
-from skyrl_train.telemetry import WORKER_ROLE, record_event
+from skyrl_train.telemetry import WORKER_ROLE, StepKind, record_event
 
 
 @dataclass
@@ -48,7 +48,8 @@ class LearnerMemory:
         self._identity: dict[str, str] = {}
         self._warned_overlap = False
 
-    def _initialize_identity(self) -> int:
+    def _identified_device(self) -> int:
+        """Return this worker's CUDA device index, building the identity attributes on first use."""
         if self._device is None:
             device = torch.cuda.current_device()
             allocator_backend = torch.cuda.get_allocator_backend()
@@ -67,9 +68,16 @@ class LearnerMemory:
         return self._device
 
     def _record(
-        self, *, phase: str, boundary: str, outcome: str, step: int | None, step_kind: str, overlapping: bool = False
+        self,
+        *,
+        phase: str,
+        boundary: str,
+        outcome: str,
+        step: int | None,
+        step_kind: StepKind,
+        overlapping: bool = False,
     ) -> None:
-        device = self._initialize_identity()
+        device = self._identified_device()
         stats = torch.cuda.memory_stats(device)
         free, total = torch.cuda.mem_get_info(device)
         fields = {
@@ -88,7 +96,9 @@ class LearnerMemory:
             "phase": phase,
             "boundary": boundary,
             "outcome": outcome,
-            "step_kind": step_kind if step is not None else "unknown",
+            # str() keeps the exported value byte-identical to the literal the
+            # dashboards were built against, whatever a serializer does with enums.
+            "step_kind": str(step_kind if step is not None else StepKind.UNKNOWN),
         }
         if step is not None:
             attributes["step"] = str(step)
@@ -100,7 +110,9 @@ class LearnerMemory:
         self.enabled = False
         logger.warning("Disabling learner CUDA memory observations after phase {} failed: {}", phase, error)
 
-    def snapshot(self, phase: str, *, step: int | None = None, step_kind: str = "model_version_step") -> None:
+    def snapshot(
+        self, phase: str, *, step: int | None = None, step_kind: StepKind = StepKind.MODEL_VERSION_STEP
+    ) -> None:
         """Sample current memory without resetting or publishing interval peaks."""
         if not self.enabled:
             return
@@ -110,7 +122,7 @@ class LearnerMemory:
             self._disable(phase, error)
 
     @contextmanager
-    def span(self, phase: str, *, step: int | None, step_kind: str) -> Iterator[None]:
+    def span(self, phase: str, *, step: int | None, step_kind: StepKind) -> Iterator[None]:
         """Measure one phase; exceptions retain their identity and a failure exit."""
         if not self.enabled:
             yield
@@ -119,7 +131,7 @@ class LearnerMemory:
         acquired = False
         scope = None
         try:
-            device = self._initialize_identity()
+            device = self._identified_device()
             with _peak_scope_lock:
                 scope = _peak_scopes.get(device)
                 if scope is None:

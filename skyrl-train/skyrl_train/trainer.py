@@ -5,6 +5,7 @@ import os
 import shutil
 import threading
 import time
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
@@ -170,6 +171,20 @@ def _policy_revision(step: int) -> str:
 
 class _ClosableDistillationRuntime(Protocol):
     async def close(self) -> None: ...
+
+
+@dataclass
+class _ConsumedGroupStaleness:
+    """One consumed group's admitted staleness and the work it contributed.
+
+    Field names and declaration order are the emitted `consumed_staleness` body
+    byte-for-byte; renaming or reordering one breaks the dashboards keyed to it.
+    """
+
+    staleness: int
+    groups: int
+    sequences: int
+    response_tokens: int
 
 
 def _validated_distillation_tensors(
@@ -1823,24 +1838,28 @@ class RayPPOTrainer:
             training_input.metadata["exclude_from_baseline"] = np.array(
                 trajectory_batch["exclude_from_baseline"], dtype=bool
             )
-        # padded response length
         if self._training_metrics_enabled:
             training_input.metadata["consumed_stop_metrics"] = consumed_stop_metrics(
                 trajectory_batch.get("stop_reasons"), len(response_ids)
             )
+        # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         if self._training_metrics_enabled and rollout_staleness is not None:
             # One event per consumed group: its admitted staleness and the tokens it contributed.
-            counts = {}
+            counts: dict[str, _ConsumedGroupStaleness] = {}
             for uid, steps, mask in zip(uids, rollout_staleness, response_masks_tensor, strict=True):
-                body = counts.setdefault(uid, {"staleness": steps, "groups": 1, "sequences": 0, "response_tokens": 0})
-                if body["staleness"] != steps:
+                group = counts.setdefault(
+                    uid, _ConsumedGroupStaleness(staleness=steps, groups=1, sequences=0, response_tokens=0)
+                )
+                if group.staleness != steps:
                     raise ValueError("Consumed group rows must share the admitted staleness")
-                body["sequences"] += 1
-                body["response_tokens"] += int(mask.sum().item())
-            for body in counts.values():
+                group.sequences += 1
+                group.response_tokens += int(mask.sum().item())
+            for group in counts.values():
                 record_event(
-                    "consumed_staleness", body, attributes={"role": TRAINER_ROLE, "step": str(self.global_step)}
+                    "consumed_staleness",
+                    asdict(group),
+                    attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
                 )
         if self.cfg.trainer.step_wise_training:
             assert "trajectory_ids" in trajectory_batch, (

@@ -33,6 +33,7 @@ from skyrl_train.utils.numa import memory_nodes_for_range
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.distributed.fsdp_utils import DEFAULT_EP_COMM_BACKEND, fsdp_version, get_init_weight_context_manager
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
+from skyrl_train.telemetry import StepKind
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     CriticWorkerBase,
@@ -936,7 +937,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # Cover full-tensor extraction and conversion, all chunks and the
         # final receiver/cache barriers; extraction can dominate the peak.
         with self._memory.span(
-            "broadcast_to_inference_engines", step=self._model_version_step, step_kind="model_version_step"
+            "broadcast_to_inference_engines", step=self._model_version_step, step_kind=StepKind.MODEL_VERSION_STEP
         ):
             return await self._broadcast_to_inference_engines(inference_engine_client)
 
@@ -1078,7 +1079,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         OFF -> byte-identical to the old sync `forward`) or off the event-loop thread
         via `asyncio.to_thread` from the async `forward` entry (flag ON).
         """
-        with self._memory.span("forward", step=data.metadata.get("global_step"), step_kind="global_step"):
+        with self._memory.span("forward", step=data.metadata.get("global_step"), step_kind=StepKind.GLOBAL_STEP):
             _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.FORWARD_IMPL_ENTER)
             output = super().forward(data)
             # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)

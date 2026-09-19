@@ -55,6 +55,7 @@ from skyrl_train.megatron_timing import (
 )
 from skyrl_train.utils.gradient_direction import gradient_direction_summary
 from skyrl_train.optimizer_state_metrics import OptimizerStateObserver
+from skyrl_train.telemetry import StepKind
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
@@ -325,7 +326,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
     def forward(self, data):
-        with self._memory.span("forward", step=data.metadata.get("global_step"), step_kind="global_step"):
+        with self._memory.span("forward", step=data.metadata.get("global_step"), step_kind=StepKind.GLOBAL_STEP):
             return super().forward(data)
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
@@ -502,7 +503,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             with self._memory.span(
                 "ppo_train",
                 step=int(train_data.metadata["global_step"]),
-                step_kind="global_step",
+                step_kind=StepKind.GLOBAL_STEP,
             ):
                 output = self._ppo_train_with_timings(train_data, timing)
             self._model_version_step = int(train_data.metadata["global_step"])
@@ -671,7 +672,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
     async def broadcast_to_inference_engines(self, inference_engine_client):
         with self._memory.span(
-            "broadcast_to_inference_engines", step=self._model_version_step, step_kind="model_version_step"
+            "broadcast_to_inference_engines", step=self._model_version_step, step_kind=StepKind.MODEL_VERSION_STEP
         ):
             return await self._broadcast_to_inference_engines(inference_engine_client)
 
