@@ -366,7 +366,11 @@ def run_sparse_bucket(
     profile: bool = True,
     dense_fallback: bool = False,
 ) -> dict:
-    """Coalesce adjacent compatible expert patches into 128 MiB dense-size buckets."""
+    """Coalesce compatible expert patches into 128 MiB buckets.
+
+    ``profile=False`` removes per-component CUDA waits and reports only total wall time.
+    ``dense_fallback`` sends non-expert slices through the unchanged dense stream.
+    """
     if encoding not in {"indices", "bitmap"}:
         raise ValueError(f"Unknown bucket encoding {encoding}")
     if stream.trainer and baseline is None:
