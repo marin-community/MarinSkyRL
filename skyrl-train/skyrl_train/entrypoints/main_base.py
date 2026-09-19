@@ -28,6 +28,7 @@ from skyrl_train.config.trajectory_runner_capabilities import (
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
 )
+from marinskyrl.inference_placement import validate_expert_block_trainer
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
 
 if TYPE_CHECKING:
@@ -227,6 +228,7 @@ class BasePPOExp:
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
         self.cfg = cfg
+        validate_expert_block_trainer(cfg, uses_fully_async_trainer=self.uses_fully_async_trainer())
         self._configure_log_level()
         self.tokenizer = self.get_tokenizer()
         self.train_dataset = self.get_train_dataset()
