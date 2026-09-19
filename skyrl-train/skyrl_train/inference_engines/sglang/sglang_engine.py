@@ -30,7 +30,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
-from skyrl_train.weight_sync import WeightLoader
+from skyrl_train.weight_sync.weight_loader import WeightLoader
 from skyrl_train.utils import torch_dtype_to_str
 from skyrl_train.inference_engines.sglang.ipc_utils import (
     serialize_ipc_request,

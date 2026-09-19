@@ -2,10 +2,14 @@
 # Adapt from rllm: https://github.com/agentica-project/rllm/blob/main/rllm/rewards/reward_types.py#L24
 import ast
 import json
+import logging
+import os
 import sys
 import faulthandler
 import platform
 import re
+import threading
+from dataclasses import dataclass
 from datetime import datetime
 import signal
 
@@ -17,8 +21,17 @@ from decimal import Decimal
 import time
 
 import multiprocessing
+import resource
 from collections.abc import Mapping
 from typing import Any, NotRequired, TypedDict
+
+# The sandbox prelude imports numpy and pandas after reliability_guard() has set
+# os.putenv to None; on Linux their first import assigns os.environ entries, which
+# calls os.putenv and fails every test with "'NoneType' object is not callable".
+# A verifier child re-imports this module before the guard runs, so importing both
+# here makes the prelude's imports sys.modules cache hits.
+import numpy  # noqa: F401
+import pandas  # noqa: F401
 
 
 BASE_IMPORTS = """from itertools import accumulate, chain, combinations, count, permutations, product, groupby, islice, repeat
@@ -546,7 +559,14 @@ def grade_stdio(
     return all_results, failure_metadata or {"execution time": total_execution_time}
 
 
-def run_test(sample, test=None, debug=False, timeout=6, execution_mode=TestExecutionMode.collect_all):
+def run_test(
+    sample,
+    test=None,
+    debug=False,
+    timeout=6,
+    execution_mode=TestExecutionMode.collect_all,
+    max_memory_bytes=None,
+):
     """
     if test(generated_code) is not None it'll try to run the code.
     otherwise it'll just return an input and output pair.
@@ -554,8 +574,8 @@ def run_test(sample, test=None, debug=False, timeout=6, execution_mode=TestExecu
     signal.signal(signal.SIGALRM, timeout_handler)
 
     # Disable functionalities that can make destructive changes to the test.
-    # max memory is set to 4GB
-    reliability_guard()
+    # A non-null max_memory_bytes caps the child's address space via RLIMIT_AS/DATA/STACK.
+    reliability_guard(maximum_memory_bytes=max_memory_bytes)
 
     if debug:
         print(f"start = {datetime.now().time()}")
@@ -628,6 +648,23 @@ def run_test(sample, test=None, debug=False, timeout=6, execution_mode=TestExecu
                 signal.alarm(0)
 
 
+def _tighten_memory_limit(limit_kind, maximum_memory_bytes):
+    """Lower one soft rlimit to ``maximum_memory_bytes``, never raising it.
+
+    Only the soft limit moves: lowering a hard limit below the current soft limit is
+    refused on macOS. Platforms that refuse the change keep their existing limit after
+    one warning.
+    """
+    soft, hard = resource.getrlimit(limit_kind)
+    cap = maximum_memory_bytes if hard == resource.RLIM_INFINITY else min(maximum_memory_bytes, hard)
+    if soft != resource.RLIM_INFINITY and soft <= cap:
+        return
+    try:
+        resource.setrlimit(limit_kind, (cap, hard))
+    except ValueError as error:
+        _logger.warning("Could not tighten %s to %d bytes: %s", limit_kind, maximum_memory_bytes, error)
+
+
 def reliability_guard(maximum_memory_bytes=None):
     """
     This disables various destructive functions and prevents the generated code
@@ -641,12 +678,10 @@ def reliability_guard(maximum_memory_bytes=None):
     """
 
     if maximum_memory_bytes is not None:
-        import resource
-
-        resource.setrlimit(resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes))
-        resource.setrlimit(resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes))
+        _tighten_memory_limit(resource.RLIMIT_AS, maximum_memory_bytes)
+        _tighten_memory_limit(resource.RLIMIT_DATA, maximum_memory_bytes)
         if not platform.uname().system == "Darwin":
-            resource.setrlimit(resource.RLIMIT_STACK, (maximum_memory_bytes, maximum_memory_bytes))
+            _tighten_memory_limit(resource.RLIMIT_STACK, maximum_memory_bytes)
 
     faulthandler.disable()
 
@@ -735,16 +770,56 @@ def postprocess_lcb_sample(sample):
     return sample
 
 
-def _run_test_in_subprocess(sample, generation, debug, result, metadata_list, timeout, execution_mode):
-    res, metadata = run_test(
+@dataclass(frozen=True)
+class VerifierLimits:
+    """Resource bounds for one verifier child process.
+
+    ``max_memory_bytes`` caps the child's address space via soft RLIMIT_AS/DATA/STACK;
+    ``total_timeout_seconds`` caps the wall-clock window one child can occupy regardless
+    of test count. A ``None`` value disables that bound.
+    """
+
+    max_memory_bytes: int | None = 4 * 1024**3
+    total_timeout_seconds: float | None = 300.0
+
+
+DEFAULT_LIMITS = VerifierLimits()
+
+_verifier_slots_lock = threading.Lock()
+_verifier_slots: threading.BoundedSemaphore | None = None
+_logger = logging.getLogger(__name__)
+
+
+def verifier_slots() -> threading.BoundedSemaphore:
+    """Process-wide verifier-child slots, sized once from SKYRL_GYM_LCB_MAX_CONCURRENT.
+
+    The trainer runs up to `max_env_workers` env threads, each able to hold one
+    verifier child; a slot count keeps concurrent children (and their memory caps)
+    summable. Default 8.
+    """
+    global _verifier_slots
+    with _verifier_slots_lock:
+        if _verifier_slots is None:
+            try:
+                count = int(os.environ.get("SKYRL_GYM_LCB_MAX_CONCURRENT", "8"))
+            except ValueError:
+                _logger.warning("Invalid SKYRL_GYM_LCB_MAX_CONCURRENT value; using 8 verifier slots")
+                count = 8
+            _verifier_slots = threading.BoundedSemaphore(max(1, count))
+        return _verifier_slots
+
+
+def _run_test_in_subprocess(sample, generation, debug, connection, timeout, execution_mode, max_memory_bytes):
+    res, _metadata = run_test(
         sample,
         test=generation,
         debug=debug,
         timeout=timeout,
         execution_mode=execution_mode,
+        max_memory_bytes=max_memory_bytes,
     )
-    result.append(res)
-    metadata_list.append(metadata)
+    connection.send(res)
+    connection.close()
 
 
 def lcb_test_results(
@@ -753,40 +828,65 @@ def lcb_test_results(
     timeout=6,
     debug=False,
     execution_mode=TestExecutionMode.collect_all,
+    limits=None,
 ):
     """Return one pass/failure result per executed test case.
 
     A process-level timeout catches extreme cases not handled by the per-test alarms.
-    Stop-on-failure mode preserves the binary scorer's original short circuit.
+    Stop-on-failure mode preserves the binary scorer's original short circuit. Each
+    child runs under ``limits`` (default :class:`VerifierLimits`): a per-child memory
+    cap and a wall-clock deadline independent of test count, with deterministic
+    reaping. See https://echo.oa.dev/wiki/471 for the failure mode these bounds exist
+    to contain.
     """
     assert len(sample) >= 1, "Sample must contain at least one test case"
+    limits = DEFAULT_LIMITS if limits is None else limits
     sample = postprocess_lcb_sample(sample)
-
-    manager = multiprocessing.Manager()
-    result = manager.list()
-    metadata_list = manager.list()
+    num_tests = len(json.loads(sample["input_output"])["inputs"])
+    deadline = (timeout + 1) * num_tests + 5
+    if limits.total_timeout_seconds is not None:
+        deadline = min(deadline, limits.total_timeout_seconds)
 
     # The target must be picklable: under the `spawn` start method the child re-imports it by
     # qualified name. The trainer forces `spawn` in `skyrl_train.entrypoints.main_base`, and it is
     # the default on macOS.
+    receiver, sender = multiprocessing.Pipe(duplex=False)
     p = multiprocessing.Process(
         target=_run_test_in_subprocess,
-        args=(sample, generation, debug, result, metadata_list, timeout, execution_mode),
+        args=(sample, generation, debug, sender, timeout, execution_mode, limits.max_memory_bytes),
     )
-    p.start()
-    p.join(timeout=(timeout + 1) * len(json.loads(sample["input_output"])["inputs"]) + 5)
-    if p.is_alive():
-        p.kill()
-    if not result:
-        in_outs = json.loads(sample["input_output"])
+    with verifier_slots():
+        p.start()
+        sender.close()
+        _logger.info(
+            "LiveCodeBench verifier child started: pid=%s tests=%d per_test_timeout=%ss deadline=%.0fs",
+            p.pid,
+            num_tests,
+            timeout,
+            deadline,
+        )
+        p.join(deadline)
+        timed_out = p.is_alive()
+        if timed_out:
+            p.kill()
+            p.join()
+        results = receiver.recv() if p.exitcode == 0 and receiver.poll() else None
+    if timed_out:
+        _logger.warning(
+            "LiveCodeBench verifier child pid=%s exceeded its %.0fs deadline (%d tests); scoring all failed",
+            p.pid,
+            deadline,
+            num_tests,
+        )
+    if results is None:
         # consider that all tests failed
-        result = [[-1 for i in range(len(in_outs["inputs"]))]]
+        results = [-1 for _ in range(num_tests)]
         if debug:
             print("global timeout")
-    return list(result[0])
+    return list(results)
 
 
-def lcb_check_correctness(sample, generation, timeout=6, debug=False):
+def lcb_check_correctness(sample, generation, timeout=6, debug=False, limits=None):
     return all(
         result is True
         for result in lcb_test_results(
@@ -795,6 +895,7 @@ def lcb_check_correctness(sample, generation, timeout=6, debug=False):
             timeout,
             debug,
             execution_mode=TestExecutionMode.stop_on_failure,
+            limits=limits,
         )
     )
 
@@ -815,14 +916,14 @@ def extract_code_from_model(model_response: str):
     return code_blocks[-1].strip()
 
 
-def compute_score(model_response, tests, reward_mode=BINARY_REWARD_MODE):
+def compute_score(model_response, tests, reward_mode=BINARY_REWARD_MODE, *, timeout=6, limits=None):
     output_code = extract_code_from_model(model_response)
     if output_code is None:
         return output_code, 0.0
     if reward_mode == BINARY_REWARD_MODE:
-        reward = 1.0 if lcb_check_correctness(tests, output_code, debug=False) else 0.0
+        reward = 1.0 if lcb_check_correctness(tests, output_code, timeout=timeout, debug=False, limits=limits) else 0.0
     elif reward_mode == FRACTIONAL_REWARD_MODE:
-        results = lcb_test_results(tests, output_code, debug=False)
+        results = lcb_test_results(tests, output_code, timeout=timeout, debug=False, limits=limits)
         reward = sum(result is True for result in results) / len(results)
     else:
         raise ValueError(f"Unsupported LCB reward_mode: {reward_mode!r}.")
