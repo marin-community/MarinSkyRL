@@ -61,7 +61,7 @@ from skyrl_train.inference_engines.base import (
 from skyrl_train.inference_engines.response_topk import select_response_topk
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
-from skyrl_train.weight_sync import WeightLoader
+from skyrl_train.weight_sync.weight_loader import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
 from skyrl_train.weight_sync.weight_extractor import is_weight_sync_dtype_compatible
 from skyrl_train.inference_engines.vllm.utils import (

@@ -38,9 +38,10 @@ from skyrl_train.workers.worker import (
     CriticWorkerBase,
     RefWorkerBase,
 )
-from skyrl_train.weight_sync import WeightExtractor, WeightChunk
+from skyrl_train.weight_sync.base import WeightChunk
 from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 from skyrl_train.weight_sync.weight_extractor import (
+    WeightExtractor,
     prepare_weight_sync_tensor,
     validate_weight_sync_mode,
     weight_sync_dtype,

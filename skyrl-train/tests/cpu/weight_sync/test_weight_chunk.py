@@ -1,6 +1,6 @@
 import pytest
 import torch
-from skyrl_train.weight_sync import WeightChunk
+from skyrl_train.weight_sync.base import WeightChunk
 
 
 class TestWeightChunk:

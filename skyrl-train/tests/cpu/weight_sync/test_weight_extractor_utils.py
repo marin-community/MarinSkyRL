@@ -1,7 +1,7 @@
 import pytest
 import torch
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
-from skyrl_train.weight_sync import WeightChunk
+from skyrl_train.weight_sync.base import WeightChunk
 from skyrl_train.utils import str_to_torch_dtype
 
 
