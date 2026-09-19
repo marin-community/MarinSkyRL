@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import json
 import os
-import subprocess
 import time
 from pathlib import Path
 
@@ -93,12 +93,10 @@ def main() -> None:
     config = json.loads(Path(config_path).read_text())
     if config["hidden_size"] != 2560 or config["intermediate_size"] != 1280 or config["vocab_size"] != 128256:
         raise RuntimeError("The pinned Grug model no longer matches the benchmark shapes")
-    source_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
-    ).stdout.strip()
     result = {
         "schema_version": 1,
-        "source_commit": source_commit,
+        "source_commit": os.environ["SPARSE_EXPERIMENT_SOURCE_COMMIT"],
+        "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "model_repo": MODEL_REPO,
         "model_revision": MODEL_REVISION,
         "model_config": {key: config[key] for key in ("hidden_size", "intermediate_size", "vocab_size")},
