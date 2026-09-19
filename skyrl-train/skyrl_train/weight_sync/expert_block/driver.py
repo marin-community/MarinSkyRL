@@ -274,7 +274,11 @@ class ExpertBlockSync:
                     f"Trainer rank {replicas.participant} differs from its data-parallel peers on "
                     f"{replicas.mismatched_bytes} of {replicas.compared_bytes} bytes"
                 )
-        return {"verify_seconds": time.perf_counter() - started, "replica_reports": replica_reports}
+        return {
+            "verify_seconds": time.perf_counter() - started,
+            "receiver_reports": [asdict(report) for report in receivers],
+            "replica_reports": replica_reports,
+        }
 
     async def close(self) -> None:
         try:

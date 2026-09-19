@@ -308,11 +308,15 @@ def _run_real(records: dict) -> None:
             records["updates"].append(update)
             update["distribution"] = asyncio.run(sync._policy("experiment_distribution", {"version": version}))
             expected_tokens = None
-            order = (
-                ("dense", "indices", "bitmap", "indices_bucket", "bitmap_bucket")
-                if version == 1
-                else ("bitmap_bucket", "indices_bucket", "bitmap", "indices", "dense")
-            )
+            if records["leading_repeats"]:
+                pair = ("dense", "indices_bucket") if version == 1 else ("indices_bucket", "dense")
+                order = pair * records["leading_repeats"]
+            else:
+                order = (
+                    ("dense", "indices", "bitmap", "indices_bucket", "bitmap_bucket")
+                    if version == 1
+                    else ("bitmap_bucket", "indices_bucket", "bitmap", "indices", "dense")
+                )
             for index, encoding in enumerate(order):
                 records["stage"] = f"install_update_{version}_{encoding}"
 
@@ -400,10 +404,22 @@ def main() -> None:
     import ray
 
     mode = "real"
+    leading_repeats = 0
     for arg in sys.argv[1:]:
         if arg.startswith("++sparse_experiment.mode="):
             mode = arg.split("=", 1)[1]
-    records = {"schema_version": 1, "mode": mode, "metadata": _metadata(), "updates": [], "complete": False}
+        if arg.startswith("++sparse_experiment.leading_repeats="):
+            leading_repeats = int(arg.split("=", 1)[1])
+    if leading_repeats < 0 or leading_repeats > 10:
+        raise ValueError("leading_repeats must be between zero and ten")
+    records = {
+        "schema_version": 1,
+        "mode": mode,
+        "leading_repeats": leading_repeats,
+        "metadata": _metadata(),
+        "updates": [],
+        "complete": False,
+    }
     try:
         if mode == "smoke":
             ray.init(address=os.environ["RAY_ADDRESS"])
