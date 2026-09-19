@@ -1,0 +1,4625 @@
+{
+  "method": "Group every scheduled expert fc1/fc2 source row by expert ID; sum values, changed values, zero tensors, adjacent changed pairs, and occupied/total 256-value blocks across 26 layers per projection.",
+  "schema_version": 1,
+  "source_raw_sha256": "13fbfbff530f29ca33068881b13154e0044cc0cc2fbcceab6ed15c3eff7cb76a",
+  "updates": [
+    {
+      "by_expert": {
+        "0": {
+          "adjacent_changed_pair_fraction": 0.022718830127479137,
+          "changed": 662226,
+          "density": 0.002590965857872596,
+          "occupied_256_value_block_fraction": 0.1699258814102564,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "1": {
+          "adjacent_changed_pair_fraction": 0.03807387884189249,
+          "changed": 1603409,
+          "density": 0.006273353772285657,
+          "occupied_256_value_block_fraction": 0.3236698717948718,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "10": {
+          "adjacent_changed_pair_fraction": 0.028870804174881425,
+          "changed": 952554,
+          "density": 0.0037268770658052883,
+          "occupied_256_value_block_fraction": 0.24149138621794872,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "100": {
+          "adjacent_changed_pair_fraction": 0.04440954660038514,
+          "changed": 2096914,
+          "density": 0.008204197027744392,
+          "occupied_256_value_block_fraction": 0.28380809294871795,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "101": {
+          "adjacent_changed_pair_fraction": 0.014224591899675365,
+          "changed": 714959,
+          "density": 0.002797284248547676,
+          "occupied_256_value_block_fraction": 0.25791266025641024,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "102": {
+          "adjacent_changed_pair_fraction": 0.019006886307445316,
+          "changed": 708217,
+          "density": 0.0027709061060196315,
+          "occupied_256_value_block_fraction": 0.20545272435897435,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "103": {
+          "adjacent_changed_pair_fraction": 0.019678686945664235,
+          "changed": 805694,
+          "density": 0.0031522858448517627,
+          "occupied_256_value_block_fraction": 0.2535606971153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "104": {
+          "adjacent_changed_pair_fraction": 0.023737851306473077,
+          "changed": 1049084,
+          "density": 0.004104551657652244,
+          "occupied_256_value_block_fraction": 0.2723197115384615,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "105": {
+          "adjacent_changed_pair_fraction": 0.04657910258832501,
+          "changed": 2344721,
+          "density": 0.009173744397285657,
+          "occupied_256_value_block_fraction": 0.35227764423076924,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "106": {
+          "adjacent_changed_pair_fraction": 0.014624199577944015,
+          "changed": 744451,
+          "density": 0.0029126719939403046,
+          "occupied_256_value_block_fraction": 0.26677784455128206,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "107": {
+          "adjacent_changed_pair_fraction": 0.034608607236909325,
+          "changed": 1595239,
+          "density": 0.006241388565454728,
+          "occupied_256_value_block_fraction": 0.30905749198717947,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "108": {
+          "adjacent_changed_pair_fraction": 0.031891342994734236,
+          "changed": 1422016,
+          "density": 0.005563651842948718,
+          "occupied_256_value_block_fraction": 0.27697616185897433,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "109": {
+          "adjacent_changed_pair_fraction": 0.027205127086547348,
+          "changed": 1260755,
+          "density": 0.004932716565254407,
+          "occupied_256_value_block_fraction": 0.3019090544871795,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "11": {
+          "adjacent_changed_pair_fraction": 0.0436751255744274,
+          "changed": 2413708,
+          "density": 0.009443656725761218,
+          "occupied_256_value_block_fraction": 0.3798277243589744,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "110": {
+          "adjacent_changed_pair_fraction": 0.035490986258136105,
+          "changed": 1255361,
+          "density": 0.004911612486227965,
+          "occupied_256_value_block_fraction": 0.25040665064102563,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "111": {
+          "adjacent_changed_pair_fraction": 0.032126560723553736,
+          "changed": 980715,
+          "density": 0.0038370572603665864,
+          "occupied_256_value_block_fraction": 0.19082732371794872,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "112": {
+          "adjacent_changed_pair_fraction": 0.0447974157074624,
+          "changed": 1704451,
+          "density": 0.00666868160932492,
+          "occupied_256_value_block_fraction": 0.22005508814102565,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "113": {
+          "adjacent_changed_pair_fraction": 0.034192312766759055,
+          "changed": 2099507,
+          "density": 0.008214342166215945,
+          "occupied_256_value_block_fraction": 0.38970252403846156,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "114": {
+          "adjacent_changed_pair_fraction": 0.01962600165646809,
+          "changed": 1144604,
+          "density": 0.004478274614383013,
+          "occupied_256_value_block_fraction": 0.3270452724358974,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "115": {
+          "adjacent_changed_pair_fraction": 0.03383544088030859,
+          "changed": 1583990,
+          "density": 0.006197376740284455,
+          "occupied_256_value_block_fraction": 0.30096053685897434,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "116": {
+          "adjacent_changed_pair_fraction": 0.03259444432278427,
+          "changed": 1780917,
+          "density": 0.0069678556002103365,
+          "occupied_256_value_block_fraction": 0.3790414663461538,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "117": {
+          "adjacent_changed_pair_fraction": 0.0413771996718128,
+          "changed": 1382138,
+          "density": 0.005407628768529647,
+          "occupied_256_value_block_fraction": 0.21948317307692308,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "118": {
+          "adjacent_changed_pair_fraction": 0.033417480841988964,
+          "changed": 778395,
+          "density": 0.0030454782339242787,
+          "occupied_256_value_block_fraction": 0.19662660256410255,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "119": {
+          "adjacent_changed_pair_fraction": 0.03314877687737036,
+          "changed": 2073259,
+          "density": 0.008111646603315304,
+          "occupied_256_value_block_fraction": 0.4116446314102564,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "12": {
+          "adjacent_changed_pair_fraction": 0.03881859079487835,
+          "changed": 1728038,
+          "density": 0.006760965983072916,
+          "occupied_256_value_block_fraction": 0.28996895032051284,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "120": {
+          "adjacent_changed_pair_fraction": 0.02877315473096875,
+          "changed": 1019770,
+          "density": 0.003989860339042468,
+          "occupied_256_value_block_fraction": 0.22575320512820513,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "121": {
+          "adjacent_changed_pair_fraction": 0.05171385701378121,
+          "changed": 1594853,
+          "density": 0.006239878336588542,
+          "occupied_256_value_block_fraction": 0.2634775641025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "122": {
+          "adjacent_changed_pair_fraction": 0.0351735803570834,
+          "changed": 1501610,
+          "density": 0.005875064165164263,
+          "occupied_256_value_block_fraction": 0.28684795673076924,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "123": {
+          "adjacent_changed_pair_fraction": 0.01820075893301918,
+          "changed": 572119,
+          "density": 0.0022384213178585737,
+          "occupied_256_value_block_fraction": 0.1745723157051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "124": {
+          "adjacent_changed_pair_fraction": 0.020238505957421597,
+          "changed": 1147812,
+          "density": 0.004490825946514423,
+          "occupied_256_value_block_fraction": 0.28526241987179485,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 27
+        },
+        "125": {
+          "adjacent_changed_pair_fraction": 0.02434205410136196,
+          "changed": 758687,
+          "density": 0.0029683704865284457,
+          "occupied_256_value_block_fraction": 0.20141326121794872,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "126": {
+          "adjacent_changed_pair_fraction": 0.03656421142106126,
+          "changed": 1298811,
+          "density": 0.005081611046424279,
+          "occupied_256_value_block_fraction": 0.2592978766025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "127": {
+          "adjacent_changed_pair_fraction": 0.036401368947168285,
+          "changed": 2011765,
+          "density": 0.007871050712389823,
+          "occupied_256_value_block_fraction": 0.3750080128205128,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "128": {
+          "adjacent_changed_pair_fraction": 0.04933763307435805,
+          "changed": 2005082,
+          "density": 0.007844903407952724,
+          "occupied_256_value_block_fraction": 0.2237469951923077,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "129": {
+          "adjacent_changed_pair_fraction": 0.04611335620860268,
+          "changed": 1820015,
+          "density": 0.007120826916816907,
+          "occupied_256_value_block_fraction": 0.3127013221153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "13": {
+          "adjacent_changed_pair_fraction": 0.03435118718939812,
+          "changed": 1992100,
+          "density": 0.007794111202924679,
+          "occupied_256_value_block_fraction": 0.35915765224358975,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "130": {
+          "adjacent_changed_pair_fraction": 0.03936362497924058,
+          "changed": 1860601,
+          "density": 0.007279620048327324,
+          "occupied_256_value_block_fraction": 0.3245322516025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "131": {
+          "adjacent_changed_pair_fraction": 0.029816633794202015,
+          "changed": 1222908,
+          "density": 0.0047846397986778845,
+          "occupied_256_value_block_fraction": 0.2591135817307692,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "132": {
+          "adjacent_changed_pair_fraction": 0.028899008711083647,
+          "changed": 1993667,
+          "density": 0.0078002421061197915,
+          "occupied_256_value_block_fraction": 0.39131009615384615,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "133": {
+          "adjacent_changed_pair_fraction": 0.024782588976949328,
+          "changed": 1058364,
+          "density": 0.004140859750600962,
+          "occupied_256_value_block_fraction": 0.24403445512820512,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "134": {
+          "adjacent_changed_pair_fraction": 0.02666867127290317,
+          "changed": 1529810,
+          "density": 0.005985396947616186,
+          "occupied_256_value_block_fraction": 0.3470172275641026,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "135": {
+          "adjacent_changed_pair_fraction": 0.0469804086015752,
+          "changed": 1607287,
+          "density": 0.006288526486127805,
+          "occupied_256_value_block_fraction": 0.23382011217948717,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "136": {
+          "adjacent_changed_pair_fraction": 0.013792568558889873,
+          "changed": 464163,
+          "density": 0.0018160423865685095,
+          "occupied_256_value_block_fraction": 0.17072816506410257,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "137": {
+          "adjacent_changed_pair_fraction": 0.019765950276663512,
+          "changed": 735912,
+          "density": 0.0028792630709134617,
+          "occupied_256_value_block_fraction": 0.21243289262820514,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "138": {
+          "adjacent_changed_pair_fraction": 0.03321304422668016,
+          "changed": 1614998,
+          "density": 0.006318695850861378,
+          "occupied_256_value_block_fraction": 0.2917528044871795,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "139": {
+          "adjacent_changed_pair_fraction": 0.027973020358490957,
+          "changed": 1212025,
+          "density": 0.004742059952173478,
+          "occupied_256_value_block_fraction": 0.27560997596153847,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "14": {
+          "adjacent_changed_pair_fraction": 0.04896378199071284,
+          "changed": 1682754,
+          "density": 0.006583791879507211,
+          "occupied_256_value_block_fraction": 0.29087640224358974,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "140": {
+          "adjacent_changed_pair_fraction": 0.029197141927203275,
+          "changed": 1302696,
+          "density": 0.005096811147836539,
+          "occupied_256_value_block_fraction": 0.26197415865384616,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "141": {
+          "adjacent_changed_pair_fraction": 0.02777377505690985,
+          "changed": 1131175,
+          "density": 0.004425733517377804,
+          "occupied_256_value_block_fraction": 0.2531570512820513,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "142": {
+          "adjacent_changed_pair_fraction": 0.027572654833683447,
+          "changed": 1452381,
+          "density": 0.005682455209585336,
+          "occupied_256_value_block_fraction": 0.31781550480769233,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "143": {
+          "adjacent_changed_pair_fraction": 0.03723577870225684,
+          "changed": 1614603,
+          "density": 0.006317150409405048,
+          "occupied_256_value_block_fraction": 0.2761949118589744,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "144": {
+          "adjacent_changed_pair_fraction": 0.03771191501322791,
+          "changed": 1657858,
+          "density": 0.0064863860301482374,
+          "occupied_256_value_block_fraction": 0.3116796875,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "145": {
+          "adjacent_changed_pair_fraction": 0.024171910459305272,
+          "changed": 1000707,
+          "density": 0.003915276160606971,
+          "occupied_256_value_block_fraction": 0.2639012419871795,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "146": {
+          "adjacent_changed_pair_fraction": 0.017232740904810695,
+          "changed": 844265,
+          "density": 0.003303195268679888,
+          "occupied_256_value_block_fraction": 0.2799228766025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "147": {
+          "adjacent_changed_pair_fraction": 0.03312969722071221,
+          "changed": 1622502,
+          "density": 0.006348055326021634,
+          "occupied_256_value_block_fraction": 0.3142928685897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "148": {
+          "adjacent_changed_pair_fraction": 0.028883903039901456,
+          "changed": 1136550,
+          "density": 0.004446763258713942,
+          "occupied_256_value_block_fraction": 0.23950620993589744,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "149": {
+          "adjacent_changed_pair_fraction": 0.03319912038901106,
+          "changed": 1291480,
+          "density": 0.005052928435496795,
+          "occupied_256_value_block_fraction": 0.2489473157051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "15": {
+          "adjacent_changed_pair_fraction": 0.01975317087243791,
+          "changed": 1344898,
+          "density": 0.005261926895532853,
+          "occupied_256_value_block_fraction": 0.36841245993589744,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "150": {
+          "adjacent_changed_pair_fraction": 0.044262999841548106,
+          "changed": 1584077,
+          "density": 0.006197717128655849,
+          "occupied_256_value_block_fraction": 0.22979366987179486,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "151": {
+          "adjacent_changed_pair_fraction": 0.03481362088121425,
+          "changed": 1753308,
+          "density": 0.0068598351111778845,
+          "occupied_256_value_block_fraction": 0.35630709134615385,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "152": {
+          "adjacent_changed_pair_fraction": 0.033826288517148494,
+          "changed": 1969415,
+          "density": 0.0077053559132111375,
+          "occupied_256_value_block_fraction": 0.36556490384615387,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "153": {
+          "adjacent_changed_pair_fraction": 0.017125658257905668,
+          "changed": 684762,
+          "density": 0.00267913818359375,
+          "occupied_256_value_block_fraction": 0.22231570512820512,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "154": {
+          "adjacent_changed_pair_fraction": 0.02895804499040672,
+          "changed": 1683470,
+          "density": 0.006586593236678686,
+          "occupied_256_value_block_fraction": 0.34052483974358977,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "155": {
+          "adjacent_changed_pair_fraction": 0.0347521703274672,
+          "changed": 1670946,
+          "density": 0.006537592961237981,
+          "occupied_256_value_block_fraction": 0.3121254006410256,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "156": {
+          "adjacent_changed_pair_fraction": 0.024289675781033835,
+          "changed": 813185,
+          "density": 0.003181594457381811,
+          "occupied_256_value_block_fraction": 0.2096103766025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "157": {
+          "adjacent_changed_pair_fraction": 0.04294601832232557,
+          "changed": 1935453,
+          "density": 0.007572479248046875,
+          "occupied_256_value_block_fraction": 0.29280048076923076,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "158": {
+          "adjacent_changed_pair_fraction": 0.03451341045922291,
+          "changed": 1293729,
+          "density": 0.005061727670522836,
+          "occupied_256_value_block_fraction": 0.3094050480769231,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "159": {
+          "adjacent_changed_pair_fraction": 0.02344139804961389,
+          "changed": 1294718,
+          "density": 0.005065597142928686,
+          "occupied_256_value_block_fraction": 0.348388421474359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "16": {
+          "adjacent_changed_pair_fraction": 0.023748148709000574,
+          "changed": 871689,
+          "density": 0.003410491943359375,
+          "occupied_256_value_block_fraction": 0.22475160256410256,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "160": {
+          "adjacent_changed_pair_fraction": 0.022385444499831868,
+          "changed": 1269843,
+          "density": 0.004968273456280048,
+          "occupied_256_value_block_fraction": 0.34205729166666665,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "161": {
+          "adjacent_changed_pair_fraction": 0.02001387516555595,
+          "changed": 808639,
+          "density": 0.0031638081868489583,
+          "occupied_256_value_block_fraction": 0.22264222756410257,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "162": {
+          "adjacent_changed_pair_fraction": 0.03267800296651824,
+          "changed": 2526868,
+          "density": 0.00988639635917468,
+          "occupied_256_value_block_fraction": 0.4791866987179487,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "163": {
+          "adjacent_changed_pair_fraction": 0.022023376223351626,
+          "changed": 902541,
+          "density": 0.003531200702373798,
+          "occupied_256_value_block_fraction": 0.23982872596153845,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "164": {
+          "adjacent_changed_pair_fraction": 0.01466190524519511,
+          "changed": 423683,
+          "density": 0.0016576639811197917,
+          "occupied_256_value_block_fraction": 0.15717147435897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "165": {
+          "adjacent_changed_pair_fraction": 0.040377435191580914,
+          "changed": 2371374,
+          "density": 0.00927802452674279,
+          "occupied_256_value_block_fraction": 0.34788060897435896,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "166": {
+          "adjacent_changed_pair_fraction": 0.034079811690347905,
+          "changed": 1227765,
+          "density": 0.004803642859825721,
+          "occupied_256_value_block_fraction": 0.2375350560897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "167": {
+          "adjacent_changed_pair_fraction": 0.02900055385271646,
+          "changed": 1453455,
+          "density": 0.005686657245342548,
+          "occupied_256_value_block_fraction": 0.34444110576923076,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "168": {
+          "adjacent_changed_pair_fraction": 0.017135409948358916,
+          "changed": 1124105,
+          "density": 0.004398072071564503,
+          "occupied_256_value_block_fraction": 0.3423046875,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "169": {
+          "adjacent_changed_pair_fraction": 0.0295755850588138,
+          "changed": 1680643,
+          "density": 0.006575532570863381,
+          "occupied_256_value_block_fraction": 0.3402183493589744,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "17": {
+          "adjacent_changed_pair_fraction": 0.0250674427750158,
+          "changed": 1307034,
+          "density": 0.005113783616286058,
+          "occupied_256_value_block_fraction": 0.33188902243589746,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "170": {
+          "adjacent_changed_pair_fraction": 0.03247556443134787,
+          "changed": 2047016,
+          "density": 0.008008970602964743,
+          "occupied_256_value_block_fraction": 0.35030048076923076,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "171": {
+          "adjacent_changed_pair_fraction": 0.017286652715082347,
+          "changed": 1031663,
+          "density": 0.004036391820663061,
+          "occupied_256_value_block_fraction": 0.3255518830128205,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "172": {
+          "adjacent_changed_pair_fraction": 0.011628298330640819,
+          "changed": 594240,
+          "density": 0.002324969951923077,
+          "occupied_256_value_block_fraction": 0.24267828525641025,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "173": {
+          "adjacent_changed_pair_fraction": 0.053663698621391205,
+          "changed": 1879576,
+          "density": 0.0073538599258814105,
+          "occupied_256_value_block_fraction": 0.3112149439102564,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "174": {
+          "adjacent_changed_pair_fraction": 0.02344939634257843,
+          "changed": 1186683,
+          "density": 0.0046429091233473555,
+          "occupied_256_value_block_fraction": 0.3261758814102564,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "175": {
+          "adjacent_changed_pair_fraction": 0.04527758731970775,
+          "changed": 2585871,
+          "density": 0.01011724618765024,
+          "occupied_256_value_block_fraction": 0.34915765224358974,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "176": {
+          "adjacent_changed_pair_fraction": 0.040335713390955784,
+          "changed": 1724328,
+          "density": 0.006746450570913462,
+          "occupied_256_value_block_fraction": 0.2994491185897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "177": {
+          "adjacent_changed_pair_fraction": 0.04979943578679335,
+          "changed": 2893587,
+          "density": 0.011321188119741586,
+          "occupied_256_value_block_fraction": 0.4054036458333333,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 16
+        },
+        "178": {
+          "adjacent_changed_pair_fraction": 0.023877087888004352,
+          "changed": 746029,
+          "density": 0.0029188459347455928,
+          "occupied_256_value_block_fraction": 0.1909735576923077,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "179": {
+          "adjacent_changed_pair_fraction": 0.02056438724759244,
+          "changed": 747749,
+          "density": 0.002925575451973157,
+          "occupied_256_value_block_fraction": 0.23396935096153845,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "18": {
+          "adjacent_changed_pair_fraction": 0.03617715562746163,
+          "changed": 2374703,
+          "density": 0.009291049272586139,
+          "occupied_256_value_block_fraction": 0.415947516025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "180": {
+          "adjacent_changed_pair_fraction": 0.029776629934055412,
+          "changed": 827058,
+          "density": 0.0032358727088341345,
+          "occupied_256_value_block_fraction": 0.18809495192307693,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "181": {
+          "adjacent_changed_pair_fraction": 0.04045083715323299,
+          "changed": 1591883,
+          "density": 0.0062282581818409455,
+          "occupied_256_value_block_fraction": 0.28846955128205126,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "182": {
+          "adjacent_changed_pair_fraction": 0.02008842007290778,
+          "changed": 1057226,
+          "density": 0.0041364073142027245,
+          "occupied_256_value_block_fraction": 0.3122315705128205,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "183": {
+          "adjacent_changed_pair_fraction": 0.025707639122549614,
+          "changed": 1310661,
+          "density": 0.005127974290114183,
+          "occupied_256_value_block_fraction": 0.2893339342948718,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "184": {
+          "adjacent_changed_pair_fraction": 0.02611699845798902,
+          "changed": 1615423,
+          "density": 0.006320358667618189,
+          "occupied_256_value_block_fraction": 0.3444971955128205,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "185": {
+          "adjacent_changed_pair_fraction": 0.023358423033397375,
+          "changed": 759940,
+          "density": 0.0029732728615785254,
+          "occupied_256_value_block_fraction": 0.21094451121794872,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "186": {
+          "adjacent_changed_pair_fraction": 0.019786586317351425,
+          "changed": 352461,
+          "density": 0.0013790071927584134,
+          "occupied_256_value_block_fraction": 0.11905248397435897,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "187": {
+          "adjacent_changed_pair_fraction": 0.04197710718002081,
+          "changed": 1922000,
+          "density": 0.007519844250801282,
+          "occupied_256_value_block_fraction": 0.2599699519230769,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "188": {
+          "adjacent_changed_pair_fraction": 0.02121641534040547,
+          "changed": 885635,
+          "density": 0.0034650558080428686,
+          "occupied_256_value_block_fraction": 0.22915064102564103,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "189": {
+          "adjacent_changed_pair_fraction": 0.036294357900309514,
+          "changed": 1292019,
+          "density": 0.005055037278395433,
+          "occupied_256_value_block_fraction": 0.2139372996794872,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "19": {
+          "adjacent_changed_pair_fraction": 0.0341255188415125,
+          "changed": 2162751,
+          "density": 0.008461784949669472,
+          "occupied_256_value_block_fraction": 0.3310586939102564,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "190": {
+          "adjacent_changed_pair_fraction": 0.01039470174095596,
+          "changed": 431085,
+          "density": 0.0016866243802584134,
+          "occupied_256_value_block_fraction": 0.1798046875,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 38
+        },
+        "191": {
+          "adjacent_changed_pair_fraction": 0.04409480123471145,
+          "changed": 1333105,
+          "density": 0.005215786664913862,
+          "occupied_256_value_block_fraction": 0.24754707532051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "192": {
+          "adjacent_changed_pair_fraction": 0.03658520137034339,
+          "changed": 2372544,
+          "density": 0.009282602163461539,
+          "occupied_256_value_block_fraction": 0.37809194711538463,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "193": {
+          "adjacent_changed_pair_fraction": 0.030206171598097315,
+          "changed": 1402230,
+          "density": 0.005486238919771635,
+          "occupied_256_value_block_fraction": 0.3161237980769231,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "194": {
+          "adjacent_changed_pair_fraction": 0.03630908594996239,
+          "changed": 725934,
+          "density": 0.0028402240459735576,
+          "occupied_256_value_block_fraction": 0.15568609775641026,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "195": {
+          "adjacent_changed_pair_fraction": 0.029971679110693785,
+          "changed": 990435,
+          "density": 0.0038750868577223556,
+          "occupied_256_value_block_fraction": 0.19302283653846153,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "196": {
+          "adjacent_changed_pair_fraction": 0.03890040860794827,
+          "changed": 1802706,
+          "density": 0.007053105280949519,
+          "occupied_256_value_block_fraction": 0.3400961538461538,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "197": {
+          "adjacent_changed_pair_fraction": 0.048028109521930866,
+          "changed": 1650117,
+          "density": 0.0064560992901141825,
+          "occupied_256_value_block_fraction": 0.31845452724358975,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "198": {
+          "adjacent_changed_pair_fraction": 0.026057486834005626,
+          "changed": 1336967,
+          "density": 0.0052308967785957535,
+          "occupied_256_value_block_fraction": 0.3171444310897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "199": {
+          "adjacent_changed_pair_fraction": 0.019970314209459036,
+          "changed": 717515,
+          "density": 0.002807284624148638,
+          "occupied_256_value_block_fraction": 0.20967648237179487,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "2": {
+          "adjacent_changed_pair_fraction": 0.01861010032043573,
+          "changed": 1288870,
+          "density": 0.005042716784354968,
+          "occupied_256_value_block_fraction": 0.3807772435897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "20": {
+          "adjacent_changed_pair_fraction": 0.025832349117288433,
+          "changed": 1881362,
+          "density": 0.007360847668770032,
+          "occupied_256_value_block_fraction": 0.37926582532051284,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "200": {
+          "adjacent_changed_pair_fraction": 0.023138412800268238,
+          "changed": 691923,
+          "density": 0.0027071556678185094,
+          "occupied_256_value_block_fraction": 0.1747676282051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "201": {
+          "adjacent_changed_pair_fraction": 0.030874613425181323,
+          "changed": 1265279,
+          "density": 0.004950416760566907,
+          "occupied_256_value_block_fraction": 0.29168770032051283,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "202": {
+          "adjacent_changed_pair_fraction": 0.023700782292930267,
+          "changed": 1017266,
+          "density": 0.00398006341396234,
+          "occupied_256_value_block_fraction": 0.25771534455128203,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "203": {
+          "adjacent_changed_pair_fraction": 0.01706102984787999,
+          "changed": 588417,
+          "density": 0.0023021874060997595,
+          "occupied_256_value_block_fraction": 0.1831199919871795,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "204": {
+          "adjacent_changed_pair_fraction": 0.0269788671515671,
+          "changed": 1227331,
+          "density": 0.004801944830478766,
+          "occupied_256_value_block_fraction": 0.31442007211538464,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 16
+        },
+        "205": {
+          "adjacent_changed_pair_fraction": 0.029021996201081396,
+          "changed": 1860003,
+          "density": 0.007277280367337741,
+          "occupied_256_value_block_fraction": 0.39602664262820514,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "206": {
+          "adjacent_changed_pair_fraction": 0.028474375471195433,
+          "changed": 1411304,
+          "density": 0.005521741035657051,
+          "occupied_256_value_block_fraction": 0.3007922676282051,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "207": {
+          "adjacent_changed_pair_fraction": 0.04806926016626948,
+          "changed": 2857169,
+          "density": 0.011178702329977966,
+          "occupied_256_value_block_fraction": 0.3818469551282051,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "208": {
+          "adjacent_changed_pair_fraction": 0.03405189885453208,
+          "changed": 1598648,
+          "density": 0.006254726312099359,
+          "occupied_256_value_block_fraction": 0.2913361378205128,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "209": {
+          "adjacent_changed_pair_fraction": 0.02228015349989475,
+          "changed": 802867,
+          "density": 0.0031412251790364585,
+          "occupied_256_value_block_fraction": 0.20484375,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "21": {
+          "adjacent_changed_pair_fraction": 0.047395212257396846,
+          "changed": 2639908,
+          "density": 0.010328666491386218,
+          "occupied_256_value_block_fraction": 0.3247956730769231,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "210": {
+          "adjacent_changed_pair_fraction": 0.03487088059936944,
+          "changed": 1324859,
+          "density": 0.005183524107321715,
+          "occupied_256_value_block_fraction": 0.2745442708333333,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "211": {
+          "adjacent_changed_pair_fraction": 0.04323019670049752,
+          "changed": 1257038,
+          "density": 0.004918173765524839,
+          "occupied_256_value_block_fraction": 0.19141326121794872,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 38
+        },
+        "212": {
+          "adjacent_changed_pair_fraction": 0.03348748622893884,
+          "changed": 803315,
+          "density": 0.003142977983523638,
+          "occupied_256_value_block_fraction": 0.184950921474359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "213": {
+          "adjacent_changed_pair_fraction": 0.021245102017735853,
+          "changed": 601268,
+          "density": 0.002352467072315705,
+          "occupied_256_value_block_fraction": 0.17176382211538463,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "214": {
+          "adjacent_changed_pair_fraction": 0.031737278499580766,
+          "changed": 1728157,
+          "density": 0.006761431571764824,
+          "occupied_256_value_block_fraction": 0.30498597756410256,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "215": {
+          "adjacent_changed_pair_fraction": 0.018608729911607898,
+          "changed": 786835,
+          "density": 0.003078499818459535,
+          "occupied_256_value_block_fraction": 0.2427804487179487,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "216": {
+          "adjacent_changed_pair_fraction": 0.03960666835756105,
+          "changed": 1711126,
+          "density": 0.006694797613681891,
+          "occupied_256_value_block_fraction": 0.3193539663461539,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "217": {
+          "adjacent_changed_pair_fraction": 0.044827748871393056,
+          "changed": 2119870,
+          "density": 0.008294012607672275,
+          "occupied_256_value_block_fraction": 0.31674278846153847,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "218": {
+          "adjacent_changed_pair_fraction": 0.039212516417338666,
+          "changed": 2041287,
+          "density": 0.007986555833082932,
+          "occupied_256_value_block_fraction": 0.34936197916666667,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "219": {
+          "adjacent_changed_pair_fraction": 0.04497711400331465,
+          "changed": 1317181,
+          "density": 0.00515348385541867,
+          "occupied_256_value_block_fraction": 0.2714072516025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "22": {
+          "adjacent_changed_pair_fraction": 0.04403823023934552,
+          "changed": 1783405,
+          "density": 0.006977589925130209,
+          "occupied_256_value_block_fraction": 0.3136738782051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "220": {
+          "adjacent_changed_pair_fraction": 0.03905727256651795,
+          "changed": 1125373,
+          "density": 0.004403033134264824,
+          "occupied_256_value_block_fraction": 0.22807291666666665,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "221": {
+          "adjacent_changed_pair_fraction": 0.02384340629793786,
+          "changed": 883305,
+          "density": 0.003455939659705529,
+          "occupied_256_value_block_fraction": 0.20193309294871795,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "222": {
+          "adjacent_changed_pair_fraction": 0.033103015075376885,
+          "changed": 2085520,
+          "density": 0.008159617888621795,
+          "occupied_256_value_block_fraction": 0.42275140224358976,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 14
+        },
+        "223": {
+          "adjacent_changed_pair_fraction": 0.03441483957936472,
+          "changed": 1174319,
+          "density": 0.004594534849509215,
+          "occupied_256_value_block_fraction": 0.23530749198717948,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "224": {
+          "adjacent_changed_pair_fraction": 0.029938728256054033,
+          "changed": 1196310,
+          "density": 0.004680574857271635,
+          "occupied_256_value_block_fraction": 0.24928285256410257,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "225": {
+          "adjacent_changed_pair_fraction": 0.041413768230678556,
+          "changed": 1364184,
+          "density": 0.005337383563701923,
+          "occupied_256_value_block_fraction": 0.20559895833333333,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "226": {
+          "adjacent_changed_pair_fraction": 0.028979305570120097,
+          "changed": 1773714,
+          "density": 0.006939673790564904,
+          "occupied_256_value_block_fraction": 0.3738511618589744,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "227": {
+          "adjacent_changed_pair_fraction": 0.028610853283363397,
+          "changed": 1370424,
+          "density": 0.005361797626201923,
+          "occupied_256_value_block_fraction": 0.3192137419871795,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "228": {
+          "adjacent_changed_pair_fraction": 0.021178940337317206,
+          "changed": 838380,
+          "density": 0.003280170147235577,
+          "occupied_256_value_block_fraction": 0.22142127403846154,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "229": {
+          "adjacent_changed_pair_fraction": 0.04960171370526188,
+          "changed": 1917716,
+          "density": 0.007503083057892628,
+          "occupied_256_value_block_fraction": 0.30171073717948715,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "23": {
+          "adjacent_changed_pair_fraction": 0.03958611676805936,
+          "changed": 2466976,
+          "density": 0.009652068309294872,
+          "occupied_256_value_block_fraction": 0.345869391025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "230": {
+          "adjacent_changed_pair_fraction": 0.03091515526882324,
+          "changed": 1139894,
+          "density": 0.004459846692207532,
+          "occupied_256_value_block_fraction": 0.2394521233974359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "231": {
+          "adjacent_changed_pair_fraction": 0.03190323524807199,
+          "changed": 2203695,
+          "density": 0.008621978759765624,
+          "occupied_256_value_block_fraction": 0.4032652243589744,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "232": {
+          "adjacent_changed_pair_fraction": 0.012178285951693665,
+          "changed": 462134,
+          "density": 0.0018081039037459935,
+          "occupied_256_value_block_fraction": 0.1907091346153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "233": {
+          "adjacent_changed_pair_fraction": 0.04283131347871623,
+          "changed": 2058564,
+          "density": 0.008054152268629808,
+          "occupied_256_value_block_fraction": 0.2978435496794872,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "234": {
+          "adjacent_changed_pair_fraction": 0.03595216954851544,
+          "changed": 1638705,
+          "density": 0.006411449725811298,
+          "occupied_256_value_block_fraction": 0.31106770833333336,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "235": {
+          "adjacent_changed_pair_fraction": 0.022706244217159718,
+          "changed": 959736,
+          "density": 0.0037549767127403847,
+          "occupied_256_value_block_fraction": 0.2370332532051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "236": {
+          "adjacent_changed_pair_fraction": 0.04125543700385782,
+          "changed": 3009470,
+          "density": 0.011774581517928685,
+          "occupied_256_value_block_fraction": 0.4649278846153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 16
+        },
+        "237": {
+          "adjacent_changed_pair_fraction": 0.012129553846113358,
+          "changed": 379981,
+          "density": 0.0014866794683994391,
+          "occupied_256_value_block_fraction": 0.15911858974358975,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "238": {
+          "adjacent_changed_pair_fraction": 0.01488301890839095,
+          "changed": 746018,
+          "density": 0.0029188028971354166,
+          "occupied_256_value_block_fraction": 0.2680428685897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "239": {
+          "adjacent_changed_pair_fraction": 0.03779533897736573,
+          "changed": 1863325,
+          "density": 0.007290277725610978,
+          "occupied_256_value_block_fraction": 0.35217247596153844,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "24": {
+          "adjacent_changed_pair_fraction": 0.029380716943558982,
+          "changed": 1635052,
+          "density": 0.006397157326722756,
+          "occupied_256_value_block_fraction": 0.31873297275641027,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "240": {
+          "adjacent_changed_pair_fraction": 0.04050881381066058,
+          "changed": 1166635,
+          "density": 0.004564471122546074,
+          "occupied_256_value_block_fraction": 0.24156951121794873,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "241": {
+          "adjacent_changed_pair_fraction": 0.027000087011132098,
+          "changed": 1689439,
+          "density": 0.006609947008964343,
+          "occupied_256_value_block_fraction": 0.3856640625,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 16
+        },
+        "242": {
+          "adjacent_changed_pair_fraction": 0.029440205167013518,
+          "changed": 1617414,
+          "density": 0.006328148475060096,
+          "occupied_256_value_block_fraction": 0.32180689102564103,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "243": {
+          "adjacent_changed_pair_fraction": 0.028508810203409212,
+          "changed": 1890819,
+          "density": 0.007397848275991587,
+          "occupied_256_value_block_fraction": 0.4275020032051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "244": {
+          "adjacent_changed_pair_fraction": 0.031030347148465937,
+          "changed": 1675940,
+          "density": 0.0065571320362580125,
+          "occupied_256_value_block_fraction": 0.32134314903846156,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "245": {
+          "adjacent_changed_pair_fraction": 0.023950876652214646,
+          "changed": 1232815,
+          "density": 0.00482340103540665,
+          "occupied_256_value_block_fraction": 0.290966546474359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "246": {
+          "adjacent_changed_pair_fraction": 0.022537349286747457,
+          "changed": 782612,
+          "density": 0.003061977288661859,
+          "occupied_256_value_block_fraction": 0.21244591346153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "247": {
+          "adjacent_changed_pair_fraction": 0.04041994109870187,
+          "changed": 1884169,
+          "density": 0.007371830084385016,
+          "occupied_256_value_block_fraction": 0.3174499198717949,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "248": {
+          "adjacent_changed_pair_fraction": 0.02989165490187528,
+          "changed": 1100742,
+          "density": 0.0043066641000600965,
+          "occupied_256_value_block_fraction": 0.24537259615384616,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "249": {
+          "adjacent_changed_pair_fraction": 0.025700596547176064,
+          "changed": 1306351,
+          "density": 0.0051111113719451125,
+          "occupied_256_value_block_fraction": 0.31835036057692306,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "25": {
+          "adjacent_changed_pair_fraction": 0.04838654266996011,
+          "changed": 1746498,
+          "density": 0.00683319091796875,
+          "occupied_256_value_block_fraction": 0.2463641826923077,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "250": {
+          "adjacent_changed_pair_fraction": 0.0320905487011395,
+          "changed": 1060468,
+          "density": 0.004149091671674679,
+          "occupied_256_value_block_fraction": 0.1972325721153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "251": {
+          "adjacent_changed_pair_fraction": 0.028039471268928612,
+          "changed": 2157316,
+          "density": 0.008440520457732371,
+          "occupied_256_value_block_fraction": 0.4588551682692308,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "252": {
+          "adjacent_changed_pair_fraction": 0.021085813619743092,
+          "changed": 850809,
+          "density": 0.0033287987342247595,
+          "occupied_256_value_block_fraction": 0.2460967548076923,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "253": {
+          "adjacent_changed_pair_fraction": 0.014995330368607075,
+          "changed": 799849,
+          "density": 0.003129417223808093,
+          "occupied_256_value_block_fraction": 0.26478465544871793,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "254": {
+          "adjacent_changed_pair_fraction": 0.03630275062362331,
+          "changed": 1466831,
+          "density": 0.005738990979316907,
+          "occupied_256_value_block_fraction": 0.285625,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "255": {
+          "adjacent_changed_pair_fraction": 0.026624457716409186,
+          "changed": 2047591,
+          "density": 0.008011220296223958,
+          "occupied_256_value_block_fraction": 0.4248968349358974,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "26": {
+          "adjacent_changed_pair_fraction": 0.022354982114698406,
+          "changed": 911922,
+          "density": 0.003567903958834135,
+          "occupied_256_value_block_fraction": 0.2371444310897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "27": {
+          "adjacent_changed_pair_fraction": 0.04111298563152761,
+          "changed": 1584998,
+          "density": 0.006201320550380609,
+          "occupied_256_value_block_fraction": 0.2505078125,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "28": {
+          "adjacent_changed_pair_fraction": 0.03876305146602728,
+          "changed": 1773364,
+          "density": 0.006938304412059295,
+          "occupied_256_value_block_fraction": 0.2976432291666667,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "29": {
+          "adjacent_changed_pair_fraction": 0.014642179422863002,
+          "changed": 458470,
+          "density": 0.0017937684670472757,
+          "occupied_256_value_block_fraction": 0.17255408653846155,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 31
+        },
+        "3": {
+          "adjacent_changed_pair_fraction": 0.04022339656777782,
+          "changed": 1131978,
+          "density": 0.004428875262920673,
+          "occupied_256_value_block_fraction": 0.20490084134615386,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "30": {
+          "adjacent_changed_pair_fraction": 0.01868261486046443,
+          "changed": 1048729,
+          "density": 0.004103162716596554,
+          "occupied_256_value_block_fraction": 0.31864583333333335,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "31": {
+          "adjacent_changed_pair_fraction": 0.04454461372115671,
+          "changed": 2206709,
+          "density": 0.008633771064953926,
+          "occupied_256_value_block_fraction": 0.29119491185897434,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "32": {
+          "adjacent_changed_pair_fraction": 0.03513254262918533,
+          "changed": 886130,
+          "density": 0.0034669925005008013,
+          "occupied_256_value_block_fraction": 0.15127403846153847,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 38
+        },
+        "33": {
+          "adjacent_changed_pair_fraction": 0.04120466077804924,
+          "changed": 1383460,
+          "density": 0.0054128011067708336,
+          "occupied_256_value_block_fraction": 0.23693309294871795,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "34": {
+          "adjacent_changed_pair_fraction": 0.01981529588288133,
+          "changed": 1195642,
+          "density": 0.0046779613005809295,
+          "occupied_256_value_block_fraction": 0.3548808092948718,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "35": {
+          "adjacent_changed_pair_fraction": 0.019535933934166246,
+          "changed": 827296,
+          "density": 0.0032368038862179488,
+          "occupied_256_value_block_fraction": 0.25111278044871793,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "36": {
+          "adjacent_changed_pair_fraction": 0.02562420499363995,
+          "changed": 874993,
+          "density": 0.0034234188764523236,
+          "occupied_256_value_block_fraction": 0.20817908653846154,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "37": {
+          "adjacent_changed_pair_fraction": 0.03416288002882167,
+          "changed": 2020702,
+          "density": 0.007906016814403045,
+          "occupied_256_value_block_fraction": 0.3495052083333333,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "38": {
+          "adjacent_changed_pair_fraction": 0.03576520993225947,
+          "changed": 1767332,
+          "density": 0.006914704151642628,
+          "occupied_256_value_block_fraction": 0.3464473157051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "39": {
+          "adjacent_changed_pair_fraction": 0.025468489368637,
+          "changed": 1303925,
+          "density": 0.005101619622646234,
+          "occupied_256_value_block_fraction": 0.2879306891025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "4": {
+          "adjacent_changed_pair_fraction": 0.01915814745757531,
+          "changed": 719746,
+          "density": 0.0028160134339943912,
+          "occupied_256_value_block_fraction": 0.20470352564102565,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "40": {
+          "adjacent_changed_pair_fraction": 0.04104235134327981,
+          "changed": 1503447,
+          "density": 0.005882251446063702,
+          "occupied_256_value_block_fraction": 0.23197215544871794,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "41": {
+          "adjacent_changed_pair_fraction": 0.03961854921085156,
+          "changed": 1864985,
+          "density": 0.0072967724922375805,
+          "occupied_256_value_block_fraction": 0.2747766426282051,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "42": {
+          "adjacent_changed_pair_fraction": 0.019206501627049493,
+          "changed": 669617,
+          "density": 0.0026198832194010415,
+          "occupied_256_value_block_fraction": 0.19697215544871796,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "43": {
+          "adjacent_changed_pair_fraction": 0.02436393830864949,
+          "changed": 757513,
+          "density": 0.0029637771997696313,
+          "occupied_256_value_block_fraction": 0.20151041666666666,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "44": {
+          "adjacent_changed_pair_fraction": 0.029465861972095782,
+          "changed": 1840367,
+          "density": 0.007200454320663061,
+          "occupied_256_value_block_fraction": 0.41770833333333335,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "45": {
+          "adjacent_changed_pair_fraction": 0.030717788806418084,
+          "changed": 1707675,
+          "density": 0.006681295541616587,
+          "occupied_256_value_block_fraction": 0.34137520032051283,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "46": {
+          "adjacent_changed_pair_fraction": 0.028671955114982495,
+          "changed": 1866458,
+          "density": 0.0073025356194911855,
+          "occupied_256_value_block_fraction": 0.3643760016025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "47": {
+          "adjacent_changed_pair_fraction": 0.0369103853595652,
+          "changed": 2137095,
+          "density": 0.008361405592698318,
+          "occupied_256_value_block_fraction": 0.32830428685897434,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "48": {
+          "adjacent_changed_pair_fraction": 0.03836206633456078,
+          "changed": 2293646,
+          "density": 0.008973912948217148,
+          "occupied_256_value_block_fraction": 0.40641826923076924,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "49": {
+          "adjacent_changed_pair_fraction": 0.03778329964245972,
+          "changed": 2429936,
+          "density": 0.009507148938301282,
+          "occupied_256_value_block_fraction": 0.39810697115384613,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "5": {
+          "adjacent_changed_pair_fraction": 0.035835291378576176,
+          "changed": 1305724,
+          "density": 0.005108658228165064,
+          "occupied_256_value_block_fraction": 0.27322616185897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "50": {
+          "adjacent_changed_pair_fraction": 0.029723543680326536,
+          "changed": 1403332,
+          "density": 0.005490550505809295,
+          "occupied_256_value_block_fraction": 0.2696895032051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "51": {
+          "adjacent_changed_pair_fraction": 0.04109471609520235,
+          "changed": 1388159,
+          "density": 0.005431185991336138,
+          "occupied_256_value_block_fraction": 0.23093349358974358,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "52": {
+          "adjacent_changed_pair_fraction": 0.048180031653436046,
+          "changed": 1918907,
+          "density": 0.007507742857321715,
+          "occupied_256_value_block_fraction": 0.3010987580128205,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "53": {
+          "adjacent_changed_pair_fraction": 0.02807806756405667,
+          "changed": 1528061,
+          "density": 0.005978553967598157,
+          "occupied_256_value_block_fraction": 0.36693709935897434,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 16
+        },
+        "54": {
+          "adjacent_changed_pair_fraction": 0.030603848649749122,
+          "changed": 1414626,
+          "density": 0.0055347383939302885,
+          "occupied_256_value_block_fraction": 0.27194310897435897,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "55": {
+          "adjacent_changed_pair_fraction": 0.026440201376117474,
+          "changed": 1408310,
+          "density": 0.005510026980669071,
+          "occupied_256_value_block_fraction": 0.3114142628205128,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "56": {
+          "adjacent_changed_pair_fraction": 0.03800444995682756,
+          "changed": 2441372,
+          "density": 0.00955189240284455,
+          "occupied_256_value_block_fraction": 0.36659354967948715,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "57": {
+          "adjacent_changed_pair_fraction": 0.031697862958661116,
+          "changed": 1547139,
+          "density": 0.006053196833683894,
+          "occupied_256_value_block_fraction": 0.28687900641025643,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "58": {
+          "adjacent_changed_pair_fraction": 0.03208660342609052,
+          "changed": 1996503,
+          "density": 0.007811337984525241,
+          "occupied_256_value_block_fraction": 0.36633613782051283,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "59": {
+          "adjacent_changed_pair_fraction": 0.046795493707301475,
+          "changed": 2223291,
+          "density": 0.008698648306039664,
+          "occupied_256_value_block_fraction": 0.3270923477564103,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "6": {
+          "adjacent_changed_pair_fraction": 0.04142404806365187,
+          "changed": 1231700,
+          "density": 0.004819038586738782,
+          "occupied_256_value_block_fraction": 0.2544571314102564,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "60": {
+          "adjacent_changed_pair_fraction": 0.03485407021353823,
+          "changed": 1958853,
+          "density": 0.007664031982421875,
+          "occupied_256_value_block_fraction": 0.3526151842948718,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "61": {
+          "adjacent_changed_pair_fraction": 0.04460614339634719,
+          "changed": 2749554,
+          "density": 0.010757657564603366,
+          "occupied_256_value_block_fraction": 0.37069711538461536,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "62": {
+          "adjacent_changed_pair_fraction": 0.03848473881047171,
+          "changed": 2113695,
+          "density": 0.008269852858323318,
+          "occupied_256_value_block_fraction": 0.35573617788461537,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "63": {
+          "adjacent_changed_pair_fraction": 0.039438553138188316,
+          "changed": 1880926,
+          "density": 0.007359141814403045,
+          "occupied_256_value_block_fraction": 0.3225180288461538,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "64": {
+          "adjacent_changed_pair_fraction": 0.027267409134293905,
+          "changed": 1266677,
+          "density": 0.004955886449569311,
+          "occupied_256_value_block_fraction": 0.3005098157051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "65": {
+          "adjacent_changed_pair_fraction": 0.04072152602092125,
+          "changed": 1239983,
+          "density": 0.0048514459072015225,
+          "occupied_256_value_block_fraction": 0.20044370993589744,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "66": {
+          "adjacent_changed_pair_fraction": 0.03032749099670643,
+          "changed": 1559707,
+          "density": 0.006102369259565305,
+          "occupied_256_value_block_fraction": 0.30071013621794873,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "67": {
+          "adjacent_changed_pair_fraction": 0.03461189505203737,
+          "changed": 1614705,
+          "density": 0.006317549485426683,
+          "occupied_256_value_block_fraction": 0.28115584935897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "68": {
+          "adjacent_changed_pair_fraction": 0.03400508504457379,
+          "changed": 1412377,
+          "density": 0.005525939158904247,
+          "occupied_256_value_block_fraction": 0.26482171474358973,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "69": {
+          "adjacent_changed_pair_fraction": 0.03713511045367974,
+          "changed": 2367463,
+          "density": 0.009262722700070112,
+          "occupied_256_value_block_fraction": 0.398515625,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "7": {
+          "adjacent_changed_pair_fraction": 0.028208768164902833,
+          "changed": 1142588,
+          "density": 0.004470386994190705,
+          "occupied_256_value_block_fraction": 0.26048677884615384,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "70": {
+          "adjacent_changed_pair_fraction": 0.03317302318533338,
+          "changed": 1333041,
+          "density": 0.005215536264272837,
+          "occupied_256_value_block_fraction": 0.24781750801282051,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "71": {
+          "adjacent_changed_pair_fraction": 0.024414213041467552,
+          "changed": 1453088,
+          "density": 0.005685221354166666,
+          "occupied_256_value_block_fraction": 0.35998497596153844,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "72": {
+          "adjacent_changed_pair_fraction": 0.03524131726130032,
+          "changed": 2470793,
+          "density": 0.009667002360026041,
+          "occupied_256_value_block_fraction": 0.4659985977564103,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "73": {
+          "adjacent_changed_pair_fraction": 0.03620009372296069,
+          "changed": 1875741,
+          "density": 0.007338855449969952,
+          "occupied_256_value_block_fraction": 0.35415064102564103,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "74": {
+          "adjacent_changed_pair_fraction": 0.03714884318186938,
+          "changed": 1775560,
+          "density": 0.0069468962840544875,
+          "occupied_256_value_block_fraction": 0.2836999198717949,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "75": {
+          "adjacent_changed_pair_fraction": 0.02698090200577665,
+          "changed": 1221123,
+          "density": 0.004777655968299279,
+          "occupied_256_value_block_fraction": 0.25731169871794873,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "76": {
+          "adjacent_changed_pair_fraction": 0.015517585908304756,
+          "changed": 870754,
+          "density": 0.003406833746494391,
+          "occupied_256_value_block_fraction": 0.30571013621794874,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "77": {
+          "adjacent_changed_pair_fraction": 0.02385056152109408,
+          "changed": 1198085,
+          "density": 0.0046875195625500805,
+          "occupied_256_value_block_fraction": 0.2673808092948718,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "78": {
+          "adjacent_changed_pair_fraction": 0.029575795686722115,
+          "changed": 1831971,
+          "density": 0.00716760488656851,
+          "occupied_256_value_block_fraction": 0.3365324519230769,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "79": {
+          "adjacent_changed_pair_fraction": 0.020957506582788898,
+          "changed": 726136,
+          "density": 0.0028410143729967947,
+          "occupied_256_value_block_fraction": 0.20337540064102563,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "8": {
+          "adjacent_changed_pair_fraction": 0.016053958395939764,
+          "changed": 748725,
+          "density": 0.002929394061748798,
+          "occupied_256_value_block_fraction": 0.2596474358974359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "80": {
+          "adjacent_changed_pair_fraction": 0.033007256954699235,
+          "changed": 1770853,
+          "density": 0.006928480099409055,
+          "occupied_256_value_block_fraction": 0.3230498798076923,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "81": {
+          "adjacent_changed_pair_fraction": 0.050691508487890516,
+          "changed": 2319422,
+          "density": 0.009074761806390224,
+          "occupied_256_value_block_fraction": 0.31892828525641026,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "82": {
+          "adjacent_changed_pair_fraction": 0.03355903552347522,
+          "changed": 1167763,
+          "density": 0.00456888443384415,
+          "occupied_256_value_block_fraction": 0.25099759615384615,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "83": {
+          "adjacent_changed_pair_fraction": 0.028235626446679905,
+          "changed": 729256,
+          "density": 0.002853221404246795,
+          "occupied_256_value_block_fraction": 0.1517177483974359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 38
+        },
+        "84": {
+          "adjacent_changed_pair_fraction": 0.03432549726149321,
+          "changed": 1667332,
+          "density": 0.006523453150040064,
+          "occupied_256_value_block_fraction": 0.28806590544871796,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "85": {
+          "adjacent_changed_pair_fraction": 0.04533589025010871,
+          "changed": 1458006,
+          "density": 0.00570446307842548,
+          "occupied_256_value_block_fraction": 0.2475060096153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "86": {
+          "adjacent_changed_pair_fraction": 0.04238234467716943,
+          "changed": 1797305,
+          "density": 0.007031973814352965,
+          "occupied_256_value_block_fraction": 0.2670562900641026,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "87": {
+          "adjacent_changed_pair_fraction": 0.025842633642950977,
+          "changed": 410291,
+          "density": 0.0016052676469851762,
+          "occupied_256_value_block_fraction": 0.10338842147435898,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 40
+        },
+        "88": {
+          "adjacent_changed_pair_fraction": 0.03946279821766203,
+          "changed": 1359787,
+          "density": 0.005320180257161459,
+          "occupied_256_value_block_fraction": 0.2526642628205128,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "89": {
+          "adjacent_changed_pair_fraction": 0.02287063555299553,
+          "changed": 996518,
+          "density": 0.0038988866561498396,
+          "occupied_256_value_block_fraction": 0.22896534455128206,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "9": {
+          "adjacent_changed_pair_fraction": 0.037377421036342014,
+          "changed": 1964448,
+          "density": 0.007685922475961539,
+          "occupied_256_value_block_fraction": 0.3447215544871795,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "90": {
+          "adjacent_changed_pair_fraction": 0.01595475721768671,
+          "changed": 407402,
+          "density": 0.0015939644055488781,
+          "occupied_256_value_block_fraction": 0.14434795673076922,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "91": {
+          "adjacent_changed_pair_fraction": 0.02476374426094401,
+          "changed": 1815194,
+          "density": 0.007101964706029648,
+          "occupied_256_value_block_fraction": 0.44241686698717947,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 16
+        },
+        "92": {
+          "adjacent_changed_pair_fraction": 0.018290161309914576,
+          "changed": 732689,
+          "density": 0.002866653051131811,
+          "occupied_256_value_block_fraction": 0.22642027243589744,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "93": {
+          "adjacent_changed_pair_fraction": 0.037444171410086886,
+          "changed": 1585881,
+          "density": 0.006204775296724759,
+          "occupied_256_value_block_fraction": 0.3015865384615385,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "94": {
+          "adjacent_changed_pair_fraction": 0.025733447699452693,
+          "changed": 933843,
+          "density": 0.0036536700908954326,
+          "occupied_256_value_block_fraction": 0.2148858173076923,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "95": {
+          "adjacent_changed_pair_fraction": 0.03983718705592354,
+          "changed": 938746,
+          "density": 0.0036728531275040063,
+          "occupied_256_value_block_fraction": 0.17946814903846153,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "96": {
+          "adjacent_changed_pair_fraction": 0.01803262080842873,
+          "changed": 927874,
+          "density": 0.0036303163186097755,
+          "occupied_256_value_block_fraction": 0.28806590544871796,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "97": {
+          "adjacent_changed_pair_fraction": 0.038181265374941264,
+          "changed": 1808950,
+          "density": 0.007077534993489583,
+          "occupied_256_value_block_fraction": 0.32941806891025643,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "98": {
+          "adjacent_changed_pair_fraction": 0.026256568155168223,
+          "changed": 1308206,
+          "density": 0.005118369078024839,
+          "occupied_256_value_block_fraction": 0.3028155048076923,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "99": {
+          "adjacent_changed_pair_fraction": 0.04387701380353815,
+          "changed": 2169154,
+          "density": 0.008486836751302084,
+          "occupied_256_value_block_fraction": 0.33963241185897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        }
+      },
+      "version": 1
+    },
+    {
+      "by_expert": {
+        "0": {
+          "adjacent_changed_pair_fraction": 0.05769039070089266,
+          "changed": 2046476,
+          "density": 0.00800685784755609,
+          "occupied_256_value_block_fraction": 0.25216446314102564,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "1": {
+          "adjacent_changed_pair_fraction": 0.08051417287287603,
+          "changed": 4190964,
+          "density": 0.016397188626802884,
+          "occupied_256_value_block_fraction": 0.4450540865384615,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "10": {
+          "adjacent_changed_pair_fraction": 0.059027401438254135,
+          "changed": 2777117,
+          "density": 0.01086549807817508,
+          "occupied_256_value_block_fraction": 0.33201121794871796,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "100": {
+          "adjacent_changed_pair_fraction": 0.08846791257106504,
+          "changed": 5141593,
+          "density": 0.020116534110827325,
+          "occupied_256_value_block_fraction": 0.35376502403846155,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "101": {
+          "adjacent_changed_pair_fraction": 0.0442094183863919,
+          "changed": 2635547,
+          "density": 0.01031160403520633,
+          "occupied_256_value_block_fraction": 0.3799759615384615,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "102": {
+          "adjacent_changed_pair_fraction": 0.056740325140298184,
+          "changed": 2270343,
+          "density": 0.008882739727313701,
+          "occupied_256_value_block_fraction": 0.2696784855769231,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "103": {
+          "adjacent_changed_pair_fraction": 0.04368155250665502,
+          "changed": 2282863,
+          "density": 0.008931724352714342,
+          "occupied_256_value_block_fraction": 0.36135116185897437,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "104": {
+          "adjacent_changed_pair_fraction": 0.05380668292328821,
+          "changed": 3071979,
+          "density": 0.012019148606520433,
+          "occupied_256_value_block_fraction": 0.39916466346153845,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "105": {
+          "adjacent_changed_pair_fraction": 0.08833581020236805,
+          "changed": 5259328,
+          "density": 0.020577173477564104,
+          "occupied_256_value_block_fraction": 0.41140625,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "106": {
+          "adjacent_changed_pair_fraction": 0.03496229253876627,
+          "changed": 2136845,
+          "density": 0.00836042746519431,
+          "occupied_256_value_block_fraction": 0.3948407451923077,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "107": {
+          "adjacent_changed_pair_fraction": 0.07225048937607188,
+          "changed": 3934091,
+          "density": 0.01539217044145633,
+          "occupied_256_value_block_fraction": 0.3956610576923077,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "108": {
+          "adjacent_changed_pair_fraction": 0.06937120004383947,
+          "changed": 3576686,
+          "density": 0.013993819799178686,
+          "occupied_256_value_block_fraction": 0.35481470352564104,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "109": {
+          "adjacent_changed_pair_fraction": 0.06114441824039326,
+          "changed": 3426527,
+          "density": 0.013406321207682292,
+          "occupied_256_value_block_fraction": 0.37021834935897435,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "11": {
+          "adjacent_changed_pair_fraction": 0.08527618115243456,
+          "changed": 5613924,
+          "density": 0.02196453387920673,
+          "occupied_256_value_block_fraction": 0.4281219951923077,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "110": {
+          "adjacent_changed_pair_fraction": 0.08082339929294781,
+          "changed": 3424924,
+          "density": 0.013400049454126603,
+          "occupied_256_value_block_fraction": 0.29658754006410254,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "111": {
+          "adjacent_changed_pair_fraction": 0.06773065742342564,
+          "changed": 2868258,
+          "density": 0.011222088153545673,
+          "occupied_256_value_block_fraction": 0.3103425480769231,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "112": {
+          "adjacent_changed_pair_fraction": 0.09283377347631429,
+          "changed": 4121388,
+          "density": 0.016124971829927885,
+          "occupied_256_value_block_fraction": 0.2705068108974359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "113": {
+          "adjacent_changed_pair_fraction": 0.07097354144555777,
+          "changed": 5234035,
+          "density": 0.020478214361728767,
+          "occupied_256_value_block_fraction": 0.4624569310897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "114": {
+          "adjacent_changed_pair_fraction": 0.04545768440208958,
+          "changed": 2954088,
+          "density": 0.011557898888221153,
+          "occupied_256_value_block_fraction": 0.40707632211538464,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "115": {
+          "adjacent_changed_pair_fraction": 0.07852486265298485,
+          "changed": 3930373,
+          "density": 0.015377623729216746,
+          "occupied_256_value_block_fraction": 0.3735637019230769,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "116": {
+          "adjacent_changed_pair_fraction": 0.07373479120051882,
+          "changed": 4843331,
+          "density": 0.018949581048427484,
+          "occupied_256_value_block_fraction": 0.48407752403846155,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "117": {
+          "adjacent_changed_pair_fraction": 0.08353816201746114,
+          "changed": 3287300,
+          "density": 0.01286159417568109,
+          "occupied_256_value_block_fraction": 0.29486378205128205,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "118": {
+          "adjacent_changed_pair_fraction": 0.06738731778190081,
+          "changed": 2598946,
+          "density": 0.010168402256109776,
+          "occupied_256_value_block_fraction": 0.3216746794871795,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "119": {
+          "adjacent_changed_pair_fraction": 0.07249644702656385,
+          "changed": 5383519,
+          "density": 0.021063072008964342,
+          "occupied_256_value_block_fraction": 0.5008844150641025,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 16
+        },
+        "12": {
+          "adjacent_changed_pair_fraction": 0.07387068507121061,
+          "changed": 4353635,
+          "density": 0.01703364054361979,
+          "occupied_256_value_block_fraction": 0.37141726762820515,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "120": {
+          "adjacent_changed_pair_fraction": 0.06947535860892408,
+          "changed": 3008779,
+          "density": 0.011771877973507611,
+          "occupied_256_value_block_fraction": 0.30963241185897433,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "121": {
+          "adjacent_changed_pair_fraction": 0.09288759459676016,
+          "changed": 3619310,
+          "density": 0.014160586626101763,
+          "occupied_256_value_block_fraction": 0.34048778044871797,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "122": {
+          "adjacent_changed_pair_fraction": 0.06988953333107098,
+          "changed": 3388805,
+          "density": 0.013258733504857772,
+          "occupied_256_value_block_fraction": 0.3591456330128205,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "123": {
+          "adjacent_changed_pair_fraction": 0.04601084829049714,
+          "changed": 1711053,
+          "density": 0.006694512000450721,
+          "occupied_256_value_block_fraction": 0.2494140625,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "124": {
+          "adjacent_changed_pair_fraction": 0.05415914078495075,
+          "changed": 3234394,
+          "density": 0.012654598920773237,
+          "occupied_256_value_block_fraction": 0.3505168269230769,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "125": {
+          "adjacent_changed_pair_fraction": 0.05724779345938949,
+          "changed": 2449649,
+          "density": 0.009584276248247196,
+          "occupied_256_value_block_fraction": 0.3040965544871795,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "126": {
+          "adjacent_changed_pair_fraction": 0.07902437011484068,
+          "changed": 2956531,
+          "density": 0.011567457150190304,
+          "occupied_256_value_block_fraction": 0.3085006009615385,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "127": {
+          "adjacent_changed_pair_fraction": 0.072946902246519,
+          "changed": 4529363,
+          "density": 0.017721178103715946,
+          "occupied_256_value_block_fraction": 0.4451572516025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "128": {
+          "adjacent_changed_pair_fraction": 0.10784188983042756,
+          "changed": 5132143,
+          "density": 0.020079560891175883,
+          "occupied_256_value_block_fraction": 0.2750330528846154,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "129": {
+          "adjacent_changed_pair_fraction": 0.08613674308563798,
+          "changed": 4783847,
+          "density": 0.018716849302634214,
+          "occupied_256_value_block_fraction": 0.3569300881410256,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "13": {
+          "adjacent_changed_pair_fraction": 0.062338732613962285,
+          "changed": 4669264,
+          "density": 0.018268542167467948,
+          "occupied_256_value_block_fraction": 0.46591746794871797,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "130": {
+          "adjacent_changed_pair_fraction": 0.07975890122400989,
+          "changed": 4504212,
+          "density": 0.017622774564302883,
+          "occupied_256_value_block_fraction": 0.4280879407051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "131": {
+          "adjacent_changed_pair_fraction": 0.07201887459295252,
+          "changed": 3706570,
+          "density": 0.014501992250100161,
+          "occupied_256_value_block_fraction": 0.31178285256410254,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "132": {
+          "adjacent_changed_pair_fraction": 0.06558943259134929,
+          "changed": 4898533,
+          "density": 0.01916555942633213,
+          "occupied_256_value_block_fraction": 0.4582832532051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "133": {
+          "adjacent_changed_pair_fraction": 0.04785599115492698,
+          "changed": 2170700,
+          "density": 0.008492885491786858,
+          "occupied_256_value_block_fraction": 0.2837860576923077,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "134": {
+          "adjacent_changed_pair_fraction": 0.06067939561968681,
+          "changed": 3898671,
+          "density": 0.015253589336688703,
+          "occupied_256_value_block_fraction": 0.4186268028846154,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "135": {
+          "adjacent_changed_pair_fraction": 0.09172787189177625,
+          "changed": 3926680,
+          "density": 0.015363174829727565,
+          "occupied_256_value_block_fraction": 0.2988291266025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "136": {
+          "adjacent_changed_pair_fraction": 0.038851846066735654,
+          "changed": 1638944,
+          "density": 0.006412384815705129,
+          "occupied_256_value_block_fraction": 0.2486728766025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "137": {
+          "adjacent_changed_pair_fraction": 0.047115145344474856,
+          "changed": 2105756,
+          "density": 0.00823879144130609,
+          "occupied_256_value_block_fraction": 0.2903145032051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "138": {
+          "adjacent_changed_pair_fraction": 0.06931018379786039,
+          "changed": 3944442,
+          "density": 0.015432668832632212,
+          "occupied_256_value_block_fraction": 0.3524519230769231,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "139": {
+          "adjacent_changed_pair_fraction": 0.06314366012218141,
+          "changed": 3996189,
+          "density": 0.01563512948843149,
+          "occupied_256_value_block_fraction": 0.417489983974359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "14": {
+          "adjacent_changed_pair_fraction": 0.08469994059660664,
+          "changed": 4151278,
+          "density": 0.01624191675430689,
+          "occupied_256_value_block_fraction": 0.39485476762820515,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "140": {
+          "adjacent_changed_pair_fraction": 0.0696834817577221,
+          "changed": 3505264,
+          "density": 0.013714380508814102,
+          "occupied_256_value_block_fraction": 0.3185556891025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "141": {
+          "adjacent_changed_pair_fraction": 0.06138395879868459,
+          "changed": 2806124,
+          "density": 0.010978988256209936,
+          "occupied_256_value_block_fraction": 0.3313131009615385,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "142": {
+          "adjacent_changed_pair_fraction": 0.06296841062378539,
+          "changed": 3936450,
+          "density": 0.015401400052584134,
+          "occupied_256_value_block_fraction": 0.3891075721153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "143": {
+          "adjacent_changed_pair_fraction": 0.0785709954106416,
+          "changed": 3594838,
+          "density": 0.014064839680989583,
+          "occupied_256_value_block_fraction": 0.34345052083333333,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "144": {
+          "adjacent_changed_pair_fraction": 0.07787546189859658,
+          "changed": 4170017,
+          "density": 0.016315233279497195,
+          "occupied_256_value_block_fraction": 0.3852504006410256,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "145": {
+          "adjacent_changed_pair_fraction": 0.06804997021421008,
+          "changed": 3432845,
+          "density": 0.013431040445963542,
+          "occupied_256_value_block_fraction": 0.3324729567307692,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "146": {
+          "adjacent_changed_pair_fraction": 0.04416328601202115,
+          "changed": 2546844,
+          "density": 0.009964552659254809,
+          "occupied_256_value_block_fraction": 0.3760196314102564,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "147": {
+          "adjacent_changed_pair_fraction": 0.0730559721310273,
+          "changed": 4526324,
+          "density": 0.017709287985777245,
+          "occupied_256_value_block_fraction": 0.4128836137820513,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "148": {
+          "adjacent_changed_pair_fraction": 0.06417408323915028,
+          "changed": 2731383,
+          "density": 0.010686563345102163,
+          "occupied_256_value_block_fraction": 0.2835136217948718,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "149": {
+          "adjacent_changed_pair_fraction": 0.07376201806192113,
+          "changed": 3506493,
+          "density": 0.013719188983623797,
+          "occupied_256_value_block_fraction": 0.3086738782051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "15": {
+          "adjacent_changed_pair_fraction": 0.056099774207841006,
+          "changed": 4134776,
+          "density": 0.016177352514022435,
+          "occupied_256_value_block_fraction": 0.44899939903846153,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "150": {
+          "adjacent_changed_pair_fraction": 0.07650729431769782,
+          "changed": 3711999,
+          "density": 0.014523233266977164,
+          "occupied_256_value_block_fraction": 0.32936798878205126,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "151": {
+          "adjacent_changed_pair_fraction": 0.07257308308724829,
+          "changed": 4616629,
+          "density": 0.018062607202774437,
+          "occupied_256_value_block_fraction": 0.49326522435897435,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "152": {
+          "adjacent_changed_pair_fraction": 0.0740138495455868,
+          "changed": 5371873,
+          "density": 0.02101750691731771,
+          "occupied_256_value_block_fraction": 0.4557902644230769,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "153": {
+          "adjacent_changed_pair_fraction": 0.05227888303439034,
+          "changed": 2310474,
+          "density": 0.009039752666766827,
+          "occupied_256_value_block_fraction": 0.28362279647435895,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "154": {
+          "adjacent_changed_pair_fraction": 0.0642416102140527,
+          "changed": 4301838,
+          "density": 0.01683098426231971,
+          "occupied_256_value_block_fraction": 0.4003976362179487,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "155": {
+          "adjacent_changed_pair_fraction": 0.07058270774215983,
+          "changed": 4143947,
+          "density": 0.016213234143379406,
+          "occupied_256_value_block_fraction": 0.4303896233974359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "156": {
+          "adjacent_changed_pair_fraction": 0.06314963332701652,
+          "changed": 2237416,
+          "density": 0.008753912510016025,
+          "occupied_256_value_block_fraction": 0.2509845753205128,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "157": {
+          "adjacent_changed_pair_fraction": 0.10273889995308122,
+          "changed": 5513783,
+          "density": 0.021572731213691906,
+          "occupied_256_value_block_fraction": 0.37106770833333336,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "158": {
+          "adjacent_changed_pair_fraction": 0.06844251284614887,
+          "changed": 3528684,
+          "density": 0.013806011493389423,
+          "occupied_256_value_block_fraction": 0.42428485576923075,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "159": {
+          "adjacent_changed_pair_fraction": 0.057031997989638705,
+          "changed": 3832147,
+          "density": 0.014993313520382611,
+          "occupied_256_value_block_fraction": 0.45345853365384614,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "16": {
+          "adjacent_changed_pair_fraction": 0.05039795661011908,
+          "changed": 1990418,
+          "density": 0.007787530361077724,
+          "occupied_256_value_block_fraction": 0.2860466746794872,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "160": {
+          "adjacent_changed_pair_fraction": 0.052830328384732145,
+          "changed": 3727518,
+          "density": 0.014583951509915866,
+          "occupied_256_value_block_fraction": 0.4384785657051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "161": {
+          "adjacent_changed_pair_fraction": 0.05080943159854285,
+          "changed": 2217482,
+          "density": 0.00867592053535657,
+          "occupied_256_value_block_fraction": 0.3024208733974359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "162": {
+          "adjacent_changed_pair_fraction": 0.07462356934215053,
+          "changed": 6053771,
+          "density": 0.023685439672225563,
+          "occupied_256_value_block_fraction": 0.5492247596153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "163": {
+          "adjacent_changed_pair_fraction": 0.05170852981313589,
+          "changed": 2368352,
+          "density": 0.009266200921474359,
+          "occupied_256_value_block_fraction": 0.30546374198717946,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "164": {
+          "adjacent_changed_pair_fraction": 0.036853281449402704,
+          "changed": 955980,
+          "density": 0.0037402813251201923,
+          "occupied_256_value_block_fraction": 0.19653846153846155,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "165": {
+          "adjacent_changed_pair_fraction": 0.08993905814701816,
+          "changed": 5825389,
+          "density": 0.022791892809745595,
+          "occupied_256_value_block_fraction": 0.4117568108974359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "166": {
+          "adjacent_changed_pair_fraction": 0.07781419606789038,
+          "changed": 3378034,
+          "density": 0.013216591859475161,
+          "occupied_256_value_block_fraction": 0.3028625801282051,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "167": {
+          "adjacent_changed_pair_fraction": 0.06530402073924864,
+          "changed": 3705438,
+          "density": 0.01449756328876202,
+          "occupied_256_value_block_fraction": 0.4306991185897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "168": {
+          "adjacent_changed_pair_fraction": 0.043951243156953125,
+          "changed": 3030631,
+          "density": 0.011857374142377804,
+          "occupied_256_value_block_fraction": 0.42121494391025643,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "169": {
+          "adjacent_changed_pair_fraction": 0.07212845403494118,
+          "changed": 4659659,
+          "density": 0.018230962508764024,
+          "occupied_256_value_block_fraction": 0.38986778846153847,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "17": {
+          "adjacent_changed_pair_fraction": 0.061672372727019684,
+          "changed": 3772305,
+          "density": 0.014759181096003606,
+          "occupied_256_value_block_fraction": 0.42971554487179486,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "170": {
+          "adjacent_changed_pair_fraction": 0.08537443799105578,
+          "changed": 5675399,
+          "density": 0.022205055432441907,
+          "occupied_256_value_block_fraction": 0.40107471955128204,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "171": {
+          "adjacent_changed_pair_fraction": 0.05182350684420807,
+          "changed": 3229519,
+          "density": 0.012635525434445112,
+          "occupied_256_value_block_fraction": 0.4192177483974359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "172": {
+          "adjacent_changed_pair_fraction": 0.046559900421630246,
+          "changed": 2281620,
+          "density": 0.008926861102764423,
+          "occupied_256_value_block_fraction": 0.38643429487179487,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "173": {
+          "adjacent_changed_pair_fraction": 0.08063333848040652,
+          "changed": 3943989,
+          "density": 0.015430896465594953,
+          "occupied_256_value_block_fraction": 0.40091947115384613,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "174": {
+          "adjacent_changed_pair_fraction": 0.054816737345414375,
+          "changed": 3236475,
+          "density": 0.012662740854116587,
+          "occupied_256_value_block_fraction": 0.42049579326923076,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "175": {
+          "adjacent_changed_pair_fraction": 0.08623447315128922,
+          "changed": 6512268,
+          "density": 0.02547931377704327,
+          "occupied_256_value_block_fraction": 0.45688701923076924,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "176": {
+          "adjacent_changed_pair_fraction": 0.08467893714877915,
+          "changed": 4726193,
+          "density": 0.018491277450170273,
+          "occupied_256_value_block_fraction": 0.34610576923076924,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "177": {
+          "adjacent_changed_pair_fraction": 0.09772684490338841,
+          "changed": 6900673,
+          "density": 0.02699895222981771,
+          "occupied_256_value_block_fraction": 0.48463441506410254,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 16
+        },
+        "178": {
+          "adjacent_changed_pair_fraction": 0.051733974579424746,
+          "changed": 2268084,
+          "density": 0.0088739013671875,
+          "occupied_256_value_block_fraction": 0.2828555689102564,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "179": {
+          "adjacent_changed_pair_fraction": 0.05217436927551005,
+          "changed": 2134688,
+          "density": 0.008351988181089743,
+          "occupied_256_value_block_fraction": 0.3306640625,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "18": {
+          "adjacent_changed_pair_fraction": 0.08389267548360388,
+          "changed": 6534015,
+          "density": 0.02556439913236178,
+          "occupied_256_value_block_fraction": 0.47776943108974357,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "180": {
+          "adjacent_changed_pair_fraction": 0.061765250833443516,
+          "changed": 2261401,
+          "density": 0.008847754062750401,
+          "occupied_256_value_block_fraction": 0.27092047275641024,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "181": {
+          "adjacent_changed_pair_fraction": 0.07806729234267747,
+          "changed": 4584801,
+          "density": 0.017938079833984374,
+          "occupied_256_value_block_fraction": 0.4175350560897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "182": {
+          "adjacent_changed_pair_fraction": 0.049842396502865115,
+          "changed": 2796575,
+          "density": 0.010941627698066907,
+          "occupied_256_value_block_fraction": 0.39548477564102563,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "183": {
+          "adjacent_changed_pair_fraction": 0.05984221875688689,
+          "changed": 3584710,
+          "density": 0.014025213779547276,
+          "occupied_256_value_block_fraction": 0.34877203525641026,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "184": {
+          "adjacent_changed_pair_fraction": 0.06165024379837449,
+          "changed": 4303146,
+          "density": 0.016836101825420672,
+          "occupied_256_value_block_fraction": 0.4079206730769231,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "185": {
+          "adjacent_changed_pair_fraction": 0.05273907574779665,
+          "changed": 2269835,
+          "density": 0.00888075217222556,
+          "occupied_256_value_block_fraction": 0.2810596955128205,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "186": {
+          "adjacent_changed_pair_fraction": 0.04183627150589361,
+          "changed": 810708,
+          "density": 0.0031719031700721155,
+          "occupied_256_value_block_fraction": 0.16783052884615385,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "187": {
+          "adjacent_changed_pair_fraction": 0.0899899688136581,
+          "changed": 4282644,
+          "density": 0.016755887545072116,
+          "occupied_256_value_block_fraction": 0.26732271634615384,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "188": {
+          "adjacent_changed_pair_fraction": 0.05415067716369295,
+          "changed": 2274930,
+          "density": 0.008900686410757211,
+          "occupied_256_value_block_fraction": 0.2716436298076923,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "189": {
+          "adjacent_changed_pair_fraction": 0.08637578199493348,
+          "changed": 3458782,
+          "density": 0.013532519218249198,
+          "occupied_256_value_block_fraction": 0.2473066907051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "19": {
+          "adjacent_changed_pair_fraction": 0.08781065271507503,
+          "changed": 6087143,
+          "density": 0.023816007956480367,
+          "occupied_256_value_block_fraction": 0.38268729967948717,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "190": {
+          "adjacent_changed_pair_fraction": 0.03835578964938473,
+          "changed": 1725424,
+          "density": 0.0067507386818910255,
+          "occupied_256_value_block_fraction": 0.2434795673076923,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 38
+        },
+        "191": {
+          "adjacent_changed_pair_fraction": 0.08958449589850065,
+          "changed": 3272218,
+          "density": 0.01280258569961939,
+          "occupied_256_value_block_fraction": 0.31566005608974357,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "192": {
+          "adjacent_changed_pair_fraction": 0.07716195448003317,
+          "changed": 6148950,
+          "density": 0.024057828463040866,
+          "occupied_256_value_block_fraction": 0.42716145833333335,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "193": {
+          "adjacent_changed_pair_fraction": 0.059160203838139754,
+          "changed": 3440573,
+          "density": 0.013461276323367388,
+          "occupied_256_value_block_fraction": 0.4093409455128205,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "194": {
+          "adjacent_changed_pair_fraction": 0.08315966228153272,
+          "changed": 2079602,
+          "density": 0.008136463654346955,
+          "occupied_256_value_block_fraction": 0.21381209935897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "195": {
+          "adjacent_changed_pair_fraction": 0.06060549966217154,
+          "changed": 2593032,
+          "density": 0.010145263671875,
+          "occupied_256_value_block_fraction": 0.2609685496794872,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "196": {
+          "adjacent_changed_pair_fraction": 0.07946318213768828,
+          "changed": 4487034,
+          "density": 0.017555565467247597,
+          "occupied_256_value_block_fraction": 0.43188902243589744,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "197": {
+          "adjacent_changed_pair_fraction": 0.08661378145662241,
+          "changed": 3818711,
+          "density": 0.014940745035807291,
+          "occupied_256_value_block_fraction": 0.3940294471153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "198": {
+          "adjacent_changed_pair_fraction": 0.06813289226472453,
+          "changed": 4030212,
+          "density": 0.01576824481670673,
+          "occupied_256_value_block_fraction": 0.38767327724358974,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "199": {
+          "adjacent_changed_pair_fraction": 0.05404889375061106,
+          "changed": 1953583,
+          "density": 0.0076434130546374195,
+          "occupied_256_value_block_fraction": 0.25873497596153844,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "2": {
+          "adjacent_changed_pair_fraction": 0.04631181225087725,
+          "changed": 3757184,
+          "density": 0.014700020032051283,
+          "occupied_256_value_block_fraction": 0.49440805288461537,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "20": {
+          "adjacent_changed_pair_fraction": 0.07043464652803882,
+          "changed": 5578533,
+          "density": 0.021826066237229567,
+          "occupied_256_value_block_fraction": 0.46270833333333333,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "200": {
+          "adjacent_changed_pair_fraction": 0.058330772961457306,
+          "changed": 2362938,
+          "density": 0.009245018592247595,
+          "occupied_256_value_block_fraction": 0.26677584134615384,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "201": {
+          "adjacent_changed_pair_fraction": 0.06150910695153463,
+          "changed": 3173400,
+          "density": 0.01241595928485577,
+          "occupied_256_value_block_fraction": 0.368739983974359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "202": {
+          "adjacent_changed_pair_fraction": 0.05432677577095813,
+          "changed": 2748074,
+          "density": 0.010751867049779647,
+          "occupied_256_value_block_fraction": 0.32946814903846156,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "203": {
+          "adjacent_changed_pair_fraction": 0.05003101920973366,
+          "changed": 1803721,
+          "density": 0.007057076478615785,
+          "occupied_256_value_block_fraction": 0.2355939503205128,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "204": {
+          "adjacent_changed_pair_fraction": 0.07169447985147746,
+          "changed": 3832415,
+          "density": 0.014994362073066907,
+          "occupied_256_value_block_fraction": 0.44857271634615387,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 16
+        },
+        "205": {
+          "adjacent_changed_pair_fraction": 0.060402719536633245,
+          "changed": 4797582,
+          "density": 0.018770587627704328,
+          "occupied_256_value_block_fraction": 0.4811388221153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "206": {
+          "adjacent_changed_pair_fraction": 0.07261444717802754,
+          "changed": 5050758,
+          "density": 0.019761141263521634,
+          "occupied_256_value_block_fraction": 0.42188401442307694,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "207": {
+          "adjacent_changed_pair_fraction": 0.09405097197022069,
+          "changed": 6410896,
+          "density": 0.025082694811698718,
+          "occupied_256_value_block_fraction": 0.4210266426282051,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "208": {
+          "adjacent_changed_pair_fraction": 0.07655991547915003,
+          "changed": 4096504,
+          "density": 0.016027612930689102,
+          "occupied_256_value_block_fraction": 0.3454457131410256,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "209": {
+          "adjacent_changed_pair_fraction": 0.0586097838376707,
+          "changed": 2093473,
+          "density": 0.008190734080779246,
+          "occupied_256_value_block_fraction": 0.26460236378205126,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "21": {
+          "adjacent_changed_pair_fraction": 0.09146400810582381,
+          "changed": 5784483,
+          "density": 0.02263184767503005,
+          "occupied_256_value_block_fraction": 0.3711979166666667,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "210": {
+          "adjacent_changed_pair_fraction": 0.0730124159358009,
+          "changed": 4099248,
+          "density": 0.01603834885817308,
+          "occupied_256_value_block_fraction": 0.4132411858974359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "211": {
+          "adjacent_changed_pair_fraction": 0.09184137452377625,
+          "changed": 3334042,
+          "density": 0.01304447271885016,
+          "occupied_256_value_block_fraction": 0.24086939102564103,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "212": {
+          "adjacent_changed_pair_fraction": 0.06318840579710144,
+          "changed": 2320125,
+          "density": 0.009077512300931491,
+          "occupied_256_value_block_fraction": 0.2668639823717949,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "213": {
+          "adjacent_changed_pair_fraction": 0.056054009586853304,
+          "changed": 1846487,
+          "density": 0.007224398881961138,
+          "occupied_256_value_block_fraction": 0.23816606570512822,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "214": {
+          "adjacent_changed_pair_fraction": 0.0731256935677846,
+          "changed": 4519205,
+          "density": 0.017681434826973156,
+          "occupied_256_value_block_fraction": 0.35838441506410257,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "215": {
+          "adjacent_changed_pair_fraction": 0.047288937394358875,
+          "changed": 2481278,
+          "density": 0.00970802502754407,
+          "occupied_256_value_block_fraction": 0.3551993189102564,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "216": {
+          "adjacent_changed_pair_fraction": 0.0796337126812582,
+          "changed": 4020232,
+          "density": 0.015729197966746794,
+          "occupied_256_value_block_fraction": 0.38857471955128203,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "217": {
+          "adjacent_changed_pair_fraction": 0.09820261204269323,
+          "changed": 5105353,
+          "density": 0.019974744747846555,
+          "occupied_256_value_block_fraction": 0.3635586939102564,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "218": {
+          "adjacent_changed_pair_fraction": 0.0795447363221065,
+          "changed": 4256083,
+          "density": 0.016651967366536458,
+          "occupied_256_value_block_fraction": 0.40247796474358977,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "219": {
+          "adjacent_changed_pair_fraction": 0.08013039372419004,
+          "changed": 3472253,
+          "density": 0.01358522464067508,
+          "occupied_256_value_block_fraction": 0.37098758012820515,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "22": {
+          "adjacent_changed_pair_fraction": 0.08705200584687134,
+          "changed": 3935096,
+          "density": 0.015396102514022436,
+          "occupied_256_value_block_fraction": 0.36351161858974357,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "220": {
+          "adjacent_changed_pair_fraction": 0.07775370518588028,
+          "changed": 2898640,
+          "density": 0.011340958032852564,
+          "occupied_256_value_block_fraction": 0.3114623397435897,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "221": {
+          "adjacent_changed_pair_fraction": 0.06260883767532373,
+          "changed": 2228663,
+          "density": 0.008719666309845752,
+          "occupied_256_value_block_fraction": 0.23604366987179487,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "222": {
+          "adjacent_changed_pair_fraction": 0.06904742167829851,
+          "changed": 5464737,
+          "density": 0.021380838247445914,
+          "occupied_256_value_block_fraction": 0.5401642628205128,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 14
+        },
+        "223": {
+          "adjacent_changed_pair_fraction": 0.07207284132053629,
+          "changed": 3044975,
+          "density": 0.011913495186047677,
+          "occupied_256_value_block_fraction": 0.3130048076923077,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "224": {
+          "adjacent_changed_pair_fraction": 0.06886352249473322,
+          "changed": 2981898,
+          "density": 0.011666705791766827,
+          "occupied_256_value_block_fraction": 0.3143860176282051,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "225": {
+          "adjacent_changed_pair_fraction": 0.08452231473718042,
+          "changed": 3403894,
+          "density": 0.013317769368489583,
+          "occupied_256_value_block_fraction": 0.2371784855769231,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "226": {
+          "adjacent_changed_pair_fraction": 0.07245799439428825,
+          "changed": 5371664,
+          "density": 0.02101668920272436,
+          "occupied_256_value_block_fraction": 0.44804286858974357,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "227": {
+          "adjacent_changed_pair_fraction": 0.060197718442664805,
+          "changed": 3711237,
+          "density": 0.014520251934344952,
+          "occupied_256_value_block_fraction": 0.44957932692307695,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "228": {
+          "adjacent_changed_pair_fraction": 0.04803476847306332,
+          "changed": 1946361,
+          "density": 0.007615156907301683,
+          "occupied_256_value_block_fraction": 0.26732772435897434,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "229": {
+          "adjacent_changed_pair_fraction": 0.09870152142912993,
+          "changed": 4629726,
+          "density": 0.01811384934645433,
+          "occupied_256_value_block_fraction": 0.3851231971153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "23": {
+          "adjacent_changed_pair_fraction": 0.08225626471918517,
+          "changed": 5684333,
+          "density": 0.02224000979692508,
+          "occupied_256_value_block_fraction": 0.38203625801282054,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "230": {
+          "adjacent_changed_pair_fraction": 0.06512329802995731,
+          "changed": 2729484,
+          "density": 0.010679133488581731,
+          "occupied_256_value_block_fraction": 0.27645733173076925,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "231": {
+          "adjacent_changed_pair_fraction": 0.07221744106152306,
+          "changed": 5440334,
+          "density": 0.02128536126552484,
+          "occupied_256_value_block_fraction": 0.4685516826923077,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "232": {
+          "adjacent_changed_pair_fraction": 0.040917518043991886,
+          "changed": 1497867,
+          "density": 0.0058604196401742786,
+          "occupied_256_value_block_fraction": 0.2927483974358974,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "233": {
+          "adjacent_changed_pair_fraction": 0.08850627043404781,
+          "changed": 4654303,
+          "density": 0.01821000710511819,
+          "occupied_256_value_block_fraction": 0.3672566105769231,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "234": {
+          "adjacent_changed_pair_fraction": 0.06613183257655968,
+          "changed": 3799683,
+          "density": 0.014866297795222356,
+          "occupied_256_value_block_fraction": 0.39938701923076925,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "235": {
+          "adjacent_changed_pair_fraction": 0.05401169062786792,
+          "changed": 2384132,
+          "density": 0.009327940329527244,
+          "occupied_256_value_block_fraction": 0.3044921875,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "236": {
+          "adjacent_changed_pair_fraction": 0.0932649358714252,
+          "changed": 7977489,
+          "density": 0.031212005615234375,
+          "occupied_256_value_block_fraction": 0.5846454326923077,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 14
+        },
+        "237": {
+          "adjacent_changed_pair_fraction": 0.029031426874432255,
+          "changed": 915904,
+          "density": 0.0035834835737179487,
+          "occupied_256_value_block_fraction": 0.21678084935897435,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "238": {
+          "adjacent_changed_pair_fraction": 0.03985622172422182,
+          "changed": 2326638,
+          "density": 0.009102994478665865,
+          "occupied_256_value_block_fraction": 0.38020532852564104,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "239": {
+          "adjacent_changed_pair_fraction": 0.07892227143143486,
+          "changed": 4699662,
+          "density": 0.018387474646935097,
+          "occupied_256_value_block_fraction": 0.45088040865384615,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "24": {
+          "adjacent_changed_pair_fraction": 0.0716756559108258,
+          "changed": 4693016,
+          "density": 0.01836147210536859,
+          "occupied_256_value_block_fraction": 0.385908453525641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "240": {
+          "adjacent_changed_pair_fraction": 0.08004451582020934,
+          "changed": 2989499,
+          "density": 0.011696444780398638,
+          "occupied_256_value_block_fraction": 0.31303185096153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "241": {
+          "adjacent_changed_pair_fraction": 0.06848166389211456,
+          "changed": 4862046,
+          "density": 0.019022803673377404,
+          "occupied_256_value_block_fraction": 0.4775631009615385,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 16
+        },
+        "242": {
+          "adjacent_changed_pair_fraction": 0.07284037738708665,
+          "changed": 4394321,
+          "density": 0.017192824926131813,
+          "occupied_256_value_block_fraction": 0.3753986378205128,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "243": {
+          "adjacent_changed_pair_fraction": 0.061509814300644484,
+          "changed": 4943959,
+          "density": 0.019343289106320112,
+          "occupied_256_value_block_fraction": 0.5060546875,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "244": {
+          "adjacent_changed_pair_fraction": 0.06782207307996731,
+          "changed": 5081502,
+          "density": 0.019881427471454327,
+          "occupied_256_value_block_fraction": 0.4650400641025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "245": {
+          "adjacent_changed_pair_fraction": 0.06422279713957676,
+          "changed": 3847123,
+          "density": 0.015051907270382612,
+          "occupied_256_value_block_fraction": 0.3897586137820513,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "246": {
+          "adjacent_changed_pair_fraction": 0.055161850023281396,
+          "changed": 2424683,
+          "density": 0.0094865965231871,
+          "occupied_256_value_block_fraction": 0.28583633814102566,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "247": {
+          "adjacent_changed_pair_fraction": 0.08109614896586728,
+          "changed": 5043840,
+          "density": 0.01973407451923077,
+          "occupied_256_value_block_fraction": 0.44131009615384614,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "248": {
+          "adjacent_changed_pair_fraction": 0.06819022887408978,
+          "changed": 3002131,
+          "density": 0.011745867606921074,
+          "occupied_256_value_block_fraction": 0.32710136217948715,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "249": {
+          "adjacent_changed_pair_fraction": 0.06415032417419184,
+          "changed": 3376117,
+          "density": 0.013209091577774439,
+          "occupied_256_value_block_fraction": 0.4004036458333333,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "25": {
+          "adjacent_changed_pair_fraction": 0.09249166009209839,
+          "changed": 3735353,
+          "density": 0.014614606025891427,
+          "occupied_256_value_block_fraction": 0.3741756810897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "250": {
+          "adjacent_changed_pair_fraction": 0.06743406335787427,
+          "changed": 2235176,
+          "density": 0.008745148487580129,
+          "occupied_256_value_block_fraction": 0.24519831730769232,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "251": {
+          "adjacent_changed_pair_fraction": 0.06369769731075742,
+          "changed": 5561975,
+          "density": 0.021761282896384213,
+          "occupied_256_value_block_fraction": 0.5550841346153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "252": {
+          "adjacent_changed_pair_fraction": 0.050128650535206876,
+          "changed": 2130578,
+          "density": 0.008335907764923878,
+          "occupied_256_value_block_fraction": 0.3197285657051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "253": {
+          "adjacent_changed_pair_fraction": 0.04347861535357077,
+          "changed": 2453045,
+          "density": 0.009597563132261618,
+          "occupied_256_value_block_fraction": 0.34260016025641027,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "254": {
+          "adjacent_changed_pair_fraction": 0.07236768456439069,
+          "changed": 3608876,
+          "density": 0.01411976349659455,
+          "occupied_256_value_block_fraction": 0.35900440705128206,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "255": {
+          "adjacent_changed_pair_fraction": 0.062125945226240605,
+          "changed": 5996448,
+          "density": 0.023461162860576923,
+          "occupied_256_value_block_fraction": 0.5770953525641026,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 16
+        },
+        "26": {
+          "adjacent_changed_pair_fraction": 0.054967492720252746,
+          "changed": 2707855,
+          "density": 0.010594509809445112,
+          "occupied_256_value_block_fraction": 0.28697115384615385,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "27": {
+          "adjacent_changed_pair_fraction": 0.09304352144083719,
+          "changed": 4329705,
+          "density": 0.0169400141789363,
+          "occupied_256_value_block_fraction": 0.33708233173076924,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "28": {
+          "adjacent_changed_pair_fraction": 0.0786006802595884,
+          "changed": 4400967,
+          "density": 0.017218827467698317,
+          "occupied_256_value_block_fraction": 0.3813080929487179,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "29": {
+          "adjacent_changed_pair_fraction": 0.042667263901712174,
+          "changed": 1531502,
+          "density": 0.005992016914563301,
+          "occupied_256_value_block_fraction": 0.2444841746794872,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "3": {
+          "adjacent_changed_pair_fraction": 0.07872121917028527,
+          "changed": 2747836,
+          "density": 0.010750935872395834,
+          "occupied_256_value_block_fraction": 0.2751592548076923,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "30": {
+          "adjacent_changed_pair_fraction": 0.045342666868277225,
+          "changed": 3095076,
+          "density": 0.012109515850360577,
+          "occupied_256_value_block_fraction": 0.4604837740384615,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "31": {
+          "adjacent_changed_pair_fraction": 0.09044653389902971,
+          "changed": 5286228,
+          "density": 0.020682419996995192,
+          "occupied_256_value_block_fraction": 0.36736177884615384,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "32": {
+          "adjacent_changed_pair_fraction": 0.07595186753477752,
+          "changed": 2298324,
+          "density": 0.008992215670072115,
+          "occupied_256_value_block_fraction": 0.1801512419871795,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "33": {
+          "adjacent_changed_pair_fraction": 0.08787160515174001,
+          "changed": 3331224,
+          "density": 0.013033447265625,
+          "occupied_256_value_block_fraction": 0.2898297275641026,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "34": {
+          "adjacent_changed_pair_fraction": 0.05121206159850804,
+          "changed": 3177025,
+          "density": 0.012430142133663863,
+          "occupied_256_value_block_fraction": 0.44506109775641023,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "35": {
+          "adjacent_changed_pair_fraction": 0.0518625953738595,
+          "changed": 2655864,
+          "density": 0.010391094501201924,
+          "occupied_256_value_block_fraction": 0.3276592548076923,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "36": {
+          "adjacent_changed_pair_fraction": 0.057196675474802484,
+          "changed": 2395891,
+          "density": 0.00937394753480569,
+          "occupied_256_value_block_fraction": 0.26766125801282054,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "37": {
+          "adjacent_changed_pair_fraction": 0.0704185434746342,
+          "changed": 4657509,
+          "density": 0.018222550612229566,
+          "occupied_256_value_block_fraction": 0.4023427483974359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "38": {
+          "adjacent_changed_pair_fraction": 0.06691635585010001,
+          "changed": 4440454,
+          "density": 0.01737332075070112,
+          "occupied_256_value_block_fraction": 0.4634725560897436,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "39": {
+          "adjacent_changed_pair_fraction": 0.06345771045329177,
+          "changed": 3569842,
+          "density": 0.013967042580629006,
+          "occupied_256_value_block_fraction": 0.361904046474359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "4": {
+          "adjacent_changed_pair_fraction": 0.05975490782934738,
+          "changed": 2355522,
+          "density": 0.00921600341796875,
+          "occupied_256_value_block_fraction": 0.24783353365384617,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "40": {
+          "adjacent_changed_pair_fraction": 0.08436181895163651,
+          "changed": 3859234,
+          "density": 0.015099291679186699,
+          "occupied_256_value_block_fraction": 0.3005228365384615,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "41": {
+          "adjacent_changed_pair_fraction": 0.08928438444305627,
+          "changed": 4565524,
+          "density": 0.01786265837840545,
+          "occupied_256_value_block_fraction": 0.3274629407051282,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "42": {
+          "adjacent_changed_pair_fraction": 0.04888448564621518,
+          "changed": 2119650,
+          "density": 0.00829315185546875,
+          "occupied_256_value_block_fraction": 0.29662159455128206,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 31
+        },
+        "43": {
+          "adjacent_changed_pair_fraction": 0.056611505859539,
+          "changed": 2393789,
+          "density": 0.009365723438752003,
+          "occupied_256_value_block_fraction": 0.27330328525641023,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "44": {
+          "adjacent_changed_pair_fraction": 0.0628211473184338,
+          "changed": 4718045,
+          "density": 0.018459398318559694,
+          "occupied_256_value_block_fraction": 0.542734375,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "45": {
+          "adjacent_changed_pair_fraction": 0.07501959607352952,
+          "changed": 4548105,
+          "density": 0.0177945063664363,
+          "occupied_256_value_block_fraction": 0.41579627403846153,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "46": {
+          "adjacent_changed_pair_fraction": 0.06859033369117,
+          "changed": 4916582,
+          "density": 0.01923617631961138,
+          "occupied_256_value_block_fraction": 0.42334034455128206,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "47": {
+          "adjacent_changed_pair_fraction": 0.0838505997765814,
+          "changed": 5333486,
+          "density": 0.02086731739533253,
+          "occupied_256_value_block_fraction": 0.38576422275641026,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "48": {
+          "adjacent_changed_pair_fraction": 0.07802754296546384,
+          "changed": 5555974,
+          "density": 0.021737803923778044,
+          "occupied_256_value_block_fraction": 0.48498197115384617,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "49": {
+          "adjacent_changed_pair_fraction": 0.08463221696929439,
+          "changed": 6702294,
+          "density": 0.02622279240534856,
+          "occupied_256_value_block_fraction": 0.4706179887820513,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "5": {
+          "adjacent_changed_pair_fraction": 0.07491056316356362,
+          "changed": 3327488,
+          "density": 0.013018830128205127,
+          "occupied_256_value_block_fraction": 0.34741386217948717,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "50": {
+          "adjacent_changed_pair_fraction": 0.07110520016245551,
+          "changed": 3720403,
+          "density": 0.014556114001151843,
+          "occupied_256_value_block_fraction": 0.3441316105769231,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "51": {
+          "adjacent_changed_pair_fraction": 0.08375514836084018,
+          "changed": 3066510,
+          "density": 0.011997751089242788,
+          "occupied_256_value_block_fraction": 0.2698046875,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "52": {
+          "adjacent_changed_pair_fraction": 0.0954131584599951,
+          "changed": 4604323,
+          "density": 0.018014459854517228,
+          "occupied_256_value_block_fraction": 0.3742858573717949,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "53": {
+          "adjacent_changed_pair_fraction": 0.060660161659788533,
+          "changed": 3735994,
+          "density": 0.014617113944811699,
+          "occupied_256_value_block_fraction": 0.46307792467948716,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 16
+        },
+        "54": {
+          "adjacent_changed_pair_fraction": 0.07208560536501372,
+          "changed": 3842376,
+          "density": 0.015033334585336539,
+          "occupied_256_value_block_fraction": 0.35398537660256413,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "55": {
+          "adjacent_changed_pair_fraction": 0.07354674236222561,
+          "changed": 4418401,
+          "density": 0.01728703816731771,
+          "occupied_256_value_block_fraction": 0.40033653846153844,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "56": {
+          "adjacent_changed_pair_fraction": 0.08011061324092753,
+          "changed": 5786649,
+          "density": 0.02264032217172476,
+          "occupied_256_value_block_fraction": 0.44812900641025644,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "57": {
+          "adjacent_changed_pair_fraction": 0.0729563318071861,
+          "changed": 4147481,
+          "density": 0.016227060953776042,
+          "occupied_256_value_block_fraction": 0.32082532051282053,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "58": {
+          "adjacent_changed_pair_fraction": 0.06881991968102948,
+          "changed": 4719433,
+          "density": 0.01846482888246194,
+          "occupied_256_value_block_fraction": 0.45311097756410257,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "59": {
+          "adjacent_changed_pair_fraction": 0.09123839961285835,
+          "changed": 4959425,
+          "density": 0.019403799986227963,
+          "occupied_256_value_block_fraction": 0.4092467948717949,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "6": {
+          "adjacent_changed_pair_fraction": 0.07728242875410549,
+          "changed": 3015472,
+          "density": 0.011798064403044872,
+          "occupied_256_value_block_fraction": 0.31226362179487177,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "60": {
+          "adjacent_changed_pair_fraction": 0.07776484990346498,
+          "changed": 5109545,
+          "density": 0.019991145989833734,
+          "occupied_256_value_block_fraction": 0.4334585336538462,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "61": {
+          "adjacent_changed_pair_fraction": 0.08710608559322629,
+          "changed": 7263729,
+          "density": 0.028419412466195913,
+          "occupied_256_value_block_fraction": 0.5093549679487179,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "62": {
+          "adjacent_changed_pair_fraction": 0.07427893624023894,
+          "changed": 5171318,
+          "density": 0.020232833471053684,
+          "occupied_256_value_block_fraction": 0.4667558092948718,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "63": {
+          "adjacent_changed_pair_fraction": 0.08473550020946831,
+          "changed": 4668964,
+          "density": 0.01826736841446314,
+          "occupied_256_value_block_fraction": 0.4123507612179487,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "64": {
+          "adjacent_changed_pair_fraction": 0.05496221662468514,
+          "changed": 2977500,
+          "density": 0.011649498572716346,
+          "occupied_256_value_block_fraction": 0.3697425881410256,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "65": {
+          "adjacent_changed_pair_fraction": 0.0796636861959874,
+          "changed": 2940587,
+          "density": 0.011505076090494792,
+          "occupied_256_value_block_fraction": 0.2559875801282051,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "66": {
+          "adjacent_changed_pair_fraction": 0.07092518296147804,
+          "changed": 4427708,
+          "density": 0.01732345189803686,
+          "occupied_256_value_block_fraction": 0.376982171474359,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "67": {
+          "adjacent_changed_pair_fraction": 0.07732223840562955,
+          "changed": 4034997,
+          "density": 0.015786966177133415,
+          "occupied_256_value_block_fraction": 0.3484375,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "68": {
+          "adjacent_changed_pair_fraction": 0.07625598503089538,
+          "changed": 3657667,
+          "density": 0.014310658772786458,
+          "occupied_256_value_block_fraction": 0.3336207932692308,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "69": {
+          "adjacent_changed_pair_fraction": 0.07537807845410795,
+          "changed": 5567892,
+          "density": 0.02178443321814904,
+          "occupied_256_value_block_fraction": 0.4753275240384615,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "7": {
+          "adjacent_changed_pair_fraction": 0.06474125670880951,
+          "changed": 3062205,
+          "density": 0.011980907733623798,
+          "occupied_256_value_block_fraction": 0.3238331330128205,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "70": {
+          "adjacent_changed_pair_fraction": 0.06606006719255714,
+          "changed": 3250360,
+          "density": 0.012717066055689102,
+          "occupied_256_value_block_fraction": 0.31989182692307694,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "71": {
+          "adjacent_changed_pair_fraction": 0.06071968050215055,
+          "changed": 4294489,
+          "density": 0.01680223122621194,
+          "occupied_256_value_block_fraction": 0.47465645032051285,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 20
+        },
+        "72": {
+          "adjacent_changed_pair_fraction": 0.07583051008880454,
+          "changed": 6383908,
+          "density": 0.024977103991386217,
+          "occupied_256_value_block_fraction": 0.5296424278846154,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 18
+        },
+        "73": {
+          "adjacent_changed_pair_fraction": 0.07727980759240499,
+          "changed": 4927872,
+          "density": 0.019280348557692308,
+          "occupied_256_value_block_fraction": 0.48838842147435896,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "74": {
+          "adjacent_changed_pair_fraction": 0.08402755749835968,
+          "changed": 4602740,
+          "density": 0.01800826635116186,
+          "occupied_256_value_block_fraction": 0.33762920673076924,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "75": {
+          "adjacent_changed_pair_fraction": 0.06548573606098891,
+          "changed": 3526936,
+          "density": 0.01379917242588141,
+          "occupied_256_value_block_fraction": 0.3254246794871795,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "76": {
+          "adjacent_changed_pair_fraction": 0.045436627104716014,
+          "changed": 2848781,
+          "density": 0.011145884195963542,
+          "occupied_256_value_block_fraction": 0.4329747596153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "77": {
+          "adjacent_changed_pair_fraction": 0.06189168725603557,
+          "changed": 3382409,
+          "density": 0.013233709090795272,
+          "occupied_256_value_block_fraction": 0.30584034455128206,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "78": {
+          "adjacent_changed_pair_fraction": 0.07164157128564064,
+          "changed": 4808521,
+          "density": 0.018813386574769633,
+          "occupied_256_value_block_fraction": 0.3832431891025641,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "79": {
+          "adjacent_changed_pair_fraction": 0.052535600030233956,
+          "changed": 2196206,
+          "density": 0.00859267797225561,
+          "occupied_256_value_block_fraction": 0.2884014423076923,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 34
+        },
+        "8": {
+          "adjacent_changed_pair_fraction": 0.042691615671976144,
+          "changed": 2522158,
+          "density": 0.009867968436999199,
+          "occupied_256_value_block_fraction": 0.3814823717948718,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "80": {
+          "adjacent_changed_pair_fraction": 0.07916947191164755,
+          "changed": 4442571,
+          "density": 0.017381603534405047,
+          "occupied_256_value_block_fraction": 0.35353766025641026,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "81": {
+          "adjacent_changed_pair_fraction": 0.10001986780724934,
+          "changed": 5707726,
+          "density": 0.02233153514372997,
+          "occupied_256_value_block_fraction": 0.3905799278846154,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "82": {
+          "adjacent_changed_pair_fraction": 0.07300237698577869,
+          "changed": 2832579,
+          "density": 0.011082493708683893,
+          "occupied_256_value_block_fraction": 0.33764222756410256,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "83": {
+          "adjacent_changed_pair_fraction": 0.0626972325352102,
+          "changed": 1860114,
+          "density": 0.007277714655949519,
+          "occupied_256_value_block_fraction": 0.20853966346153846,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 36
+        },
+        "84": {
+          "adjacent_changed_pair_fraction": 0.07752511217661891,
+          "changed": 4458594,
+          "density": 0.017444293682391827,
+          "occupied_256_value_block_fraction": 0.33857672275641026,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "85": {
+          "adjacent_changed_pair_fraction": 0.08497391369989689,
+          "changed": 3497238,
+          "density": 0.013682978703425481,
+          "occupied_256_value_block_fraction": 0.32607471955128203,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "86": {
+          "adjacent_changed_pair_fraction": 0.09022446818162821,
+          "changed": 4618071,
+          "density": 0.018068249042217547,
+          "occupied_256_value_block_fraction": 0.3264132612179487,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "87": {
+          "adjacent_changed_pair_fraction": 0.060659181789385626,
+          "changed": 1477468,
+          "density": 0.005780608348357372,
+          "occupied_256_value_block_fraction": 0.16540665064102564,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 38
+        },
+        "88": {
+          "adjacent_changed_pair_fraction": 0.0824911802696969,
+          "changed": 3398630,
+          "density": 0.013297173915765225,
+          "occupied_256_value_block_fraction": 0.30924178685897435,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 26
+        },
+        "89": {
+          "adjacent_changed_pair_fraction": 0.0627253985575151,
+          "changed": 3036011,
+          "density": 0.011878423446264023,
+          "occupied_256_value_block_fraction": 0.2951672676282051,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "9": {
+          "adjacent_changed_pair_fraction": 0.07519747727390098,
+          "changed": 5073242,
+          "density": 0.019849110138721954,
+          "occupied_256_value_block_fraction": 0.44629907852564105,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "90": {
+          "adjacent_changed_pair_fraction": 0.04083494639698478,
+          "changed": 1162901,
+          "density": 0.004549861810146234,
+          "occupied_256_value_block_fraction": 0.2409314903846154,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "91": {
+          "adjacent_changed_pair_fraction": 0.05771779319735464,
+          "changed": 5137913,
+          "density": 0.02010213607396835,
+          "occupied_256_value_block_fraction": 0.5880899439102564,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 14
+        },
+        "92": {
+          "adjacent_changed_pair_fraction": 0.04628087844198097,
+          "changed": 2188420,
+          "density": 0.008562215169270833,
+          "occupied_256_value_block_fraction": 0.3038752003205128,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "93": {
+          "adjacent_changed_pair_fraction": 0.07560810342668593,
+          "changed": 3146422,
+          "density": 0.01231040758964343,
+          "occupied_256_value_block_fraction": 0.35962940705128205,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "94": {
+          "adjacent_changed_pair_fraction": 0.07022763966806138,
+          "changed": 2693028,
+          "density": 0.0105364990234375,
+          "occupied_256_value_block_fraction": 0.26747796474358976,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 30
+        },
+        "95": {
+          "adjacent_changed_pair_fraction": 0.07715222618438422,
+          "changed": 2231666,
+          "density": 0.008731415577423879,
+          "occupied_256_value_block_fraction": 0.26123096955128206,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 32
+        },
+        "96": {
+          "adjacent_changed_pair_fraction": 0.04601796999969051,
+          "changed": 2358709,
+          "density": 0.009228472587389824,
+          "occupied_256_value_block_fraction": 0.3601472355769231,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        },
+        "97": {
+          "adjacent_changed_pair_fraction": 0.08065799708693769,
+          "changed": 4788775,
+          "density": 0.01873613015199319,
+          "occupied_256_value_block_fraction": 0.4228565705128205,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 22
+        },
+        "98": {
+          "adjacent_changed_pair_fraction": 0.06290880726951548,
+          "changed": 3835854,
+          "density": 0.015007817195012018,
+          "occupied_256_value_block_fraction": 0.3809465144230769,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 28
+        },
+        "99": {
+          "adjacent_changed_pair_fraction": 0.08414504754167083,
+          "changed": 5391060,
+          "density": 0.021092576246995193,
+          "occupied_256_value_block_fraction": 0.43717648237179485,
+          "tensors": 52,
+          "values": 255590400,
+          "zero_tensors": 24
+        }
+      },
+      "version": 2
+    }
+  ]
+}
