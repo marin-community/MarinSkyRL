@@ -321,7 +321,8 @@ def _run_real(records: dict) -> None:
             update["distribution"] = asyncio.run(sync._policy("experiment_distribution", {"version": version}))
             expected_tokens = None
             if records["leading_repeats"]:
-                pair = ("dense", "indices_bucket") if version == 1 else ("indices_bucket", "dense")
+                candidate = records["leading_candidate"]
+                pair = ("dense", candidate) if version == 1 else (candidate, "dense")
                 order = pair * records["leading_repeats"]
             elif records["fast_candidates"]:
                 candidates = ("dense", "indices_bucket", "indices_bucket_fast", "indices_expert_bucket_fast")
@@ -420,6 +421,7 @@ def main() -> None:
 
     mode = "real"
     leading_repeats = 0
+    leading_candidate = "indices_bucket"
     policy_nodes = 2
     fast_candidates = False
     for arg in sys.argv[1:]:
@@ -427,18 +429,23 @@ def main() -> None:
             mode = arg.split("=", 1)[1]
         if arg.startswith("++sparse_experiment.leading_repeats="):
             leading_repeats = int(arg.split("=", 1)[1])
+        if arg.startswith("++sparse_experiment.leading_candidate="):
+            leading_candidate = arg.split("=", 1)[1]
         if arg.startswith("++sparse_experiment.policy_nodes="):
             policy_nodes = int(arg.split("=", 1)[1])
         if arg.startswith("++sparse_experiment.fast_candidates="):
             fast_candidates = arg.split("=", 1)[1].lower() in ("1", "true", "yes")
     if leading_repeats < 0 or leading_repeats > 10:
         raise ValueError("leading_repeats must be between zero and ten")
+    if leading_candidate not in {"indices_bucket", "indices_bucket_fast", "indices_expert_bucket_fast"}:
+        raise ValueError(f"Unsupported leading_candidate {leading_candidate}")
     if policy_nodes not in (2, 4):
         raise ValueError("policy_nodes must be two or four")
     records = {
         "schema_version": 1,
         "mode": mode,
         "leading_repeats": leading_repeats,
+        "leading_candidate": leading_candidate,
         "policy_nodes": policy_nodes,
         "fast_candidates": fast_candidates,
         "metadata": _metadata(),
