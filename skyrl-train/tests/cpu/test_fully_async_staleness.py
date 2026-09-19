@@ -1,5 +1,6 @@
 import asyncio
 import collections
+import copy
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,7 @@ from skyrl_train.group_admission import (
     GroupAdvantageInvariant,
     TrainingGroupInvariantError,
 )
+from skyrl_train.retention_observability import GenerationRetentionObserver
 from skyrl_train.trajectory_selection import BestOfNTrajectorySelector
 from skyrl_train.trajectory_runners.base import TrajectoryID
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
@@ -280,6 +282,36 @@ async def test_batch_assembly_retries_stale_groups_from_entire_buffer():
     assert trainer.all_metrics["async/rejected_count"] == 2
     assert trainer.all_metrics["async/rejected_rate"] == 0.5
     assert trainer.all_metrics["async/rejected_count/stale"] == 2
+
+
+@pytest.mark.asyncio
+async def test_retention_observability_preserves_admission_and_releases_consumed_batch():
+    trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=2)
+    queues.retention_observer = GenerationRetentionObserver(
+        publish_interval_seconds=3600,
+        publish=lambda _snapshot, _boundary: None,
+    )
+    stale = _generated_group("stale", earliest_model_step=7)
+    fresh = _generated_group("fresh", earliest_model_step=10)
+    original_batch = copy.deepcopy(fresh.trajectory_batch)
+    for group in (stale, fresh):
+        queues.retention_observer.register_group(
+            group,
+            trajectory_batch=group.trajectory_batch,
+            source_prompts=group.source_prompts,
+            owner="completed_buffer",
+        )
+        queues.completed.put_nowait(group)
+
+    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+
+    assert batch == [fresh]
+    assert fresh.trajectory_batch == original_batch
+    assert queues.retention_observer.snapshot().groups == {"admitted": 1}
+
+    queues.mark_admitted_consumed()
+    queues.clear_admitted()
+    assert queues.retention_observer.snapshot().groups == {}
 
 
 @pytest.mark.asyncio

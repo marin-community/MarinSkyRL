@@ -3,12 +3,16 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
+import copy
+import gc
 import threading
 from types import SimpleNamespace
+import weakref
 
 import pytest
 
 import skyrl_train.telemetry as trainer_telemetry
+from skyrl_train.retention_observability import GenerationRetentionObserver, estimate_group_payload
 from skyrl_train.trajectory_runners.harbor import observability as harbor_observability
 
 
@@ -21,6 +25,115 @@ class _Recorder:
 
     set = add
     record = add
+
+
+class _WeakGroup:
+    pass
+
+
+def _representative_trajectory_batch():
+    return {
+        "prompt_token_ids": [[1, 2, 3], [4, 5]],
+        "response_ids": [[6, 7], [8, 9, 10]],
+        "rewards": [1.0, 0.0],
+        "loss_masks": [[1, 1], [1, 0, 1]],
+        "rollout_logprobs": [[-0.1, -0.2], [-0.3, -0.4, -0.5]],
+        "rollout_routed_experts": [
+            [[list(range(8)) for _ in range(4)] for _ in range(2)],
+            [[list(range(8)) for _ in range(4)] for _ in range(3)],
+        ],
+        "rollout_metrics": {"latency": 1.25},
+        "is_last_step": [True, True],
+        "actual_global_step": 14,
+    }
+
+
+def test_retention_observer_preserves_representation_and_does_not_retain_groups():
+    batch = _representative_trajectory_batch()
+    original = copy.deepcopy(batch)
+    field_identities = {name: id(value) for name, value in batch.items()}
+    group = _WeakGroup()
+    group_ref = weakref.ref(group)
+    observer = GenerationRetentionObserver(publish_interval_seconds=3600)
+
+    estimate = observer.register_group(
+        group,
+        trajectory_batch=batch,
+        source_prompts=[{"uid": "dataset-row", "prompt": "hello"}],
+        owner="producer",
+    )
+    observer.transfer_group(group, owner="completed_buffer")
+    snapshot = observer.snapshot()
+
+    assert batch == original
+    assert {name: id(value) for name, value in batch.items()} == field_identities
+    assert estimate.rows == 2
+    assert estimate.total_bytes > 0
+    assert snapshot.groups == {"completed_buffer": 1}
+    assert snapshot.rows == {"completed_buffer": 2}
+    assert snapshot.estimated_bytes["completed_buffer"] == estimate.total_bytes
+
+    del group
+    gc.collect()
+    assert group_ref() is None
+
+
+def test_payload_estimator_is_bounded_and_preserves_deep_input():
+    batch = _representative_trajectory_batch()
+    batch["rollout_routed_experts"] = [[[list(range(16)) for _ in range(48)] for _ in range(256)] for _ in range(2)]
+    original = copy.deepcopy(batch)
+
+    estimate = estimate_group_payload(batch, [{"uid": "dataset-row"}], max_nodes_per_field=64)
+
+    assert batch == original
+    assert estimate.rows == 2
+    assert estimate.total_bytes > 0
+    assert estimate.sampled_nodes <= 64 * (len(batch) + 1)
+    assert estimate.truncated
+
+
+def test_retention_metrics_publish_low_cardinality_snapshot(monkeypatch):
+    recorders = {
+        name: _Recorder()
+        for name in (
+            "generation_retained_groups",
+            "generation_retained_rows",
+            "generation_retained_estimated_bytes",
+            "generation_producers",
+            "generation_retention_events",
+            "process_memory_bytes",
+            "generation_memory_boundaries",
+        )
+    }
+    for name, recorder in recorders.items():
+        monkeypatch.setattr(trainer_telemetry, name, recorder)
+    monkeypatch.setattr(
+        trainer_telemetry,
+        "_process_memory_snapshot",
+        lambda: {"rss": 100, "uss": 80, "pss": 90, "system_available": 1_000},
+    )
+
+    trainer_telemetry.record_generation_retention_snapshot(
+        groups={"producer": 2, "completed_buffer": 3},
+        rows={"producer": 16, "completed_buffer": 24},
+        estimated_bytes={"producer": 200, "completed_buffer": 300},
+        field_estimated_bytes={
+            ("producer", "response_ids"): 120,
+            ("completed_buffer", "rollout_routed_experts"): 250,
+        },
+        producers={"generating": 5, "blocked_on_buffer": 1},
+        settled_groups=7,
+        settled_rows=56,
+        boundary="admission_complete",
+    )
+
+    assert (3, {"owner": "completed_buffer"}) in recorders["generation_retained_groups"].calls
+    assert (250, {"owner": "completed_buffer", "field": "rollout_routed_experts"}) in recorders[
+        "generation_retained_estimated_bytes"
+    ].calls
+    assert (1, {"state": "blocked_on_buffer"}) in recorders["generation_producers"].calls
+    assert (100, {"kind": "rss"}) in recorders["process_memory_bytes"].calls
+    assert recorders["generation_memory_boundaries"].calls == [(1, {"boundary": "admission_complete"})]
 
 
 def test_tracker_forwards_only_finite_numeric_metrics_with_step(monkeypatch):
