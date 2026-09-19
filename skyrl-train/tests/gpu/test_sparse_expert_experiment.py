@@ -106,9 +106,15 @@ def test_tiny_grug_sparse_experiment_two_updates(tmp_path):
                     "bitmap_bucket",
                     "indices_bucket_fast",
                     "indices_expert_bucket_fast",
+                    "dense_expert_bucket_fast",
+                    "dense_expert_bucket_profiled",
+                    "indices_expert_bucket_profiled",
                 )
                 if version == 1
                 else (
+                    "indices_expert_bucket_profiled",
+                    "dense_expert_bucket_profiled",
+                    "dense_expert_bucket_fast",
                     "indices_expert_bucket_fast",
                     "indices_bucket_fast",
                     "bitmap_bucket",

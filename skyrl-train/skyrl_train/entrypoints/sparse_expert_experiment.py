@@ -324,6 +324,15 @@ def _run_real(records: dict) -> None:
                 candidate = records["leading_candidate"]
                 pair = ("dense", candidate) if version == 1 else (candidate, "dense")
                 order = pair * records["leading_repeats"]
+            elif records["bucket_candidates"]:
+                candidates = (
+                    "dense",
+                    "dense_expert_bucket_fast",
+                    "indices_expert_bucket_fast",
+                    "dense_expert_bucket_profiled",
+                    "indices_expert_bucket_profiled",
+                )
+                order = candidates if version == 1 else tuple(reversed(candidates))
             elif records["fast_candidates"]:
                 candidates = ("dense", "indices_bucket", "indices_bucket_fast", "indices_expert_bucket_fast")
                 order = candidates if version == 1 else tuple(reversed(candidates))
@@ -424,6 +433,7 @@ def main() -> None:
     leading_candidate = "indices_bucket"
     policy_nodes = 2
     fast_candidates = False
+    bucket_candidates = False
     for arg in sys.argv[1:]:
         if arg.startswith("++sparse_experiment.mode="):
             mode = arg.split("=", 1)[1]
@@ -435,9 +445,16 @@ def main() -> None:
             policy_nodes = int(arg.split("=", 1)[1])
         if arg.startswith("++sparse_experiment.fast_candidates="):
             fast_candidates = arg.split("=", 1)[1].lower() in ("1", "true", "yes")
+        if arg.startswith("++sparse_experiment.bucket_candidates="):
+            bucket_candidates = arg.split("=", 1)[1].lower() in ("1", "true", "yes")
     if leading_repeats < 0 or leading_repeats > 10:
         raise ValueError("leading_repeats must be between zero and ten")
-    if leading_candidate not in {"indices_bucket", "indices_bucket_fast", "indices_expert_bucket_fast"}:
+    if leading_candidate not in {
+        "indices_bucket",
+        "indices_bucket_fast",
+        "indices_expert_bucket_fast",
+        "dense_expert_bucket_fast",
+    }:
         raise ValueError(f"Unsupported leading_candidate {leading_candidate}")
     if policy_nodes not in (2, 4):
         raise ValueError("policy_nodes must be two or four")
@@ -448,6 +465,7 @@ def main() -> None:
         "leading_candidate": leading_candidate,
         "policy_nodes": policy_nodes,
         "fast_candidates": fast_candidates,
+        "bucket_candidates": bucket_candidates,
         "metadata": _metadata(),
         "updates": [],
         "complete": False,

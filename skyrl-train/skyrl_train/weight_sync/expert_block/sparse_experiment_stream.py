@@ -227,6 +227,10 @@ def run_sparse(
     baseline: dict[str, torch.Tensor] | None = None,
 ) -> dict:
     """Run one candidate into the bound views and return participant-level components."""
+    if encoding in {"dense_expert_bucket_fast", "dense_expert_bucket_profiled"}:
+        return run_dense_expert_bucket(stream, version, profile=encoding.endswith("profiled"))
+    if encoding == "indices_expert_bucket_profiled":
+        return run_sparse_bucket(stream, version, "indices", baseline, dense_fallback=True)
     if encoding in {"indices_bucket_fast", "indices_expert_bucket_fast"}:
         return run_sparse_bucket(
             stream,
@@ -354,6 +358,109 @@ def _local_bucket(stream: Stream, bucket: tuple) -> list[tuple]:
     if stream.lands(first):
         return [(first, stream.dense_landing(first))]
     return []
+
+
+@torch.no_grad()
+def run_dense_expert_bucket(stream: Stream, version: int, *, profile: bool = False) -> dict:
+    """Coalesce compatible dense expert tensors, retaining #689's dense nonexpert route."""
+    device = stream.device
+    _sync(device)
+    host_rss_start = _rss()
+    gpu_allocated_start = _allocated(device)
+    gpu_free_start = _free(device)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    started = time.perf_counter()
+    transfers = total_values = logical_bytes = collectives = 0
+    pack_allocation_seconds = transfer_seconds = apply_seconds = 0.0
+
+    for bucket in _global_buckets(stream):
+        local = _local_bucket(stream, bucket)
+        if not local:
+            continue
+        transfers += len(local)
+        if not isinstance(bucket[0], ExpertBroadcast):
+            item, landing = local[0]
+            total_values += item.source.numel
+            stage = time.perf_counter()
+            if landing is None:
+                logical_bytes += stream.send(item)
+                collectives += 1
+            else:
+                wire = stream.wire_tensor(landing)
+                logical_bytes += stream.receive(item, wire)
+                collectives += 2
+                if not landing.direct:
+                    landing.installed.copy_(wire)
+            if profile:
+                _sync(device)
+                transfer_seconds += time.perf_counter() - stage
+            continue
+
+        sizes = [
+            stream.source_view(item).numel() if landing is None else landing.installed.numel()
+            for item, landing in local
+        ]
+        total_values += sum(sizes)
+        sender = local[0][1] is None
+        stage = time.perf_counter()
+        if sender:
+            sources = [stream.source_view(item).contiguous().view(-1) for item, _ in local]
+            wire = torch.cat(sources) if len(sources) > 1 else sources[0]
+        elif len(local) == 1:
+            wire = local[0][1].installed.view(-1)
+        else:
+            wire = torch.empty(sum(sizes), dtype=torch.bfloat16, device=device)
+        if profile:
+            _sync(device)
+            pack_allocation_seconds += time.perf_counter() - stage
+
+        stage = time.perf_counter()
+        dist.broadcast(wire, src=0, group=stream.groups[local[0][0].group])
+        collectives += 1
+        logical_bytes += wire.numel() * wire.element_size()
+        if profile:
+            _sync(device)
+            transfer_seconds += time.perf_counter() - stage
+
+        if not sender and len(local) > 1:
+            stage = time.perf_counter()
+            offset = 0
+            for (_, landing), size in zip(local, sizes):
+                landing.installed.copy_(wire.narrow(0, offset, size).view_as(landing.installed))
+                offset += size
+            if profile:
+                _sync(device)
+                apply_seconds += time.perf_counter() - stage
+
+    _sync(device)
+    report = SparseReport(
+        participant=stream.participant,
+        version=version,
+        encoding="dense_expert_bucket_profiled" if profile else "dense_expert_bucket_fast",
+        transfers=transfers,
+        changed_values=0,
+        total_values=total_values,
+        logical_bytes=logical_bytes,
+        metadata_bytes=0,
+        collectives=collectives,
+        detect_seconds=0.0,
+        construct_seconds=0.0,
+        pack_allocation_seconds=pack_allocation_seconds,
+        transfer_seconds=transfer_seconds,
+        apply_seconds=apply_seconds,
+        seconds=time.perf_counter() - started,
+        gpu_allocated_start=gpu_allocated_start,
+        gpu_peak_allocated=torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0,
+        gpu_free_start=gpu_free_start,
+        gpu_free_end=_free(device),
+        host_rss_start=host_rss_start,
+        host_rss_end=_rss(),
+        host_peak_rss=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
+    )
+    row = asdict(report)
+    row["timing_mode"] = "profiled" if profile else "end_to_end_only"
+    return row
 
 
 @torch.no_grad()
@@ -517,7 +624,9 @@ def run_sparse_bucket(
         host_peak_rss=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
     )
     row = asdict(report)
-    if not profile:
-        row["encoding"] = "indices_expert_bucket_fast" if dense_fallback else "indices_bucket_fast"
+    if dense_fallback:
+        row["encoding"] = "indices_expert_bucket_profiled" if profile else "indices_expert_bucket_fast"
+    elif not profile:
+        row["encoding"] = "indices_bucket_fast"
     row["timing_mode"] = "profiled" if profile else "end_to_end_only"
     return row
