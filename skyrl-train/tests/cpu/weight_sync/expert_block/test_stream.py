@@ -9,22 +9,22 @@ Each topology then verifies the sync. A replay finds no differing byte, then exa
 flipped on one receiver, and the peer comparison finds the one byte flipped on one data-parallel rank.
 """
 
+import os
 from dataclasses import dataclass
 from datetime import timedelta
 from itertools import product
-import os
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, create_groups, destroy_groups, warm_groups
 from skyrl_train.weight_sync.expert_block.schedule import Group, ReceiverRank, TrainerRank, build_schedule
 from skyrl_train.weight_sync.expert_block.source_views import local_expert_sources, local_source_slices
 from skyrl_train.weight_sync.expert_block.sparse_experiment_stream import measure_distribution, run_sparse
 from skyrl_train.weight_sync.expert_block.stream import Stream
 from skyrl_train.weight_sync.expert_block.verify_weights import compare_replicas, replay
+
 from tests.cpu.weight_sync.expert_block.megatron_layout import (
     HIDDEN,
     INTERMEDIATE,
@@ -244,11 +244,11 @@ def participant_main(rank, topology, port, directory):
     if rank < trainer_count:
         local, expert_sources = trainer_sources(topology, topology.trainers()[rank])
         before = {key: value.clone() for key, value in local.sources.items()}
-        kwargs = dict(sources=local.sources, expert_sources=expert_sources)
+        kwargs = {"sources": local.sources, "expert_sources": expert_sources}
     else:
         receiver = topology.receivers()[rank - trainer_count]
         parameters, maps, padded_head = receiver_parameters(topology, receiver, dense)
-        kwargs = dict(parameters=parameters, expert_maps=maps)
+        kwargs = {"parameters": parameters, "expert_maps": maps}
     rendezvous = Rendezvous("127.0.0.1", port, "test", TIMEOUT)
     groups = create_groups(rank, plan.groups, rendezvous, backend="gloo")
     try:
@@ -282,7 +282,7 @@ def participant_main(rank, topology, port, directory):
             replica_groups = dict.fromkeys(local.sources, next(iter(peer_group.values())))
             try:
                 # The chunk is smaller than any parameter, so every tensor is compared in pieces.
-                compare = lambda: compare_replicas(local.sources, replica_groups, rank, 7, chunk_bytes=8)  # noqa: E731
+                compare = lambda: compare_replicas(local.sources, replica_groups, rank, 7, chunk_bytes=8)
                 assert compare().mismatched_bytes == 0
                 if trainer.dp == 1:
                     next(iter(local.sources.values())).view(-1).view(torch.uint8)[-1] ^= 0xFF
@@ -305,7 +305,7 @@ def test_every_receiver_installs_exactly_its_experts_and_the_dense_weights_its_s
 
 
 def sparse_participant_main(rank, port, directory):
-    """Two real updates, each applied by both sparse encodings over the production schedule."""
+    """Two updates, each applied by per-tensor and bucketed encodings."""
     topology = SPARSE_TOPOLOGY
     dist.init_process_group(
         "gloo",
@@ -321,11 +321,11 @@ def sparse_participant_main(rank, port, directory):
         local, expert_sources = trainer_sources(topology, topology.trainers()[rank])
         sources = local.sources
         baseline = {name: source.clone() for name, source in sources.items()}
-        kwargs = dict(sources=sources, expert_sources=expert_sources)
+        kwargs = {"sources": sources, "expert_sources": expert_sources}
     else:
         receiver = topology.receivers()[rank - plan.trainer_count]
         parameters, maps, padded_head = receiver_parameters(topology, receiver, dense)
-        kwargs = dict(parameters=parameters, expert_maps=maps)
+        kwargs = {"parameters": parameters, "expert_maps": maps}
     rendezvous = Rendezvous("127.0.0.1", port, "sparse-test", TIMEOUT)
     groups = create_groups(rank, plan.groups, rendezvous, backend="gloo")
     try:
@@ -343,18 +343,27 @@ def sparse_participant_main(rank, port, directory):
                 rows = measure_distribution(stream, version, baseline)
                 assert rows and sum(row["changed"] for row in rows) > 0
                 assert all(row["occupied_256_value_blocks"] > 0 for row in rows if row["changed"])
-            for encoding in ("indices", "bitmap") if version == 1 else ("bitmap", "indices"):
+            order = (
+                ("indices", "bitmap", "indices_bucket", "bitmap_bucket")
+                if version == 1
+                else ("bitmap_bucket", "indices_bucket", "bitmap", "indices")
+            )
+            collective_counts = {}
+            for encoding in order:
                 if rank >= plan.trainer_count:
                     for name, value in parameters.items():
                         value.copy_(snapshot[name])
                 report = run_sparse(stream, version, encoding, baseline if rank < plan.trainer_count else None)
                 assert report["version"] == version
                 assert report["logical_bytes"] >= report["metadata_bytes"]
-                assert report["collectives"] >= report["transfers"]
+                assert report["collectives"] > 0
+                collective_counts[encoding] = report["collectives"]
                 replayed = replay(stream, version)
                 if rank >= plan.trainer_count:
                     assert replayed.mismatched_bytes == 0
                     assert replayed.compared_bytes == dict(plan.receiver_bytes)[rank] == replayed.parameter_bytes
+            assert collective_counts["indices_bucket"] < collective_counts["indices"]
+            assert collective_counts["bitmap_bucket"] < collective_counts["bitmap"]
             if rank < plan.trainer_count:
                 for name, source in sources.items():
                     baseline[name].copy_(source)

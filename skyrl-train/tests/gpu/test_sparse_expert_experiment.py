@@ -7,20 +7,20 @@ receivers acknowledge, replay passes, and generation resumes.
 """
 
 import asyncio
-from dataclasses import asdict
 import json
 import os
-from pathlib import Path
 import time
+from dataclasses import asdict
+from pathlib import Path
 
 import pytest
 import ray
-from transformers import AutoTokenizer
-
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.utils import initialize_ray
 from skyrl_train.weight_sync.expert_block.driver import ExpertBlockSync
 from skyrl_train.weight_sync.expert_block.schedule import to_wire
+from transformers import AutoTokenizer
+
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.test_expert_block_sync import GEOMETRIES, TIMEOUT_SECONDS, engine_client
 from tests.gpu.test_grug_megatron import _config, _init_policy, _padded_batch, _train_step, _write_tiny_checkpoint
@@ -92,15 +92,19 @@ def test_tiny_grug_sparse_experiment_two_updates(tmp_path):
             update_record = {"version": version, "train_status": train_status, "trials": []}
             records["updates"].append(update_record)
 
-            async def distribution():
+            async def distribution(version=version):
                 return await sync._policy("experiment_distribution", {"version": version})
 
             update_record["distribution"] = asyncio.run(distribution())
             expected_tokens = None
-            order = ("dense", "indices", "bitmap") if version == 1 else ("bitmap", "indices", "dense")
+            order = (
+                ("dense", "indices", "bitmap", "indices_bucket", "bitmap_bucket")
+                if version == 1
+                else ("bitmap_bucket", "indices_bucket", "bitmap", "indices", "dense")
+            )
             for index, encoding in enumerate(order):
 
-                async def trial():
+                async def trial(index=index, encoding=encoding, version=version):
                     if index:
                         await client.pause_generation()
                         await sync._receivers("experiment_restore_baseline")

@@ -6,10 +6,10 @@ broadcast. Dense slices retain the node-local fanout. The many count and payload
 are intentional: this is the per-tensor reference for a later bucket comparison.
 """
 
-from dataclasses import asdict, dataclass
 import os
 import resource
 import time
+from dataclasses import asdict, dataclass
 
 import torch
 import torch.distributed as dist
@@ -20,6 +20,8 @@ from skyrl_train.weight_sync.expert_block.sparse_experiment_codec import (
     Patch,
     changed_mask,
     pack_bitmap,
+)
+from skyrl_train.weight_sync.expert_block.sparse_experiment_codec import (
     apply as apply_patch,
 )
 from skyrl_train.weight_sync.expert_block.stream import Stream
@@ -203,6 +205,8 @@ def run_sparse(
     baseline: dict[str, torch.Tensor] | None = None,
 ) -> dict:
     """Run one candidate into the bound views and return participant-level components."""
+    if encoding.endswith("_bucket"):
+        return run_sparse_bucket(stream, version, encoding.removesuffix("_bucket"), baseline)
     if stream.trainer and baseline is None:
         raise ValueError("A sparse sender needs its preceding acknowledged baseline")
     device = stream.device
@@ -264,6 +268,169 @@ def run_sparse(
         participant=stream.participant,
         version=version,
         encoding=encoding,
+        transfers=transfers,
+        changed_values=changed_values,
+        total_values=total_values,
+        logical_bytes=logical_bytes + metadata_bytes,
+        metadata_bytes=metadata_bytes,
+        collectives=collectives,
+        detect_seconds=detect_seconds,
+        construct_seconds=construct_seconds,
+        pack_allocation_seconds=pack_allocation_seconds,
+        transfer_seconds=transfer_seconds,
+        apply_seconds=apply_seconds,
+        seconds=time.perf_counter() - started,
+        gpu_allocated_start=gpu_allocated_start,
+        gpu_peak_allocated=torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0,
+        gpu_free_start=gpu_free_start,
+        gpu_free_end=_free(device),
+        host_rss_start=host_rss_start,
+        host_rss_end=_rss(),
+        host_peak_rss=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
+    )
+    return asdict(report)
+
+
+def _global_buckets(stream: Stream) -> list[tuple]:
+    """Use one schedule-wide bucket order so overlapping NCCL groups cannot diverge."""
+    maximum_bytes = 128 * 1024 * 1024
+    buckets: list[tuple] = []
+    current = []
+    current_bytes = 0
+    for item in stream.schedule.experts:
+        if current and (item.group != current[0].group or current_bytes + item.entry.nbytes > maximum_bytes):
+            buckets.append(tuple(current))
+            current = []
+            current_bytes = 0
+        current.append(item)
+        current_bytes += item.entry.nbytes
+    if current:
+        buckets.append(tuple(current))
+    buckets.extend((item,) for item in stream.schedule.dense)
+    return buckets
+
+
+def _local_bucket(stream: Stream, bucket: tuple) -> list[tuple]:
+    first = bucket[0]
+    if isinstance(first, ExpertBroadcast):
+        if first.root == stream.participant:
+            return [(item, None) for item in bucket]
+        if stream.participant in first.destinations:
+            return [(item, stream.expert_landing(item)) for item in bucket]
+        return []
+    if first.root == stream.participant:
+        return [(first, None)]
+    if stream.lands(first):
+        return [(first, stream.dense_landing(first))]
+    return []
+
+
+@torch.no_grad()
+def run_sparse_bucket(
+    stream: Stream,
+    version: int,
+    encoding: str,
+    baseline: dict[str, torch.Tensor] | None = None,
+) -> dict:
+    """Coalesce adjacent compatible expert patches into 128 MiB dense-size buckets."""
+    if encoding not in {"indices", "bitmap"}:
+        raise ValueError(f"Unknown bucket encoding {encoding}")
+    if stream.trainer and baseline is None:
+        raise ValueError("A sparse sender needs its preceding acknowledged baseline")
+    device = stream.device
+    _sync(device)
+    host_rss_start = _rss()
+    gpu_allocated_start = _allocated(device)
+    gpu_free_start = _free(device)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    started = time.perf_counter()
+    transfers = changed_values = total_values = logical_bytes = metadata_bytes = collectives = 0
+    detect_seconds = construct_seconds = pack_allocation_seconds = transfer_seconds = apply_seconds = 0.0
+
+    for bucket in _global_buckets(stream):
+        local = _local_bucket(stream, bucket)
+        if not local:
+            continue
+        transfers += len(local)
+        sizes = [
+            stream.source_view(item).numel() if landing is None else landing.installed.numel()
+            for item, landing in local
+        ]
+        total_values += sum(sizes)
+        sender = local[0][1] is None
+        patches = []
+        counts = []
+        if sender:
+            for item, _ in local:
+                patch, detect, construct, allocation = _encode_timed(
+                    stream.source_view(item), _baseline_view(stream, item, baseline), encoding, device
+                )
+                patches.append(patch)
+                counts.append(patch.changed)
+                detect_seconds += detect
+                construct_seconds += construct
+                pack_allocation_seconds += allocation
+            changed_values += sum(counts)
+
+        stage = time.perf_counter()
+        metadata = (
+            torch.tensor(counts, dtype=torch.int64, device=device)
+            if sender
+            else torch.empty(len(local), dtype=torch.int64, device=device)
+        )
+        collectives += _relay(stream, local[0][0], metadata)
+        _sync(device)
+        if not sender:
+            counts = metadata.tolist()
+            changed_values += sum(counts)
+        metadata_bytes += metadata.numel() * metadata.element_size()
+        if any(counts):
+            if sender:
+                pack_started = time.perf_counter()
+                positions_parts = [patch.positions for patch in patches if patch.changed]
+                values_parts = [patch.values for patch in patches if patch.changed]
+                positions = torch.cat(positions_parts) if len(positions_parts) > 1 else positions_parts[0]
+                values = torch.cat(values_parts) if len(values_parts) > 1 else values_parts[0]
+                _sync(device)
+                pack_allocation_seconds += time.perf_counter() - pack_started
+            else:
+                position_count = sum(
+                    count if encoding == "indices" else (size + 7) // 8 for size, count in zip(sizes, counts) if count
+                )
+                position_dtype = torch.int32 if encoding == "indices" else torch.uint8
+                positions = torch.empty(position_count, dtype=position_dtype, device=device)
+                values = torch.empty(sum(counts), dtype=local[0][1].wire_dtype, device=device)
+            collectives += _relay(stream, local[0][0], positions)
+            collectives += _relay(stream, local[0][0], values)
+            _sync(device)
+            logical_bytes += positions.numel() * positions.element_size() + values.numel() * values.element_size()
+        transfer_seconds += time.perf_counter() - stage
+
+        if not sender and any(counts):
+            stage = time.perf_counter()
+            position_offset = value_offset = 0
+            for (_, landing), size, count in zip(local, sizes, counts):
+                if not count:
+                    continue
+                position_count = count if encoding == "indices" else (size + 7) // 8
+                patch = Patch(
+                    encoding,
+                    size,
+                    positions.narrow(0, position_offset, position_count),
+                    values.narrow(0, value_offset, count),
+                )
+                apply_patch(landing.installed, patch)
+                position_offset += position_count
+                value_offset += count
+            _sync(device)
+            apply_seconds += time.perf_counter() - stage
+
+    _sync(device)
+    report = SparseReport(
+        participant=stream.participant,
+        version=version,
+        encoding=f"{encoding}_bucket",
         transfers=transfers,
         changed_values=changed_values,
         total_values=total_values,

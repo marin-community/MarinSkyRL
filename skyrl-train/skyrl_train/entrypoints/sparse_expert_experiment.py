@@ -138,7 +138,11 @@ def _run_real(records: dict) -> None:
             records["updates"].append(update)
             update["distribution"] = asyncio.run(sync._policy("experiment_distribution", {"version": version}))
             expected_tokens = None
-            order = ("dense", "indices", "bitmap") if version == 1 else ("bitmap", "indices", "dense")
+            order = (
+                ("dense", "indices", "bitmap", "indices_bucket", "bitmap_bucket")
+                if version == 1
+                else ("bitmap_bucket", "indices_bucket", "bitmap", "indices", "dense")
+            )
             for index, encoding in enumerate(order):
 
                 async def trial(index=index, encoding=encoding, version=version):
@@ -160,6 +164,11 @@ def _run_real(records: dict) -> None:
                             raise RuntimeError("A trainer did not acknowledge sparse publication")
                         if {row["participant"] for row in receiver_rows} != set(dict(sync.schedule.receiver_bytes)):
                             raise RuntimeError("A receiver did not acknowledge sparse publication")
+                        if any(
+                            row["version"] != version or row["encoding"] != encoding
+                            for row in [*policy_rows, *receiver_rows]
+                        ):
+                            raise RuntimeError("A participant acknowledged another sparse publication")
                         detail = {"policy": policy_rows, "receivers": receiver_rows}
                     installed = time.perf_counter()
                     await client.resume_generation()
