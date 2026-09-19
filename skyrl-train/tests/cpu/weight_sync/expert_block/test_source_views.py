@@ -92,7 +92,9 @@ def task(name, weight, kind):
     [
         # Trainer tensor parallelism would make each parameter a shard of its HF tensor.
         (
-            task("output_layer.weight", torch.zeros(5, 3, dtype=torch.bfloat16), mapping("AutoMapping", "w", tp_size=2)),
+            task(
+                "output_layer.weight", torch.zeros(5, 3, dtype=torch.bfloat16), mapping("AutoMapping", "w", tp_size=2)
+            ),
             "requires trainer TP=1",
         ),
         (
@@ -104,14 +106,25 @@ def task(name, weight, kind):
             "contiguous and BF16 or FP32",
         ),
         (
-            task("fc1.weight", torch.zeros(3, 3, dtype=torch.bfloat16), mapping("GatedMLPMapping", {"gate": "g", "up": "u"})),
+            task(
+                "fc1.weight",
+                torch.zeros(3, 3, dtype=torch.bfloat16),
+                mapping("GatedMLPMapping", {"gate": "g", "up": "u"}),
+            ),
             "not a complete .gate;up. matrix",
         ),
         (
-            task("qkv.weight", torch.zeros(7, 3, dtype=torch.bfloat16), mapping("QKVMapping", {"q": "q", "k": "k", "v": "v"})),
+            task(
+                "qkv.weight",
+                torch.zeros(7, 3, dtype=torch.bfloat16),
+                mapping("QKVMapping", {"q": "q", "k": "k", "v": "v"}),
+            ),
             "differs from the configured interleaved layout",
         ),
-        (task("conv.weight", torch.zeros(3, dtype=torch.bfloat16), mapping("ConvMapping", "w")), "Unsupported weight mapping"),
+        (
+            task("conv.weight", torch.zeros(3, dtype=torch.bfloat16), mapping("ConvMapping", "w")),
+            "Unsupported weight mapping",
+        ),
     ],
 )
 def test_parameters_the_transport_cannot_slice_are_refused(bad_task, error):
