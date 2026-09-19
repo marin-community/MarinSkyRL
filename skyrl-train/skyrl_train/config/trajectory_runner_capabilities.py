@@ -178,6 +178,21 @@ def trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRunnerMode) 
             action_tokens=ActionTokenHandling.RETOKENIZED,
         )
     if mode is TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM:
+        # A single custom-template chat turn without a following observation uses the
+        # exact served token IDs. The runner rejects missing or misaligned evidence
+        # if an environment unexpectedly leaves this path.
+        generator = cfg.generator
+        if (
+            generator.get("use_conversation_multi_turn", False)
+            and generator.chat_template.get("name_or_path")
+            and generator.get("max_turns") == 1
+        ):
+            return TrajectoryRunnerCapabilities(
+                runner="fully-async SkyRL Gym single-turn chat",
+                sampled_completion=EvidenceFidelity.EXACT,
+                full_context_continuation=EvidenceFidelity.UNAVAILABLE,
+                action_tokens=ActionTokenHandling.RUNTIME_VALIDATED,
+            )
         return TrajectoryRunnerCapabilities(
             runner="fully-async SkyRL Gym",
             sampled_completion=EvidenceFidelity.RETOKENIZED,

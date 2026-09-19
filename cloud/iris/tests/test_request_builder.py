@@ -591,6 +591,30 @@ class TestBuildJobSpec:
         assert parsed.request.topology.role_plan.claim("reference").colocation_group == "all"
         assert parsed.request.topology.role_plan.bundles[0].role_ids == ("policy", "reference", "rollout")
 
+    def test_legacy_scalar_plan_preserves_rollout_parallelism(self, tmp_path):
+        spec = _build_basic_spec(tmp_path)
+        payload = asdict(spec)
+        payload["request"]["topology"]["num_nodes"] = 2
+        payload["request"]["topology"]["role_plan"] = {
+            "colocate_all": False,
+            "policy_num_nodes": 1,
+            "policy_num_gpus_per_node": 8,
+            "num_inference_engines": 1,
+            "inference_engine_tensor_parallel_size": 1,
+            "inference_engine_pipeline_parallel_size": 1,
+            "inference_engine_data_parallel_size": 8,
+            "inference_engine_expert_parallel_size": 1,
+            "train_batch_size": 32,
+            "policy_mini_batch_size": 32,
+            "micro_train_batch_size_per_gpu": 2,
+            "n_samples_per_prompt": 4,
+        }
+
+        rollout = job_spec(payload).request.topology.role_plan.claim("rollout")
+
+        assert (rollout.num_nodes, rollout.gpus_per_node, rollout.replicas) == (1, 8, 1)
+        assert (rollout.tensor_parallel_size, rollout.pipeline_parallel_size, rollout.data_parallel_size) == (1, 1, 8)
+
     def test_round_trips_with_validation_data_and_overrides(self, tmp_path):
         spec = _build_basic_spec(
             tmp_path,
