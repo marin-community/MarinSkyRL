@@ -1,12 +1,12 @@
-"""The receiver side of an expert-block sync, held by each vLLM worker.
+"""Receiver side of expert-block sync. Each vLLM worker holds one.
 
-The constructor and method names follow vLLM's ``WeightTransferEngine``
-(``(vllm_config, device, model)``; ``init_transfer_engine``, ``receive_weights``,
-``shutdown``). The trainer reaches it through one generic worker RPC.
+The constructor and method names follow vLLM's ``WeightTransferEngine``:
+``(vllm_config, device, model)``, ``init_transfer_engine``, ``receive_weights``, ``shutdown``.
+The trainer calls it through one worker RPC.
 
-Fused expert parameters are written in place, so the engine's ``w13_weight``
-must keep the trainer's ``[gate;up]`` order. The MoE backend decides that order,
-so ``inventory`` refuses any backend but the qualified one.
+Expert weights are written in place, so the engine's ``w13_weight`` must keep the trainer's
+``[gate;up]`` order. The MoE backend sets that order, so ``inventory`` accepts only the
+backend that was tested.
 """
 
 from dataclasses import asdict
@@ -20,17 +20,16 @@ from skyrl_train.weight_sync.expert_block.stream import Stream, bind, storage_id
 from skyrl_train.weight_sync.expert_block.verify_weights import replay
 
 SUPPORTED_MODEL_TYPE = "grug_moe"
-# The only backend qualified here. It keeps the trainer's [gate;up] order in w13_weight;
-# FlashInfer CUTLASS permutes that buffer to [up;gate] at load time, and BATCHED_TRITON
-# keeps the order but has not been run.
+# The only backend tested. TRITON keeps the trainer's [gate;up] order in w13_weight. FlashInfer
+# CUTLASS swaps it to [up;gate] at load time. BATCHED_TRITON keeps the order but is untested.
 SUPPORTED_MOE_BACKEND = "TRITON"
 
 
 def installable_parameters(model) -> dict[str, torch.Tensor]:
-    """The model's parameters as the transport writes them, with vocabulary tensors narrowed to their HF rows.
+    """The model's parameters, with vocabulary tensors narrowed to their HF rows.
 
-    ``VocabParallelEmbedding`` and the LM head pad their rows; the loader writes the
-    ``org_vocab_size`` HF rows and zeroes the tail. The trainer exports only the HF rows.
+    vLLM pads the rows of the embedding and the LM head and zeroes the padding. The trainer
+    sends only the HF rows.
     """
     rows = {}
     for name, module in model.named_modules():
@@ -71,7 +70,7 @@ class ExpertBlockReceiver:
         self.stream: Stream | None = None
 
     def inventory(self) -> dict:
-        """Check the model is one this transport can write into, and report what this worker holds."""
+        """Check that this transport can write into the model, and report what this worker holds."""
         hf, parallel = self.vllm_config.model_config.hf_config, self.vllm_config.parallel_config
         if hf.model_type != SUPPORTED_MODEL_TYPE:
             raise ValueError(f"Expert-block sync supports {SUPPORTED_MODEL_TYPE}, not {hf.model_type}")
@@ -81,7 +80,7 @@ class ExpertBlockReceiver:
             raise ValueError("Expert-block sync requires TP=1 inference engines")
         if parallel.enable_eplb:
             raise ValueError("Expert-block sync requires a static expert placement (no EPLB)")
-        # --- Receiver pipeline stages: this worker holds only its stage's layers ---
+        # With pipeline parallelism this worker holds only its stage's layers.
         maps = {}
         for name, module in self.model.named_modules():
             if not name.endswith(ROUTED_EXPERTS):
@@ -123,7 +122,7 @@ class ExpertBlockReceiver:
         }
 
     def init_transfer_engine(self, init_info: dict) -> dict:
-        """Create groups for the participant the driver assigned to this GPU; returns warm-up seconds per group."""
+        """Create this worker's groups. Returns the warm-up seconds per group."""
         if self.stream is not None:
             raise RuntimeError("Expert-block receiver is already initialised")
         participants = init_info["participants"]
@@ -142,16 +141,16 @@ class ExpertBlockReceiver:
         return {"participant": participant, "warmup_seconds": warm}
 
     def receive_weights(self, update_info: dict) -> dict:
-        """Land this sync's expert matrices and dense weights in place; returns what was installed."""
+        """Receive this sync's weights into the live parameters. Returns the install report."""
         if self.stream is None:
             raise RuntimeError("Expert-block receiver is not initialised")
-        # A reload that reallocated the parameters would leave the broadcasts writing into dead buffers.
+        # If a reload reallocated the parameters, the broadcasts would write into freed buffers.
         if storage_identity(dict(self.model.named_parameters())) != self.identity:
             raise RuntimeError("Model parameter storage changed since the expert-block receiver was initialised")
         return asdict(self.stream.run(update_info["version"]))
 
     def verify(self, update_info: dict) -> dict:
-        """Replay the sync and count bytes that differ from what was installed."""
+        """Replay the sync and count the bytes that differ from the installed weights."""
         if self.stream is None:
             raise RuntimeError("Expert-block receiver is not initialised")
         return asdict(replay(self.stream, update_info["version"]))

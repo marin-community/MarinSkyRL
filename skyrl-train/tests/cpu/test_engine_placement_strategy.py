@@ -8,8 +8,8 @@ The placement strategy checks verify that the ray/uni backend chooses:
     PACK PG (the lever1/swesmith multi-node starvation regression fix), and
   - never per-engine STRICT_PACK on the hybrid (colocate_all) or mp-backend
     paths (the mp {GPU:tp_pp_size} bundle is already node-atomic), and
-  - per-replica STRICT_PACK for node-local replicas (inference_engine_node_local),
-    whose workers are then verified against the bundles they were given.
+  - one group per node-local replica (generator.inference_engine_node_local), with its workers
+    checked against the bundles they were given.
 
 uv run --isolated --group dev --extra cpu pytest tests/cpu/test_engine_placement_strategy.py
 """
@@ -21,7 +21,8 @@ from types import SimpleNamespace
 import msgpack
 import pytest
 
-from marinskyrl.inference_placement import InferenceWorkerPlacement, validate_node_local_config
+from marinskyrl.inference_placement import InferenceWorkerPlacement, node_local_blocker, validate_node_local_config
+from marinskyrl.runtime_options import NodeLocalPlacement
 from skyrl_train.entrypoints.main_base import create_ray_wrapped_inference_engines_from_config
 from skyrl_train.inference_engines.placement import node_local_bundle_nodes, verified_inference_replica_placements
 from skyrl_train.inference_engines import ray_wrapped_inference_engine as factory
@@ -223,6 +224,7 @@ def inference_scheduler(monkeypatch):
                     ),
                     report_engine_hosts=SimpleNamespace(remote=lambda: [report.host]),
                     get_model_max_len=SimpleNamespace(remote=lambda: 4096),
+                    initialize_worker_numa_affinity=SimpleNamespace(remote=lambda: None),
                 )
                 actors.append(actor)
                 return actor
@@ -266,7 +268,7 @@ def inference_scheduler(monkeypatch):
     def launch(**kwargs):
         return factory.create_ray_wrapped_inference_engines(
             num_inference_engines=kwargs.pop("num_inference_engines", 2),
-            tensor_parallel_size=1,
+            tensor_parallel_size=kwargs.pop("tensor_parallel_size", 1),
             pipeline_parallel_size=1,
             model_dtype="bfloat16",
             pretrain="test",
@@ -285,7 +287,7 @@ def inference_scheduler(monkeypatch):
     )
 
 
-def test_node_local_config_allocates_two_ep8_replicas_and_verifies_their_workers(inference_scheduler):
+def test_the_default_config_packs_two_ep8_replicas_on_a_node_each_and_verifies_their_workers(inference_scheduler):
     scheduler = inference_scheduler
     cfg = example_dummy_config()
     cfg.trainer.placement.colocate_all = False
@@ -295,7 +297,6 @@ def test_node_local_config_allocates_two_ep8_replicas_and_verifies_their_workers
         inference_engine_pipeline_parallel_size=1,
         inference_engine_data_parallel_size=8,
         inference_engine_expert_parallel_size=8,
-        inference_engine_node_local=True,
         async_engine=True,
     )
     cfg.generator.engine_init_kwargs = {"language_model_only": False}
@@ -317,20 +318,54 @@ def test_node_local_config_allocates_two_ep8_replicas_and_verifies_their_workers
     assert len({row.worker.gpu_uuid for row in placements}) == 16
 
 
-@pytest.mark.parametrize("replicas,dp,ep", [(16, 1, 1), (1, 16, 16)])
-def test_default_placement_keeps_single_gpu_packing_and_multinode_ep16(inference_scheduler, replicas, dp, ep):
+@pytest.mark.parametrize(
+    "replicas,dp,ep,mode",
+    [
+        # Sixteen single-GPU engines: one-bundle STRICT_PACK groups would scatter and starve the policy group.
+        (16, 1, 1, NodeLocalPlacement.AUTO),
+        # One EP16 replica does not fit an 8-GPU node and spans two, as it always has.
+        (1, 16, 16, NodeLocalPlacement.AUTO),
+        # Data-parallel ranks without expert parallelism exchange nothing between them.
+        (2, 8, 1, NodeLocalPlacement.AUTO),
+        # Four-GPU replicas on two 8-GPU nodes: groups of their own could leave both nodes partly used.
+        (4, 4, 4, NodeLocalPlacement.AUTO),
+        (2, 8, 8, NodeLocalPlacement.OFF),
+    ],
+)
+def test_engines_auto_does_not_pack_keep_the_flat_pack_group(inference_scheduler, replicas, dp, ep, mode):
     scheduler = inference_scheduler
-    engines = scheduler.launch(num_inference_engines=replicas, data_parallel_size=dp, expert_parallel_size=ep)
+    engines = scheduler.launch(
+        num_inference_engines=replicas, data_parallel_size=dp, expert_parallel_size=ep, node_local_placement=mode
+    )
     assert len(engines) == 16
     assert [pg.strategy for pg in scheduler.groups] == ["PACK"]
     assert len(scheduler.groups[0].bundle_specs) == 16
     assert all(engine.worker_placements is None for engine in engines)
 
 
-def test_node_local_oversized_replica_fails_before_gpu_allocation(inference_scheduler):
+def test_tensor_parallel_engines_keep_their_per_engine_groups_without_verification(inference_scheduler):
+    scheduler = inference_scheduler
+    engines = scheduler.launch(tensor_parallel_size=4)
+    assert [pg.strategy for pg in scheduler.groups] == ["STRICT_PACK", "STRICT_PACK"]
+    assert all(engine.worker_placements is None for engine in engines)
+
+
+def test_require_packs_replicas_smaller_than_a_node(inference_scheduler):
+    scheduler = inference_scheduler
+    engines = scheduler.launch(
+        data_parallel_size=4, expert_parallel_size=4, node_local_placement=NodeLocalPlacement.REQUIRE
+    )
+    assert [pg.strategy for pg in scheduler.groups] == ["STRICT_PACK", "STRICT_PACK"]
+    assert [len(pg.bundle_specs) for pg in scheduler.groups] == [4, 4]
+    assert all(len(engine.worker_placements) == 1 for engine in engines)
+
+
+def test_require_refuses_an_oversized_replica_before_gpu_allocation(inference_scheduler):
     scheduler = inference_scheduler
     with pytest.raises(ValueError, match="needs 16 GPUs"):
-        scheduler.launch(node_local=True, data_parallel_size=16, expert_parallel_size=16)
+        scheduler.launch(
+            data_parallel_size=16, expert_parallel_size=16, node_local_placement=NodeLocalPlacement.REQUIRE
+        )
     assert scheduler.groups == []
     assert scheduler.actors == []
 
@@ -339,38 +374,85 @@ def test_wrong_worker_topology_kills_the_replica_gang(inference_scheduler):
     scheduler = inference_scheduler
     scheduler.report_changes[1] = {"gpu_uuid": "GPU-node-0-0"}
     with pytest.raises(ValueError, match="distinct"):
-        scheduler.launch(node_local=True, data_parallel_size=8, expert_parallel_size=8)
+        scheduler.launch(data_parallel_size=8, expert_parallel_size=8)
     assert scheduler.killed == scheduler.actors
     assert len(scheduler.killed) == 16
     assert scheduler.removed == scheduler.groups
 
 
+NODE_LOCAL_ENGINE = dict(
+    mode=NodeLocalPlacement.AUTO,
+    backend="vllm",
+    async_engine=True,
+    colocated=False,
+    remote=False,
+    mp_executor=False,
+    tensor_parallel_size=1,
+    pipeline_parallel_size=1,
+    data_parallel_size=8,
+    expert_parallel_size=8,
+    num_inference_engines=2,
+    node_gpu_capacities=[8, 8, 8],
+)
+
+
 @pytest.mark.parametrize(
-    "changes",
+    "change",
     [
+        {"mode": NodeLocalPlacement.OFF},
         {"backend": "sglang"},
         {"async_engine": False},
-        {"inference_engine_tensor_parallel_size": 2},
-        {"run_engines_locally": False},
-        {"inference_engine_data_parallel_size": 8, "inference_engine_expert_parallel_size": 1},
+        {"colocated": True},
+        {"remote": True},
+        {"mp_executor": True},
+        {"tensor_parallel_size": 2},
+        {"data_parallel_size": 1, "expert_parallel_size": 1},
+        # Even on one node, where nothing can scatter, a single-GPU engine has no replica to pack.
+        {"data_parallel_size": 1, "expert_parallel_size": 1, "node_gpu_capacities": [8]},
+        {"expert_parallel_size": 1},
+        # No node is large enough for a stage; too few nodes for every stage.
+        {"node_gpu_capacities": [4, 4, 4, 4]},
+        {"node_gpu_capacities": [8]},
+        # Mixed nodes: the 4-GPU nodes cannot take an 8-GPU stage, and one 8-GPU node is not enough for two.
+        {"node_gpu_capacities": [8, 4, 4]},
+        # A 4-GPU engine on 8-GPU nodes fills half a node.
+        {"data_parallel_size": 4, "expert_parallel_size": 4},
     ],
 )
-def test_node_local_config_rejects_unsupported_modes(changes):
+def test_auto_packs_only_an_engine_that_can_hold_a_replica_without_fragmenting_nodes(change):
+    assert node_local_blocker(**NODE_LOCAL_ENGINE) is None
+    assert node_local_blocker(**{**NODE_LOCAL_ENGINE, **change}) is not None
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        # Half-node engines, packed on request or when the cluster is one node and nothing can scatter.
+        {"mode": NodeLocalPlacement.REQUIRE, "data_parallel_size": 4, "expert_parallel_size": 4},
+        {"data_parallel_size": 2, "expert_parallel_size": 2, "node_gpu_capacities": [8]},
+        # Two stages of four GPUs fill one node.
+        {"data_parallel_size": 4, "expert_parallel_size": 4, "pipeline_parallel_size": 2},
+    ],
+)
+def test_engines_smaller_than_a_node_are_packed_when_nothing_can_scatter_or_on_request(change):
+    assert node_local_blocker(**{**NODE_LOCAL_ENGINE, **change}) is None
+
+
+def test_config_refuses_require_for_an_engine_that_can_never_be_node_local_and_an_unknown_mode():
     cfg = example_dummy_config()
     cfg.trainer.placement.colocate_all = False
-    cfg.generator.inference_engine_node_local = True
-    cfg.generator.inference_engine_tensor_parallel_size = 1
-    cfg.generator.async_engine = True
-    cfg.generator.update(changes)
-    with pytest.raises(ValueError, match="inference_engine_node_local"):
+    cfg.generator.update(
+        async_engine=True,
+        inference_engine_tensor_parallel_size=2,
+        inference_engine_node_local="require",
+    )
+    with pytest.raises(ValueError, match="require cannot be honoured: it needs TP=1"):
         validate_node_local_config(cfg)
-
-
-def test_node_local_config_rejects_colocation():
-    cfg = example_dummy_config()
-    cfg.trainer.placement.colocate_all = True
+    # The same shape under the default mode is placed as before, so the config is accepted.
+    cfg.generator.inference_engine_node_local = "auto"
+    validate_node_local_config(cfg)
     cfg.generator.inference_engine_node_local = True
-    with pytest.raises(ValueError, match="non-colocated"):
+    with pytest.raises(ValueError, match="not a valid NodeLocalPlacement"):
         validate_node_local_config(cfg)
 
 
@@ -417,6 +499,19 @@ def test_replica_topology_rejects_a_worker_that_disagrees_with_its_bundle(change
     reports = _replica_reports()
     reports[1][0].update(change)
     with pytest.raises(ValueError, match=error):
+        _verified_replicas(reports)
+
+
+def test_a_dense_model_that_reports_no_expert_parallel_group_is_verified_not_killed():
+    # vLLM builds an EP group only for MoE models: a dense model asked for EP=DP reports size 1 everywhere.
+    reports = _replica_reports()
+    for report in reports:
+        report[0].update(ep_rank=0, ep_world_size=1)
+    assert len(_verified_replicas(reports)) == 16
+    # One worker of a MoE replica reporting no EP group is still a mismatch.
+    reports = _replica_reports()
+    reports[3][0].update(ep_rank=0, ep_world_size=1)
+    with pytest.raises(ValueError, match="EP rank or world size"):
         _verified_replicas(reports)
 
 

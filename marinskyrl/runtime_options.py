@@ -17,3 +17,15 @@ class WeightSyncTransport(StrEnum):
 class GDNBackend(StrEnum):
     TORCH = "torch"
     FLASHQLA = "flashqla"
+
+
+class NodeLocalPlacement(StrEnum):
+    """Values of ``generator.inference_engine_node_local``.
+
+    ``auto`` packs a replica when that cannot leave nodes partly used. ``require`` packs or
+    refuses the run. ``off`` never packs.
+    """
+
+    AUTO = "auto"
+    REQUIRE = "require"
+    OFF = "off"

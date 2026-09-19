@@ -1,14 +1,13 @@
-"""Expert-block weight sync on one Hopper node: bit-exact installs, and verification catches a flipped byte.
+"""Expert-block weight sync on one Hopper node, for four geometries.
 
-Each case starts a tiny Grug Megatron policy and node-local vLLM engines, trains one
-PPO step, syncs with ``weight_sync_transport=expert_block``, verifies the sync,
-and reads every checked engine weight back through the trainer's own readback RPC
-to compare it, byte for byte, with the trainer's exported weights. It then flips
-one installed byte on one worker and requires verification to count exactly that byte,
-trains a second step and syncs again.
+Each case starts a tiny Grug Megatron policy and vLLM engines, trains one PPO step, syncs with
+``weight_sync_transport=expert_block`` and verifies the sync. It then reads engine weights back
+and compares them, byte for byte, with the trainer's exported weights. It flips one installed
+byte on one worker and checks that verification counts exactly that byte. Then it trains a
+second step and syncs again.
 
-Opt-in (needs six Hopper GPUs at most; four geometries). The test-only engine actor lives in this module,
-so Ray workers need ``skyrl-train`` on ``PYTHONPATH``; the Grug gate wrapper exports it:
+Opt-in; needs at most six Hopper GPUs. The test's engine actor is defined in this module, so Ray
+workers need ``skyrl-train`` on ``PYTHONPATH``. The Grug gate wrapper sets it:
 
     uv run --frozen --extra vllm --extra megatron --group dev \\
         python marinskyrl/environment_contract.py run-grug-gpu-gate "$PWD" -- \\
@@ -52,7 +51,7 @@ from tests.gpu.test_grug_megatron import (
 )
 
 # Tensors the transport slices out of fused trainer parameters (interleaved QKV, [gate;up]). The
-# trainer snapshot exports them through Megatron-Bridge, which shares no code with that slicing.
+# trainer snapshot exports them with Megatron-Bridge, which shares no code with the transport.
 SLICED_NAMES = [
     "model.layers.0.self_attn.q_proj.weight",
     "model.layers.0.self_attn.k_proj.weight",
@@ -95,7 +94,7 @@ GEOMETRIES = {
 
 
 def flip_one_installed_byte(worker) -> int:
-    """Test-only worker RPC: flip byte 1 of the first expert slot of layer 0 on the calling worker."""
+    """Worker RPC for this test: flip byte 1 of the first expert slot of layer 0."""
     for name, parameter in worker.model_runner.model.named_parameters():
         if name.endswith("layers.0.mlp.experts.routed_experts.w13_weight"):
             with torch.no_grad():
@@ -126,7 +125,6 @@ def engine_client(cfg, model_path: str, geometry: Geometry) -> InferenceEngineCl
         tokenizer=tokenizer,
         backend="vllm",
         engine_init_kwargs={"max_model_len": MAX_MODEL_LEN},
-        node_local=True,
     )
     return InferenceEngineClient(engines, tokenizer, cfg)
 
@@ -142,7 +140,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
         async def flip_installed_byte(self):
             return await self._get_engine().collective_rpc(flip_one_installed_byte)
 
-    # Only the test's actor adds the corruption RPC; the transport is the production code.
+    # The test's actor only adds the byte-flipping RPC. The transport is the production code.
     monkeypatch.setattr(vllm_engine, "AsyncVLLMRayActor", ray.remote(CorruptibleEngine))
     model_path = tmp_path / "model"
     model_path.mkdir()
@@ -152,7 +150,6 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
     cfg.generator.inference_engine_data_parallel_size = geometry.engine_dp
     cfg.generator.inference_engine_expert_parallel_size = geometry.engine_dp
     cfg.generator.inference_engine_pipeline_parallel_size = geometry.engine_pp
-    cfg.generator.inference_engine_node_local = True
     cfg.generator.weight_sync_transport = "expert_block"
     cfg.generator.expert_block_sync.verify = True
     tokenizer = AutoTokenizer.from_pretrained(str(model_path))

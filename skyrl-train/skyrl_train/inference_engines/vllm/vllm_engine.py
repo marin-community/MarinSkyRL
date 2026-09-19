@@ -990,7 +990,7 @@ class WorkerWrap:
         return socket.gethostname()
 
     def report_device_placement(self) -> dict[str, str | int]:
-        """This worker's physical GPU and communicator ranks, as plain fields for the utility RPC."""
+        """This worker's host, GPU and ranks, as a plain dict."""
         return asdict(self._device_placement())
 
     def _device_placement(self) -> InferenceWorkerPlacement:
@@ -1006,7 +1006,7 @@ class WorkerWrap:
         )
 
     def expert_block_rpc(self, method: str, *args):
-        """Expert-block weight sync: inventory, bind, run or close this worker's receiver."""
+        """Call a method of this worker's expert-block receiver, creating the receiver on first use."""
         receiver = getattr(self, "_expert_block_receiver", None)
         if receiver is None:
             placement = self._device_placement()
@@ -2009,13 +2009,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await engine.collective_rpc("report_host")
 
     async def report_engine_placement(self):
-        """Physical GPU and communicator ranks of every engine worker, once the model is loaded."""
+        """Host, GPU and ranks of every worker of this engine."""
         return await self._get_engine().collective_rpc("report_device_placement")
 
     async def expert_block_rpc(self, method: str, *args) -> list:
-        """Forward one expert-block sync call to every worker of this engine; installs only while paused.
+        """Call one expert-block sync method on every worker of this engine.
 
-        Returns one reply per worker, in the engine's worker order (pipeline stage order with TP=1).
+        Weights are installed only while the engine is paused. Returns one reply per worker.
         """
         engine = self._get_engine()
         if method == "receive_weights" and not await engine.is_paused():

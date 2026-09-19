@@ -1,4 +1,4 @@
-"""The sender refuses to send weights that are not the update the driver names, or whose storage moved."""
+"""The sender refuses to send for the wrong update, or after its parameters were reallocated."""
 
 from types import SimpleNamespace
 
@@ -30,7 +30,7 @@ def test_refuses_a_version_that_is_not_the_completed_update():
 
 def test_refuses_when_a_parameter_was_reassigned_new_storage_since_preparation():
     sender = bound_sender(completed_update=1)
-    # An in-place update keeps the storage and is fine; a ``.data`` swap is not.
+    # An in-place update keeps the storage and is accepted. Reassigning ``.data`` is not.
     sender.sources["decoder.layers.0.weight"].data.fill_(1)
     assert sender.send_weights({"version": 1})["expert_matrices"] == 2
     sender.sources["decoder.layers.0.weight"].data = torch.zeros(4, dtype=torch.bfloat16)

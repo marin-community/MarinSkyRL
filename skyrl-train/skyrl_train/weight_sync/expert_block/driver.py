@@ -1,12 +1,10 @@
-"""The training driver's side of expert-block weight sync.
+"""Driver side of expert-block weight sync.
 
-``prepare`` runs once: it collects what every trainer rank and receiver holds,
-builds the schedule, hosts the rendezvous store and has every participant create
-its groups. ``sync`` runs after each update with generation paused and fails if
-a participant raised, a planned receiver did not report, or a report names
-another version or byte count. A trainer rank refuses to send unless the update
-named is the one it just finished; both sides refuse if their parameters are no
-longer the storage the plan was bound to.
+``prepare`` runs once. It collects an inventory from every trainer rank and receiver,
+builds the schedule, hosts the rendezvous store and tells every participant to create
+its groups. ``sync`` runs after each update while generation is paused. It fails if a
+participant raised, a receiver did not report, or a report has the wrong version or
+byte count.
 """
 
 import asyncio
@@ -34,11 +32,10 @@ from skyrl_train.weight_sync.expert_block.verify_weights import ReplayReport, Re
 
 @dataclass(frozen=True)
 class SyncTimings:
-    """Timings of one sync.
+    """Timings of one sync, in seconds.
 
-    ``install_seconds`` is the driver's wall time. The other fields are maxima over the
-    participants' reports: over trainer ranks, over receivers, and over both for the expert and
-    dense phases.
+    ``install_seconds`` is the driver's wall time. The others are the maximum over the
+    participants' reports.
     """
 
     install_seconds: float
@@ -54,9 +51,10 @@ class SyncTimings:
 def plan_from_inventories(
     policy: list[dict], receivers: list[tuple[dict, InferenceReplicaPlacement]]
 ) -> tuple[Schedule, dict[str, int]]:
-    """Build the schedule from every trainer's and receiver's report; returns it with the GPU-to-participant map.
+    """Build the schedule from the trainer and receiver inventories.
 
-    ``receivers`` pairs each engine worker's report with its verified node-local placement.
+    ``receivers`` pairs each worker's inventory with its verified placement. Returns the schedule
+    and a map from GPU UUID to participant number.
     """
     trainers = sorted((from_wire(TrainerRank, row["trainer"]) for row in policy), key=lambda row: row.rank)
     rows = {from_wire(TrainerRank, row["trainer"]).rank: row for row in policy}
@@ -147,16 +145,19 @@ class ExpertBlockSync:
         return list(await asyncio.gather(*refs))
 
     async def _receivers(self, method: str, *args) -> list:
-        """One reply per receiver worker, flattened across engines in engine and worker order."""
+        """Call a receiver method on every worker. Returns one reply per worker, in engine then worker order."""
         return [row for rows in await self.client.expert_block_rpc(method, *args) for row in rows]
 
     async def prepare(self) -> dict[str, float]:
-        """Plan, rendezvous and bind every participant; returns the one-time cost in seconds by phase."""
+        """Build the schedule and have every participant create its groups. Returns the seconds each phase took."""
         if self.schedule is not None:
             raise RuntimeError("Expert-block sync is already prepared")
         engines = self.client.engines
         if any(engine.worker_placements is None for engine in engines):
-            raise ValueError("Expert-block sync requires generator.inference_engine_node_local=true")
+            raise ValueError(
+                "Expert-block sync requires node-local engine replicas; the engine factory's log says why these "
+                "were not, and generator.inference_engine_node_local=require packs an engine smaller than a node"
+            )
         started = time.perf_counter()
         policy_rows, engine_rows = await asyncio.gather(
             self._policy("inventory"), self.client.expert_block_rpc("inventory")
@@ -195,7 +196,7 @@ class ExpertBlockSync:
         return {"plan": planned - started, "bind": time.perf_counter() - planned}
 
     async def sync(self, version: int) -> SyncTimings:
-        """Run one sync for ``version`` and check every receiver landed exactly its share."""
+        """Run one sync for ``version`` and check that every receiver got the bytes planned for it."""
         if self.schedule is None:
             raise RuntimeError("Expert-block sync is not prepared")
         if not self.client.generation_paused_event.is_set():
@@ -236,7 +237,7 @@ class ExpertBlockSync:
         )
 
     async def verify(self, version: int) -> dict[str, float]:
-        """Replay the sync; fail on a byte mismatch, a coverage gap or a data-parallel disagreement."""
+        """Replay the sync and fail if any byte differs, a parameter was not covered, or data-parallel peers disagree."""
         if self.schedule is None:
             raise RuntimeError("Expert-block sync is not prepared")
         if not self.client.generation_paused_event.is_set():

@@ -110,8 +110,8 @@ def assert_engine_weights(
             per_rank = [per_rank]
         for rank_values in per_rank:
             serving_ep_rank = int(rank_values["__ranks__"]["ep_rank"])
-            # A pipeline stage holds neither the dense weights nor the expert slots of the
-            # layers on other stages; the final check still requires every name on some stage.
+            # A pipeline stage does not hold the weights of other stages' layers. The check at the
+            # end still requires every name to be found on some stage.
             staged = int(rank_values["__ranks__"]["pp_size"]) > 1
             for name in names:
                 entry = rank_values[name]

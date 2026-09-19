@@ -1,1 +1,1 @@
-"""Expert-block weight sync: each MoE expert block broadcast straight into the vLLM worker that serves it."""
+"""Expert-block weight sync: broadcast each MoE expert matrix to the vLLM worker that serves it."""

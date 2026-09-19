@@ -1,12 +1,11 @@
-"""Views of the live parameters an expert-block sync reads on the trainer and writes on the receiver.
+"""Views of the parameters an expert-block sync reads on the trainer and writes on the receiver.
 
-On the trainer, Megatron-Bridge conversion tasks say which HF tensor each
-Megatron parameter backs. With Grug's stacked expert layout at TP=1 every expert
-matrix is one whole parameter and every dense HF tensor is one or more runs of
-one parameter, so a broadcast reads parameter storage directly. On the receiver,
-vLLM's fused expert parameters hold one contiguous ``[2I, H]`` or ``[H, I]``
-slot per local expert and every dense Grug tensor is replicated, so a
-destination is a run of a flat parameter.
+On the trainer, Megatron-Bridge conversion tasks say which HF tensor each Megatron parameter
+holds. At TP=1 each Grug expert matrix is one whole parameter, and each dense HF tensor is
+one or more runs of one parameter, so a broadcast reads parameter storage directly. On the
+receiver, vLLM's fused expert parameters hold one contiguous ``[2I, H]`` or ``[H, I]`` slot per
+local expert, and dense tensors are replicated, so a broadcast writes into a run of a flat
+parameter.
 """
 
 from dataclasses import dataclass
@@ -32,18 +31,18 @@ WIRE_DTYPES = frozenset(WIRE_DTYPE_BYTES)
 
 
 def dtype_name(dtype: torch.dtype) -> str:
-    """``torch.bfloat16`` -> ``"bfloat16"``, the form the wire records and inventories carry."""
+    """``torch.bfloat16`` -> ``"bfloat16"``, as used in inventories and the schedule."""
     return str(dtype).removeprefix("torch.")
 
 
 def is_widened_router(hf_name: str, wire_dtype: str, installed_dtype: str) -> bool:
-    """The router weight travels as BF16 and is installed into vLLM's FP32 parameter."""
+    """Whether this is the router weight, which is sent as BF16 and stored as FP32 in vLLM."""
     return hf_name.endswith(ROUTER_WEIGHT_SUFFIX) and wire_dtype == BF16 and installed_dtype == FP32
 
 
 @dataclass(frozen=True)
 class ExpertSlice:
-    """One half (``gate``, ``up`` or ``down``) of one expert matrix as a trainer rank holds it."""
+    """One of ``gate``, ``up`` or ``down`` of an expert, and the trainer parameter that stores it."""
 
     hf_name: str
     expert: int
@@ -53,7 +52,7 @@ class ExpertSlice:
 
 @dataclass(frozen=True)
 class ExpertSource:
-    """One local expert matrix and the trainer parameter that is that matrix."""
+    """One expert matrix on this rank and the trainer parameter that stores it."""
 
     entry: ExpertEntry
     source_key: str
@@ -62,7 +61,7 @@ class ExpertSource:
 
 @dataclass(frozen=True)
 class LocalSources:
-    """What one trainer rank holds: its expert slices, its dense slices and the parameters behind them."""
+    """One trainer rank's expert slices, dense slices and the parameters that store them."""
 
     experts: list[ExpertSlice]
     dense: list[DenseSlice]
@@ -70,11 +69,11 @@ class LocalSources:
 
 
 def local_source_slices(tasks, config, *, pp: int) -> LocalSources:
-    """Split a rank's conversion tasks into expert slices, dense slices and the parameters behind them."""
+    """Turn a rank's conversion tasks into expert slices, dense slices and the parameters that store them."""
     expert, dense, sources = [], [], {}
     for task in tasks:
-        # Keep the parameter itself, not a detached view: a later ``param.data``
-        # reassignment must show up when the sender re-checks storage before a send.
+        # Keep the parameter, not a detached view, so the sender's storage check sees a
+        # reassigned ``param.data``.
         source = task.param_weight
         if source is None:
             continue
@@ -85,7 +84,7 @@ def local_source_slices(tasks, config, *, pp: int) -> LocalSources:
         sources[key] = source
         mapping = task.mapping
         kind = type(mapping).__name__
-        # For an expert mapping this is the expert-tensor-parallel size.
+        # For an expert mapping, tp_size is the expert-tensor-parallel size.
         if mapping.tp_size != 1:
             raise ValueError(f"Parameter {key} is tensor-parallel; expert-block sync requires trainer TP=1 and ETP=1")
         if kind in EXPERT_MAPPINGS:
@@ -144,7 +143,7 @@ def local_expert_sources(
     hidden_size: int,
     intermediate_size: int,
 ) -> list[ExpertSource]:
-    """Group a rank's expert slices into whole matrices and check each is one contiguous BF16 parameter."""
+    """Group expert slices into whole matrices. Check that each is one contiguous BF16 parameter."""
     per_block = num_experts // expert_parallel_size
     grouped: dict[tuple[int, int, str], dict[str, ExpertSlice]] = {}
     for item in expert_slices:
@@ -190,7 +189,7 @@ def expert_source_view(item: ExpertSource, sources: dict[str, torch.Tensor]) -> 
 
 
 def expert_slot_view(entry: ExpertEntry, parameters, expert_maps) -> torch.Tensor:
-    """The receiver's whole live slot for a global expert, flat, through the layer's global-to-local expert map."""
+    """The receiver's slot for a global expert, as a flat view. The layer's expert map gives the local index."""
     prefix = f"model.layers.{entry.layer}.{ROUTED_EXPERTS}"
     local = expert_maps[prefix][entry.expert]
     if local < 0:
@@ -214,7 +213,7 @@ def dense_source_view(item: DenseSlice, sources: dict[str, torch.Tensor]) -> tor
 
 
 def dense_installed_view(item: DenseSlice, parameters) -> torch.Tensor:
-    """The run of the installed tensor a slice lands in. The router weight is FP32 here, BF16 on the wire."""
+    """The part of the receiver's tensor a slice is written to. The router weight is FP32 here and BF16 on the wire."""
     parameter = parameters[item.hf_name]
     if not parameter.is_contiguous():
         raise ValueError(f"Installed parameter {item.hf_name} is not contiguous")

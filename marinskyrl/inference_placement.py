@@ -1,79 +1,106 @@
-"""Node-local inference replica placement: the configuration rules and the verified placement records.
+"""Node-local placement of vLLM inference replicas.
 
-An opted-in replica is one vLLM data-parallel group whose ranks all sit on one
-physical node; with pipeline parallelism each stage's data-parallel group sits
-on one node. The trainer's config validation and the engine factory refuse a
-configuration this cannot hold before any engine starts; the factory then
-verifies the workers it actually got against the bundles it was allocated
-before training starts. This module imports nothing from the trainer, so the
-config validator can import it before any model module.
+A replica is one vLLM data-parallel group. It is node-local when the data-parallel
+ranks of each pipeline stage share a node. This module decides when to use that
+placement and checks the workers Ray started. It imports nothing from the trainer,
+because config validation imports it before any model module.
 """
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from marinskyrl.runtime_options import WeightSyncTransport
+from marinskyrl.runtime_options import NodeLocalPlacement, WeightSyncTransport
 
 
-def validate_node_local_inference(
+def node_local_blocker(
     *,
-    enabled: bool,
+    mode: NodeLocalPlacement,
     backend: str,
     async_engine: bool,
-    colocate_all: bool,
+    colocated: bool,
+    remote: bool,
+    mp_executor: bool,
     tensor_parallel_size: int,
     pipeline_parallel_size: int,
     data_parallel_size: int,
     expert_parallel_size: int,
     num_inference_engines: int,
-    gpus_per_node: int | None = None,
-    remote: bool = False,
-) -> None:
-    """Reject unsupported opt-ins; every other placement keeps its existing contract."""
-    if not enabled:
-        return
-    if backend != "vllm" or not async_engine or colocate_all or remote:
-        raise ValueError("inference_engine_node_local requires local, non-colocated async vLLM engines")
+    node_gpu_capacities: Sequence[int] | None = None,
+) -> str | None:
+    """Return why an engine is not placed node-locally, or None if it is.
+
+    ``node_gpu_capacities`` is the GPU count of each live GPU node. Config validation does not
+    know the cluster and passes None; the engine factory passes it.
+    """
+    if mode is NodeLocalPlacement.OFF:
+        return "generator.inference_engine_node_local is off"
+    if backend != "vllm" or not async_engine or colocated or remote:
+        return "it needs local, non-colocated async vLLM engines"
+    if mp_executor:
+        return "the mp executor places its own workers"
     if tensor_parallel_size != 1:
-        raise ValueError("inference_engine_node_local requires TP=1")
-    if data_parallel_size <= 0 or pipeline_parallel_size <= 0 or num_inference_engines <= 0:
-        raise ValueError("inference_engine_node_local requires positive replica, PP and DP sizes")
+        return "it needs TP=1"
+    if data_parallel_size < 2:
+        return "a DP=1 engine has no replica to pack"
     if expert_parallel_size != data_parallel_size:
-        raise ValueError("inference_engine_node_local requires EP equal to DP")
-    if gpus_per_node is not None and data_parallel_size > gpus_per_node:
-        raise ValueError(
-            f"Node-local inference replica needs {data_parallel_size} GPUs but a node provides {gpus_per_node}"
+        return "it needs EP equal to DP"
+    if node_gpu_capacities is None:
+        return None
+    node_size = max(node_gpu_capacities, default=0)
+    if data_parallel_size > node_size:
+        return f"a replica stage needs {data_parallel_size} GPUs but the largest node has {node_size}"
+    stages = num_inference_engines * pipeline_parallel_size
+    if sum(capacity // data_parallel_size for capacity in node_gpu_capacities) < stages:
+        return f"the cluster's nodes cannot hold {stages} replica stages of {data_parallel_size} GPUs"
+    engine_gpus = data_parallel_size * pipeline_parallel_size
+    if mode is NodeLocalPlacement.AUTO and len(node_gpu_capacities) > 1 and engine_gpus % node_size:
+        # Groups that each fill part of a node can scatter, leaving the policy group no whole
+        # nodes (see use_per_engine_strict_pack_pg).
+        return (
+            f"an engine's {engine_gpus} GPUs are not a whole number of {node_size}-GPU nodes, so a group of "
+            "its own could leave nodes partly used; generator.inference_engine_node_local=require packs it anyway"
         )
+    return None
 
 
-def validate_node_local_config(config: Mapping[str, Any], *, gpus_per_node: int | None = None) -> None:
-    """Validate the `generator` block of a resolved training configuration."""
+def validate_node_local_config(config: Mapping[str, Any]) -> None:
+    """Reject an unknown mode, and ``require`` for an engine that can never be node-local."""
     generator = config["generator"]
-    if not generator.get("inference_engine_node_local", False):
+    mode = NodeLocalPlacement(generator.get("inference_engine_node_local", NodeLocalPlacement.AUTO))
+    if mode is not NodeLocalPlacement.REQUIRE:
         return
-    validate_node_local_inference(
-        enabled=True,
+    blocker = node_local_blocker(**node_local_engine_shape(config, mode))
+    if blocker is not None:
+        raise ValueError(f"generator.inference_engine_node_local=require cannot be honoured: {blocker}")
+
+
+def node_local_engine_shape(config: Mapping[str, Any], mode: NodeLocalPlacement) -> dict[str, Any]:
+    """The ``node_local_blocker`` arguments taken from a training config."""
+    generator = config["generator"]
+    tp_pp_size = (
+        generator["inference_engine_tensor_parallel_size"] * generator["inference_engine_pipeline_parallel_size"]
+    )
+    return dict(
+        mode=mode,
         backend=generator["backend"],
         async_engine=generator["async_engine"],
-        colocate_all=config["trainer"]["placement"]["colocate_all"],
+        colocated=config["trainer"]["placement"]["colocate_all"],
+        remote=not generator["run_engines_locally"],
+        mp_executor=bool(generator.get("inference_engine_mp_backend", False)) and tp_pp_size > 1,
         tensor_parallel_size=generator["inference_engine_tensor_parallel_size"],
         pipeline_parallel_size=generator["inference_engine_pipeline_parallel_size"],
         data_parallel_size=generator["inference_engine_data_parallel_size"],
         expert_parallel_size=generator["inference_engine_expert_parallel_size"],
         num_inference_engines=generator["num_inference_engines"],
-        remote=not generator["run_engines_locally"],
-        gpus_per_node=gpus_per_node,
     )
 
 
 def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
-    """Refuse the expert-block weight-sync transport unless every precondition holds.
+    """Reject ``expert_block`` unless the config meets its requirements.
 
-    The transport pairs each Megatron expert matrix with the vLLM worker that serves it and
-    reads each HF tensor as one or more runs of one trainer parameter, so it needs the megatron
-    strategy at TP=1 and ETP=1, local async vLLM engines at TP=1 placed node-locally, and the
-    NCCL weight-sync backend.
+    It needs the megatron strategy at TP=1 and ETP=1, node-local vLLM engines and the NCCL
+    weight-sync backend.
     """
     generator = config["generator"]
     transport = generator["weight_sync_transport"]
@@ -92,20 +119,17 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
             problems.append("the policy must use tensor_model_parallel_size 1")
         if megatron["expert_tensor_parallel_size"] not in (None, 1):
             problems.append("the policy must use expert_tensor_parallel_size 1")
-        # Unequal expert-parallel degrees are paired by the schedule; each must divide the
-        # expert count, which is checked against the model when the ranks report.
+        # Trainer and engine EP sizes may differ. Whether each divides the expert count is
+        # checked when the ranks report.
         if megatron["expert_model_parallel_size"] < 1 or generator["inference_engine_expert_parallel_size"] < 1:
             problems.append("expert-parallel sizes must be positive")
-    if generator["backend"] != "vllm" or not generator["async_engine"] or not generator["run_engines_locally"]:
-        problems.append("the engines must be local async vLLM engines")
-    if trainer["placement"]["colocate_all"]:
-        problems.append("the engines must not be colocated with the trainer")
     if generator["weight_sync_backend"] != "nccl":
         problems.append("generator.weight_sync_backend must be nccl")
-    if not generator["inference_engine_node_local"]:
-        problems.append("generator.inference_engine_node_local must be true")
-    if generator["inference_engine_tensor_parallel_size"] != 1:
-        problems.append("the engines must use TP=1")
+    # The transport matches trainer ranks to the verified placements of node-local replicas.
+    mode = NodeLocalPlacement(generator["inference_engine_node_local"])
+    blocker = node_local_blocker(**node_local_engine_shape(config, mode))
+    if blocker is not None:
+        problems.append(f"the engines must be placed node-locally, and {blocker}")
     if int(generator["expert_block_sync"]["timeout_seconds"]) <= 0:
         problems.append("generator.expert_block_sync.timeout_seconds must be positive")
     if problems:
@@ -113,9 +137,9 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
 
 
 def validate_expert_block_trainer(config: Mapping[str, Any], *, uses_fully_async_trainer: bool) -> None:
-    """Refuse the expert-block transport for an entrypoint that selects another trainer.
+    """Reject ``expert_block`` for an entrypoint that does not run ``FullyAsyncRayPPOTrainer``.
 
-    Only ``FullyAsyncRayPPOTrainer`` runs it; any other trainer would sync by broadcast.
+    No other trainer reads the option, so the run would sync by broadcast.
     """
     if (
         config["generator"]["weight_sync_transport"] == WeightSyncTransport.EXPERT_BLOCK
@@ -129,7 +153,7 @@ def validate_expert_block_trainer(config: Mapping[str, Any], *, uses_fully_async
 
 @dataclass(frozen=True)
 class InferenceWorkerPlacement:
-    """What one vLLM worker observes about itself from inside its process."""
+    """What one vLLM worker reports about itself."""
 
     host: str
     gpu_uuid: str
@@ -145,7 +169,7 @@ class InferenceWorkerPlacement:
 
 @dataclass(frozen=True)
 class InferenceReplicaPlacement:
-    """One worker joined to the replica and placement bundle it was allocated."""
+    """A worker's report joined to its replica and placement bundle."""
 
     replica: int
     node_id: str
@@ -163,10 +187,9 @@ def validate_inference_replica_topology(
     pipeline_parallel_size: int = 1,
     node_hosts: Mapping[str, str],
 ) -> None:
-    """Check the observed workers match their allocated bundles, each stage's DP group on one node.
+    """Check that every worker runs in its bundle and each stage's DP group is on one node.
 
-    A worker's bundle is ``dp_rank * PP + pp_rank`` within its engine, which is also its torch
-    rank in the engine's world of ``DP * PP`` ranks.
+    A worker's bundle index is ``dp_rank * PP + pp_rank``, which is also its torch rank in the engine.
     """
     per_replica = data_parallel_size * pipeline_parallel_size
     total = num_replicas * per_replica
@@ -179,7 +202,9 @@ def validate_inference_replica_topology(
         raise ValueError("Inference workers must have distinct, nonempty physical GPU UUIDs")
     if {row.weight_receiver_rank for row in placements} != set(range(1, total + 1)):
         raise ValueError("Inference weight receiver ranks must be unique and cover the broadcast group")
-    expected_ep_size = data_parallel_size if expert_parallel_size > 1 else 1
+    # A dense model has no EP group: every worker reports size 1.
+    expert_parallel = expert_parallel_size > 1 and any(row.worker.ep_world_size != 1 for row in placements)
+    expected_ep_size = data_parallel_size if expert_parallel else 1
     for replica in range(num_replicas):
         rows = [row for row in placements if row.replica == replica]
         if len(rows) != per_replica or {row.bundle_index for row in rows} != set(range(per_replica)):
@@ -199,7 +224,7 @@ def validate_inference_replica_topology(
                 raise ValueError(f"Inference replica {replica} worker ranks disagree with its placement bundle")
             if worker.dp_world_size != data_parallel_size or worker.torch_world_size != per_replica:
                 raise ValueError(f"Inference replica {replica} has an unexpected DP/torch world size")
-            expected_ep_rank = worker.dp_rank if expert_parallel_size > 1 else 0
+            expected_ep_rank = worker.dp_rank if expert_parallel else 0
             if worker.ep_world_size != expected_ep_size or worker.ep_rank != expected_ep_rank:
                 raise ValueError(f"Inference replica {replica} has an unexpected EP rank or world size")
             if row.weight_receiver_rank != 1 + replica * per_replica + worker.torch_rank:

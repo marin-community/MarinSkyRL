@@ -1,12 +1,12 @@
 """Verify an expert-block sync by replaying it (``generator.expert_block_sync.verify``).
 
-Every root re-sends what it sent. Every receiver lands it in scratch, counts the
-bytes that differ from what it installed, and checks that the bytes it compared
-are all the parameter bytes it holds (a padded vocabulary tensor counts only its
-HF rows). Every trainer rank also checks that its data-parallel peers hold
-byte-identical parameters, since roots rotate across those peers.
+Every root sends its weights again. Each receiver receives them into scratch and counts the
+bytes that differ from its installed weights. It also checks that the bytes it compared add up
+to all the parameter bytes it holds, counting only the HF rows of a padded vocabulary tensor.
+Each trainer rank checks that its data-parallel peers hold identical bytes, because any of
+them can be a root.
 
-The replay costs about one extra sync on the wire.
+A replay sends about as many bytes as a sync.
 """
 
 from dataclasses import dataclass
@@ -27,7 +27,7 @@ class ReplayReport:
 
 
 def replay(stream: Stream, version: int) -> ReplayReport:
-    """Re-run the sync's collectives; receivers compare each landed transfer against what they installed."""
+    """Run the sync's broadcasts again. Receivers compare each transfer with their installed weights."""
     with torch.no_grad():
         return _replay(stream, version)
 
@@ -45,13 +45,13 @@ def _replay(stream: Stream, version: int) -> ReplayReport:
             continue
         wire = scratch.narrow(0, 0, landing.nbytes).view(landing.wire_dtype).view(landing.installed.shape)
         stream.receive(item, wire)
-        # A widened parameter is compared at wire precision.
+        # The router weight is stored as FP32; compare it in its wire dtype.
         installed = landing.installed.to(landing.wire_dtype)
         mismatched.add_(wire.view(torch.uint8).ne(installed.view(torch.uint8)).sum())
         compared += landing.nbytes
     parameter_bytes = 0
     if not stream.trainer:
-        # Coverage counts every parameter byte at wire width, so a widened parameter counts as BF16.
+        # Count parameter bytes in the wire dtype, so the FP32 router weight counts as BF16.
         parameter_bytes = sum(value.numel() * value.element_size() for value in stream.parameters.values())
         for _, landing in landings:
             parameter_bytes -= landing.installed.numel() * (
@@ -70,8 +70,8 @@ class ReplicaReport:
     mismatched_bytes: int
 
 
-# Bytes compared per collective. Each chunk is widened to int32 twice (the group minimum and
-# maximum), so the working set is eight times this on a GPU the trainer already fills.
+# Bytes compared per all-reduce. Each chunk is copied to int32 twice, for the group minimum and
+# maximum, so it needs eight times this much memory on a GPU the trainer already fills.
 REPLICA_COMPARE_CHUNK_BYTES = 16 << 20
 
 
@@ -83,10 +83,10 @@ def compare_replicas(
     *,
     chunk_bytes: int = REPLICA_COMPARE_CHUNK_BYTES,
 ) -> ReplicaReport:
-    """Count bytes on which this rank's parameters differ from the peers that hold the same ones.
+    """Count the bytes where this rank's parameters differ from its peers'.
 
-    ``groups`` maps each parameter name to the process group of its replicas. Byte
-    patterns are reduced as integers, so the comparison is exact.
+    ``groups`` maps each parameter name to the process group of the ranks that hold a copy. Bytes
+    are reduced as integers, so the comparison is exact.
     """
     mismatched = 0
     compared = 0

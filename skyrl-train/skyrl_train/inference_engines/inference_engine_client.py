@@ -221,7 +221,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         return await asyncio.gather(*awaitables)
 
     async def expert_block_rpc(self, method: str, *args) -> list:
-        """Run one expert-block weight-sync call on every live engine and return their replies in engine order."""
+        """Call one expert-block sync method on every engine. Returns the replies in engine order."""
         return await self._run_on_all_engines("expert_block_rpc", method, *args)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
