@@ -16,8 +16,7 @@ def _recording_sink(histogram_format):
     scalar_batches = []
     histogram_batches = []
     published = Record(configured=True, sample_limit_dropped_records=0, telemetry_lost_records=0)
-    sink = FinelogInferenceMetricsSink.__new__(FinelogInferenceMetricsSink)
-    sink._histogram_format = histogram_format
+    sink = FinelogInferenceMetricsSink(histogram_format)
     sink._publisher = Record(publish=lambda records: scalar_batches.append(records) or published)
     sink._histogram_publisher = Record(publish=lambda records: histogram_batches.append(records) or published)
     sink._bridge_publisher = Record(publish=lambda records: scalar_batches.append(records) or published)
@@ -127,7 +126,7 @@ def test_vllm_histogram_snapshot_rejects_fractional_counts():
         vllm.snapshot_vllm_prometheus_metrics((histogram,), engine_index="0")
 
 
-def test_vllm_histogram_bundles_reduce_representative_publication_to_608_rows():
+def test_vllm_histogram_bundles_replace_scalar_rows_per_engine():
     bounds = tuple(float(index) for index in range(1, 20)) + (math.inf,)
     histograms = tuple(
         vllm.VLLMHistogramSnapshot(
@@ -160,10 +159,15 @@ def test_vllm_histogram_bundles_reduce_representative_publication_to_608_rows():
     structured.sink.publish(snapshot, step=7)
     scalar.sink.publish(snapshot, step=7)
 
-    scalar_format_rows = sum(map(len, scalar.scalar_batches)) + sum(map(len, scalar.histogram_batches))
-    structured_format_rows = sum(map(len, structured.scalar_batches)) + sum(map(len, structured.histogram_batches))
-    assert scalar_format_rows == 6_208
-    assert structured_format_rows == 608
+    histogram_names = set(vllm.VLLM_HISTOGRAM_UNITS)
+    scalar_histogram_rows = sum(
+        record.name.rsplit("_", maxsplit=1)[0] in histogram_names for batch in scalar.scalar_batches for record in batch
+    )
+    structured_bundles = [bundle for batch in structured.histogram_batches for bundle in batch]
+    expected_scalar_rows = len(engines) * len(histogram_names) * (len(bounds) + 2)
+    assert scalar_histogram_rows == expected_scalar_rows
+    assert len(structured_bundles) == len(engines)
+    assert all(len(bundle.histograms) == len(histogram_names) for bundle in structured_bundles)
 
 
 @pytest.mark.parametrize(

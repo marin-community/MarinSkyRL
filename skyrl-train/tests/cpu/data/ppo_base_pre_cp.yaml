@@ -294,6 +294,7 @@ generator:
   enforce_eager: true
   fully_sharded_loras: false
   inference_stats_interval: 1
+  vllm_histogram_format: structured
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls:
