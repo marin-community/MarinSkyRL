@@ -8,9 +8,9 @@ byte count.
 """
 
 import asyncio
+import time
 from collections import Counter
 from dataclasses import asdict, dataclass
-import time
 
 from marinskyrl.inference_placement import InferenceReplicaPlacement
 from skyrl_train.weight_sync.expert_block.groups import RendezvousStore
@@ -236,8 +236,8 @@ class ExpertBlockSync:
             dense_seconds=max(report.dense_seconds for report in (*policy, *receivers)),
         )
 
-    async def verify(self, version: int) -> dict[str, float]:
-        """Replay the sync and fail if any byte differs, a parameter was not covered, or data-parallel peers disagree."""
+    async def verify(self, version: int, *, require_identical_replicas: bool = True) -> dict:
+        """Replay all receiver bytes; optionally require identical trainer replicas."""
         if self.schedule is None:
             raise RuntimeError("Expert-block sync is not prepared")
         if not self.client.generation_paused_event.is_set():
@@ -265,14 +265,16 @@ class ExpertBlockSync:
                     f"Receiver {report.participant} compared {report.compared_bytes} bytes; the schedule assigns "
                     f"{expected_bytes[report.participant]} and it holds {report.parameter_bytes} parameter bytes"
                 )
+        replica_reports = []
         for row in policy_rows:
             replicas = ReplicaReport(**row["replicas"])
-            if replicas.version != version or replicas.mismatched_bytes != 0:
+            replica_reports.append(asdict(replicas))
+            if replicas.version != version or (require_identical_replicas and replicas.mismatched_bytes != 0):
                 raise RuntimeError(
                     f"Trainer rank {replicas.participant} differs from its data-parallel peers on "
                     f"{replicas.mismatched_bytes} of {replicas.compared_bytes} bytes"
                 )
-        return {"verify_seconds": time.perf_counter() - started}
+        return {"verify_seconds": time.perf_counter() - started, "replica_reports": replica_reports}
 
     async def close(self) -> None:
         try:

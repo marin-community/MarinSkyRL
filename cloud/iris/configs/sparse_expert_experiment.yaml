@@ -44,7 +44,7 @@ trainer:
       optimizer_checkpoint_sharding_type: dp_reshardable
       ddp_config:
         overlap_grad_reduce: true
-        overlap_param_gather: true
+        overlap_param_gather: false
         grad_reduce_in_fp32: false
       optimizer_config_kwargs:
         optimizer_cpu_offload: true

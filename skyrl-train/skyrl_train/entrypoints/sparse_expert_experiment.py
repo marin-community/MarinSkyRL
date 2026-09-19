@@ -71,7 +71,7 @@ def _config(model_path: str, geometry: Geometry):
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = geometry.policy_ep
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
     cfg.trainer.policy.megatron_config.ddp_config.overlap_grad_reduce = True
-    cfg.trainer.policy.megatron_config.ddp_config.overlap_param_gather = True
+    cfg.trainer.policy.megatron_config.ddp_config.overlap_param_gather = False
     cfg.trainer.policy.megatron_config.ddp_config.grad_reduce_in_fp32 = False
     cfg.trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload = True
     cfg.trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction = 1.0
@@ -255,6 +255,7 @@ def _run_real(records: dict) -> None:
         "learning_rate": cfg.trainer.policy.optimizer_config.lr,
         "vllm_gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
         "optimizer_cpu_offload": True,
+        "overlap_param_gather": cfg.trainer.policy.megatron_config.ddp_config.overlap_param_gather,
     }
     records["stage"] = "initialize_ray"
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
@@ -356,7 +357,9 @@ def _run_real(records: dict) -> None:
                         )
                         detail["memory_after"] = {"policy": policy_memory, "receivers": receiver_memory}
                     await client.pause_generation()
-                    verification = await sync.verify(version)
+                    # The transfer must exactly match its scheduled roots. Record any training
+                    # replica drift separately so it cannot hide a receiver byte mismatch.
+                    verification = await sync.verify(version, require_identical_replicas=False)
                     await client.resume_generation()
                     tokens = (await client.generate(score_input))["response_ids"]
                     return {

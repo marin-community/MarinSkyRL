@@ -68,6 +68,7 @@ class ReplicaReport:
     version: int
     compared_bytes: int
     mismatched_bytes: int
+    mismatched_by_parameter: dict[str, int] | None = None
 
 
 # Bytes compared per all-reduce. Each chunk is copied to int32 twice, for the group minimum and
@@ -90,14 +91,19 @@ def compare_replicas(
     """
     mismatched = 0
     compared = 0
+    mismatched_by_parameter = {}
     with torch.no_grad():
         for name, source in sources.items():
             words = source.detach().contiguous().view(-1).view(torch.uint8)
+            parameter_mismatched = 0
             for start in range(0, words.numel(), chunk_bytes):
                 low = words.narrow(0, start, min(chunk_bytes, words.numel() - start)).to(torch.int32)
                 high = low.clone()
                 dist.all_reduce(low, op=dist.ReduceOp.MIN, group=groups[name])
                 dist.all_reduce(high, op=dist.ReduceOp.MAX, group=groups[name])
-                mismatched += int(low.ne(high).sum().item())
+                parameter_mismatched += int(low.ne(high).sum().item())
+            if parameter_mismatched:
+                mismatched_by_parameter[name] = parameter_mismatched
+            mismatched += parameter_mismatched
             compared += words.numel()
-    return ReplicaReport(participant, version, compared, mismatched)
+    return ReplicaReport(participant, version, compared, mismatched, mismatched_by_parameter)
