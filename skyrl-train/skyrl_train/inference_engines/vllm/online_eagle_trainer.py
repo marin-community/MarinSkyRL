@@ -22,10 +22,12 @@ from torch import nn
 
 from marinskyrl.resource_locator import join_resource_path
 from marinskyrl.speculative_decoding import (
+    SpeculatorOptimizer,
     SpeculatorTrainingConfig,
     hugging_face_repo_from_source_uri,
     runai_model_uri,
 )
+from skyrl_train.distributed.muon_hybrid import HybridMuon, is_muon_param
 from skyrl_train.hf_model_io import HF_WEIGHT_FILENAME
 from skyrl_train.io import io
 
@@ -40,6 +42,42 @@ _SKYRL_REQUEST_PREFIX = "skyrl-group-"
 ONLINE_EAGLE_TARGET_CONFIG_FILENAME = "target-config.json"
 ONLINE_EAGLE_TARGET_WEIGHTS_FILENAME = "target.safetensors"
 TRAINER_STATE_FILENAME = "trainer_state.pt"
+
+
+def _build_optimizer(
+    model: nn.Module,
+    training: SpeculatorTrainingConfig,
+    *,
+    seed: int,
+) -> torch.optim.Optimizer:
+    named_parameters = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
+    if training.optimizer == SpeculatorOptimizer.ADAMW:
+        return torch.optim.AdamW([parameter for _, parameter in named_parameters], lr=training.learning_rate)
+
+    muon_parameters = [parameter for name, parameter in named_parameters if is_muon_param(name, parameter)]
+    adamw_parameters = [parameter for name, parameter in named_parameters if not is_muon_param(name, parameter)]
+    return HybridMuon(
+        muon_parameters,
+        adamw_parameters,
+        lr=training.learning_rate,
+        muon_lr=training.muon_learning_rate,
+        seed=seed,
+    )
+
+
+def _set_optimizer_learning_rates(
+    optimizer: torch.optim.Optimizer,
+    training: SpeculatorTrainingConfig,
+) -> None:
+    if isinstance(optimizer, HybridMuon):
+        for parameter_group in optimizer.muon.param_groups:
+            parameter_group["lr"] = training.muon_learning_rate
+        if optimizer.adamw is not None:
+            for parameter_group in optimizer.adamw.param_groups:
+                parameter_group["lr"] = training.learning_rate
+        return
+    for parameter_group in optimizer.param_groups:
+        parameter_group["lr"] = training.learning_rate
 
 
 def capture_rank_name(worker_rank: int) -> str:
@@ -760,7 +798,7 @@ class OnlineEagleTrainerRuntime:
         )
         _convert_trainable_parameters(self.model, torch.float32)
         self.trainable = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
-        self.optimizer = torch.optim.AdamW(self.trainable, lr=job.training.learning_rate)
+        self.optimizer = _build_optimizer(self.model, job.training, seed=seed)
         from speculators.losses import resolve_loss_config  # noqa: PLC0415
 
         self.loss_config = resolve_loss_config("kl_div", "fused" if self.device.type == "cuda" else "eager")
@@ -853,8 +891,7 @@ class OnlineEagleTrainerRuntime:
             _refresh_target_owned_weights(self.model, capture_dir)
             incumbent = self._evaluate_serving_weights(capture_dir, holdout_windows, job)
             _move_optimizer_state(self.optimizer, self.device)
-            for parameter_group in self.optimizer.param_groups:
-                parameter_group["lr"] = training.learning_rate
+            _set_optimizer_learning_rates(self.optimizer, training)
             weighted_train_loss = 0.0
             train_loss_tokens = 0.0
             self.model.train()

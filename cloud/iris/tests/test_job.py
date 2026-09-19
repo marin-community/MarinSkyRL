@@ -347,6 +347,55 @@ def test_execute_job_exports_terminal_checkpoint_before_committing_model(tmp_pat
     assert response.model.policy_export_uri.endswith("/global_step_8/policy")
 
 
+def test_execute_job_commits_offline_draft_without_policy_export(tmp_path: Path) -> None:
+    base = _spec(tmp_path)
+    envelope = replace(
+        base,
+        request=replace(
+            base.request,
+            config_yaml=(
+                "entrypoint: generate\n"
+                "generator:\n"
+                "  speculative_decoding:\n"
+                "    training: {max_tokens_per_update: 1000}\n"
+            ),
+        ),
+    )
+    checkpoint_root = Path(envelope.request.output.checkpoint_root.removeprefix("file://")) / "drafts"
+    candidate = checkpoint_root / "draft-step-1"
+    candidate.mkdir(parents=True)
+    completion = {
+        "step": 1,
+        "revision": "draft-step-1",
+        "uri": candidate.as_uri(),
+        "weights_uri": (candidate / "model.safetensors").as_uri(),
+        "weights_size": 7,
+        "completion_uri": (candidate / "complete.json").as_uri(),
+        "source_identity": "initial-draft",
+    }
+    (candidate / "complete.json").write_text(json.dumps(completion))
+    (checkpoint_root / "latest.json").write_text(
+        json.dumps(
+            {
+                "revision": "draft-step-1",
+                "completion_uri": completion["completion_uri"],
+                "source_identity": "initial-draft",
+            }
+        )
+    )
+    resolved = Path(envelope.request.output.resolved_config_uri.removeprefix("file://"))
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text("{}")
+    backend = FakeLaunchBackend(IrisLaunchOutcome(job_id="01KDRAFT", job_state="succeeded", exit_code=0))
+
+    response = execute_job(envelope, backend=backend)
+
+    assert response.model is None
+    assert response.draft_model is not None
+    assert response.draft_model.uri == candidate.as_uri()
+    assert response.draft_model.target_identity == envelope.request.model.identity
+
+
 def test_execute_job_detaches_without_validating_terminal_artifacts(tmp_path: Path) -> None:
     envelope = _spec(tmp_path)
     backend = FakeLaunchBackend(
@@ -672,6 +721,7 @@ def test_cli_reports_launch_state_as_json(
             iris_job_state=iris_job_state,
             runtime=envelope.request.runtime,
             model=None,
+            draft_model=None,
             failure=None,
         )
 
@@ -687,6 +737,7 @@ def test_cli_reports_launch_state_as_json(
         "iris_job_id": iris_job_id,
         "iris_job_state": iris_job_state,
         "model": None,
+        "draft_model": None,
         "run_id": "iceball-test",
         "runtime": {"commit": envelope.request.runtime.commit, "profile": "fsdp"},
         "state": state,

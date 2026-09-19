@@ -297,18 +297,18 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
     execution = spec.execution
     data_sources = [asdict(locator) for locator in (*request.train_data, *request.validation_data)]
     role_plan = request.topology.role_plan
-    policy_claim = role_plan.claim(ModelRoleKind.POLICY)
+    policy_claim = next((claim for claim in role_plan.claims if claim.kind is ModelRoleKind.POLICY), None)
     rollout_claim = role_plan.claim(ModelRoleKind.ROLLOUT)
     reference_claim = next((claim for claim in role_plan.claims if claim.kind is ModelRoleKind.REFERENCE), None)
     critic_claim = next((claim for claim in role_plan.claims if claim.kind is ModelRoleKind.CRITIC), None)
-    colocate_policy_ref = reference_claim is not None and (
-        reference_claim.colocation_group == policy_claim.colocation_group
+    colocate_policy_ref = (
+        policy_claim is not None
+        and reference_claim is not None
+        and (reference_claim.colocation_group == policy_claim.colocation_group)
     )
     role_overrides = [
         f"++trainer.placement.colocate_all={str(role_plan.colocate_all).lower()}",
         f"++trainer.placement.colocate_policy_ref={str(colocate_policy_ref).lower()}",
-        f"++trainer.placement.policy_num_nodes={policy_claim.num_nodes}",
-        f"++trainer.placement.policy_num_gpus_per_node={policy_claim.gpus_per_node}",
         f"++generator.num_inference_engines={rollout_claim.replicas}",
         f"++generator.inference_engine_tensor_parallel_size={rollout_claim.tensor_parallel_size}",
         f"++generator.inference_engine_pipeline_parallel_size={rollout_claim.pipeline_parallel_size}",
@@ -319,6 +319,13 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
         f"++trainer.micro_train_batch_size_per_gpu={role_plan.micro_train_batch_size_per_gpu}",
         f"++generator.n_samples_per_prompt={role_plan.n_samples_per_prompt}",
     ]
+    if policy_claim is not None:
+        role_overrides.extend(
+            (
+                f"++trainer.placement.policy_num_nodes={policy_claim.num_nodes}",
+                f"++trainer.placement.policy_num_gpus_per_node={policy_claim.gpus_per_node}",
+            )
+        )
     if reference_claim is not None:
         role_overrides.extend(
             (
@@ -923,8 +930,7 @@ def _validate_rl_config_topology(args: argparse.Namespace) -> None:
         return
     plan = derive_role_plan(config)
     checkpoint_export = _is_checkpoint_export(args)
-    policy_claim = plan.claim(ModelRoleKind.POLICY)
-    expected_nodes = policy_claim.num_nodes if checkpoint_export else derive_num_nodes(plan)
+    expected_nodes = plan.claim(ModelRoleKind.POLICY).num_nodes if checkpoint_export else derive_num_nodes(plan)
     if args.num_nodes != expected_nodes:
         topology_description = (
             f"policy={expected_nodes}"
@@ -2023,6 +2029,18 @@ def load_config_terminal_bench_data(rl_config_path: str) -> list[str]:
     return values
 
 
+def load_config_data_kind(rl_config_path: str) -> str:
+    """Return the input representation used by the RL config."""
+    raw = _load_rl_config_yaml(rl_config_path)
+    data = raw.get("data")
+    if not isinstance(data, dict):
+        return "tasks"
+    kind = data.get("kind", "tasks")
+    if kind not in ("tasks", "parquet"):
+        raise ValueError("data.kind must be 'tasks' or 'parquet'")
+    return kind
+
+
 def _job_scope_fr_dump_path(prefix: str, job_name: str) -> str:
     """Rewrite a JOB-SCOPED NCCL flight-recorder dump path so its slug segment is the
     ACTUAL job name, e.g. ``/tmp/fr_dumps/<slug>/nccl_fr_rank`` -> ``/tmp/fr_dumps/
@@ -2318,6 +2336,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         controller_cmd.extend(["--rendezvous-timeout", str(args.rendezvous_timeout)])
     if args.driver_liveness_timeout is not None:
         controller_cmd.extend(["--driver-liveness-timeout", str(args.driver_liveness_timeout)])
+    controller_cmd.extend(["--data-kind", load_config_data_kind(args.rl_config)])
     # Per-node task-dataset staging. The training driver resolves these selectors only
     # on rank 0, while Ray may schedule rollout and evaluation workers on any node.
     # Forward both roles to the controller so every pod has identical task-local data.

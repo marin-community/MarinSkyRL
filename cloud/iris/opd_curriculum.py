@@ -381,6 +381,7 @@ def _result_from_dict(value: Mapping[str, Any]) -> StageResult:
         iris_job_state=response_value.get("iris_job_state"),
         runtime=job_spec(value["resolved_job"]).request.runtime,
         model=SkyRLModel(**model_value) if model_value is not None else None,
+        draft_model=None,
         failure=response_value.get("failure"),
     )
     return StageResult(

@@ -96,6 +96,9 @@ def _role_plan_values(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _core_model_claims(config: dict[str, Any], values: dict[str, Any]) -> list[ModelRoleClaim]:
+    if _optional_at(config, "entrypoint") == "generate":
+        return []
+
     placement = _at(config, "trainer.placement")
     use_reference = bool(_at(config, "trainer.algorithm.use_kl_loss")) or bool(
         _optional_at(config, "trainer.algorithm.use_kl_in_reward", False)
@@ -170,9 +173,18 @@ def _rollout_claim(config: dict[str, Any], values: dict[str, Any]) -> ModelRoleC
     if not isinstance(rollout_backend, str) or not rollout_backend.strip():
         raise ValueError("generator.backend must be a non-empty string")
     rollout_is_local = values["run_engines_locally"]
+    rollout_gpus = (
+        values["num_inference_engines"]
+        * values["inference_engine_tensor_parallel_size"]
+        * values["inference_engine_pipeline_parallel_size"]
+        * values["inference_engine_data_parallel_size"]
+    )
+    evaluation_only = _optional_at(config, "entrypoint") == "generate"
     rollout_nodes = (
         values["policy_num_nodes"]
         if rollout_is_local and values["colocate_all"]
+        else (rollout_gpus + values["policy_num_gpus_per_node"] - 1) // values["policy_num_gpus_per_node"]
+        if rollout_is_local and evaluation_only
         else values["num_inference_engines"]
         if rollout_is_local
         else 0
@@ -194,9 +206,6 @@ def _rollout_claim(config: dict[str, Any], values: dict[str, Any]) -> ModelRoleC
         expert_parallel_size=values["inference_engine_expert_parallel_size"],
     )
     if claim.execution is RoleExecution.LOCAL:
-        rollout_gpus = (
-            claim.replicas * claim.tensor_parallel_size * claim.pipeline_parallel_size * claim.data_parallel_size
-        )
         rollout_capacity = claim.num_nodes * claim.gpus_per_node
         if values["colocate_all"] and rollout_gpus != rollout_capacity:
             raise ValueError(
@@ -292,14 +301,26 @@ def _draft_trainer_claims(config: dict[str, Any], values: dict[str, Any]) -> tup
     speculative_decoding = _optional_at(config, "generator.speculative_decoding")
     if not isinstance(speculative_decoding, dict) or speculative_decoding.get("training") is None:
         return ()
+    evaluation_only = _optional_at(config, "entrypoint") == "generate"
+    rollout_nodes = (
+        values["num_inference_engines"]
+        * values["inference_engine_tensor_parallel_size"]
+        * values["inference_engine_pipeline_parallel_size"]
+        * values["inference_engine_data_parallel_size"]
+        + values["policy_num_gpus_per_node"]
+        - 1
+    ) // values["policy_num_gpus_per_node"]
     return (
         ModelRoleClaim(
             role_id=ModelRoleKind.DRAFT_TRAINER.value,
             kind=ModelRoleKind.DRAFT_TRAINER,
             execution=RoleExecution.LOCAL,
             backend="torch",
-            colocation_group=ModelRoleKind.DRAFT_TRAINER.value,
-            num_nodes=1,
+            # Evaluation-only distillation tears down vLLM before training, so
+            # the one-GPU actor reuses the rollout bundle instead of reserving
+            # an otherwise idle eighth GPU node for the entire capture.
+            colocation_group=ModelRoleKind.ROLLOUT.value if evaluation_only else ModelRoleKind.DRAFT_TRAINER.value,
+            num_nodes=rollout_nodes if evaluation_only else 1,
             gpus_per_node=values["policy_num_gpus_per_node"],
             replicas=1,
             tensor_parallel_size=1,
@@ -422,7 +443,6 @@ def build_job_spec(
     config: dict[str, Any] = yaml.safe_load(config_yaml)
     plan = derive_role_plan(config)
     num_nodes = derive_num_nodes(plan)
-    policy_claim = plan.claim(ModelRoleKind.POLICY)
     profile = derive_runtime_profile(config)
     source = launcher_source or resolve_launcher_source()
 
@@ -446,7 +466,7 @@ def build_job_spec(
             validation_data=tuple(data_source(d) for d in (validation_data or [])),
             topology=SkyRLTopology(
                 num_nodes=num_nodes,
-                gpus_per_node=policy_claim.gpus_per_node,
+                gpus_per_node=plan.bundles[0].gpus_per_node,
                 gpu_variant=gpu_variant,
                 role_plan=plan,
             ),

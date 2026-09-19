@@ -111,6 +111,40 @@ def test_standard_entrypoint_identity_survives_python_module_execution(monkeypat
     assert client.engines == []
 
 
+def test_generate_entrypoint_identity_survives_python_module_execution(monkeypatch):
+    pytest.importorskip("hydra")
+    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
+    from skyrl_train.entrypoints import main_generate
+
+    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
+
+    monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **_kwargs: [])
+    monkeypatch.setattr(main_generate.EvalOnlyEntrypoint, "__module__", "__main__")
+
+    cfg = get_default_config()
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.generator.speculative_decoding = {
+        "method": "eagle3",
+        "model": {
+            "source_uri": "hf://laion/snowball-64k-eagle3-draft-r2egym",
+            "source_identity": "4bdb47c08e5b5190bea3c7a93c3e14470230e469",
+        },
+        "num_speculative_tokens": 3,
+        "training": {"interval_steps": 1},
+    }
+
+    experiment = object.__new__(main_generate.EvalOnlyEntrypoint)
+    experiment.cfg = cfg
+    experiment.colocate_pg = None
+    experiment.tokenizer = None
+
+    client = experiment.create_inference_engine_client()
+
+    assert client.backend == "vllm"
+    assert client.engines == []
+
+
 def test_online_eagle_training_uses_vllm_synchronous_scheduling(monkeypatch):
     """SkyRL's async actor API must not turn on vLLM's async scheduler for capture."""
     pytest.importorskip("hydra")

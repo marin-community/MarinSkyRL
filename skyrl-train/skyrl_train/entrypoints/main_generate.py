@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import hydra
+from omegaconf import OmegaConf
 import ray
 from loguru import logger
 from omegaconf import DictConfig
@@ -15,7 +16,18 @@ from skyrl_train.entrypoints.main_base import (
     BasePPOExp,
     config_dir,
 )
+from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
+from marinskyrl.speculative_decoding import (
+    EVALUATION_ENTRYPOINT,
+    SpeculativeDecodingConfig,
+    parse_speculative_decoding_config,
+)
+from skyrl_train.draft_trainer import DraftUpdateRequest, create_draft_trainer
 from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest, lora_disk_load_request
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
+from skyrl_train.inference_engines.vllm.online_eagle_trainer import OnlineEagleCaptureConfig, OnlineEagleUpdateResult
+from skyrl_train.io import io
 from skyrl_train.utils.utils import validate_generator_cfg, initialize_ray
 from skyrl_train.evaluate import evaluate
 from skyrl_train.utils.trainer_utils import build_dataloader
@@ -40,7 +52,106 @@ async def load_initial_policy_adapter(inference_engine_client: PolicyAdapterClie
     await inference_engine_client.update_named_weights(lora_disk_load_request(str(path)))
 
 
+def _offline_speculative_decoding_config(cfg: DictConfig) -> SpeculativeDecodingConfig | None:
+    raw = cfg.generator.get("speculative_decoding")
+    return parse_speculative_decoding_config(
+        None if raw is None else OmegaConf.to_container(raw, resolve=True),
+        backend=cfg.generator.backend,
+        run_engines_locally=cfg.generator.run_engines_locally,
+        entrypoint=EVALUATION_ENTRYPOINT,
+        colocate_all=cfg.trainer.placement.colocate_all,
+        num_inference_engines=cfg.generator.num_inference_engines,
+        tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
+        pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
+        async_engine=cfg.generator.async_engine,
+        engine_init_kwargs=OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
+    )
+
+
+def _active_capture_results(results: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    return [item for engine in results for item in engine if item.get("active", False)]
+
+
+async def _begin_offline_eagle_capture(
+    inference_engine_client: InferenceEngineClient,
+    cfg: DictConfig,
+    speculative_decoding: SpeculativeDecodingConfig | None,
+) -> str | None:
+    if speculative_decoding is None or speculative_decoding.training is None:
+        return None
+    if not is_cloud_uri(cfg.trainer.ckpt_path):
+        raise ValueError("Offline EAGLE distillation requires trainer.ckpt_path to be cloud-backed")
+    capture_uri = join_resource_path(cfg.trainer.ckpt_path, "drafts", "captures", "offline-step-1")
+    if await asyncio.to_thread(io.exists, capture_uri):
+        await asyncio.to_thread(io.remove, capture_uri)
+    source_identity = cfg.trainer.policy.model.get("source_identity")
+    if not source_identity:
+        raise ValueError("Offline EAGLE distillation requires trainer.policy.model.source_identity")
+    capture = OnlineEagleCaptureConfig(
+        step=1,
+        max_tokens=speculative_decoding.training.max_tokens_per_update,
+        max_window_tokens=speculative_decoding.training.max_window_tokens,
+        target_revision=str(source_identity),
+        draft_revision=speculative_decoding.model.source_identity,
+        reserved_gpu_memory_gib=speculative_decoding.training.reserved_gpu_memory_gib,
+    )
+    results = await inference_engine_client.begin_online_eagle_capture(capture.to_mapping())
+    if not _active_capture_results(results):
+        raise RuntimeError("Offline EAGLE capture did not start on any rollout rank")
+    return capture_uri
+
+
+async def _seal_offline_eagle_capture(
+    inference_engine_client: InferenceEngineClient,
+    capture_uri: str,
+) -> int:
+    manifests = await inference_engine_client.seal_online_eagle_capture(capture_uri)
+    active = _active_capture_results(manifests)
+    if not active:
+        raise RuntimeError("Offline EAGLE capture did not publish any rank manifests")
+    return sum(int(item.get("captured_rows", 0)) for item in active)
+
+
+async def _release_inference_engines(inference_engine_client: InferenceEngineClient) -> None:
+    await inference_engine_client.teardown()
+    for engine in inference_engine_client.engines:
+        if isinstance(engine, RayWrappedInferenceEngine):
+            ray.kill(engine.inference_engine_actor, no_restart=True)
+
+
+async def _train_offline_eagle_draft(
+    cfg: DictConfig,
+    capture_uri: str,
+    speculative_decoding: SpeculativeDecodingConfig,
+) -> OnlineEagleUpdateResult:
+    assert speculative_decoding.training is not None
+    checkpoint_root = join_resource_path(cfg.trainer.ckpt_path, "drafts")
+    draft_trainer = create_draft_trainer(
+        initial_model=speculative_decoding.model,
+        checkpoint_root=checkpoint_root,
+    )
+    try:
+        update = await draft_trainer.update.remote(
+            DraftUpdateRequest(
+                step=1,
+                capture_uri=capture_uri,
+                target_revision=str(cfg.trainer.policy.model.source_identity),
+                num_speculative_tokens=speculative_decoding.num_speculative_tokens,
+                seed=int(cfg.trainer.seed),
+                training=speculative_decoding.training,
+            )
+        )
+    finally:
+        ray.kill(draft_trainer, no_restart=True)
+    if not isinstance(update, OnlineEagleUpdateResult) or not update.accepted or update.candidate_uri is None:
+        error = update.error if isinstance(update, OnlineEagleUpdateResult) else type(update).__name__
+        raise RuntimeError(f"Offline EAGLE draft update was not accepted: {error}")
+    return update
+
+
 class EvalOnlyEntrypoint(BasePPOExp):
+    entrypoint_name = EVALUATION_ENTRYPOINT
+
     def get_train_dataset(self):
         """Override to avoid requiring a train dataset for eval-only runs."""
         return None
@@ -53,13 +164,36 @@ class EvalOnlyEntrypoint(BasePPOExp):
         await load_initial_policy_adapter(inference_engine_client, self.cfg)
         trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
 
-        results: dict[str, Any] = await evaluate(
-            eval_dataloader=build_dataloader(self.cfg, self.eval_dataset, is_train=False),
-            trajectory_runner=trajectory_runner,
-            cfg=self.cfg,
-            global_step=None,
-            tokenizer=self.tokenizer,
-        )
+        speculative_decoding = _offline_speculative_decoding_config(self.cfg)
+        capture_uri = await _begin_offline_eagle_capture(inference_engine_client, self.cfg, speculative_decoding)
+
+        try:
+            results: dict[str, Any] = await evaluate(
+                eval_dataloader=build_dataloader(self.cfg, self.eval_dataset, is_train=False),
+                trajectory_runner=trajectory_runner,
+                cfg=self.cfg,
+                global_step=None,
+                tokenizer=self.tokenizer,
+            )
+            if capture_uri is not None:
+                results["speculator/sealed_rows"] = float(
+                    await _seal_offline_eagle_capture(inference_engine_client, capture_uri)
+                )
+        finally:
+            if capture_uri is not None:
+                await _release_inference_engines(inference_engine_client)
+
+        if capture_uri is not None:
+            assert speculative_decoding is not None and speculative_decoding.training is not None
+            update = await _train_offline_eagle_draft(self.cfg, capture_uri, speculative_decoding)
+            results.update(
+                {
+                    "speculator/candidate_holdout_agreement": update.candidate_holdout_agreement,
+                    "speculator/candidate_holdout_loss": update.candidate_holdout_loss,
+                    "speculator/train_loss": update.train_loss,
+                    "speculator/train_duration_seconds": update.duration_seconds,
+                }
+            )
 
         tracker = self.get_tracker()
         tracker.log(results, step=0, commit=True)

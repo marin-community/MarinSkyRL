@@ -232,6 +232,7 @@ def test_two_stage_curriculum_hands_off_checkpoint_and_runs_retention_evaluation
                 checkpoint_root=spec.request.output.checkpoint_root,
                 terminal_manifest_uri=spec.request.output.terminal_manifest_uri,
             ),
+            draft_model=None,
             failure=None,
         )
 

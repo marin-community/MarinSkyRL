@@ -114,7 +114,7 @@ def _launcher_source() -> LauncherSource:
 
 def _build_basic_spec(tmp_path, **kwargs):
     """Call build_job_spec with minimal realistic inputs."""
-    config = _make_config(**kwargs.pop("config_overrides", {}))
+    config = kwargs.pop("config", None) or _make_config(**kwargs.pop("config_overrides", {}))
     config_path = _write_config(tmp_path, config)
     defaults = dict(
         config_path=config_path,
@@ -259,6 +259,49 @@ class TestRolePlanAccounting:
         assert draft_trainer.colocation_group == "draft_trainer"
         assert plan.bundles[-1].role_ids == ("draft_trainer",)
         assert derive_num_nodes(plan) == 6
+
+    def test_offline_draft_training_reuses_rollout_nodes_after_generation(self):
+        config = _make_config(
+            colocate_all=False,
+            policy_num_nodes=1,
+            policy_num_gpus_per_node=8,
+            num_inference_engines=1,
+            tp=1,
+            online_draft_training=True,
+            use_reference=False,
+        )
+        config["entrypoint"] = "generate"
+        config["generator"]["inference_engine_data_parallel_size"] = 64
+        config["generator"]["inference_engine_expert_parallel_size"] = 64
+
+        plan = derive_role_plan(config)
+
+        draft_trainer = plan.claim("draft_trainer")
+        assert draft_trainer.colocation_group == "rollout"
+        assert [(bundle.name, bundle.role_ids, bundle.num_nodes) for bundle in plan.bundles] == [
+            ("rollout", ("rollout", "draft_trainer"), 8)
+        ]
+        assert plan.colocate_all is False
+        assert derive_num_nodes(plan) == 8
+
+    def test_generate_only_job_spec_uses_rollout_bundle_width(self, tmp_path):
+        config = _make_config(
+            colocate_all=False,
+            policy_num_nodes=1,
+            policy_num_gpus_per_node=8,
+            num_inference_engines=1,
+            tp=1,
+            online_draft_training=True,
+            use_reference=False,
+        )
+        config["entrypoint"] = "generate"
+        config["generator"]["inference_engine_data_parallel_size"] = 64
+        config["generator"]["inference_engine_expert_parallel_size"] = 64
+
+        spec = _build_basic_spec(tmp_path, config=config)
+
+        assert spec.request.topology.num_nodes == 8
+        assert spec.request.topology.gpus_per_node == 8
 
     def test_policy_reference_colocation_and_rollout_resolve_to_ten_nodes(self):
         plan = derive_role_plan(
@@ -590,6 +633,32 @@ class TestBuildJobSpec:
 
         assert parsed.request.topology.role_plan.claim("reference").colocation_group == "all"
         assert parsed.request.topology.role_plan.bundles[0].role_ids == ("policy", "reference", "rollout")
+
+    def test_scalar_evaluation_plan_accounts_for_data_parallel_rollout_gpus(self, tmp_path):
+        spec = _build_basic_spec(tmp_path)
+        payload = asdict(spec)
+        payload["request"]["topology"]["num_nodes"] = 8
+        payload["request"]["topology"]["role_plan"] = {
+            "colocate_all": False,
+            "policy_num_nodes": 1,
+            "policy_num_gpus_per_node": 8,
+            "num_inference_engines": 1,
+            "inference_engine_tensor_parallel_size": 1,
+            "inference_engine_pipeline_parallel_size": 1,
+            "inference_engine_data_parallel_size": 64,
+            "inference_engine_expert_parallel_size": 64,
+            "evaluation_only": True,
+            "train_batch_size": 64,
+            "policy_mini_batch_size": 64,
+            "micro_train_batch_size_per_gpu": 1,
+            "n_samples_per_prompt": 16,
+        }
+
+        plan = job_spec(payload).request.topology.role_plan
+
+        assert [claim.role_id for claim in plan.claims] == ["rollout"]
+        assert plan.claim("rollout").data_parallel_size == 64
+        assert plan.bundles[0].num_nodes == 8
 
     def test_round_trips_with_validation_data_and_overrides(self, tmp_path):
         spec = _build_basic_spec(

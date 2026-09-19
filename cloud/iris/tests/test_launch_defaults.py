@@ -403,6 +403,18 @@ def test_task_command_stages_training_and_validation_selectors_on_every_node(tmp
     assert options["--val-data"] == [json.dumps([val_selector])]
 
 
+def test_task_command_preserves_parquet_data_kind_for_node_staging(tmp_path):
+    args = _args(tmp_path, "opencode", ["--val-data", json.dumps(["s3://bucket/validation.parquet"])])
+    with Path(args.rl_config).open("a") as config_file:
+        config_file.write("data:\n  kind: parquet\n")
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert options["--data-kind"] == ["parquet"]
+
+
 def test_task_command_stages_terminal_bench_sidechannel_on_every_node(tmp_path):
     selector = "fixture-org/nemotron-ultra-swe@immutable::train"
     args = _args(tmp_path, "opencode")

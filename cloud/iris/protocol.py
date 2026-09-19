@@ -157,7 +157,9 @@ class SkyRLRolePlan:
     def colocate_all(self) -> bool:
         """Whether the policy-side roles and rollout share one bundle."""
         rollout = self.claim(ModelRoleKind.ROLLOUT)
-        if rollout.execution is RoleExecution.REMOTE:
+        if rollout.execution is RoleExecution.REMOTE or not any(
+            claim.kind is ModelRoleKind.POLICY for claim in self.claims
+        ):
             return False
         groups = {
             claim.colocation_group
@@ -242,6 +244,16 @@ class SkyRLModel:
 
 
 @dataclass(frozen=True)
+class SkyRLDraftModel:
+    uri: str
+    revision: str
+    source_identity: str
+    target_identity: str
+    checkpoint_root: str
+    terminal_manifest_uri: str
+
+
+@dataclass(frozen=True)
 class SkyRLLaunchResponse:
     run_id: str
     attempt_id: str
@@ -250,6 +262,7 @@ class SkyRLLaunchResponse:
     iris_job_state: str | None
     runtime: RuntimeIdentity
     model: SkyRLModel | None
+    draft_model: SkyRLDraftModel | None
     failure: str | None
 
 
@@ -329,70 +342,94 @@ def _legacy_role_plan(value: dict[str, Any]) -> SkyRLRolePlan:
     gpus_per_node = int(value["policy_num_gpus_per_node"])
     rollout_replicas = int(value["num_inference_engines"])
     colocate_all = bool(value["colocate_all"])
+    evaluation_only = bool(value.get("evaluation_only", False))
+    rollout_tp = int(value["inference_engine_tensor_parallel_size"])
+    rollout_pp = int(value.get("inference_engine_pipeline_parallel_size", 1))
+    rollout_dp = int(value.get("inference_engine_data_parallel_size", 1))
+    rollout_ep = int(value.get("inference_engine_expert_parallel_size", 1))
+    rollout_gpus = rollout_replicas * rollout_tp * rollout_pp * rollout_dp
+    rollout_nodes = (rollout_gpus + gpus_per_node - 1) // gpus_per_node
     policy_group = "all" if colocate_all else ModelRoleKind.POLICY.value
     rollout_group = "all" if colocate_all else ModelRoleKind.ROLLOUT.value
+    model_claims = (
+        ()
+        if evaluation_only
+        else (
+            ModelRoleClaim(
+                role_id=ModelRoleKind.POLICY.value,
+                kind=ModelRoleKind.POLICY,
+                execution=RoleExecution.LOCAL,
+                backend="legacy",
+                colocation_group=policy_group,
+                num_nodes=policy_nodes,
+                gpus_per_node=gpus_per_node,
+                replicas=policy_nodes * gpus_per_node,
+                tensor_parallel_size=1,
+                pipeline_parallel_size=1,
+                data_parallel_size=policy_nodes * gpus_per_node,
+                expert_parallel_size=1,
+            ),
+            ModelRoleClaim(
+                role_id=ModelRoleKind.REFERENCE.value,
+                kind=ModelRoleKind.REFERENCE,
+                execution=RoleExecution.LOCAL,
+                backend="legacy",
+                colocation_group=policy_group,
+                num_nodes=policy_nodes,
+                gpus_per_node=gpus_per_node,
+                replicas=policy_nodes * gpus_per_node,
+                tensor_parallel_size=1,
+                pipeline_parallel_size=1,
+                data_parallel_size=policy_nodes * gpus_per_node,
+                expert_parallel_size=1,
+            ),
+        )
+    )
     claims = (
-        ModelRoleClaim(
-            role_id=ModelRoleKind.POLICY.value,
-            kind=ModelRoleKind.POLICY,
-            execution=RoleExecution.LOCAL,
-            backend="legacy",
-            colocation_group=policy_group,
-            num_nodes=policy_nodes,
-            gpus_per_node=gpus_per_node,
-            replicas=policy_nodes * gpus_per_node,
-            tensor_parallel_size=1,
-            pipeline_parallel_size=1,
-            data_parallel_size=policy_nodes * gpus_per_node,
-            expert_parallel_size=1,
-        ),
-        ModelRoleClaim(
-            role_id=ModelRoleKind.REFERENCE.value,
-            kind=ModelRoleKind.REFERENCE,
-            execution=RoleExecution.LOCAL,
-            backend="legacy",
-            colocation_group=policy_group,
-            num_nodes=policy_nodes,
-            gpus_per_node=gpus_per_node,
-            replicas=policy_nodes * gpus_per_node,
-            tensor_parallel_size=1,
-            pipeline_parallel_size=1,
-            data_parallel_size=policy_nodes * gpus_per_node,
-            expert_parallel_size=1,
-        ),
+        *model_claims,
         ModelRoleClaim(
             role_id=ModelRoleKind.ROLLOUT.value,
             kind=ModelRoleKind.ROLLOUT,
             execution=RoleExecution.LOCAL,
             backend="legacy",
             colocation_group=rollout_group,
-            num_nodes=policy_nodes if colocate_all else rollout_replicas,
+            num_nodes=policy_nodes if colocate_all else rollout_nodes,
             gpus_per_node=gpus_per_node,
             replicas=rollout_replicas,
-            tensor_parallel_size=int(value["inference_engine_tensor_parallel_size"]),
-            pipeline_parallel_size=1,
-            data_parallel_size=1,
-            expert_parallel_size=1,
+            tensor_parallel_size=rollout_tp,
+            pipeline_parallel_size=rollout_pp,
+            data_parallel_size=rollout_dp,
+            expert_parallel_size=rollout_ep,
         ),
     )
-    bundles = (
-        RoleBundle(
-            name=policy_group,
-            role_ids=(
-                (ModelRoleKind.POLICY.value, ModelRoleKind.REFERENCE.value, ModelRoleKind.ROLLOUT.value)
-                if colocate_all
-                else (ModelRoleKind.POLICY.value, ModelRoleKind.REFERENCE.value)
+    if evaluation_only:
+        bundles = (
+            RoleBundle(
+                name=rollout_group,
+                role_ids=(ModelRoleKind.ROLLOUT.value,),
+                num_nodes=rollout_nodes,
+                gpus_per_node=gpus_per_node,
             ),
-            num_nodes=policy_nodes,
-            gpus_per_node=gpus_per_node,
-        ),
-    )
-    if not colocate_all:
+        )
+    else:
+        bundles = (
+            RoleBundle(
+                name=policy_group,
+                role_ids=(
+                    (ModelRoleKind.POLICY.value, ModelRoleKind.REFERENCE.value, ModelRoleKind.ROLLOUT.value)
+                    if colocate_all
+                    else (ModelRoleKind.POLICY.value, ModelRoleKind.REFERENCE.value)
+                ),
+                num_nodes=policy_nodes,
+                gpus_per_node=gpus_per_node,
+            ),
+        )
+    if not evaluation_only and not colocate_all:
         bundles += (
             RoleBundle(
                 name=rollout_group,
                 role_ids=(ModelRoleKind.ROLLOUT.value,),
-                num_nodes=rollout_replicas,
+                num_nodes=rollout_nodes,
                 gpus_per_node=gpus_per_node,
             ),
         )

@@ -110,6 +110,16 @@ def test_materialized_speculator_uses_node_local_model_without_hub_resolution() 
     }
 
 
+def test_offline_speculator_training_is_supported_by_generate_entrypoint(tmp_path: Path) -> None:
+    config = _base_config()
+    config["entrypoint"] = "generate"
+
+    parsed = parse_rl_config(str(_write_config(tmp_path, config)))
+
+    assert parsed.entrypoint == "skyrl_train.entrypoints.main_generate"
+    assert parsed.generator["speculative_decoding"]["training"] is not None
+
+
 def test_null_speculator_keeps_the_default_disabled() -> None:
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         cfg = compose(config_name="ppo_base_config")

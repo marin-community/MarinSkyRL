@@ -18,6 +18,7 @@ _HF_SOURCE_SCHEME = "hf"
 _HF_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 _DRAFT_MODEL_ROOT = "/tmp/marinskyrl-draft-models"
 STANDARD_TRAINING_ENTRYPOINT = "skyrl_train.entrypoints.main_base"
+EVALUATION_ENTRYPOINT = "skyrl_train.entrypoints.main_generate"
 
 
 def is_hugging_face_commit(value: str) -> bool:
@@ -33,6 +34,13 @@ class SpeculativeDecodingMethod(StrEnum):
 
 class SpeculativeDecodingConfigError(ValueError):
     """A managed speculative-decoding configuration is invalid."""
+
+
+class SpeculatorOptimizer(StrEnum):
+    """Optimizers supported by the speculator trainer."""
+
+    ADAMW = "adamw"
+    HYBRID_MUON = "hybrid_muon"
 
 
 def _mapping(value: object, field: str) -> Mapping[str, Any]:
@@ -174,7 +182,9 @@ class SpeculatorTrainingConfig:
     holdout_fraction: float = 0.25
     min_holdout_sequences: int = 3
     epochs_per_update: int = 1
+    optimizer: SpeculatorOptimizer = SpeculatorOptimizer.ADAMW
     learning_rate: float = 5e-5
+    muon_learning_rate: float = 0.02
     max_validation_loss_increase: float = 0
     max_validation_agreement_decrease: float = 0
     reserved_gpu_memory_gib: float = 8
@@ -218,8 +228,12 @@ class SpeculatorTrainingConfig:
             epochs_per_update=_positive_integer(
                 mapping.get("epochs_per_update", defaults.epochs_per_update), f"{context}.epochs_per_update"
             ),
+            optimizer=SpeculatorOptimizer(mapping.get("optimizer", defaults.optimizer)),
             learning_rate=_positive_number(
                 mapping.get("learning_rate", defaults.learning_rate), f"{context}.learning_rate"
+            ),
+            muon_learning_rate=_positive_number(
+                mapping.get("muon_learning_rate", defaults.muon_learning_rate), f"{context}.muon_learning_rate"
             ),
             max_validation_loss_increase=_nonnegative_number(
                 mapping.get("max_validation_loss_increase", defaults.max_validation_loss_increase),
@@ -318,7 +332,7 @@ def parse_speculative_decoding_config(
         raise SpeculativeDecodingConfigError(f"{context} requires generator.run_engines_locally=true")
     if colocate_all:
         raise SpeculativeDecodingConfigError(f"{context} requires trainer.placement.colocate_all=false")
-    if config.training is not None and entrypoint != STANDARD_TRAINING_ENTRYPOINT:
+    if config.training is not None and entrypoint not in {STANDARD_TRAINING_ENTRYPOINT, EVALUATION_ENTRYPOINT}:
         raise SpeculativeDecodingConfigError(f"{context}.training is not supported by entrypoint {entrypoint!r}")
     if config.training is not None and num_inference_engines != 1:
         raise SpeculativeDecodingConfigError(f"{context}.training requires generator.num_inference_engines=1")

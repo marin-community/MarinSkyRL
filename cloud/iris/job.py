@@ -12,10 +12,13 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Protocol
 
+import yaml
+
 from iris.client.client import JobFailedError
 
 from cloud.iris.artifacts import (
     fs_and_path,
+    read_json,
     relative_object_key,
     terminal_checkpoint_step,
     write_json,
@@ -33,6 +36,7 @@ from cloud.iris.protocol import (
     SkyRLJobSpec,
     SkyRLLaunchResponse,
     SkyRLLaunchRequest,
+    SkyRLDraftModel,
     SkyRLModel,
     job_spec,
 )
@@ -95,6 +99,7 @@ def _launch_response(
     *,
     outcome: IrisLaunchOutcome | None = None,
     model: SkyRLModel | None = None,
+    draft_model: SkyRLDraftModel | None = None,
     failure: str | None = None,
 ) -> SkyRLLaunchResponse:
     return SkyRLLaunchResponse(
@@ -105,7 +110,46 @@ def _launch_response(
         iris_job_state=outcome.job_state if outcome else None,
         runtime=spec.request.runtime,
         model=model,
+        draft_model=draft_model,
         failure=failure,
+    )
+
+
+def _is_draft_distillation(request: SkyRLLaunchRequest) -> bool:
+    config = yaml.safe_load(request.config_yaml)
+    if not isinstance(config, dict) or config.get("entrypoint") != "generate":
+        return False
+    generator = config.get("generator")
+    if not isinstance(generator, dict):
+        return False
+    speculative = generator.get("speculative_decoding")
+    return isinstance(speculative, dict) and speculative.get("training") is not None
+
+
+def _draft_model(request: SkyRLLaunchRequest) -> SkyRLDraftModel:
+    checkpoint_root = f"{request.output.checkpoint_root.rstrip('/')}/drafts"
+    latest_uri = f"{checkpoint_root}/latest.json"
+    latest = read_json(latest_uri)
+    if latest is None:
+        raise ValueError(f"Successful draft distillation did not publish {latest_uri}")
+    completion_uri = latest.get("completion_uri")
+    if not isinstance(completion_uri, str):
+        raise ValueError(f"Draft latest pointer has no completion_uri: {latest_uri}")
+    completion = read_json(completion_uri)
+    if completion is None:
+        raise ValueError(f"Draft completion manifest does not exist: {completion_uri}")
+    uri = completion.get("uri")
+    revision = completion.get("revision")
+    source_identity = completion.get("source_identity")
+    if not all(isinstance(value, str) and value for value in (uri, revision, source_identity)):
+        raise ValueError(f"Draft completion manifest is incomplete: {completion_uri}")
+    return SkyRLDraftModel(
+        uri=uri,
+        revision=revision,
+        source_identity=source_identity,
+        target_identity=request.model.identity,
+        checkpoint_root=checkpoint_root,
+        terminal_manifest_uri=request.output.terminal_manifest_uri,
     )
 
 
@@ -175,13 +219,16 @@ def execute_job(
             return _record_failed_attempt(spec, outcome, f"Iris job reached {outcome.job_state}")
         if mode is LaunchMode.DETACH:
             return _launch_response(spec, AttemptState.SUBMITTED, outcome=outcome)
-        try:
-            active_backend.export_terminal_policy(spec, config_file.name)
-        except (OSError, subprocess.CalledProcessError, ValueError) as error:
-            return _record_failed_attempt(spec, outcome, f"Terminal policy export failed: {error}")
+        draft_distillation = _is_draft_distillation(request)
+        if not draft_distillation:
+            try:
+                active_backend.export_terminal_policy(spec, config_file.name)
+            except (OSError, subprocess.CalledProcessError, ValueError) as error:
+                return _record_failed_attempt(spec, outcome, f"Terminal policy export failed: {error}")
 
     try:
-        model = _policy_export(request)
+        model = None if draft_distillation else _policy_export(request)
+        draft_model = _draft_model(request) if draft_distillation else None
     except ValueError as error:
         return _record_failed_attempt(spec, outcome, str(error))
     if not _path_exists(request.output.resolved_config_uri):
@@ -190,7 +237,13 @@ def execute_job(
             outcome,
             f"Successful Iris job did not persist resolved config: {request.output.resolved_config_uri}",
         )
-    response = _launch_response(spec, AttemptState.SUCCEEDED, outcome=outcome, model=model)
+    response = _launch_response(
+        spec,
+        AttemptState.SUCCEEDED,
+        outcome=outcome,
+        model=model,
+        draft_model=draft_model,
+    )
     payload = _manifest_payload(spec, response)
     write_json(_attempt_uri(request), payload)
     write_json(request.output.terminal_manifest_uri, payload)
