@@ -1,0 +1,656 @@
+{
+  "complete": true,
+  "edge_semantics": {
+    "direct_nan_payload_byte_equal": true,
+    "direct_negative_zero_byte_equal": true,
+    "vllm_nan_payload_error": "Sparse checkpoint patches contain NaN values, out-of-range indices, or duplicate indices",
+    "vllm_negative_zero_byte_equal": true
+  },
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "samples": [
+    {
+      "apply_seconds": 4.201475530862808e-05,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 0,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.000299123115837574,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 0,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.00021796394139528275,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 1,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 3.034062683582306e-05,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 1,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 2.576597034931183e-05,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 2,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.00021647103130817413,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 2,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.00020284811034798622,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 3,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 2.8857961297035217e-05,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 3,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 2.514990046620369e-05,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 4,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.0002029677852988243,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 4,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.00020340178161859512,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 5,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 2.8329435735940933e-05,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 5,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 2.4959910660982132e-05,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 6,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.00019768113270401955,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 6,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.00019647786393761635,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 7,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 2.7366913855075836e-05,
+      "byte_equal": true,
+      "changed": 32768,
+      "density": 0.01,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 7,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 3.496091812849045e-05,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 0,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.0002729920670390129,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 0,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.00025028176605701447,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 1,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 3.0982308089733124e-05,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 1,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 2.6682857424020767e-05,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 2,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.0002492200583219528,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 2,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.0002433699555695057,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 3,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 2.9725022614002228e-05,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 3,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 2.700788900256157e-05,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 4,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.00024336902424693108,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 4,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.00023993337526917458,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 5,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 2.9277056455612183e-05,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 5,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 2.6442110538482666e-05,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 6,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.00024150311946868896,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 6,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.00023671984672546387,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 7,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 2.918904647231102e-05,
+      "byte_equal": true,
+      "changed": 759061,
+      "density": 0.231647,
+      "name": "expert_fc2",
+      "path": "bound_view",
+      "repeat": 7,
+      "values": 3276800
+    },
+    {
+      "apply_seconds": 0.00027236994355916977,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 0,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.00191420316696167,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 0,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0018888670019805431,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 1,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0002697361633181572,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 1,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.00026581622660160065,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 2,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0018960069864988327,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 2,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0018833819776773453,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 3,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.00027020182460546494,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 3,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0002639913000166416,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 4,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0018870960921049118,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 4,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.001892738975584507,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 5,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.00026940181851387024,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 5,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0002639768645167351,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 6,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0018874728120863438,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 6,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0018827999010682106,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 7,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.00026907073333859444,
+      "byte_equal": true,
+      "changed": 3283354,
+      "density": 0.01,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 7,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0011794236488640308,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 0,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.007132585626095533,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 0,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.007102215196937323,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 1,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0011760341003537178,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 1,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0011756573803722858,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 2,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0071212369948625565,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 2,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.007126848213374615,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 3,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.00117843272164464,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 3,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0011718478053808212,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 4,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0071095749735832214,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 4,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.007109893020242453,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 5,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0011800527572631836,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 5,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0011760001070797443,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 6,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.007137276232242584,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 6,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.007090217899531126,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "vllm_checkpoint_loader",
+      "repeat": 7,
+      "values": 328335360
+    },
+    {
+      "apply_seconds": 0.0011763321235775948,
+      "byte_equal": true,
+      "changed": 76057901,
+      "density": 0.231647,
+      "name": "embedding",
+      "path": "bound_view",
+      "repeat": 7,
+      "values": 328335360
+    }
+  ],
+  "schema_version": 1,
+  "source_commit": "e5abd753892f2dbbaf156dff24ef2594a0932fd9",
+  "torch_version": "2.13.0+cu132",
+  "vllm_version": "0.0.0.dev20260916+marin.70ea9ae8f260.cu132"
+}
