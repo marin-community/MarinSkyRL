@@ -7,9 +7,11 @@ import ray
 from loguru import logger
 from packaging import version
 from ray.actor import ActorHandle
-from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
+from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group, remove_placement_group
 from transformers import AutoConfig, PretrainedConfig
 
+from marinskyrl.inference_placement import InferenceReplicaPlacement, node_local_blocker
+from marinskyrl.runtime_options import NodeLocalPlacement
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
@@ -27,7 +29,11 @@ from skyrl_train.utils import (
 )
 from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from skyrl_train.utils.utils import use_per_engine_strict_pack_pg
-from skyrl_train.inference_engines.placement import colocated_engine_bundle_layout
+from skyrl_train.inference_engines.placement import (
+    colocated_engine_bundle_layout,
+    node_local_bundle_nodes,
+    verified_inference_replica_placements,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +184,8 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     ):
         self.inference_engine_actor = inference_engine_actor
         self.weight_sync_relative_rank_offset = weight_sync_relative_rank_offset
+        # The verified placement of each worker of a node-local replica, in worker order.
+        self.worker_placements: list[InferenceReplicaPlacement] | None = None
 
     def tp_size(self):
         # Diagnostic: unwrap un-pickleable Ray exceptions into a plain
@@ -286,6 +294,14 @@ def populate_engine_max_model_lens(engines: List["RayWrappedInferenceEngine"], *
         engine.max_model_len = max_model_len
 
 
+def _release_node_local_gang(actors: list, placement_groups: list) -> None:
+    """After a failed node-local startup, kill the started actors and remove the placement groups."""
+    for actor in actors:
+        ray.kill(actor)
+    for pg in placement_groups:
+        remove_placement_group(pg)
+
+
 def create_ray_wrapped_inference_engines(
     num_inference_engines: int,
     tensor_parallel_size: int,
@@ -321,10 +337,15 @@ def create_ray_wrapped_inference_engines(
     require_v1_model_runner: bool = False,
     mp_backend: bool = False,
     placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
+    node_local_placement: NodeLocalPlacement = NodeLocalPlacement.AUTO,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
 
+    node_local_placement: ``auto`` puts each stage of a DP/EP replica on one node when
+        ``node_local_blocker`` allows it, and checks the workers' GPUs at startup; other engines
+        are placed as before. ``require`` refuses an engine that cannot be packed. ``off`` never
+        packs.
     mp_backend: opt-in. When True (and TP>1 / PP>1 and NOT colocated), run each vLLM
         inference engine with the `mp` (multiprocessing) executor backend instead of `ray`.
         This is required for the Qwen3-Next-80B-A3B R3 router-capture path
@@ -386,6 +407,40 @@ def create_ray_wrapped_inference_engines(
             "inference engines (trainer.placement.colocate_all=false). Colocated engines need "
             "the ray backend for shared-GPU resource management."
         )
+    node_hosts: dict[str, str] = {}
+    node_gpu_capacities: dict[str, int] = {}
+    engine_shape = dict(
+        mode=node_local_placement,
+        backend=backend,
+        async_engine=async_engine,
+        colocated=use_hybrid_engine or inference_engine_enable_sleep,
+        remote=False,
+        mp_executor=use_mp_backend,
+        tensor_parallel_size=tensor_parallel_size,
+        pipeline_parallel_size=pipeline_parallel_size,
+        data_parallel_size=data_parallel_size,
+        expert_parallel_size=expert_parallel_size,
+        num_inference_engines=num_inference_engines,
+    )
+    blocker = node_local_blocker(**engine_shape)
+    if blocker is None:
+        live_nodes = [node for node in ray.nodes() if node["Alive"]]
+        node_hosts = {node["NodeID"]: node["NodeManagerHostname"] for node in live_nodes}
+        node_gpu_capacities = {node["NodeID"]: int(node["Resources"].get("GPU", 0)) for node in live_nodes}
+        gpu_nodes = [capacity for capacity in node_gpu_capacities.values() if capacity > 0]
+        blocker = node_local_blocker(**engine_shape, node_gpu_capacities=gpu_nodes)
+    node_local = blocker is None
+    if not node_local and node_local_placement is NodeLocalPlacement.REQUIRE:
+        raise ValueError(f"generator.inference_engine_node_local=require cannot be honoured: {blocker}")
+    if not node_local:
+        logger.info("Inference replicas are not placed node-locally: {}", blocker)
+    # A replica whose stages do not fit one node together uses PACK, and each stage is checked
+    # after startup.
+    node_local_strategy = (
+        "STRICT_PACK"
+        if not node_local or data_parallel_size * pipeline_parallel_size <= max(node_gpu_capacities.values(), default=0)
+        else "PACK"
+    )
     if tensor_parallel_size == 1 and pipeline_parallel_size == 1:
         distributed_executor_backend = "uni"
     elif use_mp_backend:
@@ -460,7 +515,8 @@ def create_ray_wrapped_inference_engines(
     # mechanism (main_base.get_policy_pg), which claims the policy's whole nodes BEFORE
     # these engine PGs are created.
     per_engine_pgs: list = []
-    use_per_engine_strict_pack = use_per_engine_strict_pack_pg(
+    # A node-local replica gets one group per engine, like a TP/PP>1 engine.
+    use_per_engine_strict_pack = node_local or use_per_engine_strict_pack_pg(
         use_hybrid_engine=use_hybrid_engine,
         use_mp_backend=use_mp_backend,
         tensor_parallel_size=tensor_parallel_size,
@@ -491,11 +547,20 @@ def create_ray_wrapped_inference_engines(
             for _ in range(num_inference_engines):
                 pg = placement_group(
                     [{"GPU": 1, "CPU": 1} for _ in range(per_engine_gpu_count)],
-                    strategy="STRICT_PACK",
+                    strategy=node_local_strategy,
                 )
                 per_engine_pgs.append(pg)
-            for pg in per_engine_pgs:
-                get_ray_pg_ready_with_timeout(pg, timeout=placement_group_timeout_seconds)
+            try:
+                for pg in per_engine_pgs:
+                    get_ray_pg_ready_with_timeout(pg, timeout=placement_group_timeout_seconds)
+            except Exception as error:
+                if not node_local:
+                    raise
+                _release_node_local_gang([], per_engine_pgs)
+                raise RuntimeError(
+                    "No node had room for a whole replica stage; generator.inference_engine_node_local=off "
+                    "returns the engines to one flat placement group"
+                ) from error
             # Keep `shared_pg` defined for downstream indexing; per-engine path
             # re-selects the engine's own PG in the loop.
             shared_pg = per_engine_pgs[0]
@@ -508,6 +573,19 @@ def create_ray_wrapped_inference_engines(
             bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
+
+    stage_nodes: list[list[str]] = []
+    if node_local:
+        try:
+            stage_nodes = node_local_bundle_nodes(
+                per_engine_pgs,
+                data_parallel_size=data_parallel_size,
+                node_gpu_capacities=node_gpu_capacities,
+                pipeline_parallel_size=pipeline_parallel_size,
+            )
+        except Exception:
+            _release_node_local_gang([], per_engine_pgs)
+            raise
 
     allocated_rendezvous_ports: set[int] = set()
     for i in range(num_inference_engines):
@@ -772,7 +850,10 @@ def create_ray_wrapped_inference_engines(
     # read-only probe (returns hostnames), no side effects. vLLM-only (collective_rpc);
     # the colocated sleep barrier still covers the sglang/colocated paths unchanged.
     startup_refs = []
-    if not inference_engine_enable_sleep and backend == "vllm":
+    if node_local:
+        # The placement report is also the readiness barrier.
+        startup_refs = [engine.inference_engine_actor.report_engine_placement.remote() for engine in engines]
+    elif not inference_engine_enable_sleep and backend == "vllm":
         startup_refs = [engine.inference_engine_actor.report_engine_hosts.remote() for engine in engines]
 
     if inference_engine_enable_sleep:
@@ -787,11 +868,36 @@ def create_ray_wrapped_inference_engines(
         startup_refs = sleep_refs
 
     if startup_refs:
-        wait_for_inference_engine_startup(
-            startup_refs,
-            [engine.inference_engine_actor for engine in engines],
-            timeout_seconds=engine_init_timeout_seconds,
-        )
+        try:
+            startup_results = wait_for_inference_engine_startup(
+                startup_refs,
+                [engine.inference_engine_actor for engine in engines],
+                timeout_seconds=engine_init_timeout_seconds,
+            )
+        except Exception:
+            if node_local:
+                _release_node_local_gang([], per_engine_pgs)
+            raise
+        if node_local:
+            try:
+                placements = verified_inference_replica_placements(
+                    startup_results,
+                    stage_nodes=stage_nodes,
+                    node_hosts=node_hosts,
+                    relative_rank_offsets=weight_sync_relative_rank_offsets,
+                    data_parallel_size=data_parallel_size,
+                    expert_parallel_size=expert_parallel_size,
+                    pipeline_parallel_size=pipeline_parallel_size,
+                )
+            except Exception:
+                _release_node_local_gang(inference_engine_actors, per_engine_pgs)
+                raise
+            for index, engine in enumerate(engines):
+                engine.worker_placements = placements[
+                    index * pipeline_parallel_size : (index + 1) * pipeline_parallel_size
+                ]
+                for placement in engine.worker_placements:
+                    logger.info("Verified inference replica placement: {}", placement)
 
     populate_engine_max_model_lens(engines, timeout_seconds=engine_init_timeout_seconds)
 
@@ -800,18 +906,17 @@ def create_ray_wrapped_inference_engines(
 
 def wait_for_inference_engine_startup(
     startup_refs: list[ray.ObjectRef], actor_handles: list[ActorHandle], *, timeout_seconds: float
-) -> None:
-    """Wait for every engine readiness reference or terminate the actor gang."""
+) -> list[Any]:
+    """Wait for every engine's startup reply. Kill all the actors if one fails or times out."""
 
     _, pending = ray.wait(startup_refs, num_returns=len(startup_refs), timeout=timeout_seconds, fetch_local=False)
     if not pending:
         try:
-            ray.get(startup_refs)
+            return ray.get(startup_refs)
         except Exception:
             for actor in actor_handles:
                 ray.kill(actor)
             raise
-        return
 
     pending_set = set(pending)
     pending_indices = [index for index, ref in enumerate(startup_refs) if ref in pending_set]

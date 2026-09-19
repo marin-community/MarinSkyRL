@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import threading
 from typing import List, Any, Dict, Optional, Tuple, Iterator, AsyncGenerator
-from dataclasses import dataclass, fields as _dataclass_fields, replace
+from dataclasses import asdict, dataclass, fields as _dataclass_fields, replace
 from loguru import logger
 from http import HTTPStatus
 import ray
@@ -14,6 +14,7 @@ import vllm
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
+from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_pp_group
 from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
 from vllm.renderers.online_renderer import OnlineRenderer
 
@@ -60,6 +61,8 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.inference_engines.response_topk import select_response_topk
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
+from marinskyrl.inference_placement import InferenceWorkerPlacement
+from skyrl_train.inference_engines.placement import inference_worker_placement
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
 from skyrl_train.weight_sync.weight_loader import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
@@ -973,6 +976,22 @@ class WorkerWrap:
         import socket
 
         return socket.gethostname()
+
+    def report_device_placement(self) -> dict[str, str | int]:
+        """This worker's host, GPU and ranks, as a plain dict."""
+        return asdict(self._device_placement())
+
+    def _device_placement(self) -> InferenceWorkerPlacement:
+        dp, pp = get_dp_group(), get_pp_group()
+        ep = get_ep_group() if self.model_config.is_moe else None
+        return inference_worker_placement(
+            dp_rank=dp.rank_in_group,
+            dp_world_size=dp.world_size,
+            ep_rank=ep.rank_in_group if ep is not None else 0,
+            ep_world_size=ep.world_size if ep is not None else 1,
+            pp_rank=pp.rank_in_group,
+            pp_world_size=pp.world_size,
+        )
 
 
 class BaseVLLMInferenceEngine(InferenceEngineInterface):
@@ -1959,6 +1978,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """TEST-ONLY (disaggregation proof): hostname of every engine TP/EP worker."""
         engine = self._get_engine()
         return await engine.collective_rpc("report_host")
+
+    async def report_engine_placement(self):
+        """Host, GPU and ranks of every worker of this engine."""
+        return await self._get_engine().collective_rpc("report_device_placement")
 
     async def begin_weight_reload(self):
         """#1685 fix: open the layerwise-reload bracket on every engine worker so the
