@@ -70,6 +70,7 @@ def _participant_metrics(rows: list[dict]) -> dict:
 
 
 def _trial(trial: dict) -> dict:
+    replicas = trial["verification"].get("replica_reports", [])
     row = {
         "encoding": trial["encoding"],
         "pause_seconds": trial["pause_seconds"],
@@ -77,6 +78,11 @@ def _trial(trial: dict) -> dict:
         "resume_seconds": trial["resume_seconds"],
         "publication_seconds": trial["publication_seconds"],
         "verification_seconds_outside_timer": trial["verification"]["verify_seconds"],
+        "replica_drift": {
+            "nonidentical_ranks": sum(report["mismatched_bytes"] > 0 for report in replicas),
+            "maximum_mismatched_bytes": max((report["mismatched_bytes"] for report in replicas), default=0),
+            "maximum_compared_bytes": max((report["compared_bytes"] for report in replicas), default=0),
+        },
     }
     if trial["encoding"] == "dense":
         row["dense_report"] = trial["detail"]
