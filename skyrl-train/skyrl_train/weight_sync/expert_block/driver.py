@@ -14,7 +14,6 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 import time
 
-from skyrl_train.weight_sync.expert_block.gate import ReplayReport, ReplicaReport
 from marinskyrl.inference_placement import InferenceReplicaPlacement
 from skyrl_train.weight_sync.expert_block.groups import RendezvousStore
 from skyrl_train.weight_sync.expert_block.schedule import (
@@ -30,6 +29,7 @@ from skyrl_train.weight_sync.expert_block.schedule import (
 )
 from skyrl_train.weight_sync.expert_block.source_views import is_widened_router
 from skyrl_train.weight_sync.expert_block.stream import InstallReport
+from skyrl_train.weight_sync.expert_block.verify_weights import ReplayReport, ReplicaReport
 
 
 @dataclass(frozen=True)
@@ -236,11 +236,11 @@ class ExpertBlockSync:
         )
 
     async def verify(self, version: int) -> dict[str, float]:
-        """The opt-in gate: fail unless every receiver's replay matched every installed byte and covered them all."""
+        """Replay the sync; fail unless every receiver's bytes match the trainer's and cover every parameter it holds."""
         if self.schedule is None:
             raise RuntimeError("Expert-block sync is not prepared")
         if not self.client.generation_paused_event.is_set():
-            raise RuntimeError("The expert-block gate runs only while generation is paused")
+            raise RuntimeError("Expert-block verification requires paused generation")
         started = time.perf_counter()
         update_info = {"version": version}
         policy_rows, receiver_rows = await asyncio.gather(
@@ -249,7 +249,7 @@ class ExpertBlockSync:
         expected_bytes = dict(self.schedule.receiver_bytes)
         receivers = [ReplayReport(**row) for row in receiver_rows]
         if sorted(report.participant for report in receivers) != sorted(expected_bytes):
-            raise RuntimeError("Not every planned receiver reported the gate replay")
+            raise RuntimeError("Not every planned receiver reported the replay")
         for report in receivers:
             if report.version != version or report.mismatched_bytes != 0:
                 raise RuntimeError(

@@ -1,19 +1,12 @@
-"""The opt-in byte gate for expert-block sync: proves a sync landed every byte, for qualification runs.
+"""Verify an expert-block sync by replaying it (``generator.expert_block_sync.verify``).
 
-Off by default and never part of a production sync. With ``verify: true`` the
-driver runs it after each sync:
+Every root re-sends what it sent. Every receiver lands it in scratch, counts the
+bytes that differ from what it installed, and checks that the bytes it compared
+are all the parameter bytes it holds (a padded vocabulary tensor counts only its
+HF rows). Every trainer rank also checks that its data-parallel peers hold
+byte-identical parameters, since roots rotate across those peers.
 
-* every root re-sends exactly what it sent, every receiver lands it in scratch
-  and counts bytes that differ from what it installed, and tallies the bytes it
-  compared against every byte of every parameter it holds (as the receiver
-  installs them: a padded vocabulary tensor counts only its HF rows) — so a
-  wrong slot, a skipped tensor or a parameter the schedule never covers all
-  show up;
-* every trainer rank checks that its data-parallel peers hold byte-identical
-  parameters, since roots rotate across those peers.
-
-The replay costs about one extra sync on the wire; the compare is one elementwise
-``ne`` per landed tensor.
+The replay costs about one extra sync on the wire.
 """
 
 from dataclasses import dataclass
@@ -53,8 +46,8 @@ def _replay(stream: Stream, version: int) -> ReplayReport:
         wire = scratch.narrow(0, 0, landing.nbytes).view(landing.wire_dtype).view(landing.installed.shape)
         stream.receive(item, wire)
         # A widened parameter is compared at wire precision.
-        installed = landing.installed.to(landing.wire_dtype).contiguous()
-        mismatched.add_(wire.contiguous().view(torch.uint8).ne(installed.view(torch.uint8)).sum())
+        installed = landing.installed.to(landing.wire_dtype)
+        mismatched.add_(wire.view(torch.uint8).ne(installed.view(torch.uint8)).sum())
         compared += landing.nbytes
     parameter_bytes = 0
     if not stream.trainer:

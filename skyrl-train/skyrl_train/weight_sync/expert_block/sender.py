@@ -13,11 +13,11 @@ from dataclasses import asdict
 
 import torch
 
-from skyrl_train.weight_sync.expert_block.gate import compare_replicas, replay
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, destroy_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, TrainerRank, from_wire, to_wire
 from skyrl_train.weight_sync.expert_block.source_views import local_expert_sources, local_source_slices
 from skyrl_train.weight_sync.expert_block.stream import Stream, bind, storage_identity
+from skyrl_train.weight_sync.expert_block.verify_weights import compare_replicas, replay
 
 
 class ExpertBlockSender:
@@ -102,7 +102,7 @@ class ExpertBlockSender:
         return asdict(self.stream.run(version))
 
     def verify(self, update_info: dict) -> dict:
-        """The opt-in gate: re-send this rank's blocks, and check its data-parallel peers hold the same bytes."""
+        """Re-send this rank's blocks, and check its data-parallel peers hold the same bytes."""
         if self.stream is None:
             raise RuntimeError("Expert-block sender is not initialised")
         version = update_info["version"]

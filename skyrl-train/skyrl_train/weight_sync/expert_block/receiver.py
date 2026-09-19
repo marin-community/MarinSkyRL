@@ -13,11 +13,11 @@ from dataclasses import asdict
 
 import torch
 
-from skyrl_train.weight_sync.expert_block.gate import replay
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, destroy_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, from_wire
 from skyrl_train.weight_sync.expert_block.source_views import LAYER_PREFIX, ROUTED_EXPERTS, dtype_name
 from skyrl_train.weight_sync.expert_block.stream import Stream, bind, storage_identity
+from skyrl_train.weight_sync.expert_block.verify_weights import replay
 
 SUPPORTED_MODEL_TYPE = "grug_moe"
 # The only backend qualified here. It keeps the trainer's [gate;up] order in w13_weight;
@@ -151,7 +151,7 @@ class ExpertBlockReceiver:
         return asdict(self.stream.run(update_info["version"]))
 
     def verify(self, update_info: dict) -> dict:
-        """The opt-in gate: replay the sync and count bytes that differ from what was installed."""
+        """Replay the sync and count bytes that differ from what was installed."""
         if self.stream is None:
             raise RuntimeError("Expert-block receiver is not initialised")
         return asdict(replay(self.stream, update_info["version"]))
