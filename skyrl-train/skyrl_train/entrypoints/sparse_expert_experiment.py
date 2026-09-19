@@ -11,16 +11,188 @@ from __future__ import annotations
 import asyncio
 import importlib.metadata
 import json
+import math
 import os
 import subprocess
 import sys
 import time
 import traceback
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 MODEL_REPO = "marin-community/grug-67b-a2b-sft-s2-thinking-step630"
 MODEL_REVISION = "6808fe5c219471517bd51df35addefd38ebebf89"
+MAX_MODEL_LEN = 128
+
+
+@dataclass(frozen=True)
+class Geometry:
+    policy_gpus: int
+    policy_pp: int
+    policy_ep: int
+    engines: int
+    engine_dp: int
+    engine_pp: int
+
+    @property
+    def gpus(self) -> int:
+        return self.policy_gpus + self.engines * self.engine_dp * self.engine_pp
+
+
+def _config(model_path: str, geometry: Geometry):
+    import hydra
+    from skyrl_train.entrypoints.main_base import config_dir
+    from skyrl_train.utils.utils import validate_cfg
+
+    with hydra.initialize_config_dir(config_dir=config_dir):
+        cfg = hydra.compose(config_name="ppo_base_config")
+    cfg.trainer.policy.model.path = model_path
+    cfg.trainer.logger = "console"
+    validate_cfg(cfg)
+    cfg.trainer.critic.model.path = None
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.flash_attn = False
+    cfg.trainer.bf16 = True
+    cfg.trainer.gradient_checkpointing = True
+    cfg.trainer.use_sample_packing = False
+    cfg.trainer.train_batch_size = 4
+    cfg.trainer.policy_mini_batch_size = 4
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.trainer.micro_forward_batch_size_per_gpu = 1
+    cfg.trainer.update_epochs_per_batch = 1
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_entropy_loss = False
+    cfg.trainer.placement.colocate_all = False
+    cfg.trainer.placement.policy_num_nodes = 2
+    cfg.trainer.placement.policy_num_gpus_per_node = 8
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = geometry.policy_pp
+    cfg.trainer.policy.megatron_config.context_parallel_size = 1
+    cfg.trainer.policy.megatron_config.expert_model_parallel_size = geometry.policy_ep
+    cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
+    cfg.trainer.policy.optimizer_config.lr = 1.0e-6
+    cfg.trainer.policy.optimizer_config.max_grad_norm = 1.0
+    cfg.generator.backend = "vllm"
+    cfg.generator.async_engine = True
+    cfg.generator.weight_sync_backend = "nccl"
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.generator.inference_engine_data_parallel_size = geometry.engine_dp
+    cfg.generator.inference_engine_expert_parallel_size = geometry.engine_dp
+    cfg.generator.inference_engine_pipeline_parallel_size = geometry.engine_pp
+    cfg.generator.num_inference_engines = geometry.engines
+    cfg.generator.n_samples_per_prompt = 1
+    cfg.generator.gpu_memory_utilization = 0.5
+    cfg.generator.sampling_params.temperature = 1.0
+    cfg.generator.sampling_params.top_p = 1.0
+    cfg.generator.sampling_params.top_k = -1
+    cfg.generator.sampling_params.max_generate_length = 4
+    cfg.generator.weight_sync_transport = "expert_block"
+    cfg.generator.expert_block_sync.verify = False
+    cfg.generator.engine_init_timeout_seconds = 1800
+    return cfg
+
+
+def _padded_batch(pad_token_id: int):
+    import torch
+    from skyrl_train.training_batch import TrainingInputBatch
+
+    batch_size, prompt_length, response_length = 4, 12, 8
+    generator = torch.Generator().manual_seed(5)
+    body_length = prompt_length + response_length
+    total_length = body_length + 6
+    sequences = []
+    masks = []
+    for before in (3, 0, 5, 1):
+        body = torch.randint(10, 500, (body_length,), generator=generator).tolist()
+        after = total_length - body_length - before
+        sequences.append([pad_token_id] * before + body + [pad_token_id] * after)
+        masks.append([0] * before + [1] * body_length + [0] * after)
+    sequences = torch.tensor(sequences, dtype=torch.long)
+    attention_mask = torch.tensor(masks, dtype=torch.long)
+    response_mask = attention_mask[:, -response_length:]
+    zeros = torch.zeros(batch_size, response_length, dtype=torch.float32)
+    advantages = torch.linspace(-1.0, 1.0, response_length).unsqueeze(0).repeat(batch_size, 1)
+    batch = TrainingInputBatch(
+        {
+            "sequences": sequences,
+            "attention_mask": attention_mask,
+            "action_log_probs": zeros.clone(),
+            "base_action_log_probs": zeros.clone(),
+            "rollout_logprobs": zeros.clone(),
+            "values": zeros.clone(),
+            "returns": zeros.clone(),
+            "advantages": advantages,
+            "loss_mask": response_mask.clone(),
+            "response_mask": response_mask.clone(),
+        }
+    )
+    batch.metadata = {"response_length": response_length, "global_step": 0}
+    return batch
+
+
+def _train_step(policy, batch) -> dict:
+    import ray
+
+    output = ray.get(policy.async_run_ray_method("pass_through", "ppo_train", batch))[0]
+    status = output.metadata["train_status"]
+    if not math.isfinite(status["policy_loss"]):
+        raise RuntimeError(f"Non-finite policy loss: {status['policy_loss']}")
+    return status
+
+
+def _engine_client(cfg, model_path: str, geometry: Geometry):
+    from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+    from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+    engines = create_ray_wrapped_inference_engines(
+        num_inference_engines=geometry.engines,
+        tensor_parallel_size=1,
+        pipeline_parallel_size=geometry.engine_pp,
+        data_parallel_size=geometry.engine_dp,
+        expert_parallel_size=geometry.engine_dp,
+        model_dtype="bfloat16",
+        pretrain=model_path,
+        seed=23,
+        vllm_v1_disable_multiproc=True,
+        enable_prefix_caching=False,
+        enforce_eager=True,
+        engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
+        gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
+        async_engine=True,
+        max_num_batched_tokens=MAX_MODEL_LEN * geometry.engine_dp,
+        max_num_seqs=cfg.trainer.train_batch_size,
+        tokenizer=tokenizer,
+        backend="vllm",
+        engine_init_kwargs={"max_model_len": MAX_MODEL_LEN},
+    )
+    return InferenceEngineClient(engines, tokenizer, cfg)
+
+
+def _init_policy(cfg):
+    import ray
+    from ray.util.placement_group import placement_group
+    from skyrl_train.utils import get_ray_pg_ready_with_timeout
+    from skyrl_train.workers.megatron.megatron_worker import PolicyWorker
+    from skyrl_train.workers.worker import PPORayActorGroup
+
+    bundles = [{"GPU": 8, "CPU": 8} for _ in range(2)]
+    pg = placement_group(bundles, strategy="PACK")
+    get_ray_pg_ready_with_timeout(pg, timeout=300)
+    policy = PPORayActorGroup(
+        cfg,
+        num_nodes=2,
+        num_gpus_per_node=8,
+        ray_actor_type=PolicyWorker,
+        pg=pg,
+        num_gpus_per_actor=0.75,
+        colocate_all=False,
+        sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
+        record_memory=cfg.trainer.policy.record_memory,
+    )
+    ray.get(policy.async_init_model(cfg.trainer.policy.model.path))
+    return policy
 
 
 def _output_path() -> Path:
@@ -60,9 +232,6 @@ def _run_real(records: dict) -> None:
     from skyrl_train.utils import initialize_ray
     from skyrl_train.weight_sync.expert_block.driver import ExpertBlockSync
     from skyrl_train.weight_sync.expert_block.schedule import to_wire
-    from tests.gpu.test_expert_block_sync import Geometry, engine_client
-    from tests.gpu.test_grug_megatron import _config, _padded_batch, _train_step
-    from tests.gpu.utils import init_worker_with_type
     from transformers import AutoTokenizer
 
     records["stage"] = "resolve_staged_model"
@@ -71,21 +240,7 @@ def _run_real(records: dict) -> None:
     )
     records["model"] = {"repo": MODEL_REPO, "revision": MODEL_REVISION, "node_local_snapshot": model_path}
     geometry = Geometry(policy_gpus=16, policy_pp=2, policy_ep=8, engines=1, engine_dp=8, engine_pp=1)
-    cfg = _config(model_path, world_size=8, pp=geometry.policy_pp, ep=geometry.policy_ep)
-    cfg.trainer.placement.policy_num_nodes = 2
-    cfg.trainer.placement.policy_num_gpus_per_node = 8
-    cfg.trainer.policy.optimizer_config.lr = 1.0e-6
-    cfg.trainer.policy.optimizer_config.max_grad_norm = 1.0
-    cfg.trainer.micro_train_batch_size_per_gpu = 1
-    cfg.trainer.micro_forward_batch_size_per_gpu = 1
-    cfg.generator.num_inference_engines = geometry.engines
-    cfg.generator.inference_engine_data_parallel_size = geometry.engine_dp
-    cfg.generator.inference_engine_expert_parallel_size = geometry.engine_dp
-    cfg.generator.inference_engine_pipeline_parallel_size = geometry.engine_pp
-    cfg.generator.gpu_memory_utilization = 0.5
-    cfg.generator.weight_sync_transport = "expert_block"
-    cfg.generator.expert_block_sync.verify = False
-    cfg.generator.engine_init_timeout_seconds = 1800
+    cfg = _config(model_path, geometry)
     records["geometry"] = asdict(geometry)
     records["config"] = {
         "train_batch_size": cfg.trainer.train_batch_size,
@@ -107,10 +262,8 @@ def _run_real(records: dict) -> None:
     sync = None
     try:
         records["stage"] = "initialize_receiver_and_policy"
-        client = engine_client(cfg, model_path, geometry)
-        policy = init_worker_with_type(
-            "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=8, num_nodes=2, cfg=cfg
-        )
+        client = _engine_client(cfg, model_path, geometry)
+        policy = _init_policy(cfg)
         sync = ExpertBlockSync(policy_model=policy, inference_engine_client=client, timeout_seconds=900)
 
         async def prepare():
