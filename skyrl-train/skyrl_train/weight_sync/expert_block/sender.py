@@ -102,15 +102,15 @@ class ExpertBlockSender:
         return asdict(self.stream.run(version))
 
     def verify(self, update_info: dict) -> dict:
-        """Re-send this rank's blocks, and check its data-parallel peers hold the same bytes."""
+        """Send this rank's weights again, and check that its data-parallel peers hold the same bytes."""
         if self.stream is None:
             raise RuntimeError("Expert-block sender is not initialised")
         version = update_info["version"]
         state = self.parallel_state
         expert_keys = {item.source_key for item in self.expert_sources.values()}
-        # The groups Megatron's DDP reduces gradients over, so every member must hold the same bytes:
-        # expert weights across their expert-data-parallel replicas, dense weights across data and
-        # context parallelism.
+        # Megatron's DDP reduces gradients over these groups, so their members must hold the same
+        # bytes: expert weights over expert data parallelism, dense weights over data and context
+        # parallelism.
         groups = {
             name: state.get_expert_data_parallel_group()
             if name in expert_keys

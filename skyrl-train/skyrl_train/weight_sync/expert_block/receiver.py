@@ -150,7 +150,7 @@ class ExpertBlockReceiver:
         return asdict(self.stream.run(update_info["version"]))
 
     def verify(self, update_info: dict) -> dict:
-        """Replay the sync and count bytes that differ from what was installed."""
+        """Replay the sync and count the bytes that differ from the installed weights."""
         if self.stream is None:
             raise RuntimeError("Expert-block receiver is not initialised")
         return asdict(replay(self.stream, update_info["version"]))

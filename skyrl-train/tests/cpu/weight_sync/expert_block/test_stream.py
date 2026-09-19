@@ -251,18 +251,18 @@ def participant_main(rank, topology, port, directory):
             check_trainer(rank, plan, groups, report, before, local.sources)
         else:
             check_receiver(rank, topology, plan, report, parameters, maps, padded_head, dense, experts)
-        # --- A replay of the same sync matches every installed byte and covers them all ---
+        # --- A replay matches every installed byte and covers every parameter byte ---
         replayed = replay(stream, 7)
         if rank >= trainer_count:
             assert replayed.mismatched_bytes == 0
             assert replayed.compared_bytes == dict(plan.receiver_bytes)[rank] == replayed.parameter_bytes
-        # One flipped byte on one receiver's installed slot is found by the next replay, and only there.
+        # Flip one installed byte on one receiver. The next replay finds it, and only on that receiver.
         if rank == trainer_count:
             next(iter(parameters.values())).view(-1).view(torch.uint8)[1] ^= 0xFF
         replayed = replay(stream, 7)
         if rank >= trainer_count:
             assert replayed.mismatched_bytes == (1 if rank == trainer_count else 0)
-        # --- Data-parallel peers hold byte-identical parameters, or the comparison counts the bytes that are not ---
+        # --- Data-parallel peers hold the same bytes; a flipped byte on one of them is counted ---
         if rank < trainer_count and topology.trainer_dp == 2:
             trainer = topology.trainers()[rank]
             peers = tuple(row.rank for row in topology.trainers() if (row.pp, row.ep) == (trainer.pp, trainer.ep))
@@ -271,7 +271,7 @@ def participant_main(rank, topology, port, directory):
             )
             replica_groups = dict.fromkeys(local.sources, next(iter(peer_group.values())))
             try:
-                # A chunk far smaller than any parameter, so every tensor is compared in several pieces.
+                # The chunk is smaller than any parameter, so every tensor is compared in pieces.
                 compare = lambda: compare_replicas(local.sources, replica_groups, rank, 7, chunk_bytes=8)  # noqa: E731
                 assert compare().mismatched_bytes == 0
                 if trainer.dp == 1:
