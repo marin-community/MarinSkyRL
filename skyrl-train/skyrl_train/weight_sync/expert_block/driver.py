@@ -156,7 +156,10 @@ class ExpertBlockSync:
             raise RuntimeError("Expert-block sync is already prepared")
         engines = self.client.engines
         if any(engine.worker_placements is None for engine in engines):
-            raise ValueError("Expert-block sync requires generator.inference_engine_node_local=true")
+            raise ValueError(
+                "Expert-block sync requires node-local engine replicas; the engine factory's log says why "
+                "these engines kept the default placement"
+            )
         started = time.perf_counter()
         policy_rows, engine_rows = await asyncio.gather(
             self._policy("inventory"), self.client.expert_block_rpc("inventory")

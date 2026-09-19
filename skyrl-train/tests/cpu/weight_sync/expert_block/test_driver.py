@@ -283,7 +283,7 @@ def test_prepare_requires_node_local_placement(local_store):
     ranks = FakeRanks()
     ranks.engines[1].worker_placements = None
     sync = ExpertBlockSync(policy_model=ranks, inference_engine_client=ranks, timeout_seconds=30)
-    with pytest.raises(ValueError, match="inference_engine_node_local"):
+    with pytest.raises(ValueError, match="node-local engine replicas"):
         asyncio.run(sync.prepare())
 
 
