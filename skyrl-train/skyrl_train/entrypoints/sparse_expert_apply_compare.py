@@ -45,7 +45,9 @@ def _case(name: str, count: int, density: float) -> list[dict]:
     patch = encode(current, baseline, "indices")
     destination = baseline.clone()
     engine = type("ApplyOnly", (), {"model": _NamedModel(destination)})()
-    upstream_patch = SparseWeightPatch(name="model.embed_tokens.weight", indices=patch.positions, values=patch.values)
+    upstream_patch = SparseWeightPatch(
+        name="model.embed_tokens.weight", indices=patch.positions, values=patch.values, full_shape=(count,)
+    )
     operations = {
         "bound_view": lambda: apply(destination, patch),
         "vllm_sparse_apply": lambda: SparseNCCLWeightTransferEngine._apply_patch(engine, upstream_patch),
