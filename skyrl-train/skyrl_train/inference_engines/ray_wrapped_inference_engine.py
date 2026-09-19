@@ -17,7 +17,8 @@ from skyrl_train.inference_engines.base import (
     NamedWeightsUpdateRequest,
 )
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
-from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
+from skyrl_train.inference_engines.utils import get_pg_bundle_node_ips, get_rendezvous_addr_port
+from skyrl_train.utils.placement_geometry import EnginePlacementLayout, data_parallel_rank_bundle_indices
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
 from skyrl_train.env_vars import EnvVarScope, VLLM_USE_V2_MODEL_RUNNER_ENV, managed_environment_names
 from skyrl_train.utils import (
@@ -260,8 +261,8 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def pause_generation(self) -> None:
         return await self.inference_engine_actor.pause_generation.remote()
 
-    async def resume_generation(self) -> None:
-        return await self.inference_engine_actor.resume_generation.remote()
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        return await self.inference_engine_actor.resume_generation.remote(policy_version=policy_version)
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]):
         return await self.inference_engine_actor.begin_online_eagle_capture.remote(config)
@@ -284,6 +285,19 @@ def populate_engine_max_model_lens(engines: List["RayWrappedInferenceEngine"], *
     wait_for_inference_engine_startup(limit_refs, actor_handles, timeout_seconds=timeout_seconds)
     for engine, max_model_len in zip(engines, ray.get(limit_refs), strict=True):
         engine.max_model_len = max_model_len
+
+
+def assert_data_parallel_ranks_share_a_node(
+    placement_group, bundle_indices: List[int], *, engine_index: int, node_ips_of=get_pg_bundle_node_ips
+) -> None:
+    """Raise when the bundles holding one engine's DP ranks resolve to more than one node."""
+    node_ips = node_ips_of(placement_group, bundle_indices)
+    logger.info(f"inference engine {engine_index}: DP rank -> node {dict(enumerate(node_ips))}")
+    if len(set(node_ips)) > 1:
+        raise RuntimeError(
+            f"inference engine {engine_index}: its {len(bundle_indices)} DP ranks were placed on "
+            f"{len(set(node_ips))} nodes ({dict(enumerate(node_ips))}); a DP/EP group must be node-local"
+        )
 
 
 def create_ray_wrapped_inference_engines(
@@ -465,6 +479,7 @@ def create_ray_wrapped_inference_engines(
         use_mp_backend=use_mp_backend,
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
+        data_parallel_size=data_parallel_size,
     )
     if not use_hybrid_engine:
         if use_mp_backend:
@@ -484,10 +499,19 @@ def create_ray_wrapped_inference_engines(
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
         elif use_per_engine_strict_pack:
-            # ray/uni backend, multi-GPU engines (TP*PP > 1): one STRICT_PACK PG per
+            # ray/uni backend, multi-GPU engines (TP*PP*DP > 1): one STRICT_PACK PG per
             # engine so each engine's per_engine_gpu_count {GPU:1} bundles are
             # guaranteed co-located on a single node (no cross-node TP all-reduce in
             # decode). #232 fix.
+            node_gpu_count = max(
+                (node["Resources"].get("GPU", 0) for node in ray.nodes() if node.get("Alive")), default=0
+            )
+            if per_engine_gpu_count > node_gpu_count:
+                raise ValueError(
+                    f"An inference engine needs tp*pp*dp = {tensor_parallel_size}*{pipeline_parallel_size}*"
+                    f"{data_parallel_size} = {per_engine_gpu_count} GPUs on one node, but the largest node "
+                    f"has {int(node_gpu_count)}"
+                )
             for _ in range(num_inference_engines):
                 pg = placement_group(
                     [{"GPU": 1, "CPU": 1} for _ in range(per_engine_gpu_count)],
@@ -500,7 +524,7 @@ def create_ray_wrapped_inference_engines(
             # re-selects the engine's own PG in the loop.
             shared_pg = per_engine_pgs[0]
         else:
-            # ray/uni backend, single-GPU engines (TP==PP==1): ONE flat PACK PG over
+            # ray/uni backend, single-GPU engines (TP==PP==DP==1): ONE flat PACK PG over
             # all engine {GPU:1} bundles (the original pre-#232 behavior). PACK packs
             # densely -> fills whole nodes -> leaves whole nodes free for the
             # downstream policy/ref PACK PG. Restores the multi-node disaggregated
@@ -508,6 +532,27 @@ def create_ray_wrapped_inference_engines(
             bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
+
+    if data_parallel_size > 1:
+        # An engine's DP ranks form one vLLM DP/EP group whose all-to-all runs every decode step.
+        if use_hybrid_engine:
+            layout = EnginePlacementLayout.HYBRID
+        elif use_mp_backend:
+            layout = EnginePlacementLayout.MP
+        else:
+            layout = EnginePlacementLayout.PER_ENGINE
+        for i in range(num_inference_engines):
+            assert_data_parallel_ranks_share_a_node(
+                per_engine_pgs[i] if layout is EnginePlacementLayout.PER_ENGINE else shared_pg,
+                data_parallel_rank_bundle_indices(
+                    layout,
+                    engine_index=i,
+                    data_parallel_size=data_parallel_size,
+                    tensor_pipeline_size=tp_pp_size,
+                    colocated_engine_bundles=colocated_engine_bundles,
+                ),
+                engine_index=i,
+            )
 
     allocated_rendezvous_ports: set[int] = set()
     for i in range(num_inference_engines):

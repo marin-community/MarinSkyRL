@@ -19,6 +19,7 @@ from vllm.renderers.online_renderer import OnlineRenderer
 
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
+from skyrl_train.policy_version import PolicyVersionHistory
 from skyrl_train.config.behavior_logprobs import (
     ROLLOUT_LOGPROB_VALIDATION_KEY,
     validate_behavior_logprob_sampling,
@@ -51,6 +52,7 @@ from contextvars import ContextVar
 
 
 from skyrl_train.inference_engines.base import (
+    PauseMode,
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
@@ -65,6 +67,8 @@ from skyrl_train.weight_sync.weight_loader import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
 from skyrl_train.weight_sync.weight_extractor import is_weight_sync_dtype_compatible
 from skyrl_train.inference_engines.vllm.utils import (
+    CLEAR_KV_CACHE_ON_WEIGHT_SYNC_KEY,
+    PAUSE_MODE_KEY,
     pop_vllm_wrapper_kwargs,
     apply_openai_sampling,
     ensure_token_ids_in_sse_chunk,
@@ -1150,7 +1154,8 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
     async def pause_generation(self) -> None:
         raise NotImplementedError("Pausing generation is only supported for AsyncVLLMInferenceEngine.")
 
-    async def resume_generation(self) -> None:
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        del policy_version
         raise NotImplementedError("Resuming generation is only supported for AsyncVLLMInferenceEngine.")
 
 
@@ -1576,6 +1581,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Generate unique engine ID before calling super().__init__() which calls _create_engine
         self._stats_engine_id = uuid4().hex
         self._stats_attributes: Dict[str, str] = {}
+        self._policy_versions = PolicyVersionHistory()
         super().__init__(*args, **kwargs)
         self._weight_loader = VLLMWeightLoader(self.llm, is_async=True)
 
@@ -1600,6 +1606,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Store sampling params for OpenAI-style requests (Harbor rollouts)
         self._openai_sampling_params = wrapper_kwargs.pop("openai_sampling_params", {})
         self._validate_rollout_logprob_sampling = wrapper_kwargs.pop(ROLLOUT_LOGPROB_VALIDATION_KEY, False)
+        self._pause_mode = PauseMode(wrapper_kwargs.pop(PAUSE_MODE_KEY, PauseMode.ABORT))
+        self._clear_kv_cache_on_weight_sync = bool(wrapper_kwargs.pop(CLEAR_KV_CACHE_ON_WEIGHT_SYNC_KEY, True))
         if self._openai_sampling_params:
             logger.warning(
                 f"OpenAI API sampling params overridden: "
@@ -1859,7 +1867,20 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 )
             raise
 
-        return self._postprocess_outputs(outputs, self._response_top_k(sampling_params))
+        result = self._postprocess_outputs(outputs, self._response_top_k(sampling_params))
+        # RequestOutput.metrics is populated only while vLLM keeps request stats, which the
+        # custom interval logger keeps on even though disable_log_stats is set at engine start.
+        versions = [
+            self._policy_versions.at_first_token(
+                output.metrics.first_token_ts if output is not None and output.metrics is not None else None
+            )
+            for output in outputs
+        ]
+        result["response_policy_version_segments"] = [
+            ([{"start": 0, "token_count": len(token_ids), "policy_version": policy_version}] if token_ids else [])
+            for token_ids, policy_version in zip(result["response_ids"], versions, strict=True)
+        ]
+        return result
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
@@ -2178,20 +2199,31 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         )
 
     async def pause_generation(self) -> None:
-        """Abort outstanding requests and hold the EngineCore scheduler idle for weight reload."""
+        """Hold the EngineCore scheduler idle for a weight reload, aborting or keeping in-flight requests."""
         engine = self._get_engine()
         outstanding_requests = len(engine.output_processor.request_states)
         # vLLM's scheduler-level pause is a utility RPC into EngineCore. In abort
         # mode it aborts running/waiting requests, waits for the scheduler to reach
-        # its paused state, and clears the KV/prefix cache before returning. Unlike
-        # AsyncLLM.abort(), it cannot report success merely because the frontend
-        # output_processor already removed the request IDs.
-        await engine.pause_generation(mode="abort", clear_cache=True)
-        logger.info(f"pause_generation() finished, aborted {outstanding_requests} requests and paused EngineCore")
+        # its paused state, and (with clear_cache) drops the KV/prefix cache before
+        # returning; in keep mode the requests stay queued and resume afterwards.
+        # Unlike AsyncLLM.abort(), it cannot report success merely because the
+        # frontend output_processor already removed the request IDs.
+        await engine.pause_generation(mode=self._pause_mode.value, clear_cache=self._clear_kv_cache_on_weight_sync)
+        logger.info(
+            f"pause_generation() finished: mode={self._pause_mode.value} "
+            f"clear_cache={self._clear_kv_cache_on_weight_sync} outstanding_requests={outstanding_requests}, "
+            "EngineCore paused"
+        )
 
-    async def resume_generation(self) -> None:
-        """Release the EngineCore scheduler after the weight reload completes."""
-        await self._get_engine().resume_generation()
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        """Release the scheduler after recording the installed policy version."""
+        engine = self._get_engine()
+        if policy_version is not None:
+            if not await engine.is_paused():
+                raise RuntimeError("cannot install a policy version while the vLLM scheduler is running")
+            # Record before release: first tokens may be emitted while the resume RPC returns.
+            self._policy_versions.record_resume(time.monotonic(), policy_version)
+        await engine.resume_generation()
         logger.info("resume_generation() finished, EngineCore scheduler released")
 
 

@@ -53,6 +53,7 @@ from .algorithm_registry import (
 )
 from .logging_utils import format_exception_text
 from .loss_reduction import SEQUENCE_MEAN_LOSS_REDUCTION, SUPPORTED_LOSS_REDUCTIONS
+from skyrl_train.inference_engines.base import PauseMode
 from .nccl_environment import worker_nccl_environment
 from .placement_geometry import validate_colocated_engine_geometry
 
@@ -245,32 +246,12 @@ def use_per_engine_strict_pack_pg(
     use_mp_backend: bool,
     tensor_parallel_size: int,
     pipeline_parallel_size: int,
+    data_parallel_size: int,
 ) -> bool:
-    """Whether the ray/uni inference backend should build one STRICT_PACK
-    placement group PER ENGINE (vs a single flat PACK PG over all engines).
-
-    Pure (Ray-free) predicate so the placement decision is unit-testable. The
-    per-engine STRICT_PACK guarantees each multi-GPU engine's bundles co-locate
-    on one node — required to avoid the cross-node TP/PP all-reduce decode
-    deadlock (#232) — but is ONLY needed when an engine owns more than one GPU
-    (``tensor_parallel_size * pipeline_parallel_size > 1``).
-
-    For single-GPU engines (TP==PP==1) it must be OFF: N independent 1-bundle
-    STRICT_PACK PGs scatter round-robin across nodes, leaving every node
-    partially used and STARVING the downstream policy/ref PACK PG of its whole
-    nodes (RuntimeError: Failed to create placement group ... in 180s — observed
-    multi-node TP=1 lever1/swesmith). The flat PACK fallback packs single-GPU
-    bundles densely, freeing whole nodes for the policy PG.
-
-    The gate is ``tp_pp_size > 1`` (NOT ``per_engine_gpu_count > gpus_per_node``):
-    #232 is TP=4 on 4-GPU nodes, and 4 is not > 4, so the latter would wrongly
-    fall back to flat PACK and re-break the cross-node-TP-split. The hybrid
-    (colocate_all) and mp-backend paths never use per-engine STRICT_PACK (the mp
-    path's {GPU:tp_pp_size} bundle is already node-atomic).
-    """
+    """Whether the ray/uni backend builds one STRICT_PACK placement group per multi-GPU (tp*pp*dp > 1) engine."""
     if use_hybrid_engine or use_mp_backend:
         return False
-    return (tensor_parallel_size * pipeline_parallel_size) > 1
+    return (tensor_parallel_size * pipeline_parallel_size * data_parallel_size) > 1
 
 
 class Timer:
@@ -792,6 +773,16 @@ def validate_cfg(cfg: DictConfig):
             "`offload_after_step=False` is not supported for DeepSpeed, please set `offload_after_step` to `true` for both policy and critic"
         )
 
+    fully_async = cfg.trainer.fully_async
+    if fully_async.pause_mode not in tuple(PauseMode):
+        raise ValueError(f"trainer.fully_async.pause_mode must be one of {[mode.value for mode in PauseMode]}")
+    if type(fully_async.clear_kv_cache_on_weight_sync) is not bool:
+        raise ValueError("trainer.fully_async.clear_kv_cache_on_weight_sync must be boolean")
+    if type(fully_async.first_token_admission) is not bool:
+        raise ValueError("trainer.fully_async.first_token_admission must be boolean")
+    max_buffered_groups = fully_async.max_buffered_groups
+    if max_buffered_groups is not None and (type(max_buffered_groups) is not int or max_buffered_groups < 1):
+        raise ValueError("trainer.fully_async.max_buffered_groups must be a positive integer or null")
     behavior_clip = cfg.trainer.algorithm.policy_loss_type == "behavior_clip"
     if behavior_clip and cfg.trainer.algorithm.use_tis:
         raise ValueError(

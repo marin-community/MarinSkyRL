@@ -13,6 +13,7 @@ from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 from skyrl_gym.envs import register
+from skyrl_train.policy_version import validate_policy_version_segments
 from skyrl_train.trajectory_runners.trajectory_processing import get_custom_chat_template, normalize_token_ids
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.trajectory_runners.trajectory_processing import CUSTOM_CHAT_TEMPLATES
@@ -46,16 +47,30 @@ class CPUTestEnv(BaseTextEnv):
         )
 
 
+class CPUSingleTurnEnv(BaseTextEnv):
+    """A gsm8k-shaped environment: one answer, no observation, done."""
+
+    def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
+        super().__init__()
+
+    def init(self, prompt):
+        return prompt, {}
+
+    def step(self, action: str):
+        return BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+
+
 def _register_test_env_if_needed():
-    """Register the test env only if it's not already registered."""
-    try:
-        register(
-            id="cpu_test_env",
-            entry_point="tests.cpu.trajectory_runners.test_skyrl_gym_runner_chat_templating:CPUTestEnv",
-        )
-    except Exception:
-        # Environment already registered, ignore
-        pass
+    """Register the test envs only if they are not already registered."""
+    for env_id, class_name in (("cpu_test_env", "CPUTestEnv"), ("cpu_single_turn_env", "CPUSingleTurnEnv")):
+        try:
+            register(
+                id=env_id,
+                entry_point=f"tests.cpu.trajectory_runners.test_skyrl_gym_runner_chat_templating:{class_name}",
+            )
+        except Exception:
+            # Environment already registered, ignore
+            pass
 
 
 def _build_runner(
@@ -100,8 +115,36 @@ def _default_prompt_and_extras():
     return prompt, extras
 
 
-def _make_input_batch(prompt, extras):
-    return {"prompts": prompt, "env_extras": extras, "env_classes": ["cpu_test_env"]}
+def _make_input_batch(prompt, extras, env_class="cpu_test_env"):
+    return {"prompts": prompt, "env_extras": extras, "env_classes": [env_class]}
+
+
+QWEN3_WITHOUT_THINKING = {"source": "name", "name_or_path": "qwen3_without_thinking"}
+
+
+def _serving_engine(tokenizer, response_text: str, *, stop_reason: str, policy_version: int):
+    """An engine that serves the chat prompt and returns its own prompt ids, sampled ids, logprobs and spans."""
+    sampled_text = response_text + tokenizer.eos_token if stop_reason == "stop" else response_text
+    sampled_ids = tokenizer.encode(sampled_text, add_special_tokens=False)
+
+    def generate(input_batch):
+        served_prompt_ids = normalize_token_ids(
+            tokenizer.apply_chat_template(input_batch["prompts"][0], add_generation_prompt=True, tokenize=True)
+        )
+        return {
+            "responses": [response_text],
+            "stop_reasons": [stop_reason],
+            "prompt_ids": [served_prompt_ids],
+            "response_ids": [list(sampled_ids)],
+            "response_logprobs": [[-0.25 * (index + 1) for index in range(len(sampled_ids))]],
+            "response_policy_version_segments": [
+                [{"start": 0, "token_count": len(sampled_ids), "policy_version": policy_version}]
+            ],
+        }
+
+    engine = MagicMock()
+    engine.generate = AsyncMock(side_effect=generate)
+    return engine, sampled_ids
 
 
 @pytest.mark.asyncio
@@ -410,3 +453,123 @@ async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepat
         last_token_id_false = out_false["response_ids"][0][-1]
         assert last_token_id_true == tokenizer.eos_token_id
         assert last_token_id_false == tokenizer.encode(mock_text, add_special_tokens=False)[-1]
+
+
+@pytest.mark.asyncio
+async def test_retokenized_chat_history_keeps_the_first_sampled_token_version_without_spans():
+    _register_test_env_if_needed()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    mock_llm = MagicMock()
+    versions = iter([2, 3, 3, 3])
+
+    def mock_generate(input_batch):
+        num_prompts = len(input_batch["prompts"])
+        response_ids = tokenizer.encode("b" + tokenizer.eos_token, add_special_tokens=False)
+        version = next(versions)
+        return {
+            "responses": ["b"] * num_prompts,
+            "stop_reasons": ["stop"] * num_prompts,
+            "response_logprobs": None,
+            "response_ids": [response_ids] * num_prompts,
+            "response_policy_version_segments": [
+                [{"start": 0, "token_count": len(response_ids), "policy_version": version}]
+            ]
+            * num_prompts,
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=mock_generate)
+    runner = _build_runner(tokenizer, {"source": "name", "name_or_path": "qwen3_without_thinking"}, mock_llm)
+    prompt, extras = _default_prompt_and_extras()
+
+    trajectory_batch = await runner.run(_make_input_batch(prompt, extras))
+
+    assert trajectory_batch.get("behavior_policy_version_segments") is None
+    assert trajectory_batch["first_token_policy_version"] == 2
+
+
+def _rendered_assistant_ids(tokenizer, runner, content: str) -> list[int]:
+    """The tokens today's re-render would train on for one assistant message."""
+    return normalize_token_ids(
+        tokenizer.apply_chat_template(
+            [{"role": "assistant", "content": content}],
+            chat_template=runner.custom_chat_template,
+            add_generation_prompt=False,
+            tokenize=True,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_single_turn_chat_trajectory_trains_on_the_engines_tokens():
+    """Without an observation the trainer gets the served prompt, the sampled ids, their logprobs and spans."""
+    _register_test_env_if_needed()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    # A trailing newline: re-rendering through the template moves the end-of-turn token past it
+    # and prepends the generation prompt, so the re-render cannot equal the sampled ids.
+    engine, sampled_ids = _serving_engine(tokenizer, "b\n", stop_reason="stop", policy_version=5)
+    runner = _build_runner(
+        tokenizer, QWEN3_WITHOUT_THINKING, engine, {"sampling_params": {"max_generate_length": 200, "logprobs": 0}}
+    )
+    prompt, extras = _default_prompt_and_extras()
+    assert _rendered_assistant_ids(tokenizer, runner, "b\n") != sampled_ids
+    served_prompt_ids = normalize_token_ids(
+        tokenizer.apply_chat_template(prompt[0], add_generation_prompt=True, tokenize=True)
+    )
+
+    batch = await runner.run(_make_input_batch(prompt, extras, env_class="cpu_single_turn_env"))
+
+    assert batch["prompt_token_ids"][0] == served_prompt_ids
+    assert batch["response_ids"][0] == sampled_ids
+    assert batch["loss_masks"][0] == [1] * len(sampled_ids)
+    assert batch["rollout_logprobs"][0] == [-0.25 * (index + 1) for index in range(len(sampled_ids))]
+    assert batch["stop_reasons"] == ["stop"]
+    assert batch["first_token_policy_version"] == 5
+    spans = batch["behavior_policy_version_segments"][0]
+    assert spans == [{"start": 0, "token_count": len(sampled_ids), "policy_version": 5}]
+    # The trainer's admission check: every loss-bearing token carries a known sampled version.
+    validate_policy_version_segments(
+        spans,
+        response_length=len(batch["response_ids"][0]),
+        require_known=True,
+        required_mask=[bool(m) for m in batch["loss_masks"][0]],
+    )
+
+
+@pytest.mark.asyncio
+async def test_length_stopped_single_turn_carries_no_fabricated_end_of_turn():
+    _register_test_env_if_needed()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    engine, sampled_ids = _serving_engine(tokenizer, "b\n", stop_reason="length", policy_version=1)
+    runner = _build_runner(tokenizer, QWEN3_WITHOUT_THINKING, engine)
+    prompt, extras = _default_prompt_and_extras()
+    assert tokenizer.eos_token_id not in sampled_ids
+    # Today's re-render closes the cut-off message with an end-of-turn token the model never emitted.
+    assert tokenizer.eos_token_id in _rendered_assistant_ids(tokenizer, runner, "b\n")
+
+    batch = await runner.run(_make_input_batch(prompt, extras, env_class="cpu_single_turn_env"))
+
+    assert batch["stop_reasons"] == ["length"]
+    assert batch["response_ids"][0] == sampled_ids
+    assert batch["loss_masks"][0] == [1] * len(sampled_ids)
+
+
+@pytest.mark.asyncio
+async def test_a_trajectory_with_an_observation_still_re_renders_the_chat_history():
+    _register_test_env_if_needed()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    engine, sampled_ids = _serving_engine(tokenizer, "b", stop_reason="stop", policy_version=4)
+    runner = _build_runner(
+        tokenizer, QWEN3_WITHOUT_THINKING, engine, {"sampling_params": {"max_generate_length": 200, "logprobs": 0}}
+    )
+    prompt, extras = _default_prompt_and_extras()
+
+    batch = await runner.run(_make_input_batch(prompt, extras))
+
+    rendered = tokenizer.decode(batch["prompt_token_ids"][0]) + tokenizer.decode(batch["response_ids"][0])
+    assert rendered == tokenizer.apply_chat_template(
+        get_expected_chat_history("b"), chat_template=runner.custom_chat_template, tokenize=False
+    )
+    assert batch["response_ids"][0] != sampled_ids
+    assert batch["rollout_logprobs"] is None
+    assert "behavior_policy_version_segments" not in batch
+    assert batch["first_token_policy_version"] == 4

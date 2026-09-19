@@ -314,6 +314,22 @@ trainer:
     max_staleness_steps: 4
 
     num_parallel_generation_workers: 768
+    # Finished groups the completed buffer holds before a producer waits with its group in
+    # hand. Null means num_parallel_generation_workers, so no producer ever waits; a smaller
+    # value bounds the head-node backlog without changing staleness or throughput.
+    max_buffered_groups: null
+    # Count a group's staleness from the oldest policy version that sampled it, plus one,
+    # instead of the trainer's step at submission. Chat attempts are stamped with the version
+    # installed when sent, never newer than the version that sampled them; default false.
+    first_token_admission: false
+    # What the engines do with requests still generating at each weight sync. abort cancels
+    # them and the client resubmits each prompt with the tokens it already generated, so the
+    # answer continues under the new weights after one prefill; keep freezes them in the
+    # scheduler and resumes them with the cache the old weights built.
+    pause_mode: abort
+    # Drop the engines' KV/prefix cache at the pause, so nothing computed by the old weights
+    # is reused. Set false to keep the cache for a faster resume.
+    clear_kv_cache_on_weight_sync: true
 
     # Bound teacher-scoring work independently for each logical teacher. Queue
     # backpressure is applied when a rollout group is admitted, before learner

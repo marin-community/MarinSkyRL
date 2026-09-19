@@ -29,6 +29,7 @@ from skyrl_train.config.trajectory_runner_capabilities import (
     validate_trajectory_runner_capabilities,
 )
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
+from skyrl_train.inference_engines.vllm.utils import CLEAR_KV_CACHE_ON_WEIGHT_SYNC_KEY, PAUSE_MODE_KEY
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -134,6 +135,8 @@ def create_ray_wrapped_inference_engines_from_config(
     engine_init_kwargs = {
         **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
         "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
+        PAUSE_MODE_KEY: str(cfg.trainer.fully_async.pause_mode),
+        CLEAR_KV_CACHE_ON_WEIGHT_SYNC_KEY: bool(cfg.trainer.fully_async.clear_kv_cache_on_weight_sync),
     }
     if speculative_decoding is not None:
         engine_init_kwargs["speculative_config"] = speculative_decoding.vllm_speculative_config()
