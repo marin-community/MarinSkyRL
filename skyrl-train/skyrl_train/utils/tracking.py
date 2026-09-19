@@ -66,6 +66,7 @@ class Tracking:
             assert backend in self.supported_backends, f"{backend} is not supported"
 
         self.logger = {}
+        self._finished = False
 
         if "wandb" in backends:
             import wandb
@@ -184,14 +185,15 @@ class Tracking:
             else:
                 logger_instance.log(data=data, step=step)
 
-    def __del__(self):
-        # NOTE (sumanthrh): We use a try-except block here while finishing tracking.
-        # This is because wandb often errors out with a BrokenPipeError when closing.
-        # https://github.com/wandb/wandb/issues/6449
-        # TODO (sumanthrh): Check if this is really needed. Trackers like wandb will automatically finish at program exit.
+    def finish(self, exit_code: int = 0) -> None:
+        """Flush the primary run before a Ray worker or its driver exits."""
+        if getattr(self, "_finished", False):
+            return
+        self._finished = True
+        # W&B can raise BrokenPipeError during shutdown; preserve the training result.
         try:
             if "wandb" in self.logger:
-                self.logger["wandb"].finish(exit_code=0)
+                self.logger["wandb"].finish(exit_code=exit_code)
             if "swanlab" in self.logger:
                 self.logger["swanlab"].finish()
             if "tensorboard" in self.logger:
@@ -200,6 +202,10 @@ class Tracking:
                 self.logger["mlflow"].finish()
         except Exception as e:
             logger.warning(f"Attempted to finish tracking but got error {e}")
+
+    def __del__(self):
+        if hasattr(self, "logger"):
+            self.finish()
 
 
 class ConsoleLogger:

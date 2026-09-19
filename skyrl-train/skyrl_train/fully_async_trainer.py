@@ -697,6 +697,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         Main fully async training loop for PPO
         """
         self.global_step = 0
+        completed = False
         loop_monitor = (
             asyncio.create_task(monitor_event_loop_lag(step_fn=lambda: self.global_step))
             if self._async_observations_enabled
@@ -709,6 +710,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await async_distillation_runtime.start()
             await self._startup_trajectory_runner()
             await self._train_loop()
+            completed = True
         except Exception as e:
             log_exception_as_text(f"Train loop failed at global_step {self.global_step}", e)
             raise
@@ -719,7 +721,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # (the per-epoch epilogue only runs on normal loop completion).
             self._cancel_trajectory_tasks()
 
-            await self.shutdown()
+            try:
+                await self.shutdown()
+            finally:
+                self.tracker.finish(exit_code=0 if completed else 1)
 
     async def _train_loop(self):
         """
