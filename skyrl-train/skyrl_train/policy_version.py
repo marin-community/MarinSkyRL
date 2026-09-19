@@ -20,10 +20,10 @@ class PolicyVersionSegment(TypedDict):
     policy_version: int | None
 
 
-def append_policy_version_span(
+def append_policy_version_segment_at(
     segments: list[PolicyVersionSegment], *, start: int, token_count: int, policy_version: int | None
 ) -> None:
-    """Append one ordered sampled span, coalescing an adjacent equal version."""
+    """Append one sampled span that begins at ``start``, coalescing an adjacent equal version."""
 
     if type(start) is not int or start < 0:
         raise ValueError("policy-version segment start must be a nonnegative integer")
@@ -46,13 +46,13 @@ def append_policy_version_span(
         segments.append({"start": start, "token_count": token_count, "policy_version": policy_version})
 
 
-def append_policy_version_segment(
+def append_contiguous_policy_version_segment(
     segments: list[PolicyVersionSegment], *, token_count: int, policy_version: int | None
 ) -> None:
-    """Append a contiguous retry segment after the existing response prefix."""
+    """Thin wrapper on :func:`append_policy_version_segment_at` that starts the span where the prefix ends."""
 
     start = segments[-1]["start"] + segments[-1]["token_count"] if segments else 0
-    append_policy_version_span(
+    append_policy_version_segment_at(
         segments,
         start=start,
         token_count=token_count,
@@ -131,7 +131,7 @@ def truncate_policy_version_segments(
         if segment["start"] >= response_length:
             break
         count = min(segment["token_count"], response_length - segment["start"])
-        append_policy_version_span(
+        append_policy_version_segment_at(
             result,
             start=segment["start"],
             token_count=count,

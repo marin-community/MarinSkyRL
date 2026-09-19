@@ -1727,7 +1727,14 @@ def _chat_request():
 
 
 @pytest.mark.asyncio
-async def test_chat_attempts_are_stamped_with_the_version_installed_when_they_were_sent(monkeypatch):
+@pytest.mark.parametrize(
+    ("version_installed_before_send", "expected_first_span_version"),
+    [(3, 3), (None, None)],
+    ids=["installed_version_stamps_the_first_attempt", "tokens_sampled_before_any_version_carry_none"],
+)
+async def test_chat_attempts_are_stamped_with_the_version_installed_when_they_were_sent(
+    monkeypatch, version_installed_before_send, expected_first_span_version
+):
     monkeypatch.setattr(
         "skyrl_train.inference_engines.inference_engine_client.ABORT_GENERATION_GRACE_PERIOD_SECONDS", 0
     )
@@ -1742,41 +1749,15 @@ async def test_chat_attempts_are_stamped_with_the_version_installed_when_they_we
         [_chat_partial("A", "abort", [11]), _chat_partial("BC", "stop", [12, 13])], during_attempt=sync_during
     )
     client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
-    await client.pause_generation()
-    await client.resume_generation(policy_version=3)
+    if version_installed_before_send is not None:
+        await client.pause_generation()
+        await client.resume_generation(policy_version=version_installed_before_send)
 
     out = await client.chat_completion(_chat_request())
 
     assert out["choices"][0]["token_ids"] == [11, 12, 13]
     assert out["choices"][0]["policy_version_segments"] == [
-        {"start": 0, "token_count": 1, "policy_version": 3},
-        {"start": 1, "token_count": 2, "policy_version": 4},
-    ]
-
-
-@pytest.mark.asyncio
-async def test_tokens_sampled_before_any_version_was_named_carry_none(monkeypatch):
-    monkeypatch.setattr(
-        "skyrl_train.inference_engines.inference_engine_client.ABORT_GENERATION_GRACE_PERIOD_SECONDS", 0
-    )
-    client = None
-
-    async def name_first_version_during(attempt):
-        if attempt == 0:
-            await client.pause_generation()
-            await client.resume_generation(policy_version=4)
-
-    engine = _StampedChatEngine(
-        [_chat_partial("A", "abort", [11]), _chat_partial("BC", "stop", [12, 13])],
-        during_attempt=name_first_version_during,
-    )
-    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
-
-    out = await client.chat_completion(_chat_request())
-
-    assert out["choices"][0]["token_ids"] == [11, 12, 13]
-    assert out["choices"][0]["policy_version_segments"] == [
-        {"start": 0, "token_count": 1, "policy_version": None},
+        {"start": 0, "token_count": 1, "policy_version": expected_first_span_version},
         {"start": 1, "token_count": 2, "policy_version": 4},
     ]
 

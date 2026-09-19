@@ -24,7 +24,7 @@ from skyrl_train.policy_version import (
     policy_version_bounds,
     BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY,
     PolicyVersionSegment,
-    append_policy_version_span,
+    append_policy_version_segment_at,
     truncate_policy_version_segments,
     validate_policy_version_segments,
 )
@@ -669,7 +669,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 ):
                     retained_sampled_length -= 1
                 for segment in truncate_policy_version_segments(output_version_segments, retained_sampled_length):
-                    append_policy_version_span(
+                    append_policy_version_segment_at(
                         behavior_policy_version_segments,
                         start=response_offset + segment["start"],
                         token_count=segment["token_count"],

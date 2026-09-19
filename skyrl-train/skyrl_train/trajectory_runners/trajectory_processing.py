@@ -1269,24 +1269,23 @@ class HasCapturedGlobalStep(Protocol):
     captured_global_step: Optional[int]
 
 
-def minimum_captured_global_step(outputs: Iterable[HasCapturedGlobalStep]) -> Optional[int]:
-    """Return the minimum model-step value recorded across a rollout group."""
-    return min(
-        (output.captured_global_step for output in outputs if output.captured_global_step is not None),
-        default=None,
-    )
-
-
 class HasFirstTokenPolicyVersion(Protocol):
     first_token_policy_version: Optional[int]
 
 
+def _minimum_recorded(values: Iterable[Optional[int]]) -> Optional[int]:
+    """Return the smallest value a rollout group recorded, ignoring the rows that recorded none."""
+    return min((value for value in values if value is not None), default=None)
+
+
+def minimum_captured_global_step(outputs: Iterable[HasCapturedGlobalStep]) -> Optional[int]:
+    """Return the minimum model-step value recorded across a rollout group."""
+    return _minimum_recorded(output.captured_global_step for output in outputs)
+
+
 def minimum_first_token_policy_version(outputs: Iterable[HasFirstTokenPolicyVersion]) -> Optional[int]:
     """Return the oldest first-token policy version recorded across a rollout group."""
-    return min(
-        (output.first_token_policy_version for output in outputs if output.first_token_policy_version is not None),
-        default=None,
-    )
+    return _minimum_recorded(output.first_token_policy_version for output in outputs)
 
 
 def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None, chat_template_kwargs=None):

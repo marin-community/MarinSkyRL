@@ -47,7 +47,7 @@ class _ChatChoice:
     policy_version_segments: list[PolicyVersionSegment] | None
 
 
-def _token_id_list(value: Any) -> bool:
+def _is_token_id_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(token, int) for token in value)
 
 
@@ -58,9 +58,9 @@ def _parse_chat_choice(choice: dict[str, Any], *, prompt_ids: Any, logprobs_requ
     ``prompt_token_ids`` under ``return_token_ids``, or the tokenize call that rendered it.
     """
     response_ids = choice.get("token_ids")
-    if not _token_id_list(response_ids):
+    if not _is_token_id_list(response_ids):
         raise RuntimeError("OpenAI chat completion did not return exact response token IDs")
-    if not _token_id_list(prompt_ids):
+    if not _is_token_id_list(prompt_ids):
         raise RuntimeError("OpenAI chat completion did not return the served prompt token IDs")
     logprob_items = (choice.get("logprobs") or {}).get("content")
     if logprobs_requested and logprob_items is None:
@@ -368,7 +368,7 @@ class OpenAIHTTPModelClient:
             )
             if prompt_ids is None:
                 raise RuntimeError("Cannot preserve the exact served token prefix across this chat turn")
-        if not _token_id_list(prompt_ids):
+        if not _is_token_id_list(prompt_ids):
             raise RuntimeError("OpenAI chat tokenization did not return prompt token IDs")
 
         payload = {

@@ -38,7 +38,7 @@ from skyrl_train.config.trajectory_runner_capabilities import opencode_exact_con
 from skyrl_train.policy_version import (
     POLICY_VERSION_SEGMENTS_KEY,
     PolicyVersionSegment,
-    append_policy_version_segment,
+    append_contiguous_policy_version_segment,
     validate_policy_version_segments,
 )
 
@@ -572,20 +572,20 @@ class InferenceEngineClient(InferenceEngineInterface):
                     require_known=False,
                 )
                 if accum_response_ids and not saw_policy_version_segments:
-                    append_policy_version_segment(
+                    append_contiguous_policy_version_segment(
                         accum_policy_version_segments,
                         token_count=len(accum_response_ids),
                         policy_version=None,
                     )
                 for segment in partial_segments[0]:
-                    append_policy_version_segment(
+                    append_contiguous_policy_version_segment(
                         accum_policy_version_segments,
                         token_count=segment["token_count"],
                         policy_version=segment["policy_version"],
                     )
                 saw_policy_version_segments = True
             elif new_response_ids and saw_policy_version_segments:
-                append_policy_version_segment(
+                append_contiguous_policy_version_segment(
                     accum_policy_version_segments,
                     token_count=len(new_response_ids),
                     policy_version=None,
@@ -751,10 +751,10 @@ class InferenceEngineClient(InferenceEngineInterface):
             if attempt_version is not None:
                 if tokens_before > 0 and not accum.policy_version_segments:
                     # Tokens from attempts sent before any version was named carry none.
-                    append_policy_version_segment(
+                    append_contiguous_policy_version_segment(
                         accum.policy_version_segments, token_count=tokens_before, policy_version=None
                     )
-                append_policy_version_segment(
+                append_contiguous_policy_version_segment(
                     accum.policy_version_segments,
                     token_count=accum.completion_tokens - tokens_before,
                     policy_version=attempt_version,
