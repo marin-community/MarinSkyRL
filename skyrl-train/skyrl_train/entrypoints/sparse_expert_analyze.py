@@ -56,10 +56,12 @@ def _participant_metrics(rows: list[dict]) -> dict:
         return {}
     summed = ("transfers", "changed_values", "total_values", "logical_bytes", "metadata_bytes", "collectives")
     timed = ("detect_seconds", "construct_seconds", "pack_allocation_seconds", "transfer_seconds", "apply_seconds")
+    profiled = all(row.get("timing_mode", "profiled") == "profiled" for row in rows)
     return {
         "participants": len(rows),
+        "timing_mode": "profiled" if profiled else "end_to_end_only",
         "sum": {key: sum(row[key] for row in rows) for key in summed},
-        "critical_rank": {key: max(row[key] for row in rows) for key in timed},
+        "critical_rank": {key: max(row[key] for row in rows) if profiled else None for key in timed},
         "wall_range_seconds": _range([row["seconds"] for row in rows]),
         "max_gpu_allocated_start_bytes": max(row["gpu_allocated_start"] for row in rows),
         "max_gpu_peak_allocated_bytes": max(row["gpu_peak_allocated"] for row in rows),

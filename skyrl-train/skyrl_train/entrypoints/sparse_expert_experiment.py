@@ -323,6 +323,9 @@ def _run_real(records: dict) -> None:
             if records["leading_repeats"]:
                 pair = ("dense", "indices_bucket") if version == 1 else ("indices_bucket", "dense")
                 order = pair * records["leading_repeats"]
+            elif records["fast_candidates"]:
+                candidates = ("dense", "indices_bucket", "indices_bucket_fast", "indices_expert_bucket_fast")
+                order = candidates if version == 1 else tuple(reversed(candidates))
             else:
                 order = (
                     ("dense", "indices", "bitmap", "indices_bucket", "bitmap_bucket")
@@ -418,6 +421,7 @@ def main() -> None:
     mode = "real"
     leading_repeats = 0
     policy_nodes = 2
+    fast_candidates = False
     for arg in sys.argv[1:]:
         if arg.startswith("++sparse_experiment.mode="):
             mode = arg.split("=", 1)[1]
@@ -425,6 +429,8 @@ def main() -> None:
             leading_repeats = int(arg.split("=", 1)[1])
         if arg.startswith("++sparse_experiment.policy_nodes="):
             policy_nodes = int(arg.split("=", 1)[1])
+        if arg.startswith("++sparse_experiment.fast_candidates="):
+            fast_candidates = arg.split("=", 1)[1].lower() in ("1", "true", "yes")
     if leading_repeats < 0 or leading_repeats > 10:
         raise ValueError("leading_repeats must be between zero and ten")
     if policy_nodes not in (2, 4):
@@ -434,6 +440,7 @@ def main() -> None:
         "mode": mode,
         "leading_repeats": leading_repeats,
         "policy_nodes": policy_nodes,
+        "fast_candidates": fast_candidates,
         "metadata": _metadata(),
         "updates": [],
         "complete": False,

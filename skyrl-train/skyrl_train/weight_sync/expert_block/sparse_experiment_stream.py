@@ -188,10 +188,13 @@ def _relay(stream: Stream, item, tensor: torch.Tensor) -> int:
     return count
 
 
-def _encode_timed(current: torch.Tensor, previous: torch.Tensor, encoding: str, device: torch.device):
+def _encode_timed(
+    current: torch.Tensor, previous: torch.Tensor, encoding: str, device: torch.device, *, profile: bool = True
+):
     started = time.perf_counter()
     mask = changed_mask(current, previous)
-    _sync(device)
+    if profile:
+        _sync(device)
     detect = time.perf_counter() - started
 
     started = time.perf_counter()
@@ -203,13 +206,15 @@ def _encode_timed(current: torch.Tensor, previous: torch.Tensor, encoding: str, 
         positions = pack_bitmap(mask)
     else:
         raise ValueError(f"Unknown exact sparse encoding {encoding}")
-    _sync(device)
+    if profile:
+        _sync(device)
     construct = time.perf_counter() - started
 
     started = time.perf_counter()
     flat = current.detach().view(-1)
     values = flat.index_select(0, positions.to(torch.int64)) if encoding == "indices" else flat.masked_select(mask)
-    _sync(device)
+    if profile:
+        _sync(device)
     pack_allocation = time.perf_counter() - started
     return Patch(encoding, flat.numel(), positions, values), detect, construct, pack_allocation
 
@@ -222,6 +227,15 @@ def run_sparse(
     baseline: dict[str, torch.Tensor] | None = None,
 ) -> dict:
     """Run one candidate into the bound views and return participant-level components."""
+    if encoding in {"indices_bucket_fast", "indices_expert_bucket_fast"}:
+        return run_sparse_bucket(
+            stream,
+            version,
+            "indices",
+            baseline,
+            profile=False,
+            dense_fallback=encoding == "indices_expert_bucket_fast",
+        )
     if encoding.endswith("_bucket"):
         return run_sparse_bucket(stream, version, encoding.removesuffix("_bucket"), baseline)
     if stream.trainer and baseline is None:
@@ -348,6 +362,9 @@ def run_sparse_bucket(
     version: int,
     encoding: str,
     baseline: dict[str, torch.Tensor] | None = None,
+    *,
+    profile: bool = True,
+    dense_fallback: bool = False,
 ) -> dict:
     """Coalesce adjacent compatible expert patches into 128 MiB dense-size buckets."""
     if encoding not in {"indices", "bitmap"}:
@@ -370,6 +387,23 @@ def run_sparse_bucket(
         if not local:
             continue
         transfers += len(local)
+        if dense_fallback and not isinstance(bucket[0], ExpertBroadcast):
+            item, landing = local[0]
+            total_values += item.source.numel
+            stage = time.perf_counter()
+            if landing is None:
+                logical_bytes += stream.send(item)
+                collectives += 1
+            else:
+                wire = stream.wire_tensor(landing)
+                logical_bytes += stream.receive(item, wire)
+                collectives += 2
+                if not landing.direct:
+                    landing.installed.copy_(wire)
+            if profile:
+                _sync(device)
+                transfer_seconds += time.perf_counter() - stage
+            continue
         sizes = [
             stream.source_view(item).numel() if landing is None else landing.installed.numel()
             for item, landing in local
@@ -381,13 +415,18 @@ def run_sparse_bucket(
         if sender:
             for item, _ in local:
                 patch, detect, construct, allocation = _encode_timed(
-                    stream.source_view(item), _baseline_view(stream, item, baseline), encoding, device
+                    stream.source_view(item),
+                    _baseline_view(stream, item, baseline),
+                    encoding,
+                    device,
+                    profile=profile,
                 )
                 patches.append(patch)
                 counts.append(patch.changed)
-                detect_seconds += detect
-                construct_seconds += construct
-                pack_allocation_seconds += allocation
+                if profile:
+                    detect_seconds += detect
+                    construct_seconds += construct
+                    pack_allocation_seconds += allocation
             changed_values += sum(counts)
 
         stage = time.perf_counter()
@@ -397,7 +436,8 @@ def run_sparse_bucket(
             else torch.empty(len(local), dtype=torch.int64, device=device)
         )
         collectives += _relay(stream, local[0][0], metadata)
-        _sync(device)
+        if profile:
+            _sync(device)
         if not sender:
             counts = metadata.tolist()
             changed_values += sum(counts)
@@ -409,8 +449,9 @@ def run_sparse_bucket(
                 values_parts = [patch.values for patch in patches if patch.changed]
                 positions = torch.cat(positions_parts) if len(positions_parts) > 1 else positions_parts[0]
                 values = torch.cat(values_parts) if len(values_parts) > 1 else values_parts[0]
-                _sync(device)
-                pack_allocation_seconds += time.perf_counter() - pack_started
+                if profile:
+                    _sync(device)
+                    pack_allocation_seconds += time.perf_counter() - pack_started
             else:
                 position_count = sum(
                     count if encoding == "indices" else (size + 7) // 8 for size, count in zip(sizes, counts) if count
@@ -420,9 +461,11 @@ def run_sparse_bucket(
                 values = torch.empty(sum(counts), dtype=local[0][1].wire_dtype, device=device)
             collectives += _relay(stream, local[0][0], positions)
             collectives += _relay(stream, local[0][0], values)
-            _sync(device)
+            if profile:
+                _sync(device)
             logical_bytes += positions.numel() * positions.element_size() + values.numel() * values.element_size()
-        transfer_seconds += time.perf_counter() - stage
+        if profile:
+            transfer_seconds += time.perf_counter() - stage
 
         if not sender and any(counts):
             stage = time.perf_counter()
@@ -440,8 +483,9 @@ def run_sparse_bucket(
                 apply_patch(landing.installed, patch)
                 position_offset += position_count
                 value_offset += count
-            _sync(device)
-            apply_seconds += time.perf_counter() - stage
+            if profile:
+                _sync(device)
+                apply_seconds += time.perf_counter() - stage
 
     _sync(device)
     report = SparseReport(
@@ -468,4 +512,8 @@ def run_sparse_bucket(
         host_rss_end=_rss(),
         host_peak_rss=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
     )
-    return asdict(report)
+    row = asdict(report)
+    if not profile:
+        row["encoding"] = "indices_expert_bucket_fast" if dense_fallback else "indices_bucket_fast"
+    row["timing_mode"] = "profiled" if profile else "end_to_end_only"
+    return row

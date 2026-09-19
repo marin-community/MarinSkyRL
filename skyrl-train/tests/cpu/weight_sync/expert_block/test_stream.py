@@ -344,9 +344,23 @@ def sparse_participant_main(rank, port, directory):
                 assert rows and sum(row["changed"] for row in rows) > 0
                 assert all(row["occupied_256_value_blocks"] > 0 for row in rows if row["changed"])
             order = (
-                ("indices", "bitmap", "indices_bucket", "bitmap_bucket")
+                (
+                    "indices",
+                    "bitmap",
+                    "indices_bucket",
+                    "bitmap_bucket",
+                    "indices_bucket_fast",
+                    "indices_expert_bucket_fast",
+                )
                 if version == 1
-                else ("bitmap_bucket", "indices_bucket", "bitmap", "indices")
+                else (
+                    "indices_expert_bucket_fast",
+                    "indices_bucket_fast",
+                    "bitmap_bucket",
+                    "indices_bucket",
+                    "bitmap",
+                    "indices",
+                )
             )
             collective_counts = {}
             for encoding in order:
