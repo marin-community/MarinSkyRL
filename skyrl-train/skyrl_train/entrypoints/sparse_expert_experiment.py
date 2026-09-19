@@ -320,11 +320,17 @@ def _run_real(records: dict) -> None:
                         await client.pause_generation()
                         await sync._receivers("experiment_restore_baseline")
                         await client.resume_generation()
+                    if encoding == "dense":
+                        policy_memory, receiver_memory = await asyncio.gather(
+                            sync._policy("experiment_memory", {"reset_peak": True}),
+                            sync._receivers("experiment_memory", {"reset_peak": True}),
+                        )
+                        memory_before = {"policy": policy_memory, "receivers": receiver_memory}
                     start = time.perf_counter()
                     await client.pause_generation()
                     paused = time.perf_counter()
                     if encoding == "dense":
-                        detail = asdict(await sync.sync(version))
+                        detail = {"install": asdict(await sync.sync(version)), "memory_before": memory_before}
                     else:
                         transfer = {"version": version, "encoding": encoding}
                         policy_rows, receiver_rows = await asyncio.gather(
@@ -343,6 +349,12 @@ def _run_real(records: dict) -> None:
                     installed = time.perf_counter()
                     await client.resume_generation()
                     published = time.perf_counter()
+                    if encoding == "dense":
+                        policy_memory, receiver_memory = await asyncio.gather(
+                            sync._policy("experiment_memory", {"reset_peak": False}),
+                            sync._receivers("experiment_memory", {"reset_peak": False}),
+                        )
+                        detail["memory_after"] = {"policy": policy_memory, "receivers": receiver_memory}
                     await client.pause_generation()
                     verification = await sync.verify(version)
                     await client.resume_generation()

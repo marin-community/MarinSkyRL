@@ -106,6 +106,23 @@ def _allocated(device: torch.device) -> int:
     return torch.cuda.memory_allocated(device) if device.type == "cuda" else 0
 
 
+def memory_sample(stream: Stream, reset_peak: bool = False) -> dict:
+    """Record a participant's memory outside the timed publication interval."""
+    device = stream.device
+    _sync(device)
+    if reset_peak and device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    host_rss = _rss()
+    return {
+        "participant": stream.participant,
+        "gpu_allocated_bytes": _allocated(device),
+        "gpu_peak_allocated_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0,
+        "gpu_free_bytes": _free(device),
+        "host_rss_bytes": host_rss,
+        "host_peak_rss_bytes": max(host_rss, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024),
+    }
+
+
 def _baseline_view(stream: Stream, item, baseline: dict[str, torch.Tensor]) -> torch.Tensor:
     if isinstance(item, ExpertBroadcast):
         return expert_source_view(stream.expert_sources[item.entry.name], baseline)

@@ -16,7 +16,11 @@ import torch
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, destroy_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, TrainerRank, from_wire, to_wire
 from skyrl_train.weight_sync.expert_block.source_views import local_expert_sources, local_source_slices
-from skyrl_train.weight_sync.expert_block.sparse_experiment_stream import measure_distribution, run_sparse
+from skyrl_train.weight_sync.expert_block.sparse_experiment_stream import (
+    measure_distribution,
+    memory_sample,
+    run_sparse,
+)
 from skyrl_train.weight_sync.expert_block.stream import Stream, bind, storage_identity
 from skyrl_train.weight_sync.expert_block.verify_weights import compare_replicas, replay
 
@@ -155,6 +159,11 @@ class ExpertBlockSender:
         if self.stream is None or self.experiment_baseline is None:
             raise RuntimeError("Capture a GPU baseline before measuring the update")
         return measure_distribution(self.stream, update_info["version"], self.experiment_baseline)
+
+    def experiment_memory(self, options: dict) -> dict:
+        if self.stream is None:
+            raise RuntimeError("Expert-block sender is not initialised")
+        return memory_sample(self.stream, reset_peak=options["reset_peak"])
 
     def experiment_advance_baseline(self) -> dict:
         """Advance only after the driver has observed every receiver and resumed generation."""

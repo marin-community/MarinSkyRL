@@ -16,7 +16,7 @@ import torch
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, destroy_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, from_wire
 from skyrl_train.weight_sync.expert_block.source_views import LAYER_PREFIX, ROUTED_EXPERTS, dtype_name
-from skyrl_train.weight_sync.expert_block.sparse_experiment_stream import run_sparse
+from skyrl_train.weight_sync.expert_block.sparse_experiment_stream import memory_sample, run_sparse
 from skyrl_train.weight_sync.expert_block.stream import Stream, bind, storage_identity
 from skyrl_train.weight_sync.expert_block.verify_weights import replay
 
@@ -189,6 +189,11 @@ class ExpertBlockReceiver:
         if storage_identity(dict(self.model.named_parameters())) != self.identity:
             raise RuntimeError("Model parameter storage changed since the receiver was initialised")
         return run_sparse(self.stream, update_info["version"], update_info["encoding"])
+
+    def experiment_memory(self, options: dict) -> dict:
+        if self.stream is None:
+            raise RuntimeError("Expert-block receiver is not initialised")
+        return memory_sample(self.stream, reset_peak=options["reset_peak"])
 
     def experiment_advance_baseline(self) -> dict:
         """Advance only after every receiver passed dense replay and generation resumed."""
