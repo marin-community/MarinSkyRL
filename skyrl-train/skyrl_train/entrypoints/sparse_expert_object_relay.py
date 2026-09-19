@@ -21,13 +21,8 @@ from skyrl_train.weight_sync.expert_block.sparse_experiment_codec import Patch, 
 
 def _filesystem(root: str):
     if root.startswith("s3://"):
-        import s3fs
-
-        key = os.environ.get("CW_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID")
-        secret = os.environ.get("CW_KEY_SECRET") or os.environ.get("AWS_SECRET_ACCESS_KEY")
-        if not key or not secret:
-            raise RuntimeError("CoreWeave object-store credentials are absent")
-        return s3fs.S3FileSystem(key=key, secret=secret, client_kwargs={"endpoint_url": "https://cwobject.com"})
+        # Iris task pods already supply FSSPEC_S3, including the endpoint and credentials.
+        return fsspec.filesystem("s3")
     return fsspec.filesystem("file")
 
 
