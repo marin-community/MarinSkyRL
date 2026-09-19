@@ -45,6 +45,7 @@ generator:
   max_num_batched_tokens: 16384
   enforce_eager: false
   run_engines_locally: true
+  weight_sync_backend: nccl
   async_engine: true
   batched: false
   engine_init_kwargs:
