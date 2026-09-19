@@ -4,31 +4,26 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass
-import hashlib
-import json
-import os
 from pathlib import Path
 import posixpath
-import subprocess
-import sys
 import tempfile
 import threading
 import time
 from collections.abc import Generator
 
+from fsspec.spec import AbstractFileSystem
+from huggingface_hub import snapshot_download
 from rigging.filesystem.cluster_config import marin_temp_bucket
 from rigging.filesystem.distributed_lock import HEARTBEAT_INTERVAL, DistributedLease, LeaseLostError, create_lock
 
 from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize, read_json, write_json
-from marinskyrl.hf_model import validate_hf_model_weights
-from marinskyrl.resource_locator import join_resource_path
+from marinskyrl.hf_model import hugging_face_hub_online, hugging_face_model_cache_key, validate_hf_model_weights
+from marinskyrl.resource_locator import is_hugging_face_repo_id, join_resource_path
 from marinskyrl.speculative_decoding import is_hugging_face_commit
 
 _CACHE_COMPLETE_MARKER = ".marinskyrl-cache.json"
 _CACHE_PREFIX = "marinskyrl/hf-models"
 _CACHE_POLL_INTERVAL = 10.0
-_DOWNLOAD_ATTEMPT_TIMEOUT = 600
-_DOWNLOAD_ATTEMPTS = 6
 
 
 @dataclass(frozen=True)
@@ -40,7 +35,7 @@ class CachedHuggingFaceModel:
     local_path: str
 
     def __post_init__(self) -> None:
-        if self.model_id.count("/") != 1:
+        if not is_hugging_face_repo_id(self.model_id):
             raise ValueError(f"Invalid Hugging Face model ID: {self.model_id!r}")
         if not is_hugging_face_commit(self.revision):
             raise ValueError("Cached Hugging Face models require a full lowercase commit SHA")
@@ -48,23 +43,16 @@ class CachedHuggingFaceModel:
             raise ValueError("Cached Hugging Face models require an absolute local path")
 
 
-def _cache_slug(model_id: str, revision: str) -> str:
-    identity = f"{model_id}@{revision}"
-    readable = identity.replace("/", "--")
-    digest = hashlib.sha256(identity.encode()).hexdigest()[:16]
-    return f"{readable}-{digest}"
-
-
 @contextlib.contextmanager
 def _heartbeat(lock: DistributedLease) -> Generator[None, None, None]:
     stop = threading.Event()
-    error: list[BaseException] = []
+    error: list[Exception] = []
 
     def refresh() -> None:
         while not stop.wait(HEARTBEAT_INTERVAL):
             try:
                 lock.refresh()
-            except BaseException as exc:
+            except Exception as exc:
                 error.append(exc)
                 stop.set()
 
@@ -72,11 +60,12 @@ def _heartbeat(lock: DistributedLease) -> Generator[None, None, None]:
     thread.start()
     try:
         yield
-        if error:
-            raise LeaseLostError("lost the Hugging Face model-cache lease") from error[0]
     finally:
         stop.set()
         thread.join()
+    if error:
+        raise LeaseLostError("lost the Hugging Face model-cache lease") from error[0]
+    lock.refresh()
 
 
 def _cache_metadata(marker_uri: str) -> dict[str, object] | None:
@@ -98,7 +87,7 @@ def _is_cache_complete(marker_uri: str, model_id: str, revision: str) -> bool:
     return True
 
 
-def _upload_snapshot(filesystem, cache_path: str, snapshot: Path) -> None:
+def _upload_snapshot(filesystem: AbstractFileSystem, cache_path: str, snapshot: Path) -> None:
     for local_path in sorted(path for path in snapshot.rglob("*") if path.is_file()):
         relative = local_path.relative_to(snapshot)
         if relative.parts[0] == ".cache":
@@ -117,53 +106,15 @@ def download_hugging_face_snapshot(
     destination: Path | None = None,
     allow_patterns: tuple[str, ...] = (),
 ) -> Path:
-    """Download a Hub snapshot in an online child process and return its local path."""
-    child_env = {
-        key: value for key, value in os.environ.items() if key not in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
-    }
-    child_env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-    code = (
-        "import json, sys\n"
-        "from huggingface_hub import snapshot_download\n"
-        "p = snapshot_download(\n"
-        "    sys.argv[1],\n"
-        "    revision=sys.argv[2] or None,\n"
-        "    local_dir=sys.argv[3] or None,\n"
-        "    allow_patterns=json.loads(sys.argv[4]) or None,\n"
-        ")\n"
-        "print('PRESTAGE_LOCAL_DIR=' + p)\n"
-    )
-    last_error = ""
-    for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
-        try:
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "-c",
-                    code,
-                    model_id,
-                    revision or "",
-                    str(destination) if destination is not None else "",
-                    json.dumps(allow_patterns),
-                ],
-                env=child_env,
-                capture_output=True,
-                text=True,
-                timeout=_DOWNLOAD_ATTEMPT_TIMEOUT,
-            )
-        except subprocess.TimeoutExpired:
-            last_error = f"download stalled for more than {_DOWNLOAD_ATTEMPT_TIMEOUT} seconds"
-        else:
-            if result.returncode == 0:
-                for line in result.stdout.splitlines():
-                    if line.startswith("PRESTAGE_LOCAL_DIR="):
-                        return Path(line.split("=", 1)[1])
-                last_error = "snapshot_download did not report its local directory"
-            else:
-                last_error = (result.stderr or result.stdout or "unknown error")[-800:]
-        if attempt < _DOWNLOAD_ATTEMPTS:
-            time.sleep(min(30, 2**attempt))
-    raise RuntimeError(f"Hugging Face snapshot download failed for {model_id}@{revision}: {last_error}")
+    """Download a Hub snapshot while preserving the runtime's offline environment."""
+    with hugging_face_hub_online():
+        snapshot = snapshot_download(
+            model_id,
+            revision=revision,
+            local_dir=destination,
+            allow_patterns=list(allow_patterns) or None,
+        )
+    return Path(snapshot)
 
 
 def ensure_hugging_face_model_cache(
@@ -176,7 +127,7 @@ def ensure_hugging_face_model_cache(
     """Mirror one immutable Hub snapshot and return its region-local cache URI."""
     cache_uri = marin_temp_bucket(
         ttl_days,
-        prefix=f"{_CACHE_PREFIX}/{_cache_slug(model_id, revision)}",
+        prefix=f"{_CACHE_PREFIX}/{hugging_face_model_cache_key(model_id, revision)}",
         source_prefix=source_prefix,
     ).rstrip("/")
     filesystem, cache_path = fs_and_path(cache_uri)
@@ -197,7 +148,7 @@ def ensure_hugging_face_model_cache(
             snapshot = download_hugging_face_snapshot(model_id, revision=revision, destination=Path(scratch))
             filesystem.makedirs(cache_path, exist_ok=True)
             _upload_snapshot(filesystem, cache_path, snapshot)
-            write_json(marker_uri, {"model_id": model_id, "revision": revision})
+        write_json(marker_uri, {"model_id": model_id, "revision": revision})
         return cache_uri
     finally:
         lock.release()

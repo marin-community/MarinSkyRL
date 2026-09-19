@@ -832,7 +832,7 @@ def test_policy_revision_from_config_is_staged_before_ray(tmp_path):
 
 def test_hugging_face_draft_model_is_cached_and_materialized_before_ray(tmp_path):
     revision = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
-    args = _args(tmp_path, "opencode")
+    args = _args(tmp_path, "opencode", ["--storage-ttl-days", "7"])
     Path(args.rl_config).write_text(
         f"""\
 trainer:
@@ -850,17 +850,19 @@ generator:
     normalize(args)
     resolve_launch_defaults(args)
 
-    options = _shell_options(build_task_command(args)[-1])
-    staged = json.loads(options["--prestage-draft-models-json"][0])
+    shell = build_task_command(args)[-1]
+    options = _shell_options(shell)
+    tokens = shlex.split(shell)
+    draft_option = tokens.index("--prestage-draft-model")
+    model_id, staged_revision, local_path = tokens[draft_option + 1 : draft_option + 4]
 
-    assert len(staged) == 1
-    assert staged[0]["model_id"] == "laion/snowball-64k-eagle3-draft-r2egym"
-    assert staged[0]["revision"] == revision
-    assert re.fullmatch(r"/tmp/marinskyrl-draft-models/[0-9a-f]{16}", staged[0]["local_path"])
-    assert set(options["--model-cache-ttl-days"]) == {"14"}
-    assert set(options["--model-cache-source-prefix"]) == {args.storage_paths.checkpoint_root}
+    assert model_id == "laion/snowball-64k-eagle3-draft-r2egym"
+    assert staged_revision == revision
+    assert re.fullmatch(r"/tmp/marinskyrl-draft-models/[0-9a-f]{64}", local_path)
+    assert set(options["--draft-model-cache-ttl-days"]) == {"7"}
+    assert set(options["--draft-model-cache-source-prefix"]) == {args.storage_paths.checkpoint_root}
     assert any(
-        override == f"++generator.speculative_decoding.model.materialized_path={staged[0]['local_path']}"
+        override == f"++generator.speculative_decoding.model.materialized_path={local_path}"
         for override in options["--skyrl_override"]
     )
 

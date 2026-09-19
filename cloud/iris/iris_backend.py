@@ -1416,13 +1416,6 @@ def create_parser() -> argparse.ArgumentParser:
         "repo-id model_path (same gate as --prestage-model).",
     )
     parser.add_argument(
-        "--model-cache-ttl-days",
-        type=int,
-        default=DEFAULT_STORAGE_TTL_DAYS,
-        help="Lifecycle TTL for revision-keyed Hugging Face draft-model mirrors.",
-    )
-
-    parser.add_argument(
         "--train_data",
         default=EMPTY_JSON_LIST,
         help="Training data paths as a JSON list (e.g., '[\"org/dataset\"]').",
@@ -2108,8 +2101,6 @@ def normalize(args: argparse.Namespace) -> None:
         raise SystemExit("--gpus-per-node must be >= 1.")
     if args.driver_liveness_timeout is not None and args.driver_liveness_timeout < 0:
         raise SystemExit("--driver-liveness-timeout must be >= 0.")
-    if args.model_cache_ttl_days <= 0:
-        raise SystemExit("--model-cache-ttl-days must be positive.")
 
 
 def _build_task_shell(
@@ -2350,11 +2341,13 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     if draft_model is not None:
         controller_cmd.extend(
             [
-                "--prestage-draft-models-json",
-                json.dumps([asdict(draft_model)], sort_keys=True),
-                "--model-cache-ttl-days",
-                str(args.model_cache_ttl_days),
-                "--model-cache-source-prefix",
+                "--prestage-draft-model",
+                draft_model.model_id,
+                draft_model.revision,
+                draft_model.local_path,
+                "--draft-model-cache-ttl-days",
+                str(args.storage_ttl_days),
+                "--draft-model-cache-source-prefix",
                 storage_paths.checkpoint_root,
             ]
         )

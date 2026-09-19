@@ -22,9 +22,9 @@ from torch import nn
 
 from marinskyrl.resource_locator import join_resource_path
 from marinskyrl.speculative_decoding import (
+    SpeculatorModelConfig,
     SpeculatorOptimizer,
     SpeculatorTrainingConfig,
-    hugging_face_repo_from_source_uri,
     runai_model_uri,
 )
 from skyrl_train.distributed.muon_hybrid import HybridMuon, is_muon_param
@@ -96,9 +96,7 @@ class OnlineEagleTrainingJob:
 
     step: int
     capture_dir: str
-    draft_model_source: str
-    draft_model_path: str | None
-    initial_draft_source_identity: str
+    initial_draft_model: SpeculatorModelConfig
     parent_draft_revision: str
     target_revision: str
     output_dir: str
@@ -373,9 +371,7 @@ def merge_online_eagle_captures(
 
 
 def _prepare_model(
-    draft_model_source: str,
-    draft_model_path: str | None,
-    draft_revision: str,
+    draft_model: SpeculatorModelConfig,
     capture_dir: Path,
     device: torch.device,
 ):
@@ -385,14 +381,13 @@ def _prepare_model(
     )
     from transformers import PreTrainedModel  # noqa: PLC0415
 
-    hugging_face_repo = hugging_face_repo_from_source_uri(draft_model_source)
-    pretrained_model = draft_model_path or hugging_face_repo
-    if pretrained_model is not None:
-        revision = None if draft_model_path is not None else draft_revision
-        config = Eagle3SpeculatorConfig.from_pretrained(pretrained_model, revision=revision)
+    pretrained_path = draft_model.materialized_path or draft_model.hugging_face_repo_id
+    if pretrained_path is not None:
+        revision = None if draft_model.materialized_path is not None else draft_model.source_identity
+        config = Eagle3SpeculatorConfig.from_pretrained(pretrained_path, revision=revision)
     else:
         config = Eagle3SpeculatorConfig.from_dict(
-            json.loads(io.read_bytes(join_resource_path(draft_model_source, "config.json")))
+            json.loads(io.read_bytes(join_resource_path(draft_model.source_uri, "config.json")))
         )
     # Speculators' FlexAttention mask is block-padded, but online captures retain
     # their exact sequence length. EAGLE's time-shift extension can therefore
@@ -404,10 +399,10 @@ def _prepare_model(
     # The public embedding-free Snowball checkpoint intentionally has no verifier
     # path. Bypass Speculators' generic post-load verifier hook because the exact
     # target-owned tensors come from this sealed rollout, not a second HF model.
-    if pretrained_model is not None:
+    if pretrained_path is not None:
         model = PreTrainedModel.from_pretrained.__func__(
             Eagle3DraftModel,
-            pretrained_model,
+            pretrained_path,
             config=config,
             revision=revision,
         )
@@ -418,9 +413,9 @@ def _prepare_model(
         from vllm.transformers_utils.runai_utils import list_safetensors  # noqa: PLC0415
 
         model = Eagle3DraftModel(config)
-        weight_files = list_safetensors(runai_model_uri(draft_model_source))
+        weight_files = list_safetensors(runai_model_uri(draft_model.source_uri))
         if not weight_files:
-            raise FileNotFoundError(f"Draft checkpoint has no safetensors files: {draft_model_source}")
+            raise FileNotFoundError(f"Draft checkpoint has no safetensors files: {draft_model.source_uri}")
         model.load_state_dict(
             dict(runai_safetensors_weights_iterator(weight_files, use_tqdm_on_load=False)),
             strict=False,
@@ -790,9 +785,7 @@ class OnlineEagleTrainerRuntime:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.serving_dtype = _serving_dtype(self.device)
         self.model = _prepare_model(
-            job.draft_model_source,
-            job.draft_model_path,
-            job.initial_draft_source_identity,
+            job.initial_draft_model,
             capture_dir,
             self.device,
         )
@@ -1010,7 +1003,7 @@ class OnlineEagleTrainerRuntime:
                     output_dir,
                     {
                         "draft_revision": draft_revision,
-                        "initial_source_identity": job.initial_draft_source_identity,
+                        "initial_source_identity": job.initial_draft_model.source_identity,
                         "parent_draft_revision": job.parent_draft_revision,
                         "trained_against_target_revision": manifest["target_revision"],
                         "training": asdict(training),
