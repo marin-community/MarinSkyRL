@@ -25,6 +25,7 @@ HTTP_BRIDGE_MAX_RECORDS_PER_PUBLICATION = 512
 VLLM_HISTOGRAM_BUNDLE_NAME = "vllm_histogram_bundle"
 VLLM_METRIC_SOURCE = "vllm"
 HTTP_BRIDGE_METRIC_SOURCE = "inference_http_bridge"
+METRIC_SOURCE_ATTRIBUTE = "metric_source"
 PUBLICATION_LOSS_METRIC = "metric_publication_dropped_records"
 
 
@@ -156,18 +157,25 @@ class FinelogInferenceMetricsSink:
 
         self._publisher = MetricSnapshotPublisher(
             max_records=VLLM_MAX_RECORDS_PER_ENGINE,
-            attributes={"metric_source": VLLM_METRIC_SOURCE},
+            attributes={METRIC_SOURCE_ATTRIBUTE: VLLM_METRIC_SOURCE},
         )
         self._histogram_publisher = CumulativeHistogramBundleSnapshotPublisher(
             max_records=VLLM_MAX_HISTOGRAM_BUNDLES_PER_PUBLICATION,
-            attributes={"metric_source": VLLM_METRIC_SOURCE},
+            attributes={METRIC_SOURCE_ATTRIBUTE: VLLM_METRIC_SOURCE},
         )
         self._bridge_publisher = MetricSnapshotPublisher(
             max_records=HTTP_BRIDGE_MAX_RECORDS_PER_PUBLICATION,
-            attributes={"metric_source": HTTP_BRIDGE_METRIC_SOURCE},
+            attributes={METRIC_SOURCE_ATTRIBUTE: HTTP_BRIDGE_METRIC_SOURCE},
         )
 
     def publish(self, snapshot: InferenceStatsSnapshot, step: int) -> None:
+        from rigging import telemetry  # noqa: PLC0415
+
+        sample_limit_dropped, telemetry_lost = self._publish_vllm(snapshot, step)
+        _record_publication_health(telemetry, VLLM_METRIC_SOURCE, sample_limit_dropped, telemetry_lost)
+        self._publish_http_bridge(snapshot, telemetry)
+
+    def _publish_vllm(self, snapshot: InferenceStatsSnapshot, step: int) -> tuple[int, int]:
         from rigging import telemetry  # noqa: PLC0415
         from rigging.telemetry.metrics import (  # noqa: PLC0415
             CumulativeHistogramBundleSnapshot,
@@ -278,7 +286,7 @@ class FinelogInferenceMetricsSink:
                             cumulative_base,
                             MetricSnapshot,
                             telemetry.CUMULATIVE_SNAPSHOT,
-                            publication_attributes=dual_attributes,
+                            additional_attributes=dual_attributes,
                         )
                     )
                 if self._histogram_format in (VllmHistogramFormat.STRUCTURED, VllmHistogramFormat.DUAL):
@@ -328,7 +336,11 @@ class FinelogInferenceMetricsSink:
             dropped, lost = _publication_losses(result, "vLLM histogram bundle")
             sample_limit_dropped += dropped
             telemetry_lost += lost
-        _record_publication_health(telemetry, VLLM_METRIC_SOURCE, sample_limit_dropped, telemetry_lost)
+        return sample_limit_dropped, telemetry_lost
+
+    def _publish_http_bridge(self, snapshot: InferenceStatsSnapshot, telemetry: _Telemetry) -> None:
+        from rigging.telemetry.metrics import MetricSnapshot  # noqa: PLC0415
+
         if snapshot.http_bridge is not None:
             records = []
             for histogram in snapshot.http_bridge.histograms:
@@ -414,7 +426,7 @@ def _metric_batch_is_valid(records: list[_MetricRecord]) -> bool:
             serialization.validate_attributes(
                 {
                     **record.attributes,
-                    "metric_source": VLLM_METRIC_SOURCE,
+                    METRIC_SOURCE_ATTRIBUTE: VLLM_METRIC_SOURCE,
                     "source_kind": record.source_kind,
                     "source_temporality": record.source_temporality,
                 }
@@ -429,11 +441,11 @@ def _histogram_records(
     base: Mapping[str, str],
     metric_snapshot_type: _MetricRecordFactory,
     cumulative: str,
-    publication_attributes: Mapping[str, str] | None = None,
+    additional_attributes: Mapping[str, str] | None = None,
 ) -> list[_MetricRecord]:
     attributes = {**histogram.attributes, **base}
-    if publication_attributes:
-        attributes = {**attributes, **publication_attributes}
+    if additional_attributes:
+        attributes = {**attributes, **additional_attributes}
     records = [
         metric_snapshot_type(
             name=f"{histogram.name}_bucket",
@@ -465,4 +477,4 @@ def _record_publication_health(
     """Publish current loss state; this best-effort signal cannot attest to its own delivery."""
     gauge = telemetry.gauge(PUBLICATION_LOSS_METRIC, unit="{record}")
     for reason, value in (("sample_limit", sample_limit), ("telemetry_loss", telemetry_loss)):
-        gauge.set(value, attributes={"metric_source": metric_source, "drop_reason": reason})
+        gauge.set(value, attributes={METRIC_SOURCE_ATTRIBUTE: metric_source, "drop_reason": reason})

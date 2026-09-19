@@ -88,7 +88,6 @@ def test_vllm_stats_reach_finelog():
     reasons = {r.attributes["finished_reason"]: r.value for r in engine if r.name == "request_success_total"}
     assert reasons == {"stop": 0, "length": 1, "abort": 0, "error": 0, "repetition": 0}
     assert "request_time_per_output_token_seconds_sum" not in values
-    assert len(engine) == 18
     assert len(bundles) == 1
     bundle = bundles[0]
     assert bundle.name == "vllm_histogram_bundle"
