@@ -113,7 +113,7 @@ def main() -> None:
         legend.append(plt.Rectangle((0, 0), 1, 1, facecolor="black", alpha=0.15))
         labels.append("Observed Grug density")
     fig.legend(legend, labels, loc="lower center", ncol=len(labels), bbox_to_anchor=(0.5, 0.005))
-    fig.suptitle("Per-tensor H100 GPU kernels + analytical payload / bandwidth + collective latency")
+    fig.suptitle("Per-tensor H100 wall time + analytical payload / bandwidth + collective latency")
     fig.tight_layout(rect=(0, 0.055, 1, 0.97))
     png = args.output_prefix.with_suffix(".png")
     result = args.output_prefix.with_suffix(".json")
@@ -129,7 +129,7 @@ def main() -> None:
                 else None,
                 "real_density_by_family": real_density,
                 "gpu": source["gpu"],
-                "formula": "T = measured median GPU component + logical bytes / bandwidth + calls * latency",
+                "formula": "T = measured median one-GPU wall time + logical bytes / bandwidth + calls * latency",
                 "collective_calls": {"dense": 1, "indices": 3, "bitmap": 3},
                 "density_range": [float(density[0]), float(density[-1])],
                 "bandwidth_gib_s_range": [float(bandwidth[0]), float(bandwidth[-1])],
@@ -139,7 +139,7 @@ def main() -> None:
                 },
                 "grid_winner_counts": counts,
                 "limitations": [
-                    "GPU timings are measured on one H100; bandwidth and latency are sensitivity inputs.",
+                    "One-H100 wall times include Python and synchronization; bandwidth and latency are inputs.",
                     "NCCL collective contention, metadata serialization, bucket packing and pauses are excluded.",
                     "Interpolation is only within measured 0.1%-80% changed-value densities.",
                 ],

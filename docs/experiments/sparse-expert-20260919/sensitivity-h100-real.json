@@ -12,7 +12,7 @@
     0.001,
     0.8
   ],
-  "formula": "T = measured median GPU component + logical bytes / bandwidth + calls * latency",
+  "formula": "T = measured median one-GPU wall time + logical bytes / bandwidth + calls * latency",
   "gpu": "NVIDIA H100 80GB HBM3",
   "grid_winner_counts": {
     "embedding:0": {
@@ -591,7 +591,7 @@
     1000
   ],
   "limitations": [
-    "GPU timings are measured on one H100; bandwidth and latency are sensitivity inputs.",
+    "One-H100 wall times include Python and synchronization; bandwidth and latency are inputs.",
     "NCCL collective contention, metadata serialization, bucket packing and pauses are excluded.",
     "Interpolation is only within measured 0.1%-80% changed-value densities."
   ],
