@@ -5,12 +5,13 @@ import socket
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Literal, Protocol
 
 import ray
 from loguru import logger
 
-from marinskyrl.environment_contract import TrainingLoop
+from marinskyrl.environment_contract import TRAINING_LOOP_ENV, TrainingLoop
 
 try:
     from rigging import telemetry
@@ -32,6 +33,20 @@ TRAINER_ROLE = "trainer"
 CONTROLLER_ROLE = "controller"
 WORKER_ROLE = "worker"
 SHUTDOWN_TIMEOUT_SECONDS = 2.0
+
+
+class StepKind(StrEnum):
+    """Which step counter a record's `step` attribute counts.
+
+    These members are exported verbatim as the `step_kind` attribute value, so the
+    strings are part of the published schema: dashboards filter on them and renaming
+    a member's value breaks every panel keyed to it.
+    """
+
+    GLOBAL_STEP = "global_step"
+    MODEL_VERSION_STEP = "model_version_step"
+    # No step was supplied, so neither counter describes the record.
+    UNKNOWN = "unknown"
 
 
 work_completed = telemetry.counter("work_completed", unit="{item}")
@@ -173,7 +188,7 @@ class TelemetryConfig:
             run_id=text("SKYRL_RUN_ID"),
             execution_uid=text("SKYRL_EXECUTION_UID") or _iris_execution_uid(),
             serving_job_id=text("SKYRL_SERVING_JOB_ID"),
-            training_loop=TrainingLoop(loop) if (loop := text("SKYRL_TRAINING_LOOP")) else None,
+            training_loop=TrainingLoop(loop) if (loop := text(TRAINING_LOOP_ENV)) else None,
         )
 
 

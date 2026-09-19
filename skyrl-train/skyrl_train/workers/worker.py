@@ -47,7 +47,7 @@ from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
 )
 from skyrl_train.learner_memory import INERT_LEARNER_MEMORY, LearnerMemory
-from skyrl_train.telemetry import WORKER_ROLE, ProcessTelemetry, TelemetryConfig
+from skyrl_train.telemetry import WORKER_ROLE, ProcessTelemetry, StepKind, TelemetryConfig
 from skyrl_train.utils.gradient_direction import (
     NO_GRADIENT_METRICS,
     GradientDirectionTracker,
@@ -987,6 +987,9 @@ class PolicyWorkerBase(Worker):
     # Defaults on the class, so a worker constructed without a config still answers
     # these: telemetry is off and the memory recorder is inert until __init__ replaces it.
     _memory: LearnerMemory = INERT_LEARNER_MEMORY
+    # Declared only here, not in __init__: a restored checkpoint has no known
+    # weight-sync version until an update with explicit metadata completes on this
+    # worker, which is the same "nothing yet" the class default states.
     _model_version_step: int | None = None
     _last_grad_metrics: Mapping[str, float] = NO_GRADIENT_METRICS
     _grad_updates: tuple[Mapping[str, float], ...] = ()
@@ -1008,9 +1011,6 @@ class PolicyWorkerBase(Worker):
             rank=self._rank,
             backend=str(self.cfg.trainer.get("strategy", "unknown")),
         )
-        # A restored checkpoint has no known weight-sync version until an update
-        # with explicit metadata successfully completes on this worker.
-        self._model_version_step: int | None = None
 
     async def _begin_vllm_layerwise_weight_reload(self, inference_engine_client, *, enabled: bool) -> None:
         """Open a rank-synchronized vLLM reload around a streamed weight update."""
@@ -1081,7 +1081,7 @@ class PolicyWorkerBase(Worker):
         # ahead of the barrier.
         step = (train_data.metadata or {}).get("global_step")
         self._grad_updates = ()
-        with self._memory.span("ppo_train", step=step, step_kind="global_step"):
+        with self._memory.span("ppo_train", step=step, step_kind=StepKind.GLOBAL_STEP):
             output = self._ppo_train_impl(train_data)
         if step is not None:
             self._model_version_step = int(step)

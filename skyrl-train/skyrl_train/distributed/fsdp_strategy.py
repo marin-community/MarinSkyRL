@@ -300,6 +300,12 @@ class FSDPStrategy(DistributedStrategy):
           - stale_clip_lr_scale: a multiplier (default 1.0) applied to every
             param_group's lr for this single ``optimizer.step()`` call, then
             restored. Used by StaleClip for predictive LR damping.
+
+        Optional observation kwarg:
+          - grad_observer: a callable invoked with this step's gradient shards
+            once per attempt, right before ``optimizer.zero_grad()`` -- with
+            ``successful=False`` when a non-finite grad_norm skipped the step, and
+            with the default otherwise. It observes only; it must not mutate.
         """
         self.last_optimizer_step_succeeded = False
         grad_observer = kwargs.get("grad_observer")
