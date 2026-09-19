@@ -300,6 +300,9 @@ def compute_policy_objective(
                 for value in (score_current_topk_logprobs, score_old_topk_logprobs, score_behavior_topk_logprobs)
             ):
                 raise ValueError("score centering requires aligned current, old, and behavior top-k logprobs")
+            assert score_current_topk_logprobs is not None
+            assert score_old_topk_logprobs is not None
+            assert score_behavior_topk_logprobs is not None
             correction = ppo_tis_score_centering_correction(
                 score_current_topk_logprobs,
                 score_old_topk_logprobs,
@@ -320,6 +323,19 @@ def compute_policy_objective(
             policy_loss_metrics["score_centering/correction_abs_mean"] = masked_mean(
                 correction.detach().abs(), policy_loss_mask
             ).item()
+            for name, logprobs in (
+                ("behavior", score_behavior_topk_logprobs),
+                ("old", score_old_topk_logprobs),
+                ("current", score_current_topk_logprobs),
+            ):
+                tail_mass = (1 - logprobs.detach().float().exp().sum(dim=-1)).clamp_min(0)
+                policy_loss_metrics[f"score_centering/{name}_tail_mass_mean"] = masked_mean(
+                    tail_mass, policy_loss_mask
+                ).item()
+                if name == "behavior":
+                    policy_loss_metrics["score_centering/behavior_tail_mass_gt_1pct_fraction"] = masked_mean(
+                        (tail_mass > 0.01).float(), policy_loss_mask
+                    ).item()
 
     if reward_mode is DistillationRewardMode.REPLACE:
         auxiliary = PolicyAuxiliaryTerms(
