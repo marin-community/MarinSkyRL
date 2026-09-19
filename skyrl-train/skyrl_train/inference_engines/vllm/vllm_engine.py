@@ -801,6 +801,10 @@ class WorkerWrap:
             ep_size = _ps.get_ep_group().world_size
         except Exception:
             ep_rank, ep_size = 0, 1
+        try:
+            pp_rank, pp_size = _ps.get_pp_group().rank_in_group, _ps.get_pp_group().world_size
+        except Exception:
+            pp_rank, pp_size = 0, 1
 
         def _cpu(t):
             return t.detach().to("cpu", dtype=_torch.float32).contiguous()
@@ -808,7 +812,14 @@ class WorkerWrap:
         out = {}
         if dump_inventory:
             out["__inventory__"] = {n: list(p.shape) for n, p in all_params.items()}
-        out["__ranks__"] = {"tp_rank": tp_rank, "tp_size": tp_size, "ep_rank": ep_rank, "ep_size": ep_size}
+        out["__ranks__"] = {
+            "tp_rank": tp_rank,
+            "tp_size": tp_size,
+            "ep_rank": ep_rank,
+            "ep_size": ep_size,
+            "pp_rank": pp_rank,
+            "pp_size": pp_size,
+        }
 
         expert_re = re.compile(r"^(model\.layers\.\d+\.mlp)\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$")
 
