@@ -15,6 +15,13 @@ class GeneratedOutputGroup:
     earliest_model_step: int
     source_prompts: List[dict]
 
+    # Process-local observations, deliberately outside checkpoint serialization:
+    # they describe this attempt, not state a resumed run should inherit.
+    completed_at: float | None = None
+    telemetry_attempt_id: str | None = None
+    admitted_at: float | None = None
+    telemetry_finished: bool = False
+
 
 @dataclass
 class GenerationBufferState:

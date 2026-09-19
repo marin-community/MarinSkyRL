@@ -601,7 +601,7 @@ class BasePPOExp:
         configure_progress(self.cfg.trainer.progress)
 
         with process_telemetry(TRAINER_ROLE):
-            self._run()
+            return self._run()
 
     def _run(self):
         # Force the orchestrator onto CPython's stock asyncio event loop (epoll),

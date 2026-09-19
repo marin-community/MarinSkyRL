@@ -38,7 +38,7 @@ class TerminalBenchGenerateExp(TerminalBenchExp):
         finally:
             await trajectory_runner.shutdown()
 
-    def run(self):
+    def _run(self):
         asyncio.run(self._generate())
 
 

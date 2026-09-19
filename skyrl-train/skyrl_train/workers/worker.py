@@ -3,6 +3,7 @@ import contextlib
 import logging
 import os
 import socket
+from collections.abc import Mapping
 from typing import Dict, Optional, Type, List, Any, Callable
 from skyrl_train.utils.progress import configure_progress, tqdm
 from marinskyrl.runtime_options import R3Transport
@@ -43,7 +44,16 @@ from skyrl_train.distributed.utils import init_custom_process_group, init_worker
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.policy_math import ppo_critic_loss
 from skyrl_train.utils.importance_ratio_diagnostics import (
+    ratio_diagnostics_settings,
     LogRatioMonitor,
+)
+from skyrl_train.learner_memory import INERT_LEARNER_MEMORY, LearnerMemory
+from skyrl_train.telemetry import WORKER_ROLE, ProcessTelemetry, StepKind, TelemetryConfig
+from skyrl_train.utils.gradient_direction import (
+    NO_GRADIENT_METRICS,
+    GradientDirectionTracker,
+    grad_cosine_settings,
+    gradient_direction_summary,
 )
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
 from skyrl_train.distillation import student_topk_logprobs
@@ -91,6 +101,10 @@ def _grug_query_bias_updater(
     target_weight = 1.0 if update.mode is GrugQueryBiasUpdateMode.REPLACE else update.interpolation_weight
     assert target_weight is not None
     return GrugQuantileBiasUpdater(model, valid_tokens, target_weight=target_weight)
+
+
+# Rigging's own shutdown waits two seconds; the extra covers the round trip to every rank.
+TELEMETRY_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -371,7 +385,17 @@ class Worker(DistributedTorchRayActor):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         configure_progress(cfg.trainer.progress)
+        # An actor inherits only the environment; rigging drops every record until this process
+        # configures it. The actor group drains it through close_telemetry before the kill.
+        self._telemetry = contextlib.ExitStack()
+        telemetry_config = TelemetryConfig.from_environment()
+        if telemetry_config.endpoint is not None:
+            self._telemetry.enter_context(ProcessTelemetry(telemetry_config, WORKER_ROLE))
         enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
+
+    def close_telemetry(self) -> None:
+        """Record the terminal event and drain queued telemetry; ray.kill would drop both."""
+        self._telemetry.close()
 
     def init_model(self, *args, **kwargs):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
@@ -949,6 +973,10 @@ class PPORayActorGroup:
         Args:
             no_restart: If True, prevents Ray from restarting the actors.
         """
+        # ray.kill runs no atexit handler in the actor, so the telemetry drain has to be asked for.
+        # A dead or wedged actor only costs the timeout; ray.wait raises for neither.
+        drains = [actor.close_telemetry.remote() for actor in self._actor_handlers]
+        ray.wait(drains, num_returns=len(drains), timeout=TELEMETRY_DRAIN_TIMEOUT_SECONDS)
         for actor in self._actor_handlers:
             try:
                 ray.kill(actor, no_restart=no_restart)
@@ -957,6 +985,18 @@ class PPORayActorGroup:
 
 
 class PolicyWorkerBase(Worker):
+    # Defaults on the class, so a worker constructed without a config still answers
+    # these: telemetry is off and the memory recorder is inert until __init__ replaces it.
+    _memory: LearnerMemory = INERT_LEARNER_MEMORY
+    # Declared only here, not in __init__: a restored checkpoint has no known
+    # weight-sync version until an update with explicit metadata completes on this
+    # worker, which is the same "nothing yet" the class default states.
+    _model_version_step: int | None = None
+    _last_grad_metrics: Mapping[str, float] = NO_GRADIENT_METRICS
+    _grad_updates: tuple[Mapping[str, float], ...] = ()
+    _grad_tracker: GradientDirectionTracker | None = None
+    _grad_parameter_ids: tuple[int, ...] = ()
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: nn.Module = None
@@ -967,6 +1007,11 @@ class PolicyWorkerBase(Worker):
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
         self._grug_query_bias_window: GrugQueryBiasWindow | None = None
+        self._memory = LearnerMemory(
+            enabled=bool(self.cfg.trainer.get("policy_train_spans", False)),
+            rank=self._rank,
+            backend=str(self.cfg.trainer.get("strategy", "unknown")),
+        )
 
     async def _begin_vllm_layerwise_weight_reload(self, inference_engine_client, *, enabled: bool) -> None:
         """Open a rank-synchronized vLLM reload around a streamed weight update."""
@@ -1031,6 +1076,19 @@ class PolicyWorkerBase(Worker):
             torch.distributed.barrier()
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
+        # The co-arrival entry barrier inside the implementation runs before it reads the
+        # step, and test_ep_coarrival_contracts drives that barrier with no metadata at
+        # all. The span therefore records no step for such a batch rather than raising
+        # ahead of the barrier.
+        step = (train_data.metadata or {}).get("global_step")
+        self._grad_updates = ()
+        with self._memory.span("ppo_train", step=step, step_kind=StepKind.GLOBAL_STEP):
+            output = self._ppo_train_impl(train_data)
+        if step is not None:
+            self._model_version_step = int(step)
+        return output
+
+    def _ppo_train_impl(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         self._drain_r3_decentral_stagger(train_data)
 
         global_step = train_data.metadata["global_step"]
@@ -1173,6 +1231,8 @@ class PolicyWorkerBase(Worker):
 
         torch.distributed.barrier()
         status_mean = policy_training_metrics(all_metrics, policy_update_steps / accumulation_steps)
+        # A range over the call's updates, not a per-micro-batch mean of one.
+        status_mean.update(gradient_direction_summary(self._grad_updates))
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()
@@ -1208,6 +1268,38 @@ class PolicyWorkerBase(Worker):
                 f"{tuple(experience.distillation.valid_mask.shape)} response coordinates"
             )
         return student_topk_logprobs(response_logits, token_ids)
+
+    def _gradient_observer(self, *, megatron_optimizer=None):
+        """Return a per-step gradient observer, or None when the diagnostic is off.
+
+        One tracker per parameter set: a changed layout invalidates the stored direction,
+        so the tracker resets rather than comparing against gradients from another shape.
+        """
+        settings = grad_cosine_settings(self.cfg.trainer.algorithm)
+        if not settings.enabled or settings.store == "off":
+            return None
+        if self.cfg.trainer.strategy not in {"fsdp", "fsdp2", "megatron"}:
+            raise ValueError("Gradient direction monitoring supports only qualified Megatron/FSDP layouts")
+        group = megatron_optimizer.get_grad_stats_parallel_group() if megatron_optimizer is not None else None
+        identities = tuple(id(parameter) for row in self.optimizer.param_groups for parameter in row["params"])
+        if self._grad_tracker is None:
+            self._grad_tracker = GradientDirectionTracker(
+                settings.store,
+                torch.device("cuda", torch.cuda.current_device()),
+                world_group=group,
+            )
+            self._grad_parameter_ids = identities
+        elif self._grad_parameter_ids != identities:
+            self._grad_tracker.reset()
+            self._grad_parameter_ids = identities
+        self._last_grad_metrics = NO_GRADIENT_METRICS
+
+        def observe(*args, **kwargs):
+            self._last_grad_metrics = self._grad_tracker.observe(*args, **kwargs)
+            self._grad_updates += (self._last_grad_metrics,)
+            return self._last_grad_metrics
+
+        return observe
 
     def training_step(
         self,
@@ -1319,7 +1411,14 @@ class PolicyWorkerBase(Worker):
         # dict has the same wandb keys as v4 so the downstream per-key
         # all_reduce(status) stays keyset-compatible.
         if local_step % accumulation_steps == 0 or getattr(self, "_log_ratio_monitor", None) is None:
-            self._log_ratio_monitor = LogRatioMonitor(action_log_probs.device)
+            ratio_settings = ratio_diagnostics_settings(self.cfg.trainer.algorithm)
+            self._log_ratio_monitor = LogRatioMonitor(
+                action_log_probs.device,
+                position_window=ratio_settings.position_window,
+                exact_quantiles=ratio_settings.exact_quantiles,
+                eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
+                eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
+            )
         self._log_ratio_monitor.add(action_log_probs, old_action_log_probs, loss_mask)
 
         grad_norm = None
@@ -1343,6 +1442,7 @@ class PolicyWorkerBase(Worker):
                 name="actor",
                 z_clip=z_clip,
                 stale_clip_lr_scale=lr_scale,
+                grad_observer=self._gradient_observer(),
             )
             optimizer_step_succeeded = (
                 bool(self.strategy.last_optimizer_step_succeeded) if grug_causal_lm is not None else True
@@ -1400,6 +1500,8 @@ class PolicyWorkerBase(Worker):
         # with large probability changes, per-position aggregations).
         # Trainer prefixes these with "policy/" before sending to wandb.
         status.update(ratio_diag)
+        # Gradient-direction metrics, empty unless the observer ran this step.
+        status.update(self._last_grad_metrics)
         # Spike-mitigation decisions (StaleClip / ZClip). Empty dict when disabled.
         status.update(spike_diag)
         if self.cfg.trainer.algorithm.use_kl_loss:

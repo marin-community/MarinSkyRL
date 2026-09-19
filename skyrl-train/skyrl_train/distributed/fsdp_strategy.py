@@ -18,6 +18,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import CPUOffload, MixedPrecision
 
 from skyrl_train.distributed.strategy import DistributedStrategy
+from skyrl_train.distributed.gradient_shards import fsdp_gradient_shards
 from skyrl_train.distributed.grug_muonh import build_grug_muonh
 from skyrl_train.distributed.bf16_adamw import BFloat16UpdateMode, build_adamw, parse_bf16_update_mode
 from skyrl_train.distributed.optimizer_learning_rates import validate_optimizer_learning_rates
@@ -299,8 +300,15 @@ class FSDPStrategy(DistributedStrategy):
           - stale_clip_lr_scale: a multiplier (default 1.0) applied to every
             param_group's lr for this single ``optimizer.step()`` call, then
             restored. Used by StaleClip for predictive LR damping.
+
+        Optional observation kwarg:
+          - grad_observer: a callable invoked with this step's gradient shards
+            once per attempt, right before ``optimizer.zero_grad()`` -- with
+            ``successful=False`` when a non-finite grad_norm skipped the step, and
+            with the default otherwise. It observes only; it must not mutate.
         """
         self.last_optimizer_step_succeeded = False
+        grad_observer = kwargs.get("grad_observer")
         z_clip = kwargs.get("z_clip", None)
         stale_clip_lr_scale = float(kwargs.get("stale_clip_lr_scale", 1.0))
 
@@ -324,6 +332,8 @@ class FSDPStrategy(DistributedStrategy):
                 logger.warning(f"rank {rank} grad_norm is not finite: {grad_norm}")
             else:
                 logger.warning(f"grad_norm is not finite: {grad_norm}")
+            if grad_observer is not None:
+                grad_observer(fsdp_gradient_shards(model.parameters()), successful=False)
             optimizer.zero_grad()
             return grad_norm
 
@@ -362,6 +372,8 @@ class FSDPStrategy(DistributedStrategy):
 
         if scheduler is not None:
             scheduler.step()
+        if grad_observer is not None:
+            grad_observer(fsdp_gradient_shards(model.parameters()))
         optimizer.zero_grad()
         self.last_optimizer_step_succeeded = True
         return grad_norm

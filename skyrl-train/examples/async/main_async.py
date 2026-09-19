@@ -6,12 +6,14 @@ import hydra
 from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
-import asyncio
 from skyrl_train.utils import initialize_ray
 import ray
 
 
 class AsyncPPOExp(BasePPOExp):
+    def uses_fully_async_trainer(self) -> bool:
+        return True
+
     def get_trainer(
         self,
         cfg,
@@ -33,11 +35,6 @@ class AsyncPPOExp(BasePPOExp):
             trajectory_runner=trajectory_runner,
             colocate_pg=colocate_pg,
         )
-
-    def run(self):
-        trainer = self._setup_trainer()
-        # Start the async training loop
-        asyncio.run(trainer.train())
 
 
 @ray.remote(num_cpus=1)

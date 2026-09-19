@@ -45,7 +45,10 @@ class EvalOnlyEntrypoint(BasePPOExp):
         """Override to avoid requiring a train dataset for eval-only runs."""
         return None
 
-    async def run(self) -> dict[str, Any]:
+    def _run(self) -> dict[str, Any]:
+        return asyncio.run(self._evaluate())
+
+    async def _evaluate(self) -> dict[str, Any]:
         assert self.eval_dataset is not None, "The evaluation only entrypoint requires an eval dataset is provided"
 
         inference_engine_client = self.create_inference_engine_client()
@@ -70,7 +73,7 @@ class EvalOnlyEntrypoint(BasePPOExp):
 @ray.remote(num_cpus=1)
 def eval_entrypoint(cfg: DictConfig) -> dict:
     exp = EvalOnlyEntrypoint(cfg)
-    return asyncio.run(exp.run())
+    return exp.run()
 
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)

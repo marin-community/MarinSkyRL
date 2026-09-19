@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from skyrl_train.telemetry import TRAINER_ROLE, phase_duration
+from skyrl_train.telemetry import TRAINER_ROLE, phase_attributes, phase_duration
 
 
 TIMING_PARENTS: dict[str, str | None] = {
@@ -23,6 +23,7 @@ TIMING_PARENTS: dict[str, str | None] = {
     "critic_train": "train_critic_and_policy",
     "policy_train": "train_critic_and_policy",
     "policy_critic_overlap_train": "train_critic_and_policy",
+    "backload_policy_optimizer_to_gpu": "train_critic_and_policy",
     "sync_weights": "step",
     "offload_policy_model_to_cpu": "step",
     "dump_data_batch": "run_training",
@@ -81,10 +82,12 @@ class FinelogTimingSink:
             phase_duration.record(
                 observation.duration_seconds,
                 attributes={
-                    "phase": observation.name,
-                    "root": observation.root,
-                    "parent": observation.parent or "",
-                    "clock_domain": "inclusive_wall",
+                    **phase_attributes(
+                        phase=observation.name,
+                        root=observation.root,
+                        parent=observation.parent,
+                        clock_domain="inclusive_wall",
+                    ),
                     "role": TRAINER_ROLE,
                     "step": str(step),
                 },

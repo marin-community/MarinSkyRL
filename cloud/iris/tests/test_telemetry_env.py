@@ -4,6 +4,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -16,8 +18,11 @@ from marinskyrl.environment_contract import (  # noqa: E402
     EXECUTION_UID_ENV,
     RUN_ID_ENV,
     TELEMETRY_ENDPOINT_ENV,
+    TRAINING_LOOP_ENV,
+    TrainingLoop,
 )
-from skyrl_train.telemetry import TelemetryConfig  # noqa: E402
+from cloud.iris import task_runtime  # noqa: E402
+from skyrl_train.telemetry import TelemetryConfig, _resources  # noqa: E402
 
 
 _ATTEMPT_UID = "01JABCDEF0123456789"
@@ -86,7 +91,7 @@ def test_telemetry_environment_unreachable_controller_returns_nothing(monkeypatc
 
 def test_telemetry_environment_round_trips_through_trainer_config(monkeypatch) -> None:
     _in_cluster(monkeypatch)
-    exported = telemetry_env.telemetry_environment()
+    exported = telemetry_env.telemetry_environment(training_loop=TrainingLoop.ASYNC)
     for name, value in exported.items():
         monkeypatch.setenv(name, value)
 
@@ -94,3 +99,36 @@ def test_telemetry_environment_round_trips_through_trainer_config(monkeypatch) -
     assert config.endpoint == exported[TELEMETRY_ENDPOINT_ENV]
     assert config.run_id == exported[RUN_ID_ENV]
     assert config.execution_uid == exported[EXECUTION_UID_ENV]
+    assert config.training_loop is TrainingLoop.ASYNC
+    assert exported[TRAINING_LOOP_ENV] == "async"
+
+
+def test_telemetry_environment_omits_an_unset_training_loop(monkeypatch) -> None:
+    _in_cluster(monkeypatch)
+    monkeypatch.delenv(TRAINING_LOOP_ENV, raising=False)
+    assert TRAINING_LOOP_ENV not in telemetry_env.telemetry_environment()
+
+
+def test_telemetry_environment_rejects_an_unknown_training_loop(monkeypatch) -> None:
+    _in_cluster(monkeypatch)
+    monkeypatch.setenv(TRAINING_LOOP_ENV, "batch")
+    with pytest.raises(ValueError, match="batch"):
+        telemetry_env.telemetry_environment()
+    with pytest.raises(ValueError, match="batch"):
+        TelemetryConfig.from_environment()
+
+
+def test_training_loop_lands_in_every_record_resource() -> None:
+    stamped = _resources(TelemetryConfig(run_id="run", execution_uid="x", training_loop=TrainingLoop.ASYNC), "trainer")
+    assert stamped["training_loop"] == "async"
+    assert "training_loop" not in _resources(TelemetryConfig(run_id="run", execution_uid="x"), "trainer")
+
+
+def test_task_runtime_parses_the_training_loop_as_the_enum(monkeypatch) -> None:
+    monkeypatch.setattr("sys.argv", ["task_runtime", "--training-loop", "sync", "--", "python", "-m", "x"])
+    args, _ = task_runtime.parse_args()
+    assert args.training_loop is TrainingLoop.SYNC
+
+    monkeypatch.setattr("sys.argv", ["task_runtime", "--training-loop", "batch", "--", "python", "-m", "x"])
+    with pytest.raises(SystemExit):
+        task_runtime.parse_args()
