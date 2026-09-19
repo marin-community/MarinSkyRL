@@ -237,6 +237,8 @@ def test_failed_export_never_emits_complete_summary_or_changes_optimizer_result(
 )
 def test_inventory_requires_boolean_opt_in_megatron_and_phase_memory_observation(enabled, strategy, spans):
     cfg = get_default_config()
+    # The shipped logger is wandb, whose key check would fire before the gate under test.
+    cfg.trainer.logger = "console"
     cfg.trainer.optimizer_state_metrics = enabled
     cfg.trainer.strategy = strategy
     cfg.trainer.policy_train_spans = spans
