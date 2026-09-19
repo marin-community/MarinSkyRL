@@ -225,6 +225,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         return await self.inference_engine_actor.update_named_weights.remote(request)
 
+    async def expert_block_rpc(self, method: str, *args):
+        return await self.inference_engine_actor.expert_block_rpc.remote(method, *args)
+
     async def begin_weight_reload(self):
         return await self.inference_engine_actor.begin_weight_reload.remote()
 

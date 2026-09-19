@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from marinskyrl.runtime_options import NodeLocalPlacement
+from marinskyrl.runtime_options import NodeLocalPlacement, WeightSyncTransport
 
 
 def node_local_blocker(
@@ -94,6 +94,61 @@ def node_local_engine_shape(config: Mapping[str, Any], mode: NodeLocalPlacement)
         expert_parallel_size=generator["inference_engine_expert_parallel_size"],
         num_inference_engines=generator["num_inference_engines"],
     )
+
+
+def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
+    """Reject ``expert_block`` unless the config meets its requirements.
+
+    It needs the megatron strategy at TP=1 and ETP=1, node-local vLLM engines and the NCCL
+    weight-sync backend.
+    """
+    generator = config["generator"]
+    transport = generator["weight_sync_transport"]
+    choices = [item.value for item in WeightSyncTransport]
+    if transport not in choices:
+        raise ValueError(f"generator.weight_sync_transport must be one of {choices}, not {transport!r}")
+    if transport != WeightSyncTransport.EXPERT_BLOCK:
+        return
+    trainer = config["trainer"]
+    problems = []
+    if trainer["strategy"] != "megatron":
+        problems.append("the policy must train with the megatron strategy")
+    else:
+        megatron = trainer["policy"]["megatron_config"]
+        if megatron["tensor_model_parallel_size"] != 1:
+            problems.append("the policy must use tensor_model_parallel_size 1")
+        if megatron["expert_tensor_parallel_size"] not in (None, 1):
+            problems.append("the policy must use expert_tensor_parallel_size 1")
+        # Trainer and engine EP sizes may differ. Whether each divides the expert count is
+        # checked when the ranks report.
+        if megatron["expert_model_parallel_size"] < 1 or generator["inference_engine_expert_parallel_size"] < 1:
+            problems.append("expert-parallel sizes must be positive")
+    if generator["weight_sync_backend"] != "nccl":
+        problems.append("generator.weight_sync_backend must be nccl")
+    # The transport matches trainer ranks to the verified placements of node-local replicas.
+    mode = NodeLocalPlacement(generator["inference_engine_node_local"])
+    blocker = node_local_blocker(**node_local_engine_shape(config, mode))
+    if blocker is not None:
+        problems.append(f"the engines must be placed node-locally, and {blocker}")
+    if int(generator["expert_block_sync"]["timeout_seconds"]) <= 0:
+        problems.append("generator.expert_block_sync.timeout_seconds must be positive")
+    if problems:
+        raise ValueError("generator.weight_sync_transport=expert_block requires: " + "; ".join(problems))
+
+
+def validate_expert_block_trainer(config: Mapping[str, Any], *, uses_fully_async_trainer: bool) -> None:
+    """Reject ``expert_block`` for an entrypoint that does not run ``FullyAsyncRayPPOTrainer``.
+
+    No other trainer reads the option, so the run would sync by broadcast.
+    """
+    if (
+        config["generator"]["weight_sync_transport"] == WeightSyncTransport.EXPERT_BLOCK
+        and not uses_fully_async_trainer
+    ):
+        raise ValueError(
+            "generator.weight_sync_transport=expert_block requires an entrypoint that runs "
+            "FullyAsyncRayPPOTrainer (skyrl_train.entrypoints.fully_async, or terminal_bench without colocation)"
+        )
 
 
 @dataclass(frozen=True)

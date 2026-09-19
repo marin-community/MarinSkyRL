@@ -220,6 +220,10 @@ class InferenceEngineClient(InferenceEngineInterface):
         awaitables = [getattr(engine, method_name)(*args, **kwargs) for engine in live_engines]
         return await asyncio.gather(*awaitables)
 
+    async def expert_block_rpc(self, method: str, *args) -> list:
+        """Call one expert-block sync method on every engine. Returns the replies in engine order."""
+        return await self._run_on_all_engines("expert_block_rpc", method, *args)
+
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         if self.generation_paused_event.is_set():
             raise RuntimeError("pause_generation is unsupported for InferenceEngineClient.generate().")
