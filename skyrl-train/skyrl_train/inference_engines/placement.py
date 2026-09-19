@@ -23,7 +23,7 @@ def inference_worker_placement(
     pp_rank: int = 0,
     pp_world_size: int = 1,
 ) -> InferenceWorkerPlacement:
-    """Read the physical identity of the calling process's inference device."""
+    """The calling worker's host, GPU UUID and ranks."""
     return InferenceWorkerPlacement(
         host=socket.gethostname(),
         gpu_uuid=str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid),
@@ -45,9 +45,9 @@ def node_local_bundle_nodes(
     node_gpu_capacities: Mapping[str, int],
     pipeline_parallel_size: int = 1,
 ) -> list[list[str]]:
-    """Return each replica's node per stage after checking its bundles are complete and each stage is on one node.
+    """Return the node of each stage of each replica, after checking that a stage's bundles share a node.
 
-    Bundle ``dp * PP + pp`` of a replica's group is worker ``pp`` of data-parallel rank ``dp``.
+    Bundle ``dp * PP + pp`` of a replica's group belongs to stage ``pp`` of data-parallel rank ``dp``.
     """
     stage_nodes = []
     per_replica = data_parallel_size * pipeline_parallel_size
@@ -78,9 +78,9 @@ def verified_inference_replica_placements(
     expert_parallel_size: int,
     pipeline_parallel_size: int = 1,
 ) -> list[InferenceReplicaPlacement]:
-    """Join each worker's self-report to its allocated bundle and verify the whole topology.
+    """Match each worker's report to its bundle and check the topology.
 
-    ``reports`` holds one list per data-parallel actor, one report per worker of that actor.
+    ``reports`` has one list per data-parallel actor, with one report per worker.
     """
     if len(reports) != len(stage_nodes) * data_parallel_size or len(reports) != len(relative_rank_offsets):
         raise ValueError("Incomplete inference replica reports")
