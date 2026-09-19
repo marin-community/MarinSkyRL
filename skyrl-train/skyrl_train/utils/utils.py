@@ -774,6 +774,8 @@ def validate_cfg(cfg: DictConfig):
         )
 
     fully_async = cfg.trainer.fully_async
+    if type(fully_async.weight_sync_interval_steps) is not int or fully_async.weight_sync_interval_steps < 1:
+        raise ValueError("trainer.fully_async.weight_sync_interval_steps must be a positive integer")
     if fully_async.pause_mode not in tuple(PauseMode):
         raise ValueError(f"trainer.fully_async.pause_mode must be one of {[mode.value for mode in PauseMode]}")
     if type(fully_async.clear_kv_cache_on_weight_sync) is not bool:

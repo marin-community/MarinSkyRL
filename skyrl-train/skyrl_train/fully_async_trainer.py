@@ -88,6 +88,14 @@ FIRST_TOKEN_VERSION_MISSING = (
     "and this trajectory runner or model client carried none"
 )
 
+
+def should_publish_policy_weights(step: int, interval: int, total_steps: int, eval_interval: int) -> bool:
+    """Publish for the configured cadence and before evaluation or terminal export."""
+    if step < 1 or interval < 1 or total_steps < 1:
+        raise ValueError("weight publication needs positive step counts and interval")
+    return step % interval == 0 or step >= total_steps or (eval_interval > 0 and step % eval_interval == 0)
+
+
 _QueueItem = TypeVar("_QueueItem")
 
 
@@ -975,32 +983,30 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         self._record_group_terminal(group, "consumed")
                     generation_queues.mark_admitted_consumed()
 
-                    # 4. After training: sync weights to the inference engines.
-                    #    The inference engines are a SHARED HTTP backend that every
-                    #    RolloutCoordinator calls, so the STOCK engine-level
-                    #    pause/sync/resume below (fast NCCL broadcast with the
-                    #    engines briefly quiesced) already propagates fresh weights
-                    #    to every coordinator's subsequent requests. We deliberately
-                    #    do NOT barrier-pause/drain the RolloutCoordinators at the
-                    #    trial level: a coordinator-level drain is unnecessary for
-                    #    correctness and defeats async overlap (the hard-drain stalled
-                    #    the step boundary indefinitely when long-running trials never
-                    #    drained). Rollouts in flight across the weight swap simply
-                    #    return as STALE and are bounded by the dispatcher's existing
-                    #    max_staleness_steps accounting — exactly like stock
-                    #    fully_async, which never drains trial orchestration. This
-                    #    block is now byte-identical for fan-out ON and OFF.
-                    with (
-                        Timer("sync_weights", self.all_timings) as weight_update_timer,
-                        async_phase_window(
-                            "weight_sync", step=self.global_step, enabled=self._async_observations_enabled
-                        ),
-                    ):
-                        await self._sync_policy_weights_and_offload_optimizer(sync_phase="training_step")
-                    self._log_weight_update_completed(
-                        reason="training_step",
-                        duration_seconds=weight_update_timer.duration,
+                    # 4. Publish weights on the configured cadence. The shared HTTP
+                    #    engines' pause/sync/resume reaches every RolloutCoordinator;
+                    #    in-flight requests are bounded by the normal staleness rule.
+                    #    Evaluation and the terminal export require the latest weights.
+                    publish_weights = should_publish_policy_weights(
+                        self.global_step,
+                        self.cfg.trainer.fully_async.weight_sync_interval_steps,
+                        self.total_training_steps,
+                        self.cfg.trainer.eval_interval,
                     )
+                    self.all_metrics["async/weight_sync_published"] = float(publish_weights)
+                    self.all_timings["sync_weights"] = 0.0
+                    if publish_weights:
+                        with (
+                            Timer("sync_weights", self.all_timings) as weight_update_timer,
+                            async_phase_window(
+                                "weight_sync", step=self.global_step, enabled=self._async_observations_enabled
+                            ),
+                        ):
+                            await self._sync_policy_weights_and_offload_optimizer(sync_phase="training_step")
+                        self._log_weight_update_completed(
+                            reason="training_step",
+                            duration_seconds=weight_update_timer.duration,
+                        )
 
                     # Core ends here, before the callbacks: checkpointing and evaluation run
                     # inside the step timer but are not the loop's core cycle.

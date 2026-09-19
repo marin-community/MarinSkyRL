@@ -315,6 +315,9 @@ trainer:
 
   fully_async:
     max_staleness_steps: 4
+    # Publish learner weights after this many optimizer updates. Evaluation and the
+    # terminal update always publish their weights before scoring or export.
+    weight_sync_interval_steps: 1
 
     num_parallel_generation_workers: 768
     # Finished groups the completed buffer holds before a producer waits with its group in
