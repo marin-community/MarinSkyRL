@@ -1,17 +1,12 @@
-"""Views of live parameters on both ends of an expert-block sync; nothing is copied here.
+"""Views of the live parameters an expert-block sync reads on the trainer and writes on the receiver.
 
 On the trainer, Megatron-Bridge conversion tasks say which HF tensor each
-Megatron parameter backs and, through the mapping's tensor-parallel rank, which
-part of it. With Grug's stacked expert layout every expert matrix (or its
-expert-tensor-parallel shard) is one whole parameter, and every dense HF tensor
-is a few runs of one parameter, so a broadcast can read the parameter storage
-directly. On the receiver, vLLM's fused expert parameters expose one contiguous
-``[2I, H]`` or ``[H, I]`` slot per local expert, and every dense Grug layer is
-replicated, so the destination is a region of a flat parameter.
-
-Trainer tensor parallelism (the section marked below) turns a column-parallel
-shard into one run of the HF tensor and a row-parallel shard into a column
-block; the schedule carries either as a :class:`Region`.
+Megatron parameter backs. With Grug's stacked expert layout at TP=1 every expert
+matrix is one whole parameter and every dense HF tensor is one or more runs of
+one parameter, so a broadcast reads parameter storage directly. On the receiver,
+vLLM's fused expert parameters hold one contiguous ``[2I, H]`` or ``[H, I]``
+slot per local expert and every dense Grug tensor is replicated, so a
+destination is a run of a flat parameter.
 """
 
 from dataclasses import dataclass
@@ -25,7 +20,6 @@ from skyrl_train.weight_sync.expert_block.schedule import (
     WIRE_DTYPE_BYTES,
     DenseSlice,
     ExpertEntry,
-    Region,
     TrainerRank,
 )
 
@@ -49,13 +43,11 @@ def is_widened_router(hf_name: str, wire_dtype: str, installed_dtype: str) -> bo
 
 @dataclass(frozen=True)
 class ExpertSlice:
-    """One half (``gate``, ``up`` or ``down``) of one expert matrix shard as a trainer rank holds it."""
+    """One half (``gate``, ``up`` or ``down``) of one expert matrix as a trainer rank holds it."""
 
     hf_name: str
     expert: int
     part: str
-    shard: int
-    shards: int
     source_key: str
     source_offset: int
     numel: int
@@ -63,7 +55,7 @@ class ExpertSlice:
 
 @dataclass(frozen=True)
 class ExpertSource:
-    """One local expert matrix shard and the trainer parameter that is that shard."""
+    """One local expert matrix and the trainer parameter that is that matrix."""
 
     entry: ExpertEntry
     source_key: str
@@ -95,79 +87,54 @@ def local_source_slices(tasks, config, *, pp: int) -> LocalSources:
         sources[key] = source
         mapping = task.mapping
         kind = type(mapping).__name__
-        # --- Trainer tensor parallelism: which part of the HF tensor this rank's shard is ---
-        rank, size = mapping.tp_rank, mapping.tp_size
+        # For an expert mapping this is the expert-tensor-parallel size.
+        if mapping.tp_size != 1:
+            raise ValueError(f"Parameter {key} is tensor-parallel; expert-block sync requires trainer TP=1 and ETP=1")
         if kind in EXPERT_MAPPINGS:
             match = re.search(r"\.weight(\d+)$", key)
             if match is None or source.ndim != 2:
                 raise ValueError(f"Expert parameter {key} is not a single per-expert matrix")
             expert_id = int(match.group(1))
             if kind == "GrugStackedExpertMapping":
-                expert.append(ExpertSlice(mapping.hf_param, expert_id, "down", rank, size, key, 0, source.numel()))
+                expert.append(ExpertSlice(mapping.hf_param, expert_id, "down", key, 0, source.numel()))
             else:
                 if source.shape[0] % 2 or set(mapping.hf_param) != {"gate", "up"}:
                     raise ValueError(f"Gated expert parameter {key} is not a complete [gate;up] matrix")
                 half = source.numel() // 2
                 for position, part in enumerate(("gate", "up")):
-                    expert.append(
-                        ExpertSlice(mapping.hf_param[part], expert_id, part, rank, size, key, position * half, half)
-                    )
+                    expert.append(ExpertSlice(mapping.hf_param[part], expert_id, part, key, position * half, half))
             continue
 
-        def add(name, region: Region, source_offset):
-            if source_offset < 0 or region.numel <= 0 or source_offset + region.numel > source.numel():
+        def add(name, hf_offset, numel, source_offset):
+            if source_offset < 0 or numel <= 0 or source_offset + numel > source.numel():
                 raise ValueError(f"Slice of {key} exceeds its storage")
-            dense.append(
-                DenseSlice(name, region.offset, region.numel, dtype, key, source_offset, pp, region.runs, region.stride)
-            )
+            dense.append(DenseSlice(name, hf_offset, numel, dtype, key, source_offset, pp))
 
-        if kind == "AutoMapping":
-            layout = mapping._detect_parallelism_type(task.megatron_module)
-            add(mapping.hf_param, shard_region(layout, tuple(source.shape), rank, size), 0)
-        elif kind == "ReplicatedMapping":
-            add(mapping.hf_param, Region(0, source.numel()), 0)
+        if kind in ("AutoMapping", "ReplicatedMapping"):
+            add(mapping.hf_param, 0, source.numel(), 0)
         elif kind == "GatedMLPMapping":
             if source.ndim != 2 or source.shape[0] % 2 or set(mapping.hf_param) != {"gate", "up"}:
                 raise ValueError(f"Gated parameter {key} is not a complete [gate;up] matrix")
             half = source.numel() // 2
             for position, part in enumerate(("gate", "up")):
-                # Each half is a column-parallel shard of its own HF tensor.
-                add(mapping.hf_param[part], Region(rank * half, half), position * half)
+                add(mapping.hf_param[part], 0, half, position * half)
         elif kind == "QKVMapping":
+            # Megatron interleaves [q..., k, v] per KV group; HF keeps q, k and v as separate tensors.
             heads, groups, head_dim = config.num_attention_heads, config.num_query_groups, config.kv_channels
-            if groups % size or heads % groups:
-                raise ValueError(f"QKV parameter {key}: {groups} KV groups do not split across TP {size}")
-            local_groups = groups // size
+            if heads % groups:
+                raise ValueError(f"QKV parameter {key}: {heads} heads do not split across {groups} KV groups")
             queries = heads // groups
-            expected_shape = (local_groups * (queries + 2) * head_dim, config.hidden_size)
+            expected_shape = (groups * (queries + 2) * head_dim, config.hidden_size)
             if tuple(source.shape) != expected_shape or set(mapping.hf_param) != {"q", "k", "v"}:
                 raise ValueError(f"QKV parameter {key} differs from the configured interleaved layout")
-            for local in range(local_groups):
-                group = rank * local_groups + local
+            for group in range(groups):
                 for part, offset, count in (("q", 0, queries), ("k", queries, 1), ("v", queries + 1, 1)):
                     numel = count * head_dim * config.hidden_size
-                    source_offset = (local * (queries + 2) + offset) * head_dim * config.hidden_size
-                    add(mapping.hf_param[part], Region(group * numel, numel), source_offset)
+                    source_offset = (group * (queries + 2) + offset) * head_dim * config.hidden_size
+                    add(mapping.hf_param[part], group * numel, numel, source_offset)
         else:
             raise ValueError(f"Unsupported weight mapping for expert-block sync: {kind}")
     return LocalSources(expert, dense, sources)
-
-
-def shard_region(layout: str, shape: tuple[int, ...], rank: int, size: int) -> Region:
-    """The HF region of a rank's shard: column shards are one run, row shards a column block."""
-    numel = 1
-    for dimension in shape:
-        numel *= dimension
-    if layout == "replicated" or size == 1:
-        return Region(0, numel)
-    if layout == "column":
-        return Region(rank * numel, numel)
-    if layout == "row":
-        if len(shape) != 2:
-            raise ValueError(f"Row-parallel shard of shape {shape} is not a matrix")
-        rows, columns = shape
-        return Region(rank * columns, numel, rows, columns * size)
-    raise ValueError(f"Unsupported tensor-parallel layout {layout}")
 
 
 def local_expert_sources(
@@ -180,7 +147,7 @@ def local_expert_sources(
     hidden_size: int,
     intermediate_size: int,
 ) -> list[ExpertSource]:
-    """Group a rank's expert slices into whole matrices (or shards) and check each is one contiguous BF16 parameter."""
+    """Group a rank's expert slices into whole matrices and check each is one contiguous BF16 parameter."""
     per_block = num_experts // expert_parallel_size
     grouped: dict[tuple[int, int, str], dict[str, ExpertSlice]] = {}
     for item in expert_slices:
@@ -202,26 +169,21 @@ def local_expert_sources(
                 f"Expert {expert} of layer {layer} ({projection}) is incomplete or split across parameters"
             )
         first = parts["down" if projection == "fc2" else "gate"]
-        shard, shards = first.shard, first.shards
-        if intermediate_size % shards or any((item.shard, item.shards) != (shard, shards) for item in parts.values()):
-            raise ValueError(f"Expert {expert} of layer {layer} has inconsistent tensor-parallel shards")
-        piece = intermediate_size // shards
-        if projection == "fc1" and (first.source_offset != 0 or parts["up"].source_offset != piece * hidden_size):
+        if projection == "fc1" and (
+            first.source_offset != 0 or parts["up"].source_offset != intermediate_size * hidden_size
+        ):
             raise ValueError(f"Expert {expert} of layer {layer} has reordered or nonadjacent gate/up halves")
         source = sources[first.source_key]
-        shape = (hidden_size, piece) if projection == "fc2" else (2 * piece, hidden_size)
+        shape = (hidden_size, intermediate_size) if projection == "fc2" else (2 * intermediate_size, hidden_size)
         if tuple(source.shape) != shape or source.dtype != torch.bfloat16:
             raise ValueError(f"Parameter {first.source_key} is not the {shape} BF16 matrix of expert {expert}")
-        suffix = f".shard{shard}" if shards > 1 else ""
         entry = ExpertEntry(
-            f"model.layers.{layer}.mlp.experts.{projection}.expert{expert}{suffix}",
+            f"model.layers.{layer}.mlp.experts.{projection}.expert{expert}",
             layer,
             trainer.pp,
             expert,
             projection,
             source.numel() * WIRE_DTYPE_BYTES[BF16],
-            shard,
-            shards,
         )
         result.append(ExpertSource(entry, first.source_key, shape))
     return result
@@ -245,23 +207,10 @@ def expert_slot_view(entry: ExpertEntry, parameters, expert_maps) -> torch.Tenso
     if (
         slot.dtype != torch.bfloat16
         or not slot.is_contiguous()
-        or slot.numel() * WIRE_DTYPE_BYTES[BF16] != entry.nbytes * entry.shards
+        or slot.numel() * WIRE_DTYPE_BYTES[BF16] != entry.nbytes
     ):
         raise ValueError(f"Receiver slot for {entry.name} differs from the scheduled matrix")
     return slot.view(-1)
-
-
-def expert_slot_region(entry: ExpertEntry, slot: torch.Tensor, hidden_size: int) -> Region:
-    """Where an expert shard lands in the whole slot: rows of both halves for ``fc1``, a column block for ``fc2``."""
-    if entry.shards == 1:
-        return Region(0, slot.numel())
-    if entry.projection == "fc1":
-        intermediate = slot.numel() // (2 * hidden_size)
-        piece = intermediate // entry.shards
-        return Region(entry.shard * piece * hidden_size, 2 * piece * hidden_size, 2, intermediate * hidden_size)
-    intermediate = slot.numel() // hidden_size
-    piece = intermediate // entry.shards
-    return Region(entry.shard * piece, hidden_size * piece, hidden_size, intermediate)
 
 
 def dense_source_view(item: DenseSlice, sources: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -271,21 +220,14 @@ def dense_source_view(item: DenseSlice, sources: dict[str, torch.Tensor]) -> tor
     return source.detach().view(-1).narrow(0, item.source_offset, item.numel)
 
 
-def dense_flat_view(item: DenseSlice, parameters) -> torch.Tensor:
-    """The receiver's whole installed tensor, flat; the router weight is FP32 here and BF16 on the wire."""
+def dense_installed_view(item: DenseSlice, parameters) -> torch.Tensor:
+    """The run of the receiver's installed tensor a slice lands in; the router weight is FP32 here and BF16 on the wire."""
     parameter = parameters[item.hf_name]
     if not parameter.is_contiguous():
         raise ValueError(f"Installed parameter {item.hf_name} is not contiguous")
     installed = dtype_name(parameter.dtype)
     if installed != item.wire_dtype and not is_widened_router(item.hf_name, item.wire_dtype, installed):
         raise ValueError(f"Installed dtype of {item.hf_name} differs from the wire dtype {item.wire_dtype}")
-    return parameter.detach().view(-1)
-
-
-def region_view(flat: torch.Tensor, region: Region) -> torch.Tensor:
-    """The region of a flat tensor: a narrow for one run, a strided ``[runs, run_length]`` view otherwise."""
-    if region.offset + (region.runs - 1) * region.stride + region.run_length > flat.numel():
-        raise ValueError("Region exceeds the installed tensor")
-    if region.direct:
-        return flat.narrow(0, region.offset, region.numel)
-    return flat.as_strided((region.runs, region.run_length), (region.stride, 1), flat.storage_offset() + region.offset)
+    if item.hf_offset + item.numel > parameter.numel():
+        raise ValueError(f"Slice of {item.hf_name} exceeds the installed tensor")
+    return parameter.detach().view(-1).narrow(0, item.hf_offset, item.numel)

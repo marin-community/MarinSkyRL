@@ -1,32 +1,18 @@
-"""The collective schedule for expert-block weight sync, as a pure function of what every rank holds.
+"""The collective schedule for expert-block weight sync, built from what every rank holds.
 
 Trainer ranks are Megatron ranks; receiver ranks are vLLM workers, one per
-expert-parallel slot per pipeline stage per inference replica. Every trainer
-rank reports the expert matrices (or shards of them) and the dense runs it
-holds; every transfer is then one broadcast from one of its holders straight
-into the receivers' live slots. With one inference replica that is a
-point-to-point copy; with more, NCCL's tree carries the fan-out. One NCCL group
-per (root, receiver stage, receiver block) joins a root to the receivers it
-serves.
+expert-parallel slot per pipeline stage per inference replica. Both sides run
+TP=1. Each expert matrix is one broadcast from one of the trainer ranks holding
+it into the receivers' live slots, over one NCCL group per (root, receiver
+stage, receiver block). The trainer's and the receivers' expert-parallel degrees
+may differ, and each layer goes to the receiver stage that holds it.
 
-Dense (non-expert) weights are rotated across the expert roots of their stage
-so they travel in the same groups, land on one receiver per replica on each
-stage that holds the tensor, and fan out to that stage's other receivers over
-a node-local group.
+Dense weights travel in the same groups: each slice goes from an expert root of
+its stage to one receiver per replica, which re-broadcasts it to the replica's
+other workers of that stage over a node-local group.
 
-Geometries beyond the qualified one (TP=1 both sides, equal expert-parallel
-degree, one receiver stage) are handled by the sections marked below:
-
-* unequal expert-parallel degrees: an owner talks only to the receivers that
-  hold some of its experts, because groups are keyed by receiver block;
-* receiver pipeline stages: each layer, and each dense tensor, is routed to the
-  stage that holds it;
-* trainer tensor parallelism: a rank reports the shard it holds, described as
-  a region of the full tensor; column shards are one run, row shards are a
-  column block that the receiver lands through scratch.
-
-Participants are numbered in one space: trainers by their native rank, then
-receivers offset by the trainer count.
+Participants share one numbering: trainers by native rank, then receivers
+offset by the trainer count.
 """
 
 from collections.abc import Mapping, Sequence
@@ -52,7 +38,6 @@ class TrainerRank:
     dp: int
     pp: int
     ep: int
-    tp: int = 0
 
 
 @dataclass(frozen=True)
@@ -66,40 +51,8 @@ class ReceiverRank:
 
 
 @dataclass(frozen=True)
-class Region:
-    """Where a contiguous payload lands in a flat tensor: ``runs`` runs of equal length, ``stride`` apart.
-
-    One run is a plain ``narrow`` and a broadcast can land in it directly; a
-    column block of a row-major matrix is ``rows`` runs and needs scratch.
-    """
-
-    offset: int
-    numel: int
-    runs: int = 1
-    stride: int = 0
-
-    @property
-    def run_length(self) -> int:
-        return self.numel // self.runs
-
-    @property
-    def direct(self) -> bool:
-        return self.runs == 1
-
-    def intervals(self) -> list[tuple[int, int]]:
-        return [
-            (self.offset + run * self.stride, self.offset + run * self.stride + self.run_length)
-            for run in range(self.runs)
-        ]
-
-
-@dataclass(frozen=True)
 class ExpertEntry:
-    """One expert matrix, or one expert-tensor-parallel shard of it, as a trainer rank holds it.
-
-    ``fc1`` is ``[gate;up]``, ``fc2`` is ``down``. With ``shards`` > 1 the rank holds shard
-    ``shard``: rows of both halves for ``fc1``, a column block for ``fc2``.
-    """
+    """One expert matrix as a trainer rank holds it: ``fc1`` is ``[gate;up]``, ``fc2`` is ``down``."""
 
     name: str
     layer: int
@@ -107,13 +60,11 @@ class ExpertEntry:
     expert: int
     projection: str
     nbytes: int
-    shard: int = 0
-    shards: int = 1
 
 
 @dataclass(frozen=True)
 class DenseSlice:
-    """A region of one dense HF tensor, backed by a contiguous run of one trainer parameter."""
+    """``numel`` elements of one dense HF tensor from ``hf_offset``, backed by a run of one trainer parameter."""
 
     hf_name: str
     hf_offset: int
@@ -122,20 +73,14 @@ class DenseSlice:
     source_key: str
     source_offset: int
     pp: int
-    runs: int = 1
-    stride: int = 0
 
     @property
     def nbytes(self) -> int:
         return self.numel * WIRE_DTYPE_BYTES[self.wire_dtype]
 
-    @property
-    def region(self) -> Region:
-        return Region(self.hf_offset, self.numel, self.runs, self.stride)
-
     def identity(self) -> tuple:
         """What identifies the transfer independently of which rank backs it."""
-        return (self.hf_name, self.hf_offset, self.numel, self.runs, self.stride, self.wire_dtype, self.pp)
+        return (self.hf_name, self.hf_offset, self.numel, self.wire_dtype, self.pp)
 
 
 @dataclass(frozen=True)
@@ -227,26 +172,21 @@ def build_schedule(
             groups[name] = Group(name, (root, *receivers_of(stage, block)))
         return name
 
-    # --- Expert transfers: every (layer, expert, projection, shard) exactly once, from one holder ---
+    # --- Expert transfers: every (layer, expert, projection) exactly once, from one holder ---
     holders: dict[tuple, list[int]] = {}
     entries: dict[tuple, ExpertEntry] = {}
     for rank in sorted(expert_inventories):
         for entry in expert_inventories[rank]:
-            key = (entry.layer, entry.expert, entry.projection, entry.shard)
+            key = (entry.layer, entry.expert, entry.projection)
             if key in entries and entries[key] != entry:
                 raise ValueError(f"Trainer ranks disagree on expert transfer {entry.name}")
             entries.setdefault(key, entry)
             holders.setdefault(key, []).append(rank)
-    shards = {entry.shards for entry in entries.values()}
-    if len(shards) > 1:
-        raise ValueError(f"Expert entries report different shard counts {sorted(shards)}")
-    shard_count = shards.pop() if shards else 1
     layers = {entry.layer for entry in entries.values()}
     if layers != set(receiver_stage):
         raise ValueError("Receiver stages do not hold exactly the trainer's layers")
-    expected = set(product(sorted(layers), range(num_experts), ("fc1", "fc2"), range(shard_count)))
-    if set(entries) != expected:
-        raise ValueError("Expert entries do not cover every layer, expert, projection and shard exactly once")
+    if set(entries) != set(product(sorted(layers), range(num_experts), ("fc1", "fc2"))):
+        raise ValueError("Expert entries do not cover every layer, expert and projection exactly once")
     per_receiver_block = num_experts // receiver_ep
     experts = []
     expert_roots: dict[tuple[int, int], set[int]] = {}
@@ -256,8 +196,8 @@ def build_schedule(
         block = entry.expert // per_receiver_block
         stage = receiver_stage[entry.layer]
         ranks = holders[key]
-        # Holders of one matrix are its data-parallel (and, for experts, tensor-parallel) replicas;
-        # rotate the root by stage and block so a replica set shares its egress across them.
+        # Holders of one matrix are its data-parallel replicas; rotate the root by stage and
+        # block so the replicas share the egress.
         root = ranks[(entry.pp + block) % len(ranks)]
         experts.append(ExpertBroadcast(entry, group_for(root, stage, block), root, receivers_of(stage, block)))
         expert_roots.setdefault((entry.pp, stage), set()).add(root)
@@ -268,7 +208,7 @@ def build_schedule(
         name = f"{LOCAL_GROUP_PREFIX}{replica}-{stage}"
         local_groups[name] = Group(name, tuple(receivers_of(stage, block)[replica] for block in range(receiver_ep)))
 
-    # --- Dense transfers: every region of every dense tensor exactly once, from a holder that already roots ---
+    # --- Dense transfers: every slice of every dense tensor exactly once, from a holder that already roots ---
     dense_holder_ranks: dict[tuple, list[int]] = {}
     slices: dict[tuple, DenseSlice] = {}
     for rank in sorted(dense_inventories):
@@ -287,8 +227,8 @@ def build_schedule(
     dense_broadcasts = []
     counter = 0
     for name in sorted(by_name):
-        _check_regions_cover(name, [item.region for item in by_name[name]], dense_numel[name])
-        for item in sorted(by_name[name], key=lambda item: (item.hf_offset, item.runs)):
+        _check_slices_cover(name, by_name[name], dense_numel[name])
+        for item in sorted(by_name[name], key=lambda item: item.hf_offset):
             if item.wire_dtype not in WIRE_DTYPE_BYTES:
                 raise ValueError(f"Dense slice of {name} has unsupported dtype {item.wire_dtype}")
             for stage in dense_holders[name]:
@@ -349,14 +289,13 @@ def _layer_stages(layers_by_pp: Sequence[Sequence[int]], side: str) -> dict[int,
     return owner
 
 
-def _check_regions_cover(name: str, regions: Sequence[Region], numel: int) -> None:
-    """The regions must tile ``[0, numel)`` exactly once."""
-    intervals = sorted(interval for region in regions for interval in region.intervals())
+def _check_slices_cover(name: str, slices: Sequence[DenseSlice], numel: int) -> None:
+    """The slices must tile ``[0, numel)`` exactly once."""
     cursor = 0
-    for begin, end in intervals:
-        if begin != cursor or end <= begin:
+    for item in sorted(slices, key=lambda item: item.hf_offset):
+        if item.hf_offset != cursor or item.numel <= 0:
             raise ValueError(f"Dense slices of {name} have a gap or overlap at element {cursor}")
-        cursor = end
+        cursor += item.numel
     if cursor != numel:
         raise ValueError(f"Trainer slices cover {cursor} of {numel} elements of {name}")
 

@@ -1,15 +1,12 @@
 """The training driver's side of expert-block weight sync.
 
-``prepare`` runs once: it collects what every trainer rank owns and what every
-receiver holds, builds the schedule, hosts the rendezvous store and has every
-participant create its groups. ``sync`` runs after each update with generation
-paused: every participant runs the stream and the driver fails closed if any
-participant raised, any planned receiver did not report, or a report names a
-different version. Each trainer rank refuses to send unless the update named
-is the one it just finished and its parameters are the storage the plan was
-built on; each receiver refuses unless its parameters are still the storage
-the groups were bound to. Byte-exactness of what landed is the opt-in gate's
-job, not this path's.
+``prepare`` runs once: it collects what every trainer rank and receiver holds,
+builds the schedule, hosts the rendezvous store and has every participant create
+its groups. ``sync`` runs after each update with generation paused and fails if
+a participant raised, a planned receiver did not report, or a report names
+another version or byte count. A trainer rank refuses to send unless the update
+named is the one it just finished; both sides refuse if their parameters are no
+longer the storage the plan was bound to.
 """
 
 import asyncio
@@ -37,7 +34,12 @@ from skyrl_train.weight_sync.expert_block.stream import InstallReport
 
 @dataclass(frozen=True)
 class SyncTimings:
-    """One sync's wall time as the driver saw it, and the slowest participant of each side and phase."""
+    """Timings of one sync.
+
+    ``install_seconds`` is the driver's wall time. The other fields are maxima over the
+    participants' reports: over trainer ranks, over receivers, and over both for the expert and
+    dense phases.
+    """
 
     install_seconds: float
     policy_seconds: float
