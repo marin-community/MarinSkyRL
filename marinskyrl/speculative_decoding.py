@@ -35,6 +35,13 @@ class SpeculativeDecodingConfigError(ValueError):
     """A managed speculative-decoding configuration is invalid."""
 
 
+class SpeculatorOptimizer(StrEnum):
+    """Optimizers supported by the online speculator trainer."""
+
+    ADAMW = "adamw"
+    HYBRID_MUON = "hybrid_muon"
+
+
 def _mapping(value: object, field: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise SpeculativeDecodingConfigError(f"{field} must be a mapping")
@@ -174,7 +181,9 @@ class SpeculatorTrainingConfig:
     holdout_fraction: float = 0.25
     min_holdout_sequences: int = 3
     epochs_per_update: int = 1
+    optimizer: SpeculatorOptimizer = SpeculatorOptimizer.ADAMW
     learning_rate: float = 5e-5
+    muon_learning_rate: float = 0.02
     max_validation_loss_increase: float = 0
     max_validation_agreement_decrease: float = 0
     reserved_gpu_memory_gib: float = 8
@@ -218,8 +227,12 @@ class SpeculatorTrainingConfig:
             epochs_per_update=_positive_integer(
                 mapping.get("epochs_per_update", defaults.epochs_per_update), f"{context}.epochs_per_update"
             ),
+            optimizer=SpeculatorOptimizer(mapping.get("optimizer", defaults.optimizer)),
             learning_rate=_positive_number(
                 mapping.get("learning_rate", defaults.learning_rate), f"{context}.learning_rate"
+            ),
+            muon_learning_rate=_positive_number(
+                mapping.get("muon_learning_rate", defaults.muon_learning_rate), f"{context}.muon_learning_rate"
             ),
             max_validation_loss_increase=_nonnegative_number(
                 mapping.get("max_validation_loss_increase", defaults.max_validation_loss_increase),
