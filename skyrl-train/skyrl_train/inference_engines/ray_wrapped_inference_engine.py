@@ -10,7 +10,7 @@ from ray.actor import ActorHandle
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group, remove_placement_group
 from transformers import AutoConfig, PretrainedConfig
 
-from marinskyrl.inference_placement import InferenceReplicaPlacement, validate_node_local_inference
+from marinskyrl.inference_placement import InferenceReplicaPlacement, node_local_blocker
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
@@ -340,16 +340,16 @@ def create_ray_wrapped_inference_engines(
     require_v1_model_runner: bool = False,
     mp_backend: bool = False,
     placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
-    node_local: bool = False,
+    node_local: bool = True,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
 
-    node_local: opt-in. Place each engine's whole DP/EP replica on one node with a
-        STRICT_PACK group (with pipeline parallelism, each stage's DP group on one node),
-        then verify the workers actually started there on distinct physical GPUs before
-        returning. Requires non-colocated async vLLM with TP=1 and EP=DP; every other
-        placement keeps its existing contract.
+    node_local: Place each engine's whole DP/EP replica on one node with a STRICT_PACK group
+        (with pipeline parallelism, each stage's DP group on one node), then verify the workers
+        started there on distinct physical GPUs before returning. Applies to non-colocated async
+        vLLM engines on the Ray executor with TP=1, DP>1, EP=DP and a replica stage that fits one
+        node (``node_local_blocker``); every other engine keeps the placement below.
     mp_backend: opt-in. When True (and TP>1 / PP>1 and NOT colocated), run each vLLM
         inference engine with the `mp` (multiprocessing) executor backend instead of `ray`.
         This is required for the Qwen3-Next-80B-A3B R3 router-capture path
@@ -361,31 +361,6 @@ def create_ray_wrapped_inference_engines(
         non-colocated engines (each engine owns its own GPUs); colocated/hybrid engines
         still require the ray backend for shared-GPU resource management.
     """
-    node_hosts: dict[str, str] = {}
-    node_gpu_capacities: dict[str, int] = {}
-    if node_local:
-        live_nodes = [node for node in ray.nodes() if node["Alive"]]
-        node_hosts = {node["NodeID"]: node["NodeManagerHostname"] for node in live_nodes}
-        node_gpu_capacities = {node["NodeID"]: int(node["Resources"].get("GPU", 0)) for node in live_nodes}
-    validate_node_local_inference(
-        enabled=node_local,
-        backend=backend,
-        async_engine=async_engine,
-        colocate_all=shared_pg is not None or inference_engine_enable_sleep,
-        tensor_parallel_size=tensor_parallel_size,
-        pipeline_parallel_size=pipeline_parallel_size,
-        data_parallel_size=data_parallel_size,
-        expert_parallel_size=expert_parallel_size,
-        num_inference_engines=num_inference_engines,
-        gpus_per_node=max(node_gpu_capacities.values(), default=0) if node_local else None,
-    )
-    # A node-local replica whose stages together exceed one node is packed softly and
-    # verified per stage after startup instead.
-    node_local_strategy = (
-        "STRICT_PACK"
-        if not node_local or data_parallel_size * pipeline_parallel_size <= max(node_gpu_capacities.values(), default=0)
-        else "PACK"
-    )
     if backend == "vllm":
         import vllm
         from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
@@ -436,6 +411,35 @@ def create_ray_wrapped_inference_engines(
             "inference engines (trainer.placement.colocate_all=false). Colocated engines need "
             "the ray backend for shared-GPU resource management."
         )
+    node_hosts: dict[str, str] = {}
+    node_gpu_capacities: dict[str, int] = {}
+    if node_local:
+        engine_shape = dict(
+            backend=backend,
+            async_engine=async_engine,
+            colocated=use_hybrid_engine or inference_engine_enable_sleep,
+            remote=False,
+            mp_executor=use_mp_backend,
+            tensor_parallel_size=tensor_parallel_size,
+            data_parallel_size=data_parallel_size,
+            expert_parallel_size=expert_parallel_size,
+        )
+        blocker = node_local_blocker(**engine_shape)
+        if blocker is None:
+            live_nodes = [node for node in ray.nodes() if node["Alive"]]
+            node_hosts = {node["NodeID"]: node["NodeManagerHostname"] for node in live_nodes}
+            node_gpu_capacities = {node["NodeID"]: int(node["Resources"].get("GPU", 0)) for node in live_nodes}
+            blocker = node_local_blocker(**engine_shape, gpus_per_node=max(node_gpu_capacities.values(), default=0))
+        if blocker is not None:
+            logger.info("Inference engines keep the default placement instead of node-local replicas: {}", blocker)
+            node_local = False
+    # A node-local replica whose stages together exceed one node is packed softly and
+    # verified per stage after startup instead.
+    node_local_strategy = (
+        "STRICT_PACK"
+        if not node_local or data_parallel_size * pipeline_parallel_size <= max(node_gpu_capacities.values(), default=0)
+        else "PACK"
+    )
     if tensor_parallel_size == 1 and pipeline_parallel_size == 1:
         distributed_executor_backend = "uni"
     elif use_mp_backend:
