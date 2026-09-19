@@ -900,7 +900,7 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
             "response_ids": [[10, 4]],
             "response_logprobs": [[-0.1, -0.2]],
             "student_topk_indices": [[[11, 12], [13, 14]]],
-            "behavior_topk_logprobs": [[[-0.1, -2.0], [-0.2, -1.9]]],
+            "behavior_topk_logprobs": [[[-0.3, -2.0], [-0.2, -1.9]]],
             "response_policy_version_segments": [[{"start": 0, "token_count": 2, "policy_version": 0}]],
         },
         {
@@ -935,7 +935,7 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
     assert output["student_topk_indices"] == [
         [[11, 12], [13, 14], [-1, -1], [-1, -1], [-1, -1], [-1, -1], [21, 22], [23, 24]]
     ]
-    assert output["behavior_topk_logprobs"][0][:2] == [[-0.1, -2.0], [-0.2, -1.9]]
+    assert output["behavior_topk_logprobs"][0][:2] == [[-0.3, -2.0], [-0.2, -1.9]]
     assert output["behavior_topk_logprobs"][0][-2:] == [[-0.3, -1.8], [-0.4, -1.7]]
     assert output["behavior_topk_logprobs"][0][2:6] == [[0.0, 0.0]] * 4
     output["trajectory_ids"] = [TrajectoryID("tool-trajectory", 0)]
