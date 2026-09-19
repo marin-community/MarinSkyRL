@@ -21,6 +21,13 @@ def _bounded_ratio(numerator_logprob: torch.Tensor, denominator_logprob: torch.T
     return (numerator_logprob - denominator_logprob).clamp(-LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP).exp()
 
 
+def masked_topk_tail_mass(logprobs: torch.Tensor, loss_mask: torch.Tensor) -> torch.Tensor:
+    """Measure omitted probability without letting masked sentinels poison telemetry."""
+    valid = loss_mask.to(torch.bool)
+    head = logprobs.detach().float().masked_fill(~valid.unsqueeze(-1), 0.0).exp().sum(dim=-1)
+    return (1 - head).clamp_min(0).masked_fill(~valid, 0)
+
+
 def ppo_tis_score_centering_correction(
     current_topk_logprobs: torch.Tensor,
     old_topk_logprobs: torch.Tensor,

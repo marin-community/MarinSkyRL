@@ -30,7 +30,7 @@ from skyrl_train.utils.loss_reduction import (
 from skyrl_train.utils.algorithm_registry import PolicyLossType, register_policy_loss
 from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_delta
 from skyrl_train.utils.policy_math import differentiable_approx_kl
-from skyrl_train.utils.score_centering import ppo_tis_score_centering_correction
+from skyrl_train.utils.score_centering import masked_topk_tail_mass, ppo_tis_score_centering_correction
 
 
 @dataclass(frozen=True)
@@ -328,7 +328,7 @@ def compute_policy_objective(
                 ("old", score_old_topk_logprobs),
                 ("current", score_current_topk_logprobs),
             ):
-                tail_mass = (1 - logprobs.detach().float().exp().sum(dim=-1)).clamp_min(0)
+                tail_mass = masked_topk_tail_mass(logprobs, policy_loss_mask)
                 policy_loss_metrics[f"score_centering/{name}_tail_mass_mean"] = masked_mean(
                     tail_mass, policy_loss_mask
                 ).item()
