@@ -223,6 +223,15 @@ class TestRolePlanAccounting:
         plan = derive_role_plan(_make_config(colocate_all=False, policy_num_nodes=2, num_inference_engines=4))
         assert derive_num_nodes(plan) == 6
 
+    def test_disaggregated_can_pack_one_gpu_engines_on_one_node(self):
+        config = _make_config(colocate_all=False, policy_num_nodes=1, num_inference_engines=8, tp=1)
+        config["generator"]["rollout_num_nodes"] = 1
+        plan = derive_role_plan(config)
+
+        assert derive_num_nodes(plan) == 2
+        rollout = plan.claim("rollout")
+        assert (rollout.num_nodes, rollout.replicas, rollout.data_parallel_size) == (1, 8, 1)
+
     def test_colocated_with_one_engine(self):
         plan = derive_role_plan(_make_config(colocate_all=True, policy_num_nodes=1, num_inference_engines=1, tp=8))
         assert derive_num_nodes(plan) == 1
