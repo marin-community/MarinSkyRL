@@ -534,7 +534,7 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
     cfg.trainer.placement.colocate_all = True
     # A cold FlashInfer-CUTLASS build stays memory-safe by using the frozen
     # runtime's bounded compiler pool, so allow it to outlive the usual startup window.
-    cfg.generator.engine_init_timeout_seconds = 3600
+    cfg.generator.engine_init_timeout_seconds = 4200
     # Force each completed tensor into its own transport chunk. Before grouped-export-safe
     # chunking, this threshold split the conversion tasks and silently omitted the experts.
     cfg.generator.weight_transfer_threshold_cuda_ipc_GB = 1e-9
