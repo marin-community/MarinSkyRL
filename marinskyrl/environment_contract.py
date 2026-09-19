@@ -85,6 +85,7 @@ LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
 NVRTC_HOME_ENV = "NVRTC_HOME"
 CUDA_HOME_ENV = "CUDA_HOME"
 LIBRARY_PATH_ENV = "LIBRARY_PATH"
+MAX_JOBS_ENV = "MAX_JOBS"
 CUDA_WHEEL_NAMESPACE = "cu13"
 RAY_CLUSTER_OWNER_ENV = "SKYRL_RAY_CLUSTER_OWNER"
 NUMA_AFFINITY_ENV = "SKYRL_ENABLE_NUMA_AFFINITY"
@@ -192,6 +193,12 @@ ENV_VAR_SPECS = (
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
     ),
     EnvVarSpec(
+        MAX_JOBS_ENV,
+        "runtime.bootstrap",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
         RAY_CLUSTER_OWNER_ENV,
         "runtime.ray_cluster",
         EnvVarSource.EXTERNAL,
@@ -262,7 +269,6 @@ _BUILD_BOUNDARIES = {
     "LANG",
     "LANGUAGE",
     "LC_ALL",
-    "MAX_JOBS",
     "MAMBA_FORCE_BUILD",
     "NVCC_THREADS",
     "NVTE_BUILD_MAX_JOBS",
@@ -296,6 +302,7 @@ _RUNTIME_BOUNDARIES = {
     "HF_HUB_DOWNLOAD_TIMEOUT",
     "HF_HUB_OFFLINE",
     "LD_LIBRARY_PATH",
+    "MAX_JOBS",
     "LOCAL_RANK",
     "MASTER_ADDR",
     "MASTER_PORT",
@@ -435,6 +442,7 @@ class EnvVarManager:
             NVRTC_HOME_ENV,
             CUDA_HOME_ENV,
             LIBRARY_PATH_ENV,
+            MAX_JOBS_ENV,
             TELEMETRY_ENDPOINT_ENV,
             RUN_ID_ENV,
             EXECUTION_UID_ENV,
@@ -514,6 +522,7 @@ class EnvVarManager:
                 NVRTC_HOME_ENV: str(cuda_root),
                 CUDA_HOME_ENV: str(cuda_root),
                 LIBRARY_PATH_ENV: str(cuda_root.parents[3]),
+                MAX_JOBS_ENV: "8",
             }
         )
 
