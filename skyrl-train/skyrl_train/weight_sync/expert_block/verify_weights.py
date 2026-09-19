@@ -24,6 +24,9 @@ class ReplayReport:
     compared_bytes: int
     parameter_bytes: int
     mismatched_bytes: int
+    installed_compared_bytes: int = 0
+    installed_parameter_bytes: int = 0
+    installed_mismatched_bytes: int = 0
 
 
 def replay(stream: Stream, version: int) -> ReplayReport:
@@ -38,7 +41,9 @@ def _replay(stream: Stream, version: int) -> ReplayReport:
         max([landing.nbytes for _, landing in landings] + [0]), dtype=torch.uint8, device=stream.device
     )
     mismatched = torch.zeros((), dtype=torch.int64, device=stream.device)
+    installed_mismatched = torch.zeros((), dtype=torch.int64, device=stream.device)
     compared = 0
+    installed_compared = 0
     for item, landing in stream.transfers():
         if landing is None:
             stream.send(item)
@@ -49,17 +54,41 @@ def _replay(stream: Stream, version: int) -> ReplayReport:
         installed = landing.installed.to(landing.wire_dtype)
         mismatched.add_(wire.view(torch.uint8).ne(installed.view(torch.uint8)).sum())
         compared += landing.nbytes
+        if landing.direct:
+            # The wire comparison already covers every byte of this installed view.
+            installed_compared += landing.nbytes
+        else:
+            # A BF16 replay cannot distinguish two FP32 router values that narrow to
+            # the same BF16 bits. Compare the actual widened destination as well.
+            expected_installed = wire.to(landing.installed.dtype)
+            installed_mismatched.add_(
+                expected_installed.contiguous().view(torch.uint8)
+                .ne(landing.installed.contiguous().view(torch.uint8))
+                .sum()
+            )
+            installed_compared += landing.installed.numel() * landing.installed.element_size()
     parameter_bytes = 0
+    installed_parameter_bytes = 0
     if not stream.trainer:
+        installed_parameter_bytes = sum(value.numel() * value.element_size() for value in stream.parameters.values())
         # Count parameter bytes in the wire dtype, so the FP32 router weight counts as BF16.
-        parameter_bytes = sum(value.numel() * value.element_size() for value in stream.parameters.values())
+        parameter_bytes = installed_parameter_bytes
         for _, landing in landings:
             parameter_bytes -= landing.installed.numel() * (
                 landing.installed.element_size() - landing.nbytes // landing.installed.numel()
             )
     if stream.device.type == "cuda":
         torch.cuda.synchronize(stream.device)
-    return ReplayReport(stream.participant, version, compared, parameter_bytes, int(mismatched.item()))
+    return ReplayReport(
+        stream.participant,
+        version,
+        compared,
+        parameter_bytes,
+        int(mismatched.item()),
+        installed_compared,
+        installed_parameter_bytes,
+        int(installed_mismatched.item()),
+    )
 
 
 @dataclass(frozen=True)

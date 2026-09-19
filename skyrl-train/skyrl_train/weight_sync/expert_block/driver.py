@@ -265,6 +265,15 @@ class ExpertBlockSync:
                     f"Receiver {report.participant} compared {report.compared_bytes} bytes; the schedule assigns "
                     f"{expected_bytes[report.participant]} and it holds {report.parameter_bytes} parameter bytes"
                 )
+            if report.installed_parameter_bytes and (
+                report.installed_compared_bytes != report.installed_parameter_bytes
+                or report.installed_mismatched_bytes != 0
+            ):
+                raise RuntimeError(
+                    f"Receiver {report.participant} installed storage differs on "
+                    f"{report.installed_mismatched_bytes} of {report.installed_compared_bytes} bytes; "
+                    f"it holds {report.installed_parameter_bytes} parameter bytes"
+                )
         replica_reports = []
         for row in policy_rows:
             replicas = ReplicaReport(**row["replicas"])
