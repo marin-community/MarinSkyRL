@@ -182,6 +182,40 @@ def test_online_eagle_training_uses_vllm_synchronous_scheduling(monkeypatch):
     assert captured["engine_init_kwargs"]["weight_transfer_config"] == {"backend": "runai_streamer"}
 
 
+def test_offline_eagle_capture_does_not_attach_weight_transfer_backend(monkeypatch):
+    pytest.importorskip("hydra")
+    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
+    from skyrl_train.entrypoints import main_base
+    from marinskyrl.speculative_decoding import EVALUATION_ENTRYPOINT
+    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
+
+    captured = {}
+    monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])
+    cfg = get_default_config()
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.async_engine = True
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.generator.speculative_decoding = {
+        "method": "eagle3",
+        "model": {
+            "source_uri": "hf://laion/snowball-64k-eagle3-draft-r2egym",
+            "source_identity": "4bdb47c08e5b5190bea3c7a93c3e14470230e469",
+        },
+        "num_speculative_tokens": 3,
+        "training": {"interval_steps": 1},
+    }
+
+    main_base.create_ray_wrapped_inference_engines_from_config(
+        cfg,
+        colocate_pg=None,
+        tokenizer=None,
+        entrypoint=EVALUATION_ENTRYPOINT,
+    )
+
+    assert captured["engine_init_kwargs"]["async_scheduling"] is False
+    assert "weight_transfer_config" not in captured["engine_init_kwargs"]
+
+
 def test_from_config_forwards_policy_revision_to_vllm(monkeypatch):
     pytest.importorskip("hydra")
     pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")

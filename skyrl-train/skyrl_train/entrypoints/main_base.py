@@ -142,6 +142,11 @@ def create_ray_wrapped_inference_engines_from_config(
             # enables its asynchronous scheduler by default, but online EAGLE
             # capture must reconcile each target forward before the next schedule.
             engine_init_kwargs["async_scheduling"] = False
+        if speculative_decoding.training is not None and entrypoint == STANDARD_TRAINING_ENTRYPOINT:
+            # Online training refreshes draft weights while the rollout engine is
+            # resident. Offline distillation tears the engine down before training,
+            # so attaching a live weight-transfer backend is unnecessary and makes
+            # capture depend on whichever backends the pinned vLLM wheel bundles.
             engine_init_kwargs["weight_transfer_config"] = {"backend": "runai_streamer"}
 
     requested_logprobs = [
