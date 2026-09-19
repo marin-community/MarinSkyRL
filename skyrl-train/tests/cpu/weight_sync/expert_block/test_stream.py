@@ -22,6 +22,7 @@ import torch.multiprocessing as mp
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, create_groups, destroy_groups, warm_groups
 from skyrl_train.weight_sync.expert_block.schedule import Group, ReceiverRank, TrainerRank, build_schedule
 from skyrl_train.weight_sync.expert_block.source_views import local_expert_sources, local_source_slices
+from skyrl_train.weight_sync.expert_block.sparse_experiment_stream import measure_distribution, run_sparse
 from skyrl_train.weight_sync.expert_block.stream import Stream
 from skyrl_train.weight_sync.expert_block.verify_weights import compare_replicas, replay
 from tests.cpu.weight_sync.expert_block.megatron_layout import (
@@ -111,6 +112,15 @@ UNEQUAL_STAGED = Topology(
     receiver_layers=((0,), (1, 2)),
     receiver_ep=1,
     norm_stages=(0, 1),
+)
+SPARSE_TOPOLOGY = Topology(
+    trainer_layers=((0,), (1,)),
+    trainer_ep=2,
+    trainer_dp=1,
+    replicas=1,
+    receiver_layers=((0, 1),),
+    receiver_ep=2,
+    norm_stages=(0,),
 )
 
 
@@ -292,3 +302,75 @@ def test_every_receiver_installs_exactly_its_experts_and_the_dense_weights_its_s
     world = len(topology.trainers()) + len(topology.receivers())
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     mp.spawn(participant_main, args=(topology, store.port, str(tmp_path)), nprocs=world, join=True)
+
+
+def sparse_participant_main(rank, port, directory):
+    """Two real updates, each applied by both sparse encodings over the production schedule."""
+    topology = SPARSE_TOPOLOGY
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{directory}/sparse-default-{rank}",
+        rank=0,
+        world_size=1,
+        timeout=timedelta(seconds=TIMEOUT),
+    )
+    plan = schedule(topology)
+    device = torch.device("cpu")
+    dense, _ = reference(topology)
+    if rank < plan.trainer_count:
+        local, expert_sources = trainer_sources(topology, topology.trainers()[rank])
+        sources = local.sources
+        baseline = {name: source.clone() for name, source in sources.items()}
+        kwargs = dict(sources=sources, expert_sources=expert_sources)
+    else:
+        receiver = topology.receivers()[rank - plan.trainer_count]
+        parameters, maps, padded_head = receiver_parameters(topology, receiver, dense)
+        kwargs = dict(parameters=parameters, expert_maps=maps)
+    rendezvous = Rendezvous("127.0.0.1", port, "sparse-test", TIMEOUT)
+    groups = create_groups(rank, plan.groups, rendezvous, backend="gloo")
+    try:
+        warm_groups(rank, plan.groups, groups, device)
+        stream = Stream(rank, plan, groups, device=device, **kwargs)
+        stream.run(0)
+        if rank >= plan.trainer_count:
+            snapshot = {name: value.clone() for name, value in parameters.items()}
+        for version in (1, 2):
+            if rank < plan.trainer_count:
+                for source in sources.values():
+                    raw = source.view(-1).view(torch.uint8)
+                    raw[0] ^= version
+                    raw[-1] ^= version + 1
+                rows = measure_distribution(stream, version, baseline)
+                assert rows and sum(row["changed"] for row in rows) > 0
+                assert all(row["occupied_256_value_blocks"] > 0 for row in rows if row["changed"])
+            for encoding in ("indices", "bitmap") if version == 1 else ("bitmap", "indices"):
+                if rank >= plan.trainer_count:
+                    for name, value in parameters.items():
+                        value.copy_(snapshot[name])
+                report = run_sparse(stream, version, encoding, baseline if rank < plan.trainer_count else None)
+                assert report["version"] == version
+                assert report["logical_bytes"] >= report["metadata_bytes"]
+                assert report["collectives"] >= report["transfers"]
+                replayed = replay(stream, version)
+                if rank >= plan.trainer_count:
+                    assert replayed.mismatched_bytes == 0
+                    assert replayed.compared_bytes == dict(plan.receiver_bytes)[rank] == replayed.parameter_bytes
+            if rank < plan.trainer_count:
+                for name, source in sources.items():
+                    baseline[name].copy_(source)
+            else:
+                snapshot = {name: value.clone() for name, value in parameters.items()}
+                if padded_head is not None:
+                    assert torch.all(padded_head[dense["lm_head.weight"].shape[0] :] == 0)
+    finally:
+        destroy_groups(groups)
+        dist.destroy_process_group()
+
+
+def test_sparse_encodings_install_two_updates_with_exact_dense_replay(tmp_path):
+    store = dist.TCPStore(
+        "127.0.0.1", 0, world_size=None, is_master=True, timeout=timedelta(seconds=TIMEOUT), wait_for_workers=False
+    )
+    world = len(SPARSE_TOPOLOGY.trainers()) + len(SPARSE_TOPOLOGY.receivers())
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    mp.spawn(sparse_participant_main, args=(store.port, str(tmp_path)), nprocs=world, join=True)

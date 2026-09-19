@@ -16,6 +16,7 @@ import torch
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, destroy_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, TrainerRank, from_wire, to_wire
 from skyrl_train.weight_sync.expert_block.source_views import local_expert_sources, local_source_slices
+from skyrl_train.weight_sync.expert_block.sparse_experiment_stream import measure_distribution, run_sparse
 from skyrl_train.weight_sync.expert_block.stream import Stream, bind, storage_identity
 from skyrl_train.weight_sync.expert_block.verify_weights import compare_replicas, replay
 
@@ -30,6 +31,7 @@ class ExpertBlockSender:
         self.expert_sources = {}
         self.groups = {}
         self.stream: Stream | None = None
+        self.experiment_baseline: dict[str, torch.Tensor] | None = None
 
     def inventory(self) -> dict:
         """This rank's coordinates, expert matrices and dense slices."""
@@ -122,6 +124,49 @@ class ExpertBlockSender:
             "replicas": asdict(compare_replicas(self.sources, groups, self.trainer.rank, version)),
         }
 
+    def experiment_capture_baseline(self) -> dict:
+        """Keep the current trainer parameters on this GPU until an acknowledged update replaces them."""
+        if self.stream is None:
+            raise RuntimeError("Expert-block sender is not initialised")
+        with torch.no_grad():
+            self.experiment_baseline = {name: source.detach().clone() for name, source in self.sources.items()}
+        torch.cuda.synchronize(self.stream.device)
+        return {
+            "participant": self.trainer.rank,
+            "baseline_bytes": sum(
+                source.numel() * source.element_size() for source in self.experiment_baseline.values()
+            ),
+            "gpu_free_bytes": torch.cuda.mem_get_info(self.stream.device)[0],
+        }
+
+    def experiment_send(self, update_info: dict) -> dict:
+        """Run one disposable exact encoding over the #689 source views."""
+        if self.stream is None or self.experiment_baseline is None:
+            raise RuntimeError("Capture a GPU baseline before experimental sparse sends")
+        version = update_info["version"]
+        completed = self.worker._model_version_step
+        if completed is not None and completed != version:
+            raise RuntimeError(f"Sync names update {version} but this rank last completed {completed}")
+        if storage_identity(self.sources) != self.identity:
+            raise RuntimeError("Policy parameter storage changed since the sync was prepared")
+        return run_sparse(self.stream, version, update_info["encoding"], self.experiment_baseline)
+
+    def experiment_distribution(self, update_info: dict) -> list[dict]:
+        if self.stream is None or self.experiment_baseline is None:
+            raise RuntimeError("Capture a GPU baseline before measuring the update")
+        return measure_distribution(self.stream, update_info["version"], self.experiment_baseline)
+
+    def experiment_advance_baseline(self) -> dict:
+        """Advance only after the driver has observed every receiver and resumed generation."""
+        if self.experiment_baseline is None or self.stream is None:
+            raise RuntimeError("Capture a GPU baseline before advancing it")
+        with torch.no_grad():
+            for name, source in self.sources.items():
+                self.experiment_baseline[name].copy_(source)
+        torch.cuda.synchronize(self.stream.device)
+        return {"participant": self.trainer.rank, "gpu_free_bytes": torch.cuda.mem_get_info(self.stream.device)[0]}
+
     def shutdown(self) -> None:
         destroy_groups(self.groups)
         self.stream = None
+        self.experiment_baseline = None

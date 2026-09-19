@@ -16,6 +16,7 @@ import torch
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, destroy_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, from_wire
 from skyrl_train.weight_sync.expert_block.source_views import LAYER_PREFIX, ROUTED_EXPERTS, dtype_name
+from skyrl_train.weight_sync.expert_block.sparse_experiment_stream import run_sparse
 from skyrl_train.weight_sync.expert_block.stream import Stream, bind, storage_identity
 from skyrl_train.weight_sync.expert_block.verify_weights import replay
 
@@ -68,6 +69,7 @@ class ExpertBlockReceiver:
         self.expert_maps: dict[str, tuple[int, ...]] = {}
         self.groups = {}
         self.stream: Stream | None = None
+        self.experiment_baseline: dict[str, torch.Tensor] | None = None
 
     def inventory(self) -> dict:
         """Check that this transport can write into the model, and report what this worker holds."""
@@ -155,6 +157,50 @@ class ExpertBlockReceiver:
             raise RuntimeError("Expert-block receiver is not initialised")
         return asdict(replay(self.stream, update_info["version"]))
 
+    def experiment_capture_baseline(self) -> dict:
+        """Keep a full receiver image so each timed candidate starts from identical bytes."""
+        if self.stream is None:
+            raise RuntimeError("Expert-block receiver is not initialised")
+        with torch.no_grad():
+            self.experiment_baseline = {name: value.detach().clone() for name, value in self.parameters.items()}
+        torch.cuda.synchronize(self.device)
+        return {
+            "participant": self.participant,
+            "baseline_bytes": sum(value.numel() * value.element_size() for value in self.experiment_baseline.values()),
+            "gpu_free_bytes": torch.cuda.mem_get_info(self.device)[0],
+        }
+
+    def experiment_restore_baseline(self) -> dict:
+        """Reset before another candidate; never use this after a failed or uncertain collective."""
+        if self.experiment_baseline is None or self.stream is None:
+            raise RuntimeError("Capture a receiver baseline before restoring it")
+        if storage_identity(dict(self.model.named_parameters())) != self.identity:
+            raise RuntimeError("Model parameter storage changed since the receiver was initialised")
+        with torch.no_grad():
+            for name, value in self.parameters.items():
+                value.copy_(self.experiment_baseline[name])
+        torch.cuda.synchronize(self.device)
+        return {"participant": self.participant}
+
+    def experiment_receive(self, update_info: dict) -> dict:
+        """Receive one disposable exact encoding into the #689 destination views."""
+        if self.stream is None or self.experiment_baseline is None:
+            raise RuntimeError("Capture a receiver baseline before experimental sparse receives")
+        if storage_identity(dict(self.model.named_parameters())) != self.identity:
+            raise RuntimeError("Model parameter storage changed since the receiver was initialised")
+        return run_sparse(self.stream, update_info["version"], update_info["encoding"])
+
+    def experiment_advance_baseline(self) -> dict:
+        """Advance only after every receiver passed dense replay and generation resumed."""
+        if self.experiment_baseline is None or self.stream is None:
+            raise RuntimeError("Capture a receiver baseline before advancing it")
+        with torch.no_grad():
+            for name, value in self.parameters.items():
+                self.experiment_baseline[name].copy_(value)
+        torch.cuda.synchronize(self.device)
+        return {"participant": self.participant, "gpu_free_bytes": torch.cuda.mem_get_info(self.device)[0]}
+
     def shutdown(self) -> None:
         destroy_groups(self.groups)
         self.stream = None
+        self.experiment_baseline = None
