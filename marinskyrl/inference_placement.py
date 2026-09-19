@@ -76,16 +76,26 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
         # expert count, which is checked against the model when the ranks report.
         if megatron["expert_model_parallel_size"] < 1 or generator["inference_engine_expert_parallel_size"] < 1:
             problems.append("expert-parallel sizes must be positive")
-    if generator["backend"] != "vllm" or not generator["async_engine"] or not generator["run_engines_locally"]:
-        problems.append("the engines must be local async vLLM engines")
-    if trainer["placement"]["colocate_all"]:
-        problems.append("the engines must not be colocated with the trainer")
     if generator["weight_sync_backend"] != "nccl":
         problems.append("generator.weight_sync_backend must be nccl")
+    # The transport pairs trainer ranks with the verified placement of node-local replicas.
     if not generator["inference_engine_node_local"]:
         problems.append("generator.inference_engine_node_local must be true")
-    if generator["inference_engine_tensor_parallel_size"] != 1:
-        problems.append("the engines must use TP=1")
+    tp_pp_size = (
+        generator["inference_engine_tensor_parallel_size"] * generator["inference_engine_pipeline_parallel_size"]
+    )
+    blocker = node_local_blocker(
+        backend=generator["backend"],
+        async_engine=generator["async_engine"],
+        colocated=trainer["placement"]["colocate_all"],
+        remote=not generator["run_engines_locally"],
+        mp_executor=bool(generator.get("inference_engine_mp_backend", False)) and tp_pp_size > 1,
+        tensor_parallel_size=generator["inference_engine_tensor_parallel_size"],
+        data_parallel_size=generator["inference_engine_data_parallel_size"],
+        expert_parallel_size=generator["inference_engine_expert_parallel_size"],
+    )
+    if blocker is not None:
+        problems.append(f"the engines must be placed node-locally, and {blocker}")
     if int(generator["expert_block_sync"]["timeout_seconds"]) <= 0:
         problems.append("generator.expert_block_sync.timeout_seconds must be positive")
     if problems:

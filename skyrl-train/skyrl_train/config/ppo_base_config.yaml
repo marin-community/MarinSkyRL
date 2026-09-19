@@ -371,7 +371,7 @@ generator:
   # "expert_block": each expert block is broadcast from the Megatron rank that owns it straight into
   # the live parameter slot of the vLLM worker that serves it. Requires a Grug MoE trained with the
   # megatron strategy at tensor_model_parallel_size 1 and expert_tensor_parallel_size 1, local async
-  # vLLM engines at TP=1 placed with inference_engine_node_local, the NCCL weight-sync backend and
+  # vLLM engines placed as node-local replicas (TP=1, EP=DP>1), the NCCL weight-sync backend and
   # vLLM's TRITON MoE backend, under FullyAsyncRayPPOTrainer. Trainer and engine expert-parallel
   # degrees may differ and engines may be pipeline-parallel; anything else is refused at
   # configuration or preparation time.
