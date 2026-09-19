@@ -14,7 +14,7 @@ from skyrl_train import learner_memory
 from skyrl_train import telemetry as training_telemetry
 from skyrl_train.telemetry import StepKind
 from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.weight_sync import WeightChunk
+from skyrl_train.weight_sync.base import WeightChunk
 from skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorkerBase
 
 
