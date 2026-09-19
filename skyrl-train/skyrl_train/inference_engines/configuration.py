@@ -61,7 +61,7 @@ def inference_engine_kwargs_from_config(
         "max_logprobs": role.max_logprobs,
         "mp_backend": cfg.generator.get("inference_engine_mp_backend", False),
         "placement_group_timeout_seconds": int(cfg.trainer.distributed.placement_group_timeout_seconds),
-        "node_local": cfg.generator.get("inference_engine_node_local", False),
+        "node_local": cfg.generator.get("inference_engine_node_local", True),
     }
     if (rope_scaling := cfg.generator.get("rope_scaling", None)) is not None:
         kwargs["rope_scaling"] = OmegaConf.to_container(rope_scaling, resolve=True)

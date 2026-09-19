@@ -1,68 +1,47 @@
-"""Node-local inference replica placement: the configuration rules and the verified placement records.
+"""Node-local inference replica placement: the eligibility rule and the verified placement records.
 
-An opted-in replica is one vLLM data-parallel group whose ranks all sit on one
-physical node; with pipeline parallelism each stage's data-parallel group sits
-on one node. The trainer's config validation and the engine factory refuse a
-configuration this cannot hold before any engine starts; the factory then
-verifies the workers it actually got against the bundles it was allocated
-before training starts. This module imports nothing from the trainer, so the
-config validator can import it before any model module.
+A node-local replica is one vLLM data-parallel group whose ranks all sit on one
+physical node; with pipeline parallelism each stage's data-parallel group sits on
+one node. It is the default for every engine shape that can hold it; the engine
+factory keeps the existing placement for the rest, and verifies the workers it got
+against the bundles it was allocated before training starts. This module imports
+nothing from the trainer, so the config validator can import it before any model
+module.
 """
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
 
 
-def validate_node_local_inference(
+def node_local_blocker(
     *,
-    enabled: bool,
     backend: str,
     async_engine: bool,
-    colocate_all: bool,
+    colocated: bool,
+    remote: bool,
+    mp_executor: bool,
     tensor_parallel_size: int,
-    pipeline_parallel_size: int,
     data_parallel_size: int,
     expert_parallel_size: int,
-    num_inference_engines: int,
     gpus_per_node: int | None = None,
-    remote: bool = False,
-) -> None:
-    """Reject unsupported opt-ins; every other placement keeps its existing contract."""
-    if not enabled:
-        return
-    if backend != "vllm" or not async_engine or colocate_all or remote:
-        raise ValueError("inference_engine_node_local requires local, non-colocated async vLLM engines")
+) -> str | None:
+    """Why an engine cannot be placed node-locally, or None when it can.
+
+    ``gpus_per_node`` is known only once the Ray cluster is; the config check passes None.
+    """
+    if backend != "vllm" or not async_engine or colocated or remote:
+        return "it needs local, non-colocated async vLLM engines"
+    if mp_executor:
+        return "the mp executor places its own workers"
     if tensor_parallel_size != 1:
-        raise ValueError("inference_engine_node_local requires TP=1")
-    if data_parallel_size <= 0 or pipeline_parallel_size <= 0 or num_inference_engines <= 0:
-        raise ValueError("inference_engine_node_local requires positive replica, PP and DP sizes")
+        return "it needs TP=1"
+    if data_parallel_size < 2:
+        return "a DP=1 engine has no replica to pack"
     if expert_parallel_size != data_parallel_size:
-        raise ValueError("inference_engine_node_local requires EP equal to DP")
+        return "it needs EP equal to DP"
     if gpus_per_node is not None and data_parallel_size > gpus_per_node:
-        raise ValueError(
-            f"Node-local inference replica needs {data_parallel_size} GPUs but a node provides {gpus_per_node}"
-        )
-
-
-def validate_node_local_config(config: Mapping[str, Any], *, gpus_per_node: int | None = None) -> None:
-    """Validate the `generator` block of a resolved training configuration."""
-    generator = config["generator"]
-    if not generator.get("inference_engine_node_local", False):
-        return
-    validate_node_local_inference(
-        enabled=True,
-        backend=generator["backend"],
-        async_engine=generator["async_engine"],
-        colocate_all=config["trainer"]["placement"]["colocate_all"],
-        tensor_parallel_size=generator["inference_engine_tensor_parallel_size"],
-        pipeline_parallel_size=generator["inference_engine_pipeline_parallel_size"],
-        data_parallel_size=generator["inference_engine_data_parallel_size"],
-        expert_parallel_size=generator["inference_engine_expert_parallel_size"],
-        num_inference_engines=generator["num_inference_engines"],
-        remote=not generator["run_engines_locally"],
-        gpus_per_node=gpus_per_node,
-    )
+        return f"a replica stage needs {data_parallel_size} GPUs but a node provides {gpus_per_node}"
+    return None
 
 
 @dataclass(frozen=True)
