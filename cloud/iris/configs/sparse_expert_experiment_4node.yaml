@@ -1,5 +1,5 @@
-# Disposable 2-node Megatron sender + 1-node DP8/EP8 vLLM receiver geometry.
-# CPU Adam state leaves room for a GPU-resident prior-weight baseline.
+# Disposable 4-node Megatron sender + 1-node DP8/EP8 vLLM receiver geometry.
+# The extra data-parallel copy leaves room for GPU Adam and a prior-weight baseline.
 # The --entrypoint override runs the experiment module, which owns its measurements.
 entrypoint: standard
 
@@ -47,11 +47,11 @@ trainer:
         overlap_param_gather: false
         grad_reduce_in_fp32: false
       optimizer_config_kwargs:
-        optimizer_cpu_offload: true
-        optimizer_offload_fraction: 1.0
+        optimizer_cpu_offload: false
+        optimizer_offload_fraction: 0.0
   placement:
     colocate_all: false
-    policy_num_nodes: 2
+    policy_num_nodes: 4
     policy_num_gpus_per_node: 8
 
 generator:

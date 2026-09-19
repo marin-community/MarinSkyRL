@@ -63,7 +63,7 @@ def _config(model_path: str, geometry: Geometry):
     cfg.trainer.algorithm.use_kl_loss = False
     cfg.trainer.algorithm.use_entropy_loss = False
     cfg.trainer.placement.colocate_all = False
-    cfg.trainer.placement.policy_num_nodes = 2
+    cfg.trainer.placement.policy_num_nodes = geometry.policy_gpus // 8
     cfg.trainer.placement.policy_num_gpus_per_node = 8
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = geometry.policy_pp
@@ -73,8 +73,9 @@ def _config(model_path: str, geometry: Geometry):
     cfg.trainer.policy.megatron_config.ddp_config.overlap_grad_reduce = True
     cfg.trainer.policy.megatron_config.ddp_config.overlap_param_gather = False
     cfg.trainer.policy.megatron_config.ddp_config.grad_reduce_in_fp32 = False
-    cfg.trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload = True
-    cfg.trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction = 1.0
+    cpu_offload = geometry.policy_gpus == 16
+    cfg.trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload = cpu_offload
+    cfg.trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction = float(cpu_offload)
     cfg.trainer.policy.optimizer_config.lr = 1.0e-6
     cfg.trainer.policy.optimizer_config.max_grad_norm = 1.0
     cfg.generator.backend = "vllm"
@@ -177,19 +178,20 @@ def _engine_client(cfg, model_path: str, geometry: Geometry):
     return InferenceEngineClient(engines, tokenizer, cfg)
 
 
-def _init_policy(cfg):
+def _init_policy(cfg, geometry: Geometry):
     import ray
     from ray.util.placement_group import placement_group
     from skyrl_train.utils import get_ray_pg_ready_with_timeout
     from skyrl_train.workers.megatron.megatron_worker import PolicyWorker
     from skyrl_train.workers.worker import PPORayActorGroup
 
-    bundles = [{"GPU": 8, "CPU": 8} for _ in range(2)]
+    policy_nodes = geometry.policy_gpus // 8
+    bundles = [{"GPU": 8, "CPU": 8} for _ in range(policy_nodes)]
     pg = placement_group(bundles, strategy="PACK")
     get_ray_pg_ready_with_timeout(pg, timeout=300)
     policy = PPORayActorGroup(
         cfg,
-        num_nodes=2,
+        num_nodes=policy_nodes,
         num_gpus_per_node=8,
         ray_actor_type=PolicyWorker,
         pg=pg,
@@ -246,7 +248,9 @@ def _run_real(records: dict) -> None:
         Path(hf_hub_download(MODEL_REPO, "config.json", revision=MODEL_REVISION, local_files_only=True)).parent
     )
     records["model"] = {"repo": MODEL_REPO, "revision": MODEL_REVISION, "node_local_snapshot": model_path}
-    geometry = Geometry(policy_gpus=16, policy_pp=2, policy_ep=8, engines=1, engine_dp=8, engine_pp=1)
+    geometry = Geometry(
+        policy_gpus=8 * records["policy_nodes"], policy_pp=2, policy_ep=8, engines=1, engine_dp=8, engine_pp=1
+    )
     cfg = _config(model_path, geometry)
     records["geometry"] = asdict(geometry)
     records["config"] = {
@@ -254,7 +258,7 @@ def _run_real(records: dict) -> None:
         "micro_train_batch_size_per_gpu": cfg.trainer.micro_train_batch_size_per_gpu,
         "learning_rate": cfg.trainer.policy.optimizer_config.lr,
         "vllm_gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
-        "optimizer_cpu_offload": True,
+        "optimizer_cpu_offload": cfg.trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload,
         "overlap_param_gather": cfg.trainer.policy.megatron_config.ddp_config.overlap_param_gather,
     }
     records["stage"] = "initialize_ray"
@@ -267,12 +271,12 @@ def _run_real(records: dict) -> None:
         if node["Alive"]
     ]
     if sum(node["resources"].get("GPU", 0) for node in records["ray_nodes"]) < geometry.gpus:
-        raise RuntimeError("The Ray gang has fewer than 24 GPUs")
+        raise RuntimeError(f"The Ray gang has fewer than {geometry.gpus} GPUs")
     sync = None
     try:
         records["stage"] = "initialize_receiver_and_policy"
         client = _engine_client(cfg, model_path, geometry)
-        policy = _init_policy(cfg)
+        policy = _init_policy(cfg, geometry)
         sync = ExpertBlockSync(policy_model=policy, inference_engine_client=client, timeout_seconds=900)
 
         async def prepare():
@@ -405,17 +409,23 @@ def main() -> None:
 
     mode = "real"
     leading_repeats = 0
+    policy_nodes = 2
     for arg in sys.argv[1:]:
         if arg.startswith("++sparse_experiment.mode="):
             mode = arg.split("=", 1)[1]
         if arg.startswith("++sparse_experiment.leading_repeats="):
             leading_repeats = int(arg.split("=", 1)[1])
+        if arg.startswith("++sparse_experiment.policy_nodes="):
+            policy_nodes = int(arg.split("=", 1)[1])
     if leading_repeats < 0 or leading_repeats > 10:
         raise ValueError("leading_repeats must be between zero and ten")
+    if policy_nodes not in (2, 4):
+        raise ValueError("policy_nodes must be two or four")
     records = {
         "schema_version": 1,
         "mode": mode,
         "leading_repeats": leading_repeats,
+        "policy_nodes": policy_nodes,
         "metadata": _metadata(),
         "updates": [],
         "complete": False,
