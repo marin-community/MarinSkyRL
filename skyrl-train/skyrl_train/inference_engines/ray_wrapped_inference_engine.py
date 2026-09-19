@@ -184,8 +184,7 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     ):
         self.inference_engine_actor = inference_engine_actor
         self.weight_sync_relative_rank_offset = weight_sync_relative_rank_offset
-        # Set only for node-local replicas, after their workers were verified at startup: one
-        # entry per worker of this actor, in the actor's worker order.
+        # The verified placement of each worker of a node-local replica, in worker order.
         self.worker_placements: list[InferenceReplicaPlacement] | None = None
 
     def tp_size(self):
@@ -296,7 +295,7 @@ def populate_engine_max_model_lens(engines: List["RayWrappedInferenceEngine"], *
 
 
 def _release_node_local_gang(actors: list, placement_groups: list) -> None:
-    """Undo a node-local startup that failed: kill the actors that came up and free their replicas' groups."""
+    """After a failed node-local startup, kill the started actors and remove the placement groups."""
     for actor in actors:
         ray.kill(actor)
     for pg in placement_groups:
@@ -343,13 +342,10 @@ def create_ray_wrapped_inference_engines(
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
 
-    node_local_placement: Whether to place each engine's whole DP/EP replica on one node with a
-        STRICT_PACK group (with pipeline parallelism, each stage's DP group on one node) and verify
-        the workers started there on distinct physical GPUs before returning. ``node_local_blocker``
-        holds the rule: non-colocated async vLLM on the Ray executor with TP=1, DP>1, EP=DP and a
-        replica stage that fits a node; ``auto`` also needs the engine's GPUs to be a whole number
-        of nodes on a multi-node cluster. ``auto`` places any other engine as before; ``require``
-        refuses it.
+    node_local_placement: ``auto`` puts each stage of a DP/EP replica on one node when
+        ``node_local_blocker`` allows it, and checks the workers' GPUs at startup; other engines
+        are placed as before. ``require`` refuses an engine that cannot be packed. ``off`` never
+        packs.
     mp_backend: opt-in. When True (and TP>1 / PP>1 and NOT colocated), run each vLLM
         inference engine with the `mp` (multiprocessing) executor backend instead of `ray`.
         This is required for the Qwen3-Next-80B-A3B R3 router-capture path
@@ -438,8 +434,8 @@ def create_ray_wrapped_inference_engines(
         raise ValueError(f"generator.inference_engine_node_local=require cannot be honoured: {blocker}")
     if not node_local:
         logger.info("Inference replicas are not placed node-locally: {}", blocker)
-    # A node-local replica whose stages together exceed one node is packed softly and
-    # verified per stage after startup instead.
+    # A replica whose stages do not fit one node together uses PACK, and each stage is checked
+    # after startup.
     node_local_strategy = (
         "STRICT_PACK"
         if not node_local or data_parallel_size * pipeline_parallel_size <= max(node_gpu_capacities.values(), default=0)
@@ -519,8 +515,7 @@ def create_ray_wrapped_inference_engines(
     # mechanism (main_base.get_policy_pg), which claims the policy's whole nodes BEFORE
     # these engine PGs are created.
     per_engine_pgs: list = []
-    # A node-local DP/EP replica takes the same per-engine group as a multi-GPU TP/PP engine, so
-    # "TP==PP==1" below means a TP==PP==1 engine that is not a node-local replica.
+    # A node-local replica gets one group per engine, like a TP/PP>1 engine.
     use_per_engine_strict_pack = node_local or use_per_engine_strict_pack_pg(
         use_hybrid_engine=use_hybrid_engine,
         use_mp_backend=use_mp_backend,
@@ -856,7 +851,7 @@ def create_ray_wrapped_inference_engines(
     # the colocated sleep barrier still covers the sglang/colocated paths unchanged.
     startup_refs = []
     if node_local:
-        # Same readiness barrier, but the reply carries each worker's physical placement.
+        # The placement report is also the readiness barrier.
         startup_refs = [engine.inference_engine_actor.report_engine_placement.remote() for engine in engines]
     elif not inference_engine_enable_sleep and backend == "vllm":
         startup_refs = [engine.inference_engine_actor.report_engine_hosts.remote() for engine in engines]
@@ -912,7 +907,7 @@ def create_ray_wrapped_inference_engines(
 def wait_for_inference_engine_startup(
     startup_refs: list[ray.ObjectRef], actor_handles: list[ActorHandle], *, timeout_seconds: float
 ) -> list[Any]:
-    """Return every engine's readiness reply, or terminate the actor gang."""
+    """Wait for every engine's startup reply. Kill all the actors if one fails or times out."""
 
     _, pending = ray.wait(startup_refs, num_returns=len(startup_refs), timeout=timeout_seconds, fetch_local=False)
     if not pending:

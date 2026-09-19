@@ -8,8 +8,8 @@ The placement strategy checks verify that the ray/uni backend chooses:
     PACK PG (the lever1/swesmith multi-node starvation regression fix), and
   - never per-engine STRICT_PACK on the hybrid (colocate_all) or mp-backend
     paths (the mp {GPU:tp_pp_size} bundle is already node-atomic), and
-  - per-replica STRICT_PACK for node-local replicas, the default wherever an engine can hold one,
-    whose workers are then verified against the bundles they were given.
+  - one group per node-local replica (generator.inference_engine_node_local), with its workers
+    checked against the bundles they were given.
 
 uv run --isolated --group dev --extra cpu pytest tests/cpu/test_engine_placement_strategy.py
 """

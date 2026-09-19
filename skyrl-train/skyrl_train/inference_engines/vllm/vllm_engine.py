@@ -978,7 +978,7 @@ class WorkerWrap:
         return socket.gethostname()
 
     def report_device_placement(self) -> dict[str, str | int]:
-        """This worker's physical GPU and communicator ranks, as plain fields for the utility RPC."""
+        """This worker's host, GPU and ranks, as a plain dict."""
         return asdict(self._device_placement())
 
     def _device_placement(self) -> InferenceWorkerPlacement:
@@ -1980,7 +1980,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await engine.collective_rpc("report_host")
 
     async def report_engine_placement(self):
-        """Physical GPU and communicator ranks of every engine worker, once the model is loaded."""
+        """Host, GPU and ranks of every worker of this engine."""
         return await self._get_engine().collective_rpc("report_device_placement")
 
     async def begin_weight_reload(self):
