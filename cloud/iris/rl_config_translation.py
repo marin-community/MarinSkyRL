@@ -632,20 +632,13 @@ def materialize_rl_config(
     return str(destination)
 
 
-def runs_fully_async_trainer(raw: Dict[str, Any], entrypoint: RLEntrypoint) -> bool:
-    """Whether the config selects FullyAsyncRayPPOTrainer; terminal_bench does so when colocate_all is false."""
-    if entrypoint is RLEntrypoint.FULLY_ASYNC:
-        return True
-    if entrypoint is not RLEntrypoint.TERMINAL_BENCH:
-        return False
-    trainer = raw.get("trainer")
-    placement = trainer.get("placement", {}) if isinstance(trainer, dict) else {}
-    return placement.get("colocate_all", True) is False
-
-
 def inert_fully_async_settings(raw: Dict[str, Any], entrypoint: RLEntrypoint) -> tuple[str, ...]:
-    """Return the trainer.fully_async keys a config sets although its trainer never reads them."""
-    if runs_fully_async_trainer(raw, entrypoint):
+    """Return the trainer.fully_async keys a config sets although its trainer never reads them.
+
+    Judged from the YAML alone: a launcher override that flips terminal_bench's placement is
+    applied later, so the warning speaks for the config as written.
+    """
+    if training_loop_for_entrypoint(entrypoint, raw) is TrainingLoop.ASYNC:
         return ()
     trainer = raw.get("trainer")
     fully_async = trainer.get("fully_async") if isinstance(trainer, dict) else None
