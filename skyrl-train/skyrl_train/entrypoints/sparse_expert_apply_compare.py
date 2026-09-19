@@ -1,8 +1,7 @@
-"""Compare direct bound-view patch application with vLLM's sparse apply method.
+"""Compare direct bound-view application with the pinned vLLM checkpoint loader.
 
-This isolated kernel comparison uses a contiguous named parameter, as vLLM's
-sparse NCCL engine requires. It excludes lookup in a live vLLM worker, NCCL,
-and Grug expert-name routing, which the current vLLM sparse engine lacks.
+This isolated apply comparison uses a contiguous named parameter. It excludes
+a live vLLM worker, NCCL, and Grug expert-name routing.
 """
 
 from __future__ import annotations
@@ -15,7 +14,10 @@ from pathlib import Path
 
 import torch
 from skyrl_train.weight_sync.expert_block.sparse_experiment_codec import apply, bits, encode
-from vllm.distributed.weight_transfer.sparse_nccl_engine import SparseNCCLWeightTransferEngine, SparseWeightPatch
+from vllm.model_executor.model_loader.checkpoint_weight_patch import (
+    CheckpointWeightPatch,
+    load_checkpoint_weight_patches,
+)
 
 
 class _NamedModel:
@@ -26,6 +28,13 @@ class _NamedModel:
         if name != "model.embed_tokens.weight":
             raise KeyError(name)
         return self.parameter
+
+    def load_weights(self, weights):
+        names = []
+        for name, value in weights:
+            self.get_parameter(name).copy_(value)
+            names.append(name)
+        return names
 
 
 def _measure(operation) -> float:
@@ -44,13 +53,17 @@ def _case(name: str, count: int, density: float) -> list[dict]:
     current.index_fill_(0, positions, 1)
     patch = encode(current, baseline, "indices")
     destination = baseline.clone()
-    engine = type("ApplyOnly", (), {"model": _NamedModel(destination)})()
-    upstream_patch = SparseWeightPatch(
-        name="model.embed_tokens.weight", indices=patch.positions, values=patch.values, full_shape=(count,)
+    model = _NamedModel(destination)
+    upstream_patch = CheckpointWeightPatch(
+        name="model.embed_tokens.weight",
+        shape=(count,),
+        dtype=torch.bfloat16,
+        indices=patch.positions,
+        values=patch.values,
     )
     operations = {
         "bound_view": lambda: apply(destination, patch),
-        "vllm_sparse_apply": lambda: SparseNCCLWeightTransferEngine._apply_patch(engine, upstream_patch),
+        "vllm_checkpoint_loader": lambda: load_checkpoint_weight_patches(model, [upstream_patch]),
     }
     for operation in operations.values():
         destination.copy_(baseline)
@@ -79,6 +92,36 @@ def _case(name: str, count: int, density: float) -> list[dict]:
     return rows
 
 
+def _edge_semantics() -> dict:
+    baseline = torch.tensor([0.0, 2.0], dtype=torch.bfloat16, device="cuda")
+    result = {}
+    for label, index, raw_bits in (("negative_zero", 0, -32768), ("nan_payload", 1, 32705)):
+        current = baseline.clone()
+        current.view(torch.int16)[index] = raw_bits
+        patch = encode(current, baseline, "indices")
+        direct = baseline.clone()
+        apply(direct, patch)
+        result[f"direct_{label}_byte_equal"] = bool(torch.equal(bits(direct), bits(current)))
+        if not result[f"direct_{label}_byte_equal"]:
+            raise RuntimeError(f"Direct apply changed {label} bits")
+        destination = baseline.clone()
+        model = _NamedModel(destination)
+        upstream_patch = CheckpointWeightPatch(
+            name="model.embed_tokens.weight",
+            shape=(baseline.numel(),),
+            dtype=torch.bfloat16,
+            indices=patch.positions,
+            values=patch.values,
+        )
+        try:
+            load_checkpoint_weight_patches(model, [upstream_patch])
+        except ValueError as error:
+            result[f"vllm_{label}_error"] = str(error)
+        else:
+            result[f"vllm_{label}_byte_equal"] = bool(torch.equal(bits(destination), bits(current)))
+    return result
+
+
 def main() -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("This comparison requires one CUDA GPU")
@@ -89,6 +132,7 @@ def main() -> None:
         "torch_version": importlib.metadata.version("torch"),
         "vllm_version": importlib.metadata.version("vllm"),
         "samples": [],
+        "edge_semantics": _edge_semantics(),
         "complete": False,
     }
     output = Path(os.environ.get("IRIS_OUTPUT_DIR", "/tmp")) / "sparse-expert-apply-compare.json"
