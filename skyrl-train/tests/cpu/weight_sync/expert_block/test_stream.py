@@ -177,6 +177,37 @@ def receiver_parameters(topology, receiver, dense):
     return parameters, maps, padded_head
 
 
+def check_trainer(rank, plan, groups, report, before, sources):
+    roots = {group.members[0] for group in plan.groups if group.name.startswith("expert-")}
+    if rank not in roots:
+        assert groups == {} and report.wire_bytes == 0 and report.expert_matrices == 0
+    else:
+        assert report.expert_matrices == len([item for item in plan.experts if item.root == rank])
+    # Sending never writes a source.
+    assert all(torch.equal(before[key], sources[key]) for key in before)
+
+
+def check_receiver(rank, topology, plan, report, parameters, maps, padded_head, dense, experts):
+    assert report.expert_matrices == dict(plan.receiver_experts)[rank]
+    assert report.wire_bytes == dict(plan.receiver_bytes)[rank]
+    served = 0
+    for prefix, expert_map in maps.items():
+        layer = int(prefix.split(".")[2])
+        for expert, slot in enumerate(expert_map):
+            if slot < 0:
+                continue
+            served += 1
+            assert torch.equal(parameters[f"{prefix}.w13_weight"][slot], experts["fc1", layer, expert])
+            assert torch.equal(parameters[f"{prefix}.w2_weight"][slot], experts["fc2", layer, expert])
+    assert served == len(maps) * NUM_EXPERTS // topology.receiver_ep
+    held = [name for name in parameters if ROUTED_EXPERTS not in name]
+    assert held
+    for name in held:
+        assert torch.equal(parameters[name], dense[name].to(parameters[name].dtype)), name
+    if padded_head is not None:
+        assert torch.all(padded_head[dense["lm_head.weight"].shape[0] :] == 0), "the padded vocabulary tail was written"
+
+
 def participant_main(rank, topology, port, directory):
     dist.init_process_group(
         "gloo",
@@ -202,37 +233,13 @@ def participant_main(rank, topology, port, directory):
     try:
         warm = warm_groups(rank, plan.groups, groups, device)
         assert set(warm) == set(groups)
-        report = Stream(rank, plan, groups, device=device, **kwargs).run(7)
+        stream = Stream(rank, plan, groups, device=device, **kwargs)
+        report = stream.run(7)
         assert report.version == 7
         if rank < trainer_count:
-            roots = {group.members[0] for group in plan.groups if group.name.startswith("expert-")}
-            if rank not in roots:
-                assert groups == {} and report.wire_bytes == 0 and report.expert_matrices == 0
-            else:
-                assert report.expert_matrices == len([item for item in plan.experts if item.root == rank])
-            # Sending never writes a source.
-            assert all(torch.equal(before[key], local.sources[key]) for key in before)
-            return
-        assert report.expert_matrices == dict(plan.receiver_experts)[rank]
-        assert report.wire_bytes == dict(plan.receiver_bytes)[rank]
-        served = 0
-        for prefix, expert_map in maps.items():
-            layer = int(prefix.split(".")[2])
-            for expert, slot in enumerate(expert_map):
-                if slot < 0:
-                    continue
-                served += 1
-                assert torch.equal(parameters[f"{prefix}.w13_weight"][slot], experts["fc1", layer, expert])
-                assert torch.equal(parameters[f"{prefix}.w2_weight"][slot], experts["fc2", layer, expert])
-        assert served == len(maps) * NUM_EXPERTS // topology.receiver_ep
-        held = [name for name in parameters if ROUTED_EXPERTS not in name]
-        assert held
-        for name in held:
-            assert torch.equal(parameters[name], dense[name].to(parameters[name].dtype)), name
-        if padded_head is not None:
-            assert torch.all(padded_head[dense["lm_head.weight"].shape[0] :] == 0), (
-                "the padded vocabulary tail was written"
-            )
+            check_trainer(rank, plan, groups, report, before, local.sources)
+        else:
+            check_receiver(rank, topology, plan, report, parameters, maps, padded_head, dense, experts)
     finally:
         destroy_groups(groups)
         dist.destroy_process_group()
