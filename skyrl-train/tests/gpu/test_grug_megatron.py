@@ -532,6 +532,9 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
     _write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=world_size, pp=1, ep=2)
     cfg.trainer.placement.colocate_all = True
+    # A cold FlashInfer-CUTLASS build stays memory-safe by using the frozen
+    # runtime's bounded compiler pool, so allow it to outlive the usual startup window.
+    cfg.generator.engine_init_timeout_seconds = 4200
     # Force each completed tensor into its own transport chunk. Before grouped-export-safe
     # chunking, this threshold split the conversion tasks and silently omitted the experts.
     cfg.generator.weight_transfer_threshold_cuda_ipc_GB = 1e-9
