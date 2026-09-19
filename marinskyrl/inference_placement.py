@@ -67,13 +67,11 @@ def validate_node_local_config(config: Mapping[str, Any], *, gpus_per_node: int 
     )
 
 
-# Kept here rather than under weight_sync: the trainer's config validator imports this module
-# before any model module, and the weight_sync package imports the models.
 def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
     """Refuse the expert-block weight-sync transport unless every precondition holds.
 
     The transport pairs each Megatron expert matrix with the vLLM worker that serves it and
-    reads every parameter as a whole HF tensor or a run of one, so it needs the megatron
+    reads each HF tensor as one or more runs of one trainer parameter, so it needs the megatron
     strategy at TP=1 and ETP=1, local async vLLM engines at TP=1 placed node-locally, and the
     NCCL weight-sync backend.
     """

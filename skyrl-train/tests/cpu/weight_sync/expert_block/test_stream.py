@@ -170,8 +170,8 @@ def receiver_parameters(topology, receiver, dense):
     for name, value in dense.items():
         if receiver.pp not in topology.dense_stages(name):
             continue
-        # vLLM keeps the router weight in FP32; it is BF16 on the trainer and on the wire.
-        dtype = torch.float32 if name.endswith(".mlp.router.weight") else torch.bfloat16
+        # vLLM keeps the router in FP32. Its weight is BF16 on the trainer and the wire; its bias is FP32 on both.
+        dtype = torch.float32 if ".mlp.router." in name else torch.bfloat16
         if name == "lm_head.weight":
             padded_head = torch.zeros((PADDED_VOCAB, HIDDEN), dtype=dtype)
             parameters[name] = padded_head.narrow(0, 0, value.shape[0])
@@ -194,19 +194,26 @@ def check_receiver(rank, topology, plan, report, parameters, maps, padded_head, 
     assert report.expert_matrices == dict(plan.receiver_experts)[rank]
     assert report.wire_bytes == dict(plan.receiver_bytes)[rank]
     served = 0
+    held_bytes = 0
     for prefix, expert_map in maps.items():
         layer = int(prefix.split(".")[2])
         for expert, slot in enumerate(expert_map):
             if slot < 0:
                 continue
             served += 1
-            assert torch.equal(parameters[f"{prefix}.w13_weight"][slot], experts["fc1", layer, expert])
-            assert torch.equal(parameters[f"{prefix}.w2_weight"][slot], experts["fc2", layer, expert])
+            for slot_name, projection in (("w13_weight", "fc1"), ("w2_weight", "fc2")):
+                matrix = experts[projection, layer, expert]
+                assert torch.equal(parameters[f"{prefix}.{slot_name}"][slot], matrix)
+                held_bytes += matrix.numel() * matrix.element_size()
     assert served == len(maps) * NUM_EXPERTS // topology.receiver_ep
+    assert report.expert_matrices == 2 * served
     held = [name for name in parameters if ROUTED_EXPERTS not in name]
     assert held
     for name in held:
         assert torch.equal(parameters[name], dense[name].to(parameters[name].dtype)), name
+        held_bytes += dense[name].numel() * dense[name].element_size()
+    # The wire carries each held tensor once, at the trainer's width.
+    assert report.wire_bytes == held_bytes
     if padded_head is not None:
         assert torch.all(padded_head[dense["lm_head.weight"].shape[0] :] == 0), "the padded vocabulary tail was written"
 

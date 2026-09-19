@@ -236,7 +236,7 @@ class ExpertBlockSync:
         )
 
     async def verify(self, version: int) -> dict[str, float]:
-        """Replay the sync; fail unless every receiver's bytes match the trainer's and cover every parameter it holds."""
+        """Replay the sync; fail on a byte mismatch, a coverage gap or a data-parallel disagreement."""
         if self.schedule is None:
             raise RuntimeError("Expert-block sync is not prepared")
         if not self.client.generation_paused_event.is_set():

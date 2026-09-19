@@ -228,7 +228,6 @@ class BasePPOExp:
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
         self.cfg = cfg
-        validate_expert_block_trainer(cfg, uses_fully_async_trainer=self.uses_fully_async_trainer())
         self._configure_log_level()
         self.tokenizer = self.get_tokenizer()
         self.train_dataset = self.get_train_dataset()
@@ -523,6 +522,7 @@ class BasePPOExp:
         Returns:
             RayPPOTrainer: The trainer.
         """
+        validate_expert_block_trainer(self.cfg, uses_fully_async_trainer=self.uses_fully_async_trainer())
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)

@@ -378,7 +378,7 @@ generator:
   weight_sync_transport: "broadcast"
   expert_block_sync:
     timeout_seconds: 600  # Group creation at startup and each sync's collectives.
-    verify: false  # If set, replay each synchronization and verify it against the trainer's values.
+    verify: false  # If set, replay each sync and verify it against the trainer's values.
   fuse_weights: false
   r3_transport: "decentral"
   r3_dispatch_put_timeout_seconds: 600
