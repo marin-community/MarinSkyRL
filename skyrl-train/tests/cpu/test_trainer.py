@@ -43,7 +43,7 @@ import numpy as np
 from skyrl_train.distillation import SampledReverseKLInput, SparseForwardKLInput, TopKTeacherEvidence
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
-from skyrl_train.utils.utils import validate_batch_sizes
+from skyrl_train.utils.utils import validate_batch_sizes, resolve_ratio_diagnostics_pooled
 from skyrl_train.config.utils import get_default_config
 from tests.cpu.util import example_dummy_config
 from tests.grug_training_parity import ORACLE_FIXTURE_DIR
@@ -1974,6 +1974,7 @@ def test_default_grug_ppo_train_keeps_query_bias_exact_across_optimizer_steps():
     causal_lm.set_query_bias(frozen_bias)
 
     cfg = get_default_config()
+    resolve_ratio_diagnostics_pooled(cfg)  # validate_cfg does this in the driver; the worker reads the resolved value
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.update_epochs_per_batch = 1
     cfg.trainer.algorithm.loss_reduction = "token_mean"
@@ -2008,6 +2009,7 @@ def _grug_query_bias_after_policy_training(mode, interpolation_weight=None, upda
     initial_bias = torch.stack([layer.mlp.router.bias for layer in causal_lm.model.layers]).clone()
 
     cfg = get_default_config()
+    resolve_ratio_diagnostics_pooled(cfg)  # validate_cfg does this in the driver; the worker reads the resolved value
     cfg.trainer.policy.grug_query_bias_update_mode = mode
     cfg.trainer.policy.grug_query_bias_interpolation_weight = interpolation_weight
     cfg.trainer.policy.grug_query_bias_update_rate = update_rate
@@ -2106,3 +2108,63 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     # Pass: ref disabled -> requirement reduces to policy_dp. With policy_dp=2, tbs=2 is valid.
     cfg = create_config(train_batch_size=2, policy_dp=2, ref_dp=3, include_ref=False)
     validate_batch_sizes(cfg)
+
+
+def test_consumed_staleness_events_roll_up_each_consumed_group_once(monkeypatch, dummy_config, dummy_tokenizer):
+    events = []
+    monkeypatch.setattr(
+        trainer_module,
+        "record_event",
+        lambda name, body, *, attributes: events.append((name, dict(body), dict(attributes))),
+    )
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
+    trainer.tokenizer = dummy_tokenizer
+    trainer.pad_batch = lambda batch: batch
+    trainer.global_step = 7
+    trainer._training_metrics_enabled = True
+
+    def batch():
+        return {
+            "prompt_token_ids": [[1, 2], [3], [4, 5], [6]],
+            "response_ids": [[7, 8, 9], [10], [11, 12], [13, 14, 15, 16]],
+            "rewards": [[0.0] * 3, [0.0], [0.0] * 2, [0.0] * 4],
+            "loss_masks": [[1] * 3, [1], [1] * 2, [1] * 4],
+            "rollout_logprobs": None,
+        }
+
+    trainer.convert_to_training_input(batch(), ["a", "a", "b", "b"], rollout_staleness=[2, 2, 0, 0])
+    consumed = {body["staleness"]: body for name, body, _ in events if name == "consumed_staleness"}
+    # One event per group; response_tokens counts the group's unpadded response tokens.
+    assert consumed == {
+        2: {"staleness": 2, "groups": 1, "sequences": 2, "response_tokens": 4},
+        0: {"staleness": 0, "groups": 1, "sequences": 2, "response_tokens": 6},
+    }
+    assert all(attributes == {"role": "trainer", "step": "7"} for name, _, attributes in events)
+
+    events.clear()
+    trainer._training_metrics_enabled = False
+    trainer.convert_to_training_input(batch(), ["a", "a", "b", "b"], rollout_staleness=[2, 2, 0, 0])
+    assert events == []
+
+    trainer._training_metrics_enabled = True
+    with pytest.raises(ValueError, match="share the admitted staleness"):
+        trainer.convert_to_training_input(batch(), ["a", "a", "b", "b"], rollout_staleness=[2, 1, 0, 0])
+
+
+def test_informative_group_fraction_counts_groups_whose_rewards_differ(dummy_config):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.all_metrics = {}
+    trainer._training_metrics_enabled = True
+    # Group a has reward spread; group b is a tie and carries no advantage signal.
+    trainer.postprocess_trajectory_batch(
+        {"response_ids": [[1], [2], [3], [4]], "rewards": [1.0, 0.0, 0.5, 0.5]}, ["a", "a", "b", "b"]
+    )
+    assert trainer.all_metrics["reward/informative_group_fraction"] == 0.5
+
+    trainer.all_metrics = {}
+    trainer._training_metrics_enabled = False
+    trainer.postprocess_trajectory_batch({"response_ids": [[1], [2]], "rewards": [1.0, 0.0]}, ["a", "a"])
+    assert "reward/informative_group_fraction" not in trainer.all_metrics

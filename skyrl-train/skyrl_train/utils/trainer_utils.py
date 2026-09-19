@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from copy import deepcopy
 from typing import List, Dict, Any, Union, Callable, Optional, TypedDict
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
 )
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
+    DEFAULT_ACCEPTED_STOP_REASONS,
     REWARD_SHAPING_ROW_KEYS,
     refresh_trajectory_reward_shaping_metrics,
 )
@@ -176,11 +178,114 @@ def sanitize_data_source(data_source: str) -> str:
     return data_source.replace("/", "_")
 
 
+def consumed_stop_metrics(stop_reasons: Sequence[str | None] | None, sequence_count: int) -> dict[str, float]:
+    """Count length stops on admitted sequences, before padding or worker sharding.
+
+    A length stop can come from engine or runner budget exhaustion; it does not
+    establish answer incompleteness. Omit the fraction without complete coverage.
+    """
+    if sequence_count < 0 or (stop_reasons is not None and len(stop_reasons) != sequence_count):
+        raise ValueError("Stop reasons must align with the admitted response sequences")
+    reasons = [None] * sequence_count if stop_reasons is None else stop_reasons
+    known = sum(reason is not None and reason != "" for reason in reasons)
+    length_stops = sum(reason == "length" for reason in reasons)
+    metrics = {
+        "sequences": float(sequence_count),
+        "length_stop_count": float(length_stops),
+        "known_stop_count": float(known),
+        "unknown_stop_count": float(sequence_count - known),
+    }
+    if sequence_count:
+        metrics["stop_reason_coverage"] = known / sequence_count
+        if known == sequence_count:
+            metrics["length_stop_fraction"] = length_stops / sequence_count
+    return {f"consumed/{name}": value for name, value in metrics.items()}
+
+
+def async_step_metrics(
+    *,
+    core_seconds: float,
+    cycle_seconds: float,
+    buffer_wait_seconds: float,
+    training_seconds: float,
+    sync_seconds: float,
+    consumed_loss_tokens: int,
+    consumed_response_tokens: int,
+    policy_gpus: int,
+    inference_gpus: int,
+) -> dict[str, float]:
+    """Summarize driver walls and useful work; GPU denominators are configured roles.
+
+    Core excludes callbacks, checkpoint and evaluation. Cycle includes them up to
+    metric publication; neither includes startup, inter-epoch cleanup or final
+    export. These rates are not whole-job billed efficiency or GPU utilization.
+    """
+    metrics = {
+        "core_seconds": core_seconds,
+        "cycle_seconds": cycle_seconds,
+        "outside_core_seconds": cycle_seconds - core_seconds,
+        "configured_policy_gpus": float(policy_gpus),
+        "configured_inference_gpus": float(inference_gpus),
+        "consumed_loss_tokens": float(consumed_loss_tokens),
+        "consumed_response_tokens": float(consumed_response_tokens),
+    }
+    if core_seconds > 0:
+        metrics.update(
+            buffer_wait_fraction=buffer_wait_seconds / core_seconds,
+            training_fraction=training_seconds / core_seconds,
+            weight_sync_fraction=sync_seconds / core_seconds,
+            consumed_loss_tokens_per_core_second=consumed_loss_tokens / core_seconds,
+        )
+    if cycle_seconds > 0:
+        metrics["consumed_loss_tokens_per_cycle_second"] = consumed_loss_tokens / cycle_seconds
+        if policy_gpus > 0:
+            metrics["loss_tokens_per_configured_policy_gpu_second"] = consumed_loss_tokens / cycle_seconds / policy_gpus
+        if inference_gpus > 0:
+            metrics["response_tokens_per_configured_inference_gpu_second"] = (
+                consumed_response_tokens / cycle_seconds / inference_gpus
+            )
+    return {f"async/performance/{name}": value for name, value in metrics.items()}
+
+
+def evaluation_response_metrics(trajectory_batch: TrajectoryBatch) -> Dict[str, float]:
+    """Describe evaluation work and score contributions without changing its reward.
+
+    Contributions divide by all responses, not only the selected stop class.
+    A completed stop does not certify final-answer structure or correctness.
+    Finalized response lengths may include runner-added tokens. Missing stop
+    reasons suppress fractions and contributions rather than implying completion.
+    """
+    lengths = [len(tokens) for tokens in trajectory_batch["response_ids"]]
+    count = len(lengths)
+    if not count:
+        raise ValueError("Evaluation response metrics require a nonempty batch")
+    stops = trajectory_batch.get("stop_reasons")
+    metrics = {key.removeprefix("consumed/"): value for key, value in consumed_stop_metrics(stops, count).items()}
+    metrics.update(
+        response_tokens=float(sum(lengths)),
+        response_tokens_mean=sum(lengths) / count,
+        response_tokens_max=float(max(lengths)),
+    )
+    if stops is None or metrics["stop_reason_coverage"] != 1:
+        return metrics
+    scores = [sum(reward) if isinstance(reward, list) else reward for reward in trajectory_batch["rewards"]]
+    pairs = list(zip(scores, stops, strict=True))
+    metrics.update(
+        completed_stop_fraction=sum(stop in DEFAULT_ACCEPTED_STOP_REASONS for _, stop in pairs) / count,
+        completed_stop_score_contribution=sum(score for score, stop in pairs if stop in DEFAULT_ACCEPTED_STOP_REASONS)
+        / count,
+        length_stop_score_contribution=sum(score for score, stop in pairs if stop == "length") / count,
+    )
+    return metrics
+
+
 def calculate_per_dataset_metrics(
     trajectory_batch: TrajectoryBatch,
     concat_uids: List[str],
     concat_data_sources: List[str],
     n_samples_per_prompt: int,
+    *,
+    telemetry_enabled: bool,
 ) -> Dict[str, float]:
     """Calculate metrics per data source."""
     eval_metrics = {}
@@ -209,6 +314,13 @@ def calculate_per_dataset_metrics(
         sanitized_data_source = sanitize_data_source(data_source)
         eval_metrics[f"eval/{sanitized_data_source}/avg_score"] = avg_score
         eval_metrics[f"eval/{sanitized_data_source}/pass_at_{n_samples_per_prompt}"] = pass_at_n
+        if telemetry_enabled:
+            eval_metrics.update(
+                {
+                    f"eval/{sanitized_data_source}/{key}": value
+                    for key, value in evaluation_response_metrics(subset_trajectory_batch).items()
+                }
+            )
 
     return eval_metrics
 

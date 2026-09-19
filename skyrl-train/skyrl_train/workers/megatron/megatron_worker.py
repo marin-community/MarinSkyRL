@@ -11,6 +11,7 @@ import os
 from enum import StrEnum
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
+from functools import partial
 from loguru import logger
 from skyrl_train.utils.progress import tqdm
 from omegaconf import OmegaConf
@@ -45,6 +46,15 @@ from skyrl_train.training_batch import (
     TrainingOutputBatch,
     gradient_accumulation_steps,
 )
+from skyrl_train.megatron_timing import (
+    FINAL_BARRIER,
+    OPTIMIZER_STEP,
+    WORLD_METRIC_REDUCTION,
+    MegatronTrainTimings,
+    publish_megatron_train_timings,
+)
+from skyrl_train.utils.gradient_direction import gradient_direction_summary
+from skyrl_train.optimizer_state_metrics import OptimizerStateObserver
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
@@ -309,6 +319,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler = None
         self._warned_exact_unit_policy_ratio = False
+        self._optimizer_state_observer = OptimizerStateObserver(
+            enabled=bool(OmegaConf.select(self.cfg, "trainer.optimizer_state_metrics", default=False)),
+            rank=self._rank,
+        )
+
+    def forward(self, data):
+        with self._memory.span("forward", step=data.metadata.get("global_step"), step_kind="global_step"):
+            return super().forward(data)
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self.strategy.offload_to_cpu(
@@ -475,6 +493,35 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     # are shared with the ordinary worker through backend-neutral utilities.
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
+        timing = MegatronTrainTimings(
+            enabled=bool(OmegaConf.select(self.cfg, "trainer.policy_train_spans", default=False))
+        )
+        outcome = "failure"
+        self._grad_updates = ()
+        try:
+            with self._memory.span(
+                "ppo_train",
+                step=int(train_data.metadata["global_step"]),
+                step_kind="global_step",
+            ):
+                output = self._ppo_train_with_timings(train_data, timing)
+            self._model_version_step = int(train_data.metadata["global_step"])
+            outcome = "success"
+            return output
+        finally:
+            try:
+                observations = timing.finish()
+                if observations:
+                    publish_megatron_train_timings(
+                        observations,
+                        step=int(train_data.metadata["global_step"]),
+                        rank=torch.distributed.get_rank(),
+                        outcome=outcome,
+                    )
+            except Exception as error:
+                logger.warning("Could not publish Megatron policy timings: {}", error)
+
+    def _ppo_train_with_timings(self, train_data, timing: MegatronTrainTimings) -> "TrainingOutputBatch":
         self._drain_r3_decentral_stagger(train_data)
         if self.model.router_replay is not None and (
             "rollout_routed_experts" not in train_data.keys() or train_data["rollout_routed_experts"] is None
@@ -544,12 +591,31 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         seq_len=seq_len,
                         micro_batch_size=micro_bsz,
                         temperature=self.cfg.generator.sampling_params.temperature,
+                        timings=timing,
                     )
 
                     if self.empty_cuda_cache:
                         torch.cuda.empty_cache()
 
-                    grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+                    with timing.span(OPTIMIZER_STEP):
+                        grad_norm = self.strategy.optimizer_step(
+                            self.optimizer,
+                            self.model,
+                            self.scheduler,
+                            name="actor",
+                            grad_observer=self._gradient_observer(megatron_optimizer=self.optimizer),
+                            after_step=(
+                                partial(
+                                    self._optimizer_state_observer.after_step,
+                                    model_chunks=self.actor_module,
+                                    optimizer=self.optimizer,
+                                    step=int(train_data.metadata["global_step"]),
+                                    minibatch=policy_update_steps + 1,
+                                )
+                                if self._optimizer_state_observer.enabled
+                                else None
+                            ),
+                        )
 
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
                     # the whole world size to get the metrics for the global micro batch
@@ -562,11 +628,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         # Attach grad norm only for the last micro in the mini-batch
                         if i == len(metrics_list) - 1 and grad_norm is not None:
                             status["raw_grad_norm"] = grad_norm
+                        if i == len(metrics_list) - 1:
+                            status.update(self._last_grad_metrics)
 
                         # attach response_length
                         status["response_length"] = micro_buffer[i].num_actions
 
-                        status = self.strategy.all_reduce(status)
+                        with timing.span(WORLD_METRIC_REDUCTION):
+                            status = self.strategy.all_reduce(status)
                         status_list.append(status)
                         for k, v in status.items():
                             all_metrics[k].append(v)
@@ -579,12 +648,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # drop any trailing micros that don't fill a mini-batch (keep behavior consistent)
             micro_buffer = []
 
-        torch.distributed.barrier()
+        with timing.span(FINAL_BARRIER):
+            torch.distributed.barrier()
         if self.profiler is not None:
             self.profiler.stop_and_save()
             self.profiler.stop_trace()
 
         status_mean = policy_training_metrics(all_metrics, policy_update_steps)
+        # A range over the call's updates, not a per-micro-batch mean of one.
+        status_mean.update(gradient_direction_summary(self._grad_updates))
         if status_mean.get("ppo_ratio_exact_unit_fraction") == 1.0 and not self._warned_exact_unit_policy_ratio:
             logger.warning(
                 "Megatron's recomputed old log probabilities exactly match the training forward for every policy "
@@ -598,6 +670,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         return output
 
     async def broadcast_to_inference_engines(self, inference_engine_client):
+        with self._memory.span(
+            "broadcast_to_inference_engines", step=self._model_version_step, step_kind="model_version_step"
+        ):
+            return await self._broadcast_to_inference_engines(inference_engine_client)
+
+    async def _broadcast_to_inference_engines(self, inference_engine_client):
         from torch.multiprocessing.reductions import reduce_tensor
 
         use_prefix_cache = self.cfg.generator.enable_prefix_caching
