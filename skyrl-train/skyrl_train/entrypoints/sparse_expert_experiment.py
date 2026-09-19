@@ -293,9 +293,17 @@ def _run_real(records: dict) -> None:
 
         records["stage"] = "prepare_initial_dense"
         asyncio.run(prepare())
+        # A fourth generated token varied once between byte-identical installs in job h.
+        # The first three were stable across its nine completed trials.
+        records["token_probe"] = {
+            "prompt_token_ids": [[1, 17, 29, 5, 11, 3]],
+            "temperature": 0.0,
+            "max_tokens": 3,
+            "ignore_eos": True,
+        }
         score_input = InferenceEngineInput(
-            prompt_token_ids=[[1, 17, 29, 5, 11, 3]],
-            sampling_params={"temperature": 0.0, "max_tokens": 4, "ignore_eos": True},
+            prompt_token_ids=records["token_probe"]["prompt_token_ids"],
+            sampling_params={key: records["token_probe"][key] for key in ("temperature", "max_tokens", "ignore_eos")},
         )
         for version in (1, 2):
             records["stage"] = f"train_update_{version}"
