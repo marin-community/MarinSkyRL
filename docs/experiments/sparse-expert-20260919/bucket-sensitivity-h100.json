@@ -1,0 +1,181 @@
+{
+  "formula": "T_dense = dense logical bytes/B + dense sender calls*L; T_hybrid = compute penalty + hybrid logical bytes/B + hybrid sender calls*L",
+  "limitations": [
+    "Logical sender bytes and collective counts come from the actual Grug schedule, not physical NCCL link bytes.",
+    "Effective aggregate bandwidth, collective latency and local compute penalty are independent inputs, not fitted H100 measurements.",
+    "Bucket packing, receiver apply, NCCL contention and pause/resume are not separately predicted.",
+    "Uniform density makes every expert tensor active; observed updates contain many zero tensors and are tabulated separately."
+  ],
+  "observed_updates_by_bucket_mib": {
+    "1": {
+      "128": {
+        "bucket_mib": 128,
+        "changed_expert_values": 366418897,
+        "dense_bucket_logical_bytes": 134157778944,
+        "dense_bucket_sender_collectives": 3388,
+        "dense_nonexpert_bytes": 3295494144,
+        "expert_buckets": 2652,
+        "expert_tensors": 13312,
+        "expert_values": 65431142400,
+        "hybrid_logical_bytes": 5494114022,
+        "hybrid_sender_collectives": 7416,
+        "zero_expert_tensors": 6892
+      },
+      "16": {
+        "bucket_mib": 16,
+        "changed_expert_values": 366418897,
+        "dense_bucket_logical_bytes": 134157778944,
+        "dense_bucket_sender_collectives": 11006,
+        "dense_nonexpert_bytes": 3295494144,
+        "expert_buckets": 10270,
+        "expert_tensors": 13312,
+        "expert_values": 65431142400,
+        "hybrid_logical_bytes": 5494114022,
+        "hybrid_sender_collectives": 22326,
+        "zero_expert_tensors": 6892
+      },
+      "32": {
+        "bucket_mib": 32,
+        "changed_expert_values": 366418897,
+        "dense_bucket_logical_bytes": 134157778944,
+        "dense_bucket_sender_collectives": 6300,
+        "dense_nonexpert_bytes": 3295494144,
+        "expert_buckets": 5564,
+        "expert_tensors": 13312,
+        "expert_values": 65431142400,
+        "hybrid_logical_bytes": 5494114022,
+        "hybrid_sender_collectives": 14208,
+        "zero_expert_tensors": 6892
+      },
+      "64": {
+        "bucket_mib": 64,
+        "changed_expert_values": 366418897,
+        "dense_bucket_logical_bytes": 134157778944,
+        "dense_bucket_sender_collectives": 4012,
+        "dense_nonexpert_bytes": 3295494144,
+        "expert_buckets": 3276,
+        "expert_tensors": 13312,
+        "expert_values": 65431142400,
+        "hybrid_logical_bytes": 5494114022,
+        "hybrid_sender_collectives": 9034,
+        "zero_expert_tensors": 6892
+      }
+    },
+    "2": {
+      "128": {
+        "bucket_mib": 128,
+        "changed_expert_values": 958692876,
+        "dense_bucket_logical_bytes": 134157778944,
+        "dense_bucket_sender_collectives": 3388,
+        "dense_nonexpert_bytes": 3295494144,
+        "expert_buckets": 2652,
+        "expert_tensors": 13312,
+        "expert_values": 65431142400,
+        "hybrid_logical_bytes": 9047757896,
+        "hybrid_sender_collectives": 7452,
+        "zero_expert_tensors": 6707
+      },
+      "16": {
+        "bucket_mib": 16,
+        "changed_expert_values": 958692876,
+        "dense_bucket_logical_bytes": 134157778944,
+        "dense_bucket_sender_collectives": 11006,
+        "dense_nonexpert_bytes": 3295494144,
+        "expert_buckets": 10270,
+        "expert_tensors": 13312,
+        "expert_values": 65431142400,
+        "hybrid_logical_bytes": 9047757896,
+        "hybrid_sender_collectives": 22618,
+        "zero_expert_tensors": 6707
+      },
+      "32": {
+        "bucket_mib": 32,
+        "changed_expert_values": 958692876,
+        "dense_bucket_logical_bytes": 134157778944,
+        "dense_bucket_sender_collectives": 6300,
+        "dense_nonexpert_bytes": 3295494144,
+        "expert_buckets": 5564,
+        "expert_tensors": 13312,
+        "expert_values": 65431142400,
+        "hybrid_logical_bytes": 9047757896,
+        "hybrid_sender_collectives": 14350,
+        "zero_expert_tensors": 6707
+      },
+      "64": {
+        "bucket_mib": 64,
+        "changed_expert_values": 958692876,
+        "dense_bucket_logical_bytes": 134157778944,
+        "dense_bucket_sender_collectives": 4012,
+        "dense_nonexpert_bytes": 3295494144,
+        "expert_buckets": 3276,
+        "expert_tensors": 13312,
+        "expert_values": 65431142400,
+        "hybrid_logical_bytes": 9047757896,
+        "hybrid_sender_collectives": 9088,
+        "zero_expert_tensors": 6707
+      }
+    }
+  },
+  "source_commit": "ffa7b7572ce28a8d0accdcd07f8262707486307a",
+  "source_raw_sha256": "97ebecd8c30d79e8995b9301fee5621ccf312b5157257775a76c1be3bd0ef879",
+  "uniform_sweep": {
+    "bandwidth_gib_s_range": [
+      0.1,
+      1000.0
+    ],
+    "bucket_mib": 128,
+    "density_range": [
+      0.001,
+      0.8
+    ],
+    "expert_activity": "every expert tensor active at the stated uniform changed-value density",
+    "latency_us": [
+      0,
+      50,
+      1000
+    ],
+    "local_compute_penalty_ms": [
+      0,
+      50,
+      100
+    ],
+    "winner_counts": {
+      "0:0": {
+        "dense_expert_bucket": 7680,
+        "sparse_expert_hybrid": 49920
+      },
+      "0:1000": {
+        "dense_expert_bucket": 29656,
+        "sparse_expert_hybrid": 27944
+      },
+      "0:50": {
+        "dense_expert_bucket": 13471,
+        "sparse_expert_hybrid": 44129
+      },
+      "100:0": {
+        "dense_expert_bucket": 8714,
+        "sparse_expert_hybrid": 48886
+      },
+      "100:1000": {
+        "dense_expert_bucket": 29731,
+        "sparse_expert_hybrid": 27869
+      },
+      "100:50": {
+        "dense_expert_bucket": 15185,
+        "sparse_expert_hybrid": 42415
+      },
+      "50:0": {
+        "dense_expert_bucket": 8088,
+        "sparse_expert_hybrid": 49512
+      },
+      "50:1000": {
+        "dense_expert_bucket": 29694,
+        "sparse_expert_hybrid": 27906
+      },
+      "50:50": {
+        "dense_expert_bucket": 14390,
+        "sparse_expert_hybrid": 43210
+      }
+    }
+  }
+}
