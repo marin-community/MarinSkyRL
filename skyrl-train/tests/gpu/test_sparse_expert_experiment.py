@@ -82,7 +82,7 @@ def test_tiny_grug_sparse_experiment_two_updates(tmp_path):
         asyncio.run(prepare())
         score_input = InferenceEngineInput(
             prompt_token_ids=[[1, 17, 29, 5, 11, 3]],
-            sampling_params={"temperature": 0.0, "max_tokens": 4, "ignore_eos": True},
+            sampling_params={"temperature": 0.0, "max_tokens": 3, "ignore_eos": True},
         )
 
         for version in (1, 2):
@@ -98,9 +98,25 @@ def test_tiny_grug_sparse_experiment_two_updates(tmp_path):
             update_record["distribution"] = asyncio.run(distribution())
             expected_tokens = None
             order = (
-                ("dense", "indices", "bitmap", "indices_bucket", "bitmap_bucket")
+                (
+                    "dense",
+                    "indices",
+                    "bitmap",
+                    "indices_bucket",
+                    "bitmap_bucket",
+                    "indices_bucket_fast",
+                    "indices_expert_bucket_fast",
+                )
                 if version == 1
-                else ("bitmap_bucket", "indices_bucket", "bitmap", "indices", "dense")
+                else (
+                    "indices_expert_bucket_fast",
+                    "indices_bucket_fast",
+                    "bitmap_bucket",
+                    "indices_bucket",
+                    "bitmap",
+                    "indices",
+                    "dense",
+                )
             )
             for index, encoding in enumerate(order):
 
