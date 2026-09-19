@@ -1,4 +1,4 @@
-"""Expert-block weight sync on one Hopper node: bit-exact installs across geometries, and verification catches a flipped byte.
+"""Expert-block weight sync on one Hopper node: bit-exact installs, and verification catches a flipped byte.
 
 Each case starts a tiny Grug Megatron policy and node-local vLLM engines, trains one
 PPO step, syncs with ``weight_sync_transport=expert_block``, verifies the sync,
@@ -51,7 +51,24 @@ from tests.gpu.test_grug_megatron import (
     _write_tiny_checkpoint,
 )
 
-SYNC_NAMES = [*BIAS_NAMES, *SERVING_EXPERT_INDEX_BY_NAME, LM_HEAD_NAME, ROUTER_NAME, ATTN_GATE_NAME, GATED_NORM_NAME]
+# Tensors the transport slices out of fused trainer parameters (interleaved QKV, [gate;up]). The
+# trainer snapshot exports them through Megatron-Bridge, which shares no code with that slicing.
+SLICED_NAMES = [
+    "model.layers.0.self_attn.q_proj.weight",
+    "model.layers.0.self_attn.k_proj.weight",
+    "model.layers.0.self_attn.v_proj.weight",
+    "model.layers.2.shared_expert.gate_proj.weight",
+    "model.layers.2.shared_expert.up_proj.weight",
+]
+SYNC_NAMES = [
+    *BIAS_NAMES,
+    *SERVING_EXPERT_INDEX_BY_NAME,
+    LM_HEAD_NAME,
+    ROUTER_NAME,
+    ATTN_GATE_NAME,
+    GATED_NORM_NAME,
+    *SLICED_NAMES,
+]
 TIMEOUT_SECONDS = 180
 
 
@@ -143,7 +160,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
     try:
         client = engine_client(cfg, str(model_path), geometry)
         policy = _init_policy(cfg, geometry.policy_gpus)
-        names = [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME]
+        names = [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME, *SLICED_NAMES]
         before = rank0_validation_snapshot(policy, names)
         batch = _padded_batch(tokenizer.pad_token_id)
         batch.metadata["global_step"] = 1
@@ -192,7 +209,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
         assert_engine_weights(client, SYNC_NAMES, trained_again, BIAS_NAMES, SERVING_EXPERT_INDEX_BY_NAME)
         asyncio.run(sync.close())
         print(
-            f"EXPERT_BLOCK_GATE_PASS geometry={name} policy_gpus={geometry.policy_gpus} policy_pp={geometry.policy_pp} "
+            f"EXPERT_BLOCK_VERIFY_PASS geometry={name} policy_gpus={geometry.policy_gpus} policy_pp={geometry.policy_pp} "
             f"policy_ep={geometry.policy_ep} engines={geometry.engines} "
             f"engine_dp={geometry.engine_dp} engine_pp={geometry.engine_pp} syncs=2 byte_equal=true "
             f"corruption_rejected=true prepare_seconds={timings['prepare']} "
