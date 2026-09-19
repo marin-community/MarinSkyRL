@@ -82,9 +82,17 @@ jobs:
         run: uv lock --check
       - name: Run cpu tests
         run: |
+          # Owner: SkyRL inference telemetry. Remove this ignore and the companion
+          # source step when the frozen Marin libraries provide the histogram bundle API.
           uv run --frozen pytest skyrl-train/tests/cpu/ \
+            --ignore skyrl-train/tests/cpu/callbacks/test_vllm_stats_routing.py \
             --deselect skyrl-train/tests/cpu/inf_engines/test_inference_engine_client.py::test_generate_retry_no_gen_finish \
             --deselect skyrl-train/tests/cpu/test_trainer.py::test_ppo_train_batch_calculations
+      - name: Run companion vLLM histogram tests
+        run: |
+          uv run --frozen \
+            --with 'marin-rigging @ git+https://github.com/marin-community/marin.git@6093ded02bd4afff6f1a77b56257543372dfc655#subdirectory=lib/rigging' \
+            pytest skyrl-train/tests/cpu/callbacks/test_vllm_stats_routing.py
 
   skyrl_train_macos_install:
     runs-on: macos-15

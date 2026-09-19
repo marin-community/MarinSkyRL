@@ -389,6 +389,10 @@ generator:
   enforce_eager: true
   fully_sharded_loras: false
   inference_stats_interval: 1
+  # Finelog histogram output: structured=one exact engine bundle; dual=bundle plus legacy scalar
+  # rows; scalar=legacy rows only. Owner: SkyRL inference telemetry. Remove dual/scalar on or after
+  # 2026-10-19, once one structured-only release and its canary have passed.
+  vllm_histogram_format: structured
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls: ["127.0.0.1:8001"]

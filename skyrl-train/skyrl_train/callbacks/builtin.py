@@ -38,6 +38,7 @@ from skyrl_train.io import io
 from skyrl_train.inference_engines.vllm.stats import VLLM_NUM_ENGINES_METRIC, IntervalReadMode
 from skyrl_train.inference_observability import (
     InferenceMetricsSink,
+    VllmHistogramFormat,
     configured_inference_sinks,
     format_console_summary,
     trainer_metrics,
@@ -633,6 +634,7 @@ class InferenceStatsCallback(TrainerCallback):
         log_to_tracker: bool = True,
         console_log_level: str = "info",
         poll_interval_seconds: float = 5.0,
+        histogram_format: VllmHistogramFormat = VllmHistogramFormat.STRUCTURED,
         sinks: tuple[InferenceMetricsSink, ...] | None = None,
     ):
         self.log_every_steps = log_every_steps
@@ -640,6 +642,7 @@ class InferenceStatsCallback(TrainerCallback):
         self.log_to_tracker = log_to_tracker
         self.console_log_level = console_log_level.lower()
         self.poll_interval_seconds = poll_interval_seconds
+        self.histogram_format = histogram_format
         self._sinks = sinks
         self._inference_engine_client = None
         self._poll_task: asyncio.Task | None = None
@@ -660,7 +663,7 @@ class InferenceStatsCallback(TrainerCallback):
                     "InferenceStatsCallback: No inference_engine_client found on trainer. Stats collection will be disabled."
                 )
         if self._sinks is None:
-            self._sinks = configured_inference_sinks()
+            self._sinks = configured_inference_sinks(self.histogram_format)
         return control
 
     async def on_train_begin_async(self, state: TrainerState, control: TrainerControl, **kwargs):
@@ -855,6 +858,7 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
                 log_every_steps=inference_stats_interval,
                 log_to_console=True,
                 log_to_tracker=True,
+                histogram_format=VllmHistogramFormat(cfg.generator.vllm_histogram_format),
             )
         )
 
