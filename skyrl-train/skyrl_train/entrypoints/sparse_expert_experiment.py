@@ -55,8 +55,8 @@ def _config(model_path: str, geometry: Geometry):
     cfg.trainer.bf16 = True
     cfg.trainer.gradient_checkpointing = True
     cfg.trainer.use_sample_packing = False
-    cfg.trainer.train_batch_size = 4
-    cfg.trainer.policy_mini_batch_size = 4
+    cfg.trainer.train_batch_size = 32
+    cfg.trainer.policy_mini_batch_size = 32
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.micro_forward_batch_size_per_gpu = 1
     cfg.trainer.update_epochs_per_batch = 1
@@ -96,13 +96,15 @@ def _padded_batch(pad_token_id: int):
     import torch
     from skyrl_train.training_batch import TrainingInputBatch
 
-    batch_size, prompt_length, response_length = 4, 12, 8
+    batch_size, prompt_length, response_length = 32, 12, 8
     generator = torch.Generator().manual_seed(5)
     body_length = prompt_length + response_length
     total_length = body_length + 6
     sequences = []
     masks = []
-    for before in (3, 0, 5, 1):
+    pad_before = (3, 0, 5, 1)
+    for row in range(batch_size):
+        before = pad_before[row % len(pad_before)]
         body = torch.randint(10, 500, (body_length,), generator=generator).tolist()
         after = total_length - body_length - before
         sequences.append([pad_token_id] * before + body + [pad_token_id] * after)
