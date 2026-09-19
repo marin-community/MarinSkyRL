@@ -29,7 +29,7 @@ import pytest
 
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
-from skyrl_train.callbacks import TrainerControl, TrainerState
+from skyrl_train.callbacks.base import TrainerControl, TrainerState
 
 
 # ---------------------------------------------------------------------------

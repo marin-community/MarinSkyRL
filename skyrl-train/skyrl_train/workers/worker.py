@@ -38,7 +38,8 @@ from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagn
 from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
 from loguru import logger
-from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
+from skyrl_train.distributed.ulysses.utils import set_ulysses_sequence_parallel_group
+from skyrl_train.distributed.ulysses.monkey_patch import apply_monkey_patch
 from skyrl_train.distributed.utils import init_custom_process_group, init_worker_process_group_with_device
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.policy_math import ppo_critic_loss

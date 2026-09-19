@@ -21,6 +21,15 @@ nemotron_ultra:
   sandbox:
     host: "127.0.0.1"
     port: 6000
+  # Verifier child bounds for code_gen_simple_agent. max_memory_bytes caps the
+  # subprocess address space (RLIMIT_AS/DATA/STACK); total_timeout_seconds is a
+  # wall-clock deadline independent of test count. A `null` value disables a bound.
+  # Concurrent verifier children are additionally capped by the
+  # SKYRL_GYM_LCB_MAX_CONCURRENT environment variable (default 8).
+  code_verifier:
+    per_test_timeout_seconds: 10
+    total_timeout_seconds: 300
+    max_memory_bytes: 4294967296
   judges:
     general:
       base_url: "http://127.0.0.1:8001/v1"
