@@ -111,7 +111,7 @@ ADDITIVE_GENERATOR_FIELDS = {
     "r3_transport": "decentral",
     "r3_dispatch_put_timeout_seconds": 600,
     "gdn_backend": "torch",
-    "inference_engine_node_local": False,
+    "inference_engine_node_local": "auto",
 }
 ADDITIVE_MODEL_FIELDS = {
     "source_uri": None,
