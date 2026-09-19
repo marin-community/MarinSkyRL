@@ -126,7 +126,6 @@ def engine_client(cfg, model_path: str, geometry: Geometry) -> InferenceEngineCl
         tokenizer=tokenizer,
         backend="vllm",
         engine_init_kwargs={"max_model_len": MAX_MODEL_LEN},
-        node_local=True,
     )
     return InferenceEngineClient(engines, tokenizer, cfg)
 
@@ -152,7 +151,6 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
     cfg.generator.inference_engine_data_parallel_size = geometry.engine_dp
     cfg.generator.inference_engine_expert_parallel_size = geometry.engine_dp
     cfg.generator.inference_engine_pipeline_parallel_size = geometry.engine_pp
-    cfg.generator.inference_engine_node_local = True
     cfg.generator.weight_sync_transport = "expert_block"
     cfg.generator.expert_block_sync.verify = True
     tokenizer = AutoTokenizer.from_pretrained(str(model_path))
