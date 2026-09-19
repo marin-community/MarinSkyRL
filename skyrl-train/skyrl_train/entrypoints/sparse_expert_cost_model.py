@@ -69,6 +69,7 @@ def prediction(table: dict, family: str, density: np.ndarray, bandwidth_gib_s: n
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("microbench", type=Path)
+    parser.add_argument("--real-summary", type=Path)
     parser.add_argument("--output-prefix", type=Path, required=True)
     args = parser.parse_args()
     raw = args.microbench.read_bytes()
@@ -76,6 +77,11 @@ def main() -> None:
     if not source["complete"]:
         raise ValueError("The GPU sweep is incomplete")
     table = measured_kernels(source["samples"])
+    real = json.loads(args.real_summary.read_text()) if args.real_summary else None
+    real_density = {
+        family: [update["distribution"]["family"][family]["density"] for update in real["updates"]]
+        for family in FAMILIES
+    } if real else {}
     density = np.geomspace(0.001, 0.8, 240)
     bandwidth = np.geomspace(0.1, 1000, 240)
     d, b = np.meshgrid(density, bandwidth)
@@ -88,6 +94,8 @@ def main() -> None:
             winner = prediction(table, family, d, b, latency).argmin(axis=0)
             ax = axes[row, col]
             ax.pcolormesh(d * 100, b, winner, cmap=colors, norm=norm, shading="auto")
+            if family in real_density and min(real_density[family]) >= density[0]:
+                ax.axvspan(min(real_density[family]) * 100, max(real_density[family]) * 100, color="black", alpha=0.15)
             ax.set_xscale("log")
             ax.set_yscale("log")
             ax.set_title(f"{family}, {latency} µs/call")
@@ -100,8 +108,12 @@ def main() -> None:
     for ax in axes[:, 0]:
         ax.set_ylabel("Effective bandwidth (GiB/s)")
     legend = [plt.Rectangle((0, 0), 1, 1, facecolor=colors(i)) for i in range(3)]
-    fig.legend(legend, ENCODINGS, loc="lower center", ncol=3, bbox_to_anchor=(0.5, 0.005))
-    fig.suptitle("Measured H100 GPU kernels + analytical payload / bandwidth + collective latency")
+    labels = list(ENCODINGS)
+    if real:
+        legend.append(plt.Rectangle((0, 0), 1, 1, facecolor="black", alpha=0.15))
+        labels.append("Observed Grug density")
+    fig.legend(legend, labels, loc="lower center", ncol=len(labels), bbox_to_anchor=(0.5, 0.005))
+    fig.suptitle("Per-tensor H100 GPU kernels + analytical payload / bandwidth + collective latency")
     fig.tight_layout(rect=(0, 0.055, 1, 0.97))
     png = args.output_prefix.with_suffix(".png")
     result = args.output_prefix.with_suffix(".json")
@@ -112,6 +124,10 @@ def main() -> None:
             {
                 "source_sha256": hashlib.sha256(raw).hexdigest(),
                 "source_commit": source["source_commit"],
+                "real_summary_sha256": hashlib.sha256(args.real_summary.read_bytes()).hexdigest()
+                if args.real_summary
+                else None,
+                "real_density_by_family": real_density,
                 "gpu": source["gpu"],
                 "formula": "T = measured median GPU component + logical bytes / bandwidth + calls * latency",
                 "collective_calls": {"dense": 1, "indices": 3, "bitmap": 3},
