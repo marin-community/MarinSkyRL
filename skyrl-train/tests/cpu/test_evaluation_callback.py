@@ -2,7 +2,7 @@
 
 import pytest
 
-from skyrl_train.callbacks import TrainerControl, TrainerState
+from skyrl_train.callbacks.base import TrainerControl, TrainerState
 from skyrl_train.callbacks.builtin import EvaluationCallback
 
 

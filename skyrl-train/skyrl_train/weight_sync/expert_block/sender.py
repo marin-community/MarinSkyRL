@@ -1,25 +1,23 @@
 """The trainer side of an expert-block sync, held by each Megatron policy worker.
 
-Its methods are named after vLLM's ``TrainerWeightTransferEngine`` on the marin
-fork's main (``trainer_init``, ``send_weights``, ``shutdown``) so the two halves
-read alike; the trainer half stays MarinSkyRL-owned, since that API drives a
-rank-0 client rather than every rank.
+Method names follow vLLM's ``TrainerWeightTransferEngine`` (``trainer_init``,
+``send_weights``, ``shutdown``). That API drives a rank-0 client and this
+transport sends from every rank, so the class is MarinSkyRL's own.
 
-Once per run the worker reports what it owns; the driver plans; the worker
-binds its groups and views. Every sync then checks that the parameters are the
-same storage the plan was built on and that the update the driver names is the
-one this rank just finished, and runs the stream.
+Once per run the worker reports what it owns and binds its groups and views to
+the driver's plan. Each sync checks that the parameters are still the storage
+the plan was bound to and that the update named is the one this rank finished.
 """
 
 from dataclasses import asdict
 
 import torch
 
-from skyrl_train.weight_sync.expert_block.gate import compare_replicas, replay
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, destroy_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, TrainerRank, from_wire, to_wire
 from skyrl_train.weight_sync.expert_block.source_views import local_expert_sources, local_source_slices
 from skyrl_train.weight_sync.expert_block.stream import Stream, bind, storage_identity
+from skyrl_train.weight_sync.expert_block.verify_weights import compare_replicas, replay
 
 
 class ExpertBlockSender:
@@ -34,14 +32,13 @@ class ExpertBlockSender:
         self.stream: Stream | None = None
 
     def inventory(self) -> dict:
-        """This rank's coordinates and the exact expert matrices and dense slices it owns."""
+        """This rank's coordinates and the expert matrices and dense slices it owns."""
         state = self.parallel_state
         self.trainer = TrainerRank(
             torch.distributed.get_rank(),
             state.get_expert_data_parallel_rank(),
             state.get_pipeline_model_parallel_rank(),
             state.get_expert_model_parallel_rank(),
-            state.get_tensor_model_parallel_rank(),
         )
         provider = self.worker.provider
         local = local_source_slices(
@@ -105,7 +102,7 @@ class ExpertBlockSender:
         return asdict(self.stream.run(version))
 
     def verify(self, update_info: dict) -> dict:
-        """The opt-in gate: re-send this rank's blocks, and check its data-parallel peers hold the same bytes."""
+        """Re-send this rank's blocks, and check its data-parallel peers hold the same bytes."""
         if self.stream is None:
             raise RuntimeError("Expert-block sender is not initialised")
         version = update_info["version"]

@@ -9,7 +9,8 @@ from omegaconf import OmegaConf
 
 from cloud.iris import export_hf_checkpoint
 from cloud.iris.export_hf_checkpoint import ExportJobSpec, argument_parser, build_command, manual_spec, request_spec
-from skyrl_train.callbacks import DefaultCallbackHandler, TrainerControl, TrainerState
+from skyrl_train.callbacks.base import TrainerControl, TrainerState
+from skyrl_train.callbacks.builtin import DefaultCallbackHandler
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.hf_export import (
     protected_hf_export_steps,

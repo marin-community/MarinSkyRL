@@ -4,7 +4,7 @@ from collections import defaultdict
 from typing import Any, Callable, Dict, Iterator, List
 import torch
 
-from skyrl_train.weight_sync import WeightChunk
+from skyrl_train.weight_sync.base import WeightChunk
 
 import logging
 

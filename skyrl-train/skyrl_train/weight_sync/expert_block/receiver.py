@@ -1,27 +1,23 @@
 """The receiver side of an expert-block sync, held by each vLLM worker.
 
-Its constructor and methods have the shape of vLLM's ``WeightTransferEngine``
+The constructor and method names follow vLLM's ``WeightTransferEngine``
 (``(vllm_config, device, model)``; ``init_transfer_engine``, ``receive_weights``,
-``shutdown``) so that a vLLM build exposing that API can register the class as an
-engine driven by its own weight-update RPCs. The trainer reaches it through one
-generic worker RPC forward.
+``shutdown``). The trainer reaches it through one generic worker RPC.
 
-The worker's fused expert parameters are written in place, so the layout the
-model runs with must be the layout the trainer exports: an unquantised Grug MoE
-whose ``w13_weight`` keeps the ``[gate;up]`` order. The backend vLLM's oracle
-selects decides that order, so the receiver reads the selection and refuses
-anything but the qualified backend rather than corrupt weights silently.
+Fused expert parameters are written in place, so the engine's ``w13_weight``
+must keep the trainer's ``[gate;up]`` order. The MoE backend decides that order,
+so ``inventory`` refuses any backend but the qualified one.
 """
 
 from dataclasses import asdict
 
 import torch
 
-from skyrl_train.weight_sync.expert_block.gate import replay
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, destroy_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, from_wire
 from skyrl_train.weight_sync.expert_block.source_views import LAYER_PREFIX, ROUTED_EXPERTS, dtype_name
 from skyrl_train.weight_sync.expert_block.stream import Stream, bind, storage_identity
+from skyrl_train.weight_sync.expert_block.verify_weights import replay
 
 SUPPORTED_MODEL_TYPE = "grug_moe"
 # The only backend qualified here. It keeps the trainer's [gate;up] order in w13_weight;
@@ -31,12 +27,10 @@ SUPPORTED_MOE_BACKEND = "TRITON"
 
 
 def installable_parameters(model) -> dict[str, torch.Tensor]:
-    """The model's parameters as the transport writes them: vocabulary tensors trimmed to their HF rows.
+    """The model's parameters as the transport writes them, with vocabulary tensors narrowed to their HF rows.
 
-    ``VocabParallelEmbedding`` (and the LM head built on it) pads its rows to a multiple of its
-    padding size; its loader writes the ``org_vocab_size`` HF rows first and zeroes the tail. The
-    trainer exports the HF rows, so the transport installs, replays and counts only that leading
-    view of the tensor, and the zero tail stays as the loader left it.
+    ``VocabParallelEmbedding`` and the LM head pad their rows; the loader writes the
+    ``org_vocab_size`` HF rows and zeroes the tail. The trainer exports only the HF rows.
     """
     rows = {}
     for name, module in model.named_modules():
@@ -77,11 +71,7 @@ class ExpertBlockReceiver:
         self.stream: Stream | None = None
 
     def inventory(self) -> dict:
-        """Check the model is one this transport can write into, and report what it holds.
-
-        The driver assigns this worker's place in the schedule from the verified
-        node-local placement of the GPU it reports.
-        """
+        """Check the model is one this transport can write into, and report what this worker holds."""
         hf, parallel = self.vllm_config.model_config.hf_config, self.vllm_config.parallel_config
         if hf.model_type != SUPPORTED_MODEL_TYPE:
             raise ValueError(f"Expert-block sync supports {SUPPORTED_MODEL_TYPE}, not {hf.model_type}")
@@ -148,7 +138,6 @@ class ExpertBlockReceiver:
             self.device,
             parameters=self.parameters,
             expert_maps=self.expert_maps,
-            hidden_size=self.vllm_config.model_config.hf_config.hidden_size,
         )
         return {"participant": participant, "warmup_seconds": warm}
 
@@ -156,14 +145,13 @@ class ExpertBlockReceiver:
         """Land this sync's expert matrices and dense weights in place; returns what was installed."""
         if self.stream is None:
             raise RuntimeError("Expert-block receiver is not initialised")
-        # The parameters must still be the storage the plan was bound to; a reload that
-        # reallocated them would leave the broadcasts writing into dead buffers.
+        # A reload that reallocated the parameters would leave the broadcasts writing into dead buffers.
         if storage_identity(dict(self.model.named_parameters())) != self.identity:
             raise RuntimeError("Model parameter storage changed since the expert-block receiver was initialised")
         return asdict(self.stream.run(update_info["version"]))
 
     def verify(self, update_info: dict) -> dict:
-        """The opt-in gate: replay the sync and count bytes that differ from what was installed."""
+        """Replay the sync and count bytes that differ from what was installed."""
         if self.stream is None:
             raise RuntimeError("Expert-block receiver is not initialised")
         return asdict(replay(self.stream, update_info["version"]))

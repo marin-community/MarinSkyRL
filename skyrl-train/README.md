@@ -42,7 +42,7 @@ A quick start guide for installation and your first training run is provided bel
 
 The only requirements are:
 
-- CUDA version 12.8
+- CUDA version 13.2
 - [uv](https://docs.astral.sh/uv/)
 
 If you're running on an existing Ray cluster, make sure to use Ray 2.51.1 and Python 3.12. If not, proceed with the installation instructions below.
@@ -67,8 +67,9 @@ source ../.venv/bin/activate
 
 Select `cpu` for CPU training. GPU-only component extras imply the `cuda` profile, so ordinary FSDP/vLLM
 training selects `vllm`; add `fsdp` only for its TorchTitan expert-parallel dependencies. Native CUDA artifacts
-are selected by architecture from the frozen root lock. Iris installs and validates that profile in its standard
-task image before training.
+are selected by architecture from the frozen root lock. FSDP plus vLLM supports x86_64 H100 and aarch64 GB200;
+the aarch64 Grug path uses eager attention without the x86_64-only FlashAttention and TorchTitan artifacts. Iris
+installs and validates that profile in its standard task image before training.
 
 Then, prepare the dataset:
 

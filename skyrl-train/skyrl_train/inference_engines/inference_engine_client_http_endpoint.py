@@ -45,7 +45,7 @@ _global_inference_engine_client: Optional[InferenceHTTPBackend] = None
 _global_uvicorn_server: Optional[uvicorn.Server] = None
 
 
-# Adapted from vllm.entrypoints.openai.protocol.ErrorResponse
+# Mirrors vLLM's nested OpenAI error response shape.
 class ErrorInfo(BaseModel):
     message: str
     type: str

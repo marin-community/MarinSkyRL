@@ -72,11 +72,10 @@ def validate_node_local_config(config: Mapping[str, Any], *, gpus_per_node: int 
 def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
     """Refuse the expert-block weight-sync transport unless every precondition holds.
 
-    The transport pairs each Megatron expert shard with the vLLM worker that serves it, so it
-    needs the megatron strategy without tensor parallelism, local async vLLM engines at TP=1
-    placed node-locally, and the NCCL weight-sync backend. The schedule can land tensor-parallel
-    shards as regions of the receiver's tensors, but a TP2/ETP1 trainer showed expert replicas
-    diverging across the TP pair after one update, so trainer TP stays refused.
+    The transport pairs each Megatron expert matrix with the vLLM worker that serves it and
+    reads every parameter as a whole HF tensor or a run of one, so it needs the megatron
+    strategy at TP=1 and ETP=1, local async vLLM engines at TP=1 placed node-locally, and the
+    NCCL weight-sync backend.
     """
     generator = config["generator"]
     transport = generator["weight_sync_transport"]
@@ -113,6 +112,21 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
         problems.append("generator.expert_block_sync.timeout_seconds must be positive")
     if problems:
         raise ValueError("generator.weight_sync_transport=expert_block requires: " + "; ".join(problems))
+
+
+def validate_expert_block_trainer(config: Mapping[str, Any], *, uses_fully_async_trainer: bool) -> None:
+    """Refuse the expert-block transport for an entrypoint that selects another trainer.
+
+    Only ``FullyAsyncRayPPOTrainer`` runs it; any other trainer would sync by broadcast.
+    """
+    if (
+        config["generator"]["weight_sync_transport"] == WeightSyncTransport.EXPERT_BLOCK
+        and not uses_fully_async_trainer
+    ):
+        raise ValueError(
+            "generator.weight_sync_transport=expert_block requires an entrypoint that runs "
+            "FullyAsyncRayPPOTrainer (skyrl_train.entrypoints.fully_async, or terminal_bench without colocation)"
+        )
 
 
 @dataclass(frozen=True)

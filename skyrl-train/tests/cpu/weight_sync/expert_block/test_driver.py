@@ -287,7 +287,7 @@ def test_prepare_requires_node_local_placement(local_store):
         asyncio.run(sync.prepare())
 
 
-def test_the_gate_passes_when_every_replayed_byte_matched_and_every_parameter_byte_was_covered(local_store):
+def test_verification_passes_when_every_replayed_byte_matched_and_every_parameter_byte_was_covered(local_store):
     ranks = FakeRanks()
     sync = prepared(ranks)
     asyncio.run(sync.sync(3))
@@ -304,7 +304,7 @@ def test_the_gate_passes_when_every_replayed_byte_matched_and_every_parameter_by
         ("replicas", None, {"mismatched_bytes": 2}, "differs from its data-parallel peers on 2"),
     ],
 )
-def test_the_gate_fails_on_a_mismatch_or_a_coverage_gap(local_store, kind, offset, change, error):
+def test_verification_fails_on_a_mismatch_or_a_coverage_gap(local_store, kind, offset, change, error):
     ranks = FakeRanks()
     sync = prepared(ranks)
     asyncio.run(sync.sync(3))

@@ -5,7 +5,8 @@ import sys
 
 import pytest
 
-from marinskyrl.inference_placement import validate_expert_block_transport
+from marinskyrl.inference_placement import validate_expert_block_trainer, validate_expert_block_transport
+from skyrl_train.entrypoints.main_base import BasePPOExp
 from skyrl_train.utils.utils import validate_cfg
 from tests.cpu.util import example_dummy_config
 
@@ -83,6 +84,22 @@ def test_validate_cfg_runs_the_transport_check():
     cfg.generator.weight_sync_transport = "expert_block"
     with pytest.raises(ValueError, match="weight_sync_transport=expert_block requires"):
         validate_cfg(cfg)
+
+
+def test_only_an_entrypoint_running_the_fully_async_trainer_may_select_expert_block():
+    cfg = expert_block_config()
+    # The fully async trainer is the only one that runs the transport; this must not raise.
+    validate_expert_block_trainer(cfg, uses_fully_async_trainer=True)
+    with pytest.raises(ValueError, match="FullyAsyncRayPPOTrainer"):
+        validate_expert_block_trainer(cfg, uses_fully_async_trainer=False)
+    # Broadcast is every trainer's transport.
+    validate_expert_block_trainer(example_dummy_config(), uses_fully_async_trainer=False)
+
+
+def test_the_standard_entrypoint_refuses_expert_block_instead_of_syncing_by_broadcast():
+    # BasePPOExp selects RayPPOTrainer, which never reads the transport option.
+    with pytest.raises(ValueError, match="FullyAsyncRayPPOTrainer"):
+        BasePPOExp(expert_block_config())
 
 
 def test_the_model_package_imports_before_the_trainer_utilities():

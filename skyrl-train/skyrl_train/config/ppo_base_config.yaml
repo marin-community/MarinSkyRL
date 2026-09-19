@@ -372,15 +372,13 @@ generator:
   # the live parameter slot of the vLLM worker that serves it. Requires a Grug MoE trained with the
   # megatron strategy at tensor_model_parallel_size 1 and expert_tensor_parallel_size 1, local async
   # vLLM engines at TP=1 placed with inference_engine_node_local, the NCCL weight-sync backend and
-  # vLLM's TRITON MoE backend. Trainer and engine expert-parallel degrees may differ and engines may
-  # be pipeline-parallel; anything else is refused at configuration or preparation time.
+  # vLLM's TRITON MoE backend, under FullyAsyncRayPPOTrainer. Trainer and engine expert-parallel
+  # degrees may differ and engines may be pipeline-parallel; anything else is refused at
+  # configuration or preparation time.
   weight_sync_transport: "broadcast"
   expert_block_sync:
     timeout_seconds: 600  # Group creation at startup and each sync's collectives.
-    # Qualification gate, not for production: after every sync, replay it and fail unless every
-    # receiver's installed bytes match, every installable parameter byte was covered and every
-    # trainer rank agrees with its data-parallel peers.
-    verify: false
+    verify: false  # If set, replay each synchronization and verify it against the trainer's values.
   fuse_weights: false
   r3_transport: "decentral"
   r3_dispatch_put_timeout_seconds: 600

@@ -2,9 +2,9 @@
 
 Trainers and receivers have different default process groups, so every sync
 group is a standalone communicator. The driver hosts one ``TCPStore``; each
-participant creates only the groups it belongs to, under a per-group prefix, in
-the schedule's order. A four-byte broadcast then forces NCCL's lazy connection
-setup to happen at startup rather than inside the first timed sync.
+participant creates the groups it belongs to, under a per-group prefix, in the
+schedule's order. A four-byte broadcast on each group makes NCCL connect at
+startup instead of during the first sync.
 """
 
 from dataclasses import dataclass
