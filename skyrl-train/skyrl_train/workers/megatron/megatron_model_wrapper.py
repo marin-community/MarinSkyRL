@@ -63,6 +63,13 @@ class MegatronForwardMicroBatch:
     position_ids: torch.Tensor
     num_actions: int
     rollout_routed_experts: Optional[torch.Tensor] = None
+    selected_token_ids: Optional[torch.Tensor] = None
+
+
+@dataclass(frozen=True)
+class MegatronForwardResult:
+    action_logprobs: torch.Tensor
+    selected_logprobs: Optional[torch.Tensor]
 
 
 @dataclass(frozen=True)
@@ -82,6 +89,9 @@ class MegatronPolicyMicroBatch:
     global_loss_denom: Optional[float]
     distillation: Optional[DistillationInput] = None
     rollout_routed_experts: Optional[torch.Tensor] = None
+    score_topk_indices: Optional[torch.Tensor] = None
+    score_behavior_topk_logprobs: Optional[torch.Tensor] = None
+    old_topk_logprobs: Optional[torch.Tensor] = None
 
 
 class MegatronModelWrapper:
@@ -329,7 +339,7 @@ class MegatronModelWrapper:
         seq_len: int,
         micro_batch_size: int,
         temperature: float = 1.0,
-    ) -> torch.Tensor:
+    ) -> MegatronForwardResult:
         """
         Forward-only inference to compute log-probs over a full mini-batch consisting of multiple micro-batches.
 
@@ -340,7 +350,7 @@ class MegatronModelWrapper:
             temperature: Optional temperature scaling for logits.
 
         Returns:
-            torch.Tensor of concatenated log-probs across micro-batches (valid on pipeline last stage only).
+            Sampled and optional selected-ID logprobs on the pipeline last stage.
         """
         forward_backward_func = get_forward_backward_func()
 
@@ -351,7 +361,12 @@ class MegatronModelWrapper:
                 logits.div_(temperature)
 
             token_logprobs = self._token_logprobs(logits, sequences, data.attention_mask.to(bool), packed_seq_params)
-            return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
+            result = {"log_probs": token_logprobs}
+            if data.selected_token_ids is not None:
+                result["selected_logprobs"] = self._selected_response_logprobs(
+                    logits, data.selected_token_ids, data.num_actions
+                )
+            return torch.tensor(0.0, device=token_logprobs.device), result
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
@@ -391,11 +406,31 @@ class MegatronModelWrapper:
             # Assume all micros have same num_actions
             num_actions = micro_batches[0].num_actions
             log_probs = log_probs[:, -num_actions:]
+            selected_logprobs = (
+                torch.cat([o["selected_logprobs"] for o in output], dim=0)
+                if micro_batches[0].selected_token_ids is not None
+                else None
+            )
         else:
             # return dummy tensor for non-last pp stages
             device = micro_batches[0].sequences.device
             log_probs = torch.zeros(size=(1, 1), dtype=torch.bfloat16, device=device)
-        return log_probs
+            selected_logprobs = (
+                torch.zeros_like(micro_batches[0].selected_token_ids, dtype=torch.float32)
+                if micro_batches[0].selected_token_ids is not None
+                else None
+            )
+        return MegatronForwardResult(log_probs, selected_logprobs)
+
+    def _selected_response_logprobs(
+        self, logits: torch.Tensor, token_ids: torch.Tensor, num_actions: int
+    ) -> torch.Tensor:
+        if self.use_sample_packing or mpu.get_context_parallel_world_size() != 1:
+            raise ValueError("selected-ID logprobs on Megatron require unpacked samples and context parallel size one")
+        if mpu.get_tensor_model_parallel_world_size() != 1:
+            raise ValueError("selected-ID logprobs on Megatron require tensor parallel size one")
+        response_logits = logits[:, -num_actions - 1 : -1]
+        return student_topk_logprobs(response_logits, token_ids)
 
     def _distillation_student_logprobs(
         self,
@@ -407,14 +442,7 @@ class MegatronModelWrapper:
         token_ids = data.distillation.student_token_ids()
         if token_ids is None:
             return None
-        if self.use_sample_packing or mpu.get_context_parallel_world_size() != 1:
-            raise ValueError(
-                "selected-ID distillation on Megatron does not yet support sample packing or context parallelism"
-            )
-        if mpu.get_tensor_model_parallel_world_size() != 1:
-            raise ValueError("selected-ID distillation on Megatron requires a tensor-parallel top-K gather")
-        response_logits = logits[:, -data.num_actions - 1 : -1]
-        return student_topk_logprobs(response_logits, token_ids)
+        return self._selected_response_logprobs(logits, token_ids, data.num_actions)
 
     def forward_backward_mini_batch(
         self,
@@ -465,6 +493,13 @@ class MegatronModelWrapper:
             action_log_probs = token_logprobs[:, -num_actions:]
 
             sparse_student_logprobs = self._distillation_student_logprobs(logits, data)
+            if self.cfg.trainer.algorithm.score_centering_topk and data.score_topk_indices is None:
+                raise ValueError("score centering requires behavior top-k token IDs in every learner microbatch")
+            score_current_topk_logprobs = (
+                self._selected_response_logprobs(logits, data.score_topk_indices, num_actions)
+                if self.cfg.trainer.algorithm.score_centering_topk
+                else None
+            )
 
             # Without an entropy loss the entropy is a metric only. Computing it under no_grad
             # avoids saving two vocab-sized copies of the logits for backward on the last stage.
@@ -486,6 +521,9 @@ class MegatronModelWrapper:
                 global_loss_denom=data.global_loss_denom,
                 distillation=data.distillation,
                 student_topk_logprobs=sparse_student_logprobs,
+                score_current_topk_logprobs=score_current_topk_logprobs,
+                score_old_topk_logprobs=data.old_topk_logprobs,
+                score_behavior_topk_logprobs=data.score_behavior_topk_logprobs,
             )
             if log_ratio_monitor is None:
                 log_ratio_monitor = LogRatioMonitor(

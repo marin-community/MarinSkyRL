@@ -179,7 +179,7 @@ def test_from_config_reserves_enough_rollout_logprobs(monkeypatch):
 
     main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
 
-    assert captured["max_logprobs"] == 24
+    assert captured["max_logprobs"] == 25
 
 
 def test_policy_tokenizer_uses_configured_revision(monkeypatch):

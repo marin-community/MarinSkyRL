@@ -256,6 +256,9 @@ trainer:
     clip_ratio_c: 3.0
     tis_imp_ratio_cap: -1.0
     use_tis: false
+    # Zero disables score centering. A positive value is the required behavior
+    # top-k width and must match generator.sampling_params.logprobs.
+    score_centering_topk: 0
     tito_full: null
     tis_splice: true
     tis_lcs_alert_threshold: 0.005

@@ -190,6 +190,7 @@ class MegatronWorker:
                     rollout_routed_experts=micro["rollout_routed_experts"]
                     if "rollout_routed_experts" in micro.keys()
                     else None,
+                    selected_token_ids=micro.get("student_topk_indices"),
                 )
             )
 
@@ -197,7 +198,7 @@ class MegatronWorker:
         seq_len = micro_payloads[0].sequences.shape[1]
         mbs = micro_payloads[0].sequences.shape[0]
         with torch.no_grad():
-            log_probs = self.model.forward(
+            forward_result = self.model.forward(
                 micro_batches=micro_payloads,
                 seq_len=seq_len,
                 micro_batch_size=mbs,
@@ -213,14 +214,16 @@ class MegatronWorker:
                     temperature=self.cfg.generator.sampling_params.temperature,
                 )
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
-                diff = (repeated.float() - log_probs.float()).abs()
+                diff = (repeated.action_logprobs.float() - forward_result.action_logprobs.float()).abs()
                 logger.info(
                     f"parity probe forward() repeat dp_rank={mpu.get_data_parallel_rank()}: mean abs "
                     f"{diff.mean().item():.6f}, max abs {diff.max().item():.6f}"
                 )
 
-        log_probs = log_probs.to("cpu")
-        output = TrainingOutputBatch({"output": log_probs})
+        output_values = {"output": forward_result.action_logprobs.to("cpu")}
+        if forward_result.selected_logprobs is not None:
+            output_values["old_topk_logprobs"] = forward_result.selected_logprobs.to("cpu")
+        output = TrainingOutputBatch(output_values)
         output.metadata = data.metadata
         return output
 
@@ -278,7 +281,8 @@ class MegatronWorker:
                 )
             if not mpu.is_pipeline_last_stage(ignore_virtual=True):
                 continue
-            diff = (repeated.float() - old.to(repeated.device)).abs()[mask.to(repeated.device)]
+            logprobs = repeated.action_logprobs
+            diff = (logprobs.float() - old.to(logprobs.device)).abs()[mask.to(logprobs.device)]
             logger.info(
                 f"train/eval parity probe dp_rank={mpu.get_data_parallel_rank()} {mode}-mode forward vs old "
                 f"log-probs: mean abs {diff.mean().item():.6f}, max abs {diff.max().item():.6f}, "
@@ -571,6 +575,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         rollout_action_logprobs=experience.rollout_logprobs,
                         response_span_tags=experience.response_span_tags,
                         distillation=experience.distillation,
+                        score_topk_indices=experience.score_topk_indices,
+                        score_behavior_topk_logprobs=experience.score_behavior_topk_logprobs,
+                        old_topk_logprobs=experience.old_topk_logprobs,
                         global_loss_denom=(experience.metadata or {}).get(GLOBAL_LOSS_DENOM_METADATA_KEY),
                         rollout_routed_experts=experience.rollout_routed_experts,
                     )

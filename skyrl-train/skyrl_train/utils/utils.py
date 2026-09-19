@@ -811,6 +811,24 @@ def validate_cfg(cfg: DictConfig):
             "dual_clip",
         ], "TIS is only implemented for regular and dual_clip policy loss types"
 
+    score_centering_topk = cfg.trainer.algorithm.score_centering_topk
+    if type(score_centering_topk) is not int or score_centering_topk < 0:
+        raise ValueError("trainer.algorithm.score_centering_topk must be a nonnegative integer")
+    if score_centering_topk:
+        if distillation_plan is not None:
+            raise ValueError("score centering cannot share selected-token evidence with a distillation objective")
+        if not cfg.trainer.algorithm.use_tis or cfg.trainer.algorithm.policy_loss_type != "regular":
+            raise ValueError("score centering requires regular PPO with use_tis=true")
+        if cfg.trainer.strategy != "megatron" or cfg.trainer.use_sample_packing:
+            raise ValueError("score centering currently requires unpacked Megatron training")
+        megatron = cfg.trainer.policy.megatron_config
+        if megatron.tensor_model_parallel_size != 1 or megatron.context_parallel_size != 1:
+            raise ValueError("score centering currently requires Megatron tensor and context parallel size one")
+        if cfg.generator.sampling_params.logprobs != score_centering_topk:
+            raise ValueError("score centering requires generator.sampling_params.logprobs to match its top-k width")
+        if cfg.generator.backend != "vllm" or not cfg.generator.run_engines_locally:
+            raise ValueError("score centering requires local vLLM behavior top-k capture")
+
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled
         # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
@@ -971,15 +989,14 @@ def validate_generator_cfg(cfg: DictConfig):
         if cfg.generator.sampling_params.logprobs > 0:
             plan = compile_distillation_plan_from_config(cfg)
             widths = {teacher.top_k for teacher in plan.teachers} if plan is not None else set()
-            if (
-                plan is None
-                or plan.objective is not DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
+            if cfg.generator.backend != "vllm":
+                raise ValueError("positive generator.sampling_params.logprobs requires local vLLM")
+            if plan is not None and (
+                plan.objective is not DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
                 or widths != {cfg.generator.sampling_params.logprobs}
-                or cfg.generator.backend != "vllm"
             ):
                 raise ValueError(
-                    "positive generator.sampling_params.logprobs requires a local vLLM "
-                    "student_topk_policy_surrogate plan with matching teacher top_k"
+                    "positive generator.sampling_params.logprobs must match a student_topk_policy_surrogate teacher top_k"
                 )
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")

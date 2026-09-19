@@ -122,7 +122,7 @@ def _make_input_batch(prompt, extras, env_class="cpu_test_env"):
 QWEN3_WITHOUT_THINKING = {"source": "name", "name_or_path": "qwen3_without_thinking"}
 
 
-def _serving_engine(tokenizer, response_text: str, *, stop_reason: str, policy_version: int):
+def _serving_engine(tokenizer, response_text: str, *, stop_reason: str, policy_version: int, topk: bool = False):
     """An engine that serves the chat prompt and returns its own prompt ids, sampled ids, logprobs and spans."""
     sampled_text = response_text + tokenizer.eos_token if stop_reason == "stop" else response_text
     sampled_ids = tokenizer.encode(sampled_text, add_special_tokens=False)
@@ -131,7 +131,7 @@ def _serving_engine(tokenizer, response_text: str, *, stop_reason: str, policy_v
         served_prompt_ids = normalize_token_ids(
             tokenizer.apply_chat_template(input_batch["prompts"][0], add_generation_prompt=True, tokenize=True)
         )
-        return {
+        result = {
             "responses": [response_text],
             "stop_reasons": [stop_reason],
             "prompt_ids": [served_prompt_ids],
@@ -141,6 +141,10 @@ def _serving_engine(tokenizer, response_text: str, *, stop_reason: str, policy_v
                 [{"start": 0, "token_count": len(sampled_ids), "policy_version": policy_version}]
             ],
         }
+        if topk:
+            result["student_topk_indices"] = [[[sampled_id, 0 if sampled_id != 0 else 1] for sampled_id in sampled_ids]]
+            result["behavior_topk_logprobs"] = [[[-0.25 * (index + 1), -2.0] for index in range(len(sampled_ids))]]
+        return result
 
     engine = MagicMock()
     engine.generate = AsyncMock(side_effect=generate)
@@ -533,6 +537,26 @@ async def test_single_turn_chat_trajectory_trains_on_the_engines_tokens():
         require_known=True,
         required_mask=[bool(m) for m in batch["loss_masks"][0]],
     )
+
+
+@pytest.mark.asyncio
+async def test_single_turn_custom_chat_template_keeps_selected_behavior_topk():
+    _register_test_env_if_needed()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    engine, sampled_ids = _serving_engine(tokenizer, "b\n", stop_reason="stop", policy_version=5, topk=True)
+    runner = _build_runner(
+        tokenizer, QWEN3_WITHOUT_THINKING, engine, {"sampling_params": {"max_generate_length": 200, "logprobs": 2}}
+    )
+    prompt, extras = _default_prompt_and_extras()
+
+    batch = await runner.run(_make_input_batch(prompt, extras, env_class="cpu_single_turn_env"))
+
+    assert batch["response_ids"] == [sampled_ids]
+    assert batch["student_topk_indices"][0] == [[sampled_id, 0 if sampled_id != 0 else 1] for sampled_id in sampled_ids]
+    assert batch["behavior_topk_logprobs"][0] == [[-0.25 * (index + 1), -2.0] for index in range(len(sampled_ids))]
+    assert batch["behavior_policy_version_segments"][0] == [
+        {"start": 0, "token_count": len(sampled_ids), "policy_version": 5}
+    ]
 
 
 @pytest.mark.asyncio
