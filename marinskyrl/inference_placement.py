@@ -1,37 +1,42 @@
-"""Node-local inference replica placement: the eligibility rule and the verified placement records.
+"""Node-local inference replica placement: the rule that selects it and the verified placement records.
 
 A node-local replica is one vLLM data-parallel group whose ranks all sit on one
 physical node; with pipeline parallelism each stage's data-parallel group sits on
-one node. It is the default for every engine shape that can hold it; the engine
-factory keeps the existing placement for the rest, and verifies the workers it got
-against the bundles it was allocated before training starts. This module imports
-nothing from the trainer, so the config validator can import it before any model
-module.
+one node. ``auto`` selects it wherever it cannot place a run worse than the flat
+group does; the engine factory then verifies the workers it got against the
+bundles it was allocated before training starts. This module imports nothing from
+the trainer, so the config validator can import it before any model module.
 """
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from marinskyrl.runtime_options import WeightSyncTransport
+from marinskyrl.runtime_options import NodeLocalPlacement, WeightSyncTransport
 
 
 def node_local_blocker(
     *,
+    mode: NodeLocalPlacement,
     backend: str,
     async_engine: bool,
     colocated: bool,
     remote: bool,
     mp_executor: bool,
     tensor_parallel_size: int,
+    pipeline_parallel_size: int,
     data_parallel_size: int,
     expert_parallel_size: int,
-    gpus_per_node: int | None = None,
+    num_inference_engines: int,
+    node_gpu_capacities: Sequence[int] | None = None,
 ) -> str | None:
-    """Why an engine cannot be placed node-locally, or None when it can.
+    """Why an engine is not placed node-locally, or None when it is.
 
-    ``gpus_per_node`` is known only once the Ray cluster is; the config check passes None.
+    ``node_gpu_capacities`` lists the GPUs of each live GPU node. It is known only once the Ray
+    cluster is; the config check passes None and the engine factory asks again with it.
     """
+    if mode is NodeLocalPlacement.OFF:
+        return "generator.inference_engine_node_local is off"
     if backend != "vllm" or not async_engine or colocated or remote:
         return "it needs local, non-colocated async vLLM engines"
     if mp_executor:
@@ -42,9 +47,55 @@ def node_local_blocker(
         return "a DP=1 engine has no replica to pack"
     if expert_parallel_size != data_parallel_size:
         return "it needs EP equal to DP"
-    if gpus_per_node is not None and data_parallel_size > gpus_per_node:
-        return f"a replica stage needs {data_parallel_size} GPUs but a node provides {gpus_per_node}"
+    if node_gpu_capacities is None:
+        return None
+    node_size = max(node_gpu_capacities, default=0)
+    if data_parallel_size > node_size:
+        return f"a replica stage needs {data_parallel_size} GPUs but the largest node has {node_size}"
+    stages = num_inference_engines * pipeline_parallel_size
+    if sum(capacity // data_parallel_size for capacity in node_gpu_capacities) < stages:
+        return f"the cluster's nodes cannot hold {stages} replica stages of {data_parallel_size} GPUs"
+    engine_gpus = data_parallel_size * pipeline_parallel_size
+    if mode is NodeLocalPlacement.AUTO and len(node_gpu_capacities) > 1 and engine_gpus % node_size:
+        # One group per engine that fills part of a node can scatter across nodes and leave the
+        # policy group without whole nodes (see use_per_engine_strict_pack_pg).
+        return (
+            f"an engine's {engine_gpus} GPUs are not a whole number of {node_size}-GPU nodes, so a group of "
+            "its own could leave nodes partly used; generator.inference_engine_node_local=require packs it anyway"
+        )
     return None
+
+
+def validate_node_local_config(config: Mapping[str, Any]) -> None:
+    """Refuse an unknown mode, and ``require`` for an engine shape that can never be node-local."""
+    generator = config["generator"]
+    mode = NodeLocalPlacement(generator.get("inference_engine_node_local", NodeLocalPlacement.AUTO))
+    if mode is not NodeLocalPlacement.REQUIRE:
+        return
+    blocker = node_local_blocker(**node_local_engine_shape(config, mode))
+    if blocker is not None:
+        raise ValueError(f"generator.inference_engine_node_local=require cannot be honoured: {blocker}")
+
+
+def node_local_engine_shape(config: Mapping[str, Any], mode: NodeLocalPlacement) -> dict[str, Any]:
+    """The ``node_local_blocker`` arguments a resolved training configuration determines."""
+    generator = config["generator"]
+    tp_pp_size = (
+        generator["inference_engine_tensor_parallel_size"] * generator["inference_engine_pipeline_parallel_size"]
+    )
+    return dict(
+        mode=mode,
+        backend=generator["backend"],
+        async_engine=generator["async_engine"],
+        colocated=config["trainer"]["placement"]["colocate_all"],
+        remote=not generator["run_engines_locally"],
+        mp_executor=bool(generator.get("inference_engine_mp_backend", False)) and tp_pp_size > 1,
+        tensor_parallel_size=generator["inference_engine_tensor_parallel_size"],
+        pipeline_parallel_size=generator["inference_engine_pipeline_parallel_size"],
+        data_parallel_size=generator["inference_engine_data_parallel_size"],
+        expert_parallel_size=generator["inference_engine_expert_parallel_size"],
+        num_inference_engines=generator["num_inference_engines"],
+    )
 
 
 def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
@@ -79,21 +130,8 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
     if generator["weight_sync_backend"] != "nccl":
         problems.append("generator.weight_sync_backend must be nccl")
     # The transport pairs trainer ranks with the verified placement of node-local replicas.
-    if not generator["inference_engine_node_local"]:
-        problems.append("generator.inference_engine_node_local must be true")
-    tp_pp_size = (
-        generator["inference_engine_tensor_parallel_size"] * generator["inference_engine_pipeline_parallel_size"]
-    )
-    blocker = node_local_blocker(
-        backend=generator["backend"],
-        async_engine=generator["async_engine"],
-        colocated=trainer["placement"]["colocate_all"],
-        remote=not generator["run_engines_locally"],
-        mp_executor=bool(generator.get("inference_engine_mp_backend", False)) and tp_pp_size > 1,
-        tensor_parallel_size=generator["inference_engine_tensor_parallel_size"],
-        data_parallel_size=generator["inference_engine_data_parallel_size"],
-        expert_parallel_size=generator["inference_engine_expert_parallel_size"],
-    )
+    mode = NodeLocalPlacement(generator["inference_engine_node_local"])
+    blocker = node_local_blocker(**node_local_engine_shape(config, mode))
     if blocker is not None:
         problems.append(f"the engines must be placed node-locally, and {blocker}")
     if int(generator["expert_block_sync"]["timeout_seconds"]) <= 0:
@@ -169,7 +207,9 @@ def validate_inference_replica_topology(
         raise ValueError("Inference workers must have distinct, nonempty physical GPU UUIDs")
     if {row.weight_receiver_rank for row in placements} != set(range(1, total + 1)):
         raise ValueError("Inference weight receiver ranks must be unique and cover the broadcast group")
-    expected_ep_size = data_parallel_size if expert_parallel_size > 1 else 1
+    # A dense model has no expert-parallel group: vLLM reports size 1 on every worker whatever EP was asked for.
+    expert_parallel = expert_parallel_size > 1 and any(row.worker.ep_world_size != 1 for row in placements)
+    expected_ep_size = data_parallel_size if expert_parallel else 1
     for replica in range(num_replicas):
         rows = [row for row in placements if row.replica == replica]
         if len(rows) != per_replica or {row.bundle_index for row in rows} != set(range(per_replica)):
@@ -189,7 +229,7 @@ def validate_inference_replica_topology(
                 raise ValueError(f"Inference replica {replica} worker ranks disagree with its placement bundle")
             if worker.dp_world_size != data_parallel_size or worker.torch_world_size != per_replica:
                 raise ValueError(f"Inference replica {replica} has an unexpected DP/torch world size")
-            expected_ep_rank = worker.dp_rank if expert_parallel_size > 1 else 0
+            expected_ep_rank = worker.dp_rank if expert_parallel else 0
             if worker.ep_world_size != expected_ep_size or worker.ep_rank != expected_ep_rank:
                 raise ValueError(f"Inference replica {replica} has an unexpected EP rank or world size")
             if row.weight_receiver_rank != 1 + replica * per_replica + worker.torch_rank:

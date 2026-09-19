@@ -390,10 +390,12 @@ generator:
   inference_engine_data_parallel_size: 1
   inference_engine_decode_context_parallel_size: 1
   inference_engine_mp_backend: false
-  # Keep each pipeline stage of a DP/EP replica on one node and verify its physical GPUs at startup.
-  # Applies to non-colocated async vLLM on the Ray executor with TP=1, DP>1, EP=DP and a stage that
-  # fits one node; other engines keep the default placement. Set false to never pack replicas.
-  inference_engine_node_local: true
+  # Keep each pipeline stage of a DP/EP replica on one node and verify its physical GPUs at startup:
+  # non-colocated async vLLM on the Ray executor with TP=1, DP>1, EP=DP and a stage that fits a node.
+  # "auto" also needs the engine's GPUs to be a whole number of nodes on a multi-node cluster, so its
+  # own group cannot leave nodes partly used, and places any other engine as before. "require" packs
+  # or refuses. "off" never packs.
+  inference_engine_node_local: "auto"
   n_samples_per_prompt: 5
   async_engine: true
   batched: false
