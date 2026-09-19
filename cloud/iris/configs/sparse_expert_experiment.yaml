@@ -1,4 +1,4 @@
-# Disposable 2-node Megatron sender + 1-node DP8/EP8 vLLM receiver geometry.
+# Disposable 4-node Megatron sender + 1-node DP8/EP8 vLLM receiver geometry.
 # The --entrypoint override runs the experiment module, which owns its measurements.
 entrypoint: standard
 
@@ -41,9 +41,13 @@ trainer:
       expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
       optimizer_checkpoint_sharding_type: dp_reshardable
+      ddp_config:
+        overlap_grad_reduce: true
+        overlap_param_gather: true
+        grad_reduce_in_fp32: false
   placement:
     colocate_all: false
-    policy_num_nodes: 2
+    policy_num_nodes: 4
     policy_num_gpus_per_node: 8
 
 generator:
