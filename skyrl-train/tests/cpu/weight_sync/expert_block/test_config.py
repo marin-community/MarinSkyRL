@@ -58,7 +58,7 @@ def test_the_default_transport_needs_nothing():
         ("generator.async_engine", False, "non-colocated async vLLM"),
         ("trainer.placement.colocate_all", True, "non-colocated async vLLM"),
         ("generator.weight_sync_backend", "gloo", "must be nccl"),
-        ("generator.inference_engine_node_local", False, "inference_engine_node_local must be true"),
+        ("generator.inference_engine_node_local", "off", "inference_engine_node_local is off"),
         ("generator.inference_engine_tensor_parallel_size", 2, "TP=1"),
         ("generator.inference_engine_expert_parallel_size", 4, "EP equal to DP"),
         ("generator.inference_engine_data_parallel_size", 1, "DP=1"),
