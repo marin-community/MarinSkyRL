@@ -1,4 +1,4 @@
-"""The driver plans from what the ranks report and refuses a sync that did not land exactly the plan."""
+"""The driver builds the schedule from the inventories and fails a sync that does not match it."""
 
 import asyncio
 from dataclasses import asdict
@@ -115,7 +115,7 @@ def test_receivers_that_disagree_with_each_other_are_refused():
 
 
 class FakeRanks:
-    """A policy model and an engine client that answer every RPC from the plan itself."""
+    """A fake policy model and engine client. They answer each RPC with what the schedule expects."""
 
     def __init__(self, schedule=None):
         self.receiver_rows = receivers()
@@ -200,7 +200,7 @@ def test_prepare_then_sync_accepts_reports_that_match_the_plan(local_store):
     sync = prepared(ranks)
     timings = asyncio.run(sync.sync(3))
     assert timings.receiver_seconds == 0.1
-    # The slowest participant of each phase, whichever side it is on.
+    # Each timing is the maximum over the participants.
     assert (timings.expert_seconds, timings.dense_seconds) == (0.07, 0.08)
     assert set(timings.as_metrics()) == {
         f"expert_block_sync/{name}"

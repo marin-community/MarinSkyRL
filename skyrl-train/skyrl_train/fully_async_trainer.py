@@ -1070,7 +1070,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     async def _sync_policy_weights_and_offload_optimizer(
         self, *, sync_phase: Literal["initial", "training_step"]
     ) -> None:
-        # Expert-block sync writes live engine parameters, so the initial sync pauses too.
+        # Expert-block sync writes into live engine parameters, so the first sync pauses generation too.
         pause = sync_phase == "training_step" or self._expert_block_sync is not None
         if pause:
             await self.inference_engine_client.pause_generation()

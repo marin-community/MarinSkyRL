@@ -1,18 +1,14 @@
-"""The collective schedule for expert-block weight sync, built from what every rank holds.
+"""The schedule of broadcasts for expert-block weight sync.
 
-Trainer ranks are Megatron ranks; receiver ranks are vLLM workers, one per
-expert-parallel slot per pipeline stage per inference replica. Both sides run
-TP=1. Each expert matrix is one broadcast from one of the trainer ranks holding
-it into the receivers' live slots, over one NCCL group per (root, receiver
-stage, receiver block). The trainer's and the receivers' expert-parallel degrees
-may differ, and each layer goes to the receiver stage that holds it.
+Trainer ranks are Megatron ranks. Receivers are vLLM workers, one per expert-parallel rank,
+pipeline stage and replica. Both sides run TP=1. Each expert matrix is broadcast once, from a
+trainer rank that holds it to the receivers that serve that expert. There is one NCCL group
+per (root, receiver stage, receiver expert block). Trainer and receiver EP sizes may differ.
 
-Dense weights travel in the same groups: each slice goes from an expert root of
-its stage to one receiver per replica, which re-broadcasts it to the replica's
-other workers of that stage over a node-local group.
+Dense weights use the same groups. Each slice goes from a root of its stage to one receiver
+per replica, which broadcasts it to the other workers of that stage over a node-local group.
 
-Participants share one numbering: trainers by native rank, then receivers
-offset by the trainer count.
+Participants are numbered trainers first, by rank, then receivers.
 """
 
 from collections.abc import Mapping, Sequence
@@ -25,14 +21,14 @@ from skyrl_train.json_serialization import to_jsonable
 BF16 = "bfloat16"
 FP32 = "float32"
 WIRE_DTYPE_BYTES = {BF16: 2, FP32: 4}
-# Group names: one "expert-{root}-{stage}-{block}" per expert block and one fan-out group per
-# receiver replica and stage; the stream finds its fan-out group by this prefix.
+# Expert groups are named "expert-{root}-{stage}-{block}". A replica stage's own group is named
+# "local-{replica}-{stage}"; the stream finds it by this prefix.
 LOCAL_GROUP_PREFIX = "local-"
 
 
 @dataclass(frozen=True)
 class TrainerRank:
-    """Megatron coordinates, informational: what a rank holds comes from its inventory."""
+    """A Megatron rank's coordinates. They are informational: the inventory says what the rank holds."""
 
     rank: int
     dp: int
@@ -42,7 +38,7 @@ class TrainerRank:
 
 @dataclass(frozen=True)
 class ReceiverRank:
-    """A vLLM worker: ``pp`` is its pipeline stage, 0 when the engine has one stage."""
+    """A vLLM worker. ``pp`` is its pipeline stage."""
 
     rank: int
     replica: int
@@ -52,7 +48,7 @@ class ReceiverRank:
 
 @dataclass(frozen=True)
 class ExpertEntry:
-    """One expert matrix as a trainer rank holds it: ``fc1`` is ``[gate;up]``, ``fc2`` is ``down``."""
+    """One expert matrix on a trainer rank. ``fc1`` is ``[gate;up]`` and ``fc2`` is ``down``."""
 
     name: str
     layer: int
@@ -64,7 +60,7 @@ class ExpertEntry:
 
 @dataclass(frozen=True)
 class DenseSlice:
-    """``numel`` elements of one dense HF tensor from ``hf_offset``, backed by a run of one trainer parameter."""
+    """A run of ``numel`` elements of a dense HF tensor, starting at ``hf_offset``, stored in one trainer parameter."""
 
     hf_name: str
     hf_offset: int
@@ -79,7 +75,7 @@ class DenseSlice:
         return self.numel * WIRE_DTYPE_BYTES[self.wire_dtype]
 
     def identity(self) -> tuple:
-        """What identifies the transfer independently of which rank backs it."""
+        """The fields that identify a transfer, whichever rank sends it."""
         return (self.hf_name, self.hf_offset, self.numel, self.wire_dtype, self.pp)
 
 
@@ -102,7 +98,7 @@ class DenseBroadcast:
     source: DenseSlice
     group: str
     root: int
-    # One landing receiver per replica, each followed by a fan-out on its local group.
+    # One receiver per replica gets the slice from the root, then broadcasts it on its local group.
     landings: tuple[int, ...]
     local_groups: tuple[str, ...]
 
@@ -113,7 +109,7 @@ class Schedule:
     groups: tuple[Group, ...]
     experts: tuple[ExpertBroadcast, ...]
     dense: tuple[DenseBroadcast, ...]
-    # Per receiver participant: wire bytes it must land per sync, and expert transfers it must install.
+    # Per receiver: the bytes and the expert matrices it must receive in each sync.
     receiver_bytes: tuple[tuple[int, int], ...]
     receiver_experts: tuple[tuple[int, int], ...]
 
@@ -134,12 +130,11 @@ def build_schedule(
     dense_holders: Mapping[str, Sequence[int]],
     dense_numel: Mapping[str, int],
 ) -> Schedule:
-    """Order every collective identically for every participant, without touching tensors.
+    """Build the schedule from the inventories. It touches no tensors and does no communication.
 
-    ``expert_inventories`` and ``dense_inventories`` map each trainer rank to what it holds;
-    ``receiver_layers_by_pp`` lists the layers each receiver stage holds; ``dense_holders``
-    maps each dense HF tensor to the receiver stages holding it and ``dense_numel`` to its
-    element count on the receiver.
+    ``expert_inventories`` and ``dense_inventories`` map each trainer rank to what it holds.
+    ``receiver_layers_by_pp`` lists the layers of each receiver stage. ``dense_holders`` maps a
+    dense HF tensor to the receiver stages that hold it, and ``dense_numel`` to its size there.
     """
     trainer_count = len(trainers)
     if sorted(row.rank for row in trainers) != list(range(trainer_count)):
@@ -172,7 +167,7 @@ def build_schedule(
             groups[name] = Group(name, (root, *receivers_of(stage, block)))
         return name
 
-    # --- Expert transfers: every (layer, expert, projection) exactly once, from one holder ---
+    # --- Expert transfers: each (layer, expert, projection) once, from one rank that holds it ---
     holders: dict[tuple, list[int]] = {}
     entries: dict[tuple, ExpertEntry] = {}
     for rank in sorted(expert_inventories):
@@ -192,23 +187,23 @@ def build_schedule(
     expert_roots: dict[tuple[int, int], set[int]] = {}
     for key in sorted(entries, key=lambda item: entries[item].name):
         entry = entries[key]
-        # --- Unequal expert-parallel degrees: the group is keyed by the receiver block ---
+        # --- Unequal EP sizes: the group is keyed by the receiver's expert block ---
         block = entry.expert // per_receiver_block
         stage = receiver_stage[entry.layer]
         ranks = holders[key]
-        # Holders of one matrix are its data-parallel replicas; rotate the root by stage and
-        # block so the replicas share the egress.
+        # The ranks holding one matrix are data-parallel copies. Rotate the root by stage and
+        # block to spread the sending across them.
         root = ranks[(entry.pp + block) % len(ranks)]
         experts.append(ExpertBroadcast(entry, group_for(root, stage, block), root, receivers_of(stage, block)))
         expert_roots.setdefault((entry.pp, stage), set()).add(root)
 
-    # --- Receiver pipeline stages: a stage's receivers fan a dense tensor out among themselves ---
+    # --- Receiver pipeline stages: one local group per replica stage ---
     local_groups = {}
     for replica, stage in product(range(replica_count), range(receiver_pp_count)):
         name = f"{LOCAL_GROUP_PREFIX}{replica}-{stage}"
         local_groups[name] = Group(name, tuple(receivers_of(stage, block)[replica] for block in range(receiver_ep)))
 
-    # --- Dense transfers: every slice of every dense tensor exactly once, from a holder that already roots ---
+    # --- Dense transfers: each slice once, from a rank that is already a root where possible ---
     dense_holder_ranks: dict[tuple, list[int]] = {}
     slices: dict[tuple, DenseSlice] = {}
     for rank in sorted(dense_inventories):
@@ -239,7 +234,7 @@ def build_schedule(
                     candidates = dense_holder_ranks[item.identity()]
                 root = candidates[counter % len(candidates)]
                 counter += 1
-                # Reuse a group this root already has for the stage; otherwise it gets one for its own block.
+                # Reuse a group this root already has for the stage. Otherwise give it one for its own block.
                 existing = [
                     group
                     for group in groups.values()
@@ -290,7 +285,7 @@ def _layer_stages(layers_by_pp: Sequence[Sequence[int]], side: str) -> dict[int,
 
 
 def _check_slices_cover(name: str, slices: Sequence[DenseSlice], numel: int) -> None:
-    """The slices must tile ``[0, numel)`` exactly once."""
+    """Check that the slices cover ``[0, numel)`` with no gap or overlap."""
     cursor = 0
     for item in sorted(slices, key=lambda item: item.hf_offset):
         if item.hf_offset != cursor or item.numel <= 0:
@@ -301,12 +296,12 @@ def _check_slices_cover(name: str, slices: Sequence[DenseSlice], numel: int) -> 
 
 
 def to_wire(value: Any) -> Any:
-    """Plain JSON-compatible structure: dataclasses become dicts, tuples become lists."""
+    """Convert to JSON-compatible data: dataclasses become dicts and tuples become lists."""
     return to_jsonable(value)
 
 
 def from_wire(kind: type, value: Any) -> Any:
-    """Rebuild ``kind`` from :func:`to_wire` output, using the dataclass field annotations."""
+    """Rebuild a ``kind`` from ``to_wire`` output, using the dataclass field types."""
     if is_dataclass(kind):
         hints = {field.name: field.type for field in fields(kind)}
         return kind(**{name: from_wire(hint, value[name]) for name, hint in hints.items()})

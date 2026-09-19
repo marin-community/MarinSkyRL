@@ -605,12 +605,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean}
-        # The update whose weights this rank now holds; the expert-block sender refuses any other.
+        # The update these weights belong to. The expert-block sender checks it before sending.
         self._model_version_step = int(train_data.metadata["global_step"])
         return output
 
     async def expert_block_rpc(self, method: str, *args):
-        """Expert-block weight sync: inventory, bind, run or close this rank's sender."""
+        """Call a method of this rank's expert-block sender."""
         return getattr(self._expert_block_sender, method)(*args)
 
     async def broadcast_to_inference_engines(self, inference_engine_client):

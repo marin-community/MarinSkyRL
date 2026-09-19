@@ -97,12 +97,10 @@ def node_local_engine_shape(config: Mapping[str, Any], mode: NodeLocalPlacement)
 
 
 def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
-    """Refuse the expert-block weight-sync transport unless every precondition holds.
+    """Reject ``expert_block`` unless the config meets its requirements.
 
-    The transport pairs each Megatron expert matrix with the vLLM worker that serves it and
-    reads each HF tensor as one or more runs of one trainer parameter, so it needs the megatron
-    strategy at TP=1 and ETP=1, local async vLLM engines at TP=1 placed node-locally, and the
-    NCCL weight-sync backend.
+    It needs the megatron strategy at TP=1 and ETP=1, node-local vLLM engines and the NCCL
+    weight-sync backend.
     """
     generator = config["generator"]
     transport = generator["weight_sync_transport"]
@@ -121,13 +119,13 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
             problems.append("the policy must use tensor_model_parallel_size 1")
         if megatron["expert_tensor_parallel_size"] not in (None, 1):
             problems.append("the policy must use expert_tensor_parallel_size 1")
-        # Unequal expert-parallel degrees are paired by the schedule; each must divide the
-        # expert count, which is checked against the model when the ranks report.
+        # Trainer and engine EP sizes may differ. Whether each divides the expert count is
+        # checked when the ranks report.
         if megatron["expert_model_parallel_size"] < 1 or generator["inference_engine_expert_parallel_size"] < 1:
             problems.append("expert-parallel sizes must be positive")
     if generator["weight_sync_backend"] != "nccl":
         problems.append("generator.weight_sync_backend must be nccl")
-    # The transport pairs trainer ranks with the verified placement of node-local replicas.
+    # The transport matches trainer ranks to the verified placements of node-local replicas.
     mode = NodeLocalPlacement(generator["inference_engine_node_local"])
     blocker = node_local_blocker(**node_local_engine_shape(config, mode))
     if blocker is not None:
@@ -139,9 +137,9 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
 
 
 def validate_expert_block_trainer(config: Mapping[str, Any], *, uses_fully_async_trainer: bool) -> None:
-    """Refuse the expert-block transport for an entrypoint that selects another trainer.
+    """Reject ``expert_block`` for an entrypoint that does not run ``FullyAsyncRayPPOTrainer``.
 
-    Only ``FullyAsyncRayPPOTrainer`` runs it; any other trainer would sync by broadcast.
+    No other trainer reads the option, so the run would sync by broadcast.
     """
     if (
         config["generator"]["weight_sync_transport"] == WeightSyncTransport.EXPERT_BLOCK
