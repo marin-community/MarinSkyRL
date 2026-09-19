@@ -132,6 +132,16 @@ class _CanonicalizedChatPrefix:
     per_step_rewards: List[Tuple[float, Optional[int]]]
 
 
+@dataclass(frozen=True)
+class _SampledTurn:
+    """One chat turn as the engine served and sampled it, with the logprobs and version spans it stamped."""
+
+    prompt_ids: list[int] | None
+    response_ids: list[int]
+    response_logprobs: list[float] | None
+    policy_version_segments: list[PolicyVersionSegment] | None
+
+
 class SkyRLGymTrajectoryRunner(TrajectoryRunner):
     def __init__(
         self,
@@ -319,9 +329,12 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             We ensure token-in-token-out generation. With three exceptions:
             - When calling Env.step() and BaseTextEnvStepOutput["postprocessed_action"] is not None.
               This will likely be deprecated soon.
-            - When custom_chat_template = True and use_conversation_multi_turn = True. We always
-              re-tokenize the entire chat history every turn and at the end. This is used for cases
-              like removing Qwen3 thinking tokens in non-last-round assistant message.
+            - When custom_chat_template = True and use_conversation_multi_turn = True and the
+              environment appended an observation. We then re-tokenize the entire chat history
+              every turn and at the end. This is used for cases like removing Qwen3 thinking tokens
+              in non-last-round assistant message. A trajectory that ends after its only assistant
+              turn without an observation instead trains on exactly the tokens the engine served
+              and sampled, so no template re-render can alter them.
             - When the inference backend canonicalizes a structured tool call while rendering the
               next turn. The re-rendered prior context is retained but excluded from optimization.
 
@@ -426,6 +439,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         # The oldest version that sampled a token, kept apart from the spans because re-tokenized
         # history cannot align spans to tokens but the version that sampled the first token stands.
         first_token_policy_version: int | None = None
+        # On the re-tokenize path, the engine tokens of the only assistant turn. Kept while no
+        # observation has been appended, so a trajectory that never re-rendered trains on what
+        # the engine served and sampled; cleared by an observation, a second turn, or a rewrite.
+        sole_sampled_turn: _SampledTurn | None = None
 
         while not done:
             if len(input_ids) > max_input_length:
@@ -544,6 +561,19 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                             rollout_logprobs += [0.0] * observation_token_count
                 input_ids = rendered_prompt_ids[0]
 
+            if retokenize_chat_history:
+                served_prompt_rows = engine_output.get("prompt_ids")
+                sole_sampled_turn = (
+                    _SampledTurn(
+                        prompt_ids=None if served_prompt_rows is None else list(served_prompt_rows[0]),
+                        response_ids=list(output_ids),
+                        response_logprobs=None if response_logprobs is None else list(response_logprobs),
+                        policy_version_segments=output_version_segments,
+                    )
+                    if not per_step_rewards and token_provenance == TokenProvenance.ENGINE
+                    else None
+                )
+
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
             # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
             stop_strs = current_sampling_params.get("stop", None)
@@ -574,6 +604,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             )
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             new_obs = env_step_output["observations"]
+            if new_obs:
+                sole_sampled_turn = None
             step_reward: float = env_step_output["reward"]
             verification_results.append(verification_from_env_step(env_step_output))
             done = env_step_output["done"]
@@ -620,6 +652,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     selected_capture_possible = False
                     output_version_segments = None
                     behavior_policy_version_segments = None
+                    sole_sampled_turn = None
                 output_ids = postprocessed_output_ids
 
             # 3. Update states: input ids, loss_mask, chat_history, etc.
@@ -701,7 +734,17 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         # Get environment-specific metrics after the episode is done
         env_metrics = environment_metrics_from_step(env_step_output, env.get_metrics())
         prompt_ids = input_ids[:initial_prompt_length]
-        if retokenize_chat_history:
+        if sole_sampled_turn is not None:
+            # Engine ids are the training ids: no re-render, so no second BOS, no fabricated
+            # end-of-turn token and no shifted token boundaries between sampling and training.
+            if sole_sampled_turn.prompt_ids is None:
+                raise RuntimeError("chat generation must return the served prompt token IDs")
+            prompt_ids = sole_sampled_turn.prompt_ids
+            response_ids = list(sole_sampled_turn.response_ids)
+            loss_mask = [1] * len(response_ids)
+            rollout_logprobs = sole_sampled_turn.response_logprobs if collect_logprobs else None
+            behavior_policy_version_segments = sole_sampled_turn.policy_version_segments
+        elif retokenize_chat_history:
             response_encodings = time_tokenization(
                 self.tokenizer.apply_chat_template,
                 chat_history[initial_chat_history_length : len(chat_history) - len(new_obs)],

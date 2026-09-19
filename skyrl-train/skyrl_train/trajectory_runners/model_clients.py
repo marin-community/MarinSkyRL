@@ -36,21 +36,32 @@ class ModelClient(Protocol):
 
 @dataclass(frozen=True)
 class _ChatChoice:
-    """One chat completion choice with the engine's own tokens, logprobs and version spans."""
+    """One chat completion choice with the served prompt, the engine's own tokens, logprobs and version spans."""
 
     message: dict[str, Any]
     finish_reason: str
+    prompt_ids: list[int]
     response_ids: list[int]
     response_logprobs: list[float] | None
     logprob_items: list[dict[str, Any]] | None
     policy_version_segments: list[PolicyVersionSegment] | None
 
 
-def _parse_chat_choice(choice: dict[str, Any], *, logprobs_requested: bool) -> _ChatChoice:
-    """Read one OpenAI chat completion choice, rejecting one without exact tokens or requested logprobs."""
+def _token_id_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(token, int) for token in value)
+
+
+def _parse_chat_choice(choice: dict[str, Any], *, prompt_ids: Any, logprobs_requested: bool) -> _ChatChoice:
+    """Read one OpenAI chat completion choice, rejecting one without exact tokens or requested logprobs.
+
+    ``prompt_ids`` is the prompt the engine served for this choice: vLLM's response-level
+    ``prompt_token_ids`` under ``return_token_ids``, or the tokenize call that rendered it.
+    """
     response_ids = choice.get("token_ids")
-    if not isinstance(response_ids, list) or not all(isinstance(token, int) for token in response_ids):
+    if not _token_id_list(response_ids):
         raise RuntimeError("OpenAI chat completion did not return exact response token IDs")
+    if not _token_id_list(prompt_ids):
+        raise RuntimeError("OpenAI chat completion did not return the served prompt token IDs")
     logprob_items = (choice.get("logprobs") or {}).get("content")
     if logprobs_requested and logprob_items is None:
         raise RuntimeError("OpenAI chat completion did not return the requested logprobs")
@@ -63,6 +74,7 @@ def _parse_chat_choice(choice: dict[str, Any], *, logprobs_requested: bool) -> _
     return _ChatChoice(
         message=choice["message"],
         finish_reason=choice["finish_reason"],
+        prompt_ids=prompt_ids,
         response_ids=response_ids,
         response_logprobs=response_logprobs,
         logprob_items=logprob_items,
@@ -75,6 +87,7 @@ def _assemble_plain_results(results: list[_ChatChoice]) -> ModelClientOutput:
     segments = [result.policy_version_segments for result in results]
     output = ModelClientOutput(
         responses=[result.message["content"] for result in results],
+        prompt_ids=[result.prompt_ids for result in results],
         response_ids=[result.response_ids for result in results],
         stop_reasons=[result.finish_reason for result in results],
         response_logprobs=logprobs if all(value is not None for value in logprobs) else None,
@@ -355,7 +368,7 @@ class OpenAIHTTPModelClient:
             )
             if prompt_ids is None:
                 raise RuntimeError("Cannot preserve the exact served token prefix across this chat turn")
-        if not isinstance(prompt_ids, list) or not all(isinstance(token, int) for token in prompt_ids):
+        if not _token_id_list(prompt_ids):
             raise RuntimeError("OpenAI chat tokenization did not return prompt token IDs")
 
         payload = {
@@ -381,7 +394,9 @@ class OpenAIHTTPModelClient:
             body = await response.json()
             if response.status >= 400:
                 raise RuntimeError(f"OpenAI chat completion returned HTTP {response.status}: {body}")
-        choice = _parse_chat_choice(body["choices"][0], logprobs_requested=sampling_params.get("logprobs") is not None)
+        choice = _parse_chat_choice(
+            body["choices"][0], prompt_ids=prompt_ids, logprobs_requested=sampling_params.get("logprobs") is not None
+        )
         selected = None
         if requested_top_k is not None and choice.logprob_items is not None:
             selected = [
@@ -389,7 +404,7 @@ class OpenAIHTTPModelClient:
                 for item in choice.logprob_items
             ]
         return _ChatResult(
-            prompt_ids=prompt_ids,
+            prompt_ids=choice.prompt_ids,
             response_ids=choice.response_ids,
             response_logprobs=choice.response_logprobs,
             student_topk_indices=None if selected is None else [ids for ids, _ in selected],
@@ -419,7 +434,8 @@ class OpenAIHTTPModelClient:
             "messages": [{"role": message["role"], "content": message["content"]} for message in messages],
             "session_id": session_id,
             **request_sampling_params,
-            # The engine's own tokens, so the trainer sees what was sampled, not a re-encoding of the text.
+            # The engine's own prompt and response tokens, so the trainer sees what was served and
+            # sampled, not a re-encoding of the text.
             "return_token_ids": True,
         }
         if sampling_params.get("logprobs") is not None:
@@ -432,4 +448,8 @@ class OpenAIHTTPModelClient:
             body = await response.json()
             if response.status >= 400:
                 raise RuntimeError(f"OpenAI chat completion returned HTTP {response.status}: {body}")
-        return _parse_chat_choice(body["choices"][0], logprobs_requested=sampling_params.get("logprobs") is not None)
+        return _parse_chat_choice(
+            body["choices"][0],
+            prompt_ids=body.get("prompt_token_ids"),
+            logprobs_requested=sampling_params.get("logprobs") is not None,
+        )

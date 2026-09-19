@@ -267,6 +267,7 @@ async def test_http_model_client_returns_the_engines_tokens_logprobs_and_version
         requests.append(await request.json())
         return web.json_response(
             {
+                "prompt_token_ids": [1, 2],
                 "choices": [
                     {
                         "message": {"content": "answer"},
@@ -275,7 +276,7 @@ async def test_http_model_client_returns_the_engines_tokens_logprobs_and_version
                         "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
                         "policy_version_segments": [{"start": 0, "token_count": 2, "policy_version": 3}],
                     }
-                ]
+                ],
             }
         )
 
@@ -295,6 +296,7 @@ async def test_http_model_client_returns_the_engines_tokens_logprobs_and_version
     ]
     assert output == {
         "responses": ["answer"],
+        "prompt_ids": [[1, 2]],
         "response_ids": [[7, 8]],
         "stop_reasons": ["stop"],
         "response_logprobs": [[-0.1, -0.2]],
@@ -315,10 +317,25 @@ async def test_http_model_client_refuses_a_response_without_exact_tokens(http_cl
 
 
 @pytest.mark.asyncio
-async def test_http_model_client_refuses_a_response_missing_requested_logprobs(http_client):
+async def test_http_model_client_refuses_a_response_without_the_served_prompt(http_client):
     async def complete(request):
         return web.json_response(
             {"choices": [{"message": {"content": "answer"}, "finish_reason": "stop", "token_ids": [7, 8]}]}
+        )
+
+    async with http_client(complete) as client:
+        with pytest.raises(RuntimeError, match="served prompt token IDs"):
+            await client.generate(_plain_request())
+
+
+@pytest.mark.asyncio
+async def test_http_model_client_refuses_a_response_missing_requested_logprobs(http_client):
+    async def complete(request):
+        return web.json_response(
+            {
+                "prompt_token_ids": [1, 2],
+                "choices": [{"message": {"content": "answer"}, "finish_reason": "stop", "token_ids": [7, 8]}],
+            }
         )
 
     async with http_client(complete) as client:
