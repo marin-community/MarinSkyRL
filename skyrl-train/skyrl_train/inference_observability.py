@@ -229,12 +229,7 @@ class FinelogInferenceMetricsSink:
                 step,
             )
             if self._histogram_format == VllmHistogramFormat.SCALAR:
-                records.extend(
-                    _engine_scalar_histogram_records(
-                        engine,
-                        engine_attributes,
-                    )
-                )
+                records.extend(_engine_histogram_records(engine, engine_attributes))
             elif self._histogram_format == VllmHistogramFormat.DUAL:
                 records.extend(
                     _engine_correlated_scalar_histogram_records(
@@ -385,13 +380,6 @@ def _histogram_publication_identity(engine: VLLMEngineStatsSnapshot) -> _Histogr
     )
 
 
-def _engine_scalar_histogram_records(
-    engine: VLLMEngineStatsSnapshot,
-    cumulative_base: Mapping[str, str],
-) -> list[MetricSnapshot]:
-    return _engine_histogram_records(engine, cumulative_base, (None,) * len(engine.histograms))
-
-
 def _engine_correlated_scalar_histogram_records(
     engine: VLLMEngineStatsSnapshot,
     cumulative_base: Mapping[str, str],
@@ -413,8 +401,10 @@ def _engine_correlated_scalar_histogram_records(
 def _engine_histogram_records(
     engine: VLLMEngineStatsSnapshot,
     cumulative_base: Mapping[str, str],
-    additional_attributes: Sequence[Mapping[str, str] | None],
+    additional_attributes: Sequence[Mapping[str, str] | None] | None = None,
 ) -> list[MetricSnapshot]:
+    if additional_attributes is None:
+        additional_attributes = (None,) * len(engine.histograms)
     records = []
     for histogram, attributes in zip(engine.histograms, additional_attributes, strict=True):
         records.extend(_histogram_records(histogram, cumulative_base, additional_attributes=attributes))
