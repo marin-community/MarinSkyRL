@@ -1,14 +1,12 @@
 """The trainer side of an expert-block sync, held by each Megatron policy worker.
 
-Its methods are named after vLLM's ``TrainerWeightTransferEngine`` on the marin
-fork's main (``trainer_init``, ``send_weights``, ``shutdown``) so the two halves
-read alike; the trainer half stays MarinSkyRL-owned, since that API drives a
-rank-0 client rather than every rank.
+Method names follow vLLM's ``TrainerWeightTransferEngine`` (``trainer_init``,
+``send_weights``, ``shutdown``). That API drives a rank-0 client and this
+transport sends from every rank, so the class is MarinSkyRL's own.
 
-Once per run the worker reports what it owns; the driver plans; the worker
-binds its groups and views. Every sync then checks that the parameters are the
-same storage the plan was built on and that the update the driver names is the
-one this rank just finished, and runs the stream.
+Once per run the worker reports what it owns and binds its groups and views to
+the driver's plan. Each sync checks that the parameters are still the storage
+the plan was bound to and that the update named is the one this rank finished.
 """
 
 from dataclasses import asdict
@@ -33,14 +31,13 @@ class ExpertBlockSender:
         self.stream: Stream | None = None
 
     def inventory(self) -> dict:
-        """This rank's coordinates and the exact expert matrices and dense slices it owns."""
+        """This rank's coordinates and the expert matrices and dense slices it owns."""
         state = self.parallel_state
         self.trainer = TrainerRank(
             torch.distributed.get_rank(),
             state.get_expert_data_parallel_rank(),
             state.get_pipeline_model_parallel_rank(),
             state.get_expert_model_parallel_rank(),
-            state.get_tensor_model_parallel_rank(),
         )
         provider = self.worker.provider
         local = local_source_slices(

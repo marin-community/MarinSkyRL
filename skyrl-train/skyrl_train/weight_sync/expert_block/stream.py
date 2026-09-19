@@ -1,13 +1,11 @@
-"""Run one sync's collectives on one participant, in the schedule's order.
+"""Run one sync's collectives on one participant.
 
 Every participant walks the same schedule and issues only the collectives of
-groups it belongs to, so the relative order of operations on every communicator
-is identical everywhere. A transfer whose destination is one contiguous run and
-the wire dtype lands straight in the live parameter; a column block (a
-tensor-parallel row shard) or a widened tensor (the FP32 router weight, BF16 on
-the wire) lands in scratch and is copied into its region. Dense slices go from
-the owner to one receiver per replica and are then re-broadcast on the replica's
-local group.
+groups it belongs to, so every communicator sees its operations in the same
+order on every member. A broadcast lands straight in the live parameter, except
+the router weight: it is BF16 on the wire and FP32 in vLLM, so it lands in
+scratch and is copied. Dense slices go from the root to one receiver per
+replica and are re-broadcast on the replica's local group.
 """
 
 from dataclasses import dataclass
@@ -20,12 +18,10 @@ from skyrl_train.weight_sync.expert_block.groups import Rendezvous, create_group
 from skyrl_train.weight_sync.expert_block.schedule import LOCAL_GROUP_PREFIX, DenseBroadcast, ExpertBroadcast, Schedule
 from skyrl_train.weight_sync.expert_block.source_views import (
     ExpertSource,
-    dense_flat_view,
+    dense_installed_view,
     dense_source_view,
-    expert_slot_region,
     expert_slot_view,
     expert_source_view,
-    region_view,
 )
 
 
@@ -52,14 +48,14 @@ class InstallReport:
 
 @dataclass(frozen=True)
 class Landing:
-    """Where a receiver puts a transfer: the installed region, and the tensor the collective writes."""
+    """Where a receiver puts a transfer: the installed run, and the dtype it has on the wire."""
 
     installed: torch.Tensor
     wire_dtype: torch.dtype
 
     @property
     def direct(self) -> bool:
-        return self.installed.is_contiguous() and self.installed.dtype == self.wire_dtype
+        return self.installed.dtype == self.wire_dtype
 
     @property
     def nbytes(self) -> int:
@@ -79,7 +75,6 @@ class Stream:
         expert_sources: dict[str, ExpertSource] | None = None,
         parameters: dict[str, torch.Tensor] | None = None,
         expert_maps: dict[str, tuple[int, ...]] | None = None,
-        hidden_size: int | None = None,
         device: torch.device,
     ):
         self.participant = participant
@@ -90,25 +85,15 @@ class Stream:
         self.expert_sources = expert_sources if self.trainer else None
         self.parameters = None if self.trainer else parameters
         self.expert_maps = None if self.trainer else expert_maps
-        self.hidden_size = hidden_size
         self.device = device
         self.local = self.local_group()
         # Resolve every view once so a bad layout fails at preparation, not mid-sync.
         scratch_bytes = 0
-        for broadcast in schedule.experts:
-            if broadcast.root == participant:
-                expert_source_view(self.expert_sources[broadcast.entry.name], self.sources)
-            elif participant in broadcast.destinations:
-                landing = self.expert_landing(broadcast)
-                if not landing.direct:
-                    scratch_bytes = max(scratch_bytes, landing.nbytes)
-        for item in schedule.dense:
-            if item.root == participant:
-                dense_source_view(item.source, self.sources)
-            elif self.lands(item):
-                landing = self.dense_landing(item)
-                if not landing.direct:
-                    scratch_bytes = max(scratch_bytes, landing.nbytes)
+        for item, landing in self.transfers():
+            if landing is None:
+                self.source_view(item)
+            elif not landing.direct:
+                scratch_bytes = max(scratch_bytes, landing.nbytes)
         self.scratch = torch.empty(scratch_bytes, dtype=torch.uint8, device=device)
 
     def lands(self, item: DenseBroadcast) -> bool:
@@ -116,15 +101,19 @@ class Stream:
         return not self.trainer and self.local is not None and self.local[0] in item.local_groups
 
     def expert_landing(self, broadcast: ExpertBroadcast) -> Landing:
-        slot = expert_slot_view(broadcast.entry, self.parameters, self.expert_maps)
-        return Landing(region_view(slot, expert_slot_region(broadcast.entry, slot, self.hidden_size)), torch.bfloat16)
+        return Landing(expert_slot_view(broadcast.entry, self.parameters, self.expert_maps), torch.bfloat16)
 
     def dense_landing(self, item: DenseBroadcast) -> Landing:
-        flat = dense_flat_view(item.source, self.parameters)
-        return Landing(region_view(flat, item.source.region), getattr(torch, item.source.wire_dtype))
+        return Landing(dense_installed_view(item.source, self.parameters), getattr(torch, item.source.wire_dtype))
+
+    def source_view(self, item) -> torch.Tensor:
+        """The trainer storage behind an item this participant roots."""
+        if isinstance(item, ExpertBroadcast):
+            return expert_source_view(self.expert_sources[item.entry.name], self.sources)
+        return dense_source_view(item.source, self.sources)
 
     def wire_tensor(self, landing: Landing) -> torch.Tensor:
-        """The tensor a collective writes: the installed region itself, or scratch shaped like it."""
+        """The tensor a collective writes: the installed run itself, or scratch shaped like it."""
         if landing.direct:
             return landing.installed
         return self.scratch.narrow(0, 0, landing.nbytes).view(landing.wire_dtype).view(landing.installed.shape)
@@ -141,8 +130,7 @@ class Stream:
         """This participant's part of a sync, in collective order.
 
         Yields ``(item, landing)``: ``landing`` is None when this participant is the item's
-        root; items it neither sends nor lands are skipped. The gate replays exactly this walk,
-        so the two never drift apart.
+        root; items it neither sends nor lands are skipped.
         """
         for broadcast in self.schedule.experts:
             if broadcast.root == self.participant:
@@ -157,14 +145,8 @@ class Stream:
 
     def send(self, item) -> int:
         """Broadcast one item this participant roots; returns the bytes put on the wire."""
-        if isinstance(item, ExpertBroadcast):
-            tensor = expert_source_view(self.expert_sources[item.entry.name], self.sources)
-            nbytes = item.entry.nbytes
-        else:
-            tensor = dense_source_view(item.source, self.sources)
-            nbytes = item.source.nbytes
-        dist.broadcast(tensor, src=0, group=self.groups[item.group])
-        return nbytes
+        dist.broadcast(self.source_view(item), src=0, group=self.groups[item.group])
+        return item.entry.nbytes if isinstance(item, ExpertBroadcast) else item.source.nbytes
 
     def receive(self, item, tensor: torch.Tensor) -> int:
         """Run the collectives that land one item into ``tensor``; returns the bytes received."""

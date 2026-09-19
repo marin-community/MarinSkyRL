@@ -1,7 +1,6 @@
-"""The expert-block schedule: every slot receives each of its transfers exactly once, from a holder, with no scratch copies."""
+"""The expert-block schedule: every slot receives each of its transfers exactly once, from a rank that holds it."""
 
 from collections import Counter
-from dataclasses import replace
 from itertools import product
 
 import pytest
@@ -10,7 +9,6 @@ from skyrl_train.weight_sync.expert_block.schedule import (
     DenseSlice,
     ExpertEntry,
     ReceiverRank,
-    Region,
     Schedule,
     TrainerRank,
     build_schedule,
@@ -37,24 +35,20 @@ def receivers(replicas=2):
     return tuple(ReceiverRank(replica * EP + ep, replica, ep) for replica in range(replicas) for ep in range(EP))
 
 
-def entries_of(trainer, shards=1):
-    """The expert entries a trainer rank holds: its stage's layers, its EP block, every shard."""
+def entries_of(trainer):
+    """The expert entries a trainer rank holds: its stage's layers, its EP block."""
     per_block = NUM_EXPERTS // EP
     result = []
     for layer in LAYERS_BY_PP[trainer.pp]:
         for expert in range(trainer.ep * per_block, (trainer.ep + 1) * per_block):
             for projection in ("fc1", "fc2"):
-                for shard in range(shards):
-                    suffix = f".shard{shard}" if shards > 1 else ""
-                    name = f"model.layers.{layer}.mlp.experts.{projection}.expert{expert}{suffix}"
-                    result.append(
-                        ExpertEntry(name, layer, trainer.pp, expert, projection, MATRIX_BYTES // shards, shard, shards)
-                    )
+                name = f"model.layers.{layer}.mlp.experts.{projection}.expert{expert}"
+                result.append(ExpertEntry(name, layer, trainer.pp, expert, projection, MATRIX_BYTES))
     return result
 
 
 def dense_of(trainer):
-    """Every trainer rank of a stage holds the same dense runs (TP=1)."""
+    """Every trainer rank of a stage holds the same dense slices."""
     if trainer.pp == 0:
         return [DenseSlice("model.layers.0.mlp.router.weight", 0, 12, "bfloat16", "router", 0, 0)]
     return [
@@ -99,20 +93,20 @@ def test_every_receiver_slot_gets_each_of_its_expert_matrices_exactly_once():
     }
 
 
-def test_each_broadcast_comes_from_a_holder_and_the_root_is_fixed_per_stage_and_block():
+def test_every_expert_matrix_is_sent_by_a_rank_holding_it_and_the_data_parallel_replicas_split_the_egress():
     schedule = build()
     holders = {row.rank: {entry.name for entry in entries_of(row)} for row in trainers()}
-    by_rank = {row.rank: row for row in trainers()}
-    roots = {}
+    replica_of = {row.rank: row.dp for row in trainers()}
+    sent = Counter()
     for item in schedule.experts:
         assert item.entry.name in holders[item.root]
-        owner = by_rank[item.root]
-        assert roots.setdefault((owner.pp, owner.ep), item.root) == item.root
-    # Both data-parallel replicas take turns as root, so neither carries everything.
-    assert {by_rank[root].dp for root in roots.values()} == {0, 1}
+        sent[replica_of[item.root]] += item.entry.nbytes
+    # Two data-parallel replicas hold every matrix; each sends half of the bytes.
+    total = 3 * NUM_EXPERTS * 2 * MATRIX_BYTES
+    assert sent == {0: total // 2, 1: total // 2}
 
 
-def test_groups_hold_one_root_and_only_the_receivers_of_its_block_so_nothing_lands_in_scratch():
+def test_groups_hold_one_root_and_only_the_receivers_of_its_block():
     schedule = build()
     expert_groups = [group for group in schedule.groups if group.name.startswith("expert-")]
     assert len(expert_groups) == len(LAYERS_BY_PP) * EP
@@ -250,62 +244,15 @@ def test_a_dense_tensor_held_by_two_stages_is_sent_to_both():
     assert {tuple(item.local_groups) for item in schedule.dense} == {("local-0-0",), ("local-0-1",)}
 
 
-# --- Trainer tensor parallelism ----------------------------------------------------
-
-
-def tp_trainers():
-    """Two TP ranks per (pp, ep) slot, DP=1: still eight ranks."""
-    return tuple(
-        TrainerRank(index, 0, pp, ep, tp) for index, (pp, ep, tp) in enumerate(product(range(2), range(EP), range(2)))
-    )
-
-
-def test_tensor_parallel_dense_shards_each_travel_once_and_tile_the_tensor():
-    rows = tp_trainers()
-    dense = {}
-    for row in rows:
-        # Column shard of the norm (one run of 4); row shard of a [4, 3] router (a column block: 4 runs of... 3/2).
-        # Keep the router [2, 6] here so the block is 2 runs of 3 with stride 6.
-        router = DenseSlice("model.layers.2.mlp.router.weight", row.tp * 3, 6, "bfloat16", "router", 0, 1, 2, 6)
-        if row.pp == 0:
-            dense[row.rank] = [
-                DenseSlice("model.layers.0.mlp.router.weight", row.tp * 3, 6, "bfloat16", "router", 0, 0, 2, 6)
+def test_dense_slices_that_overlap_within_their_tensor_are_refused():
+    inventories = {row.rank: dense_of(row) for row in trainers()}
+    for rank, items in inventories.items():
+        if items[0].hf_name == "model.norm.weight":
+            # Two runs of the norm: [0, 5) and [4, 8) share element 4.
+            inventories[rank] = [
+                DenseSlice("model.norm.weight", 0, 5, "bfloat16", "norm", 0, 1),
+                DenseSlice("model.norm.weight", 4, 4, "bfloat16", "norm", 4, 1),
+                *items[1:],
             ]
-        else:
-            dense[row.rank] = [DenseSlice("model.norm.weight", row.tp * 4, 4, "bfloat16", "norm", 0, 1), router]
-    schedule = build(
-        trainers=rows, expert_inventories={row.rank: entries_of(row) for row in rows}, dense_inventories=dense
-    )
-    transfers = Counter((item.source.hf_name, item.source.hf_offset) for item in schedule.dense)
-    assert set(transfers.values()) == {1}
-    assert sorted(transfers) == [
-        ("model.layers.0.mlp.router.weight", 0),
-        ("model.layers.0.mlp.router.weight", 3),
-        ("model.layers.2.mlp.router.weight", 0),
-        ("model.layers.2.mlp.router.weight", 3),
-        ("model.norm.weight", 0),
-        ("model.norm.weight", 4),
-    ]
-    by_rank = {row.rank: row for row in rows}
-    for item in schedule.dense:
-        # A shard can only come from a rank of its tensor-parallel index.
-        assert by_rank[item.root].tp == item.source.hf_offset // (3 if item.source.runs == 2 else 4)
-    assert Region(3, 6, 2, 6).intervals() == [(3, 6), (9, 12)]
-
-
-def test_expert_tensor_parallel_shards_are_scheduled_per_shard_from_the_rank_holding_them():
-    rows = tp_trainers()
-    experts = {row.rank: [entry for entry in entries_of(row, shards=2) if entry.shard == row.tp] for row in rows}
-    schedule = build(
-        trainers=rows, expert_inventories=experts, dense_inventories={row.rank: dense_of(row) for row in rows}
-    )
-    assert {count for _, count in schedule.receiver_experts} == {3 * 2 * 2 * 2}
-    by_rank = {row.rank: row for row in rows}
-    assert all(by_rank[item.root].tp == item.entry.shard for item in schedule.experts)
-
-
-def test_a_shard_count_disagreement_is_refused():
-    experts = {row.rank: entries_of(row) for row in trainers()}
-    experts[0] = [replace(experts[0][0], shards=2)] + experts[0][1:]
-    with pytest.raises(ValueError, match="disagree on expert transfer|different shard counts"):
-        build(expert_inventories=experts)
+    with pytest.raises(ValueError, match="gap or overlap at element 5"):
+        build(dense_inventories=inventories)
