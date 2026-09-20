@@ -1,5 +1,9 @@
 # Latest-first FA4 prototype
 
+Read [RESULTS.md](RESULTS.md) for the final comparison, job links, limits, and
+recommendation. The notes below retain the experiment's chronological setup
+and early probes; beta31 results are historical, not the retained candidate.
+
 The baseline is MarinSkyRL `4d798b12`: Torch 2.13/CUDA 13.2, Megatron Core
 0.18, Bridge 0.6, Transformer Engine 2.11, and FlashAttention 2.8.3. This
 branch first tested Core 0.19.2, Bridge 0.6.2, Transformer Engine 2.19, and
@@ -25,11 +29,14 @@ backend-selection result.
 The newest Megatron lock needs Hydra 1.3.4. Bridge 0.6.2 imports Megatron
 Core's dev extra, which pins cuDNN Frontend 1.26, while Transformer Engine
 2.19 requires at least 1.28. The lock uses a narrow 1.29 override; its runtime
-compatibility remains an accelerator gate. Marin's fixed vLLM package keeps
-Quack at 0.6.4 and CUTLASS DSL at 4.6.2, which FA4 beta29 permits.
+compatibility was exercised in the linked Grug jobs. Marin's fixed vLLM
+package keeps Quack at 0.6.4 and CUTLASS DSL at 4.6.2, which FA4 beta29 permits.
 The fixed vLLM wheel also pins Apache TVM FFI 0.1.11, whereas FA4 beta29
 requires at least 0.1.12. The lock overrides that transitive pin to the
-latest 0.1.14.post0; vLLM import and runtime behavior still need checking.
+latest 0.1.14.post0. The four-GPU rollout test **failed before training** with
+a native TVM FFI/TileLang registration collision. RESULTS.md gives the causal
+log and a minimal version-isolation probe; this lock is not a serving-qualified
+environment.
 
 The `cache/` and `dist/` directories are ignored local scratch. No custom
 repacked wheel is required or published. The experimental lock now also
@@ -58,7 +65,7 @@ arm64 `apache-tvm-ffi==0.1.14.post0` wheel. The
 [second GB200 backend probe](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-gb200-backend2-e99529c2)
 selected FA4 beta31 in TE's log and completed finite forward/backward on
 Torch 2.13.0+cu132. The separate project arm64 lock was added after this
-probe; it still needs install/import and Grug validation.
+probe; later full-lock and Grug results are in RESULTS.md.
 
 For the native TE 2.19 build, use
 `bash scripts/wheels/build_native.sh transformer-engine-torch-2.19 <build-dir>`
@@ -159,7 +166,8 @@ update. This is not just a missing metric. The separately run
 reported a finite norm and finite sampled weights, with an attention-gate
 update. Both jobs selected their intended backend in TE logs. The FA4 result
 does not license a CP migration: the matched new-cohort FA2 reference failed,
-and the old-stack FA2 baseline remains to be checked.
+and the old-stack FA2 baseline subsequently proved unable to run this CP2
+toy geometry with its supported transport choices (see RESULTS.md).
 
 `run_three_arm_h100.sh <world-size> <toy|snowball>` runs the two new-cohort
 arms, then checks out baseline commit `4d798b12` in task-local scratch, installs
