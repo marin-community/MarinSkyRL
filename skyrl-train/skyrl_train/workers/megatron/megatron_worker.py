@@ -884,6 +884,19 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 )
                 if layer_index == 0:
 
+                    def after_router_linear(_module, _args, output, *, capture_fn=capture):
+                        capture_fn("router_logits", output[0] if isinstance(output, tuple) else output)
+
+                    def after_latent_norm(_module, _args, output, *, capture_fn=capture):
+                        capture_fn("routed_input", output)
+
+                    self._grug_trace_hooks.extend(
+                        (
+                            layer.mlp.router.gating.register_forward_hook(after_router_linear),
+                            layer.mlp.latent_norm.register_forward_hook(after_latent_norm),
+                        )
+                    )
+
                     def before_routed_up(_module, args, kwargs, *, capture_fn=capture):
                         value = args[0] if args else kwargs["hidden_states"]
                         capture_fn("routed_latent", value)
