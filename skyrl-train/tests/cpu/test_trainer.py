@@ -1037,12 +1037,16 @@ def test_load_checkpoints_accepts_trailing_slash_resume_path(dummy_config):
     exists.assert_called_once_with(resume_path.rstrip("/"))
 
 
-def test_load_checkpoints_offloads_disaggregated_optimizer_before_policy_restore(dummy_config, tmp_path, monkeypatch):
+@pytest.mark.parametrize("offload_during_rollouts", [False, True])
+def test_load_checkpoints_offloads_disaggregated_optimizer_before_policy_restore(
+    dummy_config, tmp_path, monkeypatch, offload_during_rollouts
+):
     checkpoint_path = tmp_path / "global_step_12"
     (checkpoint_path / trainer_module.POLICY_CHECKPOINT_SUBDIRECTORY).mkdir(parents=True)
     torch.save({"global_step": 12}, checkpoint_path / trainer_module.TRAINER_STATE_FILENAME)
     dummy_config.trainer.resume_path = str(checkpoint_path)
-    dummy_config.trainer.offload_optimizer_during_rollouts = True
+    dummy_config.trainer.strategy = "megatron"
+    dummy_config.trainer.offload_optimizer_during_rollouts = offload_during_rollouts
 
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = dummy_config
@@ -1063,6 +1067,10 @@ def test_load_checkpoints_offloads_disaggregated_optimizer_before_policy_restore
     assert restored_path == str(checkpoint_path)
     assert trainer.policy_model.restore_residencies == [(True, False)]
     assert "offload_policy_optimizer_before_checkpoint_load" in trainer.all_startup_timings
+    assert trainer.policy_model.optimizer_on_gpu is not offload_during_rollouts
+    assert (
+        "backload_policy_optimizer_after_checkpoint_load" in trainer.all_startup_timings
+    ) is not offload_during_rollouts
 
 
 class _CursorDataLoader:

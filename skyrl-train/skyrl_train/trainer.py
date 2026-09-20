@@ -2957,13 +2957,24 @@ class RayPPOTrainer:
                 f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
             )
 
-        # Match the optimizer residency used when disaggregated checkpoints are
-        # saved. Megatron initializes restore buffers before reading checkpoint
-        # tensors; leaving the optimizer and gradient buffers on GPU can double
-        # their peak allocation and OOM before the first rollout.
-        self._offload_policy_optimizer(
-            getattr(self, "all_startup_timings", {}), timer_label="offload_policy_optimizer_before_checkpoint_load"
+        # Megatron's distributed loader allocates restore buffers in addition to
+        # the initialized optimizer state. Free the old state before loading even
+        # when ordinary rollout-time optimizer offload is disabled. Put the newly
+        # restored state back afterward in that case so training starts with the
+        # configured optimizer residency.
+        restore_only_offload = (
+            not self.colocate_all
+            and self.cfg.trainer.strategy == "megatron"
+            and not self.cfg.trainer.offload_optimizer_during_rollouts
         )
+        startup_timings = getattr(self, "all_startup_timings", {})
+        if restore_only_offload:
+            with Timer("offload_policy_optimizer_before_checkpoint_load", startup_timings):
+                self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
+        else:
+            self._offload_policy_optimizer(
+                startup_timings, timer_label="offload_policy_optimizer_before_checkpoint_load"
+            )
 
         # 3. Load policy checkpoint
         logger.info(f"Loading policy checkpoint from {policy_ckpt_dir}")
@@ -2976,6 +2987,9 @@ class RayPPOTrainer:
             )
         )
         logger.info("Successfully loaded policy checkpoint")
+        if restore_only_offload:
+            with Timer("backload_policy_optimizer_after_checkpoint_load", startup_timings):
+                self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=False)
 
         # 4. Load critic checkpoint if it exists and we have a critic model
         if self.critic_model is not None:
