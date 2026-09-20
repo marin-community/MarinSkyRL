@@ -210,11 +210,14 @@ Some rules for configuring these parameters:
 - ``world_size % (pp_size * ep_size * etp_size) == 0``
     - This means that ``ep_size * etp_size`` can scale independently of ``tp_size * cp_size``, and can go across data parallel ranks.
 
-.. warning::
-  
-  ``optimizer_config_kwargs.use_precision_aware_optimizer=true`` can cause checkpointing to fail. See: https://github.com/nvidia/megatron-lm/issues/1820.
-
-  We recommend leaving this setting to ``false``
+Precision-aware AdamW with CPU offload uses
+``optimizer_config_kwargs.use_precision_aware_optimizer=true``,
+``optimizer_config_kwargs.store_param_remainders=false``, and
+``optimizer_checkpoint_sharding_type=dp_reshardable``. This retains FP32 master
+weights and moments while accepting BF16 gradients. The checkpoint integration
+restores native CPU/GPU optimizer state and step counters. See
+``docs/grug-megatron-training.md`` for the complete configuration and validation
+scope; this does not establish support for reduced-precision optimizer states.
 
 
 .. _deepspeed-configurations:
