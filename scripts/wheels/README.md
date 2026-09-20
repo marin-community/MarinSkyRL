@@ -15,20 +15,11 @@ runtime dependencies pin each published wheel by URL and SHA-256.
 `build_native.sh` is a manual release tool. CI and runtime installation do not
 invoke it; they consume the published, hash-pinned wheels.
 
-FlashAttention uses upstream commit
-[`060c9188`](https://github.com/Dao-AILab/flash-attention/commit/060c9188beec3a8b62b33a3bfa6d5d2d44975fab)
-(2.8.3). [Transformer Engine 2.11](https://github.com/NVIDIA/TransformerEngine/blob/v2.11/transformer_engine/pytorch/attention/dot_product_attention/utils.py)
-accepts FA2 versions from 2.1.1 through 2.8.3 and rejects 2.8.4. This version
-alignment repairs the Megatron context-parallel failure.
-
-The published wheel was built with a packaging-only patch. It backports the
-`flash_attn.cute` exclusion from
-[`4219765`](https://github.com/Dao-AILab/flash-attention/commit/4219765dfdd8913bfe26134f748dd5ffcedd3c39).
-FA2's [normal imports](https://github.com/Dao-AILab/flash-attention/blob/060c9188beec3a8b62b33a3bfa6d5d2d44975fab/flash_attn/__init__.py)
-do not load that experimental namespace. The exclusion keeps it out of the
-wheel; it is not needed for the current CP2 runtime path and does not change
-FA2's native kernels. The script restores the source checkout after the build.
-Every source is fetched by exact commit.
+Every source is fetched by exact commit. The pinned 2.8.3 FlashAttention wheel
+was built with an unused package excluded; its
+[release record](https://github.com/marin-community/MarinSkyRL/releases/tag/native-cu132-fa283-20260920)
+preserves that provenance. This script now builds unmodified upstream source,
+so a new wheel needs its own qualification and release.
 
 Use CPython 3.12.14 on Linux x86_64 with git, a C++ compiler, and uv. The
 qualified FlashAttention 2.8.3 build used the Iris task image

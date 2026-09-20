@@ -57,23 +57,6 @@ git -C "$build_dir/source" submodule update --init --recursive
 git -C "$build_dir/source" submodule foreach --quiet --recursive \
     'test -z "$(git status --porcelain --untracked-files=all --ignore-submodules=none)"'
 
-if [[ "$package" == flash-attn ]]; then
-    # Match the published wheel: exclude the unused experimental flash_attn.cute
-    # package as later upstream does. The CP2 repair is the TE 2.11/FA2 2.8.3 pair.
-    packaging_patch="$script_dir/flash-attn-2.8.3-packaging.patch"
-    git -C "$build_dir/source" apply "$packaging_patch"
-    trap 'git -C "$build_dir/source" apply --reverse "$packaging_patch"' EXIT
-    # setuptools can reuse an excluded package from an earlier build/lib tree.
-    "$build_dir/venv/bin/python" - "$build_dir/source/build" <<'PY'
-import shutil
-import sys
-from pathlib import Path
-
-for package in Path(sys.argv[1]).glob("lib.*/flash_attn/cute"):
-    shutil.rmtree(package)
-PY
-fi
-
 virtual_env="$build_dir/venv"
 site_packages="$virtual_env/lib/python${python_version%.*}/site-packages"
 cuda_home="$site_packages/nvidia/cu13"

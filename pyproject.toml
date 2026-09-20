@@ -87,6 +87,7 @@ deepspeed = [
 ]
 fsdp = [
     "causal-conv1d>=1.5,<2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # Match the Megatron pin below so combined installs resolve one wheel.
     "flash-attn==2.8.3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "flash-linear-attention==0.4.2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torch==2.13.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -117,6 +118,8 @@ megatron = [
     "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "accelerate>=1.14,<2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "causal-conv1d>=1.5,<2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # Transformer Engine 2.11 rejects flash-attn 2.8.4; CP2 cannot fall back.
+    # See https://github.com/NVIDIA/TransformerEngine/blob/v2.11/transformer_engine/pytorch/attention/dot_product_attention/utils.py
     "flash-attn==2.8.3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "flash-linear-attention==0.4.2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "mamba-ssm>=2.2,<3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",

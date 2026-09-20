@@ -23,9 +23,6 @@ chosen by the provider (`window_size`, `window_attn_skip_freq`, `no_rope_freq`,
 `rotary_percent=0.5`, `moe_grouped_gemm`, `moe_shared_expert_intermediate_size`).
 Attention runs through Transformer Engine's fused backend; `trainer.flash_attn`
 selects the flash backend instead.
-The frozen x86_64 Megatron runtime pairs Transformer Engine 2.11 with
-FlashAttention 2.8.3. Transformer Engine rejects FlashAttention 2.8.4, leaving
-no attention backend for context-parallel runs that select the flash backend.
 
 ## Weights
 
