@@ -883,6 +883,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     )
                 )
                 if layer_index == 0:
+                    shared_experts = layer.mlp.shared_experts.experts
+                    if len(shared_experts) != 2:
+                        raise ValueError("Hero layer-0 trace needs two shared experts")
+
+                    for shared_index, shared_expert in enumerate(shared_experts):
+
+                        def after_shared(_module, _args, output, *, site=f"shared_{shared_index}", capture_fn=capture):
+                            capture_fn(site, output)
+
+                        self._grug_trace_hooks.append(shared_expert.register_forward_hook(after_shared))
 
                     def before_sconv_mlp(_module, args, kwargs, *, capture_fn=capture):
                         value = args[0] if args else kwargs["hidden_states"]
