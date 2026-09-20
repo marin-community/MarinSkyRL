@@ -69,6 +69,7 @@ def test_megatron_flash_attention_cp2_forward_backward(ray_init_fixture):
         status = output.metadata["train_status"]
         assert status["policy_update_steps"] == 1
         assert torch.isfinite(torch.tensor(status["policy_loss"]))
+        assert 0 < status["raw_grad_norm"] < float("inf")
 
 
 def get_test_actor_config(model_name=MODEL_NAME) -> DictConfig:

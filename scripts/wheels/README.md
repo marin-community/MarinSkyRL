@@ -17,12 +17,18 @@ invoke it; they consume the published, hash-pinned wheels.
 
 FlashAttention uses upstream commit
 [`060c9188`](https://github.com/Dao-AILab/flash-attention/commit/060c9188beec3a8b62b33a3bfa6d5d2d44975fab)
-(2.8.3). Transformer Engine 2.11 accepts FA2 through 2.8.3 and rejects 2.8.4.
-The checked-in packaging patch backports the `flash_attn.cute` exclusion from
+(2.8.3). [Transformer Engine 2.11](https://github.com/NVIDIA/TransformerEngine/blob/v2.11/transformer_engine/pytorch/attention/dot_product_attention/utils.py)
+accepts FA2 versions from 2.1.1 through 2.8.3 and rejects 2.8.4. This version
+alignment repairs the Megatron context-parallel failure.
+
+The already-published wheel also contains a packaging-only patch that backports
+the `flash_attn.cute` exclusion from
 [`4219765`](https://github.com/Dao-AILab/flash-attention/commit/4219765dfdd8913bfe26134f748dd5ffcedd3c39).
-It removes the experimental FA4 namespace, which requires an older CUTLASS DSL,
-without changing FA2's native kernels. The script restores the source checkout
-after the build. Every source is fetched by exact commit.
+FA2's [normal imports](https://github.com/Dao-AILab/flash-attention/blob/060c9188beec3a8b62b33a3bfa6d5d2d44975fab/flash_attn/__init__.py)
+do not load that experimental namespace. The exclusion keeps it out of the
+wheel; it is not needed for the current CP2 runtime path and does not change
+FA2's native kernels. The script restores the source checkout after the build.
+Every source is fetched by exact commit.
 
 Use CPython 3.12.14 on Linux x86_64 with git, a C++ compiler, and uv. The
 qualified FlashAttention 2.8.3 build used the Iris task image

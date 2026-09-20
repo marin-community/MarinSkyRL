@@ -58,8 +58,8 @@ git -C "$build_dir/source" submodule foreach --quiet --recursive \
     'test -z "$(git status --porcelain --untracked-files=all --ignore-submodules=none)"'
 
 if [[ "$package" == flash-attn ]]; then
-    # FA2 2.8.3 bundles an experimental FA4 package that needs an older CuTe DSL.
-    # Exclude it without changing the native FA2 kernels.
+    # Match the published wheel: exclude the unused experimental flash_attn.cute
+    # package as later upstream does. The CP2 repair is the TE 2.11/FA2 2.8.3 pair.
     packaging_patch="$script_dir/flash-attn-2.8.3-packaging.patch"
     git -C "$build_dir/source" apply "$packaging_patch"
     trap 'git -C "$build_dir/source" apply --reverse "$packaging_patch"' EXIT
