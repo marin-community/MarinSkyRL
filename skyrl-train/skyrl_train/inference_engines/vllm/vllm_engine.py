@@ -319,8 +319,23 @@ class WorkerWrap:
             if layer_index == 0:
                 if layer.sconv_mlp is None:
                     raise ValueError("Hero layer-0 trace needs MLP ShortConv")
+                if layer.mlp.latent_up_proj is None:
+                    raise ValueError("Hero layer-0 trace needs latent routed experts")
                 if len(layer.shared_experts) != 2:
                     raise ValueError("Hero layer-0 trace needs two shared experts")
+
+                def before_routed_up(_module, args, *, capture_fn=capture):
+                    capture_fn("routed_latent", args[0])
+
+                def after_routed_up(_module, _args, output, *, capture_fn=capture):
+                    capture_fn("routed_expanded", output[0])
+
+                hooks.extend(
+                    (
+                        layer.mlp.latent_up_proj.register_forward_pre_hook(before_routed_up),
+                        layer.mlp.latent_up_proj.register_forward_hook(after_routed_up),
+                    )
+                )
 
                 for shared_index, shared_expert in enumerate(layer.shared_experts):
 

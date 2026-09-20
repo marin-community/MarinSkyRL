@@ -115,7 +115,9 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
             metrics[str(layer)] = {}
             sites = ["model_input", "after_attn", "mlp_input", "after_block"]
             if layer == 0:
-                sites.extend(("shared_0", "shared_1", "before_sconv_mlp", "after_sconv_mlp"))
+                sites.extend(
+                    ("routed_latent", "routed_expanded", "shared_0", "shared_1", "before_sconv_mlp", "after_sconv_mlp")
+                )
             for site in sites:
                 key = f"layer_{layer}_{site}"
                 serving = vllm_trace[key].numpy()
@@ -126,7 +128,8 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
                     [call.shape for call in calls],
                 )
                 trainer = calls[0][positions, 0].numpy()
-                assert serving.shape == trainer.shape == (len(positions), model_config.hidden_size)
+                width = model_config.latent_dim if site == "routed_latent" else model_config.hidden_size
+                assert serving.shape == trainer.shape == (len(positions), width)
                 assert np.isfinite(serving).all() and np.isfinite(trainer).all(), key
                 delta = trainer - serving
                 metrics[str(layer)][site] = {
