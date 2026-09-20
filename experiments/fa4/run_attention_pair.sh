@@ -12,6 +12,7 @@ window="${6:?usage: run_attention_pair.sh BATCH SEQ HEADS KV_HEADS HEAD_DIM LEFT
 warmups="${7:-3}"
 samples="${8:-10}"
 window_right="${9:-0}"
+reference="${10:-}"
 
 uv sync --frozen --extra vllm --extra megatron --extra fa4 --group dev
 common_env=(NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=2 NVTE_FUSED_ATTN=0 NVTE_FLASH_ATTN=1)
@@ -20,6 +21,12 @@ common_args=(
     --head-dim "$head_dim" --window-left "$window" --window-right "$window_right"
     --warmups "$warmups" --samples "$samples"
 )
+if [[ "$reference" == "reference" ]]; then
+    common_args+=(--reference-sdpa)
+elif [[ -n "$reference" ]]; then
+    echo "unknown reference mode: $reference" >&2
+    exit 2
+fi
 env "${common_env[@]}" NVTE_FLASH_ATTN_V4=0 timeout 900 .venv/bin/python \
     experiments/fa4/probe_attention.py --output /tmp/fa2-attention.pt "${common_args[@]}"
 env "${common_env[@]}" NVTE_FLASH_ATTN_V4=1 timeout 900 .venv/bin/python \

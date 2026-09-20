@@ -16,6 +16,8 @@ from importlib import metadata
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from transformer_engine.pytorch.attention import DotProductAttention
 
 
@@ -31,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-right", type=int, default=0)
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--samples", type=int, default=10)
+    parser.add_argument("--reference-sdpa", action="store_true")
     return parser.parse_args()
 
 
@@ -119,6 +122,30 @@ def main() -> None:
         "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
         "finite": all(torch.isfinite(t).all().item() for t in (output, q.grad, k.grad, v.grad)),
     }
+    if args.reference_sdpa:
+        if (args.window_left, args.window_right) != (-1, -1) or args.seq > 128:
+            raise ValueError("The FP32 math-SDPA reference is limited to short full-causal probes")
+        q_ref = q.detach().float().permute(0, 2, 1, 3).contiguous().requires_grad_()
+        k_ref = k.detach().float().permute(0, 2, 1, 3).contiguous().requires_grad_()
+        v_ref = v.detach().float().permute(0, 2, 1, 3).contiguous().requires_grad_()
+        with sdpa_kernel(SDPBackend.MATH):
+            expected = F.scaled_dot_product_attention(q_ref, k_ref, v_ref, is_causal=True, enable_gqa=True)
+        expected = expected.permute(0, 2, 1, 3).contiguous().reshape_as(output)
+        reference_loss = (expected * target.float()).sum() / expected.numel()
+        dq_ref, dk_ref, dv_ref = torch.autograd.grad(reference_loss, (q_ref, k_ref, v_ref))
+        reference_tensors = {
+            "output": (output.float(), expected),
+            "dq": (q.grad.float(), dq_ref.permute(0, 2, 1, 3)),
+            "dk": (k.grad.float(), dk_ref.permute(0, 2, 1, 3)),
+            "dv": (v.grad.float(), dv_ref.permute(0, 2, 1, 3)),
+        }
+        result["sdpa_reference"] = {
+            name: {
+                "max_abs": float((actual - expected).abs().max().item()),
+                "mean_abs": float((actual - expected).abs().mean().item()),
+            }
+            for name, (actual, expected) in reference_tensors.items()
+        }
     print(json.dumps(result, indent=2))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
