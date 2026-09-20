@@ -45,6 +45,7 @@ def main() -> None:
     parser.add_argument("--world-size", type=int, choices=(1, 2), default=1)
     parser.add_argument("--shape", choices=("toy", "snowball"), default="toy")
     parser.add_argument("--steps", type=int, default=1)
+    parser.add_argument("--cp-comm-type", choices=("default", "p2p", "all_gather"), default="all_gather")
     args = parser.parse_args()
     if os.getenv("NVTE_FLASH_ATTN_V4") not in ("0", "1"):
         raise ValueError("Set NVTE_FLASH_ATTN_V4=0 for FA2 or 1 for FA4")
@@ -70,13 +71,13 @@ def main() -> None:
         # The Megatron wrapper requires packed sequences for CP. Grug's active
         # configuration disables packing, so CP2 here is an experimental gate.
         cfg.trainer.use_sample_packing = args.world_size > 1
-        if args.world_size > 1:
-            # TE 2.19 rejects Grug's sliding window with the default p2p CP
-            # transport. all_gather is one of its explicit supported modes.
+        if args.world_size > 1 and args.cp_comm_type != "default":
+            # TE 2.19 rejects Grug's sliding window with its default p2p CP
+            # transport. The older baseline may require its own default mode.
             OmegaConf.update(
                 cfg.trainer.policy.megatron_config.transformer_config_kwargs,
                 "cp_comm_type",
-                "all_gather",
+                args.cp_comm_type,
                 force_add=True,
             )
         cfg.trainer.micro_forward_batch_size_per_gpu = 1
@@ -127,7 +128,7 @@ def main() -> None:
                 "world_size": args.world_size,
                 "context_parallel_size": args.world_size,
                 "sample_packing": bool(cfg.trainer.use_sample_packing),
-                "cp_comm_type": cfg.trainer.policy.megatron_config.transformer_config_kwargs.get("cp_comm_type"),
+                "cp_comm_type": args.cp_comm_type if args.world_size > 1 else "not_applicable",
                 "shape": args.shape,
                 "prompt_length": prompt_length,
                 "response_length": response_length,

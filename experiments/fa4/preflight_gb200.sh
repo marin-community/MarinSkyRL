@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Disposable arm64 kernel gate. The current Marin Megatron extra has no arm64
-# closure or FA2 wheel; this tests TE/FA4 directly, not a Grug worker.
+# Disposable arm64 kernel gate. This tests TE/FA4 directly, not the complete
+# project lock or a Grug worker.
 wheel_uri="${1:?usage: preflight_gb200.sh S3_WHEEL_URI SHA256}"
 wheel_sha256="${2:?usage: preflight_gb200.sh S3_WHEEL_URI SHA256}"
 wheel=/tmp/transformer_engine_torch-2.19.0-cp312-cp312-linux_aarch64.whl
@@ -11,8 +11,8 @@ venv=/tmp/fa4-gb200-preflight
 uv run --no-project --with boto3==1.42.97 python experiments/fa4/download_candidate.py \
     "$wheel_uri" "$wheel" "$wheel_sha256"
 uv venv --python 3.12.14 "$venv"
-# Run this disposable resolver outside the project. The project currently
-# limits its FA4/TVM overrides to x86_64, which would erase an arm64 request.
+# Run this disposable resolver outside the project so the kernel preflight is
+# independent of the evolving arm64 project closure.
 (
     cd /tmp
     uv pip install --python "$venv/bin/python" --only-binary all \

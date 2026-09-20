@@ -8,7 +8,8 @@ with `--extra megatron` to install the FA4 distribution.
 
 The current [Marin FA2 wheel](https://github.com/marin-community/MarinSkyRL/releases/tag/native-cu132-fa283-20260920)
 has SHA-256 `4b5086728757d81c8ef89f3008b0bcea72483cf18ed96e0e31b5293ed1f01bc7`
-on x86_64. The [upstream FA4 beta31 wheel](https://github.com/Dao-AILab/flash-attention/releases/tag/fa4-v4.0.0.beta31)
+on x86_64 and `9cd0731dcc8fe780aeea28480ad80456d235fc0f9cb75d92c45d2b3c233eee5e`
+on arm64/SM100. The [upstream FA4 beta31 wheel](https://github.com/Dao-AILab/flash-attention/releases/tag/fa4-v4.0.0.beta31)
 has SHA-256 `6eda5890b29e90fc46e19a47b4018effae7c042f75ee8aaaeebd3f56ccd82edf`.
 An archive audit found zero `flash_attn/cute` files in Marin's FA2 wheel, 52
 in stock FA4, and no overlapping file paths. A no-dependency `uv pip install`
@@ -27,9 +28,13 @@ requires at least 0.1.12. The lock overrides that transitive pin to the
 latest 0.1.14.post0; vLLM import and runtime behavior still need checking.
 
 The `cache/` and `dist/` directories are ignored local scratch. No custom
-repacked wheel is required or published. The current `megatron` extra is
-x86_64-only, so GB200/Grace needs an explicit arm64 closure before it can
-support a Grug result. No CPU packaging check proves that GPU gate.
+repacked wheel is required or published. The experimental lock now also
+selects the published SM100 FA2 and TE 2.19 arm64 wheels on GB200/Grace and
+resolves the Megatron/FA4 extra there. Bridge declares Flash Linear Attention,
+but Grug does not use its FLA backend and release 0.4.2 has no arm64 wheel, so
+the lock limits that one transitive package to x86_64. The full arm64 install,
+imports, and Grug behavior remain accelerator gates; CPU resolution is not
+their proof.
 
 The [GB200 arm64 TE build](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-te219-arm-build-11082662)
 also succeeded from the same TE source and pinned native build environment.
@@ -39,16 +44,16 @@ is 980,583 bytes, SHA-256
 The staged and independently downloaded release asset hashes match.
 `preflight_gb200.sh <staged-wheel-URI> <SHA-256>` installs a disposable
 Torch/TE/FA4 environment and checks one GB200 kernel forward/backward with
-explicit backend logs. It cannot establish a Grug result while the project
-extra lacks an arm64 Megatron closure and FA2 reference.
+explicit backend logs. It is separate from the full arm64 lock and cannot
+establish a Grug result.
 Its first attempt installed TE and FA4 but import failed because `tvm_ffi` was
-absent: the current project override and FA4 extra are x86_64-only. The
-preflight now resolves outside the project and explicitly pins the available
+absent: the then-current project override and FA4 extra were x86_64-only. The
+preflight resolves outside the project and explicitly pins the available
 arm64 `apache-tvm-ffi==0.1.14.post0` wheel. The
 [second GB200 backend probe](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-gb200-backend2-e99529c2)
 selected FA4 beta31 in TE's log and completed finite forward/backward on
-Torch 2.13.0+cu132. This does not yet change the project's arm64 lock or
-establish a Grug result.
+Torch 2.13.0+cu132. The separate project arm64 lock was added after this
+probe; it still needs install/import and Grug validation.
 
 For the native TE 2.19 build, use
 `bash scripts/wheels/build_native.sh transformer-engine-torch-2.19 <build-dir>`

@@ -116,27 +116,27 @@ vllm = [
 ]
 megatron = [
     "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "accelerate>=1.14,<2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "causal-conv1d>=1.5,<2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     # FA2 remains the default while the newer Megatron/attention cohort is qualified.
-    "flash-attn==2.8.3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flash-attn==2.8.3 ; sys_platform == 'linux'",
     "flash-linear-attention==0.4.2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "mamba-ssm>=2.2,<3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "megatron-bridge==0.6.2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "megatron-core==0.19.2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "harbor-config ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "nvidia-modelopt==0.46.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "peft>=0.19 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "tensordict ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "torch==2.13.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "torchdata ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "torchvision==0.28.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "transformer-engine[pytorch]==2.19.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "transformer-engine-cu13==2.19.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "transformer-engine-torch==2.19.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "megatron-bridge==0.6.2 ; sys_platform == 'linux'",
+    "megatron-core==0.19.2 ; sys_platform == 'linux'",
+    "harbor-config ; sys_platform == 'linux'",
+    "nvidia-modelopt==0.46.1 ; sys_platform == 'linux'",
+    "peft>=0.19 ; sys_platform == 'linux'",
+    "tensordict ; sys_platform == 'linux'",
+    "torch==2.13.0 ; sys_platform == 'linux'",
+    "torchdata ; sys_platform == 'linux'",
+    "torchvision==0.28.0 ; sys_platform == 'linux'",
+    "transformer-engine[pytorch]==2.19.0 ; sys_platform == 'linux'",
+    "transformer-engine-cu13==2.19.0 ; sys_platform == 'linux'",
+    "transformer-engine-torch==2.19.0 ; sys_platform == 'linux'",
 ]
 fa4 = [
-    "flash-attn-4[cu13]==4.0.0b31 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flash-attn-4[cu13]==4.0.0b31 ; sys_platform == 'linux'",
 ]
 telemetry = [
     "marin-rigging[prometheus]",
@@ -204,11 +204,13 @@ override-dependencies = [
     # Megatron Bridge declares this native extension but does not import or use it.
     "fast-hadamard-transform ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",
+    # Grug does not use Bridge's FLA backend; only an x86_64 FLA wheel exists.
+    "flash-linear-attention==0.4.2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "fsspec==2026.4.0",
     # Bridge 0.6.2 pulls MCore's dev extra, which pins 1.26; TE 2.19 requires >=1.28.
-    "nvidia-cudnn-frontend[cutedsl]==1.29.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "nvidia-cudnn-frontend[cutedsl]==1.29.0 ; sys_platform == 'linux'",
     # The fixed vLLM wheel pins 0.1.11; FA4 beta31 requires >=0.1.12.
-    "apache-tvm-ffi==0.1.14.post0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "apache-tvm-ffi==0.1.14.post0 ; sys_platform == 'linux'",
     # Megatron Bridge pins older serving libraries; share the selected vLLM ABI.
     "flashinfer-python==0.6.18.post1 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.18.post1 ; sys_platform == 'linux'",
@@ -235,9 +237,11 @@ torchaudio = { index = "pytorch-cpu", marker = "sys_platform == 'linux'" }
 torchcodec = { index = "pytorch-cu132", extra = "vllm", marker = "sys_platform == 'linux'" }
 flash-attn = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
 transformer-engine-torch = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/fa4-te219-cu132-20260920-694f3adf/transformer_engine_torch-2.19.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/fa4-te219-cu132-20260920-694f3adf/transformer_engine_torch-2.19.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
 harbor = { git = "https://github.com/marin-community/harbor.git" }
 hs-connectors = { git = "https://github.com/lukedhlee/speculators.git", rev = "6496b4db007de00dd4741349643d23b23e29dce8", subdirectory = "hs_connectors" }
