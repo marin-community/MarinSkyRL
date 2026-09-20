@@ -82,6 +82,7 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         names.insert(0, "lm_head.weight")
     sampling = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
     sampling.update(temperature=0.0, max_tokens=4, ignore_eos=True, logprobs=1)
+    result_uri = os.environ.get("HERO_REPLAY_RESULT_URI")
 
     initialize_ray(cfg)
     try:
@@ -97,6 +98,16 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         captured = torch.tensor(rollout["routed_experts"], dtype=torch.int32)
         assert captured.shape == (4, 4, model_config.num_hidden_layers, model_config.num_experts_per_tok)
         assert torch.all((captured >= 0) & (captured < model_config.num_local_experts))
+        if result_uri:
+            _put_s3_json(
+                result_uri.removesuffix(".json") + "-rollout.json",
+                {
+                    "model": trained_uri or "random Hero schema-v2",
+                    "prompts": prompts,
+                    "response_ids": rollout["response_ids"],
+                    "routed_experts": rollout["routed_experts"],
+                },
+            )
         batch = rollout_training_batch(prompts, rollout)
         native = _score(policy, batch, torch.zeros_like(captured))
         replayed = _score(policy, batch, captured)
@@ -112,12 +123,19 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
             "native_replay_max_abs": (native - replayed)[valid].abs().max().item(),
         }
         print("LIVE_HERO_REPLAY_SCORE_STATUS=" + json.dumps(score_diagnostic, sort_keys=True), flush=True)
-        result_uri = os.environ.get("HERO_REPLAY_RESULT_URI")
         if result_uri:
             _put_s3_json(result_uri, score_diagnostic)
         batch["action_log_probs"] = replayed.float()
         status = _train_step(policy, batch)
         after = rank0_validation_snapshot(policy, names)
+        bias_diagnostics = {
+            name: {
+                "finite": bool(torch.isfinite(after[name]).all()),
+                "mean_delta": (after[name].float().mean() - before[name].float().mean()).item(),
+                "max_change": (after[name] - before[name]).abs().max().item(),
+            }
+            for name in bias_names
+        }
         train_diagnostic = {
             "phase": "after_train",
             "model": trained_uri or "random Hero schema-v2",
@@ -131,6 +149,7 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
             .abs()
             .max()
             .item(),
+            "bias_diagnostics": bias_diagnostics,
             "status": {
                 key: float(value)
                 for key, value in status.items()
@@ -147,10 +166,10 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         assert status["router_replay/query_bias_max_change"] > 0.0, status
         assert status["log_ratio_abs_max"] < 1e-3, status
         assert not torch.equal(after["model.layers.0.mlp.router.weight"], before["model.layers.0.mlp.router.weight"])
-        assert any(not torch.equal(after[name], before[name]) for name in bias_names)
-        for name in bias_names:
-            assert torch.isfinite(after[name]).all()
-            assert (after[name].float().mean() - before[name].float().mean()).abs() < 1e-6
+        assert any(info["max_change"] > 0 for info in bias_diagnostics.values()), bias_diagnostics
+        for name, info in bias_diagnostics.items():
+            assert info["finite"], f"non-finite query bias after update: {name}"
+            assert abs(info["mean_delta"]) < 1e-6, f"query-bias mean drift in {name}: {info['mean_delta']}"
         on_metrics = {
             "model": trained_uri or "random Hero schema-v2, 4 layers, 16 experts, top-8, latent MoE, ShortConv",
             "model_layers": model_config.num_hidden_layers,
