@@ -172,7 +172,6 @@ class SpeculatorModelConfig:
             "draft_load_config": {"load_format": "runai_streamer"},
         }
 
-
 @dataclass(frozen=True)
 class SpeculatorTrainingConfig:
     """Bounded single-rank online EAGLE update settings."""

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fsspec.spec import AbstractFileSystem
 
-from cloud.iris.artifacts import FileEntry, copy_file_inventory, copy_tree, fs_and_path, relative_object_key
+from cloud.iris.artifacts import FileEntry, copy_file_inventory, copy_tree, file_inventory, fs_and_path
 from cloud.iris.open_mopd_evaluation import (
     GATES,
     SMOKE_MAX_TOKENS,
@@ -210,16 +210,13 @@ def _committed_checkpoint_step(
 
 
 def _checkpoint_model_inventory(filesystem: AbstractFileSystem, target: str) -> tuple[tuple[str, FileEntry], ...]:
-    selected = []
-    for remote_path in filesystem.find(target):
-        relative = relative_object_key(target, remote_path)
-        if (
-            relative == FSDP_CONFIG_NAME
-            or relative.startswith(f"{HUGGINGFACE_METADATA_DIRECTORY}/")
-            or FSDP_MODEL_SHARD_PATTERN.fullmatch(relative)
-        ):
-            selected.append((remote_path, FileEntry(path=relative, size=int(filesystem.info(remote_path)["size"]))))
-    return tuple(sorted(selected, key=lambda item: item[1].path))
+    return tuple(
+        (remote_path, entry)
+        for remote_path, entry in file_inventory(filesystem, target)
+        if entry.path == FSDP_CONFIG_NAME
+        or entry.path.startswith(f"{HUGGINGFACE_METADATA_DIRECTORY}/")
+        or FSDP_MODEL_SHARD_PATTERN.fullmatch(entry.path)
+    )
 
 
 def _validate_checkpoint_files(
