@@ -22,8 +22,8 @@ one.
 
 Grug serving uses the Marin vLLM wheels selected by the root `uv.lock`. The lock
 chooses immutable x86_64 and aarch64 assets for the H100 and GB200 execution
-platforms, respectively. The standard Iris environment verifies `vllm._C`, the
-cuMem allocator, and `GrugMoeForCausalLM` before training starts.
+platforms, respectively. The standard Iris environment verifies the stable vLLM
+libtorch bridge, the cuMem allocator, and `GrugMoeForCausalLM` before training starts.
 
 The eager policy path does not require FlashAttention. Selecting the fused policy
 path still requires a compiled FlashAttention build compatible with the locked

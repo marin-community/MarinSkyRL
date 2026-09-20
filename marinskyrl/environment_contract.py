@@ -83,6 +83,12 @@ HF_HUB_OFFLINE_ENV = "HF_HUB_OFFLINE"
 TRANSFORMERS_OFFLINE_ENV = "TRANSFORMERS_OFFLINE"
 LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
 NVRTC_HOME_ENV = "NVRTC_HOME"
+CUDA_HOME_ENV = "CUDA_HOME"
+LIBRARY_PATH_ENV = "LIBRARY_PATH"
+MAX_JOBS_ENV = "MAX_JOBS"
+CUDA_WHEEL_NAMESPACE = "cu13"
+# Native CUDA compiler workers can consume about 5 GB each; keep cold JITs near a 40 GB host-memory budget.
+DEFAULT_CUDA_JIT_MAX_JOBS = "8"
 RAY_CLUSTER_OWNER_ENV = "SKYRL_RAY_CLUSTER_OWNER"
 NUMA_AFFINITY_ENV = "SKYRL_ENABLE_NUMA_AFFINITY"
 TELEMETRY_ENDPOINT_ENV = "SKYRL_TELEMETRY_ENDPOINT"
@@ -177,6 +183,24 @@ ENV_VAR_SPECS = (
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
     ),
     EnvVarSpec(
+        CUDA_HOME_ENV,
+        "runtime.bootstrap",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
+        LIBRARY_PATH_ENV,
+        "runtime.bootstrap",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
+        MAX_JOBS_ENV,
+        "runtime.bootstrap",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
         RAY_CLUSTER_OWNER_ENV,
         "runtime.ray_cluster",
         EnvVarSource.EXTERNAL,
@@ -236,21 +260,30 @@ _SECRET_BOUNDARIES = {
     "WANDB_API_KEY",
 }
 _BUILD_BOUNDARIES = {
+    "CAUSAL_CONV1D_FORCE_BUILD",
     "CPATH",
+    "CUDA_HOME",
     "CUDNN_PATH",
     "DEBIAN_FRONTEND",
     "DOCKER_CONFIG",
+    "FLASH_ATTENTION_FORCE_BUILD",
+    "FLASH_ATTN_CUDA_ARCHS",
     "LANG",
     "LANGUAGE",
     "LC_ALL",
-    "MAX_JOBS",
+    "MAMBA_FORCE_BUILD",
     "NVCC_THREADS",
+    "NVTE_BUILD_MAX_JOBS",
+    "NVTE_NO_LOCAL_VERSION",
+    "NVTE_PYTORCH_FORCE_BUILD",
+    "PATH",
     "TORCH_CUDA_ARCH_LIST",
     "UV_HTTP_TIMEOUT",
     "UV_PROJECT_ENVIRONMENT",
     "UV_RETRIES",
     "VLLM_FORK_DIR",
     "VLLM_TARGET_DEVICE",
+    "VIRTUAL_ENV",
     "WHEEL_VENV",
 }
 _RUNTIME_BOUNDARIES = {
@@ -274,6 +307,7 @@ _RUNTIME_BOUNDARIES = {
     "LOCAL_RANK",
     "MASTER_ADDR",
     "MASTER_PORT",
+    "MAX_JOBS",
     "MLFLOW_TRACKING_URI",
     "NCCL_CUMEM_ENABLE",
     "NCCL_DEBUG",
@@ -408,6 +442,9 @@ class EnvVarManager:
         passthrough_names = (
             LD_LIBRARY_PATH_ENV,
             NVRTC_HOME_ENV,
+            CUDA_HOME_ENV,
+            LIBRARY_PATH_ENV,
+            MAX_JOBS_ENV,
             TELEMETRY_ENDPOINT_ENV,
             RUN_ID_ENV,
             EXECUTION_UID_ENV,
@@ -468,17 +505,28 @@ class EnvVarManager:
         cls,
         site_packages: list[str],
     ) -> "EnvVarManager":
-        """Resolve Python-wheel CUDA library paths for task and Ray worker processes."""
+        """Resolve Python-wheel CUDA paths and a bounded JIT worker pool for task and Ray worker processes."""
         nvidia_roots = [Path(root) / "nvidia" for root in site_packages if (Path(root) / "nvidia").is_dir()]
         library_paths = sorted(path for root in nvidia_roots for path in root.glob("*/lib") if path.is_dir())
-        nvrtc_homes = [root / "cuda_nvrtc" for root in nvidia_roots if (root / "cuda_nvrtc" / "lib").is_dir()]
+        cuda_roots = [
+            root / CUDA_WHEEL_NAMESPACE for root in nvidia_roots if (root / CUDA_WHEEL_NAMESPACE / "lib").is_dir()
+        ]
         if not library_paths:
             raise RuntimeError("The frozen GPU runtime has no Python-wheel CUDA library directories")
-        if len(nvrtc_homes) != 1:
-            raise RuntimeError(f"The frozen GPU runtime must have exactly one NVRTC home; found {nvrtc_homes}")
+        if len(cuda_roots) != 1:
+            raise RuntimeError(f"The frozen GPU runtime must have exactly one CUDA root; found {cuda_roots}")
 
         library_path = os.pathsep.join(str(path) for path in library_paths)
-        return cls({LD_LIBRARY_PATH_ENV: library_path, NVRTC_HOME_ENV: str(nvrtc_homes[0])})
+        cuda_root = cuda_roots[0]
+        return cls(
+            {
+                LD_LIBRARY_PATH_ENV: library_path,
+                NVRTC_HOME_ENV: str(cuda_root),
+                CUDA_HOME_ENV: str(cuda_root),
+                LIBRARY_PATH_ENV: str(cuda_root.parents[3]),
+                MAX_JOBS_ENV: DEFAULT_CUDA_JIT_MAX_JOBS,
+            }
+        )
 
     def write_shell_activation(self, path: Path, scope: EnvVarScope) -> None:
         """Write managed values as a sourceable shell activation file."""

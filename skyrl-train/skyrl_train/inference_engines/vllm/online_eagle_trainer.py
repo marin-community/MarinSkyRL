@@ -190,7 +190,7 @@ def capture_config_for_worker(config: Mapping[str, Any], *, worker_count: int, w
         worker_count=worker_count,
         worker_index=worker_index,
     )
-    resolved["trainer_rank"] = worker_index
+    resolved.pop("max_sequences_per_prompt_group")
     resolved["capture_target_snapshot"] = worker_index == 0
     return resolved
 

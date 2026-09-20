@@ -112,14 +112,8 @@ from skyrl_train.utils.utils import (
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.utils.logging_utils import log_example
-from skyrl_train.callbacks import (
-    TrainerCallback,
-    TrainerState,
-    TrainerControl,
-    CallbackHandler,
-    DefaultCallbackHandler,
-    RefModelUpdateCallback,
-)
+from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
+from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
 from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (

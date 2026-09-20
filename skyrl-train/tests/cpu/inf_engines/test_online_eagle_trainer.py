@@ -89,9 +89,9 @@ def test_capture_config_activates_every_data_parallel_worker() -> None:
         worker_index=3,
     )
 
-    assert resolved["trainer_rank"] == 3
     assert resolved["capture_target_snapshot"] is False
     assert resolved["max_tokens"] == 32_768
+    assert "max_sequences_per_prompt_group" not in resolved
 
 
 def test_replay_session_id_preserves_loss_boundary_in_request_id() -> None:

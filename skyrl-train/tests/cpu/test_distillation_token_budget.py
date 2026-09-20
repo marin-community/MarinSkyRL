@@ -3,7 +3,8 @@ from types import SimpleNamespace
 import pytest
 from omegaconf import OmegaConf
 
-from skyrl_train.callbacks import DistillationTokenBudgetCallback, TrainerControl, TrainerState
+from skyrl_train.callbacks.base import TrainerControl, TrainerState
+from skyrl_train.callbacks.builtin import DistillationTokenBudgetCallback
 from skyrl_train.callbacks.builtin import create_default_callbacks
 from skyrl_train.config.utils import get_default_config
 
