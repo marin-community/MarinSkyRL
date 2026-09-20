@@ -1016,6 +1016,10 @@ class InferenceEngineClient(InferenceEngineInterface):
             )
         await asyncio.gather(*tasks)
 
+    async def weight_sync_gpu_uuids(self) -> list[str]:
+        receivers = await self._run_on_all_engines("weight_sync_gpu_uuids")
+        return [gpu_uuid for engine_receivers in receivers for gpu_uuid in engine_receivers]
+
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         return await self._run_on_all_engines("update_named_weights", request=request)
 

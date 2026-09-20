@@ -143,6 +143,10 @@ class InferenceEngineInterface(ABC):
     ):
         raise NotImplementedError()
 
+    async def weight_sync_gpu_uuids(self) -> list[str]:
+        """Return one physical GPU UUID per CUDA IPC receiver."""
+        raise NotImplementedError("This inference backend does not expose CUDA IPC receivers")
+
     @abstractmethod
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         raise NotImplementedError()

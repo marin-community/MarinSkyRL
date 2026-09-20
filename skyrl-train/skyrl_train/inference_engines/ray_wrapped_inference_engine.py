@@ -214,6 +214,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
             master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing
         )
 
+    async def weight_sync_gpu_uuids(self) -> list[str]:
+        return await self.inference_engine_actor.weight_sync_gpu_uuids.remote()
+
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         return await self.inference_engine_actor.update_named_weights.remote(request)
 

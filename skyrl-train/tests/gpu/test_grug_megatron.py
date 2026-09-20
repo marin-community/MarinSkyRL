@@ -522,7 +522,8 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
 
 
 @pytest.mark.vllm
-def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tmp_path):
+@pytest.mark.parametrize("serving_world_size", [1, 2])
+def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tmp_path, serving_world_size):
     """A sleep-level-2 CUDA-IPC sync preserves grouped experts and serving output."""
 
     world_size = 2
@@ -535,6 +536,8 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
     # A cold FlashInfer-CUTLASS build stays memory-safe by using the frozen
     # runtime's bounded compiler pool, so allow it to outlive the usual startup window.
     cfg.generator.engine_init_timeout_seconds = 4200
+    cfg.generator.inference_engine_data_parallel_size = serving_world_size
+    cfg.generator.inference_engine_expert_parallel_size = serving_world_size
     # Force each completed tensor into its own transport chunk. Before grouped-export-safe
     # chunking, this threshold split the conversion tasks and silently omitted the experts.
     cfg.generator.weight_transfer_threshold_cuda_ipc_GB = 1e-9
@@ -584,6 +587,15 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
         )
         asyncio.run(client.wake_up(tags=["weights"]))
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+
+        # Repeated publication must release buffers even on training GPUs without
+        # a serving worker. Unconsumed CUDA IPC handles retain their full storage.
+        before_memory = ray.get(policy.async_run_ray_method("pass_through", "get_cuda_memory"))
+        for _ in range(2):
+            ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+        after_memory = ray.get(policy.async_run_ray_method("pass_through", "get_cuda_memory"))
+        for before_rank, after_rank in zip(before_memory, after_memory, strict=True):
+            assert after_rank["allocated"] <= before_rank["allocated"] + 1024**2
 
         assert_engine_weights(client, sync_names, training, [], {})
 
