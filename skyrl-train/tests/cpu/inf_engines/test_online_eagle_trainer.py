@@ -178,7 +178,13 @@ def _write_rank_capture(
     for index, (request_id, group_id) in enumerate(windows):
         window_path = directory / f"window-{index:06d}.safetensors"
         tokens = (tokens_by_request or {}).get(request_id, 3)
-        save_file({"input_ids": torch.arange(tokens)}, str(window_path))
+        save_file(
+            {
+                "input_ids": torch.arange(tokens),
+                "loss_mask": torch.ones(tokens, dtype=torch.bool),
+            },
+            str(window_path),
+        )
         manifest_windows.append(
             {
                 "path": window_path.name,
@@ -240,6 +246,26 @@ def test_capture_merge_is_globally_bounded_and_rank_assignment_independent(tmp_p
         assert manifest["unselected_windows"] == 1
 
     assert selected_orders[0] == selected_orders[1]
+
+
+def test_capture_merge_normalizes_pre_shift_supervised_count(tmp_path: Path) -> None:
+    root = tmp_path / "capture"
+    _write_rank_capture(root, 0, [("request-a", "group-a")])
+    manifest_path = root / "rank-00000" / "manifest.json"
+    rank_manifest = json.loads(manifest_path.read_text())
+    rank_manifest["windows"][0]["supervised_tokens"] = 3
+    manifest_path.write_text(json.dumps(rank_manifest))
+
+    manifest = merge_online_eagle_captures(
+        root,
+        tmp_path / "merged",
+        expected_step=7,
+        max_tokens=10,
+        max_sequences_per_prompt_group=1,
+        max_window_tokens=100,
+    )
+
+    assert manifest["windows"][0]["supervised_tokens"] == 2
 
 
 def test_capture_merge_rejects_different_lineage(tmp_path: Path) -> None:

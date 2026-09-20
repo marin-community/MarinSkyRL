@@ -286,6 +286,13 @@ def _capture_file(capture_dir: Path, relative_path: object) -> Path:
     return path
 
 
+def _window_supervised_tokens(path: Path) -> int:
+    loss_mask = load_file(path, device="cpu")["loss_mask"]
+    if loss_mask.shape[0] < 2:
+        raise ValueError(f"Online EAGLE window is too short: {path}")
+    return int(loss_mask[1:].sum())
+
+
 def _load_and_validate_capture(capture_dir: Path) -> dict[str, Any]:
     manifest_path = capture_dir / ONLINE_EAGLE_MANIFEST_FILENAME
     manifest = json.loads(manifest_path.read_text())
@@ -373,8 +380,15 @@ def merge_online_eagle_captures(
     windows = []
     for index, (directory, window) in enumerate(selected):
         destination_path = f"window-{index:06d}.safetensors"
-        shutil.copyfile(_capture_file(directory, window["path"]), output_dir / destination_path)
-        windows.append({**window, "path": destination_path})
+        source_path = _capture_file(directory, window["path"])
+        shutil.copyfile(source_path, output_dir / destination_path)
+        windows.append(
+            {
+                **window,
+                "path": destination_path,
+                "supervised_tokens": _window_supervised_tokens(source_path),
+            }
+        )
     shutil.copyfile(
         _capture_file(baseline_directory, baseline_target["weights_path"]),
         output_dir / ONLINE_EAGLE_TARGET_WEIGHTS_FILENAME,
