@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 
 def _convolve(x: torch.Tensor, weight: torch.Tensor, history: torch.Tensor) -> torch.Tensor:
-    # Levanter accumulates taps in FP32 and rounds once at the output.
+    # Accumulate taps in FP32 and round once at the output.
     joined = torch.cat((history, x), dim=0).permute(1, 2, 0).float()
     kernel = weight.flip(0).T.unsqueeze(1).float()
     return F.conv1d(joined, kernel, groups=x.shape[-1]).permute(2, 0, 1).to(x.dtype)
