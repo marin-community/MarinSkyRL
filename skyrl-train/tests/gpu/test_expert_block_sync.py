@@ -223,7 +223,7 @@ def test_expert_block_sync_installs_exact_weights_across_two_updates(tmp_path, n
             f"policy_pp={geometry.policy_pp} "
             f"policy_ep={geometry.policy_ep} engines={geometry.engines} "
             f"engine_dp={geometry.engine_dp} engine_pp={geometry.engine_pp} syncs=2 byte_equal=true "
-            f"corruption_rejected=true prepare_seconds={timings['prepare']} "
+            f"corruption_tested={encoding == ExpertBlockEncoding.DENSE} prepare_seconds={timings['prepare']} "
             f"install_seconds={[timings[f'install_{v}'].install_seconds for v in (1, 2)]} "
             f"verify_seconds={[timings[f'verify_{v}']['verify_seconds'] for v in (1, 2)]} "
             f"paused_seconds={[timings[f'paused_{v}'] for v in (1, 2)]} "
