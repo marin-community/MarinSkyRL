@@ -1,4 +1,4 @@
-"""Replay actual vLLM expert IDs through a feature-complete tiny Hero update."""
+"""Replay actual vLLM expert IDs through tiny or trained Hero updates."""
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -29,9 +29,8 @@ from tests.gpu.test_grug_megatron import (
     _config,
     _init_policy,
     _megatron_response_logprobs,
-    _train_step,
 )
-from tests.gpu.test_hero_megatron import write_tiny_hero_checkpoint
+from tests.gpu.test_hero_megatron import _train_step, write_tiny_hero_checkpoint
 
 
 @pytest.mark.vllm
@@ -83,13 +82,33 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         replayed = _score(policy, batch, captured)
         serving = torch.tensor(rollout["response_logprobs"], dtype=torch.float32)
         valid = batch["response_mask"].bool()
+        score_diagnostic = {
+            "phase": "after_score",
+            "model": trained_uri or "random Hero schema-v2",
+            "native_response_logprobs": native.tolist(),
+            "replay_response_logprobs": replayed.tolist(),
+            "serving_response_logprobs": serving.tolist(),
+            "native_replay_max_abs": (native - replayed)[valid].abs().max().item(),
+        }
+        print("LIVE_HERO_REPLAY_SCORE_STATUS=" + json.dumps(score_diagnostic, sort_keys=True), flush=True)
+        result_uri = os.environ.get("HERO_REPLAY_RESULT_URI")
+        if result_uri:
+            _put_s3_json(result_uri, score_diagnostic)
         batch["action_log_probs"] = replayed.float()
         status = _train_step(policy, batch)
+        after = rank0_validation_snapshot(policy, names)
         train_diagnostic = {
             "phase": "after_train",
             "model": trained_uri or "random Hero schema-v2",
             "native_logprob_max_abs": (native - serving)[valid].abs().max().item(),
             "replay_logprob_max_abs": (replayed - serving)[valid].abs().max().item(),
+            "native_replay_max_abs": score_diagnostic["native_replay_max_abs"],
+            "router_weight_max_change": (
+                after["model.layers.0.mlp.router.weight"] - before["model.layers.0.mlp.router.weight"]
+            )
+            .abs()
+            .max()
+            .item(),
             "status": {
                 key: float(value)
                 for key, value in status.items()
@@ -98,7 +117,6 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
             },
         }
         print("LIVE_HERO_REPLAY_TRAIN_STATUS=" + json.dumps(train_diagnostic, sort_keys=True), flush=True)
-        result_uri = os.environ.get("HERO_REPLAY_RESULT_URI")
         if result_uri:
             _put_s3_json(result_uri, train_diagnostic)
         assert status["router_replay/hit_fraction"] == 1.0, status
@@ -106,7 +124,6 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         assert status["router_replay/router_grad_norm"] > 0.0, status
         assert status["router_replay/query_bias_max_change"] > 0.0, status
         assert status["log_ratio_abs_max"] < 1e-3, status
-        after = rank0_validation_snapshot(policy, names)
         assert not torch.equal(after["model.layers.0.mlp.router.weight"], before["model.layers.0.mlp.router.weight"])
         assert any(not torch.equal(after[name], before[name]) for name in bias_names)
         for name in bias_names:
