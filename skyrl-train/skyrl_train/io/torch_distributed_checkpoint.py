@@ -1,14 +1,16 @@
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from collections import deque
 from concurrent.futures import Future as ConcurrentFuture, ThreadPoolExecutor
 from contextlib import contextmanager
 import io
 import os
-from typing import cast, Protocol, runtime_checkable
+from typing import Protocol, TypeVar, cast, runtime_checkable
 
 from fsspec import AbstractFileSystem
 from loguru import logger
 import torch
+import torch.distributed as dist
+from torch.distributed.checkpoint.api import CheckpointException
 from torch.distributed.checkpoint import FileSystemWriter, SavePlan, SavePlanner
 from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as FsspecFileSystem
 from torch.distributed.checkpoint.filesystem import (
@@ -29,6 +31,34 @@ DEFAULT_TENSOR_COPY_AHEAD_BYTES = 2**30
 DEFAULT_S3_MULTIPART_PART_BYTES = 64 * 2**20
 DEFAULT_S3_MULTIPART_CONCURRENCY = 4
 _MINIMUM_S3_MULTIPART_PART_BYTES = 5 * 2**20
+_T = TypeVar("_T")
+
+
+def raise_if_any_rank_checkpoint_failed(local_error: BaseException | None) -> None:
+    """Raise on every rank when any rank's synchronous checkpoint save failed."""
+    if not dist.is_initialized():
+        if local_error is not None:
+            raise RuntimeError("Distributed checkpoint save failed") from local_error
+        return
+
+    backend = dist.get_backend()
+    device = torch.device("cuda", torch.cuda.current_device()) if backend == dist.Backend.NCCL else torch.device("cpu")
+    failed = torch.tensor([local_error is not None], dtype=torch.int32, device=device)
+    dist.all_reduce(failed, op=dist.ReduceOp.MAX)
+    if failed.item():
+        raise RuntimeError("Distributed checkpoint save failed on at least one rank") from local_error
+
+
+def save_checkpoint_and_propagate_failure(save: Callable[[], _T]) -> _T:
+    """Run a synchronous save and make a local failure visible to every rank."""
+    local_error = None
+    result = None
+    try:
+        result = save()
+    except (Exception, CheckpointException) as exc:
+        local_error = exc
+    raise_if_any_rank_checkpoint_failed(local_error)
+    return cast(_T, result)
 
 
 @runtime_checkable

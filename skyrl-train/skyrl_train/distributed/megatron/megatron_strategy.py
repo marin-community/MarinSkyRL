@@ -26,6 +26,7 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     load_megatron_grads_to_gpu,
 )
 from skyrl_train.distributed.megatron.direct_checkpoint import DirectS3TorchDistSaveShardedStrategy
+from skyrl_train.io.torch_distributed_checkpoint import save_checkpoint_and_propagate_failure
 from skyrl_train.io.s3fs import abort_multipart_uploads
 
 from megatron.core.dist_checkpointing.strategies import base as ckpt_base
@@ -236,12 +237,14 @@ class MegatronStrategy(DistributedStrategy):
 
         with io.local_work_dir(ckpt_dir) as work_dir:
             # TODO(tgriggs): Support configurable async saves.
-            async_save_request = dist_checkpointing.save(
-                sharded_state_dict=sharded_state_dict,
-                checkpoint_dir=work_dir,
-                sharded_strategy=save_strategy,
-                async_sharded_save=False,
-                validate_access_integrity=True,
+            async_save_request = save_checkpoint_and_propagate_failure(
+                lambda: dist_checkpointing.save(
+                    sharded_state_dict=sharded_state_dict,
+                    checkpoint_dir=work_dir,
+                    sharded_strategy=save_strategy,
+                    async_sharded_save=False,
+                    validate_access_integrity=True,
+                )
             )
             assert async_save_request is None, "Async save is not yet supported for Megatron"
 

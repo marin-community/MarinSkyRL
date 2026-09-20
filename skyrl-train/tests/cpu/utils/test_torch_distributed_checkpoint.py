@@ -1,3 +1,4 @@
+import tempfile
 import threading
 import warnings
 
@@ -5,6 +6,7 @@ import fsspec
 from fsspec import AbstractFileSystem
 import pytest
 import torch
+import torch.multiprocessing as mp
 from torch.distributed import checkpoint
 from torch.distributed.checkpoint.api import CheckpointException
 
@@ -12,7 +14,38 @@ from skyrl_train.io.torch_distributed_checkpoint import (
     _ConcurrentS3WriteStream,
     _MINIMUM_S3_MULTIPART_PART_BYTES,
     StreamingFsspecWriter,
+    save_checkpoint_and_propagate_failure,
 )
+from tests.cpu.util import gloo_process_group
+from tests.distributed_runtime_constants import CPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS
+
+
+def _checkpoint_failure_worker(rank: int, world_size: int, port: int) -> None:
+    with gloo_process_group(rank, world_size, port, timeout_seconds=CPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS):
+        with pytest.raises(RuntimeError) as exc_info:
+
+            def save_locally() -> None:
+                if rank == 0:
+                    checkpoint.save(
+                        {"tensor": torch.arange(8)},
+                        storage_writer=StreamingFsspecWriter(
+                            "memory://failed-rank-checkpoint/step", filesystem=_FailingFilesystem()
+                        ),
+                        no_dist=True,
+                    )
+                else:
+                    with tempfile.TemporaryDirectory() as checkpoint_dir:
+                        checkpoint.save({"tensor": torch.arange(8)}, checkpoint_id=checkpoint_dir, no_dist=True)
+
+            save_checkpoint_and_propagate_failure(save_locally)
+        if rank == 0:
+            assert isinstance(exc_info.value.__cause__, CheckpointException)
+        else:
+            assert exc_info.value.__cause__ is None
+
+
+def test_checkpoint_failure_is_raised_on_every_rank(unused_tcp_port):
+    mp.spawn(_checkpoint_failure_worker, args=(2, unused_tcp_port), nprocs=2, join=True)
 
 
 def test_streaming_fsspec_writer_round_trips_one_aggregated_object_per_rank():
