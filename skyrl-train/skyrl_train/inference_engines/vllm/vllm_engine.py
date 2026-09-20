@@ -382,6 +382,8 @@ class WorkerWrap:
             with tempfile.TemporaryDirectory(prefix="marinskyrl-eagle-capture-") as scratch:
                 rank_output_dir = capture_rank_directory(Path(scratch), worker_rank)
                 result = self.model_runner.seal_online_eagle_capture(str(rank_output_dir))
+                if not result.get("active", False):
+                    return result
                 io.upload_directory(str(rank_output_dir), rank_destination)
         except Exception as error:
             logger.exception("Online EAGLE capture seal or publication failed for worker rank {}", worker_rank)
@@ -390,7 +392,7 @@ class WorkerWrap:
                 "worker_rank": worker_rank,
                 "error": f"{type(error).__name__}: {error}",
             }
-        return {**result, "active": True, "path": rank_destination}
+        return {**result, "path": rank_destination}
 
     def init_weight_update_communicator(
         self,
