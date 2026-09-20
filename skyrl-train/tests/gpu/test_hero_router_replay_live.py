@@ -25,6 +25,7 @@ from tests.gpu.grug_serving import (
     rank0_validation_snapshot,
     rollout_training_batch,
 )
+from tests.gpu.hero_replay_checkpoint import split_stacked_hero_checkpoint
 from tests.gpu.test_grug_megatron import (
     _config,
     _init_policy,
@@ -40,9 +41,16 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
     require_hoppers(policy_world_size + 1)
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     model_path = tmp_path / "hero"
-    model_path.mkdir()
-    staged_bytes = _stage_trained_checkpoint(trained_uri, model_path) if trained_uri else 0
-    if not trained_uri:
+    staged_bytes = 0
+    split_tensors = 0
+    if trained_uri:
+        stacked_path = tmp_path / "hero-source"
+        stacked_path.mkdir()
+        staged_bytes = _stage_trained_checkpoint(trained_uri, stacked_path)
+        split_tensors = split_stacked_hero_checkpoint(stacked_path, model_path)
+        assert split_tensors > 0, "trained export unexpectedly had no stacked experts to split"
+    else:
+        model_path.mkdir()
         write_tiny_hero_checkpoint(model_path)
     model_config = GrugMoeConfig.from_pretrained(model_path)
     cfg = _config(str(model_path), world_size=policy_world_size, pp=1, ep=policy_world_size)
@@ -58,7 +66,18 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
     prompts = [[1, 17 + row, 29, 5, 11, 3] for row in range(4)]
     bias_names = [f"model.layers.{layer}.mlp.router.bias" for layer in range(model_config.num_hidden_layers)]
     names = ["model.layers.0.mlp.router.weight", *bias_names]
-    if not trained_uri:
+    if trained_uri:
+        names.extend(
+            [
+                "model.layers.0.mlp.experts.3.gate_proj.weight",
+                f"model.layers.{model_config.num_hidden_layers - 1}.mlp.experts."
+                f"{model_config.num_local_experts - 1}.gate_proj.weight",
+                "model.layers.0.mlp.latent_down_proj.weight",
+                "model.layers.0.shared_experts.1.up_proj.weight",
+                "model.layers.0.self_attn.sconv_k.weight",
+            ]
+        )
+    else:
         names.insert(0, "lm_head.weight")
     sampling = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
     sampling.update(temperature=0.0, max_tokens=4, ignore_eos=True, logprobs=1)
@@ -85,6 +104,7 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         score_diagnostic = {
             "phase": "after_score",
             "model": trained_uri or "random Hero schema-v2",
+            "converted_split_expert_tensors": split_tensors,
             "native_response_logprobs": native.tolist(),
             "replay_response_logprobs": replayed.tolist(),
             "serving_response_logprobs": serving.tolist(),
@@ -100,6 +120,7 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         train_diagnostic = {
             "phase": "after_train",
             "model": trained_uri or "random Hero schema-v2",
+            "score_diagnostic": score_diagnostic,
             "native_logprob_max_abs": (native - serving)[valid].abs().max().item(),
             "replay_logprob_max_abs": (replayed - serving)[valid].abs().max().item(),
             "native_replay_max_abs": score_diagnostic["native_replay_max_abs"],
@@ -134,6 +155,8 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
             "model_layers": model_config.num_hidden_layers,
             "model_experts": model_config.num_local_experts,
             "staged_checkpoint_bytes": staged_bytes,
+            "converted_split_expert_tensors": split_tensors,
+            "score_diagnostic": score_diagnostic,
             "layout": f"vLLM TP1/EP1; Megatron TP1/PP1/EP{policy_world_size}/CP1",
             "captured_shape": list(captured.shape),
             "native_logprob_max_abs": (native - serving)[valid].abs().max().item(),
