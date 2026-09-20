@@ -3079,8 +3079,8 @@ vllm = [
     { name = "torchcodec", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "torchdata", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "torchvision", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
-    { name = "vllm", version = "0.0.0.dev20260920+marin.9d1ccba766fc.cu132", source = { url = "https://github.com/marin-community/vllm/releases/download/hero-megatron-cu132-9d1ccba766fc/vllm-0.0.0.dev20260920+marin.9d1ccba766fc.cu132-cp312-cp312-linux_aarch64.whl" }, marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-fsdp') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
-    { name = "vllm", version = "0.0.0.dev20260920+marin.9d1ccba766fc.cu132", source = { url = "https://github.com/marin-community/vllm/releases/download/hero-megatron-cu132-9d1ccba766fc/vllm-0.0.0.dev20260920+marin.9d1ccba766fc.cu132-cp312-cp312-linux_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-fsdp') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+    { name = "vllm", version = "0.0.0.dev20260920+marin.9ff94e459611.cu132", source = { url = "https://github.com/yonromai/vllm/releases/download/hero-megatron-cu132-9ff94e459611/vllm-0.0.0.dev20260920+marin.9ff94e459611.cu132-cp312-cp312-linux_aarch64.whl" }, marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-fsdp') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+    { name = "vllm", version = "0.0.0.dev20260920+marin.9ff94e459611.cu132", source = { url = "https://github.com/yonromai/vllm/releases/download/hero-megatron-cu132-9ff94e459611/vllm-0.0.0.dev20260920+marin.9ff94e459611.cu132-cp312-cp312-linux_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-fsdp') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
 
 [package.dev-dependencies]
@@ -3229,9 +3229,9 @@ requires-dist = [
     { name = "transformers", specifier = "==5.16.1" },
     { name = "uvicorn" },
     { name = "verifiable-instructions", git = "https://github.com/abukharin-nv/verifiable-instructions.git?rev=f46a5ac87b1400a4f8973039844b6be9b56e3faf" },
-    { name = "vllm", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/hero-megatron-cu132-9d1ccba766fc/vllm-0.0.0.dev20260920+marin.9d1ccba766fc.cu132-cp312-cp312-linux_aarch64.whl" },
-    { name = "vllm", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.0.0.dev20260920+marin.9d1ccba766fc.cu132" },
-    { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/hero-megatron-cu132-9d1ccba766fc/vllm-0.0.0.dev20260920+marin.9d1ccba766fc.cu132-cp312-cp312-linux_x86_64.whl" },
+    { name = "vllm", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/yonromai/vllm/releases/download/hero-megatron-cu132-9ff94e459611/vllm-0.0.0.dev20260920+marin.9ff94e459611.cu132-cp312-cp312-linux_aarch64.whl" },
+    { name = "vllm", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.0.0.dev20260920+marin.9ff94e459611.cu132" },
+    { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/yonromai/vllm/releases/download/hero-megatron-cu132-9ff94e459611/vllm-0.0.0.dev20260920+marin.9ff94e459611.cu132-cp312-cp312-linux_x86_64.whl" },
     { name = "wandb" },
     { name = "xmltodict" },
 ]
@@ -7276,8 +7276,8 @@ wheels = [
 
 [[package]]
 name = "vllm"
-version = "0.0.0.dev20260920+marin.9d1ccba766fc.cu132"
-source = { url = "https://github.com/marin-community/vllm/releases/download/hero-megatron-cu132-9d1ccba766fc/vllm-0.0.0.dev20260920+marin.9d1ccba766fc.cu132-cp312-cp312-linux_aarch64.whl" }
+version = "0.0.0.dev20260920+marin.9ff94e459611.cu132"
+source = { url = "https://github.com/yonromai/vllm/releases/download/hero-megatron-cu132-9ff94e459611/vllm-0.0.0.dev20260920+marin.9ff94e459611.cu132-cp312-cp312-linux_aarch64.whl" }
 resolution-markers = [
     "platform_machine == 'aarch64' and sys_platform == 'linux'",
 ]
@@ -7359,7 +7359,7 @@ dependencies = [
     { name = "xgrammar", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/vllm/releases/download/hero-megatron-cu132-9d1ccba766fc/vllm-0.0.0.dev20260920+marin.9d1ccba766fc.cu132-cp312-cp312-linux_aarch64.whl", hash = "sha256:d591c0e5f437766ae0674fec3aa684b61113941a963ce4056619e1c6f37b1213" },
+    { url = "https://github.com/yonromai/vllm/releases/download/hero-megatron-cu132-9ff94e459611/vllm-0.0.0.dev20260920+marin.9ff94e459611.cu132-cp312-cp312-linux_aarch64.whl", hash = "sha256:54214917b02522d140e5ec66064a2e3d32de751b6494bff40c79db94204ac9de" },
 ]
 
 [package.metadata]
@@ -7469,8 +7469,8 @@ provides-extras = ["zen", "bench", "tensorizer", "fastsafetensors", "instanttens
 
 [[package]]
 name = "vllm"
-version = "0.0.0.dev20260920+marin.9d1ccba766fc.cu132"
-source = { url = "https://github.com/marin-community/vllm/releases/download/hero-megatron-cu132-9d1ccba766fc/vllm-0.0.0.dev20260920+marin.9d1ccba766fc.cu132-cp312-cp312-linux_x86_64.whl" }
+version = "0.0.0.dev20260920+marin.9ff94e459611.cu132"
+source = { url = "https://github.com/yonromai/vllm/releases/download/hero-megatron-cu132-9ff94e459611/vllm-0.0.0.dev20260920+marin.9ff94e459611.cu132-cp312-cp312-linux_x86_64.whl" }
 resolution-markers = [
     "platform_machine == 'x86_64' and sys_platform == 'linux'",
 ]
@@ -7552,7 +7552,7 @@ dependencies = [
     { name = "xgrammar", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/vllm/releases/download/hero-megatron-cu132-9d1ccba766fc/vllm-0.0.0.dev20260920+marin.9d1ccba766fc.cu132-cp312-cp312-linux_x86_64.whl", hash = "sha256:7961b8e15b13f45dfa4ddf69b244f8b806886c0ce565b5da0bf6c055b24d764a" },
+    { url = "https://github.com/yonromai/vllm/releases/download/hero-megatron-cu132-9ff94e459611/vllm-0.0.0.dev20260920+marin.9ff94e459611.cu132-cp312-cp312-linux_x86_64.whl", hash = "sha256:0729ef1dfbef437f3dcbb0760285f55790a803379ec59743e648988caefd0e08" },
 ]
 
 [package.metadata]
