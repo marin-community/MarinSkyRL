@@ -131,6 +131,14 @@ def test_hero_worker_repeated_updates(tmp_path, tp, pp, ep, cp, packing, overlap
         for name in names:
             expected = original[name] if name.endswith("router.bias") else original[name].to(torch.bfloat16).float()
             torch.testing.assert_close(before[name], expected, rtol=0, atol=0)
+        selected_names = [
+            "model.layers.0.mlp.experts.3.gate_proj.weight",
+            "model.layers.0.mlp.experts.15.down_proj.weight",
+        ]
+        selected = rank0_validation_snapshot(policy, selected_names)
+        assert set(selected) == set(selected_names)
+        for name in selected_names:
+            torch.testing.assert_close(selected[name], before[name], rtol=0, atol=0)
         initial_scores = _megatron_response_logprobs(policy, batch)
         assert torch.isfinite(initial_scores).all()
         repeated_scores = _megatron_response_logprobs(policy, batch)

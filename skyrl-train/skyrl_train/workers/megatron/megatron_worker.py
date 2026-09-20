@@ -8,6 +8,7 @@ from huggingface_hub import snapshot_download
 import asyncio
 import importlib.util
 import os
+import re
 from enum import StrEnum
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
@@ -807,10 +808,22 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         is_rank0 = torch.distributed.get_rank() == 0
         weights = {}
         tasks = []
+        # Bridge gathers the same local expert index from every EP rank. Include
+        # its peer experts in the conversion stream even when only one is read.
+        conversion_names = set(wanted)
+        ep_size = mpu.get_expert_model_parallel_world_size()
+        experts_per_rank = self.provider.num_moe_experts // ep_size
+        for name in wanted:
+            match = re.search(r"\.experts\.(\d+)\.", name)
+            if match is not None:
+                local_expert = int(match.group(1)) % experts_per_rank
+                for ep_rank in range(ep_size):
+                    expert = str(local_expert + ep_rank * experts_per_rank)
+                    conversion_names.add(name[: match.start(1)] + expert + name[match.end(1) :])
         for task in self.bridge.get_conversion_tasks(self.actor_module):
             hf_names = task.mapping.hf_param
             hf_names = (hf_names,) if isinstance(hf_names, str) else hf_names.values()
-            if wanted.intersection(hf_names):
+            if conversion_names.intersection(hf_names):
                 tasks.append(task)
         for name, tensor in self.bridge.export_hf_weights(
             self.actor_module, show_progress=False, conversion_tasks=tasks
