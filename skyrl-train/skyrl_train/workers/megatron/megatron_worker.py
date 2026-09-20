@@ -884,6 +884,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         layer.register_forward_hook(after_layer),
                     )
                 )
+                if layer_index == 0:
+
+                    def before_sconv_mlp(_module, args, kwargs, *, capture_fn=capture):
+                        value = args[0] if args else kwargs["hidden_states"]
+                        capture_fn("before_sconv_mlp", value)
+
+                    def after_sconv_mlp(_module, _args, output, *, capture_fn=capture):
+                        capture_fn("after_sconv_mlp", output)
+
+                    self._grug_trace_hooks.extend(
+                        (
+                            layer.sconv_mlp.register_forward_pre_hook(before_sconv_mlp, with_kwargs=True),
+                            layer.sconv_mlp.register_forward_hook(after_sconv_mlp),
+                        )
+                    )
         return {"rank": rank, "layers": len(seen)}
 
     def finish_grug_layer_trace(self):

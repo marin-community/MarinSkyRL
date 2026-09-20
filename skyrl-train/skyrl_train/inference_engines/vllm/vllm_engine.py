@@ -316,6 +316,22 @@ class WorkerWrap:
                     layer.register_forward_hook(after_layer),
                 )
             )
+            if layer_index == 0:
+                if layer.sconv_mlp is None:
+                    raise ValueError("Hero layer-0 trace needs MLP ShortConv")
+
+                def before_sconv_mlp(_module, args, *, capture_fn=capture):
+                    capture_fn("before_sconv_mlp", args[0])
+
+                def after_sconv_mlp(_module, _args, output, *, capture_fn=capture):
+                    capture_fn("after_sconv_mlp", output)
+
+                hooks.extend(
+                    (
+                        layer.sconv_mlp.register_forward_pre_hook(before_sconv_mlp),
+                        layer.sconv_mlp.register_forward_hook(after_sconv_mlp),
+                    )
+                )
 
         self._hero_trace_hooks = hooks
         self._hero_trace_values = traces

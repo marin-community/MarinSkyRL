@@ -113,7 +113,10 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
         metrics = {}
         for layer in range(model_config.num_hidden_layers):
             metrics[str(layer)] = {}
-            for site in ("model_input", "after_attn", "mlp_input", "after_block"):
+            sites = ["model_input", "after_attn", "mlp_input", "after_block"]
+            if layer == 0:
+                sites.extend(("before_sconv_mlp", "after_sconv_mlp"))
+            for site in sites:
                 key = f"layer_{layer}_{site}"
                 serving = vllm_trace[key].numpy()
                 calls = mega_trace[key]
