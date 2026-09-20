@@ -1071,28 +1071,31 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     async def _sync_policy_weights_and_offload_optimizer(
         self, *, sync_phase: Literal["initial", "training_step"]
     ) -> None:
+        timings = self.all_timings if sync_phase == "training_step" else self.all_startup_timings
         # Expert-block sync writes into live engine parameters, so the first sync pauses generation too.
         pause = sync_phase == "training_step" or self._expert_block_sync is not None
         if pause:
-            await self.inference_engine_client.pause_generation()
+            with Timer("weight_publication/pause_seconds", timings, log_events=False):
+                await self.inference_engine_client.pause_generation()
         # The shared training path backloads optimizer state before every step when
         # offload_optimizer_during_rollouts is enabled. Offload after each update,
         # including the initial sync, so Megatron gradient buffers are not resized
         # while still resident on the GPU.
-        timings = self.all_timings if sync_phase == "training_step" else self.all_startup_timings
         await asyncio.to_thread(self._offload_policy_optimizer, timings, timer_label="offload_policy_optimizer_to_cpu")
         await self.async_sync_policy_weights_to_inference_engines()
         # A hard sync point leaves every policy rank free before the next forward.
         try:
-            await self._drain_policy_event_loops()
+            with Timer("weight_publication/post_drain_seconds", timings, log_events=False):
+                await self._drain_policy_event_loops()
             if pause:
-                await self.inference_engine_client.resume_generation()
+                with Timer("weight_publication/resume_seconds", timings, log_events=False):
+                    await self.inference_engine_client.resume_generation()
         except BaseException as exc:
             if self._expert_block_sync is not None and self._expert_block_sync.pending_version is not None:
                 self._expert_block_sync.fail_closed(exc)
             raise
         if self._expert_block_sync is not None:
-            await self._expert_block_sync.commit(self.global_step)
+            timings.update(await self._expert_block_sync.commit(self.global_step))
 
     async def _run_training(self, training_input: TrainingInputBatch):
         # TODO(Charlie): share this code with the one-step-off async trainer.
@@ -1267,26 +1270,27 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # policy_train->sync_weights transition). Symmetric to the POST-broadcast drain at
         # the call sites + the ppo_train entry barrier (worker.py); reuses the proven
         # async-loop-safe barrier_all (WORLD PG >> the 600s submesh default).
-        await self._drain_policy_event_loops()
+        with Timer("weight_publication/pre_drain_seconds", self.all_timings, log_events=False):
+            await self._drain_policy_event_loops()
         if self._expert_block_sync is not None:
-            timings = await self._expert_block_sync.sync(self.global_step)
-            self.all_timings.update(timings.as_metrics())
+            sync_timings = await self._expert_block_sync.sync(self.global_step)
+            self.all_timings.update(sync_timings.as_metrics())
             logger.info(
                 "Expert-block sync: step={} encoding={} install_seconds={:.3f} policy_seconds={:.3f} "
                 "receiver_seconds={:.3f} expert_seconds={:.3f} dense_seconds={:.3f} changed_density={:.4f} "
                 "expert_dense_bytes={} expert_encoded_bytes={} buckets={} collectives={}",
                 self.global_step,
-                "sparse_index" if timings.sparse else "dense",
-                timings.install_seconds,
-                timings.policy_seconds,
-                timings.receiver_seconds,
-                timings.expert_seconds,
-                timings.dense_seconds,
-                timings.changed_density,
-                timings.logical_dense_bytes,
-                timings.encoded_bytes,
-                timings.expert_buckets,
-                timings.expert_collectives,
+                "sparse_index" if sync_timings.sparse else "dense",
+                sync_timings.install_seconds,
+                sync_timings.policy_seconds,
+                sync_timings.receiver_seconds,
+                sync_timings.expert_seconds,
+                sync_timings.dense_seconds,
+                sync_timings.changed_density,
+                sync_timings.logical_dense_bytes,
+                sync_timings.encoded_bytes,
+                sync_timings.expert_buckets,
+                sync_timings.expert_collectives,
             )
             if self.cfg.generator.expert_block_sync.verify:
                 try:

@@ -10,6 +10,8 @@ one it just finished.
 """
 
 from dataclasses import asdict
+import resource
+import time
 
 import torch
 
@@ -122,6 +124,12 @@ class ExpertBlockSender:
         version = update_info["version"]
         if self.failed or self.pending_version != version or self.stream is None:
             raise RuntimeError(f"Sender cannot commit expert-block publication {version}")
+        device = self.stream.device
+        gpu_allocated_before = 0
+        if device.type == "cuda":
+            gpu_allocated_before = torch.cuda.memory_allocated(device)
+            torch.cuda.reset_peak_memory_stats(device)
+        started = time.perf_counter()
         try:
             if storage_identity(self.sources) != self.identity:
                 raise RuntimeError("Policy parameter storage changed before baseline commit")
@@ -140,7 +148,18 @@ class ExpertBlockSender:
             self.failed = True
             raise
         self.pending_version = None
-        return {"participant": self.stream.participant, "version": version}
+        gpu_allocated_after = torch.cuda.memory_allocated(device) if device.type == "cuda" else 0
+        gpu_peak_allocated = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
+        return {
+            "participant": self.stream.participant,
+            "version": version,
+            "seconds": time.perf_counter() - started,
+            "baseline_bytes": sum(value.numel() * value.element_size() for value in self.baseline.values()),
+            "gpu_allocated_before_bytes": gpu_allocated_before,
+            "gpu_allocated_after_bytes": gpu_allocated_after,
+            "gpu_peak_allocated_bytes": gpu_peak_allocated,
+            "cpu_peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
+        }
 
     def verify(self, update_info: dict) -> dict:
         """Send this rank's weights again, and check that its data-parallel peers hold the same bytes."""

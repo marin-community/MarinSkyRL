@@ -7,6 +7,7 @@ vLLM, so it is received into scratch and copied.
 """
 
 from dataclasses import dataclass
+import resource
 import time
 
 import torch
@@ -56,6 +57,10 @@ class InstallReport:
     pack_seconds: float = 0.0
     transfer_seconds: float = 0.0
     apply_seconds: float = 0.0
+    gpu_allocated_before_bytes: int = 0
+    gpu_allocated_after_bytes: int = 0
+    gpu_peak_allocated_bytes: int = 0
+    cpu_peak_rss_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -183,6 +188,10 @@ class Stream:
 
     def _run(self, version: int, *, sparse: bool, baseline: dict[str, torch.Tensor] | None) -> InstallReport:
         self._sync_device()
+        gpu_allocated_before = 0
+        if self.device.type == "cuda":
+            gpu_allocated_before = torch.cuda.memory_allocated(self.device)
+            torch.cuda.reset_peak_memory_stats(self.device)
         started = time.perf_counter()
         matrices = wire_bytes = 0
         experts_done = None
@@ -212,6 +221,8 @@ class Stream:
         if experts_done is None:
             experts_done = finished
         expert_bytes = sparse_stats.logical_bytes if sparse_stats else self.expert_bytes
+        gpu_allocated_after = torch.cuda.memory_allocated(self.device) if self.device.type == "cuda" else 0
+        gpu_peak_allocated = torch.cuda.max_memory_allocated(self.device) if self.device.type == "cuda" else 0
         return InstallReport(
             self.participant,
             version,
@@ -230,6 +241,10 @@ class Stream:
             pack_seconds=sparse_stats.pack_seconds if sparse_stats else 0.0,
             transfer_seconds=sparse_stats.transfer_seconds if sparse_stats else 0.0,
             apply_seconds=sparse_stats.apply_seconds if sparse_stats else 0.0,
+            gpu_allocated_before_bytes=gpu_allocated_before,
+            gpu_allocated_after_bytes=gpu_allocated_after,
+            gpu_peak_allocated_bytes=gpu_peak_allocated,
+            cpu_peak_rss_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
         )
 
     def local_group(self) -> tuple[str, tuple[int, ...]] | None:

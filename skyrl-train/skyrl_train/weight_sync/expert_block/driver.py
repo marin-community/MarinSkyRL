@@ -56,6 +56,12 @@ class SyncTimings:
     pack_seconds: float = 0.0
     transfer_seconds: float = 0.0
     apply_seconds: float = 0.0
+    sender_gpu_peak_bytes: int = 0
+    sender_gpu_peak_transient_bytes: int = 0
+    receiver_gpu_peak_bytes: int = 0
+    receiver_gpu_peak_transient_bytes: int = 0
+    sender_cpu_peak_rss_bytes: int = 0
+    receiver_cpu_peak_rss_bytes: int = 0
 
     def as_metrics(self) -> dict[str, float]:
         values = asdict(self)
@@ -250,12 +256,13 @@ class ExpertBlockSync:
             f"Expert-block publication may have left receiver state partial; restart or dense reseeding is required: {cause}"
         ) from cause
 
-    async def commit(self, version: int) -> None:
+    async def commit(self, version: int) -> dict[str, float]:
         """Commit sender baselines only after all receivers acknowledged and generation resumed."""
         if self.encoding != ExpertBlockEncoding.SPARSE_INDEX:
-            return
+            return {}
         if self.failed or self.pending_version != version or self.client.generation_paused_event.is_set():
             raise RuntimeError("Sparse expert publication cannot commit before acknowledged resume")
+        started = time.perf_counter()
         try:
             reports = await self._policy("commit", {"version": version})
             if sorted((row["participant"], row["version"]) for row in reports) != [
@@ -266,6 +273,20 @@ class ExpertBlockSync:
             self.fail_closed(exc)
         self.pending_version = None
         self.seeded = True
+        return {
+            "expert_block_sync/commit_seconds": time.perf_counter() - started,
+            "expert_block_sync/baseline_commit_rank_max_seconds": max(row.get("seconds", 0.0) for row in reports),
+            "expert_block_sync/sender_baseline_bytes": sum(row.get("baseline_bytes", 0) for row in reports),
+            "expert_block_sync/sender_commit_gpu_peak_bytes": max(
+                row.get("gpu_peak_allocated_bytes", 0) for row in reports
+            ),
+            "expert_block_sync/sender_commit_gpu_peak_transient_bytes": max(
+                row.get("gpu_peak_allocated_bytes", 0) - row.get("gpu_allocated_before_bytes", 0) for row in reports
+            ),
+            "expert_block_sync/sender_commit_cpu_peak_rss_bytes": max(
+                row.get("cpu_peak_rss_bytes", 0) for row in reports
+            ),
+        }
 
     async def _sync(self, version: int) -> SyncTimings:
         """Run one sync for ``version`` and check that every receiver got the bytes planned for it."""
@@ -317,6 +338,16 @@ class ExpertBlockSync:
             pack_seconds=max(report.pack_seconds for report in phase_reports),
             transfer_seconds=max(report.transfer_seconds for report in phase_reports),
             apply_seconds=max(report.apply_seconds for report in phase_reports),
+            sender_gpu_peak_bytes=max(report.gpu_peak_allocated_bytes for report in policy),
+            sender_gpu_peak_transient_bytes=max(
+                report.gpu_peak_allocated_bytes - report.gpu_allocated_before_bytes for report in policy
+            ),
+            receiver_gpu_peak_bytes=max(report.gpu_peak_allocated_bytes for report in receivers),
+            receiver_gpu_peak_transient_bytes=max(
+                report.gpu_peak_allocated_bytes - report.gpu_allocated_before_bytes for report in receivers
+            ),
+            sender_cpu_peak_rss_bytes=max(report.cpu_peak_rss_bytes for report in policy),
+            receiver_cpu_peak_rss_bytes=max(report.cpu_peak_rss_bytes for report in receivers),
         )
 
     async def verify(self, version: int) -> dict[str, float]:
