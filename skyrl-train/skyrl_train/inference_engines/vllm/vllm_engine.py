@@ -347,8 +347,9 @@ class WorkerWrap:
         parallel_config = self.model_runner.parallel_config
         if parallel_config.tensor_parallel_size != 1 or parallel_config.pipeline_parallel_size != 1:
             raise RuntimeError("Online EAGLE training requires vLLM tensor and pipeline parallel size 1")
-        worker_rank = parallel_config.data_parallel_rank
-        worker_count = parallel_config.data_parallel_size
+        worker_count = int(config["capture_worker_count"])
+        worker_rank = int(config["capture_worker_index"])
+        config = {key: value for key, value in config.items() if not key.startswith("capture_worker_")}
         resolved = capture_config_for_worker(
             config,
             worker_count=worker_count,
@@ -366,6 +367,7 @@ class WorkerWrap:
                 f"on this {total_memory_gib:.2f} GiB device"
             )
         result = self.model_runner.begin_online_eagle_capture(resolved)
+        self._online_eagle_capture_worker_rank = worker_rank
         return {
             **result,
             "node_id": str(ray.get_runtime_context().get_node_id()),
@@ -376,7 +378,7 @@ class WorkerWrap:
         """Seal verifier-state capture and publish it to cloud storage."""
         if not is_cloud_uri(destination):
             raise ValueError(f"Online EAGLE capture destination must be cloud-backed: {destination}")
-        worker_rank = self.model_runner.parallel_config.data_parallel_rank
+        worker_rank = self._online_eagle_capture_worker_rank
         rank_destination = join_resource_path(destination, capture_rank_name(worker_rank))
         try:
             with tempfile.TemporaryDirectory(prefix="marinskyrl-eagle-capture-") as scratch:
@@ -392,6 +394,8 @@ class WorkerWrap:
                 "worker_rank": worker_rank,
                 "error": f"{type(error).__name__}: {error}",
             }
+        finally:
+            del self._online_eagle_capture_worker_rank
         return {**result, "path": rank_destination}
 
     def init_weight_update_communicator(

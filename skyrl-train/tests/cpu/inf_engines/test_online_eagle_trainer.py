@@ -26,6 +26,7 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     partition_capture_windows,
     per_worker_capture_token_credit,
     request_group_from_id,
+    replay_session_id,
 )
 
 
@@ -91,6 +92,13 @@ def test_capture_config_activates_every_data_parallel_worker() -> None:
     assert resolved["trainer_rank"] == 3
     assert resolved["capture_target_snapshot"] is False
     assert resolved["max_tokens"] == 32_768
+
+
+def test_replay_session_id_preserves_loss_boundary_in_request_id() -> None:
+    session_id = replay_session_id("same-prompt", 37)
+
+    assert session_id.startswith("skyrl-eagle-replay-")
+    assert session_id.endswith("-37")
 
 
 def test_per_worker_capture_credit_has_bounded_fragmentation_slack() -> None:

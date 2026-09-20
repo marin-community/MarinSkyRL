@@ -23,13 +23,23 @@ from marinskyrl.speculative_decoding import (
     parse_speculative_decoding_config,
 )
 from skyrl_train.draft_trainer import DraftUpdateRequest, create_draft_trainer
+from skyrl_train.eagle_replay import (
+    EagleReplaySelection,
+    load_replay_rows,
+    replay_batches,
+    select_replay_sequences,
+)
 from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest, lora_disk_load_request
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     RayWrappedInferenceEngine,
     release_owned_placement_groups,
 )
-from skyrl_train.inference_engines.vllm.online_eagle_trainer import OnlineEagleCaptureConfig, OnlineEagleUpdateResult
+from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    OnlineEagleCaptureConfig,
+    OnlineEagleUpdateResult,
+    replay_session_id,
+)
 from skyrl_train.io import io
 from skyrl_train.utils.utils import validate_generator_cfg, initialize_ray
 from skyrl_train.evaluate import evaluate
@@ -163,15 +173,85 @@ class EvalOnlyEntrypoint(BasePPOExp):
         """Override to avoid requiring a train dataset for eval-only runs."""
         return None
 
+    def get_eval_dataset(self):
+        """Keep replay sources raw; ordinary generation uses PromptDataset."""
+        if self.cfg.data.eagle_replay:
+            return tuple(self.cfg.data.val_data)
+        return super().get_eval_dataset()
+
+    async def _run_eagle_replay(
+        self,
+        inference_engine_client: InferenceEngineClient,
+        speculative_decoding: SpeculativeDecodingConfig,
+        selection: EagleReplaySelection,
+    ) -> dict[str, Any]:
+        training = speculative_decoding.training
+        assert training is not None
+        capture_uri = await _begin_offline_eagle_capture(inference_engine_client, self.cfg, speculative_decoding)
+        assert capture_uri is not None
+        try:
+            for batch in replay_batches(selection, int(self.cfg.data.eagle_replay_batch_size)):
+                await inference_engine_client.generate(
+                    {
+                        "prompts": None,
+                        "prompt_token_ids": [sequence.token_ids for sequence in batch],
+                        "sampling_params": {"max_tokens": 1, "temperature": 0},
+                        "session_ids": [
+                            replay_session_id(sequence.group_id, sequence.loss_start) for sequence in batch
+                        ],
+                    }
+                )
+            sealed_rows = await _seal_offline_eagle_capture(inference_engine_client, capture_uri)
+        finally:
+            await _release_inference_engines(inference_engine_client)
+
+        update = await _train_offline_eagle_draft(self.cfg, capture_uri, speculative_decoding)
+        return {
+            "speculator/replay_sequences": float(len(selection.sequences)),
+            "speculator/replay_tokens": float(selection.charged_tokens),
+            "speculator/replay_skipped_rows": float(selection.skipped_rows),
+            "speculator/sealed_rows": float(sealed_rows),
+            "speculator/candidate_holdout_agreement": update.candidate_holdout_agreement,
+            "speculator/candidate_holdout_loss": update.candidate_holdout_loss,
+            "speculator/train_loss": update.train_loss,
+            "speculator/train_duration_seconds": update.duration_seconds,
+        }
+
     async def run(self) -> dict[str, Any]:
         assert self.eval_dataset is not None, "The evaluation only entrypoint requires an eval dataset is provided"
+
+        speculative_decoding = _offline_speculative_decoding_config(self.cfg)
+        replay_selection = None
+        if self.cfg.data.eagle_replay:
+            if speculative_decoding is None or speculative_decoding.training is None:
+                raise ValueError("data.eagle_replay requires speculative_decoding.training")
+            training = speculative_decoding.training
+            replay_selection = select_replay_sequences(
+                load_replay_rows(self.eval_dataset),
+                self.tokenizer,
+                max_tokens=training.max_tokens_per_update,
+                max_window_tokens=training.max_window_tokens,
+                max_sequences_per_group=training.max_sequences_per_prompt_group,
+            )
+            required_sequences = training.min_train_sequences + training.min_holdout_sequences
+            if len(replay_selection.sequences) < required_sequences:
+                raise ValueError(
+                    f"EAGLE replay selected {len(replay_selection.sequences)} sequences; "
+                    f"at least {required_sequences} are required"
+                )
 
         inference_engine_client = self.create_inference_engine_client()
         await inference_engine_client.wake_up()
         await load_initial_policy_adapter(inference_engine_client, self.cfg)
-        trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
 
-        speculative_decoding = _offline_speculative_decoding_config(self.cfg)
+        if replay_selection is not None:
+            assert speculative_decoding is not None
+            results = await self._run_eagle_replay(inference_engine_client, speculative_decoding, replay_selection)
+            tracker = self.get_tracker()
+            tracker.log(results, step=0, commit=True)
+            return results
+
+        trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
         capture_uri = await _begin_offline_eagle_capture(inference_engine_client, self.cfg, speculative_decoding)
 
         try:

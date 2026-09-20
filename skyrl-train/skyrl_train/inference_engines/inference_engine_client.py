@@ -381,8 +381,23 @@ class InferenceEngineClient(InferenceEngineInterface):
         return output
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> List[OnlineEagleResult]:
-        """Begin the same capture interval on every live inference engine."""
-        return await self._run_on_all_engines("begin_online_eagle_capture", config)
+        """Begin one globally ranked capture interval across every live engine."""
+        live = [(index, engine) for index, engine in enumerate(self.engines) if index not in self._dead_engines]
+        if len(live) != len(self.engines):
+            raise RuntimeError("EAGLE capture cannot start after an inference engine has died")
+        worker_count = len(live)
+        return await asyncio.gather(
+            *(
+                engine.begin_online_eagle_capture(
+                    {
+                        **config,
+                        "capture_worker_count": worker_count,
+                        "capture_worker_index": index,
+                    }
+                )
+                for index, engine in live
+            )
+        )
 
     async def seal_online_eagle_capture(self, destination: str) -> List[OnlineEagleResult]:
         """Publish every engine's capture before target-weight synchronization."""

@@ -613,6 +613,26 @@ class _DraftUpdateEngine:
         return self.result
 
 
+class _CaptureEngine:
+    def __init__(self) -> None:
+        self.config = None
+
+    async def begin_online_eagle_capture(self, config):
+        self.config = config
+        return [{"active": True}]
+
+
+@pytest.mark.asyncio
+async def test_eagle_capture_assigns_global_worker_ranks_across_engine_pools() -> None:
+    engines = [_CaptureEngine() for _ in range(4)]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+
+    await client.begin_online_eagle_capture({"step": 3})
+
+    assert [engine.config["capture_worker_index"] for engine in engines] == [0, 1, 2, 3]
+    assert {engine.config["capture_worker_count"] for engine in engines} == {4}
+
+
 @pytest.mark.asyncio
 async def test_draft_refresh_retains_per_engine_exceptions() -> None:
     engines = [

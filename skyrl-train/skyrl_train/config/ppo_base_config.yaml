@@ -10,6 +10,10 @@ data:
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
   val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
   shuffle: true
+  # Offline EAGLE distillation can replay cached prompt/response rows as one
+  # target-model prefill instead of regenerating every response token.
+  eagle_replay: false
+  eagle_replay_batch_size: 4096
   # Optional task-directory sidechannel for mixed Nemotron Ultra RLVR. The
   # parquet dataloader remains authoritative; SWE rows resolve their instance ID
   # against these terminal-bench task roots at rollout time.

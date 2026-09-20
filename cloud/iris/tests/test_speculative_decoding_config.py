@@ -236,7 +236,6 @@ def test_online_speculator_requires_explicit_single_rank_inference(tmp_path: Pat
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        ({"num_inference_engines": 2}, "num_inference_engines=1"),
         ({"tensor_parallel_size": 2}, "tensor_parallel_size=1"),
         ({"pipeline_parallel_size": 2}, "pipeline_parallel_size=1"),
         ({"async_engine": False}, "async_engine=true"),
@@ -253,6 +252,21 @@ def test_online_speculator_rejects_unsupported_vllm_geometry(kwargs: dict, messa
             colocate_all=False,
             **kwargs,
         )
+
+
+def test_online_speculator_supports_multiple_node_local_engine_pools() -> None:
+    resolved = parse_speculative_decoding_config(
+        _base_config()["generator"]["speculative_decoding"],
+        backend="vllm",
+        run_engines_locally=True,
+        entrypoint="skyrl_train.entrypoints.main_generate",
+        colocate_all=False,
+        num_inference_engines=8,
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+    )
+
+    assert resolved is not None
 
 
 def test_raw_vllm_speculative_config_is_reserved(tmp_path: Path) -> None:

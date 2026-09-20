@@ -338,8 +338,6 @@ def parse_speculative_decoding_config(
         raise SpeculativeDecodingConfigError(f"{context} requires trainer.placement.colocate_all=false")
     if config.training is not None and entrypoint not in {STANDARD_TRAINING_ENTRYPOINT, EVALUATION_ENTRYPOINT}:
         raise SpeculativeDecodingConfigError(f"{context}.training is not supported by entrypoint {entrypoint!r}")
-    if config.training is not None and num_inference_engines != 1:
-        raise SpeculativeDecodingConfigError(f"{context}.training requires generator.num_inference_engines=1")
     if config.training is not None and tensor_parallel_size != 1:
         raise SpeculativeDecodingConfigError(
             f"{context}.training requires generator.inference_engine_tensor_parallel_size=1"
