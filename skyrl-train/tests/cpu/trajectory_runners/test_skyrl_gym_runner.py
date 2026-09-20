@@ -2,6 +2,9 @@
 uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/test_skyrl_gym_runner.py
 """
 
+import gc
+import weakref
+
 import pytest
 from typing import List, Dict, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,6 +26,7 @@ from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput, BaseTextEnv
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, BatchMetadata, TokenProvenance
+from skyrl_train.retention_observability import GenerationRetentionObserver
 
 
 # Mock constants, where 4 is the eos token id
@@ -187,6 +191,44 @@ async def test_whole_trajectory_collector_masks_one_agent_loop_failure(generator
     assert batch["exclude_from_baseline"] == [False, True]
     assert batch["exception_types"] == [None, "TimeoutError"]
     assert batch["error_treatments"] == [None, "mask"]
+
+
+@pytest.mark.asyncio
+async def test_whole_trajectory_collector_observes_actual_fanout_without_retaining_outputs(
+    generator_cfg, mock_tokenizer
+):
+    generator_cfg.batched = False
+    generator_cfg.sampling_params.logprobs = 1
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg,
+        DictConfig({"max_env_workers": 0}),
+        MagicMock(),
+        mock_tokenizer,
+    )
+    snapshots = []
+    output_refs = []
+
+    async def agent_loop(*_args, **_kwargs):
+        output = _successful_trajectory_output()
+        output_refs.append(weakref.ref(output))
+        return output
+
+    runner.agent_loop = agent_loop
+    runner.retention_observer = GenerationRetentionObserver(
+        publish_interval_seconds=3600,
+        publish=lambda snapshot, boundary: snapshots.append((snapshot, boundary)),
+    )
+
+    batch = await runner._run(_two_row_request("train"), disable_tqdm=True)
+    gc.collect()
+
+    projected = next(snapshot for snapshot, boundary in snapshots if boundary == "fanout_projection_complete")
+    released = next(snapshot for snapshot, boundary in snapshots if boundary == "fanout_released")
+    assert projected.groups == {"fanout_completed": 2, "projected_batch": 1}
+    assert projected.rows == {"fanout_completed": 2, "projected_batch": 2}
+    assert released.groups == {}
+    assert all(reference() is None for reference in output_refs)
+    assert batch["response_ids"] == [[12], [12]]
 
 
 @pytest.mark.asyncio

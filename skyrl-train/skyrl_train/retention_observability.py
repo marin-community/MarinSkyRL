@@ -197,6 +197,53 @@ def estimate_group_payload(
     )
 
 
+def estimate_agent_loop_payload(output: object, *, max_nodes_per_field: int = 64) -> PayloadEstimate:
+    """Estimate one pre-projection ``AgentLoopOutput`` without retaining it.
+
+    The synchronous Snowball path fans out thousands of these objects through
+    ``tqdm.gather``.  Keeping the estimate primitive-only lets us measure that
+    actual retention seam without adding another reference to the payload.
+    """
+
+    if max_nodes_per_field <= 0:
+        raise ValueError("max_nodes_per_field must be positive")
+
+    evidence = getattr(output, "evidence", None)
+    fields = {
+        "prompt_token_ids": getattr(evidence, "prompt_token_ids", None),
+        "response_ids": getattr(evidence, "response_token_ids", None),
+        "rollout_logprobs": getattr(evidence, "behavior_logprobs", None),
+        "student_topk_indices": getattr(evidence, "student_topk_indices", None),
+        "behavior_topk_logprobs": getattr(evidence, "behavior_topk_logprobs", None),
+        "rollout_routed_experts": getattr(evidence, "routed_experts", None),
+        "source_prompts": getattr(evidence, "messages", None),
+        "loss_masks": getattr(output, "loss_mask", None),
+        "other": (
+            getattr(evidence, "response", None),
+            getattr(output, "verification", None),
+            getattr(output, "reward", None),
+            getattr(output, "disposition", None),
+            getattr(output, "env_metrics", None),
+        ),
+    }
+    field_sizes: Counter[str] = Counter()
+    sampled_nodes = 0
+    truncated = False
+    for name, value in fields.items():
+        budget = _Budget(max_nodes_per_field)
+        size, field_truncated = _estimate_value(value, budget)
+        field_sizes[name] += size
+        sampled_nodes += budget.sampled
+        truncated = truncated or field_truncated
+    return PayloadEstimate(
+        rows=1,
+        total_bytes=sum(field_sizes.values()),
+        field_bytes=tuple(sorted(field_sizes.items())),
+        sampled_nodes=sampled_nodes,
+        truncated=truncated,
+    )
+
+
 def _default_publish(snapshot: RetentionSnapshot, boundary: str | None) -> None:
     from skyrl_train.telemetry import record_generation_retention_snapshot
 
@@ -309,6 +356,18 @@ class GenerationRetentionObserver:
         self.publish()
         return estimate
 
+    def register_estimate(self, payload: object, *, estimate: PayloadEstimate, owner: str) -> None:
+        """Track a primitive estimate while deliberately not retaining ``payload``."""
+
+        with self._lock:
+            payload_id = id(payload)
+            if payload_id in self._retained:
+                raise ValueError("payload is already registered")
+            self._retained[payload_id] = _RetainedEstimate(owner=owner, estimate=estimate)
+            self._settled_groups += 1
+            self._settled_rows += estimate.rows
+        self.publish()
+
     def transfer_group(self, group: object, *, owner: str) -> None:
         with self._lock:
             group_id = id(group)
@@ -321,6 +380,15 @@ class GenerationRetentionObserver:
     def release_group(self, group: object) -> None:
         with self._lock:
             self._retained.pop(id(group), None)
+        self.publish()
+
+    def release_owner(self, owner: str) -> None:
+        """Forget all primitive estimates for one ownership stage."""
+
+        with self._lock:
+            self._retained = {
+                payload_id: retained for payload_id, retained in self._retained.items() if retained.owner != owner
+            }
         self.publish()
 
     def snapshot(self) -> RetentionSnapshot:

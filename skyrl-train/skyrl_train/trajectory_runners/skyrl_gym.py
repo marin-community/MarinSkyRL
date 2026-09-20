@@ -51,6 +51,7 @@ from skyrl_train.trajectory_runners.projections import (
     WholeTrajectoryProjection,
 )
 from skyrl_train.telemetry import JudgeTelemetryObserver, run_in_executor_observed
+from skyrl_train.retention_observability import GenerationRetentionObserver
 
 
 class WholeTrajectoryCollector:
@@ -69,6 +70,7 @@ class WholeTrajectoryCollector:
             self._runner.agent_loop,
             disable_tqdm=disable_tqdm,
             on_error=lambda index, error: self._runner.failed_agent_loop_output(request, index, error),
+            retention_observer=self._runner.retention_observer,
         )
 
 
@@ -150,6 +152,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         self.model_client = model_client or DirectModelClient(inference_engine_client)
         self.tokenizer = tokenizer
         self.require_full_token_continuation = require_full_token_continuation
+        self.retention_observer = GenerationRetentionObserver()
         if pipeline is None:
             pipeline = (
                 TrajectoryPipeline(BatchedTrajectoryCollector, IdentityTrajectoryProjection())
@@ -945,10 +948,25 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """Run the configured environment loop and project its interaction records."""
-        outputs = await self.collector.collect(input_batch, disable_tqdm=disable_tqdm)
-        if isinstance(outputs, list) and outputs and isinstance(outputs[0], AgentLoopOutput):
-            await self._apply_genrm_cohort_rewards(outputs, input_batch)
-        return self.projection.project(outputs, input_batch)
+        self.retention_observer.start()
+        try:
+            outputs = await self.collector.collect(input_batch, disable_tqdm=disable_tqdm)
+            if isinstance(outputs, list) and outputs and isinstance(outputs[0], AgentLoopOutput):
+                await self._apply_genrm_cohort_rewards(outputs, input_batch)
+            result = self.projection.project(outputs, input_batch)
+            self.retention_observer.register_group(
+                result,
+                trajectory_batch=result,
+                source_prompts=input_batch["prompts"],
+                owner="projected_batch",
+            )
+            self.retention_observer.publish(force=True, boundary="fanout_projection_complete")
+            return result
+        finally:
+            self.retention_observer.release_owner("fanout_completed")
+            self.retention_observer.release_owner("projected_batch")
+            self.retention_observer.publish(force=True, boundary="fanout_released")
+            await self.retention_observer.stop()
 
     async def _apply_genrm_cohort_rewards(
         self,

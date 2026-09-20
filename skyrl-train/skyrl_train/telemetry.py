@@ -71,7 +71,14 @@ generation_retention_events = telemetry.gauge("generation_retention_events", uni
 process_memory_bytes = telemetry.gauge("process_memory_bytes", unit="By")
 generation_memory_boundaries = telemetry.counter("generation_memory_boundaries", unit="{boundary}")
 
-_RETENTION_OWNERS = ("producer", "completed_buffer", "admission", "admitted")
+_RETENTION_OWNERS = (
+    "producer",
+    "completed_buffer",
+    "admission",
+    "admitted",
+    "fanout_completed",
+    "projected_batch",
+)
 _PRODUCER_STATES = ("waiting_input", "generating", "projecting", "holding_completed", "blocked_on_buffer")
 _RETENTION_FIELDS = (
     "prompt_token_ids",
