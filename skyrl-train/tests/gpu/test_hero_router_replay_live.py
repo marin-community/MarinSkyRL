@@ -84,6 +84,22 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         valid = batch["response_mask"].bool()
         batch["action_log_probs"] = replayed.float()
         status = _train_step(policy, batch)
+        train_diagnostic = {
+            "phase": "after_train",
+            "model": trained_uri or "random Hero schema-v2",
+            "native_logprob_max_abs": (native - serving)[valid].abs().max().item(),
+            "replay_logprob_max_abs": (replayed - serving)[valid].abs().max().item(),
+            "status": {
+                key: float(value)
+                for key, value in status.items()
+                if key.startswith("router_replay/")
+                or key in {"raw_grad_norm", "policy_update_steps", "log_ratio_abs_max"}
+            },
+        }
+        print("LIVE_HERO_REPLAY_TRAIN_STATUS=" + json.dumps(train_diagnostic, sort_keys=True), flush=True)
+        result_uri = os.environ.get("HERO_REPLAY_RESULT_URI")
+        if result_uri:
+            _put_s3_json(result_uri, train_diagnostic)
         assert status["router_replay/hit_fraction"] == 1.0, status
         assert status["router_replay/executed_route_match_fraction"] == 1.0, status
         assert status["router_replay/router_grad_norm"] > 0.0, status
@@ -130,7 +146,6 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         on_metrics["flag_off_vs_sentinel_max_abs"] = flag_off_vs_sentinel
         on_metrics["flag_off_ratio_max_deviation"] = (torch.exp(off_scores - serving)[valid] - 1).abs().max().item()
         print("LIVE_HERO_ROUTE_REPLAY=" + json.dumps(on_metrics, sort_keys=True), flush=True)
-        result_uri = os.environ.get("HERO_REPLAY_RESULT_URI")
         if result_uri:
             _put_s3_json(result_uri, on_metrics)
     finally:
