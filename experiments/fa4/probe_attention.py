@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kv-heads", type=int, default=5)
     parser.add_argument("--head-dim", type=int, default=128)
     parser.add_argument("--window-left", type=int, default=2048)
+    parser.add_argument("--window-right", type=int, default=0)
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--samples", type=int, default=10)
     return parser.parse_args()
@@ -67,7 +68,7 @@ def main() -> None:
         kv_channels=args.head_dim,
         qkv_format="bshd",
         attn_mask_type="causal",
-        window_size=(args.window_left, 0),
+        window_size=(args.window_left, args.window_right),
         attention_dropout=0.0,
     ).to(device)
 
@@ -102,6 +103,7 @@ def main() -> None:
             "kv_heads": args.kv_heads,
             "head_dim": args.head_dim,
             "window_left": args.window_left,
+            "window_right": args.window_right,
         },
         "gpu": torch.cuda.get_device_name(),
         "torch": str(torch.__version__),
