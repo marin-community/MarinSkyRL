@@ -96,8 +96,9 @@ Grug model registry entry, then runs a real rollout, eager FSDP2 policy update,
 mixed-dtype weight broadcast, and second rollout. The eager policy path keeps this
 gate independent of the optional compiled FlashAttention package.
 
-The Megatron lane runs `tests/gpu/test_grug_megatron.py` with the Megatron runtime
-closure; see `docs/grug-megatron-training.md` for what each test guards.
+The Megatron lane runs `tests/gpu/test_grug_megatron.py` and the two-GPU CP2
+FlashAttention forward/backward smoke with the frozen Megatron runtime closure;
+see `docs/grug-megatron-training.md` for the Grug tests.
 
 The OpenCode lane is deliberately a real federated RL launch rather than a mocked agent
 test. It provisions one RNO2A H100x8 node, creates eight air-gapped Daytona sandboxes,

@@ -15,6 +15,7 @@ def test_ray_workers_inherit_frozen_cuda_library_path(monkeypatch):
     monkeypatch.setenv("NVRTC_HOME", cuda_root)
     monkeypatch.setenv("CUDA_HOME", cuda_root)
     monkeypatch.setenv("LIBRARY_PATH", "/app/.venv/lib")
+    monkeypatch.setenv("MAX_JOBS", "8")
     monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **_: True)
 
     runtime_environment = prepare_runtime_environment(example_dummy_config())
@@ -23,6 +24,7 @@ def test_ray_workers_inherit_frozen_cuda_library_path(monkeypatch):
     assert runtime_environment["NVRTC_HOME"] == cuda_root
     assert runtime_environment["CUDA_HOME"] == cuda_root
     assert runtime_environment["LIBRARY_PATH"] == "/app/.venv/lib"
+    assert runtime_environment["MAX_JOBS"] == "8"
 
 
 def test_frozen_cuda_runtime_resolves_one_cuda_root_and_all_library_directories(tmp_path):
@@ -41,6 +43,7 @@ def test_frozen_cuda_runtime_resolves_one_cuda_root_and_all_library_directories(
         "NVRTC_HOME": str(cuda_library.parent),
         "CUDA_HOME": str(cuda_library.parent),
         "LIBRARY_PATH": str(tmp_path / "lib"),
+        "MAX_JOBS": "8",
     }
 
 

@@ -91,7 +91,7 @@ jobs:
       - name: Run companion vLLM histogram tests
         run: |
           uv run --frozen \
-            --with 'marin-rigging @ git+https://github.com/marin-community/marin.git@6093ded02bd4afff6f1a77b56257543372dfc655#subdirectory=lib/rigging' \
+            --with 'marin-rigging @ git+https://github.com/marin-community/marin.git@69ea2e23147750665a56a39b81c3dbb70e9ab2d2#subdirectory=lib/rigging' \
             pytest skyrl-train/tests/cpu/callbacks/test_vllm_stats_routing.py
 
   skyrl_train_macos_install:

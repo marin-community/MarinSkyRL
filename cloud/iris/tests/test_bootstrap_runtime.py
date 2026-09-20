@@ -247,6 +247,19 @@ def test_bootstrap_activation_exposes_runtime_commands(tmp_path: Path) -> None:
     assert activation.stdout.strip() == str(ninja)
 
 
+def test_bootstrap_exposes_cuda_linker_compatibility_paths(tmp_path: Path) -> None:
+    environment, process_environment = _fake_frozen_runtime(tmp_path)
+    site_packages = next((environment / "lib").glob("python*/site-packages"))
+    nvrtc = site_packages / "nvidia" / "cu13" / "lib" / "libnvrtc.so.13"
+    nvrtc.touch()
+
+    result = _run_bootstrap(environment, process_environment, "megatron")
+
+    assert result.returncode == 0, result.stderr
+    assert (site_packages / "nvidia" / "cu13" / "lib64").resolve() == site_packages / "nvidia" / "cu13" / "lib"
+    assert (environment / "lib" / "libnvrtc.so").resolve() == nvrtc
+
+
 @pytest.mark.parametrize(
     ("missing_module", "expected_error"),
     [
