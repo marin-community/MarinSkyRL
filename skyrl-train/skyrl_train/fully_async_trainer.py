@@ -1262,6 +1262,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             )
             summary = record["summaries"]["all"]
             self.all_metrics["policy/mismatch_decomposition/reference_tokens"] = record["reference_tokens"]
+            self.all_metrics["policy/mismatch_decomposition/fresh_version_tokens"] = record["fresh_version_tokens"]
+            self.all_metrics["policy/mismatch_decomposition/matched_tokens"] = record["matched_tokens"]
             self.all_metrics["policy/mismatch_decomposition/other_version_tokens"] = record["other_version_tokens"]
             if summary["tokens"]:
                 for component in ("engine", "stale", "combined"):
