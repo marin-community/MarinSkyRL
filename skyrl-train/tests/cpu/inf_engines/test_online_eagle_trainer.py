@@ -21,6 +21,7 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     _refresh_target_owned_weights,
     _restore_trainable_master_state,
     capture_config_for_worker,
+    capture_publication_result,
     candidate_is_acceptable,
     merge_online_eagle_captures,
     partition_capture_windows,
@@ -92,6 +93,21 @@ def test_capture_config_activates_every_data_parallel_worker() -> None:
     assert resolved["capture_target_snapshot"] is False
     assert resolved["max_tokens"] == 32_768
     assert "max_sequences_per_prompt_group" not in resolved
+
+
+def test_capture_publication_marks_candidate_manifest_active() -> None:
+    result = capture_publication_result(
+        {"worker_rank": 0, "captured_rows": 17, "windows": [{"request_id": "request-0"}]},
+        "s3://bucket/captures/step-1/rank-00003",
+    )
+
+    assert result == {
+        "active": True,
+        "worker_rank": 0,
+        "captured_rows": 17,
+        "windows": [{"request_id": "request-0"}],
+        "path": "s3://bucket/captures/step-1/rank-00003",
+    }
 
 
 def test_replay_session_id_preserves_loss_boundary_in_request_id() -> None:

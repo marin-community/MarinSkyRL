@@ -25,6 +25,7 @@ from skyrl_train.config.behavior_logprobs import (
 )
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     capture_config_for_worker,
+    capture_publication_result,
     capture_rank_directory,
     capture_rank_name,
     request_id_for_group,
@@ -328,8 +329,6 @@ class WorkerWrap:
             with tempfile.TemporaryDirectory(prefix="marinskyrl-eagle-capture-") as scratch:
                 rank_output_dir = capture_rank_directory(Path(scratch), worker_rank)
                 result = self.model_runner.seal_online_eagle_capture(str(rank_output_dir))
-                if not result.get("active", False):
-                    return result
                 io.upload_directory(str(rank_output_dir), rank_destination)
         except Exception as error:
             logger.exception("Online EAGLE capture seal or publication failed for worker rank {}", worker_rank)
@@ -340,7 +339,7 @@ class WorkerWrap:
             }
         finally:
             del self._online_eagle_capture_worker_rank
-        return {**result, "path": rank_destination}
+        return capture_publication_result(result, rank_destination)
 
     def init_weight_update_communicator(
         self,

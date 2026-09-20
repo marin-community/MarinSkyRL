@@ -91,6 +91,14 @@ def capture_rank_directory(capture_root: Path, worker_rank: int) -> Path:
     return capture_root / capture_rank_name(worker_rank)
 
 
+def capture_publication_result(manifest: Mapping[str, Any], path: str) -> dict[str, Any]:
+    """Add SkyRL publication state to a sealed vLLM capture manifest."""
+    reserved = {"active", "path"}.intersection(manifest)
+    if reserved:
+        raise ValueError(f"vLLM capture manifest contains SkyRL-owned fields: {', '.join(sorted(reserved))}")
+    return {**manifest, "active": True, "path": path}
+
+
 @dataclass(frozen=True)
 class OnlineEagleTrainingJob:
     """One bounded draft update assembled inside DraftTrainer."""
