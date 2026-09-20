@@ -130,10 +130,26 @@ the Ray host-memory guard during 65K restore. The successful restore retry
 used 768 GiB/node. CPU offload therefore needs a host-memory budget for both
 training and checkpoint loading.
 
+Across the measured training and resume lifecycle, peak container memory was
+629.6 GiB/node on H100 and reached the 768 GiB/node limit on GB200. These
+container peaks include reclaimable file cache and shared memory; they are not
+just optimizer allocations. The largest individual worker peak RSS was
+63.3 GiB on H100 and 143.0 GiB on GB200. The successful GB200 run therefore
+does not justify reducing its host-memory request.
+
 Each full model-plus-optimizer checkpoint occupies about 6.82 TiB in S3.
 H100 save/restore took 676/737 seconds; GB200 took 659/1,406 seconds. These
 measurements establish long-context training and restart capacity. They do not
 establish 65K vLLM generation capacity or end-to-end RL iteration throughput.
+
+For planning only, the BF16 checkpoint implies about 40.6 GiB of weights per
+vLLM rank at TP1/EP64: 25.4 GiB of replicated weights plus 15.2 GiB of routed
+expert weights. One 65K sequence adds about 2.67 GiB of BF16 KV data if local
+layers retain only their 2,048-token windows. Cache padding, activations,
+ShortConv state, kernel workspace, and allocator overhead need additional room.
+These are storage estimates, not a tested serving batch limit. Whole-cluster
+RL capacity also depends on rollout lengths, scoring, policy epochs, and how
+often weights and checkpoints are transferred.
 
 The immutable reports are under
 `s3://marin-us-east-02a/marin/users/romain/hero-megatron-01a0bca4/`:
@@ -178,6 +194,15 @@ expandable segments disabled, then immediately restores the training allocator
 settings. In the pinned Torch 2.13 runtime, GB200 fabric-handle cleanup raises
 `std::get: wrong index for variant` after an expandable buffer crosses IPC.
 Model and optimizer allocations can still use expandable segments.
+
+When serving uses fewer GPUs than training, only training ranks with a
+colocated receiver create IPC handles. All ranks still participate in export
+collectives. Creating handles on unused ranks leaves their packing buffers
+resident because no receiver can release the IPC reference.
+
+Reloading model weights onto the GPU releases their pinned CPU staging copy
+and clears unused pinned allocations after the transfer finishes. Otherwise
+that obsolete copy competes with optimizer offload during the next rollout.
 
 The pinned vLLM reload loader discards inputs for experts owned by other ranks
 and copies retained weight views into compact storage. Otherwise a small view
