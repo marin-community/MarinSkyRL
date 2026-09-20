@@ -1,8 +1,8 @@
 ## Current status (2026-09-20)
 
 Marin now uses **Torch 2.13 / CUDA 13.2 and a compiled FlashAttention 2.8.3
-wheel** for its Megatron path. The original Torch 2.11/cu130, stub-package,
-eager-attention, and vLLM 0.20.2 account below is obsolete after #561 and
+wheel** for its Megatron path. The old Torch 2.11/cu130, stub-package,
+eager-attention, and vLLM 0.20.2 account is obsolete after #561 and
 subsequent dependency work. This issue now tracks whether to promote FA4 for
 Grug training, not how to make flash attention install at all.
 
@@ -11,7 +11,7 @@ working FA4 beta29 Megatron kernel path, but no supported production migration
 result. FA4's TVM FFI dependency conflicts at runtime with the fixed Marin
 vLLM wheel, and the four-GPU rollout test aborts before training. Beta30/31
 also silently zeroed full-context Grug attention gradients; beta29 did not
-improve observed Grug policy-step time; and the representative Snowball-like
+improve observed toy Grug policy-step time; and the representative Snowball-like
 forward failed the existing HF parity gate for both new-cohort arms. We did
 not open a production PR or alter the FA2 default.
 
@@ -31,14 +31,14 @@ FA2 remains the selected attention default; FA4 is an opt-in `--extra fa4`.
 But the experimental TVM FFI override is global: **this retained lock cannot
 serve with the fixed vLLM wheel even when FA2 is selected**. The Megatron/TE
 refresh without FA4 and without that override was not rollout-tested, so its
-serving viability remains unknown.
-Core/Bridge track TE 2.18, so TE 2.19 here is an *unqualified compatibility
+serving viability remains unknown. Core/Bridge track TE 2.18, so TE 2.19 here is an *unqualified compatibility
 experiment*. The fixed Marin vLLM wheel and Torch/CUDA line did not change.
 The [TE 2.19 experimental x86/arm64 wheels](https://github.com/marin-community/MarinSkyRL/releases/tag/fa4-te219-cu132-20260920-694f3adf)
 were built from source `5e52befd5262c06289106338c308079d6adb391f`;
 hashes, lock, reproduction commands, and full job matrix are in the
-[prototype results](https://github.com/marin-community/MarinSkyRL/blob/goal/fa4-latest-first-20260920/experiments/fa4/RESULTS.md). The old Megatron extra is x86-only, so the
-three-arm comparison is H100; GB200 compares the two refreshed arms.
+[prototype results](https://github.com/marin-community/MarinSkyRL/blob/71b3635ab50737e28fb8a8c451929c1c83b2db01/experiments/fa4/RESULTS.md).
+The old Megatron extra is x86-only, so the three-arm comparison is H100;
+GB200 compares the two refreshed arms.
 
 ### What ran
 
@@ -97,9 +97,9 @@ three-arm comparison is H100; GB200 compares the two refreshed arms.
   Matched FA4-vs-FA2 pre-update max/mean log-prob differences were
   `0.853/0.040` on [H100](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-b29-snowball-diag-h100-9532de51)
   and `0.807/0.044` on [GB200](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-b29-snowball-diag-gb200-9532de51).
-  One-update diagnostics are recorded in the [results](https://github.com/marin-community/MarinSkyRL/blob/goal/fa4-latest-first-20260920/experiments/fa4/RESULTS.md).
-  Neither failed-parity timing nor five high-LR steps
-  are production throughput evidence.
+  One-update diagnostics are recorded in the [results](https://github.com/marin-community/MarinSkyRL/blob/71b3635ab50737e28fb8a8c451929c1c83b2db01/experiments/fa4/RESULTS.md).
+  Neither failed-parity timing nor five high-LR steps are production
+  throughput evidence.
 - CP2 is only an **experimental packed/all-gather** path; active Grug disables
   packing. Under beta29, refreshed FA2 produced a NaN grad norm and nonfinite
   sampled weights on [H100](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-b29-cp2-fa2-9532de51)
@@ -115,8 +115,8 @@ three-arm comparison is H100; GB200 compares the two refreshed arms.
 
 Reconsider FA4 only after a proposed candidate release passes the full-causal
 gradient check against an independent attention reference; a supported
-FA4/TVM FFI/vLLM dependency combination runs; representative Grug HF parity and a usable
-matched CP topology pass without tolerance relaxation; and repeated,
+FA4/TVM FFI/vLLM dependency combination runs; representative Grug HF parity
+and a usable matched CP topology pass without tolerance relaxation; and repeated,
 order-controlled *end-to-end* RL measurements show a meaningful benefit on
 the target hardware. Until then, retain FA2 and the current production
 dependency cohort. The older issue proposal to remove FA2 and switch the
