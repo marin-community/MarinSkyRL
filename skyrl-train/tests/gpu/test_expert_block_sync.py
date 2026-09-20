@@ -193,18 +193,18 @@ def test_expert_block_sync_installs_exact_weights_across_two_updates(tmp_path, n
         asyncio.run(prepare_and_sync(1))
         assert_engine_weights(client, SYNC_NAMES, trained, BIAS_NAMES, SERVING_EXPERT_INDEX_BY_NAME)
 
-        async def corrupt_and_verify():
+        async def corrupt_and_verify(version):
             flipped = await client.engines[-1].inference_engine_actor.flip_installed_byte.remote()
             assert sum(flipped) == 1
             await client.pause_generation()
             try:
                 with pytest.raises(RuntimeError, match=r"1 of \d+ replayed bytes differ"):
-                    await sync.verify(1)
+                    await sync.verify(version)
             finally:
                 await client.resume_generation()
 
         if encoding == ExpertBlockEncoding.DENSE:
-            asyncio.run(corrupt_and_verify())
+            asyncio.run(corrupt_and_verify(1))
 
         second = _padded_batch(tokenizer.pad_token_id)
         second.metadata["global_step"] = 2
@@ -217,13 +217,14 @@ def test_expert_block_sync_installs_exact_weights_across_two_updates(tmp_path, n
             assert not timings["install_1"].sparse
             assert timings["install_2"].sparse
             assert timings["install_2"].changed_density > 0
+            asyncio.run(corrupt_and_verify(2))
         asyncio.run(sync.close())
         print(
             f"EXPERT_BLOCK_VERIFY_PASS geometry={name} encoding={encoding} policy_gpus={geometry.policy_gpus} "
             f"policy_pp={geometry.policy_pp} "
             f"policy_ep={geometry.policy_ep} engines={geometry.engines} "
             f"engine_dp={geometry.engine_dp} engine_pp={geometry.engine_pp} syncs=2 byte_equal=true "
-            f"corruption_tested={encoding == ExpertBlockEncoding.DENSE} prepare_seconds={timings['prepare']} "
+            f"corruption_tested=true prepare_seconds={timings['prepare']} "
             f"install_seconds={[timings[f'install_{v}'].install_seconds for v in (1, 2)]} "
             f"verify_seconds={[timings[f'verify_{v}']['verify_seconds'] for v in (1, 2)]} "
             f"paused_seconds={[timings[f'paused_{v}'] for v in (1, 2)]} "
