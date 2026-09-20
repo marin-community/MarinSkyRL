@@ -1527,14 +1527,14 @@ wheels = [
 
 [[package]]
 name = "flash-attn"
-version = "2.8.4"
-source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-flash-attn-4219765/flash_attn-2.8.4-cp312-cp312-linux_x86_64.whl" }
+version = "2.8.3"
+source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl" }
 dependencies = [
     { name = "einops", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "torch", version = "2.13.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-flash-attn-4219765/flash_attn-2.8.4-cp312-cp312-linux_x86_64.whl", hash = "sha256:ed692c1408411aa2637b95feced22d55d9ebb7f6da0aeb49d164594b5ee635c7" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", hash = "sha256:4b5086728757d81c8ef89f3008b0bcea72483cf18ed96e0e31b5293ed1f01bc7" },
 ]
 
 [package.metadata]
@@ -3109,8 +3109,8 @@ requires-dist = [
     { name = "deepspeed", marker = "sys_platform == 'linux' and extra == 'deepspeed'", specifier = "==0.17.6" },
     { name = "fastapi" },
     { name = "filelock", specifier = ">=3.16" },
-    { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'fsdp'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-flash-attn-4219765/flash_attn-2.8.4-cp312-cp312-linux_x86_64.whl" },
-    { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-flash-attn-4219765/flash_attn-2.8.4-cp312-cp312-linux_x86_64.whl" },
+    { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'fsdp'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl" },
+    { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl" },
     { name = "flash-linear-attention", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'fsdp'", specifier = "==0.4.2" },
     { name = "flash-linear-attention", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.4.2" },
     { name = "flashinfer-cubin", marker = "sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.6.18.post1", index = "https://flashinfer.ai/whl" },
