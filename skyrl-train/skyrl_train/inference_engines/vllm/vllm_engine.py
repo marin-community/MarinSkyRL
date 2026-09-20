@@ -23,9 +23,9 @@ from skyrl_train.config.behavior_logprobs import (
     validate_behavior_logprob_sampling,
 )
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    capture_config_for_worker,
     capture_rank_directory,
     capture_rank_name,
-    per_worker_capture_token_credit,
     request_id_for_group,
 )
 from skyrl_train.io import io
@@ -344,22 +344,16 @@ class WorkerWrap:
 
     def begin_online_eagle_capture(self, config):
         """Begin bounded verifier-state capture on the resident model runner."""
-        resolved = dict(config)
         parallel_config = self.model_runner.parallel_config
         if parallel_config.tensor_parallel_size != 1 or parallel_config.pipeline_parallel_size != 1:
             raise RuntimeError("Online EAGLE training requires vLLM tensor and pipeline parallel size 1")
         worker_rank = parallel_config.data_parallel_rank
         worker_count = parallel_config.data_parallel_size
-        global_token_budget = int(resolved["max_tokens"])
-        if global_token_budget < worker_count:
-            raise ValueError("Online EAGLE capture token budget must cover every data-parallel rank")
-        resolved["max_tokens"] = per_worker_capture_token_credit(
-            global_max_tokens=global_token_budget,
-            max_window_tokens=int(resolved["max_window_tokens"]),
+        resolved = capture_config_for_worker(
+            config,
             worker_count=worker_count,
             worker_index=worker_rank,
         )
-        resolved["capture_target_snapshot"] = worker_rank == 0
         reserved_gpu_memory_gib = float(resolved.pop("reserved_gpu_memory_gib"))
         total_memory_gib = torch.cuda.get_device_properties(self.device).total_memory / 2**30
         gpu_memory_utilization = float(self.model_runner.cache_config.gpu_memory_utilization)

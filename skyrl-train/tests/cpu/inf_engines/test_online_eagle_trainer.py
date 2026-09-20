@@ -19,12 +19,33 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     _pack_windows,
     _restore_rng_states,
     _restore_trainable_master_state,
+    capture_config_for_worker,
     candidate_is_acceptable,
     merge_online_eagle_captures,
     partition_capture_windows,
     per_worker_capture_token_credit,
     request_group_from_id,
 )
+
+
+def test_capture_config_activates_every_data_parallel_worker() -> None:
+    resolved = capture_config_for_worker(
+        {
+            "step": 1,
+            "max_tokens": 131_072,
+            "max_window_tokens": 16_384,
+            "max_sequences_per_prompt_group": 2,
+            "target_revision": "target",
+            "draft_revision": "draft",
+            "reserved_gpu_memory_gib": 8,
+        },
+        worker_count=8,
+        worker_index=3,
+    )
+
+    assert resolved["trainer_rank"] == 3
+    assert resolved["capture_target_snapshot"] is False
+    assert resolved["max_tokens"] == 32_768
 
 
 def test_per_worker_capture_credit_has_bounded_fragmentation_slack() -> None:

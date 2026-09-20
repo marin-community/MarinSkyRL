@@ -166,6 +166,25 @@ def per_worker_capture_token_credit(
     return token_credit + int(worker_index < remainder) + max_window_tokens
 
 
+def capture_config_for_worker(
+    config: Mapping[str, Any], *, worker_count: int, worker_index: int
+) -> dict[str, Any]:
+    """Resolve one DP worker's capture budget and make that worker active."""
+    resolved = dict(config)
+    global_token_budget = int(resolved["max_tokens"])
+    if global_token_budget < worker_count:
+        raise ValueError("Online EAGLE capture token budget must cover every data-parallel rank")
+    resolved["max_tokens"] = per_worker_capture_token_credit(
+        global_max_tokens=global_token_budget,
+        max_window_tokens=int(resolved["max_window_tokens"]),
+        worker_count=worker_count,
+        worker_index=worker_index,
+    )
+    resolved["trainer_rank"] = worker_index
+    resolved["capture_target_snapshot"] = worker_index == 0
+    return resolved
+
+
 @dataclass(frozen=True)
 class OnlineEagleEvaluation:
     """Mean EAGLE loss and next-token agreement on one window set."""
