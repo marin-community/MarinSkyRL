@@ -19,7 +19,6 @@ trainer:
   gradient_checkpointing: true
   algorithm:
     advantage_estimator: grpo
-    policy_loss_type: behavior_clip
     use_kl_loss: false
   fully_async:
     max_staleness_steps: 2
