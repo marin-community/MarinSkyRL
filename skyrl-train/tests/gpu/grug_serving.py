@@ -122,7 +122,7 @@ def assert_engine_weights(
                     continue
                 assert entry["found"], (name, entry)
                 found[name] = True
-                expected_dtype = "float32" if name in bias_names or name == ROUTER_NAME else "bfloat16"
+                expected_dtype = "float32" if name in bias_names or name.endswith(".mlp.router.weight") else "bfloat16"
                 assert entry["dtype"] == expected_dtype, (name, entry["dtype"])
                 expert_index = serving_expert_index_by_name.get(name)
                 if expert_index is not None:
