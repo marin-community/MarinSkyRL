@@ -129,6 +129,46 @@ def main() -> None:
                         key = f"rows={rows}/hidden={hidden_mode}/down={down_mode}/weights={backend}/sum={sum_mode}"
                         results[key] = _candidate_metrics(candidate, saved)
 
+            # MCore 0.18 TEGroupedMLP weights the SwiGLU activation before FC2,
+            # whereas vLLM's TritonExperts weights the FC2 accumulator. Keep
+            # the BF16 activation cast explicit so this tests that boundary.
+            for backend, combine in weights.items():
+                weight_modes = ("fp32_then_bf16", "bf16")
+                if hidden_mode == "fp32_then_bf16":
+                    weight_modes += ("fp32_fused_swiglu",)
+                for weight_mode in weight_modes:
+                    weighted_hidden = []
+                    for expert, hidden in enumerate(hidden_values):
+                        if weight_mode == "fp32_then_bf16":
+                            value = (hidden.float() * combine[expert]).to(torch.bfloat16)
+                        elif weight_mode == "fp32_fused_swiglu":
+                            gate_output = F.linear(expanded, gate[expert])
+                            up_output = F.linear(expanded, up[expert])
+                            value = (F.silu(gate_output.float()) * up_output.float() * combine[expert]).to(
+                                torch.bfloat16
+                            )
+                        else:
+                            value = hidden * combine[expert].to(torch.bfloat16)
+                        weighted_hidden.append(value)
+                    weighted_outputs = torch.stack(
+                        [F.linear(weighted_hidden[expert], down[expert])[0] for expert in range(len(selected))]
+                    )
+                    expert_arrays[f"rows_{rows}_hidden_{hidden_mode}_weights_{backend}_pre_down_{weight_mode}"] = (
+                        weighted_outputs.detach().float().cpu().numpy()
+                    )
+                    serial = torch.zeros_like(weighted_outputs[0], dtype=torch.bfloat16)
+                    for contribution in weighted_outputs:
+                        serial = serial + contribution
+                    candidates = {
+                        "fp32_sum": weighted_outputs.float().sum(dim=0).to(torch.bfloat16),
+                        "serial_bf16_sum": serial,
+                    }
+                    for sum_mode, candidate in candidates.items():
+                        key = (
+                            f"rows={rows}/hidden={hidden_mode}/weights={backend}/pre_down={weight_mode}/sum={sum_mode}"
+                        )
+                        results[key] = _candidate_metrics(candidate, saved)
+
     arrays_uri = args.result.removesuffix(".json") + "-arrays.npz"
     payload = BytesIO()
     np.savez_compressed(payload, **expert_arrays)
