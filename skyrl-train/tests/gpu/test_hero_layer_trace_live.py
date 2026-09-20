@@ -15,10 +15,21 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.models.grug_moe import GrugMoeConfig
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
-from tests.gpu.grug_serving import grug_engine_client, rollout_training_batch
+from tests.gpu.grug_serving import (
+    assert_engine_weights,
+    grug_engine_client,
+    rank0_validation_snapshot,
+    rollout_training_batch,
+)
 from tests.gpu.hero_replay_checkpoint import split_stacked_hero_checkpoint
 from tests.gpu.test_grug_megatron import _config, _init_policy
-from tests.gpu.test_hero_router_replay_live import _s3_client, _s3_target, _score, _stage_trained_checkpoint
+from tests.gpu.test_hero_router_replay_live import (
+    _checkpoint_weight_max_diffs,
+    _s3_client,
+    _s3_target,
+    _score,
+    _stage_trained_checkpoint,
+)
 
 
 @pytest.mark.vllm
@@ -63,6 +74,28 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
         assert direct["routed_experts"] == rollout["routed_experts"]
         full_routes = torch.tensor(direct["all_routed_experts"], dtype=torch.int32)
         assert full_routes.shape == (4, 9, model_config.num_hidden_layers, model_config.num_experts_per_tok)
+
+        selected_experts = full_routes[row_index, 0, 0].tolist()
+        layer_prefix = "model.layers.0.mlp."
+        weight_names = [
+            layer_prefix + suffix
+            for suffix in (
+                "router.weight",
+                "router.bias",
+                "latent_down_proj.weight",
+                "latent_norm.weight",
+                "latent_up_proj.weight",
+            )
+        ]
+        weight_names.extend(
+            f"{layer_prefix}experts.{expert}.{projection}_proj.weight"
+            for expert in selected_experts
+            for projection in ("gate", "up", "down")
+        )
+        policy_weights = rank0_validation_snapshot(policy, weight_names)
+        source_weight_diffs = _checkpoint_weight_max_diffs(model_path, policy_weights)
+        assert all(diff == 0 for diff in source_weight_diffs.values()), source_weight_diffs
+        assert_engine_weights(client, weight_names, policy_weights, [layer_prefix + "router.bias"], {})
 
         sequence = prompts[row_index] + rollout["response_ids"][row_index]
         vllm_actor = client.engines[0].inference_engine_actor
@@ -170,6 +203,9 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
             "sequence": sequence,
             "positions": positions,
             "captured_shape": list(full_routes.shape),
+            "selected_layer_0_position_0_experts": selected_experts,
+            "verified_source_to_trainer_to_serving_weight_count": len(weight_names),
+            "source_weight_max_abs_diffs": source_weight_diffs,
             "response_scores": scores.tolist(),
             "serving_response_scores": rollout_scores.tolist(),
             "max_response_logprob_gap": max_response_gap,
