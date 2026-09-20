@@ -15,6 +15,7 @@ from torch import distributed as dist
 
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
+from skyrl_train.distributed.megatron.optimizer import restore_offloaded_optimizer_state
 from skyrl_train.io import io
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
 import megatron.core.parallel_state as mpu
@@ -342,6 +343,7 @@ class MegatronStrategy(DistributedStrategy):
                 f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             )
             optimizer.load_state_dict(state_dict.pop("optimizer"))
+            restore_offloaded_optimizer_state(optimizer)
             load_megatron_grads_to_gpu(model)
             self.log("Loaded optimizer state dict.")
 

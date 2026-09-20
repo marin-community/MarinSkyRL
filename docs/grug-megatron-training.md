@@ -34,6 +34,29 @@ Hero parameter families, packed training, repeated updates, and checkpoint
 continuation; passing it alone does not establish full-Hero capacity or parity
 with Levanter.
 
+Megatron's precision-aware AdamW can consume BF16 gradient buffers while keeping
+FP32 master weights and moments. Native CPU offload can move a fraction of those
+optimizer states out of GPU memory. Configure these together under
+`trainer.policy.megatron_config`:
+
+```yaml
+ddp_config:
+  grad_reduce_in_fp32: false
+optimizer_checkpoint_sharding_type: dp_reshardable
+optimizer_config_kwargs:
+  use_precision_aware_optimizer: true
+  store_param_remainders: false
+  optimizer_cpu_offload: true
+  optimizer_offload_fraction: 0.5
+  overlap_cpu_optimizer_d2h_h2d: false
+```
+
+This uses fresh AdamW, not Hero's pretraining optimizer history. CPU offload
+requires host memory for master weights, moments, and temporary gradients.
+The checkpoint integration restores the inner CPU/GPU master weights and Adam
+step counters, including subsequent GPU updates after resume. The pinned TE
+norm and clipping kernels avoid Megatron's gradient-sized Torch temporary.
+
 The port lives in two modules:
 
 - `skyrl_train.models.grug_megatron` holds the Megatron-Core modules that a
