@@ -25,7 +25,10 @@ from marinskyrl.speculative_decoding import (
 from skyrl_train.draft_trainer import DraftUpdateRequest, create_draft_trainer
 from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest, lora_disk_load_request
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
+from skyrl_train.inference_engines.ray_wrapped_inference_engine import (
+    RayWrappedInferenceEngine,
+    release_owned_placement_groups,
+)
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import OnlineEagleCaptureConfig, OnlineEagleUpdateResult
 from skyrl_train.io import io
 from skyrl_train.utils.utils import validate_generator_cfg, initialize_ray
@@ -115,9 +118,12 @@ async def _seal_offline_eagle_capture(
 
 async def _release_inference_engines(inference_engine_client: InferenceEngineClient) -> None:
     await inference_engine_client.teardown()
+    local_engines = []
     for engine in inference_engine_client.engines:
         if isinstance(engine, RayWrappedInferenceEngine):
+            local_engines.append(engine)
             ray.kill(engine.inference_engine_actor, no_restart=True)
+    release_owned_placement_groups(local_engines)
 
 
 async def _train_offline_eagle_draft(

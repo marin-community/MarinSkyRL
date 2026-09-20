@@ -2,7 +2,10 @@ import asyncio
 
 import pytest
 
-from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
+from skyrl_train.inference_engines.ray_wrapped_inference_engine import (
+    RayWrappedInferenceEngine,
+    release_owned_placement_groups,
+)
 
 
 class PendingReference:
@@ -145,3 +148,28 @@ async def test_online_eagle_methods_cross_the_ray_actor_boundary() -> None:
         ("seal_online_eagle_capture", ("s3://bucket/captures/step-3",)),
         ("update_draft_weights", ("s3://bucket/drafts/draft-3/model.safetensors",)),
     ]
+
+
+def test_release_owned_placement_groups_deduplicates_shared_group(monkeypatch) -> None:
+    class PlacementGroupID:
+        def hex(self):
+            return "shared-group"
+
+    class PlacementGroup:
+        id = PlacementGroupID()
+
+    group = PlacementGroup()
+    engines = [
+        RayWrappedInferenceEngine(object(), owned_placement_group=group),
+        RayWrappedInferenceEngine(object(), owned_placement_group=group),
+        RayWrappedInferenceEngine(object()),
+    ]
+    removed = []
+    monkeypatch.setattr(
+        "skyrl_train.inference_engines.ray_wrapped_inference_engine.remove_placement_group",
+        removed.append,
+    )
+
+    release_owned_placement_groups(engines)
+
+    assert removed == [group]

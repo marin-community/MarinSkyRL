@@ -7,7 +7,12 @@ import ray
 from loguru import logger
 from packaging import version
 from ray.actor import ActorHandle
-from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
+from ray.util.placement_group import (
+    PlacementGroup,
+    PlacementGroupSchedulingStrategy,
+    placement_group,
+    remove_placement_group,
+)
 from transformers import AutoConfig, PretrainedConfig
 
 from skyrl_train.inference_engines.base import (
@@ -175,9 +180,11 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         inference_engine_actor: ActorHandle,
         *,
         weight_sync_relative_rank_offset: int | None = None,
+        owned_placement_group: PlacementGroup | None = None,
     ):
         self.inference_engine_actor = inference_engine_actor
         self.weight_sync_relative_rank_offset = weight_sync_relative_rank_offset
+        self.owned_placement_group = owned_placement_group
 
     def tp_size(self):
         # Diagnostic: unwrap un-pickleable Ray exceptions into a plain
@@ -277,6 +284,17 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         return await self.inference_engine_actor.get_stats.remote(read_mode=read_mode)
 
 
+def release_owned_placement_groups(engines: Collection[RayWrappedInferenceEngine]) -> None:
+    """Release non-colocated placement groups created for rollout engines."""
+    groups = {
+        engine.owned_placement_group.id.hex(): engine.owned_placement_group
+        for engine in engines
+        if engine.owned_placement_group is not None
+    }
+    for group in groups.values():
+        remove_placement_group(group)
+
+
 def populate_engine_max_model_lens(engines: List["RayWrappedInferenceEngine"], *, timeout_seconds: float) -> None:
     """Record each serving actor's resolved context limit on its local wrapper."""
     actor_handles = [engine.inference_engine_actor for engine in engines]
@@ -351,6 +369,7 @@ def create_ray_wrapped_inference_engines(
         raise ValueError(f"Unsupported backend: {backend}")
 
     inference_engine_actors = []
+    owned_placement_groups: list[PlacementGroup | None] = []
     weight_sync_relative_rank_offsets = []
     # Qwen3.5/3.6 VLM-shell rollout (tmax Stage 2): materialize the text tower only
     # (language_model_only=True) so vLLM does not build/expect the vision tower.
@@ -672,6 +691,7 @@ def create_ray_wrapped_inference_engines(
                     **rope_engine_kwargs,
                 )
                 inference_engine_actors.append(engine)
+                owned_placement_groups.append(None if use_hybrid_engine else engine_pg)
                 weight_sync_relative_rank_offsets.append(i * per_engine_gpu_count)
         elif backend == "sglang":
             # NOTE: there is no async / sync engine distinction in SGLang
@@ -739,14 +759,21 @@ def create_ray_wrapped_inference_engines(
             engine = ray.get(get_sglang_engine.remote())
 
             inference_engine_actors.append(engine)
+            owned_placement_groups.append(None if use_hybrid_engine else engine_pg)
             weight_sync_relative_rank_offsets.append(i * per_engine_gpu_count)
 
     engines = [
         RayWrappedInferenceEngine(
             actor_handle,
             weight_sync_relative_rank_offset=rank_offset,
+            owned_placement_group=owned_placement_group,
         )
-        for actor_handle, rank_offset in zip(inference_engine_actors, weight_sync_relative_rank_offsets, strict=True)
+        for actor_handle, rank_offset, owned_placement_group in zip(
+            inference_engine_actors,
+            weight_sync_relative_rank_offsets,
+            owned_placement_groups,
+            strict=True,
+        )
     ]
 
     if backend == "vllm" and (tensor_parallel_size > 1 or pipeline_parallel_size > 1):
