@@ -185,7 +185,7 @@ class MegatronModelWrapper:
         (packing or left-pad removal, with the CP chunk split), flattens
         sequence-major (``s*B + b``, mirroring the router view), and slices to
         this TP rank's contiguous sequence chunk under sequence parallelism.
-        Returns ``(per_layer, mask, response_mask)`` keyed by capture index for
+        Returns ``(per_layer, mask, response_mask, valid_mask)`` keyed by capture index for
         the layers the model chunk about to run owns.
         """
         controller = self.router_replay
@@ -216,16 +216,19 @@ class MegatronModelWrapper:
             dense, _ = preprocess_packed_seqs(dense, attention_mask, pre_process=True)
             mask_BS, _ = preprocess_packed_seqs(mask_BS, attention_mask, pre_process=True)
             response_BS, _ = preprocess_packed_seqs(response_BS, attention_mask, pre_process=True)
+            valid_BS, _ = preprocess_packed_seqs(attention_mask, attention_mask, pre_process=True)
         else:
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids = position_ids.masked_fill(attention_mask == 0, 0)
             dense, _, _ = remove_left_padding(dense, attention_mask, position_ids, pre_process=True)
             mask_BS, _, _ = remove_left_padding(mask_BS, attention_mask, position_ids, pre_process=True)
             response_BS, _, _ = remove_left_padding(response_BS, attention_mask, position_ids, pre_process=True)
+            valid_BS, _, _ = remove_left_padding(attention_mask, attention_mask, position_ids, pre_process=True)
 
         flat = sequence_major_flatten(dense)
         mask = sequence_major_flatten(mask_BS)
         response_mask = sequence_major_flatten(response_BS)
+        valid_mask = sequence_major_flatten(valid_BS)
         tp_size = mpu.get_tensor_model_parallel_world_size()
         if tp_size > 1:
             # Under TP sequence parallelism the router sees this rank's
@@ -240,8 +243,9 @@ class MegatronModelWrapper:
             flat = slice_sequence_parallel(flat, **slice_kwargs)
             mask = slice_sequence_parallel(mask, **slice_kwargs)
             response_mask = slice_sequence_parallel(response_mask, **slice_kwargs)
+            valid_mask = slice_sequence_parallel(valid_mask, **slice_kwargs)
         per_layer = {idx: flat[:, idx, :].to(device) for idx in layer_indices}
-        return per_layer, mask.to(device), response_mask.to(device)
+        return per_layer, mask.to(device), response_mask.to(device), valid_mask.to(device)
 
     def _forward_micro_batch(
         self,
@@ -270,10 +274,12 @@ class MegatronModelWrapper:
             layer_indices = self.router_replay.local_indices_for_module.get(
                 id(model), self.router_replay.local_layer_indices
             )
-            per_layer, mask, response_mask = self._build_router_replay_targets(
+            per_layer, mask, response_mask, valid_mask = self._build_router_replay_targets(
                 sequences, attention_mask, rollout_routed_experts, num_actions, layer_indices
             )
-            self.router_replay.begin_forward(per_layer, mask, response_mask, record_recompute=record_recompute)
+            self.router_replay.begin_forward(
+                per_layer, mask, response_mask, record_recompute=record_recompute, valid_mask=valid_mask
+            )
             armed = True
         try:
             if self.use_sample_packing:
@@ -529,6 +535,13 @@ class MegatronModelWrapper:
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
                 metrics_list[-1]["router_replay/hit_fraction"] = replay_metrics["hit_fraction"]
                 metrics_list[-1]["router_replay/sentinel_fraction"] = replay_metrics["sentinel_fraction"]
+                metrics_list[-1]["router_replay/native_mismatch_fraction"] = replay_metrics["native_mismatch_fraction"]
+                metrics_list[-1]["router_replay/native_set_mismatch_fraction"] = replay_metrics[
+                    "native_set_mismatch_fraction"
+                ]
+                metrics_list[-1]["router_replay/executed_route_match_fraction"] = replay_metrics[
+                    "executed_route_match_fraction"
+                ]
 
         # broadcast metrics to all pp ranks
         if not mpu.is_pipeline_last_stage(ignore_virtual=True):

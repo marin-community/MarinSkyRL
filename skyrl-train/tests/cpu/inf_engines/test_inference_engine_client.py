@@ -500,6 +500,28 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
         assert sorted(observed) == sorted(session_ids)
 
 
+@pytest.mark.asyncio
+async def test_generate_batched_routes_keep_response_order():
+    class RouteEngine:
+        async def generate(self, input_batch):
+            bases = [row[0] for row in input_batch["prompt_token_ids"]]
+            return InferenceEngineOutput(
+                responses=[str(base) for base in bases],
+                response_ids=[[base + 10, base + 11] for base in bases],
+                stop_reasons=["stop"] * len(bases),
+                response_logprobs=[[-0.1, -0.2] for _ in bases],
+                prompt_logprobs=None,
+                routed_experts=[[[[base, base + 1]], [[base + 2, base + 3]]] for base in bases],
+            )
+
+    client = InferenceEngineClient(
+        engines=[RouteEngine(), RouteEngine()], tokenizer=object(), full_config=_make_min_cfg()
+    )
+    output = await client.generate(InferenceEngineInput(prompt_token_ids=[[3], [5], [7], [9]], sampling_params={}))
+
+    assert output["routed_experts"] == [[[[base, base + 1]], [[base + 2, base + 3]]] for base in (3, 5, 7, 9)]
+
+
 # -----------------------------
 # Test for route_prompts_to_engines function that routes prompts to inference engines
 # in inference engine client.
@@ -1061,6 +1083,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
                     response_ids=[[21, 22]],
                     stop_reasons=["abort"],
                     response_logprobs=[[-0.1, -0.2]],
+                    routed_experts=[[[[3, 4]], [[5, 6]]]],
                 ),
                 # 2) abort with 0 tokens (should be ignored)
                 InferenceEngineOutput(
@@ -1075,6 +1098,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
                     response_ids=[[23, 24]],
                     stop_reasons=["stop"],
                     response_logprobs=[[-0.3, -0.4]],
+                    routed_experts=[[[[7, 8]], [[9, 10]]]],
                 ),
             ]
 
@@ -1130,6 +1154,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
     assert out["response_ids"] == [expected_final_response_ids]
     assert out["stop_reasons"] == ["stop"]
     assert out["response_logprobs"] == [[-0.1, -0.2, -0.3, -0.4]]
+    assert out["routed_experts"] == [[[[3, 4]], [[5, 6]], [[7, 8]], [[9, 10]]]]
 
 
 @pytest.mark.asyncio
