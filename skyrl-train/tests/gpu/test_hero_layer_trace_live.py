@@ -115,7 +115,7 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
             metrics[str(layer)] = {}
             sites = ["model_input", "after_attn", "mlp_input", "after_block"]
             if layer == 0:
-                sites.extend(("before_sconv_mlp", "after_sconv_mlp"))
+                sites.extend(("shared_0", "shared_1", "before_sconv_mlp", "after_sconv_mlp"))
             for site in sites:
                 key = f"layer_{layer}_{site}"
                 serving = vllm_trace[key].numpy()
