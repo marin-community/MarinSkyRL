@@ -33,6 +33,7 @@ scripts/wheels/build_native.sh flash-attn /tmp/build-flash-attn
 scripts/wheels/build_native.sh causal-conv1d /tmp/build-causal-conv1d
 scripts/wheels/build_native.sh mamba-ssm /tmp/build-mamba
 scripts/wheels/build_native.sh transformer-engine-torch /tmp/build-te
+scripts/wheels/build_native.sh transformer-engine-torch-2.19 /tmp/build-te-2.19
 ```
 
 Each directory retains its environment and source build cache. Wheels are written
@@ -43,6 +44,13 @@ is built by this script.
 The source checkout and recursive submodules must be clean. The script rejects
 tracked changes and unexpected untracked files; Git-ignored build outputs remain
 available for cache reuse.
+
+The 2.19 command is experimental. It builds tag `v2.19` at
+`5e52befd5262c06289106338c308079d6adb391f` against the same pinned
+Torch 2.13/CUDA 13.2 environment. The released NVIDIA `26.06`–`26.08` wheels
+target container PyTorch builds, not Marin's exact Torch 2.13.0+cu132 wheel.
+Do not adopt the 2.19 output until the install, native, Grug CP, and numerical
+gates pass.
 
 Before publishing a wheel, install its exact bytes in the proposed runtime and
 run its native forward and backward checks on H100. Megatron also needs a

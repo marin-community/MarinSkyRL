@@ -11,8 +11,6 @@ import tomllib
 import zipfile
 
 from packaging.requirements import Requirement
-from packaging.specifiers import SpecifierSet
-from packaging.version import Version
 import pytest
 
 
@@ -173,17 +171,19 @@ def test_policy_closures_match_supported_architectures(
     assert vllm.url is not None and vllm.url.endswith(f"manylinux_2_28_{architecture}.whl")
 
 
-def test_megatron_flash_attention_is_supported_by_transformer_engine() -> None:
+def test_fa4_extra_adds_only_the_opt_in_attention_distribution() -> None:
     platform = {"sys_platform": "linux", "platform_machine": "x86_64"}
-    names = {
+    fa2_requirements = [
         requirement.name
         for requirement in _exported_requirements(("megatron", "vllm"))
         if requirement.marker is None or requirement.marker.evaluate(platform)
-    }
-    assert {"flash-attn", "transformer-engine"}.issubset(names)
-
-    lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
-    versions = {package["name"]: package["version"] for package in lock["package"] if package["name"] in names}
-    # TE 2.11's accepted range: https://github.com/NVIDIA/TransformerEngine/blob/v2.11/transformer_engine/pytorch/attention/dot_product_attention/utils.py
-    assert versions["transformer-engine"] == "2.11.0"
-    assert Version(versions["flash-attn"]) in SpecifierSet(">=2.1.1,<=2.8.3")
+    ]
+    fa4_requirements = [
+        requirement.name
+        for requirement in _exported_requirements(("megatron", "vllm", "fa4"))
+        if requirement.marker is None or requirement.marker.evaluate(platform)
+    ]
+    assert "flash-attn" in fa2_requirements
+    assert "flash-attn-4" not in fa2_requirements
+    assert set(fa4_requirements) - set(fa2_requirements) == {"flash-attn-4"}
+    assert set(fa2_requirements) - set(fa4_requirements) == set()

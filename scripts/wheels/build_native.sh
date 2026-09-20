@@ -32,6 +32,13 @@ case "$package" in
         package_environment+=(NVTE_PYTORCH_FORCE_BUILD=TRUE NVTE_NO_LOCAL_VERSION=1 NVTE_BUILD_MAX_JOBS=1)
         max_jobs=1
         ;;
+    transformer-engine-torch-2.19)
+        repository=NVIDIA/TransformerEngine
+        source_commit=5e52befd5262c06289106338c308079d6adb391f
+        source_subdir=transformer_engine/pytorch
+        package_environment+=(NVTE_PYTORCH_FORCE_BUILD=TRUE NVTE_NO_LOCAL_VERSION=1 NVTE_BUILD_MAX_JOBS=1)
+        max_jobs=1
+        ;;
     *) echo "unsupported package: $package" >&2; exit 2 ;;
 esac
 
