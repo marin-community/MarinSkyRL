@@ -61,3 +61,7 @@ for FA4. Inspect the Transformer Engine `Selected backend` log; a package
 version alone is not backend proof. Use `compare_attention.py` on output files
 from matched shapes and hardware to report max/mean/RMS differences. This
 microprobe is not a substitute for the Grug CP2 optimizer or RL timing gates.
+`preflight_h100.sh <staged-wheel-URI> <SHA-256>` installs a disposable, binary-only
+Torch/TE/FA2/FA4 environment and runs the two 32-token kernel probes with a
+ten-minute bound on each arm. It is an import/backend gate, not a lockfile or
+performance conclusion.
