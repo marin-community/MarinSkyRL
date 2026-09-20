@@ -93,23 +93,28 @@ def relative_object_key(root: str, path: str) -> str:
     return relative
 
 
+def file_inventory(filesystem: AbstractFileSystem, root: str) -> tuple[tuple[str, FileEntry], ...]:
+    """List files below a storage root using metadata returned by the listing."""
+    files = filesystem.find(root, detail=True)
+    return tuple(
+        sorted(
+            (
+                path,
+                FileEntry(path=relative_object_key(root, path), size=int(info["size"])),
+            )
+            for path, info in files.items()
+            if info["type"] == "file"
+        )
+    )
+
+
 def _source_inventory(uri: str) -> tuple[AbstractFileSystem, tuple[tuple[str, FileEntry], ...]]:
     filesystem, source_path = fs_and_path(uri)
     source_info = filesystem.info(source_path)
     if source_info["type"] == "file":
         entry = FileEntry(path=posixpath.basename(source_path), size=int(source_info["size"]))
         return filesystem, ((source_path, entry),)
-    source_files = filesystem.find(source_path, detail=True)
-    inventory = tuple(
-        sorted(
-            (
-                path,
-                FileEntry(path=relative_object_key(source_path, path), size=int(info["size"])),
-            )
-            for path, info in source_files.items()
-            if info["type"] == "file"
-        )
-    )
+    inventory = file_inventory(filesystem, source_path)
     if not inventory:
         raise ValueError(f"Artifact source contains no files: {uri}")
     return filesystem, inventory
