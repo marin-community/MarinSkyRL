@@ -259,7 +259,53 @@ class TestMetrics:
         metrics = controller.pop_metrics()
         assert metrics["hit_fraction"] == pytest.approx(3 / 4)
         assert metrics["sentinel_fraction"] == pytest.approx(2 / 6)
-        assert controller.pop_metrics() == {"hit_fraction": 1.0, "sentinel_fraction": 0.0}
+        assert controller.pop_metrics() == {
+            "hit_fraction": 1.0,
+            "sentinel_fraction": 0.0,
+            "native_mismatch_fraction": 0.0,
+            "native_set_mismatch_fraction": 0.0,
+            "executed_route_match_fraction": 1.0,
+        }
+
+    def test_executed_dispatch_map_must_match_captured_expert_set(self):
+        scores = torch.randn(4, 8)
+        targets, mask = _masked_target_rows(4, 2, 8, n_masked=2)
+        controller = MegatronRouterReplay(local_layer_indices=[0], recompute_enabled=False)
+        handle = LayerReplayHandle(controller, layer_idx=0)
+        controller.begin_forward({0: targets}, mask)
+        _, idx = handle.get_replay_topk(scores, 2, None, None, _fake_compute_topk)
+        routing_map = torch.zeros_like(scores, dtype=torch.bool).scatter(1, idx, True)
+        handle.observe_executed_routing_map(idx, routing_map)
+        controller.end_forward()
+        assert controller.pop_metrics()["executed_route_match_fraction"] == 1.0
+
+    def test_executed_dispatch_map_rejects_wrong_expert(self):
+        scores = torch.randn(4, 8)
+        targets, mask = _masked_target_rows(4, 2, 8, n_masked=2)
+        controller = MegatronRouterReplay(local_layer_indices=[0], recompute_enabled=False)
+        handle = LayerReplayHandle(controller, layer_idx=0)
+        controller.begin_forward({0: targets}, mask)
+        _, idx = handle.get_replay_topk(scores, 2, None, None, _fake_compute_topk)
+        routing_map = torch.zeros_like(scores, dtype=torch.bool).scatter(1, idx, True)
+        routing_map[0, idx[0, 0]] = False
+        with pytest.raises(RuntimeError, match="dispatch map differs"):
+            handle.observe_executed_routing_map(idx, routing_map)
+        controller.end_forward()
+
+    def test_loss_free_loads_count_valid_forward_routes_once_with_recompute(self):
+        scores = torch.randn(4, 8)
+        targets, mask = _masked_target_rows(4, 2, 8, n_masked=2)
+        valid = torch.tensor([True, True, False, True])
+        controller = MegatronRouterReplay(local_layer_indices=[0], recompute_enabled=True)
+        handle = LayerReplayHandle(controller, layer_idx=0)
+        controller.begin_loss_free_bias_window()
+        controller.begin_forward({0: targets}, mask, valid_mask=valid)
+        _, first_indices = handle.get_replay_topk(scores, 2, None, None, _fake_compute_topk)
+        controller.end_forward()
+        handle.get_replay_topk(scores, 2, None, None, _fake_compute_topk)
+        loads = controller.take_loss_free_bias_loads()[0]
+        torch.testing.assert_close(loads, torch.bincount(first_indices[valid].reshape(-1), minlength=8).float())
+        assert loads.sum() == 6
 
 
 class TestValidateReplayGeometry:

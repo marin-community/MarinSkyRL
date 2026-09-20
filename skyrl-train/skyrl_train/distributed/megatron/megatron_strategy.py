@@ -94,6 +94,7 @@ class MegatronStrategy(DistributedStrategy):
         self.optimizer_config = optimizer_config
         self.seed = seed
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
+        self.last_optimizer_step_succeeded = False
         if optimizer_config is not None:
             _optimizer_checkpoint_metadata(megatron_config.optimizer_checkpoint_sharding_type)
 
@@ -163,7 +164,8 @@ class MegatronStrategy(DistributedStrategy):
         **kwargs,
     ) -> Optional[Float[torch.Tensor, "1"]]:
         """Perform optimizer step"""
-        _, grad_norm, _ = optimizer.step()
+        update_successful, grad_norm, _ = optimizer.step()
+        self.last_optimizer_step_succeeded = bool(update_successful)
         scheduler.step(1)
         optimizer.zero_grad()
         return grad_norm
