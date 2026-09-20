@@ -30,6 +30,7 @@ def main() -> None:
         "world_size",
         "context_parallel_size",
         "sample_packing",
+        "cp_comm_type",
         "shape",
         "prompt_length",
         "response_length",

@@ -112,3 +112,7 @@ wrapper requires sample packing for CP, while the active Grug configuration
 disables packing. The probe now enables packing only when CP2 is requested and
 revalidates the configuration. A resulting CP2 success would establish the
 packed experimental path, not current Grug production support.
+That packed attempt reached TE but TE 2.19 rejected sliding-window attention
+with its default `p2p` CP transport. The next probe sets MCore's documented
+`cp_comm_type=all_gather`, which TE 2.19 explicitly supports with a sliding
+window; this is a visible experimental transport choice, not a fallback.

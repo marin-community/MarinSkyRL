@@ -17,6 +17,7 @@ from pathlib import Path
 
 import ray
 import torch
+from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from skyrl_train.utils import initialize_ray
@@ -69,6 +70,15 @@ def main() -> None:
         # The Megatron wrapper requires packed sequences for CP. Grug's active
         # configuration disables packing, so CP2 here is an experimental gate.
         cfg.trainer.use_sample_packing = args.world_size > 1
+        if args.world_size > 1:
+            # TE 2.19 rejects Grug's sliding window with the default p2p CP
+            # transport. all_gather is one of its explicit supported modes.
+            OmegaConf.update(
+                cfg.trainer.policy.megatron_config.transformer_config_kwargs,
+                "cp_comm_type",
+                "all_gather",
+                force_add=True,
+            )
         cfg.trainer.micro_forward_batch_size_per_gpu = 1
         cfg.trainer.micro_train_batch_size_per_gpu = 1
         validate_cfg(cfg)
@@ -107,6 +117,7 @@ def main() -> None:
                 "world_size": args.world_size,
                 "context_parallel_size": args.world_size,
                 "sample_packing": bool(cfg.trainer.use_sample_packing),
+                "cp_comm_type": cfg.trainer.policy.megatron_config.transformer_config_kwargs.get("cp_comm_type"),
                 "shape": args.shape,
                 "prompt_length": prompt_length,
                 "response_length": response_length,
