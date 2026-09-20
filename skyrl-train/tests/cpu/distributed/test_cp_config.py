@@ -142,6 +142,8 @@ ADDITIVE_TRAINING_OPTIMIZER_FIELDS = {
 # the stock shuffled sampler, so the tree is behavior-preserving and stripped
 # before the structural-identity comparison against the pre-CP golden.
 ADDITIVE_DATA_FIELDS = {
+    "eagle_replay": None,
+    "eagle_replay_batch_size": 256,
     "sampling": None,
     "shuffle": True,
     "terminal_bench_data": [],
