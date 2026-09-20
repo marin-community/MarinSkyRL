@@ -842,14 +842,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
     def begin_grug_layer_trace(self, expected_seq_len: int):
-        """TEST-ONLY: capture one scored Hero forward at layer boundaries on rank 0."""
+        """TEST-ONLY: capture one scored Hero forward at layer boundaries on each rank."""
         if getattr(self, "_grug_trace_hooks", None) is not None:
             raise RuntimeError("Grug layer trace is already armed")
         self._grug_trace_hooks = []
         self._grug_trace_values = {}
         rank = torch.distributed.get_rank()
-        if rank != 0:
-            return {"rank": rank, "layers": 0}
         seen = set()
         for chunk in self.actor_module:
             for layer in chunk.modules():
