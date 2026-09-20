@@ -37,6 +37,9 @@ from skyrl_train.utils.utils import (
 )
 from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
 from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
+from skyrl_train.config.query_bias import GrugQueryBiasUpdateMode, resolve_grug_query_bias_update
+from skyrl_train.models.grug_megatron import GrugTopKRouter
+from skyrl_train.models.grug_query_bias import next_loss_free_query_bias
 import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
 from skyrl_train.training_batch import (
@@ -320,6 +323,46 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.actor_module, self.optimizer, non_blocking, backload_optimizer, backload_model
         )
 
+    @torch.no_grad()
+    def _apply_loss_free_query_bias(self, loads: dict[int, torch.Tensor], update_rate: float) -> float:
+        """Apply one signed load-error update to each local Grug router."""
+        remaining = set(loads)
+        max_change = 0.0
+        for chunk in self.actor_module:
+            for module in chunk.modules():
+                if not isinstance(module, GrugTopKRouter):
+                    continue
+                layer_idx = module.router_replay.layer_idx
+                if layer_idx not in remaining:
+                    raise RuntimeError(f"loss-free query bias has no load for router layer {layer_idx}")
+                old = module.expert_bias.float()
+                new = next_loss_free_query_bias(old[None], loads[layer_idx][None].to(old), update_rate=update_rate)[0]
+                max_change = max(max_change, (new - old).abs().max().item())
+                module.expert_bias.copy_(new)
+                remaining.remove(layer_idx)
+        if remaining:
+            raise RuntimeError(f"loss-free query bias loads have no local routers: {sorted(remaining)}")
+        return max_change
+
+    def _global_loss_free_loads(self, local_loads: dict[int, torch.Tensor]) -> dict[int, torch.Tensor]:
+        """Sum loads across PP/TP/EP/DP ranks before the signed update.
+
+        Replicated routes multiply every expert count in a layer equally, so
+        they do not change the sign of its load error.
+        """
+        controller = self.model.router_replay
+        config = get_model_config(self.actor_module[0])
+        total = torch.zeros(
+            (controller.num_moe_layers_total, config.num_moe_experts),
+            device=torch.device("cuda", torch.cuda.current_device()),
+            dtype=torch.float32,
+        )
+        for idx, loads in local_loads.items():
+            total[idx] = loads
+        if torch.distributed.get_world_size() > 1:
+            torch.distributed.all_reduce(total, op=torch.distributed.ReduceOp.SUM)
+        return {idx: total[idx] for idx in controller.local_layer_indices}
+
     def init_worker_process_group(self):
         """
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
@@ -476,6 +519,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
         self._drain_r3_decentral_stagger(train_data)
+        query_bias_update = resolve_grug_query_bias_update(self.cfg.trainer.policy)
+        if query_bias_update.mode not in (GrugQueryBiasUpdateMode.FROZEN, GrugQueryBiasUpdateMode.LOSS_FREE):
+            raise ValueError("Megatron Grug query bias supports frozen or loss_free, not Quantile Balancing modes")
+        loss_free_bias = query_bias_update.mode is GrugQueryBiasUpdateMode.LOSS_FREE
+        if loss_free_bias and self.model.router_replay is None:
+            raise ValueError("Megatron loss_free query bias requires router replay to observe executed routes")
+        if loss_free_bias and self.strategy.hf_config.model_type != GRUG_MOE_MODEL_TYPE:
+            raise ValueError("Megatron loss_free query bias requires a Grug model")
+        if loss_free_bias:
+            assert query_bias_update.update_rate is not None
         if self.model.router_replay is not None and (
             "rollout_routed_experts" not in train_data.keys() or train_data["rollout_routed_experts"] is None
         ):
@@ -539,6 +592,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     seq_len = micro_buffer[0].sequences.shape[1]
                     micro_bsz = micro_buffer[0].sequences.shape[0]
 
+                    if loss_free_bias:
+                        self.model.router_replay.begin_loss_free_bias_window()
+
                     metrics_list = self.model.forward_backward_mini_batch(
                         micro_batches=micro_buffer,
                         seq_len=seq_len,
@@ -546,10 +602,32 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         temperature=self.cfg.generator.sampling_params.temperature,
                     )
 
+                    # Replay must keep the live gate trainable. Measure its
+                    # actual gradient after backward, before the optimizer
+                    # consumes and clears Megatron's main_grad buffers.
+                    router_grad_sq = torch.zeros((), device=torch.device("cuda", torch.cuda.current_device()))
+                    if self.model.router_replay is not None:
+                        for chunk in self.actor_module:
+                            for parameter_name, parameter in chunk.named_parameters():
+                                if not parameter_name.endswith(".router.weight"):
+                                    continue
+                                gradient = getattr(parameter, "main_grad", None)
+                                if gradient is None:
+                                    gradient = parameter.grad
+                                if gradient is not None:
+                                    router_grad_sq += gradient.detach().float().square().sum()
+                        metrics_list[-1]["router_replay/router_grad_norm"] = router_grad_sq.sqrt().item()
+
                     if self.empty_cuda_cache:
                         torch.cuda.empty_cache()
 
                     grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+                    if loss_free_bias:
+                        loads = self._global_loss_free_loads(self.model.router_replay.take_loss_free_bias_loads())
+                        if self.strategy.last_optimizer_step_succeeded:
+                            metrics_list[-1]["router_replay/query_bias_max_change"] = self._apply_loss_free_query_bias(
+                                loads, query_bias_update.update_rate
+                            )
 
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
                     # the whole world size to get the metrics for the global micro batch

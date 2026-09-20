@@ -161,6 +161,30 @@ class MegatronRouterReplay:
         self._hit_rows = 0
         self._response_rows = 0
         self._sentinel_rows = 0
+        self._native_mismatch_rows = 0
+        self._native_set_mismatch_rows = 0
+        self._executed_rows = 0
+        self._forward_masked_rows = 0
+        self._valid_mask: Optional[torch.Tensor] = None
+        self._loss_free_loads: Optional[dict[int, torch.Tensor]] = None
+
+    def begin_loss_free_bias_window(self) -> None:
+        """Count actual forward routes once, excluding checkpoint recomputes."""
+        if self._loss_free_loads is not None:
+            raise RuntimeError("router replay: loss-free bias window is already open")
+        self._loss_free_loads = {}
+
+    def take_loss_free_bias_loads(self) -> dict[int, torch.Tensor]:
+        """Consume local per-layer assignment counts after an optimizer window."""
+        self.assert_drained()
+        if self._loss_free_loads is None:
+            raise RuntimeError("router replay: no loss-free bias window is open")
+        loads = self._loss_free_loads
+        self._loss_free_loads = None
+        missing = set(self.local_layer_indices) - set(loads)
+        if missing:
+            raise RuntimeError(f"router replay: loss-free bias missing layers {sorted(missing)}")
+        return loads
 
     # ------------------------------------------------------------- drivers
 
@@ -171,6 +195,7 @@ class MegatronRouterReplay:
         response_mask: Optional[torch.Tensor] = None,
         *,
         record_recompute: bool = True,
+        valid_mask: Optional[torch.Tensor] = None,
     ) -> None:
         """Arm the controller for one forward over the model's local layers.
 
@@ -187,6 +212,7 @@ class MegatronRouterReplay:
         self._expected = tuple(sorted(per_layer_targets))
         self._consumed = set()
         self._response_mask = response_mask
+        self._valid_mask = valid_mask
         self._record_recompute = record_recompute
         self._phase = _Phase.FORWARD
 
@@ -203,6 +229,7 @@ class MegatronRouterReplay:
         self._current = {}
         self._expected = ()
         self._response_mask = None
+        self._valid_mask = None
         self._record_recompute = False
         self._phase = _Phase.IDLE
 
@@ -216,6 +243,7 @@ class MegatronRouterReplay:
         self._expected = ()
         self._consumed = set()
         self._response_mask = None
+        self._valid_mask = None
         self._record_recompute = False
         self._phase = _Phase.IDLE
         for fifo in self._fifo.values():
@@ -242,11 +270,40 @@ class MegatronRouterReplay:
         """
         hit_fraction = self._hit_rows / self._masked_rows if self._masked_rows else 1.0
         sentinel_fraction = self._sentinel_rows / self._response_rows if self._response_rows else 0.0
+        native_mismatch_fraction = self._native_mismatch_rows / self._masked_rows if self._masked_rows else 0.0
+        native_set_mismatch_fraction = self._native_set_mismatch_rows / self._masked_rows if self._masked_rows else 0.0
+        executed_route_match_fraction = (
+            self._executed_rows / self._forward_masked_rows if self._forward_masked_rows else 1.0
+        )
         self._masked_rows = 0
         self._hit_rows = 0
         self._response_rows = 0
         self._sentinel_rows = 0
-        return {"hit_fraction": hit_fraction, "sentinel_fraction": sentinel_fraction}
+        self._native_mismatch_rows = 0
+        self._native_set_mismatch_rows = 0
+        self._executed_rows = 0
+        self._forward_masked_rows = 0
+        return {
+            "hit_fraction": hit_fraction,
+            "sentinel_fraction": sentinel_fraction,
+            "native_mismatch_fraction": native_mismatch_fraction,
+            "native_set_mismatch_fraction": native_set_mismatch_fraction,
+            "executed_route_match_fraction": executed_route_match_fraction,
+        }
+
+    def observe_executed_routing_map(self, layer_idx: int, selected: torch.Tensor, routing_map: torch.Tensor) -> None:
+        """Check the actual Grug dispatch map against the captured expert set."""
+        expected_map = torch.zeros_like(routing_map).scatter(1, selected, True)
+        if not torch.equal(routing_map, expected_map):
+            raise RuntimeError(f"router replay: layer {layer_idx} dispatch map differs from selected experts")
+        if self._phase is not _Phase.FORWARD:
+            return
+        targets, mask = self._current[layer_idx]
+        mask = mask.to(device=routing_map.device, dtype=torch.bool)
+        target_map = torch.zeros_like(routing_map).scatter(1, targets.to(routing_map.device).clamp_min(0), True)
+        if not torch.equal(routing_map[mask], target_map[mask]):
+            raise RuntimeError(f"router replay: layer {layer_idx} did not execute captured expert set")
+        self._executed_rows += mask.sum().item()
 
     # ------------------------------------------------------ router-side entry
 
@@ -290,6 +347,19 @@ class MegatronRouterReplay:
         probs = scores.gather(1, idx)
 
         replayed = mask.sum().item()
+        self._native_mismatch_rows += (mask & (targets != native_idx).any(dim=-1)).sum().item()
+        self._native_set_mismatch_rows += (
+            (mask & (targets.sort(dim=-1).values != native_idx.sort(dim=-1).values).any(dim=-1)).sum().item()
+        )
+        if self._phase is _Phase.FORWARD:
+            self._forward_masked_rows += replayed
+            if self._loss_free_loads is not None:
+                if self._valid_mask is None or self._valid_mask.shape != mask.shape:
+                    raise RuntimeError("router replay: loss-free bias requires an aligned valid-token mask")
+                valid = self._valid_mask.to(device=idx.device, dtype=torch.bool)
+                loads = torch.bincount(idx[valid].reshape(-1), minlength=scores.shape[1]).float()
+                previous = self._loss_free_loads.get(layer_idx)
+                self._loss_free_loads[layer_idx] = loads if previous is None else previous + loads
         # A masked row whose target is all-sentinel means the mask and the
         # target tensor disagree (layout bug): count it so hit_fraction < 1.0
         # surfaces it as a hard error at mini-batch end.
@@ -351,6 +421,9 @@ class LayerReplayHandle:
         return self._controller.get_replay_topk(
             self.layer_idx, scores, topk, num_groups, group_topk, default_compute_topk
         )
+
+    def observe_executed_routing_map(self, selected: torch.Tensor, routing_map: torch.Tensor) -> None:
+        self._controller.observe_executed_routing_map(self.layer_idx, selected, routing_map)
 
 
 def validate_replay_geometry(

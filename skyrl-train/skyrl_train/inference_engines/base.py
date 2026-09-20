@@ -43,6 +43,9 @@ class InferenceEngineOutput(TypedDict):
     response_ids: List[List[int]]
     stop_reasons: List[str]
     response_logprobs: Optional[List[List[float]]]
+    # For each generated token, the MoE routes of the prefix token that
+    # predicted it: [batch, response, MoE layer, selected expert].
+    routed_experts: NotRequired[List[List[List[List[int]]]]]
     # Exact student-policy candidates at each generated token, when generation
     # requested a positive number of response logprobs. The selected token may
     # also be returned by vLLM, but is not forced into these top-K rows.

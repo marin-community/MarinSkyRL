@@ -29,6 +29,7 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     per_worker_capture_token_credit,
     request_id_for_group,
 )
+from skyrl_train.inference_engines.vllm.route_capture import response_routes
 from skyrl_train.io import io
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest, ChatCompletionResponse
@@ -1057,6 +1058,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         response_logprobs: Optional[List[List[float]]] = []
         student_topk_indices: List[List[List[int]]] = []
         behavior_topk_logprobs: List[List[List[float]]] = []
+        routed_experts_rows: list[list[list[list[int]]] | None] = []
         all_prompt_logprobs: Optional[List] = None
 
         for output in outputs:
@@ -1068,6 +1070,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             responses.append(resp.text)
             stop_reasons.append(resp.finish_reason)
             response_ids.append(resp.token_ids)
+            routed_experts_rows.append(response_routes(resp.routed_experts, len(resp.token_ids)))
             _logprobs = None
             selected_ids = []
             selected_scores = []
@@ -1124,6 +1127,10 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         if response_top_k is not None and response_top_k > 0:
             result["student_topk_indices"] = student_topk_indices
             result["behavior_topk_logprobs"] = behavior_topk_logprobs
+        if any(routes is not None for routes in routed_experts_rows):
+            if any(routes is None for routes in routed_experts_rows):
+                raise ValueError("vLLM omitted routed experts for part of a batch")
+            result["routed_experts"] = [routes for routes in routed_experts_rows if routes is not None]
         return result
 
     def _get_engine(self):
