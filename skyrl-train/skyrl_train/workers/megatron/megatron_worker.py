@@ -885,6 +885,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     )
                 )
                 if layer_index == 0:
+
+                    def before_routed_up(_module, args, kwargs, *, capture_fn=capture):
+                        value = args[0] if args else kwargs["hidden_states"]
+                        capture_fn("routed_latent", value)
+
+                    def after_routed_up(_module, _args, output, *, capture_fn=capture):
+                        capture_fn("routed_expanded", output[0])
+
+                    self._grug_trace_hooks.extend(
+                        (
+                            layer.mlp.fc2_latent_proj.register_forward_pre_hook(before_routed_up, with_kwargs=True),
+                            layer.mlp.fc2_latent_proj.register_forward_hook(after_routed_up),
+                        )
+                    )
+
                     shared_experts = layer.mlp.shared_experts.experts
                     if len(shared_experts) != 2:
                         raise ValueError("Hero layer-0 trace needs two shared experts")
