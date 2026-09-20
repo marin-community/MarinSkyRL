@@ -101,6 +101,11 @@ settings. In the pinned Torch 2.13 runtime, GB200 fabric-handle cleanup raises
 `std::get: wrong index for variant` after an expandable buffer crosses IPC.
 Model and optimizer allocations can still use expandable segments.
 
+The pinned vLLM reload loader discards inputs for experts owned by other ranks
+and copies retained weight views into compact storage. Otherwise a small view
+can keep an entire IPC bucket alive until its layer finishes loading, exhausting
+the memory needed to gather the next expert tensor.
+
 Re-stacking gathers every expert of a layer onto each rank before the tensor
 is sent, which needs a few GiB of headroom beyond the resident model, gradient
 buffers, and optimizer state. On the 67B-A2B snowball checkpoint at PP2 x EP8 x
