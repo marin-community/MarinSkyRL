@@ -24,10 +24,14 @@ not open a production PR or alter the FA2 default.
 | Megatron Core / Bridge / TE | 0.18.0 / 0.6.0 / 2.11.0 | 0.19.2 / 0.6.2 / 2.19.0 | same |
 | Attention | FA2 2.8.3 | FA2 2.8.3 | FA4 `4.0.0b29` |
 | Explicit TE selector | `NVTE_FLASH_ATTN_V4=0` | `=0` | `=1` |
+| ModelOpt / Quack / CUTLASS DSL / TileLang | 0.46.1 / 0.6.4 / 4.6.2 / 0.1.12 | same | same |
+| Hydra / cuDNN Frontend / TVM FFI | 1.3.2 / 1.26.0 / 0.1.11 | 1.3.4 / 1.29.0 / 0.1.14.post0 | same |
 
-The prototype keeps FA2 operational by default; FA4 is an opt-in `--extra
-fa4`. The other coupled versions are ModelOpt 0.46.1, Quack 0.6.4, CUTLASS
-DSL 4.6.2, Hydra 1.3.4, cuDNN Frontend 1.29.0, and TVM FFI 0.1.14.post0.
+FA2 remains the selected attention default; FA4 is an opt-in `--extra fa4`.
+But the experimental TVM FFI override is global: **this retained lock cannot
+serve with the fixed vLLM wheel even when FA2 is selected**. The Megatron/TE
+refresh without FA4 and without that override was not rollout-tested, so its
+serving viability remains unknown.
 Core/Bridge track TE 2.18, so TE 2.19 here is an *unqualified compatibility
 experiment*. The fixed Marin vLLM wheel and Torch/CUDA line did not change.
 The [TE 2.19 experimental x86/arm64 wheels](https://github.com/marin-community/MarinSkyRL/releases/tag/fa4-te219-cu132-20260920-694f3adf)
@@ -45,7 +49,7 @@ three-arm comparison is H100; GB200 compares the two refreshed arms.
 - **End-to-end serving is blocked.** The fixed Marin vLLM wheel pins
   `apache-tvm-ffi==0.1.11` and `tilelang==0.1.12`; FA4 beta28/29 require
   `apache-tvm-ffi>=0.1.12,<0.2`. The experimental lock overrides to
-  `0.1.14.post0`, but the
+  `0.1.14.post0` for every Linux install, but the
   [four-H100 rollout test](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-b29-grug-rollout-h100-9532de51)
   aborts in vLLM startup with `tvm::ffi::Error: TypeAttr __ffi_repr__ is
   already registered` when TileLang loads its bundled TVM. SkyRL's repeated
@@ -79,10 +83,14 @@ three-arm comparison is H100; GB200 compares the two refreshed arms.
   GB200 `2.511 ms` versus `1.241 ms`
   ([job](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-b29-attn-2700-gb200-9532de51)).
   Peak allocated memory in that probe was about 618 versus 585 MB.
-  But four post-JIT toy Grug policy steps averaged `0.478 s` FA2 versus
-  `0.486 s` FA4 on H100, and `0.732 s` versus `0.759 s` on GB200.
-  Process order/load were not randomized; these runs show **no resolved RL
-  step-time win**, not a significant slowdown.
+  Four post-JIT toy Grug policy steps averaged H100 old FA2 `0.548 s`
+  (sample SD `0.020`), refreshed FA2 `0.478 s` (SD `0.002`), and FA4
+  `0.486 s` (SD `0.034`); GB200 refreshed FA2 `0.732 s` (SD `0.010`) versus
+  FA4 `0.759 s` (SD `0.039`). The observed old-to-new FA2 difference is
+  about 12.7% in this single fixed-order toy run. Process order, separate
+  environments, and load were not controlled, so it is not a qualified
+  dependency-refresh throughput gain. These runs show **no resolved FA4
+  policy-step win**, not a significant slowdown.
 - Snowball-like hidden-2560, 2400+300-token Grug is a failed diagnostic gate.
   Both FA2 and FA4 fail the existing strict HF parity check before an update;
   old H100 FA2 fails identically, so this is not a new-refresh regression.

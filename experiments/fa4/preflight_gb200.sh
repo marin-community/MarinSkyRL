@@ -22,7 +22,7 @@ uv venv --python 3.12.14 "$venv"
         'transformer-engine[pytorch]==2.19.0' \
         'transformer-engine-cu13==2.19.0' \
         "$wheel" \
-        'flash-attn-4[cu13]==4.0.0b31' \
+        'flash-attn-4[cu13]==4.0.0b29' \
         'nvidia-cutlass-dsl==4.6.2' \
         'quack-kernels==0.6.4' \
         'apache-tvm-ffi==0.1.14.post0'

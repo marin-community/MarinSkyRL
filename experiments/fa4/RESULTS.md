@@ -1,6 +1,7 @@
 # FA4 latest-first Grug experiment: results
 
-Status: experimental branch only; FA2 remains the default. The recommendation
+Status: experimental branch only; FA2 remains the selected attention default
+in Marin. The recommendation
 is to **keep FA2 and defer FA4 for Grug**. FA4 beta29 can run Megatron on both
 H100 and GB200, but the fixed Marin vLLM wheel and FA4 require incompatible
 TVM FFI versions at runtime. The newer beta30/31 also silently lost
@@ -18,7 +19,8 @@ beta29 or of the new Megatron cohort.
 | Megatron Core / Bridge | 0.18.0 / 0.6.0 | 0.19.2 / 0.6.2 | same |
 | Transformer Engine | 2.11.0 | 2.19.0 | 2.19.0 |
 | Attention package and explicit selector | FA2 2.8.3, `NVTE_FLASH_ATTN_V4=0` | FA2 2.8.3, `NVTE_FLASH_ATTN_V4=0` | `flash-attn-4[cu13]==4.0.0b29`, `NVTE_FLASH_ATTN_V4=1` |
-| Other coupled packages | ModelOpt 0.46.1, Quack 0.6.4 | same, plus CUTLASS DSL 4.6.2, Hydra 1.3.4, cuDNN Frontend 1.29.0 and TVM FFI 0.1.14.post0 overrides | same |
+| Unchanged coupled packages | ModelOpt 0.46.1, Quack 0.6.4, CUTLASS DSL 4.6.2, TileLang 0.1.12 | same | same |
+| Hydra / cuDNN Frontend / TVM FFI | 1.3.2 / 1.26.0 / 0.1.11 | 1.3.4 / 1.29.0 / 0.1.14.post0 (global experimental overrides) | same |
 
 The new TE wheel was built from official source commit
 `5e52befd5262c06289106338c308079d6adb391f` against the fixed Torch/CUDA
@@ -34,7 +36,7 @@ paths do not overlap, so a combined wheel was unnecessary. The baseline
 Megatron extra is x86_64-only; the three-arm comparison is therefore H100,
 while GB200 compares the two new-cohort arms.
 
-**The lock is not a valid rollout environment.** The fixed Marin vLLM wheel's
+**The lock is not a valid rollout environment in either selector mode.** The fixed Marin vLLM wheel's
 metadata pins `apache-tvm-ffi==0.1.11` and `tilelang==0.1.12`; FA4 beta28 and
 beta29 metadata require `apache-tvm-ffi>=0.1.12,<0.2`. The prototype override
 selected `0.1.14.post0` to resolve, but the
@@ -45,7 +47,11 @@ bundled TVM. SkyRL reported repeated `EADDRINUSE`/engine-init retries, but
 that was a misleading wrapper, not the first causal failure. A disposable
 x86_64 CPU import probe using the same TileLang version reproduced the abort
 with TVM FFI `0.1.12` and `0.1.14.post0`; it succeeded with vLLM's pinned
-`0.1.11`. No mixed-version override is retained as a working serving path.
+`0.1.11`. The TVM FFI override is global, so omitting `--extra fa4` or setting
+`NVTE_FLASH_ATTN_V4=0` does **not** restore vLLM serving in this lock. The
+Megatron/TE refresh without FA4 and without this override has not been
+rollout-tested; its serving viability is unknown. No mixed-version override
+is retained as a working serving path.
 Changing the fixed vLLM wheel or its runtime behavior is outside this goal;
 there is therefore no valid end-to-end RL timing or rollout qualification.
 This runtime incompatibility is independent of the Megatron FA2/FA4 kernel
@@ -138,11 +144,14 @@ output max/mean difference was `0.0078125/0.0000202`, GB200
 `0.00390625/0.0000763`. These are kernel results, not RL throughput.
 
 Excluding the first JIT/initialization step, toy PP1 Grug policy-update means
-over four subsequent steps were H100 new FA2 `0.478 s` (sample SD `0.002`),
-FA4 `0.486 s` (SD `0.034`); GB200 new FA2 `0.732 s` (SD `0.010`), FA4
-`0.759 s` (SD `0.039`). Process order and cluster load were
-not randomized. The single-run differences are within observed variation and
-do not establish a policy-step speedup. The Snowball-like five-step runs also
+over four subsequent steps were H100 old FA2 `0.548 s` (sample SD `0.020`),
+new FA2 `0.478 s` (SD `0.002`), and FA4 `0.486 s` (SD `0.034`); GB200 new FA2
+`0.732 s` (SD `0.010`) and FA4 `0.759 s` (SD `0.039`). The observed H100
+old-to-new FA2 difference is about 12.7% in this single fixed-order toy run,
+but separate processes, package environments, and cluster load were not
+randomized, so it does not establish a dependency-refresh throughput gain.
+Likewise, the small new-FA2-versus-FA4 differences are within observed
+variation and do not establish a policy-step speedup. The Snowball-like five-step runs also
 show no clear step-time win but fail parity and are diagnostic only.
 
 The CP2 probe must enable sample packing and `cp_comm_type=all_gather` to use

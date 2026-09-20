@@ -19,7 +19,7 @@ uv pip install --python "$venv/bin/python" --only-binary all \
     'transformer-engine-cu13==2.19.0' \
     "$wheel" \
     'flash-attn @ https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl' \
-    'flash-attn-4[cu13]==4.0.0b31' \
+    'flash-attn-4[cu13]==4.0.0b29' \
     'nvidia-cutlass-dsl==4.6.2' \
     'quack-kernels==0.6.4'
 

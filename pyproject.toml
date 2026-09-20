@@ -209,7 +209,8 @@ override-dependencies = [
     "fsspec==2026.4.0",
     # Bridge 0.6.2 pulls MCore's dev extra, which pins 1.26; TE 2.19 requires >=1.28.
     "nvidia-cudnn-frontend[cutedsl]==1.29.0 ; sys_platform == 'linux'",
-    # The fixed vLLM wheel pins 0.1.11; FA4 beta31 requires >=0.1.12.
+    # The fixed vLLM wheel pins 0.1.11; FA4 beta29 requires >=0.1.12.
+    # This global experimental override breaks serving with the fixed wheel.
     "apache-tvm-ffi==0.1.14.post0 ; sys_platform == 'linux'",
     # Megatron Bridge pins older serving libraries; share the selected vLLM ABI.
     "flashinfer-python==0.6.18.post1 ; sys_platform == 'linux'",
