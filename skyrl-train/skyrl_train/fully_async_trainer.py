@@ -13,10 +13,13 @@ High-level notes:
 
 import asyncio
 import collections
+import gzip
+import json
 import os
 import sys
 import time
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
+from marinskyrl.resource_locator import join_resource_path
 from loguru import logger
 from skyrl_train.policy_version import (
     BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY,
@@ -29,6 +32,7 @@ from skyrl_train.utils import Timer, get_system_memory_metrics
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader, async_step_metrics
+from skyrl_train.utils.mismatch_decomposition import mismatch_decomposition_record
 from skyrl_train.utils.logging_utils import log_exception_as_text
 from skyrl_train.trajectory_runners.trajectory_processing import (
     prepare_trajectory_request,
@@ -1221,6 +1225,56 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # inference and calculate values, log probs, rewards, kl divergence
         with Timer("fwd_logprobs_values_reward", self.all_timings):
             training_input = await asyncio.to_thread(self.fwd_logprobs_values_reward, training_input)
+
+        if self.cfg.trainer.mismatch_decomposition.enabled:
+            if training_input.get("rollout_logprobs") is None or training_input.get("base_action_log_probs") is None:
+                raise ValueError("mismatch decomposition requires behavior and frozen-reference log probabilities")
+            real_rows = training_input.batch_size - training_input.metadata.get("pad_size", 0)
+            if self.global_step == 1:
+                first = {
+                    key: training_input[key].clone()
+                    for key in ("base_action_log_probs", "action_log_probs", "old_topk_logprobs")
+                    if training_input.get(key) is not None
+                }
+                training_input = await asyncio.to_thread(self.fwd_logprobs_values_reward, training_input)
+                selected = training_input["loss_mask"][:real_rows] > 0
+                for key, name in (("base_action_log_probs", "reference"), ("action_log_probs", "policy")):
+                    difference = (training_input[key][:real_rows][selected] - first[key][:real_rows][selected]).abs()
+                    self.all_metrics[f"policy/mismatch_decomposition/repeat_{name}_abs_mean"] = difference.mean().item()
+                    self.all_metrics[f"policy/mismatch_decomposition/repeat_{name}_abs_max"] = difference.max().item()
+                for key, value in first.items():
+                    training_input[key] = value
+
+            record = mismatch_decomposition_record(
+                response_ids=training_input.metadata["mismatch_response_ids"],
+                version_rows=training_input.metadata["mismatch_version_rows"],
+                sequences=training_input["sequences"][:real_rows],
+                attention_mask=training_input["attention_mask"][:real_rows],
+                response_mask=training_input["response_mask"][:real_rows],
+                loss_mask=training_input["loss_mask"][:real_rows],
+                behavior_logprobs=training_input["rollout_logprobs"][:real_rows],
+                reference_logprobs=training_input["base_action_log_probs"][:real_rows],
+                current_logprobs=training_input["action_log_probs"][:real_rows],
+                consuming_step=self.global_step,
+                reference_version=0,
+                tis_cap=self.cfg.trainer.algorithm.tis_imp_ratio_cap,
+                sample_rows=self.cfg.trainer.mismatch_decomposition.sample_rows_per_step,
+            )
+            summary = record["summaries"]["all"]
+            self.all_metrics["policy/mismatch_decomposition/reference_tokens"] = record["reference_tokens"]
+            self.all_metrics["policy/mismatch_decomposition/other_version_tokens"] = record["other_version_tokens"]
+            if summary["tokens"]:
+                for component in ("engine", "stale", "combined"):
+                    self.all_metrics[f"policy/mismatch_decomposition/{component}_abs_mean"] = summary[component][
+                        "log_ratio_abs_mean"
+                    ]
+                self.all_metrics["policy/mismatch_decomposition/tis_capped_fraction"] = summary["tis_capped_fraction"]
+            path = join_resource_path(
+                self.cfg.trainer.export_path,
+                "mismatch_decomposition",
+                f"global_step_{self.global_step}.json.gz",
+            )
+            io.write_bytes_atomic(path, gzip.compress(json.dumps(record, allow_nan=False).encode()))
 
         # calculate kl divergence and create experiences
         if self.cfg.trainer.algorithm.use_kl_in_reward:

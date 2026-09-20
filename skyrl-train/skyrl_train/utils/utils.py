@@ -85,17 +85,20 @@ def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
       - `trainer.placement.policy_strict_spread_pg` is enabled (opt-in; default
         false, so every existing run is byte-for-byte unchanged),
       - the run is disaggregated (`colocate_all=false`), and
-      - no reference model is used (`use_kl_loss` and `use_kl_in_reward` both
-        false) — i.e. the policy placement group is NOT shared with a ref model.
+      - no reference model is used, including by the mismatch diagnostic.
     """
     placement = cfg.trainer.placement
     if not bool(getattr(placement, "policy_strict_spread_pg", False)):
         return False
     if placement.colocate_all:
         return False
-    algo = cfg.trainer.algorithm
-    use_ref_model = algo.use_kl_loss or algo.use_kl_in_reward
-    return not use_ref_model
+    return not reference_model_required(cfg)
+
+
+def reference_model_required(cfg: DictConfig) -> bool:
+    """Whether KL training or the frozen-policy diagnostic needs a reference actor."""
+    algorithm = cfg.trainer.algorithm
+    return bool(algorithm.use_kl_loss or algorithm.use_kl_in_reward or cfg.trainer.mismatch_decomposition.enabled)
 
 
 def resolve_pinned_local_rank(
@@ -423,7 +426,7 @@ def validate_batch_sizes(cfg: DictConfig):
     # Validate training batch size is larger than the least common multiple of the DP sizes of policy (and ref if used).
     lcm_dp_size = policy_dp_size
 
-    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    use_ref_model = reference_model_required(cfg)
     if use_ref_model:
         ref_world_size = cfg.trainer.placement.ref_num_nodes * cfg.trainer.placement.ref_num_gpus_per_node
         if cfg.trainer.strategy == "megatron":
@@ -685,7 +688,7 @@ def validate_cfg(cfg: DictConfig):
         "use_kl_in_reward and use_kl_loss should be mutually exclusive"
     )
 
-    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    use_ref_model = reference_model_required(cfg)
     colocate_ref = cfg.trainer.placement.colocate_all or cfg.trainer.placement.colocate_policy_ref
     if (
         cfg.trainer.strategy == "fsdp2"
@@ -812,6 +815,24 @@ def validate_cfg(cfg: DictConfig):
             "regular",
             "dual_clip",
         ], "TIS is only implemented for regular and dual_clip policy loss types"
+
+    mismatch_probe = cfg.trainer.mismatch_decomposition
+    if type(mismatch_probe.enabled) is not bool or type(mismatch_probe.sample_rows_per_step) is not int:
+        raise ValueError("trainer.mismatch_decomposition requires boolean enabled and integer sample_rows_per_step")
+    if mismatch_probe.sample_rows_per_step < 0 or mismatch_probe.sample_rows_per_step > 32:
+        raise ValueError("trainer.mismatch_decomposition.sample_rows_per_step must be between zero and 32")
+    if mismatch_probe.enabled:
+        if cfg.trainer.strategy != "megatron" or not cfg.trainer.fully_async.first_token_admission:
+            raise ValueError("mismatch decomposition requires Megatron and first-token policy provenance")
+        if not cfg.trainer.algorithm.use_tis or cfg.generator.sampling_params.logprobs is None:
+            raise ValueError("mismatch decomposition requires sampled-token behavior log probabilities and TIS")
+        if (
+            cfg.trainer.algorithm.use_kl_loss
+            or cfg.trainer.algorithm.use_kl_in_reward
+            or cfg.trainer.ref.model.path != cfg.trainer.policy.model.path
+            or cfg.trainer.update_ref_every_epoch
+        ):
+            raise ValueError("mismatch decomposition requires a frozen matching reference and no KL objective")
 
     score_centering_topk = cfg.trainer.algorithm.get("score_centering_topk", 0)
     if type(score_centering_topk) is not int or score_centering_topk < 0:

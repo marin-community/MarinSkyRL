@@ -397,6 +397,9 @@ trainer:
   logger: "wandb"
   tracker_commit_each_step: false
   dump_data_batch: false
+  mismatch_decomposition:
+    enabled: false
+    sample_rows_per_step: 8
   dump_eval_results: true
   log_level: "INFO"
 

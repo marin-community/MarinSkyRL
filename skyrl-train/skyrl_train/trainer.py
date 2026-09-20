@@ -111,6 +111,7 @@ from skyrl_train.utils.utils import (
     moe_router_replay_enabled,
     policy_per_gpu_bundles_enabled,
     policy_force_cvd_mask_enabled,
+    reference_model_required,
 )
 
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
@@ -1362,7 +1363,7 @@ class RayPPOTrainer:
         cfg = self.cfg
         pg = None
 
-        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        use_ref_model = reference_model_required(cfg)
 
         if cfg.trainer.placement.colocate_all:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -1853,6 +1854,11 @@ class RayPPOTrainer:
         if loop_advantages_tensor is not None:
             training_input["loop_advantages"] = loop_advantages_tensor
         training_input.metadata = {"uids": uids}
+        if self.cfg.trainer.mismatch_decomposition.enabled:
+            if version_rows is None:
+                raise ValueError("mismatch decomposition requires sampled-token policy-version spans")
+            training_input.metadata["mismatch_response_ids"] = response_ids
+            training_input.metadata["mismatch_version_rows"] = version_rows
         # For RLOO-N: pass through exclude_from_baseline flags if present
         if trajectory_batch.get("exclude_from_baseline") is not None:
             training_input.metadata["exclude_from_baseline"] = np.array(
