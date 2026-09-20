@@ -1,0 +1,106 @@
+# Validation-only Grug rollout comparison for exact expert-block sparse encoding.
+# Four H100x8 Megatron policy nodes and one H100x8 vLLM DP8/EP8 node.
+# Launch dense and sparse with the same frozen source and data; override only encoding.
+entrypoint: fully_async
+
+context_budget:
+  request_window_tokens: 2048
+  max_new_tokens_per_turn: 512
+  max_turns: 1
+
+environment:
+  env_class: gsm8k
+
+trainer:
+  strategy: megatron
+  flash_attn: false
+  use_sample_packing: false
+  offload_optimizer_during_rollouts: true
+  gradient_checkpointing: true
+  algorithm:
+    advantage_estimator: grpo
+    policy_loss_type: behavior_clip
+    use_kl_loss: false
+  fully_async:
+    max_staleness_steps: 2
+    num_parallel_generation_workers: 128
+  epochs: 1
+  max_steps: 3
+  update_epochs_per_batch: 1
+  train_batch_size: 32
+  policy_mini_batch_size: 32
+  eval_batch_size: 64
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+  eval_before_train: false
+  eval_interval: -1
+  ckpt_interval: 100
+  resume_mode: none
+  logger: console
+  policy:
+    optimizer_config:
+      lr: 1.0e-6
+      max_grad_norm: 1.0
+    megatron_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 2
+      context_parallel_size: 1
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      optimizer_checkpoint_sharding_type: dp_reshardable
+      ddp_config:
+        overlap_grad_reduce: true
+        overlap_param_gather: false
+        grad_reduce_in_fp32: false
+      optimizer_config_kwargs:
+        optimizer_cpu_offload: false
+        optimizer_offload_fraction: 0.0
+  placement:
+    colocate_all: false
+    policy_num_nodes: 4
+    policy_num_gpus_per_node: 8
+    policy_strict_spread_pg: true
+
+generator:
+  backend: vllm
+  model_dtype: bfloat16
+  vllm_attention_backend: FLASH_ATTN
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_data_parallel_size: 8
+  inference_engine_expert_parallel_size: 8
+  inference_engine_node_local: require
+  num_inference_engines: 1
+  n_samples_per_prompt: 4
+  gpu_memory_utilization: 0.5
+  max_num_seqs: 32
+  max_num_batched_tokens: 8192
+  enforce_eager: true
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  weight_sync_transport: expert_block
+  expert_block_sync:
+    encoding: dense
+    timeout_seconds: 600
+    verify: true
+  async_engine: true
+  batched: false
+  enable_http_endpoint: true
+  use_conversation_multi_turn: true
+  chat_template:
+    source: name
+    name_or_path: qwen3_with_thinking
+  sampling_params:
+    temperature: 1.0
+    top_p: 1.0
+  engine_init_kwargs:
+    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
+
+data:
+  kind: parquet
+  train_data:
+    - s3://marin-us-east-02a/marin/users/romain/skyrl/sparse-expert-production-20260919/gsm8k/train.parquet
+  val_data:
+    - s3://marin-us-east-02a/marin/users/romain/skyrl/sparse-expert-production-20260919/gsm8k/validation.parquet
+
+extra_env:
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
