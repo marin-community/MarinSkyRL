@@ -13,6 +13,7 @@ import boto3
 from botocore.config import Config
 import pytest
 import ray
+from safetensors import safe_open
 import torch
 
 from skyrl_train.inference_engines.base import InferenceEngineInput
@@ -72,16 +73,28 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
     bias_names = [f"model.layers.{layer}.mlp.router.bias" for layer in range(model_config.num_hidden_layers)]
     names = ["model.layers.0.mlp.router.weight", *bias_names]
     if trained_uri:
-        names.extend(
-            [
-                "model.layers.0.mlp.experts.3.gate_proj.weight",
-                f"model.layers.{model_config.num_hidden_layers - 1}.mlp.experts."
-                f"{model_config.num_local_experts - 1}.gate_proj.weight",
-                "model.layers.0.mlp.latent_down_proj.weight",
-                "model.layers.0.shared_experts.1.up_proj.weight",
-                "model.layers.0.self_attn.sconv_k.weight",
-            ]
+        for layer in sorted({0, model_config.num_hidden_layers // 2, model_config.num_hidden_layers - 1}):
+            prefix = f"model.layers.{layer}."
+            names.extend(
+                prefix + suffix
+                for suffix in (
+                    "mlp.router.weight",
+                    "mlp.experts.3.gate_proj.weight",
+                    "mlp.latent_down_proj.weight",
+                    "mlp.latent_up_proj.weight",
+                    "self_attn.q_proj.weight",
+                    "self_attn.o_proj.weight",
+                    "self_attn.sconv_k.weight",
+                    "sconv_attn.weight",
+                    "sconv_mlp.weight",
+                    "shared_experts.1.up_proj.weight",
+                )
+            )
+        names.append(
+            f"model.layers.{model_config.num_hidden_layers - 1}.mlp.experts."
+            f"{model_config.num_local_experts - 1}.gate_proj.weight"
         )
+        names = list(dict.fromkeys(names))
     else:
         names.insert(0, "lm_head.weight")
     sampling = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
@@ -93,6 +106,8 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         client = grug_engine_client(cfg, str(model_path), capture_routes=True, enable_flashinfer_autotune=False)
         policy = _init_policy(cfg, policy_world_size)
         before = rank0_validation_snapshot(policy, names)
+        source_weight_diffs = _checkpoint_weight_max_diffs(model_path, before) if trained_uri else {}
+        assert all(diff == 0 for diff in source_weight_diffs.values()), source_weight_diffs
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
         assert_engine_weights(client, names, before, bias_names, {})
@@ -124,6 +139,7 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
             "model": trained_uri or "random Hero schema-v2",
             "batch_invariant": cfg.trainer.algorithm.batch_invariant,
             "converted_split_expert_tensors": split_tensors,
+            "source_weight_max_abs_diffs": source_weight_diffs,
             "native_response_logprobs": native.tolist(),
             "replay_response_logprobs": replayed.tolist(),
             "serving_response_logprobs": serving.tolist(),
@@ -277,6 +293,21 @@ def _prefill_response_logprobs(client, prompts, responses, *, individual: bool) 
         ],
         dtype=torch.float32,
     )
+
+
+def _checkpoint_weight_max_diffs(path: Path, weights: dict[str, torch.Tensor]) -> dict[str, float]:
+    """Compare sampled loaded policy weights with the converted source export."""
+
+    weight_map = json.loads((path / "model.safetensors.index.json").read_text())["weight_map"]
+    differences = {}
+    for name, actual in weights.items():
+        with safe_open(path / weight_map[name], framework="pt", device="cpu") as reader:
+            expected = reader.get_tensor(name)
+        if not name.endswith(".mlp.router.weight") and not name.endswith(".mlp.router.bias"):
+            expected = expected.to(torch.bfloat16)
+        assert actual.shape == expected.shape, (name, actual.shape, expected.shape)
+        differences[name] = (actual.float() - expected.float()).abs().max().item()
+    return differences
 
 
 def _s3_target(uri: str) -> tuple[str, str]:
