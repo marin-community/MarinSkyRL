@@ -722,7 +722,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         wanted = set(names)
         is_rank0 = torch.distributed.get_rank() == 0
         weights = {}
-        for name, tensor in self.bridge.export_hf_weights(self.actor_module, show_progress=False):
+        tasks = []
+        for task in self.bridge.get_conversion_tasks(self.actor_module):
+            hf_names = task.mapping.hf_param
+            hf_names = (hf_names,) if isinstance(hf_names, str) else hf_names.values()
+            if wanted.intersection(hf_names):
+                tasks.append(task)
+        for name, tensor in self.bridge.export_hf_weights(
+            self.actor_module, show_progress=False, conversion_tasks=tasks
+        ):
             if is_rank0 and name in wanted:
                 weights[name] = tensor.detach().to("cpu", dtype=torch.float32).contiguous()
         missing = wanted.difference(weights) if is_rank0 else set()
