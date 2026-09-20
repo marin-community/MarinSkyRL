@@ -162,6 +162,33 @@ bundle establish the revision. Source bundles and launch arguments are stored
 under `evidence/qualification-20260920/` and
 `evidence/qualification-20260920b/` at the same S3 prefix.
 
+### Controlled publication cycle
+
+Full Hero completed a controlled cycle on the 256-H100 layout above with
+64 colocated vLLM ranks at TP1/EP64. It published the initial weights,
+generated eight four-token responses, scored and trained with captured routes,
+saved a checkpoint, made another update, restored, published the restored
+weights, and generated again. Readback matched the selected weight families
+and all 48 FP32 router biases exactly before and after training. The biases
+stayed frozen. Route replay hit and executed-route match fractions were both
+1.0, router gradient norm was 4.185, and the training log-ratio maximum was zero.
+
+Initial and updated publication took 178 and 279 seconds. The replay update
+took 67 seconds; checkpoint save and restore took 671 and 623 seconds. Serving
+used a 128-token maximum context and GPU memory utilization 0.58. These timings
+do not measure long-context generation or steady-state rollout throughput.
+
+The serving/training log-probability gap was 0.3623 maximum and 0.0324 mean.
+This cycle establishes the training and publication lifecycle; cross-backend
+numerical qualification remains open. A GB200 cycle reached checkpoint restore
+but exceeded its 768-GiB host-memory guard during optimizer offload before the
+second publication. Its full lifecycle is not yet qualified.
+
+The successful H100 report is `full-cycle-h100-a6/report.json` under the S3
+prefix above, from SkyRL `bf37e425` and vLLM `9ff94e459611`. Its source bundle,
+launch arguments, and focused memory-lifetime regressions are under
+`evidence/bf37e425/`.
+
 The port lives in two modules:
 
 - `skyrl_train.models.grug_megatron` holds the Megatron-Core modules that a
