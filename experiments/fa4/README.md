@@ -85,3 +85,24 @@ recorded tensor was finite. Two samples per arm are too few for a performance
 claim. The first attempt used the same kernels successfully but failed after
 them because the pointwise comparison loader rejected a saved TorchVersion
 object; commit `694f3adf` corrected that recorder error.
+
+The [full x86_64 frozen-lock import](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-full-lock-import-3ef87994)
+passed with the fixed Marin vLLM wheel, Bridge 0.6.2, Core 0.19.2, TE 2.19,
+and FA4 beta31. The first Grug worker import then found that Core 0.19.2
+removed `dist_checkpointing.strategies.base`; the prototype deleted Marin's
+obsolete global async queue setup because checkpoint saves are synchronous
+(`async_sharded_save=False`). The next attempt reached its optimizer update and
+found that Core's fused grad-norm path returns a device scalar; the strategy
+now converts that boundary value to the Python float expected by the policy
+metric reducer. These are prototype compatibility edits, not proof of
+checkpoint or production training behavior.
+
+The [one-H100 Grug toy test](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-grug-pp1-toy3-6927610c)
+passed an eager-HF reference comparison, Megatron forward/backward, and one
+PPO optimizer update in each arm. Ray worker logs report FA2 2.8.3 and FA4
+beta31 respectively. Valid-token FA4-versus-FA2 log-prob differences were
+max/mean `0.01131/0.00222` before the update and `0.02715/0.00888` afterward.
+The chosen attention-gate weight update differed by at most `4.77e-6`; the
+layer-3 Q-projection update differed by at most `0.00189`. All compared values
+were finite. The first-step wall times include initialization and JIT; they
+must not be used as steady-state performance evidence.
