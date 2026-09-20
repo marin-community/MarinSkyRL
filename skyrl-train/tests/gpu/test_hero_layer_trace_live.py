@@ -168,6 +168,21 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
                 "megatron_layer_0_router_combine": trainer_combine,
             }
         )
+        onehot_ids = vllm_trace["layer_0_routed_onehot_ids"].numpy()
+        assert np.array_equal(onehot_ids, selected[0])
+        onehot_outputs = vllm_trace["layer_0_routed_onehot"].numpy()
+        routed_original = vllm_trace["layer_0_routed_original"].numpy()
+        routed_replayed = vllm_trace["layer_0_routed_replayed"].numpy()
+        assert onehot_outputs.shape == (model_config.num_experts_per_tok, model_config.latent_dim)
+        assert routed_original.shape == routed_replayed.shape == (model_config.latent_dim,)
+        trace_arrays.update(
+            {
+                "vllm_layer_0_routed_onehot": onehot_outputs,
+                "vllm_layer_0_routed_onehot_ids": onehot_ids,
+                "vllm_layer_0_routed_replayed": routed_replayed,
+                "vllm_layer_0_routed_original": routed_original,
+            }
+        )
         metrics = {}
         for layer in range(model_config.num_hidden_layers):
             metrics[str(layer)] = {}
@@ -233,6 +248,7 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
             "source_weight_max_abs_diffs": source_weight_diffs,
             "router_combine_rms_by_position": np.sqrt(np.mean(np.square(combine_delta), axis=-1)).tolist(),
             "router_combine_max_abs_by_position": np.max(np.abs(combine_delta), axis=-1).tolist(),
+            "vllm_routed_replay_max_abs": float(np.max(np.abs(routed_original - routed_replayed))),
             "response_scores": scores.tolist(),
             "serving_response_scores": rollout_scores.tolist(),
             "max_response_logprob_gap": max_response_gap,
