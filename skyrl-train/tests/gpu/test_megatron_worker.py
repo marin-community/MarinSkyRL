@@ -40,7 +40,7 @@ MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 def test_megatron_flash_attention_cp2_forward_backward(ray_init_fixture):
     """Keep the selected FlashAttention backend usable through a CP2 policy step."""
     require_hoppers(2)
-    cfg = get_test_actor_config()
+    cfg = get_test_actor_config(logger="console")
     cfg.trainer.strategy = "megatron"
     cfg.trainer.flash_attn = True
     cfg.trainer.use_sample_packing = True
@@ -72,11 +72,13 @@ def test_megatron_flash_attention_cp2_forward_backward(ray_init_fixture):
         assert 0 < status["raw_grad_norm"] < float("inf")
 
 
-def get_test_actor_config(model_name=MODEL_NAME) -> DictConfig:
+def get_test_actor_config(model_name=MODEL_NAME, logger=None) -> DictConfig:
     with hydra.initialize_config_dir(config_dir=config_dir):
         cfg = hydra.compose(config_name="ppo_base_config")
 
     cfg.trainer.policy.model.path = model_name
+    if logger is not None:
+        cfg.trainer.logger = logger
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.micro_train_batch_size_per_gpu = 2
     cfg.trainer.use_sample_packing = False
