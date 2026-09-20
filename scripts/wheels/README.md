@@ -21,8 +21,8 @@ FlashAttention uses upstream commit
 accepts FA2 versions from 2.1.1 through 2.8.3 and rejects 2.8.4. This version
 alignment repairs the Megatron context-parallel failure.
 
-The already-published wheel also contains a packaging-only patch that backports
-the `flash_attn.cute` exclusion from
+The published wheel was built with a packaging-only patch. It backports the
+`flash_attn.cute` exclusion from
 [`4219765`](https://github.com/Dao-AILab/flash-attention/commit/4219765dfdd8913bfe26134f748dd5ffcedd3c39).
 FA2's [normal imports](https://github.com/Dao-AILab/flash-attention/blob/060c9188beec3a8b62b33a3bfa6d5d2d44975fab/flash_attn/__init__.py)
 do not load that experimental namespace. The exclusion keeps it out of the
