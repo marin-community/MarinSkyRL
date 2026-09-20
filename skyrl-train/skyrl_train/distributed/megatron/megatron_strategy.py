@@ -3,7 +3,6 @@ import random
 import tempfile
 from datetime import timedelta
 from typing import List, Union, Optional
-from jaxtyping import Float
 from loguru import logger
 
 import numpy as np
@@ -155,12 +154,14 @@ class MegatronStrategy(DistributedStrategy):
         scheduler,
         name="model",
         **kwargs,
-    ) -> Optional[Float[torch.Tensor, "1"]]:
+    ) -> Optional[float]:
         """Perform optimizer step"""
         _, grad_norm, _ = optimizer.step()
         scheduler.step(1)
         optimizer.zero_grad()
-        return grad_norm
+        # MCore 0.19 can return a device scalar from its fused norm path; the
+        # policy metric reducer requires a Python number.
+        return float(grad_norm) if grad_norm is not None else None
 
     def prepare(
         self, *models_or_model_optim_pairs: ModelOrModelOptimPair
