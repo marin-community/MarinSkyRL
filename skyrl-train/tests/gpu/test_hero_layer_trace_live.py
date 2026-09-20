@@ -116,7 +116,16 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
             sites = ["model_input", "after_attn", "mlp_input", "after_block"]
             if layer == 0:
                 sites.extend(
-                    ("routed_latent", "routed_expanded", "shared_0", "shared_1", "before_sconv_mlp", "after_sconv_mlp")
+                    (
+                        "router_logits",
+                        "routed_input",
+                        "routed_latent",
+                        "routed_expanded",
+                        "shared_0",
+                        "shared_1",
+                        "before_sconv_mlp",
+                        "after_sconv_mlp",
+                    )
                 )
             for site in sites:
                 key = f"layer_{layer}_{site}"
@@ -128,7 +137,11 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
                     [call.shape for call in calls],
                 )
                 trainer = calls[0][positions, 0].numpy()
-                width = model_config.latent_dim if site == "routed_latent" else model_config.hidden_size
+                width = {
+                    "router_logits": model_config.num_experts,
+                    "routed_input": model_config.latent_dim,
+                    "routed_latent": model_config.latent_dim,
+                }.get(site, model_config.hidden_size)
                 assert serving.shape == trainer.shape == (len(positions), width)
                 assert np.isfinite(serving).all() and np.isfinite(trainer).all(), key
                 delta = trainer - serving
