@@ -51,6 +51,7 @@ def test_megatron_flash_attention_cp2_forward_backward(ray_init_fixture):
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = 1
     cfg.trainer.train_batch_size = 4
     cfg.trainer.policy_mini_batch_size = 4
+    cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.micro_forward_batch_size_per_gpu = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     batch = get_test_training_batch(4)
@@ -66,6 +67,7 @@ def test_megatron_flash_attention_cp2_forward_backward(ray_init_fixture):
     assert len(train_outputs) == 2
     for output in train_outputs:
         status = output.metadata["train_status"]
+        assert status["policy_update_steps"] == 1
         assert torch.isfinite(torch.tensor(status["policy_loss"]))
 
 
