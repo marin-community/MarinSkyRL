@@ -30,3 +30,21 @@ The `cache/` and `dist/` directories are ignored local scratch. No custom
 repacked wheel is required or published. The current `megatron` extra is
 x86_64-only, so GB200/Grace needs an explicit arm64 closure before it can
 support a Grug result. No CPU packaging check proves that GPU gate.
+
+For the native TE 2.19 build, use
+`scripts/wheels/build_native.sh transformer-engine-torch-2.19 <build-dir>` on
+an H100 Iris task. The task image provides CPython 3.12.14, git, and a C++
+compiler. Its bare Python lacks `boto3`; run the uploader through
+`uv run --no-project --with boto3==1.42.97 python experiments/fa4/upload_candidate.py`
+so it can use the cluster-injected S3 credentials. Upload the resulting wheel
+to an immutable key in
+`s3://marin-us-east-02a/iris/fa4-experiment/` and preserve the Iris job ID,
+source commit, build script, pinned environment, and SHA-256. This staging key
+is not a runtime wheel source; the lock must later reference a published,
+verified candidate artifact.
+
+The [H100 task preflight](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-b31-h100-preflight-f6fed696)
+completed on `cw-rno2a` with Python 3.12.14, uv 0.10.3, git 2.47.3, GCC
+14.2, and driver 595.71.05. The [storage preflight](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-b31-s3-preflight2-f6fed696)
+confirmed that an isolated `boto3==1.42.97` environment reaches the Marin
+bucket from an Iris task. Neither preflight installed Transformer Engine.
