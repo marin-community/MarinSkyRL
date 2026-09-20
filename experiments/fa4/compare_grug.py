@@ -52,6 +52,10 @@ def main() -> None:
         candidate_change = candidate["after_weights"][name] - candidate["before_weights"][name]
         reference_change = reference["after_weights"][name] - reference["before_weights"][name]
         comparisons[f"update/{name}"] = difference(candidate_change, reference_change)
+    if reference.get("gradients") and candidate.get("gradients"):
+        assert reference["gradients"].keys() == candidate["gradients"].keys()
+        for name in reference["gradients"]:
+            comparisons[f"gradient/{name}"] = difference(candidate["gradients"][name], reference["gradients"][name])
     print(json.dumps(comparisons, indent=2))
 
 

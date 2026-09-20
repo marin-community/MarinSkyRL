@@ -46,11 +46,14 @@ def main() -> None:
     parser.add_argument("--shape", choices=("toy", "snowball"), default="toy")
     parser.add_argument("--steps", type=int, default=1)
     parser.add_argument("--cp-comm-type", choices=("default", "p2p", "all_gather"), default="all_gather")
+    parser.add_argument("--capture-grads", action="store_true")
     args = parser.parse_args()
     if os.getenv("NVTE_FLASH_ATTN_V4") not in ("0", "1"):
         raise ValueError("Set NVTE_FLASH_ATTN_V4=0 for FA2 or 1 for FA4")
     if args.steps < 1:
         raise ValueError("steps must be positive")
+    if args.capture_grads:
+        os.environ["FA4_EXPERIMENT_GRAD_SNAPSHOT"] = "1"
 
     shape = TOY_SHAPE if args.shape == "toy" else SNOWBALL_LIKE_SHAPE
     prompt_length, response_length = (12, 8) if args.shape == "toy" else (2400, 300)
@@ -117,6 +120,24 @@ def main() -> None:
                 for name in names
             }
             print(f"WEIGHT_HEALTH {weight_health!r}", flush=True)
+            gradients = {}
+            if args.capture_grads:
+                snapshots = ray.get(policy.async_run_ray_method("pass_through", "fa4_experiment_gradient_snapshot"))
+                gradients = next(snapshot["grads"] for snapshot in snapshots if snapshot["rank"] == 0)
+                if not gradients or not any(torch.count_nonzero(grad).item() for grad in gradients.values()):
+                    raise AssertionError("Gradient capture returned no nonzero attention gradients")
+                print(
+                    "GRADIENT_HEALTH",
+                    {
+                        name: {
+                            "nonzero": int(torch.count_nonzero(grad).item()),
+                            "nonfinite": int((~torch.isfinite(grad)).sum().item()),
+                            "max_abs": float(grad.abs().max().item()),
+                        }
+                        for name, grad in gradients.items()
+                    },
+                    flush=True,
+                )
             weights_finite = all(health["nonfinite"] == 0 for health in weight_health.values())
             after_logprobs = (
                 _megatron_response_logprobs(policy, batch)
@@ -139,6 +160,7 @@ def main() -> None:
                 "training_seconds": training_seconds,
                 "statuses": statuses,
                 "weight_health": weight_health,
+                "captured_gradients": bool(gradients),
                 "post_forward_skipped_due_to_nonfinite_weights": not weights_finite,
                 "memory": memory,
             }
@@ -152,6 +174,7 @@ def main() -> None:
                     "response_mask": batch["response_mask"].cpu(),
                     "before_weights": before_weights,
                     "after_weights": after_weights,
+                    "gradients": gradients,
                 },
                 args.output,
             )

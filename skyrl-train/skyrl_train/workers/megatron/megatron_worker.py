@@ -546,6 +546,23 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         temperature=self.cfg.generator.sampling_params.temperature,
                     )
 
+                    # Experimental FA2/FA4 diagnosis: copy the attention
+                    # gradients before optimizer_step clears them. This is
+                    # dormant outside the explicit probe environment.
+                    if os.getenv("FA4_EXPERIMENT_GRAD_SNAPSHOT") == "1":
+                        self._fa4_experiment_grads = {}
+                        for chunk_index, chunk in enumerate(self.actor_module):
+                            for param_name, parameter in chunk.named_parameters():
+                                if "linear_qkv" not in param_name and "attn_gate" not in param_name:
+                                    continue
+                                gradient = getattr(parameter, "main_grad", None)
+                                if gradient is None:
+                                    gradient = parameter.grad
+                                if gradient is not None:
+                                    self._fa4_experiment_grads[f"{chunk_index}:{param_name}"] = (
+                                        gradient.detach().float().cpu().contiguous().clone()
+                                    )
+
                     if self.empty_cuda_cache:
                         torch.cuda.empty_cache()
 
@@ -733,6 +750,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             attention_backend=str(self.provider.attention_backend),
             weights=weights,
         )
+
+    def fa4_experiment_gradient_snapshot(self):
+        """Return the last explicitly requested pre-optimizer attention grads."""
+        return {
+            "rank": torch.distributed.get_rank(),
+            "grads": getattr(self, "_fa4_experiment_grads", {}),
+        }
 
     def get_weight_statistics(self):
         """Compute lightweight statistics for model weights"""
