@@ -11,6 +11,7 @@ import ray
 import torch
 import asyncio
 import vllm
+from zmq.error import ZMQError
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
@@ -1691,7 +1692,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             try:
                 engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
                 break
-            except (DistNetworkError, RuntimeError) as e:
+            except (DistNetworkError, RuntimeError, ZMQError) as e:
                 if not _is_port_collision(e):
                     raise
                 if _attempt == _MAX_INIT_ATTEMPTS - 1:
