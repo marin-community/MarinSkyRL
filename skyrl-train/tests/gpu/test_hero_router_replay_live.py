@@ -131,6 +131,8 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         bias_diagnostics = {
             name: {
                 "finite": bool(torch.isfinite(after[name]).all()),
+                "before_mean": before[name].float().mean().item(),
+                "after_mean": after[name].float().mean().item(),
                 "mean_delta": (after[name].float().mean() - before[name].float().mean()).item(),
                 "max_change": (after[name] - before[name]).abs().max().item(),
             }
@@ -169,7 +171,7 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         assert any(info["max_change"] > 0 for info in bias_diagnostics.values()), bias_diagnostics
         for name, info in bias_diagnostics.items():
             assert info["finite"], f"non-finite query bias after update: {name}"
-            assert abs(info["mean_delta"]) < 1e-6, f"query-bias mean drift in {name}: {info['mean_delta']}"
+            assert abs(info["after_mean"]) < 1e-6, f"query bias was not centered after update: {name} {info}"
         on_metrics = {
             "model": trained_uri or "random Hero schema-v2, 4 layers, 16 experts, top-8, latent MoE, ShortConv",
             "model_layers": model_config.num_hidden_layers,

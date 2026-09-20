@@ -422,6 +422,17 @@ def test_loss_free_bias_does_not_move_when_expert_loads_are_balanced():
     )
 
 
+def test_loss_free_bias_recenters_a_nonzero_checkpoint_mean():
+    current_bias = torch.tensor([[0.31, -0.1, -0.1, -0.1]])
+    loads = torch.tensor([[4.0, 2.0, 1.0, 1.0]])
+
+    updated_bias = next_loss_free_query_bias(current_bias, loads, update_rate=0.001)
+
+    assert current_bias.mean().abs() > 1e-3
+    torch.testing.assert_close(updated_bias.mean(), torch.zeros(()), atol=1e-7, rtol=0)
+    assert not torch.equal(updated_bias, current_bias)
+
+
 def test_query_bias_stays_finite_and_centered_across_optimizer_steps():
     torch.manual_seed(31)
     model = GrugMoeForCausalLM(tiny_config(num_hidden_layers=1, num_local_experts=4, num_experts_per_tok=2))
