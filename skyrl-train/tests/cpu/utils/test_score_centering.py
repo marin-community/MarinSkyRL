@@ -70,6 +70,33 @@ def test_topk_tail_model_matches_full_gradient_when_tail_ratios_are_constant():
     torch.testing.assert_close(topk_gradient, full_gradient, atol=1e-12, rtol=0)
 
 
+def test_float32_subfloor_tails_track_full_vocabulary_score_gradient():
+    # Both omitted masses are below the production 1e-6 floor, and they differ.
+    current_probs = torch.tensor([0.55 * (1 - 8e-7), 0.45 * (1 - 8e-7), 8e-7], dtype=torch.float32)
+    behavior_probs = torch.tensor([0.45 * (1 - 2e-7), 0.55 * (1 - 2e-7), 2e-7], dtype=torch.float32)
+    logits = current_probs.log().clone().requires_grad_()
+    current_logprobs = logits.log_softmax(dim=-1)
+    assert 0 < 1 - current_logprobs[:2].detach().exp().sum() < 1e-6
+    assert 0 < 1 - behavior_probs[:2].sum() < 1e-6
+
+    correction = ppo_tis_score_centering_correction(
+        current_logprobs[:2].reshape(1, 1, 2),
+        current_probs[:2].log().reshape(1, 1, 2),
+        behavior_probs[:2].log().reshape(1, 1, 2),
+        torch.ones((1, 1), dtype=torch.float32),
+        torch.ones((1, 1), dtype=torch.float32),
+        tis_cap=1.05,
+        eps_clip_low=0.2,
+        eps_clip_high=0.2,
+    )
+    actual = torch.autograd.grad(correction.sum(), logits)[0]
+    p = current_logprobs.detach().exp()
+    full_coefficient = torch.minimum(p, 1.05 * behavior_probs)
+    expected = full_coefficient - p * full_coefficient.sum()
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, atol=2e-6, rtol=1e-5)
+
+
 def test_masked_sentinel_rows_do_not_poison_centering():
     logits = torch.tensor([[[[-0.3, 0.1, 0.2]]]], dtype=torch.float64, requires_grad=True)
     selected = logits.log_softmax(dim=-1)[..., :2].squeeze(0)
