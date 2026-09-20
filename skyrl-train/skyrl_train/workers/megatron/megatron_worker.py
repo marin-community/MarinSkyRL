@@ -43,7 +43,7 @@ from skyrl_train.utils.utils import (
 from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
 from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
 from skyrl_train.config.query_bias import GrugQueryBiasUpdateMode, resolve_grug_query_bias_update
-from skyrl_train.models.grug_megatron import GrugTopKRouter
+from skyrl_train.models.grug_megatron import GrugTopKRouter, GrugTransformerLayer
 from skyrl_train.models.grug_query_bias import next_loss_free_query_bias
 import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
@@ -843,8 +843,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
     def begin_grug_layer_trace(self, expected_seq_len: int):
         """TEST-ONLY: capture one scored Hero forward at layer boundaries on rank 0."""
-        from skyrl_train.models.grug_megatron import GrugTransformerLayer
-
         if getattr(self, "_grug_trace_hooks", None) is not None:
             raise RuntimeError("Grug layer trace is already armed")
         self._grug_trace_hooks = []
@@ -866,11 +864,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     key = f"layer_{index}_{site}"
                     self._grug_trace_values.setdefault(key, []).append(value.detach().float().cpu().contiguous())
 
-                def before_layer(_module, args, *, capture_fn=capture):
-                    capture_fn("model_input", args[0])
+                def before_layer(_module, args, kwargs, *, capture_fn=capture):
+                    hidden_states = args[0] if args else kwargs["hidden_states"]
+                    capture_fn("model_input", hidden_states)
 
-                def before_mlp_norm(_module, args, *, capture_fn=capture):
-                    capture_fn("after_attn", args[0])
+                def before_mlp_norm(_module, args, kwargs, *, capture_fn=capture):
+                    hidden_states = args[0] if args else kwargs["hidden_states"]
+                    capture_fn("after_attn", hidden_states)
 
                 def after_mlp_norm(_module, _args, output, *, capture_fn=capture):
                     capture_fn("mlp_input", output)
@@ -880,8 +880,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
                 self._grug_trace_hooks.extend(
                     (
-                        layer.register_forward_pre_hook(before_layer),
-                        layer.pre_mlp_layernorm.register_forward_pre_hook(before_mlp_norm),
+                        layer.register_forward_pre_hook(before_layer, with_kwargs=True),
+                        layer.pre_mlp_layernorm.register_forward_pre_hook(before_mlp_norm, with_kwargs=True),
                         layer.pre_mlp_layernorm.register_forward_hook(after_mlp_norm),
                         layer.register_forward_hook(after_layer),
                     )
