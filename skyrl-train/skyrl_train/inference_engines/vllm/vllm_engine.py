@@ -269,6 +269,70 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
 
 
 class WorkerWrap:
+    def begin_hero_layer_trace(self, positions: list[int]):
+        """TEST-ONLY: capture one full-prefill Hero layer trace on this vLLM rank."""
+        if getattr(self, "_hero_trace_hooks", None):
+            raise RuntimeError("Hero layer trace is already armed")
+        layers = self.model_runner.model.model.layers
+        wanted = tuple(int(position) for position in positions)
+        if not wanted or min(wanted) < 0:
+            raise ValueError("Hero trace positions must be nonempty and nonnegative")
+        traces = {}
+        hooks = []
+
+        for layer_index, layer in enumerate(layers):
+            state = {"indices": None}
+
+            def capture(site, value, *, index=layer_index, current=state):
+                selected = current["indices"]
+                if selected is not None:
+                    traces[f"layer_{index}_{site}"] = value.index_select(0, selected).detach().float().cpu()
+
+            def before_layer(_module, args, *, current=state, capture_fn=capture):
+                positions_tensor, hidden_states = args[:2]
+                if positions_tensor.ndim != 1 or positions_tensor.numel() <= max(wanted):
+                    return
+                prefix = torch.arange(positions_tensor.numel(), device=positions_tensor.device)
+                if not torch.equal(positions_tensor, prefix):
+                    return
+                current["indices"] = torch.tensor(wanted, device=positions_tensor.device)
+                capture_fn("model_input", hidden_states)
+
+            def before_mlp_norm(_module, args, *, capture_fn=capture):
+                capture_fn("after_attn", args[0])
+
+            def after_mlp_gate(_module, _args, output, *, capture_fn=capture):
+                capture_fn("mlp_input", output)
+
+            def after_layer(_module, _args, output, *, current=state, capture_fn=capture):
+                capture_fn("after_block", output)
+                current["indices"] = None
+
+            hooks.extend(
+                (
+                    layer.register_forward_pre_hook(before_layer),
+                    layer.post_attention_layernorm.register_forward_pre_hook(before_mlp_norm),
+                    layer.mlp_gated_norm.register_forward_hook(after_mlp_gate),
+                    layer.register_forward_hook(after_layer),
+                )
+            )
+
+        self._hero_trace_hooks = hooks
+        self._hero_trace_values = traces
+        return {"layers": len(layers), "positions": list(wanted)}
+
+    def finish_hero_layer_trace(self):
+        """TEST-ONLY: remove hooks and return the sampled prefill boundaries."""
+        hooks = getattr(self, "_hero_trace_hooks", None)
+        if not hooks:
+            raise RuntimeError("Hero layer trace was not armed")
+        for hook in hooks:
+            hook.remove()
+        self._hero_trace_hooks = None
+        traces = self._hero_trace_values
+        self._hero_trace_values = None
+        return traces
+
     def set_numa_affinity(self):
         """Set CPU affinity to match this worker's GPU NUMA node.
 
@@ -1963,6 +2027,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """
         engine = self._get_engine()
         return await engine.collective_rpc("read_named_weights", args=(list(hf_names), dump_inventory))
+
+    async def begin_hero_layer_trace(self, positions: list[int]):
+        """TEST-ONLY: arm layer-boundary hooks on the resident vLLM worker."""
+        return await self._get_engine().collective_rpc("begin_hero_layer_trace", args=(positions,))
+
+    async def finish_hero_layer_trace(self):
+        """TEST-ONLY: collect and remove layer-boundary hooks."""
+        return await self._get_engine().collective_rpc("finish_hero_layer_trace")
 
     async def read_engine_expert_slots_raw(self, layer_idx: int):
         """TEST-ONLY (D1/D2 diag): per-engine-worker RAW FusedMoE local-slot weights +

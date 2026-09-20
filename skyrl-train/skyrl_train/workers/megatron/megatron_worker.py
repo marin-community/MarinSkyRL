@@ -839,6 +839,65 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             weights=weights,
         )
 
+    def begin_grug_layer_trace(self, expected_seq_len: int):
+        """TEST-ONLY: capture one scored Hero forward at layer boundaries on rank 0."""
+        from skyrl_train.models.grug_megatron import GrugTransformerLayer
+
+        if getattr(self, "_grug_trace_hooks", None) is not None:
+            raise RuntimeError("Grug layer trace is already armed")
+        self._grug_trace_hooks = []
+        self._grug_trace_values = {}
+        rank = torch.distributed.get_rank()
+        if rank != 0:
+            return {"rank": rank, "layers": 0}
+        seen = set()
+        for chunk in self.actor_module:
+            for layer in chunk.modules():
+                if not isinstance(layer, GrugTransformerLayer) or id(layer) in seen:
+                    continue
+                seen.add(id(layer))
+                layer_index = layer.layer_number - 1
+
+                def capture(site, value, *, index=layer_index):
+                    if value.ndim != 3 or value.shape[0] != expected_seq_len:
+                        return
+                    key = f"layer_{index}_{site}"
+                    self._grug_trace_values.setdefault(key, []).append(value.detach().float().cpu().contiguous())
+
+                def before_layer(_module, args, *, capture_fn=capture):
+                    capture_fn("model_input", args[0])
+
+                def before_mlp_norm(_module, args, *, capture_fn=capture):
+                    capture_fn("after_attn", args[0])
+
+                def after_mlp_norm(_module, _args, output, *, capture_fn=capture):
+                    capture_fn("mlp_input", output)
+
+                def after_layer(_module, _args, output, *, capture_fn=capture):
+                    capture_fn("after_block", output[0])
+
+                self._grug_trace_hooks.extend(
+                    (
+                        layer.register_forward_pre_hook(before_layer),
+                        layer.pre_mlp_layernorm.register_forward_pre_hook(before_mlp_norm),
+                        layer.pre_mlp_layernorm.register_forward_hook(after_mlp_norm),
+                        layer.register_forward_hook(after_layer),
+                    )
+                )
+        return {"rank": rank, "layers": len(seen)}
+
+    def finish_grug_layer_trace(self):
+        """TEST-ONLY: collect and remove Grug layer-boundary hooks."""
+        hooks = getattr(self, "_grug_trace_hooks", None)
+        if hooks is None:
+            raise RuntimeError("Grug layer trace was not armed")
+        for hook in hooks:
+            hook.remove()
+        self._grug_trace_hooks = None
+        traces = self._grug_trace_values
+        self._grug_trace_values = None
+        return {"rank": torch.distributed.get_rank(), "traces": traces}
+
     def get_weight_statistics(self):
         """Compute lightweight statistics for model weights"""
         raise NotImplementedError()
