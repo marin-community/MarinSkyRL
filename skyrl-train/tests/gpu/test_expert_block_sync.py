@@ -2,9 +2,9 @@
 
 Each case starts a tiny Grug Megatron policy and vLLM engines, trains one PPO step, syncs with
 ``weight_sync_transport=expert_block`` and verifies the sync. It then reads engine weights back
-and compares them, byte for byte, with the trainer's exported weights. It flips one installed
-byte on one worker and checks that verification counts exactly that byte. Then it trains a
-second step and syncs again.
+and compares them, byte for byte, with the trainer's exported weights. Dense cases flip one
+installed byte and check that verification counts exactly that byte. Every case trains a second
+step and syncs again.
 
 Opt-in; needs at most six Hopper GPUs. The test's engine actor is defined in this module, so Ray
 workers need ``skyrl-train`` on ``PYTHONPATH``. The Grug gate wrapper sets it:

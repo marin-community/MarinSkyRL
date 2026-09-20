@@ -13,6 +13,7 @@ from dataclasses import asdict
 
 import torch
 
+from marinskyrl.runtime_options import ExpertBlockEncoding
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, destroy_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, TrainerRank, from_wire, to_wire
 from skyrl_train.weight_sync.expert_block.source_views import local_expert_sources, local_source_slices
@@ -111,7 +112,7 @@ class ExpertBlockSender:
         except BaseException:
             self.failed = True
             raise
-        if update_info["encoding"] == "sparse_index":
+        if update_info["encoding"] == ExpertBlockEncoding.SPARSE_INDEX:
             self.pending_version = version
         return asdict(result)
 
