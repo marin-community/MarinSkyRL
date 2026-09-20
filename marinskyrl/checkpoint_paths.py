@@ -6,6 +6,8 @@ GLOBAL_STEP_PREFIX = "global_step_"
 LATEST_CHECKPOINT_FILE = "latest_ckpt_global_step.txt"
 HF_EXPORT_REQUEST_FILENAME = "hf_export_request.json"
 POLICY_CHECKPOINT_SUBDIRECTORY = "policy"
+DRAFT_CHECKPOINT_SUBDIRECTORY = "drafts"
+LATEST_DRAFT_FILENAME = "latest.json"
 
 
 def policy_export_path(export_root: str, global_step: int) -> str:

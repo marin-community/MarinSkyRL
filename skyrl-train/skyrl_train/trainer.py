@@ -66,6 +66,7 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     OnlineEagleCaptureConfig,
     OnlineEagleUpdateResult,
+    active_capture_results,
 )
 from skyrl_train.draft_trainer import (
     DraftUpdateRequest,
@@ -87,8 +88,11 @@ from skyrl_train.sync_group_admission import (
 )
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.checkpoint_paths import (
+    DRAFT_CHECKPOINT_SUBDIRECTORY,
     GLOBAL_STEP_PREFIX,
     LATEST_CHECKPOINT_FILE,
+    POLICY_CHECKPOINT_SUBDIRECTORY,
+    policy_export_path,
 )
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculativeDecodingConfig, runai_model_uri
@@ -121,7 +125,6 @@ from skyrl_train.hf_export import (
     read_hf_export_request,
     write_hf_export_request,
 )
-from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY, policy_export_path
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_HUB_REVISION,
     DEFAULT_HF_UPLOAD_MODE,
@@ -132,10 +135,6 @@ from skyrl_train.hf_export_schema import (
 )
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
-
-
-def _active_online_eagle_results(results: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    return [item for engine_results in results for item in engine_results if item.get("active", False)]
 
 
 def _poll_object_ref(ref: ObjectRef) -> tuple[bool, Any | None]:
@@ -232,7 +231,7 @@ class RayPPOTrainer:
             None if self.speculative_decoding is None else self.speculative_decoding.model.source_identity
         )
         self._sealed_speculator_capture_uri: str | None = None
-        self._speculator_checkpoint_root = join_resource_path(self.cfg.trainer.ckpt_path, "drafts")
+        self._speculator_checkpoint_root = join_resource_path(self.cfg.trainer.ckpt_path, DRAFT_CHECKPOINT_SUBDIRECTORY)
         self._draft_trainer = None
         self._draft_trainer_update_ref: ObjectRef | None = None
         self._draft_trainer_submitted_at: float | None = None
@@ -706,7 +705,6 @@ class RayPPOTrainer:
             step=self.global_step,
             max_tokens=training.max_tokens_per_update,
             max_window_tokens=training.max_window_tokens,
-            max_sequences_per_prompt_group=training.max_sequences_per_prompt_group,
             target_revision=_policy_revision(self.global_step - 1),
             draft_revision=self._speculator_revision,
             reserved_gpu_memory_gib=training.reserved_gpu_memory_gib,
@@ -720,7 +718,7 @@ class RayPPOTrainer:
             logger.warning("Online EAGLE capture skipped at step {}: {}", self.global_step, error)
             self.all_metrics["speculator/capture_failures"] = 1.0
             return
-        active = _active_online_eagle_results(results)
+        active = active_capture_results(results)
         if not active:
             logger.warning("Online EAGLE capture had no active ranks at step {}", self.global_step)
             return
@@ -745,7 +743,7 @@ class RayPPOTrainer:
             logger.warning("Online EAGLE capture publication failed at step {}: {}", self.global_step, error)
             self.all_metrics["speculator/capture_failures"] = 1.0
             return
-        active = _active_online_eagle_results(manifests)
+        active = active_capture_results(manifests)
         if not active:
             logger.warning("Online EAGLE capture published no rank manifests at step {}", self.global_step)
             self.all_metrics["speculator/capture_failures"] = 1.0

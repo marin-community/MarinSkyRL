@@ -26,6 +26,8 @@ from cloud.iris.protocol import (
     SkyRLOutputPaths,
     SkyRLRolePlan,
     SkyRLTopology,
+    rollout_gpu_count,
+    rollout_node_count,
 )
 from marinskyrl.distillation import (
     LocalInferenceTeacherSpec,
@@ -173,18 +175,22 @@ def _rollout_claim(config: dict[str, Any], values: dict[str, Any]) -> ModelRoleC
     if not isinstance(rollout_backend, str) or not rollout_backend.strip():
         raise ValueError("generator.backend must be a non-empty string")
     rollout_is_local = values["run_engines_locally"]
-    rollout_gpus = (
-        values["num_inference_engines"]
-        * values["inference_engine_tensor_parallel_size"]
-        * values["inference_engine_pipeline_parallel_size"]
-        * values["inference_engine_data_parallel_size"]
+    rollout_gpus = rollout_gpu_count(
+        replicas=values["num_inference_engines"],
+        tensor_parallel_size=values["inference_engine_tensor_parallel_size"],
+        pipeline_parallel_size=values["inference_engine_pipeline_parallel_size"],
+        data_parallel_size=values["inference_engine_data_parallel_size"],
     )
     rollout_nodes = (
         values["policy_num_nodes"]
         if rollout_is_local and values["colocate_all"]
-        else max(
-            values["num_inference_engines"],
-            (rollout_gpus + values["policy_num_gpus_per_node"] - 1) // values["policy_num_gpus_per_node"],
+        else rollout_node_count(
+            replicas=values["num_inference_engines"],
+            tensor_parallel_size=values["inference_engine_tensor_parallel_size"],
+            pipeline_parallel_size=values["inference_engine_pipeline_parallel_size"],
+            data_parallel_size=values["inference_engine_data_parallel_size"],
+            gpus_per_node=values["policy_num_gpus_per_node"],
+            minimum_nodes=values["num_inference_engines"],
         )
         if rollout_is_local
         else 0
@@ -302,14 +308,13 @@ def _draft_trainer_claims(config: dict[str, Any], values: dict[str, Any]) -> tup
     if not isinstance(speculative_decoding, dict) or speculative_decoding.get("training") is None:
         return ()
     evaluation_only = _optional_at(config, "entrypoint") == "generate"
-    rollout_nodes = (
-        values["num_inference_engines"]
-        * values["inference_engine_tensor_parallel_size"]
-        * values["inference_engine_pipeline_parallel_size"]
-        * values["inference_engine_data_parallel_size"]
-        + values["policy_num_gpus_per_node"]
-        - 1
-    ) // values["policy_num_gpus_per_node"]
+    rollout_nodes = rollout_node_count(
+        replicas=values["num_inference_engines"],
+        tensor_parallel_size=values["inference_engine_tensor_parallel_size"],
+        pipeline_parallel_size=values["inference_engine_pipeline_parallel_size"],
+        data_parallel_size=values["inference_engine_data_parallel_size"],
+        gpus_per_node=values["policy_num_gpus_per_node"],
+    )
     return (
         ModelRoleClaim(
             role_id=ModelRoleKind.DRAFT_TRAINER.value,

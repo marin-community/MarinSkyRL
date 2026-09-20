@@ -388,13 +388,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         worker_count = len(live)
         return await asyncio.gather(
             *(
-                engine.begin_online_eagle_capture(
-                    {
-                        **config,
-                        "capture_worker_count": worker_count,
-                        "capture_worker_index": index,
-                    }
-                )
+                engine.begin_online_eagle_capture(config, worker_count=worker_count, worker_index=index)
                 for index, engine in live
             )
         )

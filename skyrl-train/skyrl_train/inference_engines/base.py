@@ -178,7 +178,13 @@ class InferenceEngineInterface(ABC):
         """Resume the scheduler after a weight update."""
         raise NotImplementedError()
 
-    async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> OnlineEagleResult:
+    async def begin_online_eagle_capture(
+        self,
+        config: Dict[str, Any],
+        *,
+        worker_count: int,
+        worker_index: int,
+    ) -> OnlineEagleResult:
         """Begin a bounded online-EAGLE capture interval when supported."""
         raise NotImplementedError()
 

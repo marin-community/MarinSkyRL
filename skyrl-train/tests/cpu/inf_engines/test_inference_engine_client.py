@@ -625,9 +625,13 @@ class _DraftUpdateEngine:
 class _CaptureEngine:
     def __init__(self) -> None:
         self.config = None
+        self.worker_count = None
+        self.worker_index = None
 
-    async def begin_online_eagle_capture(self, config):
+    async def begin_online_eagle_capture(self, config, *, worker_count, worker_index):
         self.config = config
+        self.worker_count = worker_count
+        self.worker_index = worker_index
         return [{"active": True}]
 
 
@@ -638,8 +642,8 @@ async def test_eagle_capture_assigns_global_worker_ranks_across_engine_pools() -
 
     await client.begin_online_eagle_capture({"step": 3})
 
-    assert [engine.config["capture_worker_index"] for engine in engines] == [0, 1, 2, 3]
-    assert {engine.config["capture_worker_count"] for engine in engines} == {4}
+    assert [engine.worker_index for engine in engines] == [0, 1, 2, 3]
+    assert {engine.worker_count for engine in engines} == {4}
 
 
 @pytest.mark.asyncio

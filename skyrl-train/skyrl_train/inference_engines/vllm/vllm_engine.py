@@ -288,18 +288,15 @@ class WorkerWrap:
         """Test RPC call to worker"""
         return args, kwargs
 
-    def begin_online_eagle_capture(self, config):
+    def begin_online_eagle_capture(self, config, worker_count: int, worker_index: int):
         """Begin bounded verifier-state capture on the resident model runner."""
         parallel_config = self.model_runner.parallel_config
         if parallel_config.tensor_parallel_size != 1 or parallel_config.pipeline_parallel_size != 1:
             raise RuntimeError("Online EAGLE training requires vLLM tensor and pipeline parallel size 1")
-        worker_count = int(config["capture_worker_count"])
-        worker_rank = int(config["capture_worker_index"])
-        config = {key: value for key, value in config.items() if not key.startswith("capture_worker_")}
         resolved = capture_config_for_worker(
             config,
             worker_count=worker_count,
-            worker_index=worker_rank,
+            worker_index=worker_index,
         )
         reserved_gpu_memory_gib = float(resolved.pop("reserved_gpu_memory_gib"))
         total_memory_gib = torch.cuda.get_device_properties(self.device).total_memory / 2**30
@@ -313,7 +310,7 @@ class WorkerWrap:
                 f"on this {total_memory_gib:.2f} GiB device"
             )
         result = self.model_runner.begin_online_eagle_capture(resolved)
-        self._online_eagle_capture_worker_rank = worker_rank
+        self._online_eagle_capture_worker_rank = worker_index
         return {
             **result,
             "node_id": str(ray.get_runtime_context().get_node_id()),
@@ -1908,10 +1905,16 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
         )
 
-    async def begin_online_eagle_capture(self, config: Dict[str, Any]):
+    async def begin_online_eagle_capture(
+        self,
+        config: Dict[str, Any],
+        *,
+        worker_count: int,
+        worker_index: int,
+    ):
         """Begin bounded capture on every worker rank."""
         engine = self._get_engine()
-        return await engine.collective_rpc("begin_online_eagle_capture", args=(config,))
+        return await engine.collective_rpc("begin_online_eagle_capture", args=(config, worker_count, worker_index))
 
     async def seal_online_eagle_capture(self, destination: str):
         """Publish capture from every rank before target synchronization."""

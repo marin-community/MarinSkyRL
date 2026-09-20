@@ -226,6 +226,8 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
 
 
 class BasePPOExp:
+    entrypoint_name = STANDARD_TRAINING_ENTRYPOINT
+
     def __init__(self, cfg: DictConfig):
         """
         Initializes a PPO experiment.
@@ -253,16 +255,11 @@ class BasePPOExp:
         engine_mode = "local" if self.cfg.generator.run_engines_locally else "remote"
         logger.info("Starting inference engines: mode={}", engine_mode)
         if self.cfg.generator.run_engines_locally:
-            entrypoint = (
-                STANDARD_TRAINING_ENTRYPOINT
-                if type(self) is BasePPOExp
-                else getattr(type(self), "entrypoint_name", type(self).__module__)
-            )
             inference_engines = create_ray_wrapped_inference_engines_from_config(
                 self.cfg,
                 self.colocate_pg,
                 self.tokenizer,
-                entrypoint=entrypoint,
+                entrypoint=self.entrypoint_name,
             )
         else:
             inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)

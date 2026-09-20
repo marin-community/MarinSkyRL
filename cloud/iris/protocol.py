@@ -37,6 +37,36 @@ class RoleExecution(StrEnum):
     REMOTE = "remote"
 
 
+def rollout_node_count(
+    *,
+    replicas: int,
+    tensor_parallel_size: int,
+    pipeline_parallel_size: int,
+    data_parallel_size: int,
+    gpus_per_node: int,
+    minimum_nodes: int = 0,
+) -> int:
+    """Return the whole-node footprint for a rollout geometry."""
+    rollout_gpus = rollout_gpu_count(
+        replicas=replicas,
+        tensor_parallel_size=tensor_parallel_size,
+        pipeline_parallel_size=pipeline_parallel_size,
+        data_parallel_size=data_parallel_size,
+    )
+    return max(minimum_nodes, (rollout_gpus + gpus_per_node - 1) // gpus_per_node)
+
+
+def rollout_gpu_count(
+    *,
+    replicas: int,
+    tensor_parallel_size: int,
+    pipeline_parallel_size: int,
+    data_parallel_size: int,
+) -> int:
+    """Return the GPU count for a rollout geometry."""
+    return replicas * tensor_parallel_size * pipeline_parallel_size * data_parallel_size
+
+
 @dataclass(frozen=True)
 class RuntimeIdentity:
     commit: str
@@ -347,8 +377,13 @@ def _legacy_role_plan(value: dict[str, Any]) -> SkyRLRolePlan:
     rollout_pp = int(value.get("inference_engine_pipeline_parallel_size", 1))
     rollout_dp = int(value.get("inference_engine_data_parallel_size", 1))
     rollout_ep = int(value.get("inference_engine_expert_parallel_size", 1))
-    rollout_gpus = rollout_replicas * rollout_tp * rollout_pp * rollout_dp
-    rollout_nodes = (rollout_gpus + gpus_per_node - 1) // gpus_per_node
+    rollout_nodes = rollout_node_count(
+        replicas=rollout_replicas,
+        tensor_parallel_size=rollout_tp,
+        pipeline_parallel_size=rollout_pp,
+        data_parallel_size=rollout_dp,
+        gpus_per_node=gpus_per_node,
+    )
     policy_group = "all" if colocate_all else ModelRoleKind.POLICY.value
     rollout_group = "all" if colocate_all else ModelRoleKind.ROLLOUT.value
     model_claims = (

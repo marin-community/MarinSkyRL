@@ -96,6 +96,11 @@ def capture_publication_result(manifest: Mapping[str, Any], path: str) -> dict[s
     return {**manifest, "active": True, "path": path}
 
 
+def active_capture_results(results: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Flatten results from ranks that participated in an EAGLE capture."""
+    return [item for engine_results in results for item in engine_results if item.get("active", False)]
+
+
 @dataclass(frozen=True)
 class OnlineEagleTrainingJob:
     """One bounded draft update assembled inside DraftTrainer."""
@@ -118,7 +123,6 @@ class OnlineEagleCaptureConfig:
     step: int
     max_tokens: int
     max_window_tokens: int
-    max_sequences_per_prompt_group: int
     target_revision: str
     draft_revision: str
     reserved_gpu_memory_gib: float
@@ -195,7 +199,6 @@ def capture_config_for_worker(config: Mapping[str, Any], *, worker_count: int, w
         worker_count=worker_count,
         worker_index=worker_index,
     )
-    resolved.pop("max_sequences_per_prompt_group")
     resolved["capture_target_snapshot"] = worker_index == 0
     return resolved
 

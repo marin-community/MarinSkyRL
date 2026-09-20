@@ -270,8 +270,18 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def resume_generation(self) -> None:
         return await self.inference_engine_actor.resume_generation.remote()
 
-    async def begin_online_eagle_capture(self, config: Dict[str, Any]):
-        return await self.inference_engine_actor.begin_online_eagle_capture.remote(config)
+    async def begin_online_eagle_capture(
+        self,
+        config: Dict[str, Any],
+        *,
+        worker_count: int,
+        worker_index: int,
+    ):
+        return await self.inference_engine_actor.begin_online_eagle_capture.remote(
+            config,
+            worker_count=worker_count,
+            worker_index=worker_index,
+        )
 
     async def seal_online_eagle_capture(self, destination: str):
         return await self.inference_engine_actor.seal_online_eagle_capture.remote(destination)
@@ -470,9 +480,7 @@ def create_ray_wrapped_inference_engines(
     # leaves whole nodes free), so the policy PACK PG gets its nodes. Thus plain
     # TP==PP==1 uses flat PACK, while multi-GPU TP/PP or explicitly node-local
     # DP/EP uses per-engine STRICT_PACK.
-    # NOTE: the gate is `tp_pp_size > 1`, NOT `per_engine_gpu_count > gpus_per_node` —
-    # #232 is TP=4 on 4-GPU nodes (4 is NOT > 4), which the latter would wrongly send
-    # down the flat-PACK path and re-break the cross-node-TP-split bug.
+    # Multi-GPU TP/PP engines and explicitly node-local DP/EP pools use this path.
     # For the multi-GPU-engine ray/uni case that could still scatter densely-packed
     # engines onto partially-used nodes (e.g. TP=2 on 4-GPU nodes), the policy PG is
     # protected independently by the `placement.policy_strict_spread_pg` reserve-first

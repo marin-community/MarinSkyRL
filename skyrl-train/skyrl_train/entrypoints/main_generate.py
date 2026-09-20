@@ -12,6 +12,7 @@ import ray
 from loguru import logger
 from omegaconf import DictConfig
 
+from marinskyrl.checkpoint_paths import DRAFT_CHECKPOINT_SUBDIRECTORY
 from skyrl_train.entrypoints.main_base import (
     BasePPOExp,
     config_dir,
@@ -38,6 +39,7 @@ from skyrl_train.inference_engines.ray_wrapped_inference_engine import (
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     OnlineEagleCaptureConfig,
     OnlineEagleUpdateResult,
+    active_capture_results,
     replay_session_id,
 )
 from skyrl_train.io import io
@@ -81,10 +83,6 @@ def _offline_speculative_decoding_config(cfg: DictConfig) -> SpeculativeDecoding
     )
 
 
-def _active_capture_results(results: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    return [item for engine in results for item in engine if item.get("active", False)]
-
-
 async def _begin_offline_eagle_capture(
     inference_engine_client: InferenceEngineClient,
     cfg: DictConfig,
@@ -94,7 +92,7 @@ async def _begin_offline_eagle_capture(
         return None
     if not is_cloud_uri(cfg.trainer.ckpt_path):
         raise ValueError("Offline EAGLE distillation requires trainer.ckpt_path to be cloud-backed")
-    capture_uri = join_resource_path(cfg.trainer.ckpt_path, "drafts", "captures", "offline-step-1")
+    capture_uri = join_resource_path(cfg.trainer.ckpt_path, DRAFT_CHECKPOINT_SUBDIRECTORY, "captures", "offline-step-1")
     if await asyncio.to_thread(io.exists, capture_uri):
         await asyncio.to_thread(io.remove, capture_uri)
     source_identity = cfg.trainer.policy.model.get("source_identity")
@@ -104,13 +102,12 @@ async def _begin_offline_eagle_capture(
         step=1,
         max_tokens=speculative_decoding.training.max_tokens_per_update,
         max_window_tokens=speculative_decoding.training.max_window_tokens,
-        max_sequences_per_prompt_group=speculative_decoding.training.max_sequences_per_prompt_group,
         target_revision=str(source_identity),
         draft_revision=speculative_decoding.model.source_identity,
         reserved_gpu_memory_gib=speculative_decoding.training.reserved_gpu_memory_gib,
     )
     results = await inference_engine_client.begin_online_eagle_capture(capture.to_mapping())
-    if not _active_capture_results(results):
+    if not active_capture_results(results):
         raise RuntimeError("Offline EAGLE capture did not start on any rollout rank")
     return capture_uri
 
@@ -120,7 +117,7 @@ async def _seal_offline_eagle_capture(
     capture_uri: str,
 ) -> int:
     manifests = await inference_engine_client.seal_online_eagle_capture(capture_uri)
-    active = _active_capture_results(manifests)
+    active = active_capture_results(manifests)
     if not active:
         raise RuntimeError("Offline EAGLE capture did not publish any rank manifests")
     return sum(int(item.get("captured_rows", 0)) for item in active)
@@ -142,7 +139,7 @@ async def _train_offline_eagle_draft(
     speculative_decoding: SpeculativeDecodingConfig,
 ) -> OnlineEagleUpdateResult:
     assert speculative_decoding.training is not None
-    checkpoint_root = join_resource_path(cfg.trainer.ckpt_path, "drafts")
+    checkpoint_root = join_resource_path(cfg.trainer.ckpt_path, DRAFT_CHECKPOINT_SUBDIRECTORY)
     draft_trainer = create_draft_trainer(
         initial_model=speculative_decoding.model,
         checkpoint_root=checkpoint_root,

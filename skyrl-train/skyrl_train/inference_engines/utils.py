@@ -271,5 +271,4 @@ def get_rendezvous_addr_ports(
         placement_group_capture_child_tasks=True,
         placement_group_bundle_index=pg_index,
     )
-    # Get DP group rendezvous (addr, port) on the same node as index `pg_index`'s bundle.
     return ray.get(get_addr_ports.options(scheduling_strategy=master_sched).remote())

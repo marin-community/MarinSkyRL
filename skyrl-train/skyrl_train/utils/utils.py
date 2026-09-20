@@ -246,26 +246,19 @@ def use_per_engine_strict_pack_pg(
     tensor_parallel_size: int,
     pipeline_parallel_size: int,
 ) -> bool:
-    """Whether the ray/uni inference backend should build one STRICT_PACK
-    placement group PER ENGINE (vs a single flat PACK PG over all engines).
+    """Whether ray/uni should build one node-local STRICT_PACK group per engine.
 
     Pure (Ray-free) predicate so the placement decision is unit-testable. The
     per-engine STRICT_PACK guarantees each engine's bundles co-locate on one
     node. It is required for multi-GPU TP/PP engines and can be requested for
     DP/EP pools whose collectives must remain node-local.
 
-    For single-GPU engines (TP==PP==1) it must be OFF: N independent 1-bundle
-    STRICT_PACK PGs scatter round-robin across nodes, leaving every node
-    partially used and STARVING the downstream policy/ref PACK PG of its whole
-    nodes (RuntimeError: Failed to create placement group ... in 180s — observed
-    multi-node TP=1 lever1/swesmith). The flat PACK fallback packs single-GPU
-    bundles densely, freeing whole nodes for the policy PG.
+    Single-GPU engines use flat PACK unless ``require_node_local_engine`` is set.
+    Flat PACK leaves whole nodes free for a downstream policy placement group.
+    Explicit node locality instead keeps a DP/EP pool on one node.
 
-    The gate is ``tp_pp_size > 1`` (NOT ``per_engine_gpu_count > gpus_per_node``):
-    #232 is TP=4 on 4-GPU nodes, and 4 is not > 4, so the latter would wrongly
-    fall back to flat PACK and re-break the cross-node-TP-split. The hybrid
-    (colocate_all) and mp-backend paths never use per-engine STRICT_PACK (the mp
-    path's {GPU:tp_pp_size} bundle is already node-atomic).
+    Multi-GPU TP/PP engines also require node locality. Hybrid and mp-backend
+    paths do not use per-engine groups because their bundles are already atomic.
     """
     if use_hybrid_engine or use_mp_backend:
         return False

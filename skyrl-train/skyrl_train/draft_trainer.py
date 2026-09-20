@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from loguru import logger
 import ray
 
+from marinskyrl.checkpoint_paths import LATEST_DRAFT_FILENAME
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculatorModelConfig, SpeculatorTrainingConfig
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
@@ -24,7 +25,6 @@ from skyrl_train.hf_model_io import HF_WEIGHT_FILENAME
 from skyrl_train.io import io
 
 
-LATEST_DRAFT_FILENAME = "latest.json"
 COMPLETE_DRAFT_FILENAME = "complete.json"
 
 

@@ -9,6 +9,7 @@ import os
 from typing import Any
 
 import datasets
+from loguru import logger
 from transformers import PreTrainedTokenizerBase
 
 
@@ -33,8 +34,6 @@ class EagleReplaySelection:
 def _token_ids(value: object, *, field: str) -> list[int]:
     if isinstance(value, Mapping):
         value = value.get("input_ids")
-    if hasattr(value, "tolist"):
-        value = value.tolist()
     if isinstance(value, list) and len(value) == 1 and isinstance(value[0], list):
         value = value[0]
     if not isinstance(value, list) or any(isinstance(token, bool) or not isinstance(token, int) for token in value):
@@ -121,10 +120,9 @@ def replay_sequence_from_row(
     return EagleReplaySequence(token_ids=token_ids, loss_start=loss_start, group_id=group_id)
 
 
-def load_replay_rows(sources: str | Sequence[str]) -> Iterator[dict[str, Any]]:
+def load_replay_rows(sources: Sequence[str]) -> Iterator[dict[str, Any]]:
     """Yield rows from JSON, JSONL, or Parquet corpus shards."""
-    paths = [sources] if isinstance(sources, str) else list(sources)
-    for source in paths:
+    for source in sources:
         extension = os.path.splitext(source)[-1].lower()
         if extension == ".parquet":
             dataset = datasets.load_dataset("parquet", data_files=source, keep_in_memory=False, split="train")
@@ -148,10 +146,11 @@ def select_replay_sequences(
     charged_tokens = 0
     skipped_rows = 0
     group_counts: dict[str, int] = {}
-    for row in rows:
+    for row_index, row in enumerate(rows):
         try:
             sequence = replay_sequence_from_row(row, tokenizer)
-        except ValueError:
+        except ValueError as error:
+            logger.warning("Skipping malformed EAGLE replay row {}: {}", row_index, error)
             skipped_rows += 1
             continue
         if group_counts.get(sequence.group_id, 0) >= max_sequences_per_group:

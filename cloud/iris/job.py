@@ -24,9 +24,10 @@ from cloud.iris.artifacts import (
     write_json,
 )
 from cloud.iris.opd_curriculum import load_curriculum_manifest, run_curriculum
-from marinskyrl.checkpoint_paths import policy_export_path
+from marinskyrl.checkpoint_paths import DRAFT_CHECKPOINT_SUBDIRECTORY, LATEST_DRAFT_FILENAME, policy_export_path
 from marinskyrl.hf_model import validate_portable_hf_model_files
 from marinskyrl.packed_tasks import select_task_references
+from marinskyrl.resource_locator import join_resource_path
 from marinskyrl.task_sources import DataSource, TaskTroveParquetSource, TaskTroveSelectionSnapshot
 from cloud.iris.runtime_bundle import runtime_bundle_inputs
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome
@@ -127,8 +128,8 @@ def _is_draft_distillation(request: SkyRLLaunchRequest) -> bool:
 
 
 def _draft_model(request: SkyRLLaunchRequest) -> SkyRLDraftModel:
-    checkpoint_root = f"{request.output.checkpoint_root.rstrip('/')}/drafts"
-    latest_uri = f"{checkpoint_root}/latest.json"
+    checkpoint_root = join_resource_path(request.output.checkpoint_root, DRAFT_CHECKPOINT_SUBDIRECTORY)
+    latest_uri = join_resource_path(checkpoint_root, LATEST_DRAFT_FILENAME)
     latest = read_json(latest_uri)
     if latest is None:
         raise ValueError(f"Successful draft distillation did not publish {latest_uri}")
