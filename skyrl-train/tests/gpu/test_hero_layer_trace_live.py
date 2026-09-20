@@ -99,25 +99,29 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
 
         sequence = prompts[row_index] + rollout["response_ids"][row_index]
         vllm_actor = client.engines[0].inference_engine_actor
-        vllm_start = ray.get(vllm_actor.begin_hero_layer_trace.remote(positions))
-        if isinstance(vllm_start, dict):
-            vllm_start = [vllm_start]
-        assert vllm_start[0]["layers"] == model_config.num_hidden_layers
-        try:
-            asyncio.run(
-                client.engines[0].generate(
-                    InferenceEngineInput(
-                        prompt_token_ids=[sequence],
-                        sampling_params={"temperature": 1.0, "max_tokens": 1, "prompt_logprobs": 1},
+        vllm_traces = {}
+        for trace_row in range(len(prompts)):
+            trace_sequence = prompts[trace_row] + rollout["response_ids"][trace_row]
+            vllm_start = ray.get(vllm_actor.begin_hero_layer_trace.remote(positions))
+            if isinstance(vllm_start, dict):
+                vllm_start = [vllm_start]
+            assert vllm_start[0]["layers"] == model_config.num_hidden_layers
+            try:
+                asyncio.run(
+                    client.engines[0].generate(
+                        InferenceEngineInput(
+                            prompt_token_ids=[trace_sequence],
+                            sampling_params={"temperature": 1.0, "max_tokens": 1, "prompt_logprobs": 1},
+                        )
                     )
                 )
-            )
-        finally:
-            vllm_rank_traces = ray.get(vllm_actor.finish_hero_layer_trace.remote())
-        if isinstance(vllm_rank_traces, dict):
-            vllm_rank_traces = [vllm_rank_traces]
-        assert len(vllm_rank_traces) == 1
-        vllm_trace = vllm_rank_traces[0]
+            finally:
+                vllm_rank_traces = ray.get(vllm_actor.finish_hero_layer_trace.remote())
+            if isinstance(vllm_rank_traces, dict):
+                vllm_rank_traces = [vllm_rank_traces]
+            assert len(vllm_rank_traces) == 1
+            vllm_traces[trace_row] = vllm_rank_traces[0]
+        vllm_trace = vllm_traces[row_index]
 
         mega_start = ray.get(policy.async_run_ray_method("pass_through", "begin_grug_layer_trace", len(sequence)))
         assert len(mega_start) == 4
@@ -226,6 +230,53 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
                 trace_arrays[f"vllm_{key}"] = serving
                 trace_arrays[f"megatron_{key}"] = trainer
 
+        # The ordinary four-sequence replay score already ran under one
+        # Megatron trace. Match each EP rank by its distinct second token and
+        # retain all rows' boundaries without scoring a different workload.
+        row_to_rank = {}
+        for trace_row, row_trace in vllm_traces.items():
+            row_embed = row_trace[embed_key][positions.index(1)].numpy()
+            distances = {
+                item["rank"]: float(np.sqrt(np.mean(np.square(item["traces"][embed_key][0][1, 0].numpy() - row_embed))))
+                for item in mega_rank_traces
+            }
+            ordered = sorted(distances, key=distances.get)
+            assert distances[ordered[0]] < distances[ordered[1]] / 2, (trace_row, distances)
+            row_to_rank[trace_row] = ordered[0]
+        assert len(set(row_to_rank.values())) == len(prompts), row_to_rank
+        assert row_to_rank[row_index] == selected_rank
+        for layer in range(model_config.num_hidden_layers):
+            sites = ["model_input", "after_attn", "mlp_input", "after_block"]
+            if layer == 0:
+                sites.extend(
+                    (
+                        "routed_input",
+                        "routed_latent",
+                        "routed_expanded",
+                        "shared_0",
+                        "shared_1",
+                        "before_sconv_mlp",
+                        "after_sconv_mlp",
+                    )
+                )
+            for site in sites:
+                key = f"layer_{layer}_{site}"
+                serving_rows = []
+                trainer_rows = []
+                for trace_row in range(len(prompts)):
+                    serving_rows.append(vllm_traces[trace_row][key].numpy())
+                    rank_trace = next(
+                        item["traces"] for item in mega_rank_traces if item["rank"] == row_to_rank[trace_row]
+                    )
+                    calls = rank_trace[key]
+                    assert len(calls) == 1 and calls[0].shape[:2] == (len(sequence), 1), key
+                    trainer_rows.append(calls[0][positions, 0].numpy())
+                serving_all = np.stack(serving_rows)
+                trainer_all = np.stack(trainer_rows)
+                assert serving_all.shape == trainer_all.shape, key
+                trace_arrays[f"vllm_all_rows_{key}"] = serving_all
+                trace_arrays[f"megatron_all_rows_{key}"] = trainer_all
+
         trace_uri = result_uri.removesuffix(".json") + "-arrays.npz"
         payload = BytesIO()
         np.savez_compressed(payload, **trace_arrays)
@@ -242,6 +293,7 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
             "source_commit": os.environ.get("HERO_REPLAY_SOURCE_COMMIT"),
             "row_index": row_index,
             "selected_megatron_rank": selected_rank,
+            "row_to_megatron_rank": row_to_rank,
             "embedding_rms_by_rank": embedding_rms_by_rank,
             "sequence": sequence,
             "positions": positions,
