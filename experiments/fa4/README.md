@@ -2,14 +2,18 @@
 
 The baseline is MarinSkyRL `4d798b12`: Torch 2.13/CUDA 13.2, Megatron Core
 0.18, Bridge 0.6, Transformer Engine 2.11, and FlashAttention 2.8.3. This
-branch tests Core 0.19.2, Bridge 0.6.2, Transformer Engine 2.19, and
-FlashAttention 4 beta31. FA2 remains the default; select `--extra fa4` together
-with `--extra megatron` to install the FA4 distribution.
+branch first tested Core 0.19.2, Bridge 0.6.2, Transformer Engine 2.19, and
+FlashAttention 4 beta31. The retained lock uses beta29 after a full-causal
+regression appeared in beta30 and persisted in beta31. FA2 remains the default;
+select `--extra fa4` together with `--extra megatron` to install FA4.
 
 The current [Marin FA2 wheel](https://github.com/marin-community/MarinSkyRL/releases/tag/native-cu132-fa283-20260920)
 has SHA-256 `4b5086728757d81c8ef89f3008b0bcea72483cf18ed96e0e31b5293ed1f01bc7`
 on x86_64 and `9cd0731dcc8fe780aeea28480ad80456d235fc0f9cb75d92c45d2b3c233eee5e`
-on arm64/SM100. The [upstream FA4 beta31 wheel](https://github.com/Dao-AILab/flash-attention/releases/tag/fa4-v4.0.0.beta31)
+on arm64/SM100. The retained
+[upstream FA4 beta29 wheel](https://github.com/Dao-AILab/flash-attention/releases/tag/fa4-v4.0.0.beta29)
+has SHA-256 `85dd4b0e98ca38f5681a3214b2f9f230638030e3b868a50f3873336fc98d7537`.
+The rejected [beta31 wheel](https://github.com/Dao-AILab/flash-attention/releases/tag/fa4-v4.0.0.beta31)
 has SHA-256 `6eda5890b29e90fc46e19a47b4018effae7c042f75ee8aaaeebd3f56ccd82edf`.
 An archive audit found zero `flash_attn/cute` files in Marin's FA2 wheel, 52
 in stock FA4, and no overlapping file paths. A no-dependency `uv pip install`
@@ -22,8 +26,8 @@ The newest Megatron lock needs Hydra 1.3.4. Bridge 0.6.2 imports Megatron
 Core's dev extra, which pins cuDNN Frontend 1.26, while Transformer Engine
 2.19 requires at least 1.28. The lock uses a narrow 1.29 override; its runtime
 compatibility remains an accelerator gate. Marin's fixed vLLM package keeps
-Quack at 0.6.4 and CUTLASS DSL at 4.6.2, which FA4 beta31 permits.
-The fixed vLLM wheel also pins Apache TVM FFI 0.1.11, whereas FA4 beta31
+Quack at 0.6.4 and CUTLASS DSL at 4.6.2, which FA4 beta29 permits.
+The fixed vLLM wheel also pins Apache TVM FFI 0.1.11, whereas FA4 beta29
 requires at least 0.1.12. The lock overrides that transitive pin to the
 latest 0.1.14.post0; vLLM import and runtime behavior still need checking.
 
@@ -32,9 +36,10 @@ repacked wheel is required or published. The experimental lock now also
 selects the published SM100 FA2 and TE 2.19 arm64 wheels on GB200/Grace and
 resolves the Megatron/FA4 extra there. Bridge declares Flash Linear Attention,
 but Grug does not use its FLA backend and release 0.4.2 has no arm64 wheel, so
-the lock limits that one transitive package to x86_64. The full arm64 install,
-imports, and Grug behavior remain accelerator gates; CPU resolution is not
-their proof.
+the lock limits that one transitive package to x86_64. The
+[full arm64 frozen-lock import](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-arm-full-lock-import-9f284477)
+passed with the initial beta31 lock, the fixed vLLM wheel, Bridge/Core, and
+TE 2.19. Grug behavior and vLLM serving are separate accelerator gates.
 
 The [GB200 arm64 TE build](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-te219-arm-build-11082662)
 also succeeded from the same TE source and pinned native build environment.

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Disposable version-isolation probe. The project lock stays at beta31;
-# only this task environment substitutes a selected earlier beta wheel.
+# Disposable version-isolation probe. The project lock is not modified;
+# only this task environment substitutes the selected beta wheel.
 beta="${1:-28}"
 case "$beta" in
     28 | 29 | 30) ;;

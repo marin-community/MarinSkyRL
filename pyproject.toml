@@ -136,7 +136,7 @@ megatron = [
     "transformer-engine-torch==2.19.0 ; sys_platform == 'linux'",
 ]
 fa4 = [
-    "flash-attn-4[cu13]==4.0.0b31 ; sys_platform == 'linux'",
+    "flash-attn-4[cu13]==4.0.0b29 ; sys_platform == 'linux'",
 ]
 telemetry = [
     "marin-rigging[prometheus]",

@@ -1573,7 +1573,7 @@ requires-dist = [
 
 [[package]]
 name = "flash-attn-4"
-version = "4.0.0b31"
+version = "4.0.0b29"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "apache-tvm-ffi", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
@@ -1584,9 +1584,9 @@ dependencies = [
     { name = "torch-c-dlpack-ext", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "typing-extensions", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6d/05/8034f96223f4d68a449a6e4d8621de57df1ca87b35220e38ffd60eaf0140/flash_attn_4-4.0.0b31.tar.gz", hash = "sha256:c686b54d7709c22e13c9f5da5371299aca0db2fdd90e6252d4047b4cf7b92e12", size = 385897, upload-time = "2026-09-16T08:21:32.495Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/67/c8/b8c59af3cc8cb90f22cb323dc79db2c19dbd6e6c0f0514bd7213f907e6a5/flash_attn_4-4.0.0b29.tar.gz", hash = "sha256:ad79d2029dbb0c7fb09b92d989caf72cfa207cedb09d58b281caab23bed077bc", size = 377738, upload-time = "2026-09-02T08:21:28.353Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b1/28/6e0452ec7c42934267be78aa4b2e7b1f886084e9750d8b1ba7ecff2c20f5/flash_attn_4-4.0.0b31-py3-none-any.whl", hash = "sha256:6eda5890b29e90fc46e19a47b4018effae7c042f75ee8aaaeebd3f56ccd82edf", size = 411043, upload-time = "2026-09-16T08:21:31.185Z" },
+    { url = "https://files.pythonhosted.org/packages/74/f6/83590de66aa8389adac280ad6a555b53064d74866d06c1def7e3397e1a82/flash_attn_4-4.0.0b29-py3-none-any.whl", hash = "sha256:85dd4b0e98ca38f5681a3214b2f9f230638030e3b868a50f3873336fc98d7537", size = 402723, upload-time = "2026-09-02T08:21:26.945Z" },
 ]
 
 [package.optional-dependencies]
@@ -3169,7 +3169,7 @@ requires-dist = [
     { name = "flash-attn", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = "==2.8.3" },
     { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'fsdp'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl" },
     { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl" },
-    { name = "flash-attn-4", extras = ["cu13"], marker = "sys_platform == 'linux' and extra == 'fa4'", specifier = "==4.0.0b31" },
+    { name = "flash-attn-4", extras = ["cu13"], marker = "sys_platform == 'linux' and extra == 'fa4'", specifier = "==4.0.0b29" },
     { name = "flash-linear-attention", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'fsdp'", specifier = "==0.4.2" },
     { name = "flash-linear-attention", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.4.2" },
     { name = "flashinfer-cubin", marker = "sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.6.18.post1", index = "https://flashinfer.ai/whl" },
