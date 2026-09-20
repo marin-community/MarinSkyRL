@@ -37,6 +37,11 @@ with Levanter.
 The frozen `megatron` runtime includes ARM64 Transformer Engine and
 FlashAttention wheels for GB200, built against the same Torch 2.13/CUDA 13.2
 versions as H100. See [native wheel builds](../scripts/wheels/README.md).
+Transformer Engine 2.11 disables deterministic fused-attention training on
+SM100. Deterministic GB200 runs use `trainer.flash_attn=true` with the pinned
+FlashAttention 2.8.3 wheel. When using local attention's `a2a` context exchange,
+both the query and KV head counts after TP must divide evenly by CP; Hero's
+12 local KV heads permit CP4 at TP1, but not CP8.
 
 The port lives in two modules:
 

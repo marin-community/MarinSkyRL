@@ -16,15 +16,18 @@ runtime dependencies pin each published wheel by URL and SHA-256.
 invoke it; they consume the published, hash-pinned wheels.
 
 FlashAttention uses upstream commit
-[`4219765`](https://github.com/Dao-AILab/flash-attention/commit/4219765dfdd8913bfe26134f748dd5ffcedd3c39),
-the merged FA2 and FA4 namespace-coexistence fix. That 2.8.4 source excludes the
-bundled `flash_attn.cute` package written for an older CUTLASS DSL while retaining
-FA2's native interface. The script fetches every source by its exact commit so a
-moving branch or tag cannot change the input tree.
+[`060c9188`](https://github.com/Dao-AILab/flash-attention/commit/060c9188beec3a8b62b33a3bfa6d5d2d44975fab)
+(2.8.3). Transformer Engine 2.11 rejects newer FA2 versions, including 2.8.4;
+standalone FlashAttention checks do not establish Transformer Engine support.
+The checked-in packaging patch backports the FA2/FA4 namespace exclusion from
+[`4219765`](https://github.com/Dao-AILab/flash-attention/commit/4219765dfdd8913bfe26134f748dd5ffcedd3c39).
+It excludes the experimental `flash_attn.cute` package, which requires an older
+CUTLASS DSL, without changing the native FA2 kernels. The script applies this
+patch only during the build and restores the source checkout on exit.
 
 Use CPython 3.12.14 on Linux with git, a C++ compiler, and uv. Build on the
 target CPU architecture: x86_64 for the H100 runtime or aarch64 for GB200. The
-qualified FlashAttention 2.8.4 build used the Iris task image
+FlashAttention build uses the Iris task image
 `ghcr.io/marin-community/iris-task@sha256:ecdb2f7f90f8760a7e74c49b49b67d7ecf44557298860411c148c186706067f2`,
 GCC/G++ `14.2.0-19`, glibc `2.41-12+deb13u3`, git `1:2.47.3-0+deb13u1`, and
 uv `0.10.3`. Install the compiler and git inside the build container. These are
@@ -54,6 +57,8 @@ tracked changes and unexpected untracked files; Git-ignored build outputs remain
 available for cache reuse.
 
 Before publishing a wheel, install its exact bytes in the proposed runtime and
-run its native forward and backward checks on the target GPU. Publish the source commits,
+run its native forward and backward checks on the target GPU. For Megatron,
+also exercise Transformer Engine attention and the actual training worker;
+optional backend imports can fail even when FA2 itself works. Publish the source commits,
 build environment, and checksums with the wheel assets. Adoption URLs and wheel
 hashes belong in the root dependency manifest and lock.

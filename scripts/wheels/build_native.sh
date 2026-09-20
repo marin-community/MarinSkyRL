@@ -14,7 +14,7 @@ package_environment=()
 case "$package" in
     flash-attn)
         repository=Dao-AILab/flash-attention
-        source_commit=4219765dfdd8913bfe26134f748dd5ffcedd3c39
+        source_commit=060c9188beec3a8b62b33a3bfa6d5d2d44975fab
         package_environment+=(FLASH_ATTENTION_FORCE_BUILD=TRUE "FLASH_ATTN_CUDA_ARCHS=$cuda_arch")
         ;;
     causal-conv1d)
@@ -58,6 +58,23 @@ fi
 git -C "$build_dir/source" submodule update --init --recursive
 git -C "$build_dir/source" submodule foreach --quiet --recursive \
     'test -z "$(git status --porcelain --untracked-files=all --ignore-submodules=none)"'
+
+if [[ "$package" == flash-attn ]]; then
+    # Backport upstream's FA2 packaging exclusion from 4219765: the experimental
+    # FA4 package needs a different CuTe DSL and is not part of this CUDA build.
+    packaging_patch="$script_dir/flash-attn-2.8.3-packaging.patch"
+    git -C "$build_dir/source" apply "$packaging_patch"
+    trap 'git -C "$build_dir/source" apply --reverse "$packaging_patch"' EXIT
+    # setuptools reuses build/lib between builds, including excluded packages.
+    "$build_dir/venv/bin/python" - "$build_dir/source/build" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+
+for package in Path(sys.argv[1]).glob("lib.*/flash_attn/cute"):
+    shutil.rmtree(package)
+PY
+fi
 
 virtual_env="$build_dir/venv"
 site_packages="$virtual_env/lib/python${python_version%.*}/site-packages"
