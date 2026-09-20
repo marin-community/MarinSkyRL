@@ -19,6 +19,7 @@ from megatron.bridge.models.conversion.param_mapping import (
     GatedMLPMapping,
     QKVMapping,
     ReplicatedMapping,
+    RowParallelMapping,
 )
 from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.utils.common_utils import extract_expert_number_from_param
@@ -37,6 +38,13 @@ class GrugModelProvider(GPTModelProvider):
 
     grug_qk_mult: float = 1.0
     grug_qk_mult_long_scale: float = 1.0
+    grug_global_every: int = 4
+    grug_local_kv_heads: int = 1
+    grug_global_kv_heads: int = 1
+    grug_num_shared_experts: int = 1
+    grug_sconv_kernel: int = 4
+    grug_sconv_sites: tuple[str, ...] = ()
+    grug_hero: bool = False
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None) -> GrugGPTModel:
         if self.virtual_pipeline_model_parallel_size:
@@ -44,6 +52,13 @@ class GrugModelProvider(GPTModelProvider):
         assert self.vocab_size is not None, "vocab_size must be configured before calling provide()"
         assert not self.should_pad_vocab, "Grug keeps the checkpoint vocab size; vLLM pads it on the serving side"
 
+        for count in (self.num_query_groups, self.grug_local_kv_heads, self.grug_global_kv_heads):
+            if self.grug_hero and count % self.tensor_model_parallel_size:
+                raise ValueError("Grug stored, local, and global KV head counts must divide evenly over TP")
+        if self.grug_hero and self.moe_shared_expert_overlap:
+            raise ValueError("Hero shared experts require moe_shared_expert_overlap=False")
+        if self.grug_sconv_sites and self.mlp_chunks_for_training != 1:
+            raise ValueError("ShortConv requires an unchunked MLP sequence")
         pp_group = self._pg_collection.pp
         if pre_process is None:
             pre_process = is_pp_first_stage(pp_group)
@@ -131,7 +146,7 @@ class GrugMoeBridge(MegatronModelBridge):
     def provider_bridge(self, hf_pretrained) -> GrugModelProvider:
         provider = super().provider_bridge(hf_pretrained)
         config = hf_pretrained.config
-        long_flags = grug_long_layer_flags(config.num_hidden_layers)
+        long_flags = grug_long_layer_flags(config.num_hidden_layers, config.global_every)
 
         provider.params_dtype = torch.bfloat16
         provider.bf16 = True
@@ -156,6 +171,19 @@ class GrugMoeBridge(MegatronModelBridge):
         provider.window_size = (config.sliding_window - 1, 0)
         provider.window_attn_skip_freq = [0 if is_long else 1 for is_long in long_flags]
         provider.no_rope_freq = [1 if is_long else 0 for is_long in long_flags]
+        provider.rotary_interleaved = config.rope_fused
+        provider.grug_global_every = config.global_every
+        provider.grug_local_kv_heads = config.local_kv_heads or config.num_key_value_heads
+        provider.grug_global_kv_heads = config.global_kv_heads or config.num_key_value_heads
+        provider.grug_num_shared_experts = config.num_shared_experts
+        provider.grug_sconv_sites = config.sconv_sites if config.sconv else ()
+        provider.grug_sconv_kernel = config.sconv_kernel
+        provider.grug_hero = config.uses_hero_architecture
+        provider.moe_latent_size = config.latent_dim
+        if provider.grug_hero:
+            # TE's ring CP cannot apply sliding windows. A2A preserves packed
+            # document boundaries; global layers can retain the ring implementation.
+            provider.cp_comm_type = ["p2p" if is_long else "a2a" for is_long in long_flags]
         provider.grug_qk_mult = config.qk_mult
         provider.grug_qk_mult_long_scale = config.qk_mult_long_scale
 
@@ -207,23 +235,82 @@ class GrugMoeBridge(MegatronModelBridge):
             ),
             ReplicatedMapping("decoder.layers.*.mlp.router.weight", "model.layers.*.mlp.router.weight"),
             ReplicatedMapping("decoder.layers.*.mlp.router.expert_bias", "model.layers.*.mlp.router.bias"),
-            GatedMLPMapping(
-                "decoder.layers.*.mlp.shared_experts.linear_fc1.weight",
-                gate="model.layers.*.shared_expert.gate_proj.weight",
-                up="model.layers.*.shared_expert.up_proj.weight",
-            ),
-            AutoMapping(
-                "decoder.layers.*.mlp.shared_experts.linear_fc2.weight",
-                "model.layers.*.shared_expert.down_proj.weight",
-            ),
-            GrugStackedGatedExpertMapping(
-                "decoder.layers.*.mlp.experts.linear_fc1.weight*",
-                gate="model.layers.*.mlp.experts.gate_proj.weight",
-                up="model.layers.*.mlp.experts.up_proj.weight",
-            ),
-            GrugStackedExpertMapping(
-                "decoder.layers.*.mlp.experts.linear_fc2.weight*",
-                "model.layers.*.mlp.experts.down_proj.weight",
-            ),
         ]
+        config = self.hf_config
+        hero = config.uses_hero_architecture
+        if hero:
+            for index in range(config.num_shared_experts):
+                mg = f"decoder.layers.*.mlp.shared_experts.experts.{index}"
+                hf = f"model.layers.*.shared_experts.{index}"
+                mappings.extend(
+                    [
+                        GatedMLPMapping(
+                            f"{mg}.linear_fc1.weight", gate=f"{hf}.gate_proj.weight", up=f"{hf}.up_proj.weight"
+                        ),
+                        AutoMapping(f"{mg}.linear_fc2.weight", f"{hf}.down_proj.weight"),
+                    ]
+                )
+        else:
+            mappings.extend(
+                [
+                    GatedMLPMapping(
+                        "decoder.layers.*.mlp.shared_experts.linear_fc1.weight",
+                        gate="model.layers.*.shared_expert.gate_proj.weight",
+                        up="model.layers.*.shared_expert.up_proj.weight",
+                    ),
+                    AutoMapping(
+                        "decoder.layers.*.mlp.shared_experts.linear_fc2.weight",
+                        "model.layers.*.shared_expert.down_proj.weight",
+                    ),
+                ]
+            )
+        if config.grugmoe_artifact_schema_version == 2:
+            mappings.extend(
+                [
+                    GatedMLPMapping(
+                        "decoder.layers.*.mlp.experts.linear_fc1.weight*",
+                        gate="model.layers.*.mlp.experts.*.gate_proj.weight",
+                        up="model.layers.*.mlp.experts.*.up_proj.weight",
+                    ),
+                    AutoMapping(
+                        "decoder.layers.*.mlp.experts.linear_fc2.weight*",
+                        "model.layers.*.mlp.experts.*.down_proj.weight",
+                    ),
+                ]
+            )
+        else:
+            mappings.extend(
+                [
+                    GrugStackedGatedExpertMapping(
+                        "decoder.layers.*.mlp.experts.linear_fc1.weight*",
+                        gate="model.layers.*.mlp.experts.gate_proj.weight",
+                        up="model.layers.*.mlp.experts.up_proj.weight",
+                    ),
+                    GrugStackedExpertMapping(
+                        "decoder.layers.*.mlp.experts.linear_fc2.weight*", "model.layers.*.mlp.experts.down_proj.weight"
+                    ),
+                ]
+            )
+        if config.latent_dim is not None:
+            mappings.extend(
+                [
+                    ReplicatedMapping(
+                        "decoder.layers.*.mlp.fc1_latent_proj.weight", "model.layers.*.mlp.latent_down_proj.weight"
+                    ),
+                    ReplicatedMapping(
+                        "decoder.layers.*.mlp.fc2_latent_proj.weight", "model.layers.*.mlp.latent_up_proj.weight"
+                    ),
+                    ReplicatedMapping(
+                        "decoder.layers.*.mlp.latent_norm.weight", "model.layers.*.mlp.latent_norm.weight"
+                    ),
+                ]
+            )
+        if config.sconv:
+            for site, mg, hf, mapping in (
+                ("k", "self_attention.sconv_k", "self_attn.sconv_k", RowParallelMapping),
+                ("attn", "self_attention.sconv_attn", "sconv_attn", ReplicatedMapping),
+                ("mlp", "sconv_mlp", "sconv_mlp", ReplicatedMapping),
+            ):
+                if site in config.sconv_sites:
+                    mappings.append(mapping(f"decoder.layers.*.{mg}.weight", f"model.layers.*.{hf}.weight"))
         return MegatronMappingRegistry(*mappings)
