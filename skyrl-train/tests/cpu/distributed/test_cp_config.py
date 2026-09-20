@@ -106,6 +106,7 @@ ADDITIVE_OVERLONG_FIELDS = {
 ADDITIVE_GENERATOR_FIELDS = {
     "speculative_decoding": None,
     "inference_engine_decode_context_parallel_size": 1,
+    "inference_engine_node_local": False,
     "vllm_attention_backend": None,
     "engine_init_timeout_seconds": 1800,
     "r3_transport": "decentral",
