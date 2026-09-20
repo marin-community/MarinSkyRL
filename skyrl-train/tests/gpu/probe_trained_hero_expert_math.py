@@ -89,10 +89,11 @@ def main() -> None:
     down = _selected_stacked_weights(client, args.checkpoint, index, prefix + "down_proj.weight", selected)
     x = torch.from_numpy(input_vllm.copy()).to(device="cuda", dtype=torch.bfloat16)
     results = {}
+    expert_arrays = {}
     for rows in (1, 8):
         expanded = x.expand(rows, -1).contiguous()
         for hidden_mode in ("bf16", "fp32_then_bf16"):
-            expert_outputs = []
+            hidden_values = []
             for expert in range(len(selected)):
                 gate_output = F.linear(expanded, gate[expert])
                 up_output = F.linear(expanded, up[expert])
@@ -100,29 +101,47 @@ def main() -> None:
                     hidden = F.silu(gate_output) * up_output
                 else:
                     hidden = (F.silu(gate_output.float()) * up_output.float()).to(torch.bfloat16)
-                expert_outputs.append(F.linear(hidden, down[expert])[0])
-            outputs = torch.stack(expert_outputs)
-            for backend, combine in weights.items():
-                weighted_fp32 = outputs.float() * combine[:, None]
-                weighted_bf16 = (outputs * combine.to(torch.bfloat16)[:, None]).to(torch.bfloat16)
-                serial = torch.zeros_like(outputs[0])
-                for contribution in weighted_bf16:
-                    serial = serial + contribution
-                candidates = {
-                    "fp32_product_fp32_sum": weighted_fp32.sum(dim=0).to(torch.bfloat16),
-                    "bf16_product_fp32_sum": weighted_bf16.float().sum(dim=0).to(torch.bfloat16),
-                    "bf16_product_serial_bf16_sum": serial,
-                }
-                for sum_mode, candidate in candidates.items():
-                    key = f"rows={rows}/hidden={hidden_mode}/weights={backend}/sum={sum_mode}"
-                    results[key] = _candidate_metrics(candidate, saved)
+                hidden_values.append(hidden)
+            for down_mode in ("bf16", "fp32"):
+                outputs = torch.stack(
+                    [
+                        F.linear(hidden_values[expert], down[expert])[0]
+                        if down_mode == "bf16"
+                        else F.linear(hidden_values[expert].float(), down[expert].float())[0]
+                        for expert in range(len(selected))
+                    ]
+                )
+                expert_arrays[f"rows_{rows}_hidden_{hidden_mode}_down_{down_mode}"] = (
+                    outputs.detach().float().cpu().numpy()
+                )
+                for backend, combine in weights.items():
+                    weighted_fp32 = outputs.float() * combine[:, None]
+                    weighted_bf16 = (outputs * combine.to(torch.bfloat16)[:, None]).to(torch.bfloat16)
+                    serial = torch.zeros_like(outputs[0], dtype=torch.bfloat16)
+                    for contribution in weighted_bf16:
+                        serial = serial + contribution
+                    candidates = {
+                        "fp32_product_fp32_sum": weighted_fp32.sum(dim=0).to(torch.bfloat16),
+                        "bf16_product_fp32_sum": weighted_bf16.float().sum(dim=0).to(torch.bfloat16),
+                        "bf16_product_serial_bf16_sum": serial,
+                    }
+                    for sum_mode, candidate in candidates.items():
+                        key = f"rows={rows}/hidden={hidden_mode}/down={down_mode}/weights={backend}/sum={sum_mode}"
+                        results[key] = _candidate_metrics(candidate, saved)
 
+    arrays_uri = args.result.removesuffix(".json") + "-arrays.npz"
+    payload = BytesIO()
+    np.savez_compressed(payload, **expert_arrays)
+    bucket, key = _s3_target(arrays_uri)
+    client.put_object(Bucket=bucket, Key=key, Body=payload.getvalue())
     report = {
         "checkpoint": args.checkpoint,
         "trace": args.trace,
         "selected": selected,
         "device": torch.cuda.get_device_name(0),
+        "allow_tf32": torch.backends.cuda.matmul.allow_tf32,
         "saved_cross_backend_rms": _rms(saved["vllm"] - saved["megatron"]),
+        "raw_arrays_uri": arrays_uri,
         "candidates": results,
     }
     bucket, key = _s3_target(args.result)
