@@ -204,6 +204,7 @@ def test_online_speculator_capture_seals_target_snapshot_before_training_boundar
             "step": 2,
             "max_tokens": 16_384,
             "max_window_tokens": 16_384,
+            "max_sequences_per_prompt_group": 2,
             "target_revision": "policy-step-1",
             "draft_revision": "draft-step-1",
             "reserved_gpu_memory_gib": 8,
