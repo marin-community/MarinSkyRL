@@ -33,8 +33,10 @@ support a Grug result. No CPU packaging check proves that GPU gate.
 
 The [GB200 arm64 TE build](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-te219-arm-build-11082662)
 also succeeded from the same TE source and pinned native build environment.
-Its staged wheel is 980,583 bytes, SHA-256
+Its [prerelease wheel](https://github.com/marin-community/MarinSkyRL/releases/tag/fa4-te219-cu132-20260920-694f3adf)
+is 980,583 bytes, SHA-256
 `185d4dd78a26623351d7ea22ac3a353d6c675bdee47f19b6d8839618473c82ac`.
+The staged and independently downloaded release asset hashes match.
 `preflight_gb200.sh <staged-wheel-URI> <SHA-256>` installs a disposable
 Torch/TE/FA4 environment and checks one GB200 kernel forward/backward with
 explicit backend logs. It cannot establish a Grug result while the project
@@ -42,8 +44,11 @@ extra lacks an arm64 Megatron closure and FA2 reference.
 Its first attempt installed TE and FA4 but import failed because `tvm_ffi` was
 absent: the current project override and FA4 extra are x86_64-only. The
 preflight now resolves outside the project and explicitly pins the available
-arm64 `apache-tvm-ffi==0.1.14.post0` wheel. This does not yet change the
-project's arm64 lock.
+arm64 `apache-tvm-ffi==0.1.14.post0` wheel. The
+[second GB200 backend probe](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-gb200-backend2-e99529c2)
+selected FA4 beta31 in TE's log and completed finite forward/backward on
+Torch 2.13.0+cu132. This does not yet change the project's arm64 lock or
+establish a Grug result.
 
 For the native TE 2.19 build, use
 `bash scripts/wheels/build_native.sh transformer-engine-torch-2.19 <build-dir>`
@@ -135,6 +140,16 @@ probe's own positive-grad-norm assertion. Grug sets gradient clipping to zero,
 and Core may report a zero norm in that mode. The probe now requires a finite,
 nonnegative reported value plus an actual attention-weight change; zero alone
 is neither accepted as gradient proof nor treated as a kernel failure.
+
+The [next CP2 FA2 arm](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-grug-cp2-health-fa2-5032510d)
+reported `raw_grad_norm=nan`, with nonfinite values in all 8,192 sampled
+layer-3 Q weights and all 128 sampled attention-gate weights after its one
+update. This is not just a missing metric. The separately run
+[CP2 FA4 arm](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-grug-cp2-health-fa4-5032510d)
+reported a finite norm and finite sampled weights, with an attention-gate
+update. Both jobs selected their intended backend in TE logs. The FA4 result
+does not license a CP migration: the matched new-cohort FA2 reference failed,
+and the old-stack FA2 baseline remains to be checked.
 
 `run_three_arm_h100.sh <world-size> <toy|snowball>` runs the two new-cohort
 arms, then checks out baseline commit `4d798b12` in task-local scratch, installs

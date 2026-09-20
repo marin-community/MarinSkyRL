@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# CPython 3.12, Linux x86_64, H100. Requires git and a CUDA-supported C++ compiler.
+# CPython 3.12, Linux x86_64/H100 or aarch64/GB200. Requires git and a CUDA-supported C++ compiler.
 package="${1:?usage: build_native.sh PACKAGE BUILD_DIRECTORY}"
 build_dir="$(realpath -m "${2:?usage: build_native.sh PACKAGE BUILD_DIRECTORY}")"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
@@ -14,6 +14,11 @@ case "$package" in
         repository=Dao-AILab/flash-attention
         source_commit=060c9188beec3a8b62b33a3bfa6d5d2d44975fab
         package_environment+=(FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_CUDA_ARCHS=90)
+        ;;
+    flash-attn-sm100)
+        repository=Dao-AILab/flash-attention
+        source_commit=060c9188beec3a8b62b33a3bfa6d5d2d44975fab
+        package_environment+=(FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_CUDA_ARCHS=100)
         ;;
     causal-conv1d)
         repository=Dao-AILab/causal-conv1d
