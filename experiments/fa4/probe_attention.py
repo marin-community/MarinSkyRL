@@ -104,7 +104,7 @@ def main() -> None:
             "window_left": args.window_left,
         },
         "gpu": torch.cuda.get_device_name(),
-        "torch": torch.__version__,
+        "torch": str(torch.__version__),
         "packages": {
             name: package_version(name)
             for name in ("transformer-engine", "transformer-engine-torch", "flash-attn", "flash-attn-4")
