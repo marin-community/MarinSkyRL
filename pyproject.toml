@@ -114,24 +114,24 @@ vllm = [
     "vllm==0.0.0.dev20260916+marin.70ea9ae8f260.cu132 ; sys_platform == 'linux'",
 ]
 megatron = [
-    "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "accelerate>=1.14,<2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux'",
+    "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "causal-conv1d>=1.5,<2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flash-attn==2.8.4 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flash-linear-attention==0.4.2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flash-attn==2.8.4 ; sys_platform == 'linux'",
+    "flash-linear-attention==0.4.2 ; sys_platform == 'linux'",
     "mamba-ssm>=2.2,<3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "megatron-bridge==0.6.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "megatron-core==0.18.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "harbor-config ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "nvidia-modelopt==0.46.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "peft>=0.19 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "tensordict ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "torch==2.13.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "torchdata ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "torchvision==0.28.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "transformer-engine[pytorch]==2.11.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "transformer-engine-cu13==2.11.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "transformer-engine-torch==2.11.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "megatron-bridge==0.6.0 ; sys_platform == 'linux'",
+    "megatron-core==0.18.0 ; sys_platform == 'linux'",
+    "harbor-config ; sys_platform == 'linux'",
+    "nvidia-modelopt==0.46.1 ; sys_platform == 'linux'",
+    "peft>=0.19 ; sys_platform == 'linux'",
+    "tensordict ; sys_platform == 'linux'",
+    "torch==2.13.0 ; sys_platform == 'linux'",
+    "torchdata ; sys_platform == 'linux'",
+    "torchvision==0.28.0 ; sys_platform == 'linux'",
+    "transformer-engine[pytorch]==2.11.0 ; sys_platform == 'linux'",
+    "transformer-engine-cu13==2.11.0 ; sys_platform == 'linux'",
+    "transformer-engine-torch==2.11.0 ; sys_platform == 'linux'",
 ]
 telemetry = [
     "marin-rigging[prometheus]",
@@ -224,6 +224,7 @@ pycosat = { url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wh
 torchaudio = { index = "pytorch-cpu", marker = "sys_platform == 'linux'" }
 torchcodec = { index = "pytorch-cu132", extra = "vllm", marker = "sys_platform == 'linux'" }
 flash-attn = [
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-sm100-aarch64-20260920/flash_attn-2.8.4-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-flash-attn-4219765/flash_attn-2.8.4-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 harbor = { git = "https://github.com/marin-community/harbor.git" }
@@ -250,6 +251,7 @@ vllm = [
 ]
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 transformer-engine-torch = [
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-sm100-aarch64-20260920/transformer_engine_torch-2.11.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 causal-conv1d = [

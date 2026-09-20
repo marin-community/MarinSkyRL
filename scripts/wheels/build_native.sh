@@ -9,7 +9,7 @@ cuda_arch="${3:-90}"
 case "$cuda_arch" in 90|100) ;; *) echo "CUDA_ARCH must be 90 (H100) or 100 (B200)" >&2; exit 2 ;; esac
 source_subdir=.
 python_version=3.12.14
-max_jobs=2
+max_jobs="${NATIVE_BUILD_MAX_JOBS:-2}"
 package_environment=()
 case "$package" in
     flash-attn)

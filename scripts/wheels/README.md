@@ -45,6 +45,9 @@ to `dist/`, with their SHA-256 digests in `SHA256SUMS`. The optional third
 argument selects SM90 (the default) or SM100 for FlashAttention and Transformer
 Engine. The wheel tag reflects the host CPU architecture. Causal-conv1d and
 Mamba retain their upstream architecture choices.
+Set `NATIVE_BUILD_MAX_JOBS` to fit the build allocation when compiling
+FlashAttention, causal-conv1d, or Mamba. The default is two; Transformer Engine
+retains its single-job bound.
 
 The source checkout and recursive submodules must be clean. The script rejects
 tracked changes and unexpected untracked files; Git-ignored build outputs remain
