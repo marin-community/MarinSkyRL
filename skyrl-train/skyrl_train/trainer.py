@@ -1854,7 +1854,7 @@ class RayPPOTrainer:
         if loop_advantages_tensor is not None:
             training_input["loop_advantages"] = loop_advantages_tensor
         training_input.metadata = {"uids": uids}
-        if self.cfg.trainer.mismatch_decomposition.enabled:
+        if self.cfg.trainer.get("mismatch_decomposition", {}).get("enabled", False):
             if version_rows is None:
                 raise ValueError("mismatch decomposition requires sampled-token policy-version spans")
             training_input.metadata["mismatch_response_ids"] = response_ids

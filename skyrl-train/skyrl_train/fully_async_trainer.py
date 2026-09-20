@@ -1226,7 +1226,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         with Timer("fwd_logprobs_values_reward", self.all_timings):
             training_input = await asyncio.to_thread(self.fwd_logprobs_values_reward, training_input)
 
-        if self.cfg.trainer.mismatch_decomposition.enabled:
+        if self.cfg.trainer.get("mismatch_decomposition", {}).get("enabled", False):
             if training_input.get("rollout_logprobs") is None or training_input.get("base_action_log_probs") is None:
                 raise ValueError("mismatch decomposition requires behavior and frozen-reference log probabilities")
             real_rows = training_input.batch_size - training_input.metadata.get("pad_size", 0)

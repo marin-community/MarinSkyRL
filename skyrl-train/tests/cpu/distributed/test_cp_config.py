@@ -58,6 +58,7 @@ DEBUG_MODE_TRAINER_FIELDS = {
     "debug_mode": "light",
 }
 RUNTIME_CONFIG_TRAINER_FIELDS = {
+    "mismatch_decomposition": {"enabled": False, "sample_rows_per_step": 8},
     "collective_phase_diagnostics": None,
     "training_metrics": False,
     "policy_train_spans": False,
