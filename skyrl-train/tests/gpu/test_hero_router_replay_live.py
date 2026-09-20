@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import time
+import traceback
 from urllib.parse import urlsplit
 
 import boto3
@@ -174,8 +175,8 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
     cfg.trainer.policy.fsdp_config.moe_router_replay = False
     cfg.trainer.policy.grug_query_bias_update_mode = "frozen"
     cfg.trainer.policy.grug_query_bias_update_rate = None
-    initialize_ray(cfg)
     try:
+        initialize_ray(cfg)
         off_policy = _init_policy(cfg, policy_world_size)
         off_weights = rank0_validation_snapshot(off_policy, names)
         off_reload_max_diffs = {
@@ -196,6 +197,19 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         print("LIVE_HERO_ROUTE_REPLAY=" + json.dumps(on_metrics, sort_keys=True), flush=True)
         if result_uri:
             _put_s3_json(result_uri, on_metrics)
+    except Exception as exc:
+        if result_uri:
+            _put_s3_json(
+                result_uri,
+                {
+                    **on_metrics,
+                    "phase": "flag_off_exception",
+                    "exception_type": type(exc).__name__,
+                    "exception": str(exc)[:1200],
+                    "traceback": traceback.format_exc()[:6000],
+                },
+            )
+        raise
     finally:
         ray.shutdown()
 
