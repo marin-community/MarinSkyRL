@@ -97,7 +97,12 @@ def test_capture_config_activates_every_data_parallel_worker() -> None:
 
 def test_capture_publication_marks_candidate_manifest_active() -> None:
     result = capture_publication_result(
-        {"worker_rank": 0, "captured_rows": 17, "windows": [{"request_id": "request-0"}]},
+        {
+            "worker_rank": 0,
+            "captured_rows": 17,
+            "windows": [{"request_id": "request-0"}],
+            "path": "/tmp/capture/rank-00003",
+        },
         "s3://bucket/captures/step-1/rank-00003",
     )
 
