@@ -39,6 +39,11 @@ Its staged wheel is 980,583 bytes, SHA-256
 Torch/TE/FA4 environment and checks one GB200 kernel forward/backward with
 explicit backend logs. It cannot establish a Grug result while the project
 extra lacks an arm64 Megatron closure and FA2 reference.
+Its first attempt installed TE and FA4 but import failed because `tvm_ffi` was
+absent: the current project override and FA4 extra are x86_64-only. The
+preflight now resolves outside the project and explicitly pins the available
+arm64 `apache-tvm-ffi==0.1.14.post0` wheel. This does not yet change the
+project's arm64 lock.
 
 For the native TE 2.19 build, use
 `bash scripts/wheels/build_native.sh transformer-engine-torch-2.19 <build-dir>`
