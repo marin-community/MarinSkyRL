@@ -63,9 +63,7 @@ def test_topk_tail_model_matches_full_gradient_when_tail_ratios_are_constant():
     # The tail of both fixed policies is proportional to current on IDs 2:.
     head = torch.tensor([0, 1])
     logits = current.log().clone().requires_grad_()
-    topk_gradient = torch.autograd.grad(
-        _correction(logits, old, behavior, -1.0, head, 1.3, 0.2, 0.2), logits
-    )[0]
+    topk_gradient = torch.autograd.grad(_correction(logits, old, behavior, -1.0, head, 1.3, 0.2, 0.2), logits)[0]
     full_gradient = torch.autograd.grad(
         _correction(logits, old, behavior, -1.0, torch.arange(5), 1.3, 0.2, 0.2), logits
     )[0]
