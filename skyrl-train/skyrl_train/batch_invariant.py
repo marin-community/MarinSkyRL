@@ -25,7 +25,7 @@ def enable_trainer_batch_invariance(enabled: bool) -> None:
     try:
         # Use the same installed kernels as rollout workers so the two
         # log-probability paths share reduction order.
-        batch_invariant = importlib.import_module("vllm.model_executor.layers.batch_invariant")
+        batch_invariant = importlib.import_module("vllm.model_executor.determinism.batch_invariant")
     except ImportError as error:
         raise RuntimeError(
             "trainer.algorithm.batch_invariant=true requires the pinned Marin vLLM runtime; "
