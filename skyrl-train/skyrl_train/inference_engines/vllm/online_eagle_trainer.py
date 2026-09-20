@@ -166,9 +166,7 @@ def per_worker_capture_token_credit(
     return token_credit + int(worker_index < remainder) + max_window_tokens
 
 
-def capture_config_for_worker(
-    config: Mapping[str, Any], *, worker_count: int, worker_index: int
-) -> dict[str, Any]:
+def capture_config_for_worker(config: Mapping[str, Any], *, worker_count: int, worker_index: int) -> dict[str, Any]:
     """Resolve one DP worker's capture budget and make that worker active."""
     resolved = dict(config)
     global_token_budget = int(resolved["max_tokens"])
