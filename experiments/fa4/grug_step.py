@@ -47,6 +47,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=1)
     parser.add_argument("--cp-comm-type", choices=("default", "p2p", "all_gather"), default="all_gather")
     parser.add_argument("--capture-grads", action="store_true")
+    parser.add_argument("--diagnose-parity-failure", action="store_true")
     args = parser.parse_args()
     if os.getenv("NVTE_FLASH_ATTN_V4") not in ("0", "1"):
         raise ValueError("Set NVTE_FLASH_ATTN_V4=0 for FA2 or 1 for FA4")
@@ -93,7 +94,14 @@ def main() -> None:
             start = time.perf_counter()
             before_logprobs = _megatron_response_logprobs(policy, batch)
             forward_seconds = time.perf_counter() - start
-            _assert_logprobs_close(before_logprobs, expected, batch["response_mask"])
+            parity_passed = True
+            try:
+                _assert_logprobs_close(before_logprobs, expected, batch["response_mask"])
+            except AssertionError:
+                if not args.diagnose_parity_failure:
+                    raise
+                parity_passed = False
+                print("PARITY_GATE_FAILED: continuing only to record diagnostic FA2/FA4 evidence", flush=True)
             names = (LONG_LAYER_Q_NAME, ATTN_GATE_NAME)
             before_weights = rank0_validation_snapshot(policy, names)
             training_seconds = []
@@ -162,6 +170,7 @@ def main() -> None:
                 "weight_health": weight_health,
                 "captured_gradients": bool(gradients),
                 "post_forward_skipped_due_to_nonfinite_weights": not weights_finite,
+                "parity_passed": parity_passed,
                 "memory": memory,
             }
             args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -179,6 +188,7 @@ def main() -> None:
                 args.output,
             )
             print(json.dumps(result, indent=2))
+            assert parity_passed, "HF parity gate failed; diagnostic data are not a pass"
             assert len(statuses) == args.steps
             assert all(math.isfinite(status["policy_loss"]) for status in statuses)
             # Grug disables clipping, so a zero norm may be a missing metric;
