@@ -324,6 +324,11 @@ class WorkerWrap:
                 if len(layer.shared_experts) != 2:
                     raise ValueError("Hero layer-0 trace needs two shared experts")
 
+                def after_router_linear(_module, _args, output, *, capture_fn=capture):
+                    capture_fn("router_logits", output[0])
+
+                hooks.append(layer.mlp.router.register_forward_hook(after_router_linear))
+
                 def after_latent_norm(_module, _args, output, *, capture_fn=capture):
                     capture_fn("routed_input", output)
 
