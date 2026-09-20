@@ -3,12 +3,13 @@ set -euo pipefail
 
 # Run the same Grug probe under the two experimental arms and the immutable
 # pre-refresh Marin baseline. Each arm uses its own frozen project environment.
-world_size="${1:?usage: run_three_arm_h100.sh WORLD_SIZE SHAPE}"
-shape="${2:?usage: run_three_arm_h100.sh WORLD_SIZE SHAPE}"
+world_size="${1:?usage: run_three_arm_h100.sh WORLD_SIZE SHAPE [STEPS]}"
+shape="${2:?usage: run_three_arm_h100.sh WORLD_SIZE SHAPE [STEPS]}"
+steps="${3:-1}"
 baseline_commit=4d798b12c9545c73ab893883c890633ee1db353e
 baseline_dir=/tmp/fa4-marin-baseline
 
-bash experiments/fa4/run_grug_h100.sh "$world_size" "$shape"
+bash experiments/fa4/run_grug_h100.sh "$world_size" "$shape" "$steps"
 
 git init --quiet "$baseline_dir"
 git -C "$baseline_dir" remote add origin https://github.com/marin-community/MarinSkyRL.git
@@ -26,6 +27,6 @@ baseline_env=(
 )
 env "${baseline_env[@]}" timeout 900 "$baseline_dir/.venv/bin/python" \
     experiments/fa4/grug_step.py --output /tmp/fa4-grug-old-fa2.pt \
-    --world-size "$world_size" --shape "$shape" --steps 1 --cp-comm-type default
+    --world-size "$world_size" --shape "$shape" --steps "$steps" --cp-comm-type default
 .venv/bin/python experiments/fa4/compare_grug.py /tmp/fa4-grug-old-fa2.pt /tmp/fa4-grug-fa2.pt
 .venv/bin/python experiments/fa4/compare_grug.py /tmp/fa4-grug-old-fa2.pt /tmp/fa4-grug-fa4.pt
