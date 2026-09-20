@@ -68,6 +68,24 @@ norm and clipping kernels avoid Megatron's gradient-sized Torch temporary.
 Tiny Hero with half of its optimizer offloaded passes exact continuation at
 512 and 65,536 tokens on H100; full-model capacity must be measured separately.
 
+For long sequences, enable Megatron's native weighted SwiGLU fusion under the
+same `trainer.policy.megatron_config` section:
+
+```yaml
+transformer_config_kwargs:
+  bias_activation_fusion: true
+  recompute_granularity: full
+  recompute_method: uniform
+  recompute_num_layers: 1
+```
+
+The fused activation avoids the unfused path's large FP32 intermediate before
+casting routed outputs back to BF16. It changes intermediate BF16 rounding, so
+qualify training and serving comparisons with the selected setting. It does
+not require FP8. CPU offload still needs enough host memory for optimizer state
+and staging; increasing its fraction can move an out-of-memory failure from
+the GPU to the host.
+
 The port lives in two modules:
 
 - `skyrl_train.models.grug_megatron` holds the Megatron-Core modules that a
