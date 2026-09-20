@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import time
 from urllib.parse import urlsplit
 
 import boto3
@@ -177,24 +178,36 @@ def _s3_client():
 def _stage_trained_checkpoint(uri: str, destination: Path) -> int:
     bucket, prefix = _s3_target(uri)
     prefix = prefix.rstrip("/") + "/"
-    client = _s3_client()
-    objects = [
-        item
-        for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix)
-        for item in page.get("Contents", ())
-        if item["Key"].removeprefix(prefix)
-        in {
-            "config.json",
-            "model.safetensors.index.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "chat_template.jinja",
-        }
-        or item["Key"].removeprefix(prefix).startswith("model-")
-        and item["Key"].endswith(".safetensors")
-    ]
-    filenames = {item["Key"].removeprefix(prefix) for item in objects}
-    assert {"config.json", "model.safetensors.index.json", "tokenizer.json"} <= filenames, filenames
+    for attempt in range(4):
+        client = _s3_client()
+        listed = [
+            item
+            for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix)
+            for item in page.get("Contents", ())
+        ]
+        objects = [
+            item
+            for item in listed
+            if item["Key"].removeprefix(prefix)
+            in {
+                "config.json",
+                "model.safetensors.index.json",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "chat_template.jinja",
+            }
+            or item["Key"].removeprefix(prefix).startswith("model-")
+            and item["Key"].endswith(".safetensors")
+        ]
+        filenames = {item["Key"].removeprefix(prefix) for item in objects}
+        if {"config.json", "model.safetensors.index.json", "tokenizer.json"} <= filenames:
+            break
+        if attempt < 3:
+            time.sleep(2**attempt)
+    assert {"config.json", "model.safetensors.index.json", "tokenizer.json"} <= filenames, (
+        f"checkpoint list missing required files after four attempts: listed={len(listed)}, "
+        f"sample={[item['Key'] for item in listed[:3]]}, selected={sorted(filenames)[:5]}"
+    )
     assert any(name.startswith("model-") and name.endswith(".safetensors") for name in filenames), filenames
     assert all(Path(name).name == name for name in filenames), filenames
 
