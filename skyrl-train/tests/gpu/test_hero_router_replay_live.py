@@ -48,6 +48,8 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
     cfg = _config(str(model_path), world_size=policy_world_size, pp=1, ep=policy_world_size)
     if trained_uri:
         cfg.trainer.policy.optimizer_config.lr = 1e-4
+        # Four policy ranks share four examples, so each rank has one example.
+        cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.policy.fsdp_config.moe_router_replay = True
     cfg.trainer.policy.grug_query_bias_update_mode = "loss_free"
     cfg.trainer.policy.grug_query_bias_update_rate = 0.001
