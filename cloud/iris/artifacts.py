@@ -7,6 +7,7 @@ import os
 import posixpath
 import shutil
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -18,6 +19,7 @@ from marinskyrl.resource_locator import join_resource_path
 CHECKPOINT_MARKER_FILENAME = "latest_ckpt_global_step.txt"
 SOURCE_MANIFEST_FILENAME = ".marinskyrl-source.json"
 S3_ADDRESSING_STYLE_ENV = "OT_AGENT_S3_ADDRESSING_STYLE"
+FILE_COPY_WORKERS = 16
 
 
 @dataclass(frozen=True)
@@ -93,16 +95,23 @@ def relative_object_key(root: str, path: str) -> str:
 
 def _source_inventory(uri: str) -> tuple[AbstractFileSystem, tuple[tuple[str, FileEntry], ...]]:
     filesystem, source_path = fs_and_path(uri)
-    if filesystem.isfile(source_path):
-        entry = FileEntry(path=posixpath.basename(source_path), size=int(filesystem.info(source_path)["size"]))
+    source_info = filesystem.info(source_path)
+    if source_info["type"] == "file":
+        entry = FileEntry(path=posixpath.basename(source_path), size=int(source_info["size"]))
         return filesystem, ((source_path, entry),)
-    source_files = sorted(path for path in filesystem.find(source_path) if not filesystem.isdir(path))
-    if not source_files:
-        raise ValueError(f"Artifact source contains no files: {uri}")
+    source_files = filesystem.find(source_path, detail=True)
     inventory = tuple(
-        (path, FileEntry(path=relative_object_key(source_path, path), size=int(filesystem.info(path)["size"])))
-        for path in source_files
+        sorted(
+            (
+                path,
+                FileEntry(path=relative_object_key(source_path, path), size=int(info["size"])),
+            )
+            for path, info in source_files.items()
+            if info["type"] == "file"
+        )
     )
+    if not inventory:
+        raise ValueError(f"Artifact source contains no files: {uri}")
     return filesystem, inventory
 
 
@@ -113,13 +122,20 @@ def copy_file_inventory(
 ) -> tuple[FileEntry, ...]:
     """Copy a selected remote file inventory and verify each recorded size."""
     destination.mkdir(parents=True, exist_ok=False)
-    for source_path, entry in inventory:
+    if not inventory:
+        return ()
+
+    def copy_file(item: tuple[str, FileEntry]) -> None:
+        source_path, entry = item
         local_path = destination / entry.path
         local_path.parent.mkdir(parents=True, exist_ok=True)
         filesystem.get_file(source_path, str(local_path))
         actual_size = local_path.stat().st_size
         if actual_size != entry.size:
             raise ValueError(f"Staging size mismatch for {entry.path}: expected {entry.size}, found {actual_size}")
+
+    with ThreadPoolExecutor(max_workers=min(FILE_COPY_WORKERS, len(inventory))) as executor:
+        tuple(executor.map(copy_file, inventory))
     return tuple(entry for _, entry in inventory)
 
 

@@ -211,14 +211,16 @@ def _committed_checkpoint_step(
 
 def _checkpoint_model_inventory(filesystem: AbstractFileSystem, target: str) -> tuple[tuple[str, FileEntry], ...]:
     selected = []
-    for remote_path in filesystem.find(target):
+    for remote_path, info in filesystem.find(target, detail=True).items():
+        if info["type"] != "file":
+            continue
         relative = relative_object_key(target, remote_path)
         if (
             relative == FSDP_CONFIG_NAME
             or relative.startswith(f"{HUGGINGFACE_METADATA_DIRECTORY}/")
             or FSDP_MODEL_SHARD_PATTERN.fullmatch(relative)
         ):
-            selected.append((remote_path, FileEntry(path=relative, size=int(filesystem.info(remote_path)["size"]))))
+            selected.append((remote_path, FileEntry(path=relative, size=int(info["size"]))))
     return tuple(sorted(selected, key=lambda item: item[1].path))
 
 
