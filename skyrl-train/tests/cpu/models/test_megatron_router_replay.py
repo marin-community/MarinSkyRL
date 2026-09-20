@@ -375,10 +375,10 @@ class TestExpandMoeLayerFreq:
 class TestDenseReplayTargets:
     @pytest.mark.parametrize(
         ("batch_size", "seq_len", "response_len", "num_layers", "topk", "num_experts"),
-        [(3, 12, 5, 4, 2, 8), (1, 8, 8, 1, 4, 6), (2, 10, 3, 2, 2, 4)],
-        ids=["padded", "full_response", "short_response"],
+        [(3, 12, 5, 4, 2, 8), (1, 9, 8, 1, 4, 6), (2, 10, 3, 2, 2, 4)],
+        ids=["padded", "one_prompt_token", "short_response"],
     )
-    def test_fills_response_window_and_masks_lost_capture(
+    def test_fills_prediction_positions_and_masks_lost_capture(
         self, batch_size, seq_len, response_len, num_layers, topk, num_experts
     ):
         torch.manual_seed(4)
@@ -389,17 +389,25 @@ class TestDenseReplayTargets:
         full, mask = dense_replay_targets(rollout, batch_size, seq_len, response_len)
 
         for b in range(batch_size):
-            prompt_start = seq_len - response_len
-            # Outside the response window: sentinel everywhere, mask False.
-            assert (full[b, :prompt_start] == SENTINEL_EXPERT_ID).all()
-            assert not mask[b, :prompt_start].any()
+            prediction_start = seq_len - response_len - 1
+            # The first captured route predicts the first response token from
+            # the final prompt token; the final response input is uncaptured.
+            assert (full[b, :prediction_start] == SENTINEL_EXPERT_ID).all()
+            assert not mask[b, :prediction_start].any()
+            assert (full[b, -1] == SENTINEL_EXPERT_ID).all()
+            assert not mask[b, -1]
             for t in range(response_len):
-                row = full[b, prompt_start + t]
+                row = full[b, prediction_start + t]
                 row_is_sentinel = all(
                     row[layer][k] == SENTINEL_EXPERT_ID for layer in range(num_layers) for k in range(topk)
                 )
                 assert torch.equal(row[:, :], rollout[b, t])
-                assert mask[b, prompt_start + t].item() == (not row_is_sentinel)
+                assert mask[b, prediction_start + t].item() == (not row_is_sentinel)
+
+    def test_rejects_response_without_prompt(self):
+        rollout = torch.ones(1, 4, 1, 2, dtype=torch.long)
+        with pytest.raises(ValueError, match="at least one prompt token"):
+            dense_replay_targets(rollout, 1, 4, 4)
 
     def test_list_num_actions_raises_not_implemented(self):
         rollout = torch.zeros(2, 5, 3, 2, dtype=torch.long)

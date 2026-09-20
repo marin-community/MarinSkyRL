@@ -178,8 +178,15 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
     try:
         off_policy = _init_policy(cfg, policy_world_size)
         off_weights = rank0_validation_snapshot(off_policy, names)
-        for name in names:
-            torch.testing.assert_close(off_weights[name], before[name], rtol=0, atol=0)
+        off_reload_max_diffs = {
+            name: (off_weights[name].float() - before[name].float()).abs().max().item() for name in names
+        }
+        if result_uri:
+            _put_s3_json(
+                result_uri, {**on_metrics, "phase": "after_off_reload", "off_reload_max_diffs": off_reload_max_diffs}
+            )
+        for name, max_diff in off_reload_max_diffs.items():
+            assert max_diff == 0, f"flag-off reload changed {name}: max_abs={max_diff}"
         off_batch = rollout_training_batch(prompts, rollout)
         off_scores = _megatron_response_logprobs(off_policy, off_batch)
         flag_off_vs_sentinel = (off_scores - native)[valid].abs().max().item()
