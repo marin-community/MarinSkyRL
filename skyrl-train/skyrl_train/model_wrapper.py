@@ -1021,7 +1021,7 @@ class HFModelWrapper(nn.Module):
             from skyrl_train.models.router_replay import set_active_replay
 
             # Build the dense target off the ORIGINAL [B, seq_len] sequences (the
-            # response slice is only meaningful pre-pack), then index_select to
+            # prediction-position slice is only meaningful pre-pack), then index_select to
             # the packed [1, nnz] layout by the same nnz_indices the forward's
             # unpad_input used. Both flatten batch-major, so the index_select
             # lands the packed target on the correct rows.
@@ -1425,12 +1425,13 @@ class HFModelWrapper(nn.Module):
 
         ``rollout_routed_experts`` is ``[B, response_len, L, K]`` (response axis).
         The dense target is built by the shared ``dense_replay_targets`` off the
-        ORIGINAL ``[B, seq_len]`` ``sequences`` (the response slice is only
-        meaningful pre-pack); HF MoE blocks flatten ``[B, seq_len] -> (B*seq_len)``
+        ORIGINAL ``[B, seq_len]`` ``sequences`` (the prediction-position slice
+        is only meaningful pre-pack); HF MoE blocks flatten ``[B, seq_len] -> (B*seq_len)``
         in batch-major (row) order. We build a full-sequence target
         ``[B*seq_len, K]`` per layer and a ``[B*seq_len]`` bool mask True only on
-        response positions AND non-sentinel rows. Prompt / pad / sentinel rows
-        fall through to natural routing.
+        positions predicting response tokens AND non-sentinel rows. The first
+        route belongs to the final prompt token; uncaptured / pad / sentinel
+        rows fall through to natural routing.
 
         Stage 3a — sample packing: when ``nnz_indices`` is not None the forward
         ran ``unpad_input`` and the model sees a packed ``[1, nnz]`` sequence.

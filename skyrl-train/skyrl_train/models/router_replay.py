@@ -73,12 +73,12 @@ def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_action
     """Build the dense per-position replay target and mask, layout-agnostic.
 
     ``rollout_routed_experts`` is ``[B, response_len, L, K]`` on the response
-    axis. Returns ``(full, mask)`` where ``full`` is a ``[B, seq_len, L, K]``
-    long tensor sentinel-filled outside the response window and ``mask`` is a
-    ``[B, seq_len]`` bool tensor True only on response positions whose captured
-    row is non-sentinel (a row is sentinel iff all K captured experts equal
-    ``SENTINEL_EXPERT_ID``). Prompt / pad / sentinel rows fall through to
-    native routing.
+    axis, but each row belongs to the input token that *predicted* that
+    response token. The first row therefore belongs to the final prompt token,
+    and the last belongs to the penultimate response token. Returns
+    ``(full, mask)`` with sentinel targets outside those prediction positions.
+    A captured row is sentinel iff all K captured experts equal
+    ``SENTINEL_EXPERT_ID``. Uncaptured positions fall through to native routing.
     """
     require_scalar_num_actions(num_actions)
     device = rollout_routed_experts.device
@@ -86,12 +86,16 @@ def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_action
     B, response_len, L, K = captured.shape
     assert B == batch_size, f"router_replay batch mismatch: {B} vs {batch_size}"
     assert response_len == num_actions, f"router_replay response_len {response_len} != num_actions {num_actions}"
+    if response_len and seq_len <= response_len:
+        raise ValueError("router_replay needs at least one prompt token before the response")
 
     full = torch.full((batch_size, seq_len, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)
-    full[:, seq_len - response_len : seq_len, :, :] = captured
+    prediction_start = seq_len - response_len - 1
+    prediction_end = seq_len - 1
+    full[:, prediction_start:prediction_end, :, :] = captured
 
     response_pos = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
-    response_pos[:, seq_len - response_len : seq_len] = True
+    response_pos[:, prediction_start:prediction_end] = True
     # non-sentinel per [B, seq_len, L]; collapse over L: a position is valid
     # for replay only where every layer carries real data. Use layer 0 as the
     # representative (the capture rail writes the same sentinel pattern across
