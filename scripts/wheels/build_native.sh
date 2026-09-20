@@ -12,7 +12,7 @@ package_environment=()
 case "$package" in
     flash-attn)
         repository=Dao-AILab/flash-attention
-        source_commit=4219765dfdd8913bfe26134f748dd5ffcedd3c39
+        source_commit=060c9188beec3a8b62b33a3bfa6d5d2d44975fab
         package_environment+=(FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_CUDA_ARCHS=90)
         ;;
     causal-conv1d)
