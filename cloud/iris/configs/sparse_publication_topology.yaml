@@ -2,6 +2,8 @@
 # H100x8 vLLM DP8/EP8 node. This is an experiment, not a production default.
 # Keep model, seed, data and cadence fixed across arms. For exactness qualification,
 # override max_steps=4, max_staleness_steps=0 and verify=true.
+# Add the optional buffer cap with +trainer.fully_async.max_buffered_groups=32
+# at launch because the base Hydra schema does not declare that newer field.
 entrypoint: fully_async
 
 context_budget:
@@ -24,7 +26,6 @@ trainer:
   fully_async:
     max_staleness_steps: 4
     num_parallel_generation_workers: 160
-    max_buffered_groups: 32
   seed: 17
   epochs: 1
   max_steps: 25
