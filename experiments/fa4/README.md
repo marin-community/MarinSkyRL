@@ -116,3 +116,11 @@ That packed attempt reached TE but TE 2.19 rejected sliding-window attention
 with its default `p2p` CP transport. The next probe sets MCore's documented
 `cp_comm_type=all_gather`, which TE 2.19 explicitly supports with a sliding
 window; this is a visible experimental transport choice, not a fallback.
+
+`run_three_arm_h100.sh <world-size> <toy|snowball>` runs the two new-cohort
+arms, then checks out baseline commit `4d798b12` in task-local scratch, installs
+its frozen lock, and runs the same Grug probe against the old FA2 stack. It
+compares valid-token log-probs and optimizer-induced changes in two attention
+weights. Each environment remains separate; the fixed vLLM source is installed
+in every arm. Use the output of this script only after the individual Grug
+gates pass on the chosen topology.
