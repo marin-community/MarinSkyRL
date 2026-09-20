@@ -216,6 +216,49 @@ def test_offline_eagle_capture_does_not_attach_weight_transfer_backend(monkeypat
     assert "weight_transfer_config" not in captured["engine_init_kwargs"]
 
 
+@pytest.mark.asyncio
+async def test_offline_eagle_capture_forwards_prompt_group_limit(monkeypatch):
+    pytest.importorskip("hydra")
+    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
+    from omegaconf import OmegaConf
+
+    from marinskyrl.speculative_decoding import SpeculativeDecodingConfig
+    from skyrl_train.entrypoints import main_generate
+
+    class CaptureClient:
+        config = None
+
+        async def begin_online_eagle_capture(self, config):
+            self.config = config
+            return [[{"active": True}]]
+
+    monkeypatch.setattr(main_generate.io, "exists", lambda _uri: False)
+    cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "ckpt_path": "s3://bucket/checkpoints",
+                "policy": {"model": {"source_identity": "target-revision"}},
+            }
+        }
+    )
+    speculative_decoding = SpeculativeDecodingConfig.from_mapping(
+        {
+            "method": "eagle3",
+            "model": {
+                "source_uri": "hf://laion/snowball-64k-eagle3-draft-r2egym",
+                "source_identity": "4bdb47c08e5b5190bea3c7a93c3e14470230e469",
+            },
+            "num_speculative_tokens": 3,
+            "training": {"max_sequences_per_prompt_group": 7},
+        }
+    )
+    client = CaptureClient()
+
+    await main_generate._begin_offline_eagle_capture(client, cfg, speculative_decoding)
+
+    assert client.config["max_sequences_per_prompt_group"] == 7
+
+
 def test_from_config_forwards_policy_revision_to_vllm(monkeypatch):
     pytest.importorskip("hydra")
     pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")

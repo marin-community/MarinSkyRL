@@ -712,6 +712,7 @@ class RayPPOTrainer:
             step=self.global_step,
             max_tokens=training.max_tokens_per_update,
             max_window_tokens=training.max_window_tokens,
+            max_sequences_per_prompt_group=training.max_sequences_per_prompt_group,
             target_revision=_policy_revision(self.global_step - 1),
             draft_revision=self._speculator_revision,
             reserved_gpu_memory_gib=training.reserved_gpu_memory_gib,

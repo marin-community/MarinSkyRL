@@ -91,6 +91,7 @@ async def _begin_offline_eagle_capture(
         step=1,
         max_tokens=speculative_decoding.training.max_tokens_per_update,
         max_window_tokens=speculative_decoding.training.max_window_tokens,
+        max_sequences_per_prompt_group=speculative_decoding.training.max_sequences_per_prompt_group,
         target_revision=str(source_identity),
         draft_revision=speculative_decoding.model.source_identity,
         reserved_gpu_memory_gib=speculative_decoding.training.reserved_gpu_memory_gib,

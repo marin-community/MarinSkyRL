@@ -112,6 +112,7 @@ class OnlineEagleCaptureConfig:
     step: int
     max_tokens: int
     max_window_tokens: int
+    max_sequences_per_prompt_group: int
     target_revision: str
     draft_revision: str
     reserved_gpu_memory_gib: float
