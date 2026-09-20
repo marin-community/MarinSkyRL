@@ -28,8 +28,6 @@ from skyrl_train.distributed.megatron.megatron_utils import (
 from skyrl_train.distributed.megatron.direct_checkpoint import DirectS3TorchDistSaveShardedStrategy
 from skyrl_train.io.s3fs import abort_multipart_uploads
 
-from megatron.core.dist_checkpointing.strategies import base as ckpt_base
-from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
 from megatron.core import dist_checkpointing
 from megatron.core.dist_checkpointing.serialization import (
     get_default_load_sharded_strategy,
@@ -96,10 +94,6 @@ class MegatronStrategy(DistributedStrategy):
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
         if optimizer_config is not None:
             _optimizer_checkpoint_metadata(megatron_config.optimizer_checkpoint_sharding_type)
-
-        # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
-        # short-lived background workers, which does not work well with Ray.
-        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
 
     def set_seed(self, seed: int) -> None:
         random.seed(seed)
@@ -259,8 +253,6 @@ class MegatronStrategy(DistributedStrategy):
                     torch.save({"client_state": client_state, "tag": tag}, f)
 
         dist.barrier()
-        ckpt_base.async_calls.close()
-        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
         self.log(f"Checkpoint successfully saved to {ckpt_dir}")
 
     def load_checkpoint(
