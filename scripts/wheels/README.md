@@ -22,7 +22,8 @@ bundled `flash_attn.cute` package written for an older CUTLASS DSL while retaini
 FA2's native interface. The script fetches every source by its exact commit so a
 moving branch or tag cannot change the input tree.
 
-Use CPython 3.12.14 on Linux x86_64 with git, a C++ compiler, and uv. The
+Use CPython 3.12.14 on Linux with git, a C++ compiler, and uv. Build on the
+target CPU architecture: x86_64 for the H100 runtime or aarch64 for GB200. The
 qualified FlashAttention 2.8.4 build used the Iris task image
 `ghcr.io/marin-community/iris-task@sha256:ecdb2f7f90f8760a7e74c49b49b67d7ecf44557298860411c148c186706067f2`,
 GCC/G++ `14.2.0-19`, glibc `2.41-12+deb13u3`, git `1:2.47.3-0+deb13u1`, and
@@ -34,18 +35,22 @@ scripts/wheels/build_native.sh flash-attn /tmp/build-flash-attn
 scripts/wheels/build_native.sh causal-conv1d /tmp/build-causal-conv1d
 scripts/wheels/build_native.sh mamba-ssm /tmp/build-mamba
 scripts/wheels/build_native.sh transformer-engine-torch /tmp/build-te
+# On an aarch64 GB200 task:
+scripts/wheels/build_native.sh transformer-engine-torch /tmp/build-te 100
+scripts/wheels/build_native.sh flash-attn /tmp/build-flash-attn 100
 ```
 
 Each directory retains its environment and source build cache. Wheels are written
-to `dist/`, with their SHA-256 digests in `SHA256SUMS`. FlashAttention targets SM90;
-the other projects retain their upstream architecture choices. No aarch64 wheel
-is built by this script.
+to `dist/`, with their SHA-256 digests in `SHA256SUMS`. The optional third
+argument selects SM90 (the default) or SM100 for FlashAttention and Transformer
+Engine. The wheel tag reflects the host CPU architecture. Causal-conv1d and
+Mamba retain their upstream architecture choices.
 
 The source checkout and recursive submodules must be clean. The script rejects
 tracked changes and unexpected untracked files; Git-ignored build outputs remain
 available for cache reuse.
 
 Before publishing a wheel, install its exact bytes in the proposed runtime and
-run its native forward and backward checks on H100. Publish the source commits,
+run its native forward and backward checks on the target GPU. Publish the source commits,
 build environment, and checksums with the wheel assets. Adoption URLs and wheel
 hashes belong in the root dependency manifest and lock.

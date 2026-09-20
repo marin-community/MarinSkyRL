@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# CPython 3.12, Linux x86_64, H100. Requires git and a CUDA-supported C++ compiler.
-package="${1:?usage: build_native.sh PACKAGE BUILD_DIRECTORY}"
+# CPython 3.12 on Linux. Requires git and a CUDA-supported C++ compiler.
+package="${1:?usage: build_native.sh PACKAGE BUILD_DIRECTORY [CUDA_ARCH]}"
 build_dir="$(realpath -m "${2:?usage: build_native.sh PACKAGE BUILD_DIRECTORY}")"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
+cuda_arch="${3:-90}"
+case "$cuda_arch" in 90|100) ;; *) echo "CUDA_ARCH must be 90 (H100) or 100 (B200)" >&2; exit 2 ;; esac
 source_subdir=.
 python_version=3.12.14
 max_jobs=2
@@ -13,7 +15,7 @@ case "$package" in
     flash-attn)
         repository=Dao-AILab/flash-attention
         source_commit=4219765dfdd8913bfe26134f748dd5ffcedd3c39
-        package_environment+=(FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_CUDA_ARCHS=90)
+        package_environment+=(FLASH_ATTENTION_FORCE_BUILD=TRUE "FLASH_ATTN_CUDA_ARCHS=$cuda_arch")
         ;;
     causal-conv1d)
         repository=Dao-AILab/causal-conv1d
@@ -68,6 +70,8 @@ build_environment=(
     "PATH=$virtual_env/bin:$cuda_home/bin:$PATH"
     "CPATH=$site_packages/nvidia/cudnn/include:$site_packages/nvidia/nccl/include"
     "NVCC_THREADS=1"
+    "NVTE_CUDA_ARCHS=$cuda_arch"
+    "TORCH_CUDA_ARCH_LIST=${cuda_arch%0}.0"
     "MAX_JOBS=$max_jobs"
     "${package_environment[@]}"
 )
