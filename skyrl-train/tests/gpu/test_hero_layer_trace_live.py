@@ -45,7 +45,7 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
     prompts = [[1, 17 + row, 29, 5, 11, 3] for row in range(4)]
     sampling = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
     sampling.update(temperature=0.0, max_tokens=4, ignore_eos=True, logprobs=1)
-    positions = [0, 5, 6, 7, 8]
+    positions = [0, 1, 5, 6, 7, 8]
     row_index = 3
 
     initialize_ray(cfg)
@@ -87,13 +87,27 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
         vllm_trace = vllm_rank_traces[0]
 
         mega_start = ray.get(policy.async_run_ray_method("pass_through", "begin_grug_layer_trace", len(sequence)))
-        assert next(item for item in mega_start if item["rank"] == 0)["layers"] == model_config.num_hidden_layers
+        assert len(mega_start) == 4
+        assert all(item["layers"] == model_config.num_hidden_layers for item in mega_start)
         batch = rollout_training_batch(prompts, rollout)
         try:
             scores = _score(policy, batch, full_routes)
         finally:
             mega_rank_traces = ray.get(policy.async_run_ray_method("pass_through", "finish_grug_layer_trace"))
-        mega_trace = next(item for item in mega_rank_traces if item["rank"] == 0)["traces"]
+        # EP4 distributes the four sequences across ranks. Identify the row
+        # from its second-token embedding, rather than assuming a rank order.
+        embed_key = "layer_0_model_input"
+        serving_embed = vllm_trace[embed_key][positions.index(1)].numpy()
+        embedding_rms_by_rank = {}
+        for item in mega_rank_traces:
+            calls = item["traces"][embed_key]
+            assert len(calls) == 1 and calls[0].shape[:2] == (len(sequence), 1)
+            delta = calls[0][1, 0].numpy() - serving_embed
+            embedding_rms_by_rank[item["rank"]] = float(np.sqrt(np.mean(np.square(delta))))
+        closest = sorted(embedding_rms_by_rank, key=embedding_rms_by_rank.get)
+        assert embedding_rms_by_rank[closest[0]] < embedding_rms_by_rank[closest[1]] / 2
+        selected_rank = closest[0]
+        mega_trace = next(item for item in mega_rank_traces if item["rank"] == selected_rank)["traces"]
 
         trace_arrays = {"positions": np.asarray(positions), "token_ids": np.asarray(sequence)}
         metrics = {}
@@ -103,12 +117,12 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
                 key = f"layer_{layer}_{site}"
                 serving = vllm_trace[key].numpy()
                 calls = mega_trace[key]
-                assert len(calls) == 2, (key, len(calls))
-                assert all(call.shape[:2] == (len(sequence), 2) for call in calls), (
+                assert len(calls) == 1, (key, len(calls))
+                assert calls[0].shape[:2] == (len(sequence), 1), (
                     key,
                     [call.shape for call in calls],
                 )
-                trainer = calls[1][positions, 1].numpy()
+                trainer = calls[0][positions, 0].numpy()
                 assert serving.shape == trainer.shape == (len(positions), model_config.hidden_size)
                 assert np.isfinite(serving).all() and np.isfinite(trainer).all(), key
                 delta = trainer - serving
@@ -134,6 +148,8 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
             "layout": "vLLM TP1/EP1; Megatron TP1/PP1/EP4/CP1",
             "source_commit": os.environ.get("HERO_REPLAY_SOURCE_COMMIT"),
             "row_index": row_index,
+            "selected_megatron_rank": selected_rank,
+            "embedding_rms_by_rank": embedding_rms_by_rank,
             "sequence": sequence,
             "positions": positions,
             "captured_shape": list(full_routes.shape),
