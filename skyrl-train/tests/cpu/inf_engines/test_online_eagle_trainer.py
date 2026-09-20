@@ -41,8 +41,24 @@ class _TargetOwnedModel(torch.nn.Module):
         self.verifier_gate_up = torch.nn.Linear(2, 2)
 
 
-def test_refresh_target_owned_weights_moves_vocabulary_mask_to_head_device(tmp_path: Path) -> None:
+class _DeviceSensitiveVocabularyMap:
+    def __init__(self, mask: torch.Tensor) -> None:
+        self.mask = mask
+
+    def to(self, *, device=None, dtype=None) -> torch.Tensor:
+        assert device == self.mask.device
+        return self.mask.to(dtype=dtype)
+
+    def numel(self) -> int:
+        return self.mask.numel()
+
+
+def test_refresh_target_owned_weights_moves_vocabulary_mask_to_head_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     model = _TargetOwnedModel()
+    model.t2d = _DeviceSensitiveVocabularyMap(model.t2d)
+    monkeypatch.setattr(torch, "any", lambda _: True)
     target = {
         "model.embed_tokens.weight": torch.arange(6, dtype=torch.float32).reshape(3, 2),
         "lm_head.weight": torch.arange(6, dtype=torch.float32).reshape(3, 2),
