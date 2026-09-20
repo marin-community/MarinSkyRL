@@ -42,7 +42,9 @@ def test_mismatch_decomposition_selects_exact_version_spans_and_reconstructs_gap
     assert record["fresh_version_tokens"] == 0
     assert record["matched_tokens"] == 3
     assert record["other_version_tokens"] == 2
+    assert record["selected_tokens_by_version"] == {"0": 3, "1": 2}
     assert record["mixed_version_responses"] == 2
+    assert record["matched_mixed_version_responses"] == 0
     assert record["summaries"]["age_2"]["tokens"] == 3
     assert record["summaries"]["all"]["engine"]["log_ratio_abs_mean"] == pytest.approx(0.4 / 3)
     assert record["summaries"]["all"]["stale"]["log_ratio_abs_mean"] == pytest.approx(0.2 / 3)
@@ -81,6 +83,8 @@ def test_mismatch_decomposition_scores_fresh_span_with_current_generating_weight
     assert record["matched_tokens"] == record["selected_tokens"] == 5
     assert record["other_version_tokens"] == 0
     assert record["mixed_version_responses"] == 2
+    assert record["matched_mixed_version_responses"] == 2
+    assert record["selected_tokens_by_version"] == {"0": 3, "2": 2}
     assert record["summaries"]["age_0"]["tokens"] == 2
     assert record["summaries"]["age_0"]["stale"]["log_ratio_abs_max"] == 0
     assert record["summaries"]["all"]["reconstruction_abs_max"] == 0
@@ -89,6 +93,22 @@ def test_mismatch_decomposition_scores_fresh_span_with_current_generating_weight
         sample_index = row["positions"].index(fresh_position)
         assert row["B_generating_trainer"][sample_index] == row["C_consumer_trainer"][sample_index]
         assert row["B_source"][sample_index] == "fresh_consuming_policy"
+
+
+def test_mismatch_decomposition_samples_a_matched_mixed_response_first():
+    record = _probe(
+        version_rows=[
+            [
+                {"start": 0, "token_count": 2, "policy_version": 0},
+                {"start": 2, "token_count": 1, "policy_version": 2},
+            ],
+            [{"start": 0, "token_count": 2, "policy_version": 0}],
+        ],
+        sample_rows=1,
+    )
+    assert record["matched_mixed_version_responses"] == 1
+    assert record["samples"][0]["row"] == 0
+    assert set(record["samples"][0]["B_source"]) == {"frozen_reference", "fresh_consuming_policy"}
 
 
 def test_mismatch_decomposition_rejects_token_id_shift():

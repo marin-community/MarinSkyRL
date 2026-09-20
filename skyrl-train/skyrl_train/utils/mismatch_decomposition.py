@@ -57,6 +57,7 @@ def mismatch_decomposition_record(
     ages = torch.full(shape, -1, dtype=torch.int32)
     reference_tokens = torch.zeros(shape, dtype=torch.bool)
     fresh_tokens = torch.zeros(shape, dtype=torch.bool)
+    selected_tokens_by_version: dict[int, int] = {}
     for row, (ids, segments) in enumerate(zip(response_ids, version_rows, strict=True)):
         length = len(ids)
         if length > shape[1] or not response[row, :length].all() or response[row, length:].any():
@@ -83,6 +84,9 @@ def mismatch_decomposition_record(
                 raise ValueError("sampled policy version is newer than optimizer consumption")
             start = segment["start"]
             span = slice(start, start + segment["token_count"])
+            selected_tokens_by_version[version] = selected_tokens_by_version.get(version, 0) + int(
+                selected[row, span].sum()
+            )
             ages[row, span] = age
             if version == reference_version:
                 reference_tokens[row, span] = True
@@ -133,7 +137,11 @@ def mismatch_decomposition_record(
 
     ranked_rows = sorted(
         (row for row in range(batch_size) if selected_matched[row].any()),
-        key=lambda row: hashlib.sha256(json.dumps(response_ids[row]).encode()).digest(),
+        key=lambda row: (
+            not (selected_reference[row].any() and selected_fresh[row].any()),
+            len(version_rows[row]) <= 1,
+            hashlib.sha256(json.dumps(response_ids[row]).encode()).digest(),
+        ),
     )[:sample_rows]
     samples = []
     for row in ranked_rows:
@@ -168,7 +176,13 @@ def mismatch_decomposition_record(
         "fresh_version_tokens": int(selected_fresh.sum()),
         "matched_tokens": int(selected_matched.sum()),
         "other_version_tokens": int((selected & ~selected_matched).sum()),
+        "selected_tokens_by_version": {
+            str(version): count for version, count in sorted(selected_tokens_by_version.items())
+        },
         "mixed_version_responses": sum(len(row) > 1 for row in version_rows),
+        "matched_mixed_version_responses": sum(
+            bool(selected_reference[row].any() and selected_fresh[row].any()) for row in range(batch_size)
+        ),
         "summaries": summaries,
         "samples": samples,
     }
