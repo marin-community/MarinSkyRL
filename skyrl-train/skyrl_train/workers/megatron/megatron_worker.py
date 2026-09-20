@@ -28,7 +28,11 @@ from skyrl_train.distributed.megatron.optimizer import (
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
-from skyrl_train.distributed.megatron.megatron_utils import get_model_config, print_model_size
+from skyrl_train.distributed.megatron.megatron_utils import (
+    get_model_config,
+    materialize_megatron_params,
+    print_model_size,
+)
 from skyrl_train.utils.utils import (
     moe_router_replay_requested,
     update_model_config,
@@ -679,6 +683,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         from torch.multiprocessing.reductions import reduce_tensor
 
         use_prefix_cache = self.cfg.generator.enable_prefix_caching
+        materialize_megatron_params(self.actor_module)
         generator_dtype = str_to_torch_dtype(self.cfg.generator.model_dtype)
         cache_reset_task = None
         if use_prefix_cache and torch.distributed.get_rank() == 0:
@@ -797,6 +802,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """
         if self.strategy.hf_config.model_type != GRUG_MOE_MODEL_TYPE:
             raise ValueError("grug_validation_snapshot is only valid for Grug models")
+        materialize_megatron_params(self.actor_module)
         wanted = set(names)
         is_rank0 = torch.distributed.get_rank() == 0
         weights = {}

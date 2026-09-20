@@ -34,6 +34,13 @@ from megatron.core.packed_seq_params import PackedSeqParams
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
 
+def materialize_megatron_params(model_chunks: list[nn.Module]) -> None:
+    """Finish deferred parameter gathers before checkpointing or exporting."""
+    for module in model_chunks:
+        if isinstance(module, DDP) and module.ddp_config.overlap_param_gather:
+            module.start_param_sync(force_sync=True)
+
+
 def make_batch_generator(batches, vpp_size):
     """
     Creates a batch generator suitable for Megatron pipeline parallelism,
