@@ -47,6 +47,7 @@ __all__ = [
     "RouterReplay",
     "SENTINEL_EXPERT_ID",
     "dense_replay_targets",
+    "dense_prefix_replay_targets",
     "require_scalar_num_actions",
     "set_active_replay",
     "get_active_replay",
@@ -102,6 +103,24 @@ def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_action
     # layers for a given token), then AND with response_pos.
     non_sentinel = (full != SENTINEL_EXPERT_ID).any(dim=-1).all(dim=-1)  # [B, seq_len]
     return full, response_pos & non_sentinel
+
+
+def dense_prefix_replay_targets(captured, batch_size, seq_len):
+    """Diagnostic-only targets for every input position except the last."""
+    if captured.ndim != 4 or captured.shape[:2] != (batch_size, seq_len - 1):
+        raise ValueError(
+            "full-prefix replay expects [batch, sequence_length - 1, layers, topk], "
+            f"got {tuple(captured.shape)} for batch={batch_size}, sequence_length={seq_len}"
+        )
+    full = torch.full(
+        (batch_size, seq_len, *captured.shape[2:]),
+        SENTINEL_EXPERT_ID,
+        dtype=torch.long,
+        device=captured.device,
+    )
+    full[:, :-1] = captured.long()
+    mask = (full != SENTINEL_EXPERT_ID).any(dim=-1).all(dim=-1)
+    return full, mask
 
 
 # --------------------------------------------------------------------------- #

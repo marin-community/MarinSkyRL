@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from functools import partial
+import os
 from typing import Any, Callable, List, Optional
 
 import torch
@@ -35,7 +36,7 @@ from skyrl_train.models.megatron_router_replay import (
     slice_sequence_parallel,
     validate_replay_geometry,
 )
-from skyrl_train.models.router_replay import dense_replay_targets
+from skyrl_train.models.router_replay import dense_prefix_replay_targets, dense_replay_targets
 
 
 # Sentinel: distinguishes "caller did not pass logprob_chunk_size" (=> fall back to
@@ -192,7 +193,10 @@ class MegatronModelWrapper:
         assert controller is not None
         config = get_model_config(self.actor_module[0])
         batch_size, seq_len = sequences.shape
-        _, response_len, _, _ = rollout_routed_experts.shape
+        _, captured_len, _, _ = rollout_routed_experts.shape
+        full_prefix_diagnostic = (
+            os.environ.get("HERO_REPLAY_DIAGNOSTIC_FULL_ROUTES") == "1" and captured_len == seq_len - 1
+        )
         validate_replay_geometry(
             num_layers_captured=rollout_routed_experts.shape[2],
             expected_moe_layers=controller.num_moe_layers_total,
@@ -200,15 +204,21 @@ class MegatronModelWrapper:
             expected_topk=controller.topk,
             num_experts=config.num_moe_experts,
             targets=rollout_routed_experts,
-            response_len=response_len,
+            response_len=num_actions if full_prefix_diagnostic else captured_len,
             num_actions=num_actions,
         )
 
         device = sequences.device
-        dense, mask_BS = dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions)
+        if full_prefix_diagnostic:
+            # The normal replay contract remains response-only. This opt-in
+            # diagnostic also forces prompt routes to isolate their effect on
+            # the serving/trainer score gap.
+            dense, mask_BS = dense_prefix_replay_targets(rollout_routed_experts, batch_size, seq_len)
+        else:
+            dense, mask_BS = dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions)
         response_BS = torch.zeros_like(mask_BS)
         # A response token is scored from the preceding input position.
-        response_BS[:, seq_len - response_len - 1 : seq_len - 1] = True
+        response_BS[:, seq_len - num_actions - 1 : seq_len - 1] = True
 
         if self.use_sample_packing:
             # The routes tensor is ours, not the pipeline's input: always run the
