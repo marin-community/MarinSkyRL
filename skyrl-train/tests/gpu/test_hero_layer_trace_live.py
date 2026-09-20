@@ -110,6 +110,7 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
                 )
                 trainer = calls[1][positions, 1].numpy()
                 assert serving.shape == trainer.shape == (len(positions), model_config.hidden_size)
+                assert np.isfinite(serving).all() and np.isfinite(trainer).all(), key
                 delta = trainer - serving
                 metrics[str(layer)][site] = {
                     "rms_by_position": np.sqrt(np.mean(np.square(delta), axis=-1)).tolist(),
@@ -124,6 +125,10 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
         bucket, key = _s3_target(trace_uri)
         _s3_client().put_object(Bucket=bucket, Key=key, Body=payload.getvalue())
         rollout_scores = torch.tensor(rollout["response_logprobs"], dtype=torch.float32)
+        max_response_gap = (scores - rollout_scores).abs().max().item()
+        # The same full-prefix control measured 0.05281 before observation hooks.
+        # A larger shift would make the boundary trace an altered workload.
+        assert max_response_gap < 0.1, max_response_gap
         report = {
             "model": trained_uri,
             "layout": "vLLM TP1/EP1; Megatron TP1/PP1/EP4/CP1",
@@ -134,7 +139,7 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
             "captured_shape": list(full_routes.shape),
             "response_scores": scores.tolist(),
             "serving_response_scores": rollout_scores.tolist(),
-            "max_response_logprob_gap": (scores - rollout_scores).abs().max().item(),
+            "max_response_logprob_gap": max_response_gap,
             "raw_arrays_uri": trace_uri,
             "layers": metrics,
         }
