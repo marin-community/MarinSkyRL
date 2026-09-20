@@ -12,7 +12,7 @@ import torch
 
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.models.grug_moe import GrugMoeConfig
+from skyrl_train.models.grug_moe import GRUG_ROUTER_RENORM_EPS, GRUG_ROUTING_RENORM_SUM, GrugMoeConfig
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.grug_serving import (
@@ -143,6 +143,31 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
         mega_trace = next(item for item in mega_rank_traces if item["rank"] == selected_rank)["traces"]
 
         trace_arrays = {"positions": np.asarray(positions), "token_ids": np.asarray(sequence)}
+        router_logits = vllm_trace["layer_0_router_logits"].numpy()
+        router_prob_calls = mega_trace["layer_0_router_probs"]
+        assert len(router_prob_calls) == 1
+        router_probs = router_prob_calls[0][positions, 0].numpy()
+        assert router_logits.shape == router_probs.shape == (len(positions), model_config.num_local_experts)
+        selected = full_routes[row_index, positions, 0].numpy().astype(np.int64)
+        selected_logits = torch.from_numpy(np.take_along_axis(router_logits, selected, axis=1))
+        serving_combine = torch.sigmoid(selected_logits)
+        serving_combine *= GRUG_ROUTING_RENORM_SUM / (
+            serving_combine.sum(dim=-1, keepdim=True) + GRUG_ROUTER_RENORM_EPS
+        )
+        serving_combine = serving_combine.numpy()
+        trainer_combine = np.take_along_axis(router_probs, selected, axis=1)
+        np.testing.assert_allclose(serving_combine.sum(axis=-1), GRUG_ROUTING_RENORM_SUM, atol=1e-6)
+        np.testing.assert_allclose(trainer_combine.sum(axis=-1), GRUG_ROUTING_RENORM_SUM, atol=1e-6)
+        combine_delta = trainer_combine - serving_combine
+        trace_arrays.update(
+            {
+                "layer_0_selected_experts": selected,
+                "vllm_layer_0_router_logits": router_logits,
+                "megatron_layer_0_router_probs": router_probs,
+                "vllm_layer_0_router_combine": serving_combine,
+                "megatron_layer_0_router_combine": trainer_combine,
+            }
+        )
         metrics = {}
         for layer in range(model_config.num_hidden_layers):
             metrics[str(layer)] = {}
@@ -206,6 +231,8 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
             "selected_layer_0_position_0_experts": selected_experts,
             "verified_source_to_trainer_to_serving_weight_count": len(weight_names),
             "source_weight_max_abs_diffs": source_weight_diffs,
+            "router_combine_rms_by_position": np.sqrt(np.mean(np.square(combine_delta), axis=-1)).tolist(),
+            "router_combine_max_abs_by_position": np.max(np.abs(combine_delta), axis=-1).tolist(),
             "response_scores": scores.tolist(),
             "serving_response_scores": rollout_scores.tolist(),
             "max_response_logprob_gap": max_response_gap,

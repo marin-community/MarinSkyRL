@@ -884,6 +884,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 )
                 if layer_index == 0:
 
+                    def after_router(_module, _args, output, *, capture_fn=capture):
+                        capture_fn("router_probs", output[0].unsqueeze(1))
+
+                    self._grug_trace_hooks.append(layer.mlp.router.register_forward_hook(after_router))
+
                     def after_latent_norm(_module, _args, output, *, capture_fn=capture):
                         capture_fn("routed_input", output)
 
