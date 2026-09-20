@@ -146,7 +146,14 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
         selected_rank = closest[0]
         mega_trace = next(item for item in mega_rank_traces if item["rank"] == selected_rank)["traces"]
 
-        trace_arrays = {"positions": np.asarray(positions), "token_ids": np.asarray(sequence)}
+        trace_arrays = {
+            "positions": np.asarray(positions),
+            "token_ids": np.asarray(sequence),
+            "all_row_token_ids": np.asarray(
+                [prompts[trace_row] + rollout["response_ids"][trace_row] for trace_row in range(len(prompts))]
+            ),
+            "all_row_routes": full_routes.numpy(),
+        }
         router_logits = vllm_trace["layer_0_router_logits"].numpy()
         router_prob_calls = mega_trace["layer_0_router_probs"]
         assert len(router_prob_calls) == 1
@@ -296,6 +303,7 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
             "row_to_megatron_rank": row_to_rank,
             "embedding_rms_by_rank": embedding_rms_by_rank,
             "sequence": sequence,
+            "all_row_response_ids": rollout["response_ids"],
             "positions": positions,
             "captured_shape": list(full_routes.shape),
             "selected_layer_0_position_0_experts": selected_experts,
