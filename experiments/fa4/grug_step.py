@@ -105,17 +105,24 @@ def main() -> None:
                     }
                 )
                 print(f"TRAIN_STATUS {statuses[-1]!r}", flush=True)
-                assert math.isfinite(statuses[-1]["policy_loss"])
-                # Grug disables clipping, so MCore may report zero instead of
-                # computing a norm. The weight-change check below proves update.
-                assert 0 <= statuses[-1]["raw_grad_norm"] < float("inf")
-                assert statuses[-1]["policy_update_steps"] == 1
+                if not all(math.isfinite(value) for value in statuses[-1].values()):
+                    break
             after_weights = rank0_validation_snapshot(policy, names)
-            after_logprobs = _megatron_response_logprobs(policy, batch)
+            weight_health = {
+                name: {
+                    "nonfinite": int((~torch.isfinite(after_weights[name])).sum().item()),
+                    "changed": int((after_weights[name] != before_weights[name]).sum().item()),
+                }
+                for name in names
+            }
+            print(f"WEIGHT_HEALTH {weight_health!r}", flush=True)
+            weights_finite = all(health["nonfinite"] == 0 for health in weight_health.values())
+            after_logprobs = (
+                _megatron_response_logprobs(policy, batch)
+                if weights_finite
+                else torch.full_like(before_logprobs, float("nan"))
+            )
             memory = ray.get(policy.async_run_ray_method("pass_through", "get_cuda_memory"))[0]
-            assert torch.isfinite(before_logprobs).all() and torch.isfinite(after_logprobs).all()
-            assert all(torch.isfinite(weight).all() for weight in after_weights.values())
-            assert any(not torch.equal(before_weights[name], after_weights[name]) for name in names)
             result = {
                 "world_size": args.world_size,
                 "context_parallel_size": args.world_size,
@@ -130,6 +137,8 @@ def main() -> None:
                 "forward_seconds": forward_seconds,
                 "training_seconds": training_seconds,
                 "statuses": statuses,
+                "weight_health": weight_health,
+                "post_forward_skipped_due_to_nonfinite_weights": not weights_finite,
                 "memory": memory,
             }
             args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -146,6 +155,14 @@ def main() -> None:
                 args.output,
             )
             print(json.dumps(result, indent=2))
+            assert len(statuses) == args.steps
+            assert all(math.isfinite(status["policy_loss"]) for status in statuses)
+            # Grug disables clipping, so a zero norm may be a missing metric;
+            # nonfinite norms remain a failed numeric gate.
+            assert all(0 <= status["raw_grad_norm"] < float("inf") for status in statuses)
+            assert all(status["policy_update_steps"] == 1 for status in statuses)
+            assert weights_finite and torch.isfinite(before_logprobs).all() and torch.isfinite(after_logprobs).all()
+            assert any(health["changed"] > 0 for health in weight_health.values())
         finally:
             ray.shutdown()
 
