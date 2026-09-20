@@ -373,6 +373,7 @@ generator:
   # and ETP=1, node-local vLLM engines, the NCCL weight-sync backend and vLLM's TRITON MoE backend.
   weight_sync_transport: "broadcast"
   expert_block_sync:
+    encoding: "dense"  # "sparse_index" patches routed experts; shared and other weights stay dense.
     timeout_seconds: 600  # For creating the sync groups and for the broadcasts of each sync.
     verify: false  # If set, replay synchronization and verify it against the trainer values.
   fuse_weights: false

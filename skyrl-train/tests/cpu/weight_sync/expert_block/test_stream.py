@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from itertools import product
 import os
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -20,9 +21,18 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, create_groups, destroy_groups, warm_groups
-from skyrl_train.weight_sync.expert_block.schedule import Group, ReceiverRank, TrainerRank, build_schedule
+from skyrl_train.weight_sync.expert_block.schedule import (
+    ExpertBroadcast,
+    ExpertEntry,
+    Group,
+    ReceiverRank,
+    TrainerRank,
+    build_schedule,
+)
+from skyrl_train.weight_sync.expert_block.sender import ExpertBlockSender
+from skyrl_train.weight_sync.expert_block.sparse import BUCKET_BYTES, expert_buckets
 from skyrl_train.weight_sync.expert_block.source_views import local_expert_sources, local_source_slices
-from skyrl_train.weight_sync.expert_block.stream import Stream
+from skyrl_train.weight_sync.expert_block.stream import InstallReport, Stream, storage_identity
 from skyrl_train.weight_sync.expert_block.verify_weights import compare_replicas, replay
 from tests.cpu.weight_sync.expert_block.megatron_layout import (
     HIDDEN,
@@ -129,14 +139,34 @@ def trainer_sources(topology, trainer):
     return local, {item.entry.name: item for item in experts}
 
 
-def reference(topology):
+def reference(topology, updates=0):
     """Every dense HF tensor and expert matrix of the whole model."""
     dense, experts = {}, {}
     for trainer in topology.trainers():
-        rank_dense, rank_experts = reference_hf(topology.parameters_of(trainer))
+        parameters = topology.parameters_of(trainer)
+        for update in range(1, updates + 1):
+            change_parameters(parameters, update)
+        rank_dense, rank_experts = reference_hf(parameters)
         dense.update(rank_dense)
         experts.update(rank_experts)
     return dense, experts
+
+
+def change_parameters(parameters, update):
+    """Make one full, one empty and one raw-bit expert change, plus a dense shared change."""
+    for name, value in parameters.items():
+        if name.endswith(".experts.linear_fc1.weight0"):
+            bits = value.view(-1).view(torch.int16)
+            bits[0] = -32768 if update == 1 else 0  # Negative then positive zero.
+            bits[1] = 0x7FC1 if update == 1 else 0x7FC2  # Distinct NaN payloads.
+        elif name.endswith(".experts.linear_fc2.weight0") and update == 1:
+            value.view(-1).view(torch.int16).bitwise_xor_(1)
+        elif name.endswith(".shared_experts.linear_fc1.weight"):
+            value.view(-1)[0] = 7 + update
+
+
+def same_bytes(left, right):
+    return torch.equal(left.contiguous().view(torch.uint8), right.contiguous().view(torch.uint8))
 
 
 def schedule(topology):
@@ -292,3 +322,100 @@ def test_every_receiver_installs_exactly_its_experts_and_the_dense_weights_its_s
     world = len(topology.trainers()) + len(topology.receivers())
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     mp.spawn(participant_main, args=(topology, store.port, str(tmp_path)), nprocs=world, join=True)
+
+
+def sparse_participant_main(rank, port, directory):
+    """Two acknowledged indexed updates over real gloo groups and bound receiver views."""
+    topology = UNEQUAL_STAGED
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{directory}/sparse-default-{rank}",
+        rank=0,
+        world_size=1,
+        timeout=timedelta(seconds=TIMEOUT),
+    )
+    plan = schedule(topology)
+    trainer_count = plan.trainer_count
+    if rank < trainer_count:
+        local, expert_sources = trainer_sources(topology, topology.trainers()[rank])
+        kwargs = dict(sources=local.sources, expert_sources=expert_sources)
+    else:
+        receiver = topology.receivers()[rank - trainer_count]
+        dense, _ = reference(topology)
+        parameters, maps, _ = receiver_parameters(topology, receiver, dense)
+        kwargs = dict(parameters=parameters, expert_maps=maps)
+    groups = create_groups(rank, plan.groups, Rendezvous("127.0.0.1", port, "sparse-test", TIMEOUT), backend="gloo")
+    try:
+        stream = Stream(rank, plan, groups, device=torch.device("cpu"), **kwargs)
+        if rank < trainer_count:
+            sender = ExpertBlockSender(SimpleNamespace(_model_version_step=None), parallel_state=None)
+            sender.sources = local.sources
+            sender.identity = storage_identity(local.sources)
+            sender.stream = stream
+            sender.send_weights({"version": 0, "sparse": False, "encoding": "sparse_index"})
+            sender.commit({"version": 0})
+        else:
+            stream.run(0)  # Seed every receiver from the trainer before sending any patch.
+        for update in (1, 2):
+            if rank < trainer_count:
+                change_parameters(local.sources, update)
+                sender.worker._model_version_step = update
+                report = InstallReport(
+                    **sender.send_weights({"version": update, "sparse": True, "encoding": "sparse_index"})
+                )
+                sender.commit({"version": update})
+            else:
+                report = stream.run(update, sparse=True)
+            assert report.wire_bytes == (
+                dict(plan.receiver_bytes)[rank]
+                if rank >= trainer_count
+                else sum(item.entry.nbytes for item in plan.experts if item.root == rank)
+                + sum(item.source.nbytes for item in plan.dense if item.root == rank)
+            )
+            if rank < trainer_count:
+                expected_changed = sum(
+                    (2 if item.entry.projection == "fc1" else HIDDEN * INTERMEDIATE if update == 1 else 0)
+                    for item in plan.experts
+                    if item.root == rank and item.entry.expert == 0
+                )
+                assert report.changed_values == expected_changed
+            else:
+                expected_dense, expected_experts = reference(topology, updates=update)
+                for prefix, expert_map in maps.items():
+                    layer = int(prefix.split(".")[2])
+                    for expert, slot in enumerate(expert_map):
+                        if slot < 0:
+                            continue
+                        for slot_name, projection in (("w13_weight", "fc1"), ("w2_weight", "fc2")):
+                            assert same_bytes(
+                                parameters[f"{prefix}.{slot_name}"][slot],
+                                expected_experts[projection, layer, expert],
+                            )
+                for name, value in parameters.items():
+                    if ROUTED_EXPERTS not in name:
+                        assert same_bytes(value, expected_dense[name].to(value.dtype)), name
+    finally:
+        destroy_groups(groups)
+        dist.destroy_process_group()
+
+
+def test_indexed_experts_and_dense_shared_weights_remain_byte_exact_across_two_updates(tmp_path):
+    store = dist.TCPStore(
+        "127.0.0.1", 0, world_size=None, is_master=True, timeout=timedelta(seconds=TIMEOUT), wait_for_workers=False
+    )
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    mp.spawn(
+        sparse_participant_main,
+        args=(store.port, str(tmp_path)),
+        nprocs=len(UNEQUAL_STAGED.trainers()) + len(UNEQUAL_STAGED.receivers()),
+        join=True,
+    )
+
+
+def test_sparse_bucket_boundary_keeps_compatible_experts_within_128_mib():
+    sizes = (BUCKET_BYTES // 2, BUCKET_BYTES // 2, 2)
+    items = tuple(
+        ExpertBroadcast(ExpertEntry(f"expert-{index}", 0, 0, index, "fc1", size), "group", 0, (1,))
+        for index, size in enumerate(sizes)
+    )
+    assert tuple(sum(item.entry.nbytes for item in bucket) for bucket in expert_buckets(items)) == (BUCKET_BYTES, 2)

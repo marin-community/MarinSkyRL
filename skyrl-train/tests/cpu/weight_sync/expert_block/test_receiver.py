@@ -107,8 +107,8 @@ def test_a_sync_after_parameters_were_reallocated_is_refused():
     model = Model()
     worker = receiver(model=model)
     worker.inventory()
-    worker.stream = SimpleNamespace(run=lambda version: InstallReport(4, version, 2, 96, 0.01))
-    assert worker.receive_weights({"version": 2})["version"] == 2
+    worker.stream = SimpleNamespace(run=lambda version, **kwargs: InstallReport(4, version, 2, 96, 0.01))
+    assert worker.receive_weights({"version": 2, "sparse": False})["version"] == 2
     model.model.layers[0].mlp.router.weight.data = torch.zeros(4, 3)
     with pytest.raises(RuntimeError, match="storage changed"):
-        worker.receive_weights({"version": 3})
+        worker.receive_weights({"version": 3, "sparse": False})
