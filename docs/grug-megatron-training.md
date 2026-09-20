@@ -34,6 +34,10 @@ Hero parameter families, packed training, repeated updates, and checkpoint
 continuation; passing it alone does not establish full-Hero capacity or parity
 with Levanter.
 
+The frozen `megatron` runtime includes ARM64 Transformer Engine and
+FlashAttention wheels for GB200, built against the same Torch 2.13/CUDA 13.2
+versions as H100. See [native wheel builds](../scripts/wheels/README.md).
+
 The port lives in two modules:
 
 - `skyrl_train.models.grug_megatron` holds the Megatron-Core modules that a
@@ -104,6 +108,13 @@ budget is 1.3125GiB per rank, or 10.5GiB on an eight-GPU host, plus transient
 serialization and client overhead. Only small control files such as `common.pt`,
 `metadata.json`, and the Hugging Face configuration use a local temporary
 directory. Local-path checkpoints retain Megatron Core's standard writer.
+
+S3 restores stage only control files locally. PyTorch DCP reads the tensor
+ranges needed by each rank directly from the rank objects, so every node does
+not need disk space for the full model and optimizer checkpoint. Parameter
+gathering completes before checkpointing, HF export, validation snapshots, and
+vLLM publication, including when normal training overlaps those gathers with
+the next forward pass.
 
 Megatron Core 0.18's Multi-Storage Client path remains disabled because its
 object writer buffers each complete remote file in `BytesIO` before uploading

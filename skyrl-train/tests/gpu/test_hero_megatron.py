@@ -1,5 +1,6 @@
 """Hero architecture through the actual Megatron worker, with split-expert checkpoints."""
 
+import asyncio
 import json
 import math
 from pathlib import Path
@@ -11,9 +12,16 @@ from safetensors.torch import load_file, save_file
 from transformers import AutoTokenizer
 
 from skyrl_train.models.grug_moe import GrugMoeConfig
+from skyrl_train.inference_engines.base import InferenceEngineInput
+from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
-from tests.gpu.grug_serving import rank0_validation_snapshot
+from tests.gpu.grug_serving import (
+    assert_engine_weights,
+    grug_engine_client,
+    rank0_validation_snapshot,
+    rollout_training_batch,
+)
 from tests.gpu.test_grug_megatron import (
     _config,
     _init_policy,
@@ -91,17 +99,19 @@ def write_tiny_hero_checkpoint(path: Path):
 
 
 @pytest.mark.parametrize(
-    "tp,pp,ep,cp,packing",
+    "tp,pp,ep,cp,packing,overlap_param_gather",
     [
-        (1, 1, 1, 1, False),
-        (1, 2, 1, 1, False),
-        (1, 1, 2, 1, True),
-        (1, 1, 1, 2, True),
-        (2, 1, 1, 1, True),
+        (1, 1, 1, 1, False, False),
+        (1, 2, 1, 1, False, False),
+        (1, 1, 2, 1, True, False),
+        (1, 1, 1, 2, True, False),
+        (2, 1, 1, 1, True, False),
+        (1, 1, 1, 2, True, True),
+        (2, 2, 4, 2, True, True),
     ],
 )
-def test_hero_worker_repeated_updates(tmp_path, tp, pp, ep, cp, packing):
-    world_size = max(tp, pp, ep, cp)
+def test_hero_worker_repeated_updates(tmp_path, tp, pp, ep, cp, packing, overlap_param_gather):
+    world_size = pp * max(tp * cp, ep)
     require_hoppers(world_size)
     model_path = tmp_path / "model"
     model_path.mkdir()
@@ -109,6 +119,7 @@ def test_hero_worker_repeated_updates(tmp_path, tp, pp, ep, cp, packing):
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    cfg.trainer.policy.megatron_config.ddp_config.overlap_param_gather = overlap_param_gather
     cfg.trainer.use_sample_packing = packing
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     batch = _padded_batch(tokenizer.pad_token_id, prompt_length=48, response_length=48, variable_lengths=True)
@@ -164,5 +175,88 @@ def test_hero_worker_repeated_updates(tmp_path, tp, pp, ep, cp, packing):
         for name in names:
             torch.testing.assert_close(resumed[name], continued[name], rtol=0, atol=0)
         print(json.dumps({"tp": tp, "pp": pp, "ep": ep, "cp": cp, "packing": packing, "metrics": metrics}, default=str))
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.vllm
+def test_hero_replay_checkpoint_and_weight_publication(tmp_path, monkeypatch):
+    require_hoppers(2)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    write_tiny_hero_checkpoint(model_path)
+    cfg = _config(str(model_path), world_size=1, pp=1, ep=1)
+    cfg.trainer.policy.fsdp_config.moe_router_replay = True
+    cfg.generator.inference_engine_data_parallel_size = 1
+    cfg.generator.inference_engine_expert_parallel_size = 1
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    bias_names = [f"model.layers.{layer}.mlp.router.bias" for layer in range(4)]
+    names = [
+        "lm_head.weight",
+        "model.layers.0.mlp.router.weight",
+        "model.layers.0.mlp.experts.3.gate_proj.weight",
+        "model.layers.0.mlp.latent_down_proj.weight",
+        "model.layers.0.shared_experts.1.up_proj.weight",
+        "model.layers.0.self_attn.sconv_k.weight",
+        "model.layers.0.sconv_attn.weight",
+        "model.layers.0.sconv_mlp.weight",
+        *bias_names,
+    ]
+    prompts = [[1, 17 + row, 29, 5, 11, 3] for row in range(4)]
+    sampling = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+    sampling.update(temperature=0.0, max_tokens=4, ignore_eos=True, logprobs=1)
+    request = InferenceEngineInput(prompt_token_ids=prompts, sampling_params=sampling)
+    initialize_ray(cfg)
+    try:
+        # vLLM's autotune dummy forwards omit ShortConv cache metadata.
+        client = grug_engine_client(cfg, str(model_path), capture_routes=True, enable_flashinfer_autotune=False)
+        policy = _init_policy(cfg, 1)
+        before = rank0_validation_snapshot(policy, names)
+        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+        assert_engine_weights(client, names, before, bias_names, {})
+        rollout = asyncio.run(client.generate(request))
+        captured = torch.tensor(rollout["routed_experts"], dtype=torch.int32)
+        assert captured.shape == (4, 4, 4, 8)
+        assert torch.all((captured >= 0) & (captured < 16))
+        batch = rollout_training_batch(prompts, rollout)
+        batch["rollout_routed_experts"] = captured
+        scores = _megatron_response_logprobs(policy, batch)
+        serving_scores = torch.tensor(rollout["response_logprobs"])
+        assert torch.isfinite(scores).all()
+        # Keep the independent backend gap visible; replay execution itself is
+        # checked below and is not a claim of numerical parity with Levanter.
+        gap = (scores - serving_scores).abs()
+        batch["action_log_probs"] = scores.float()
+        status = _train_step(policy, batch)
+        assert status["router_replay/hit_fraction"] == 1.0
+        assert status["router_replay/executed_route_match_fraction"] == 1.0
+        assert status["router_replay/router_grad_norm"] > 0.0
+        after = rank0_validation_snapshot(policy, names)
+        for name in bias_names:
+            torch.testing.assert_close(after[name], before[name], rtol=0, atol=0)
+        assert not torch.equal(after["lm_head.weight"], before["lm_head.weight"])
+        checkpoint = str(tmp_path / "checkpoint")
+        ray.get(
+            policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint, tokenizer=tokenizer)
+        )
+        batch["action_log_probs"] = _megatron_response_logprobs(policy, batch).float()
+        _train_step(policy, batch)
+        ray.get(policy.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint))
+        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+        assert_engine_weights(client, names, after, bias_names, {})
+        updated = asyncio.run(client.generate(request))
+        assert all(len(tokens) == 4 for tokens in updated["response_ids"])
+        assert torch.isfinite(torch.tensor(updated["response_logprobs"])).all()
+        print(
+            json.dumps(
+                {
+                    "hero_replay": status,
+                    "vllm_logprob_gap_max": gap.max().item(),
+                    "vllm_logprob_gap_mean": gap.mean().item(),
+                }
+            )
+        )
     finally:
         ray.shutdown()
