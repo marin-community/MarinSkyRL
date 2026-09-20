@@ -18,7 +18,11 @@ from skyrl_train.models.megatron_router_replay import (
     slice_sequence_parallel,
     validate_replay_geometry,
 )
-from skyrl_train.models.router_replay import SENTINEL_EXPERT_ID, dense_replay_targets
+from skyrl_train.models.router_replay import (
+    SENTINEL_EXPERT_ID,
+    dense_prefix_replay_targets,
+    dense_replay_targets,
+)
 
 
 def _fake_compute_topk(scores, topk, num_groups=None, group_topk=None):
@@ -418,6 +422,15 @@ class TestDenseReplayTargets:
         rollout = torch.zeros(2, 5, 3, 2, dtype=torch.long)
         with pytest.raises((ValueError, AssertionError)):
             dense_replay_targets(rollout, 3, 8, 5)
+
+
+def test_dense_prefix_replay_targets_keeps_prompt_and_response_prediction_rows():
+    captured = torch.tensor([[[[1, 2]], [[3, 4]], [[0, 0]], [[5, 6]]]], dtype=torch.int32)
+    dense, mask = dense_prefix_replay_targets(captured, batch_size=1, seq_len=5)
+    assert dense.shape == (1, 5, 1, 2)
+    assert torch.equal(dense[0, :4], captured[0].long())
+    assert torch.equal(dense[0, -1], torch.zeros((1, 2), dtype=torch.long))
+    assert mask.tolist() == [[True, True, False, True, False]]
 
 
 def test_module_has_no_megatron_imports():
