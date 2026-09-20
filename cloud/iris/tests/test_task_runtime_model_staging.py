@@ -1,21 +1,7 @@
-from types import SimpleNamespace
-
 import pytest
 
-from cloud.iris import task_runtime
-from cloud.iris.task_runtime import policy_chat_template_model, stage_model, teacher_model_specs_from_json
-
-
-@pytest.fixture
-def recorded_stage_model_commands(monkeypatch):
-    commands = []
-
-    def run(command, **_kwargs):
-        commands.append(command)
-        return SimpleNamespace(returncode=0, stdout="PRESTAGE_LOCAL_DIR=/cache/model\n", stderr="")
-
-    monkeypatch.setattr(task_runtime.subprocess, "run", run)
-    return commands
+from cloud.iris.hf_model_cache import CachedHuggingFaceModel
+from cloud.iris.task_runtime import parse_args, policy_chat_template_model
 
 
 @pytest.mark.parametrize(
@@ -36,20 +22,26 @@ def test_policy_chat_template_requires_a_materialized_model() -> None:
         policy_chat_template_model("", "")
 
 
-def test_stage_model_forwards_immutable_teacher_revision(recorded_stage_model_commands) -> None:
-    stage_model("Qwen/teacher", revision="abc123")
+def test_model_staging_cli_parses_launcher_payloads() -> None:
+    revision = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
+    args, train_argv = parse_args(
+        [
+            "--prestage-teacher-models-json",
+            '[{"path":"Qwen/teacher","revision":"abc123"}]',
+            "--prestage-draft-model",
+            "laion/draft",
+            revision,
+            "/tmp/draft",
+            "--",
+            "python",
+            "train.py",
+        ]
+    )
 
-    assert recorded_stage_model_commands[0][-1] == "abc123"
-
-
-def test_stage_model_preserves_repository_chat_template(recorded_stage_model_commands) -> None:
-    task_runtime.stage_model("HuggingFaceTB/SmolLM3-3B")
-
-    allow_patterns = recorded_stage_model_commands[0][-2].split(",")
-    assert "*.jinja" in allow_patterns
-
-
-def test_teacher_model_staging_boundary_returns_typed_identities() -> None:
-    models = teacher_model_specs_from_json('[{"path":"Qwen/teacher","revision":"abc123"}]')
-
-    assert [(model.path, model.revision) for model in models] == [("Qwen/teacher", "abc123")]
+    assert [(model.path, model.revision) for model in args.prestage_teacher_models] == [("Qwen/teacher", "abc123")]
+    assert args.prestage_draft_model == CachedHuggingFaceModel(
+        model_id="laion/draft",
+        revision=revision,
+        local_path="/tmp/draft",
+    )
+    assert train_argv == ["python", "train.py"]
