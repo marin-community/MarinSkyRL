@@ -117,7 +117,6 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
             if layer == 0:
                 sites.extend(
                     (
-                        "router_logits",
                         "routed_input",
                         "routed_latent",
                         "routed_expanded",
@@ -138,7 +137,6 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
                 )
                 trainer = calls[0][positions, 0].numpy()
                 width = {
-                    "router_logits": model_config.num_experts,
                     "routed_input": model_config.latent_dim,
                     "routed_latent": model_config.latent_dim,
                 }.get(site, model_config.hidden_size)
