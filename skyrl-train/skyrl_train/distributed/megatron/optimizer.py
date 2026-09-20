@@ -18,9 +18,46 @@
 # limitations under the License.
 
 import torch
-from megatron.core.optimizer import OptimizerConfig
+from megatron.core.optimizer import ChainedOptimizer, OptimizerConfig
+from megatron.core.optimizer.cpu_offloading.hybrid_optimizer import HybridDeviceOptimizer
+from megatron.core.optimizer import clip_grads
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from transformer_engine.pytorch.optimizers import multi_tensor_applier, multi_tensor_l2norm, multi_tensor_scale
+
+
+def use_transformer_engine_gradient_kernels() -> None:
+    """Use the native norm and clipping kernels in the pinned TE runtime."""
+    # MCore 0.18 imports these together with multi_tensor_scale_tensor, which
+    # TE 2.11 does not expose. That drops all three available kernels and makes
+    # clipping allocate a gradient-sized temporary through its Torch fallback.
+    clip_grads.multi_tensor_applier = multi_tensor_applier
+    clip_grads.l2_norm_impl = multi_tensor_l2norm
+    clip_grads.multi_tensor_scale_impl = multi_tensor_scale
+
+
+def restore_offloaded_optimizer_state(optimizer) -> None:
+    """Bind restored moments and master weights to the native CPU/GPU optimizers."""
+    optimizers = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
+    for distributed_optimizer in optimizers:
+        inner = distributed_optimizer.optimizer
+        if isinstance(inner, HybridDeviceOptimizer):
+            # Bucket-space checkpoints keep per-parameter steps as local,
+            # nonpersistent objects. Those overwrite the restored AdamW step
+            # with the current process's value; the saved value is in the groups.
+            for group in inner.param_groups:
+                for parameter in group["params"]:
+                    state = inner.state[parameter]
+                    if "step" in state:
+                        state["step"].fill_(group["step"])
+            # MCore 0.18's dp_reshardable loader replaces the state tensors but
+            # omits the synchronization performed by its model-space loaders.
+            # In particular, the inner FP32 parameters still contain old weights.
+            inner._sync_hdo_state_to_sub_optimizers()
+            # The outer groups normally have no step. Keeping the checkpoint's
+            # step here would reset FusedAdam's counter before every later update.
+            for group in inner.param_groups:
+                group.pop("step", None)
 
 
 def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict) -> OptimizerConfig:
@@ -70,7 +107,7 @@ def get_megatron_optimizer(
             "megatron-core 0.18.x's config_overrides mapping; only the defaults "
             "are supported."
         )
-    # Base optimizer.
+    use_transformer_engine_gradient_kernels()
     return get_megatron_optimizer_native(
         config=config,
         model_chunks=model,
