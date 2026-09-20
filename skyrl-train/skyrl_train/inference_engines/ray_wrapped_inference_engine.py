@@ -321,6 +321,7 @@ def create_ray_wrapped_inference_engines(
     shared_pg=None,
     gpu_memory_utilization=None,
     inference_engine_enable_sleep=False,
+    require_node_local_engine: bool = False,
     async_engine=False,
     max_num_batched_tokens=8192,
     max_num_seqs=1024,
@@ -436,9 +437,8 @@ def create_ray_wrapped_inference_engines(
         num_gpus_per_actor = 0.2
 
     per_engine_gpu_count = tensor_parallel_size * pipeline_parallel_size * data_parallel_size
-    # #232 ROOT-CAUSE FIX (cross-node TP all-reduce decode deadlock): when an engine
-    # spans MORE THAN ONE GPU (TP*PP > 1), create one PG PER ENGINE with STRICT_PACK,
-    # NOT a single flat PACK PG over all engines.
+    # Multi-GPU TP/PP engines and explicitly node-local DP/EP pools need one
+    # STRICT_PACK placement group per engine, rather than a flat PACK group.
     #
     # The flat `placement_group(<all bundles>, strategy="PACK")` is SOFT — Ray packs
     # bundles greedily to minimize node count but gives NO per-engine node-affinity:
@@ -455,10 +455,9 @@ def create_ray_wrapped_inference_engines(
     # PG is atomic-per-node), restoring the intended "TP=4 = one 4-GPU node, on-node
     # NVLink all-reduce" guarantee. Bundle indices become engine-local (0..n-1).
     #
-    # *** PLACEMENT-PG-STARVATION FIX (gate STRICT_PACK on tp_pp_size > 1) ***
-    # The per-engine STRICT_PACK above is only NEEDED when an engine owns >1 GPU
-    # (TP>1 or PP>1) — that's the only case with an on-node TP/PP all-reduce to
-    # protect. For TP==PP==1 (single-GPU engines, e.g. lever1's 16 TP=1 engines and
+    # *** PLACEMENT-PG-STARVATION FIX ***
+    # Without an explicit node-local requirement, TP==PP==1 engines (e.g.
+    # lever1's 16 TP=1 engines and
     # swesmith's 48), each engine is ONE {GPU:1} bundle, so there is no intra-engine
     # all-reduce to keep on-node, and STRICT_PACK is actively HARMFUL: N independent
     # 1-bundle STRICT_PACK PGs scatter round-robin across nodes, leaving every node
@@ -468,8 +467,9 @@ def create_ray_wrapped_inference_engines(
     # `RuntimeError: Failed to create placement group (2 bundles, 8 GPUs) in 180s`
     # (confirmed: lever1 924882 / swesmith 924888, both multi-node TP=1, post-e5f0ff5).
     # A flat PACK over all single-GPU bundles packs them DENSELY (fills whole nodes,
-    # leaves whole nodes free), so the policy PACK PG gets its nodes. So: TP==PP==1 ->
-    # restore the original flat PACK; TP*PP>1 -> per-engine STRICT_PACK.
+    # leaves whole nodes free), so the policy PACK PG gets its nodes. Thus plain
+    # TP==PP==1 uses flat PACK, while multi-GPU TP/PP or explicitly node-local
+    # DP/EP uses per-engine STRICT_PACK.
     # NOTE: the gate is `tp_pp_size > 1`, NOT `per_engine_gpu_count > gpus_per_node` —
     # #232 is TP=4 on 4-GPU nodes (4 is NOT > 4), which the latter would wrongly send
     # down the flat-PACK path and re-break the cross-node-TP-split bug.
@@ -482,6 +482,7 @@ def create_ray_wrapped_inference_engines(
     use_per_engine_strict_pack = use_per_engine_strict_pack_pg(
         use_hybrid_engine=use_hybrid_engine,
         use_mp_backend=use_mp_backend,
+        require_node_local_engine=require_node_local_engine,
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
     )
@@ -503,10 +504,9 @@ def create_ray_wrapped_inference_engines(
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
         elif use_per_engine_strict_pack:
-            # ray/uni backend, multi-GPU engines (TP*PP > 1): one STRICT_PACK PG per
-            # engine so each engine's per_engine_gpu_count {GPU:1} bundles are
-            # guaranteed co-located on a single node (no cross-node TP all-reduce in
-            # decode). #232 fix.
+            # Each engine's per_engine_gpu_count {GPU:1} bundles are guaranteed
+            # to share one node. This protects TP/PP collectives and explicitly
+            # node-local DP/EP collectives from crossing the network.
             for _ in range(num_inference_engines):
                 pg = placement_group(
                     [{"GPU": 1, "CPU": 1} for _ in range(per_engine_gpu_count)],
@@ -530,7 +530,7 @@ def create_ray_wrapped_inference_engines(
 
     allocated_rendezvous_ports: set[int] = set()
     for i in range(num_inference_engines):
-        # Per-engine STRICT_PACK PGs (ray/uni, multi-GPU engines) are engine-LOCAL: each
+        # Per-engine STRICT_PACK PGs are engine-local: each
         # has its own bundle index space 0..per_engine_gpu_count-1, so base_pg_index
         # resets to 0. The mp PACK PG and TP==PP==1 flat PACK PG remain global.
         # Hybrid engines use colocated_engine_bundles for node-ordered indices.

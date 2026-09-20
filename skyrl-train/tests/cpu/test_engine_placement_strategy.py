@@ -1,8 +1,8 @@
 """Unit tests for inference-engine placement and startup configuration.
 
 The placement strategy checks verify that the ray/uni backend chooses:
-  - per-engine STRICT_PACK ONLY for multi-GPU engines (TP*PP > 1), to keep each
-    engine's TP/PP workers on one node (#232 cross-node all-reduce fix), and
+  - per-engine STRICT_PACK for multi-GPU TP/PP engines and explicitly node-local
+    DP/EP pools, keeping each engine's collective group on one node, and
   - the flat PACK fallback for single-GPU engines (TP==PP==1), so single-GPU
     bundles pack densely and leave whole nodes free for the downstream policy
     PACK PG (the lever1/swesmith multi-node starvation regression fix), and
@@ -50,6 +50,7 @@ def test_ray_uni_backend_gate(tp, pp, expected):
         use_per_engine_strict_pack_pg(
             use_hybrid_engine=False,
             use_mp_backend=False,
+            require_node_local_engine=False,
             tensor_parallel_size=tp,
             pipeline_parallel_size=pp,
         )
@@ -64,6 +65,7 @@ def test_tp1_never_strict_pack_so_policy_pg_not_starved():
     assert not use_per_engine_strict_pack_pg(
         use_hybrid_engine=False,
         use_mp_backend=False,
+        require_node_local_engine=False,
         tensor_parallel_size=1,
         pipeline_parallel_size=1,
     )
@@ -76,6 +78,7 @@ def test_tp4_on_4gpu_node_still_strict_pack():
     assert use_per_engine_strict_pack_pg(
         use_hybrid_engine=False,
         use_mp_backend=False,
+        require_node_local_engine=False,
         tensor_parallel_size=4,
         pipeline_parallel_size=1,
     )
@@ -88,6 +91,7 @@ def test_mp_backend_never_per_engine_strict_pack(tp, pp):
     assert not use_per_engine_strict_pack_pg(
         use_hybrid_engine=False,
         use_mp_backend=True,
+        require_node_local_engine=False,
         tensor_parallel_size=tp,
         pipeline_parallel_size=pp,
     )
@@ -100,8 +104,19 @@ def test_hybrid_engine_never_per_engine_strict_pack(tp, pp):
     assert not use_per_engine_strict_pack_pg(
         use_hybrid_engine=True,
         use_mp_backend=False,
+        require_node_local_engine=False,
         tensor_parallel_size=tp,
         pipeline_parallel_size=pp,
+    )
+
+
+def test_node_local_dp_ep_pool_uses_per_engine_strict_pack():
+    assert use_per_engine_strict_pack_pg(
+        use_hybrid_engine=False,
+        use_mp_backend=False,
+        require_node_local_engine=True,
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
     )
 
 

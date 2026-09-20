@@ -242,6 +242,7 @@ def use_per_engine_strict_pack_pg(
     *,
     use_hybrid_engine: bool,
     use_mp_backend: bool,
+    require_node_local_engine: bool,
     tensor_parallel_size: int,
     pipeline_parallel_size: int,
 ) -> bool:
@@ -249,10 +250,9 @@ def use_per_engine_strict_pack_pg(
     placement group PER ENGINE (vs a single flat PACK PG over all engines).
 
     Pure (Ray-free) predicate so the placement decision is unit-testable. The
-    per-engine STRICT_PACK guarantees each multi-GPU engine's bundles co-locate
-    on one node — required to avoid the cross-node TP/PP all-reduce decode
-    deadlock (#232) — but is ONLY needed when an engine owns more than one GPU
-    (``tensor_parallel_size * pipeline_parallel_size > 1``).
+    per-engine STRICT_PACK guarantees each engine's bundles co-locate on one
+    node. It is required for multi-GPU TP/PP engines and can be requested for
+    DP/EP pools whose collectives must remain node-local.
 
     For single-GPU engines (TP==PP==1) it must be OFF: N independent 1-bundle
     STRICT_PACK PGs scatter round-robin across nodes, leaving every node
@@ -269,7 +269,7 @@ def use_per_engine_strict_pack_pg(
     """
     if use_hybrid_engine or use_mp_backend:
         return False
-    return (tensor_parallel_size * pipeline_parallel_size) > 1
+    return require_node_local_engine or (tensor_parallel_size * pipeline_parallel_size) > 1
 
 
 class Timer:

@@ -23,6 +23,7 @@ class InferenceEngineRoleConfig:
     decode_context_parallel_size: int
     shared_pg: Any
     inference_engine_enable_sleep: bool
+    require_node_local_engine: bool
     max_logprobs: int = 1
 
 
@@ -51,6 +52,7 @@ def inference_engine_kwargs_from_config(
         "engine_init_timeout_seconds": cfg.generator.engine_init_timeout_seconds,
         "gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
         "inference_engine_enable_sleep": role.inference_engine_enable_sleep,
+        "require_node_local_engine": role.require_node_local_engine,
         "async_engine": cfg.generator.async_engine,
         "max_num_batched_tokens": cfg.generator.max_num_batched_tokens,
         "max_num_seqs": cfg.generator.max_num_seqs,
