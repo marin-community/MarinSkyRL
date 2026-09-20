@@ -899,6 +899,8 @@ generator:
         override == f"++generator.speculative_decoding.model.materialized_path={local_path}"
         for override in options["--skyrl_override"]
     )
+
+
 def test_policy_revision_from_config_rejects_task_local_model(tmp_path):
     args = _args(tmp_path, "opencode", ["--model_path", "/models/preloaded-policy"])
     Path(args.rl_config).write_text("trainer:\n  policy:\n    model:\n      revision: immutable-revision\n")

@@ -1993,6 +1993,8 @@ def load_config_draft_model(rl_config_path: str) -> SpeculatorModelConfig | None
     if value is None:
         return None
     return SpeculativeDecodingConfig.from_mapping(value).model
+
+
 def load_config_terminal_bench_data(rl_config_path: str) -> list[str]:
     """Return task datasets used by the mixed Gym/Harbor sidechannel.
 
