@@ -6,9 +6,11 @@ the publication fast path or a substitute for a distributed end-to-end measureme
 
 import argparse
 import json
+import os
 from pathlib import Path
 import statistics
 import time
+from urllib.parse import urlparse
 
 import torch
 
@@ -56,9 +58,7 @@ def run_case(size: int, density: float, repeats: int) -> dict:
         # next source image, compare exact BF16 bits, pack, then stage the patch.
         cpu_baseline = landing.to("cpu", non_blocking=False).pin_memory()
         # landing equals current here, so restore the old image for CPU comparison.
-        cpu_baseline.view(torch.int16).index_copy_(
-            0, changed_positions.cpu(), old_bits.cpu()
-        )
+        cpu_baseline.view(torch.int16).index_copy_(0, changed_positions.cpu(), old_bits.cpu())
         staged = torch.empty(size, dtype=torch.bfloat16, pin_memory=True)
         d2h, _ = timed(lambda: staged.copy_(current, non_blocking=True))
         start = time.perf_counter()
@@ -75,9 +75,7 @@ def run_case(size: int, density: float, repeats: int) -> dict:
             )
         )
         cpu_landing = cpu_baseline.to("cuda")
-        cpu_apply, _ = timed(
-            lambda: cpu_landing.index_copy_(0, device_patch[0].to(torch.int64), device_patch[1])
-        )
+        cpu_apply, _ = timed(lambda: cpu_landing.index_copy_(0, device_patch[0].to(torch.int64), device_patch[1]))
         assert torch.equal(cpu_landing.view(torch.int16), current.view(torch.int16))
         start = time.perf_counter()
         cpu_baseline.copy_(staged)
@@ -113,7 +111,7 @@ def main():
     parser.add_argument("--sizes", type=int, nargs="+", default=[6553600, 3276800, 67108864])
     parser.add_argument("--densities", type=float, nargs="+", default=[0.025, 0.23, 0.5])
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--output", type=Path)
+    parser.add_argument("--output", type=str)
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("This probe requires one CUDA GPU")
@@ -127,8 +125,21 @@ def main():
     }
     payload = json.dumps(result, indent=2)
     if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(payload + "\n")
+        if args.output.startswith("s3://"):
+            import boto3  # noqa: PLC0415 - only a probe writing one small artifact
+            from botocore.config import Config  # noqa: PLC0415
+
+            uri = urlparse(args.output)
+            client = boto3.client(
+                "s3",
+                endpoint_url=os.environ["AWS_ENDPOINT_URL"],
+                config=Config(s3={"addressing_style": "virtual"}),
+            )
+            client.put_object(Bucket=uri.netloc, Key=uri.path.lstrip("/"), Body=(payload + "\n").encode())
+        else:
+            output = Path(args.output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(payload + "\n")
     print(payload, flush=True)
 
 
