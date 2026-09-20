@@ -25,6 +25,7 @@ import ray
 import torch
 from transformers import AutoTokenizer
 
+from marinskyrl.runtime_options import ExpertBlockEncoding
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.utils import initialize_ray
@@ -130,8 +131,12 @@ def engine_client(cfg, model_path: str, geometry: Geometry) -> InferenceEngineCl
 
 
 @pytest.mark.vllm
-@pytest.mark.parametrize("name", list(GEOMETRIES))
-def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flipped_one(tmp_path, name, monkeypatch):
+@pytest.mark.parametrize(
+    "name,encoding",
+    [(name, ExpertBlockEncoding.DENSE) for name in GEOMETRIES] + [("equal-ep", ExpertBlockEncoding.SPARSE_INDEX)],
+    ids=[*GEOMETRIES, "sparse-index"],
+)
+def test_expert_block_sync_installs_exact_weights_across_two_updates(tmp_path, name, encoding, monkeypatch):
     geometry = GEOMETRIES[name]
     require_hoppers(geometry.gpus)
     from skyrl_train.inference_engines.vllm import vllm_engine  # noqa: PLC0415 - vLLM is a GPU-only extra
@@ -165,7 +170,9 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
         trained = rank0_validation_snapshot(policy, names)
         assert any(not torch.equal(trained[key], before[key]) for key in PARAMETER_NAMES)
 
-        sync = ExpertBlockSync(policy_model=policy, inference_engine_client=client, timeout_seconds=TIMEOUT_SECONDS)
+        sync = ExpertBlockSync(
+            policy_model=policy, inference_engine_client=client, timeout_seconds=TIMEOUT_SECONDS, encoding=encoding
+        )
         timings = {}
 
         async def prepare_and_sync(version):
@@ -181,6 +188,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
             timings[f"verify_{version}"] = await sync.verify(version)
             timings[f"paused_{version}"] = time.perf_counter() - started
             await client.resume_generation()
+            await sync.commit(version)
 
         asyncio.run(prepare_and_sync(1))
         assert_engine_weights(client, SYNC_NAMES, trained, BIAS_NAMES, SERVING_EXPERT_INDEX_BY_NAME)
@@ -195,7 +203,8 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
             finally:
                 await client.resume_generation()
 
-        asyncio.run(corrupt_and_verify())
+        if encoding == ExpertBlockEncoding.DENSE:
+            asyncio.run(corrupt_and_verify())
 
         second = _padded_batch(tokenizer.pad_token_id)
         second.metadata["global_step"] = 2
@@ -204,9 +213,14 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
         assert any(not torch.equal(trained_again[key], trained[key]) for key in PARAMETER_NAMES)
         asyncio.run(prepare_and_sync(2))
         assert_engine_weights(client, SYNC_NAMES, trained_again, BIAS_NAMES, SERVING_EXPERT_INDEX_BY_NAME)
+        if encoding == ExpertBlockEncoding.SPARSE_INDEX:
+            assert not timings["install_1"].sparse
+            assert timings["install_2"].sparse
+            assert timings["install_2"].changed_density > 0
         asyncio.run(sync.close())
         print(
-            f"EXPERT_BLOCK_VERIFY_PASS geometry={name} policy_gpus={geometry.policy_gpus} policy_pp={geometry.policy_pp} "
+            f"EXPERT_BLOCK_VERIFY_PASS geometry={name} encoding={encoding} policy_gpus={geometry.policy_gpus} "
+            f"policy_pp={geometry.policy_pp} "
             f"policy_ep={geometry.policy_ep} engines={geometry.engines} "
             f"engine_dp={geometry.engine_dp} engine_pp={geometry.engine_pp} syncs=2 byte_equal=true "
             f"corruption_rejected=true prepare_seconds={timings['prepare']} "

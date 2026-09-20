@@ -147,7 +147,7 @@ class ExpertBlockReceiver:
         # If a reload reallocated the parameters, the broadcasts would write into freed buffers.
         if storage_identity(dict(self.model.named_parameters())) != self.identity:
             raise RuntimeError("Model parameter storage changed since the expert-block receiver was initialised")
-        return asdict(self.stream.run(update_info["version"]))
+        return asdict(self.stream.run(update_info["version"], sparse=update_info["sparse"]))
 
     def verify(self, update_info: dict) -> dict:
         """Replay the sync and count the bytes that differ from the installed weights."""

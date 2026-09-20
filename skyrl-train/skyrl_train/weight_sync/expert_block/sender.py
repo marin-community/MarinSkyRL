@@ -30,6 +30,9 @@ class ExpertBlockSender:
         self.expert_sources = {}
         self.groups = {}
         self.stream: Stream | None = None
+        self.baseline: dict[str, torch.Tensor] | None = None
+        self.pending_version: int | None = None
+        self.failed = False
 
     def inventory(self) -> dict:
         """This rank's coordinates, expert matrices and dense slices."""
@@ -90,6 +93,10 @@ class ExpertBlockSender:
         """Send this rank's weights for one update. Refuses if the rank has not finished that update."""
         if self.stream is None:
             raise RuntimeError("Expert-block sender is not initialised")
+        if self.failed or self.pending_version is not None:
+            raise RuntimeError(
+                "Expert-block sender has an uncommitted or failed publication; restart or dense reseeding is required"
+            )
         version = update_info["version"]
         # Before the first update the weights are the loaded checkpoint. After that, the sync must
         # name the update this rank just finished.
@@ -99,7 +106,40 @@ class ExpertBlockSender:
         # ``sources`` holds the parameters themselves, so a reassigned ``param.data`` shows up here.
         if storage_identity(self.sources) != self.identity:
             raise RuntimeError("Policy parameter storage changed since the sync was prepared")
-        return asdict(self.stream.run(version))
+        try:
+            result = self.stream.run(version, sparse=update_info["sparse"], baseline=self.baseline)
+        except BaseException:
+            self.failed = True
+            raise
+        if update_info["encoding"] == "sparse_index":
+            self.pending_version = version
+        return asdict(result)
+
+    @torch.no_grad()
+    def commit(self, update_info: dict) -> dict:
+        """Advance the prior image after every receiver acknowledged and generation resumed."""
+        version = update_info["version"]
+        if self.failed or self.pending_version != version or self.stream is None:
+            raise RuntimeError(f"Sender cannot commit expert-block publication {version}")
+        try:
+            if storage_identity(self.sources) != self.identity:
+                raise RuntimeError("Policy parameter storage changed before baseline commit")
+            if self.baseline is None:
+                self.baseline = {
+                    item.entry.name: self.stream.source_view(item).clone()
+                    for item in self.stream.schedule.experts
+                    if item.root == self.stream.participant
+                }
+            else:
+                for item in self.stream.schedule.experts:
+                    if item.root == self.stream.participant:
+                        self.baseline[item.entry.name].copy_(self.stream.source_view(item))
+            self.stream._sync_device()
+        except BaseException:
+            self.failed = True
+            raise
+        self.pending_version = None
+        return {"participant": self.stream.participant, "version": version}
 
     def verify(self, update_info: dict) -> dict:
         """Send this rank's weights again, and check that its data-parallel peers hold the same bytes."""
@@ -125,3 +165,4 @@ class ExpertBlockSender:
     def shutdown(self) -> None:
         destroy_groups(self.groups)
         self.stream = None
+        self.baseline = None

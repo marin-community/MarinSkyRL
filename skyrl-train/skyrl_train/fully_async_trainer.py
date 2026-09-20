@@ -20,7 +20,7 @@ from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer, get_system_memory_metrics
-from marinskyrl.runtime_options import WeightSyncTransport
+from marinskyrl.runtime_options import ExpertBlockEncoding, WeightSyncTransport
 from skyrl_train.weight_sync.expert_block.driver import ExpertBlockSync
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
@@ -747,6 +747,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     policy_model=self.policy_model,
                     inference_engine_client=self.inference_engine_client,
                     timeout_seconds=self.cfg.generator.expert_block_sync.timeout_seconds,
+                    encoding=ExpertBlockEncoding(self.cfg.generator.expert_block_sync.encoding),
                 )
                 for phase, seconds in (await self._expert_block_sync.prepare()).items():
                     self.all_startup_timings[f"expert_block_sync/{phase}"] = seconds
@@ -1082,9 +1083,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         await asyncio.to_thread(self._offload_policy_optimizer, timings, timer_label="offload_policy_optimizer_to_cpu")
         await self.async_sync_policy_weights_to_inference_engines()
         # A hard sync point leaves every policy rank free before the next forward.
-        await self._drain_policy_event_loops()
-        if pause:
-            await self.inference_engine_client.resume_generation()
+        try:
+            await self._drain_policy_event_loops()
+            if pause:
+                await self.inference_engine_client.resume_generation()
+        except BaseException as exc:
+            if self._expert_block_sync is not None and self._expert_block_sync.pending_version is not None:
+                self._expert_block_sync.fail_closed(exc)
+            raise
+        if self._expert_block_sync is not None:
+            await self._expert_block_sync.commit(self.global_step)
 
     async def _run_training(self, training_input: TrainingInputBatch):
         # TODO(Charlie): share this code with the one-step-off async trainer.
@@ -1264,17 +1272,29 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             timings = await self._expert_block_sync.sync(self.global_step)
             self.all_timings.update(timings.as_metrics())
             logger.info(
-                "Expert-block sync: step={} install_seconds={:.3f} policy_seconds={:.3f} receiver_seconds={:.3f} "
-                "expert_seconds={:.3f} dense_seconds={:.3f}",
+                "Expert-block sync: step={} encoding={} install_seconds={:.3f} policy_seconds={:.3f} "
+                "receiver_seconds={:.3f} expert_seconds={:.3f} dense_seconds={:.3f} changed_density={:.4f} "
+                "expert_dense_bytes={} expert_encoded_bytes={} buckets={} collectives={}",
                 self.global_step,
+                "sparse_index" if timings.sparse else "dense",
                 timings.install_seconds,
                 timings.policy_seconds,
                 timings.receiver_seconds,
                 timings.expert_seconds,
                 timings.dense_seconds,
+                timings.changed_density,
+                timings.logical_dense_bytes,
+                timings.encoded_bytes,
+                timings.expert_buckets,
+                timings.expert_collectives,
             )
             if self.cfg.generator.expert_block_sync.verify:
-                self.all_timings.update(await self._expert_block_sync.verify(self.global_step))
+                try:
+                    self.all_timings.update(await self._expert_block_sync.verify(self.global_step))
+                except BaseException as exc:
+                    if self._expert_block_sync.pending_version is not None:
+                        self._expert_block_sync.fail_closed(exc)
+                    raise
             return None
         return await self.policy_model.async_run_method(
             "pass_through", "broadcast_to_inference_engines", self.inference_engine_client

@@ -47,6 +47,16 @@ def test_the_default_transport_needs_nothing():
     validate_expert_block_transport(cfg)
 
 
+def test_sparse_encoding_requires_expert_block_transport_and_known_encoding():
+    cfg = example_dummy_config()
+    cfg.generator.expert_block_sync.encoding = "sparse_index"
+    with pytest.raises(ValueError, match="requires weight_sync_transport=expert_block"):
+        validate_expert_block_transport(cfg)
+    cfg.generator.expert_block_sync.encoding = "adaptive"
+    with pytest.raises(ValueError, match="encoding must be one of"):
+        validate_expert_block_transport(cfg)
+
+
 @pytest.mark.parametrize(
     "path,value,message",
     [

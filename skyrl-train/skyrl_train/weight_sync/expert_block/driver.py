@@ -11,8 +11,10 @@ import asyncio
 from collections import Counter
 from dataclasses import asdict, dataclass
 import time
+from typing import NoReturn
 
 from marinskyrl.inference_placement import InferenceReplicaPlacement
+from marinskyrl.runtime_options import ExpertBlockEncoding
 from skyrl_train.weight_sync.expert_block.groups import RendezvousStore
 from skyrl_train.weight_sync.expert_block.schedule import (
     DenseSlice,
@@ -26,16 +28,17 @@ from skyrl_train.weight_sync.expert_block.schedule import (
     to_wire,
 )
 from skyrl_train.weight_sync.expert_block.source_views import is_widened_router
+from skyrl_train.weight_sync.expert_block.sparse import BUCKET_BYTES
 from skyrl_train.weight_sync.expert_block.stream import InstallReport
 from skyrl_train.weight_sync.expert_block.verify_weights import ReplayReport, ReplicaReport
 
 
 @dataclass(frozen=True)
 class SyncTimings:
-    """Timings of one sync, in seconds.
+    """Wall times, sparse CPU submission times and routed payload counts for one sync.
 
     ``install_seconds`` is the driver's wall time. The others are the maximum over the
-    participants' reports.
+    participants' reports. Component times omit per-patch CUDA waits.
     """
 
     install_seconds: float
@@ -43,9 +46,24 @@ class SyncTimings:
     receiver_seconds: float
     expert_seconds: float
     dense_seconds: float
+    sparse: bool = False
+    changed_density: float = 0.0
+    logical_dense_bytes: int = 0
+    encoded_bytes: int = 0
+    expert_buckets: int = 0
+    expert_collectives: int = 0
+    detect_seconds: float = 0.0
+    pack_seconds: float = 0.0
+    transfer_seconds: float = 0.0
+    apply_seconds: float = 0.0
 
     def as_metrics(self) -> dict[str, float]:
-        return {f"expert_block_sync/{name}": value for name, value in asdict(self).items()}
+        values = asdict(self)
+        values.pop("sparse")
+        metrics = {f"expert_block_sync/{name}": value for name, value in values.items()}
+        mode = "sparse_index" if self.sparse else "dense"
+        metrics[f"expert_block_sync/{mode}/expert_seconds"] = self.expert_seconds
+        return metrics
 
 
 def plan_from_inventories(
@@ -132,13 +150,24 @@ def plan_from_inventories(
 
 
 class ExpertBlockSync:
-    def __init__(self, *, policy_model, inference_engine_client, timeout_seconds: int):
+    def __init__(
+        self,
+        *,
+        policy_model,
+        inference_engine_client,
+        timeout_seconds: int,
+        encoding: ExpertBlockEncoding = ExpertBlockEncoding.DENSE,
+    ):
         self.policy_model = policy_model
         self.client = inference_engine_client
         self.timeout_seconds = timeout_seconds
         self.store: RendezvousStore | None = None
         self.schedule: Schedule | None = None
         self.root_bytes: dict[int, int] = {}
+        self.encoding = encoding
+        self.pending_version: int | None = None
+        self.seeded = False
+        self.failed = False
 
     async def _policy(self, method: str, *args) -> list:
         refs = self.policy_model.async_run_ray_method("pass_through", "expert_block_rpc", method, *args)
@@ -172,6 +201,10 @@ class ExpertBlockSync:
                 )
             receivers.extend(zip(rows, engine.worker_placements, strict=True))
         schedule, participants = plan_from_inventories(policy_rows, receivers)
+        if self.encoding == ExpertBlockEncoding.SPARSE_INDEX:
+            oversized = [item.entry.name for item in schedule.experts if item.entry.nbytes > BUCKET_BYTES]
+            if oversized:
+                raise ValueError(f"Sparse expert matrix {oversized[0]} exceeds the 128 MiB bucket limit")
         planned = time.perf_counter()
         self.store = RendezvousStore(f"expert-block-{id(self):x}", timeout_seconds=self.timeout_seconds)
         init_info = {"schedule": to_wire(schedule), "rendezvous": asdict(self.store.rendezvous)}
@@ -196,13 +229,49 @@ class ExpertBlockSync:
         return {"plan": planned - started, "bind": time.perf_counter() - planned}
 
     async def sync(self, version: int) -> SyncTimings:
-        """Run one sync for ``version`` and check that every receiver got the bytes planned for it."""
+        """Publish one version, failing closed if a collective or receiver may be partial."""
         if self.schedule is None:
             raise RuntimeError("Expert-block sync is not prepared")
         if not self.client.generation_paused_event.is_set():
             raise RuntimeError("Expert-block sync requires paused generation")
+        if self.failed or self.pending_version is not None:
+            raise RuntimeError("Expert-block publication state is uncertain; restart or dense reseeding is required")
+        try:
+            result = await self._sync(version)
+        except BaseException as exc:
+            self.fail_closed(exc)
+        if self.encoding == ExpertBlockEncoding.SPARSE_INDEX:
+            self.pending_version = version
+        return result
+
+    def fail_closed(self, cause: BaseException) -> NoReturn:
+        self.failed = True
+        raise RuntimeError(
+            f"Expert-block publication may have left receiver state partial; restart or dense reseeding is required: {cause}"
+        ) from cause
+
+    async def commit(self, version: int) -> None:
+        """Commit sender baselines only after all receivers acknowledged and generation resumed."""
+        if self.encoding != ExpertBlockEncoding.SPARSE_INDEX:
+            return
+        if self.failed or self.pending_version != version or self.client.generation_paused_event.is_set():
+            raise RuntimeError("Sparse expert publication cannot commit before acknowledged resume")
+        try:
+            reports = await self._policy("commit", {"version": version})
+            if sorted((row["participant"], row["version"]) for row in reports) != [
+                (rank, version) for rank in range(self.schedule.trainer_count)
+            ]:
+                raise RuntimeError("Not every trainer rank committed the sparse expert baseline")
+        except BaseException as exc:
+            self.fail_closed(exc)
+        self.pending_version = None
+        self.seeded = True
+
+    async def _sync(self, version: int) -> SyncTimings:
+        """Run one sync for ``version`` and check that every receiver got the bytes planned for it."""
         started = time.perf_counter()
-        update_info = {"version": version}
+        sparse = self.encoding == ExpertBlockEncoding.SPARSE_INDEX and self.seeded
+        update_info = {"version": version, "sparse": sparse, "encoding": self.encoding.value}
         policy_rows, receiver_rows = await asyncio.gather(
             self._policy("send_weights", update_info), self._receivers("receive_weights", update_info)
         )
@@ -210,6 +279,8 @@ class ExpertBlockSync:
         receivers = [InstallReport(**row) for row in receiver_rows]
         expected_bytes = dict(self.schedule.receiver_bytes)
         expected_experts = dict(self.schedule.receiver_experts)
+        if sorted(report.participant for report in policy) != list(range(self.schedule.trainer_count)):
+            raise RuntimeError("Not every planned trainer rank reported this sync")
         if sorted(report.participant for report in receivers) != sorted(expected_bytes):
             raise RuntimeError("Not every planned receiver reported this sync")
         for report in receivers:
@@ -228,12 +299,24 @@ class ExpertBlockSync:
                 raise RuntimeError(
                     f"Trainer rank {report.participant} sent {report.wire_bytes} bytes for version {report.version}"
                 )
+        expert_values = sum(report.expert_values for report in policy)
+        phase_reports = (*policy, *receivers)
         return SyncTimings(
             install_seconds=time.perf_counter() - started,
             policy_seconds=max(report.seconds for report in policy),
             receiver_seconds=max(report.seconds for report in receivers),
-            expert_seconds=max(report.expert_seconds for report in (*policy, *receivers)),
-            dense_seconds=max(report.dense_seconds for report in (*policy, *receivers)),
+            expert_seconds=max(report.expert_seconds for report in phase_reports),
+            dense_seconds=max(report.dense_seconds for report in phase_reports),
+            sparse=sparse,
+            changed_density=sum(report.changed_values for report in policy) / expert_values if sparse else 0.0,
+            logical_dense_bytes=sum(report.expert_logical_bytes for report in policy),
+            encoded_bytes=sum(report.encoded_bytes for report in policy),
+            expert_buckets=sum(report.expert_buckets for report in policy),
+            expert_collectives=sum(report.expert_collectives for report in policy),
+            detect_seconds=max(report.detect_seconds for report in phase_reports),
+            pack_seconds=max(report.pack_seconds for report in phase_reports),
+            transfer_seconds=max(report.transfer_seconds for report in phase_reports),
+            apply_seconds=max(report.apply_seconds for report in phase_reports),
         )
 
     async def verify(self, version: int) -> dict[str, float]:

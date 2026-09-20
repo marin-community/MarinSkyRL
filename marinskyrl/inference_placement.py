@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from marinskyrl.runtime_options import NodeLocalPlacement, WeightSyncTransport
+from marinskyrl.runtime_options import ExpertBlockEncoding, NodeLocalPlacement, WeightSyncTransport
 
 
 def node_local_blocker(
@@ -107,6 +107,14 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
     choices = [item.value for item in WeightSyncTransport]
     if transport not in choices:
         raise ValueError(f"generator.weight_sync_transport must be one of {choices}, not {transport!r}")
+    encoding = generator["expert_block_sync"]["encoding"]
+    encodings = [item.value for item in ExpertBlockEncoding]
+    if encoding not in encodings:
+        raise ValueError(f"generator.expert_block_sync.encoding must be one of {encodings}, not {encoding!r}")
+    if encoding != ExpertBlockEncoding.DENSE and transport != WeightSyncTransport.EXPERT_BLOCK:
+        raise ValueError(
+            "generator.expert_block_sync.encoding=sparse_index requires weight_sync_transport=expert_block"
+        )
     if transport != WeightSyncTransport.EXPERT_BLOCK:
         return
     trainer = config["trainer"]

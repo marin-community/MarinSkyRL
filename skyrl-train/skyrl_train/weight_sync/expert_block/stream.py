@@ -14,6 +14,7 @@ import torch.distributed as dist
 
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, create_groups, destroy_groups, warm_groups
 from skyrl_train.weight_sync.expert_block.schedule import LOCAL_GROUP_PREFIX, DenseBroadcast, ExpertBroadcast, Schedule
+from skyrl_train.weight_sync.expert_block.sparse import expert_buckets, run_sparse_experts
 from skyrl_train.weight_sync.expert_block.source_views import (
     ExpertSource,
     dense_installed_view,
@@ -33,7 +34,10 @@ def storage_identity(tensors: dict[str, torch.Tensor]) -> dict[str, tuple]:
 
 @dataclass(frozen=True)
 class InstallReport:
-    """What one participant sent or received in a sync, and how long the expert and dense phases took."""
+    """One participant's logical bytes, routed payload and phase wall times.
+
+    Sparse component times are CPU submission intervals. Only the phase times wait for CUDA.
+    """
 
     participant: int
     version: int
@@ -42,6 +46,16 @@ class InstallReport:
     seconds: float
     expert_seconds: float = 0.0
     dense_seconds: float = 0.0
+    expert_values: int = 0
+    changed_values: int = 0
+    expert_logical_bytes: int = 0
+    encoded_bytes: int = 0
+    expert_buckets: int = 0
+    expert_collectives: int = 0
+    detect_seconds: float = 0.0
+    pack_seconds: float = 0.0
+    transfer_seconds: float = 0.0
+    apply_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -85,6 +99,12 @@ class Stream:
         self.expert_maps = None if self.trainer else expert_maps
         self.device = device
         self.local = self.local_group()
+        self.expert_buckets = expert_buckets(schedule.experts)
+        self.expert_bytes = sum(
+            item.entry.nbytes
+            for item in schedule.experts
+            if item.root == participant or participant in item.destinations
+        )
         # Resolve every view now, so a bad layout fails at startup and not during a sync.
         scratch_bytes = 0
         for item, landing in self.transfers():
@@ -116,9 +136,11 @@ class Stream:
             return landing.installed
         return self.scratch.narrow(0, 0, landing.nbytes).view(landing.wire_dtype).view(landing.installed.shape)
 
-    def run(self, version: int) -> InstallReport:
+    def run(
+        self, version: int, *, sparse: bool = False, baseline: dict[str, torch.Tensor] | None = None
+    ) -> InstallReport:
         with torch.no_grad():
-            return self._run(version)
+            return self._run(version, sparse=sparse, baseline=baseline)
 
     def _sync_device(self) -> None:
         if self.device.type == "cuda":
@@ -159,12 +181,20 @@ class Stream:
         dist.broadcast(tensor, src=members.index(origin), group=self.groups[local_name])
         return item.source.nbytes
 
-    def _run(self, version: int) -> InstallReport:
+    def _run(self, version: int, *, sparse: bool, baseline: dict[str, torch.Tensor] | None) -> InstallReport:
         self._sync_device()
         started = time.perf_counter()
         matrices = wire_bytes = 0
         experts_done = None
+        sparse_stats = run_sparse_experts(self, baseline) if sparse else None
+        if sparse_stats is not None:
+            matrices = sparse_stats.matrices
+            wire_bytes = sparse_stats.logical_bytes
+            self._sync_device()
+            experts_done = time.perf_counter()
         for item, landing in self.transfers():
+            if sparse and isinstance(item, ExpertBroadcast):
+                continue
             if experts_done is None and isinstance(item, DenseBroadcast):
                 self._sync_device()
                 experts_done = time.perf_counter()
@@ -181,6 +211,7 @@ class Stream:
         finished = time.perf_counter()
         if experts_done is None:
             experts_done = finished
+        expert_bytes = sparse_stats.logical_bytes if sparse_stats else self.expert_bytes
         return InstallReport(
             self.participant,
             version,
@@ -189,6 +220,16 @@ class Stream:
             finished - started,
             expert_seconds=experts_done - started,
             dense_seconds=finished - experts_done,
+            expert_values=sparse_stats.total_values if sparse_stats else expert_bytes // 2,
+            changed_values=sparse_stats.changed_values if sparse_stats else 0,
+            expert_logical_bytes=expert_bytes,
+            encoded_bytes=sparse_stats.encoded_bytes if sparse_stats else expert_bytes,
+            expert_buckets=sparse_stats.buckets if sparse_stats else matrices,
+            expert_collectives=sparse_stats.collectives if sparse_stats else matrices,
+            detect_seconds=sparse_stats.detect_seconds if sparse_stats else 0.0,
+            pack_seconds=sparse_stats.pack_seconds if sparse_stats else 0.0,
+            transfer_seconds=sparse_stats.transfer_seconds if sparse_stats else 0.0,
+            apply_seconds=sparse_stats.apply_seconds if sparse_stats else 0.0,
         )
 
     def local_group(self) -> tuple[str, tuple[int, ...]] | None:

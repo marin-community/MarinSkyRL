@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from marinskyrl.inference_placement import InferenceReplicaPlacement, InferenceWorkerPlacement
+from marinskyrl.runtime_options import ExpertBlockEncoding
 from skyrl_train.weight_sync.expert_block.driver import ExpertBlockSync, plan_from_inventories
 from skyrl_train.weight_sync.expert_block.schedule import receiver_participant, to_wire
 from skyrl_train.weight_sync.expert_block.stream import InstallReport
@@ -146,7 +147,19 @@ class FakeRanks:
         else:
             sent = sum(item.entry.nbytes for item in self.schedule.experts if item.root == participant)
             sent += sum(item.source.nbytes for item in self.schedule.dense if item.root == participant)
-            report = InstallReport(participant, version, 0, sent, 0.1, expert_seconds=0.02, dense_seconds=0.08)
+            expert_bytes = sum(item.entry.nbytes for item in self.schedule.experts if item.root == participant)
+            report = InstallReport(
+                participant,
+                version,
+                0,
+                sent,
+                0.1,
+                expert_seconds=0.02,
+                dense_seconds=0.08,
+                expert_values=expert_bytes // 2,
+                expert_logical_bytes=expert_bytes,
+                encoded_bytes=expert_bytes,
+            )
         return {**asdict(report), **self.report_changes.get(participant, {})}
 
     def replay_report(self, participant, version):
@@ -177,6 +190,8 @@ class FakeRanks:
                 replies.append({"participant": trainer.rank, "warmup_seconds": {}})
             elif method == "send_weights":
                 replies.append(self.report(trainer.rank, args[0]["version"]))
+            elif method == "commit":
+                replies.append({"participant": trainer.rank, "version": args[0]["version"]})
             elif method == "verify":
                 version = args[0]["version"]
                 replies.append(
@@ -228,10 +243,7 @@ def test_prepare_then_sync_accepts_reports_that_match_the_plan(local_store):
     assert timings.receiver_seconds == 0.1
     # Each timing is the maximum over the participants.
     assert (timings.expert_seconds, timings.dense_seconds) == (0.07, 0.08)
-    assert set(timings.as_metrics()) == {
-        f"expert_block_sync/{name}"
-        for name in ("install_seconds", "policy_seconds", "receiver_seconds", "expert_seconds", "dense_seconds")
-    }
+    assert timings.as_metrics()["expert_block_sync/dense/expert_seconds"] == 0.07
     assert [call for call in ranks.calls if call[1] != "inventory"] == [
         ("policy", "trainer_init"),
         ("engines", "init_transfer_engine"),
@@ -276,6 +288,39 @@ def test_sync_requires_paused_generation(local_store):
     sync = prepared(ranks)
     ranks.generation_paused_event.clear()
     with pytest.raises(RuntimeError, match="paused"):
+        asyncio.run(sync.sync(3))
+
+
+def test_sparse_baseline_commit_waits_for_resume_and_a_partial_publication_fails_closed(local_store):
+    ranks = FakeRanks()
+    sync = ExpertBlockSync(
+        policy_model=ranks,
+        inference_engine_client=ranks,
+        timeout_seconds=30,
+        encoding=ExpertBlockEncoding.SPARSE_INDEX,
+    )
+    asyncio.run(sync.prepare())
+    ranks.schedule = sync.schedule
+    assert not asyncio.run(sync.sync(0)).sparse  # The first publication seeds every receiver densely.
+    with pytest.raises(RuntimeError, match="acknowledged resume"):
+        asyncio.run(sync.commit(0))
+    ranks.generation_paused_event.clear()
+    asyncio.run(sync.commit(0))
+    assert ("policy", "commit") in ranks.calls
+    ranks.generation_paused_event.set()
+    assert asyncio.run(sync.sync(1)).sparse
+    ranks.generation_paused_event.clear()
+    asyncio.run(sync.commit(1))
+    ranks.generation_paused_event.set()
+    receiver = receiver_participant(sync.schedule.trainer_count, receivers()[0])
+    ranks.report_changes[receiver] = {"wire_bytes": 1}
+    with pytest.raises(RuntimeError, match="receiver state partial; restart or dense reseeding is required"):
+        asyncio.run(sync.sync(2))
+    ranks.generation_paused_event.clear()
+    with pytest.raises(RuntimeError):
+        asyncio.run(sync.commit(2))
+    ranks.generation_paused_event.set()
+    with pytest.raises(RuntimeError, match="state is uncertain"):
         asyncio.run(sync.sync(3))
 
 

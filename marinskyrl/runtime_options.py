@@ -14,6 +14,11 @@ class WeightSyncTransport(StrEnum):
     EXPERT_BLOCK = "expert_block"
 
 
+class ExpertBlockEncoding(StrEnum):
+    DENSE = "dense"
+    SPARSE_INDEX = "sparse_index"
+
+
 class GDNBackend(StrEnum):
     TORCH = "torch"
     FLASHQLA = "flashqla"
