@@ -2,12 +2,10 @@
 
 import asyncio
 import json
-import shutil
 
 import pytest
 import ray
 import torch
-from safetensors.torch import load_file, save_file
 
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
@@ -35,8 +33,6 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
     model_path = tmp_path / "hero"
     model_path.mkdir()
     write_tiny_hero_checkpoint(model_path)
-    serving_path = tmp_path / "hero-serving"
-    _write_stacked_serving_checkpoint(model_path, serving_path)
     cfg = _config(str(model_path), world_size=1, pp=1, ep=1)
     cfg.trainer.policy.fsdp_config.moe_router_replay = True
     cfg.trainer.policy.grug_query_bias_update_mode = "loss_free"
@@ -51,7 +47,7 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
 
     initialize_ray(cfg)
     try:
-        client = grug_engine_client(cfg, str(serving_path), capture_routes=True)
+        client = grug_engine_client(cfg, str(model_path), capture_routes=True, enable_flashinfer_autotune=False)
         policy = _init_policy(cfg, 1)
         before = rank0_validation_snapshot(policy, names)
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
@@ -120,17 +116,3 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
 def _score(policy, batch, routes: torch.Tensor) -> torch.Tensor:
     batch["rollout_routed_experts"] = routes
     return _megatron_response_logprobs(policy, batch)
-
-
-def _write_stacked_serving_checkpoint(model_path, serving_path) -> None:
-    """Adapt only the expert file layout for the frozen serving vLLM wheel."""
-    shutil.copytree(model_path, serving_path)
-    weights_file = serving_path / "model.safetensors"
-    weights = load_file(str(weights_file))
-    for layer in range(4):
-        for projection in ("gate_proj", "up_proj", "down_proj"):
-            prefix = f"model.layers.{layer}.mlp.experts"
-            weights[f"{prefix}.{projection}.weight"] = torch.stack(
-                [weights.pop(f"{prefix}.{expert}.{projection}.weight") for expert in range(16)]
-            )
-    save_file(weights, str(weights_file), metadata={"format": "pt"})
