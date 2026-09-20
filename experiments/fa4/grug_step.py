@@ -105,7 +105,9 @@ def main() -> None:
                     }
                 )
                 assert math.isfinite(statuses[-1]["policy_loss"])
-                assert 0 < statuses[-1]["raw_grad_norm"] < float("inf")
+                # Grug disables clipping, so MCore may report zero instead of
+                # computing a norm. The weight-change check below proves update.
+                assert 0 <= statuses[-1]["raw_grad_norm"] < float("inf")
                 assert statuses[-1]["policy_update_steps"] == 1
             after_weights = rank0_validation_snapshot(policy, names)
             after_logprobs = _megatron_response_logprobs(policy, batch)

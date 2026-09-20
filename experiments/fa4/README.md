@@ -116,6 +116,11 @@ That packed attempt reached TE but TE 2.19 rejected sliding-window attention
 with its default `p2p` CP transport. The next probe sets MCore's documented
 `cp_comm_type=all_gather`, which TE 2.19 explicitly supports with a sliding
 window; this is a visible experimental transport choice, not a fallback.
+The first `all_gather` run reached an FA2 optimizer step but stopped on the
+probe's own positive-grad-norm assertion. Grug sets gradient clipping to zero,
+and Core may report a zero norm in that mode. The probe now requires a finite,
+nonnegative reported value plus an actual attention-weight change; zero alone
+is neither accepted as gradient proof nor treated as a kernel failure.
 
 `run_three_arm_h100.sh <world-size> <toy|snowball>` runs the two new-cohort
 arms, then checks out baseline commit `4d798b12` in task-local scratch, installs
