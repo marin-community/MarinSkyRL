@@ -452,11 +452,12 @@ def _refresh_target_owned_weights(model: nn.Module, capture_dir: Path) -> None:
     head = target["lm_head.weight"]
     if model.t2d is None or not torch.any(model.t2d):
         raise ValueError("The EAGLE checkpoint has no target-to-draft vocabulary map")
-    draft_rows = int(model.t2d.to(dtype=torch.bool).sum())
+    draft_vocabulary_mask = model.t2d.to(device=head.device, dtype=torch.bool)
+    draft_rows = int(draft_vocabulary_mask.sum())
     if head.shape[0] == draft_rows:
         draft_head = head
     elif head.shape[0] == model.t2d.numel():
-        draft_head = head[model.t2d.to(dtype=torch.bool)]
+        draft_head = head[draft_vocabulary_mask]
     else:
         raise ValueError("Captured target head has neither target nor draft vocabulary rows")
     with torch.no_grad():

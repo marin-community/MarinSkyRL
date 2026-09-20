@@ -18,6 +18,7 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     _offload_optimizer_state,
     _pack_windows,
     _restore_rng_states,
+    _refresh_target_owned_weights,
     _restore_trainable_master_state,
     capture_config_for_worker,
     candidate_is_acceptable,
@@ -26,6 +27,34 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     per_worker_capture_token_credit,
     request_group_from_id,
 )
+
+
+class _TargetOwnedModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.t2d = torch.tensor([True, False, True])
+        self.embed_tokens = torch.nn.Embedding(3, 2)
+        self.lm_head = torch.nn.Linear(2, 2, bias=False)
+        self.verifier_lm_head = torch.nn.Linear(2, 2, bias=False)
+        self.verifier_norm = torch.nn.LayerNorm(2)
+        self.verifier_gate_down = torch.nn.Linear(2, 2)
+        self.verifier_gate_up = torch.nn.Linear(2, 2)
+
+
+def test_refresh_target_owned_weights_moves_vocabulary_mask_to_head_device(tmp_path: Path) -> None:
+    model = _TargetOwnedModel()
+    target = {
+        "model.embed_tokens.weight": torch.arange(6, dtype=torch.float32).reshape(3, 2),
+        "lm_head.weight": torch.arange(6, dtype=torch.float32).reshape(3, 2),
+    }
+    save_file(target, str(tmp_path / "target.safetensors"))
+
+    _refresh_target_owned_weights(model, tmp_path)
+
+    torch.testing.assert_close(model.embed_tokens.weight, target["model.embed_tokens.weight"])
+    torch.testing.assert_close(model.lm_head.weight, target["lm_head.weight"][[0, 2]])
+    torch.testing.assert_close(model.verifier_lm_head.weight, target["lm_head.weight"][[0, 2]])
+    assert isinstance(model.verifier_norm, torch.nn.Identity)
 
 
 def test_capture_config_activates_every_data_parallel_worker() -> None:
