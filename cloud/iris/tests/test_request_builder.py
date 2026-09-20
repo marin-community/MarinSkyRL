@@ -243,6 +243,22 @@ class TestRolePlanAccounting:
         plan = derive_role_plan(_make_config(colocate_all=False, policy_num_nodes=1, num_inference_engines=1))
         assert derive_num_nodes(plan) == 2
 
+    def test_disaggregated_distributed_engine_reserves_all_rollout_gpus(self):
+        config = _make_config(
+            colocate_all=False,
+            policy_num_nodes=4,
+            policy_num_gpus_per_node=8,
+            num_inference_engines=1,
+            tp=1,
+        )
+        config["generator"]["inference_engine_data_parallel_size"] = 64
+        config["generator"]["inference_engine_expert_parallel_size"] = 64
+
+        plan = derive_role_plan(config)
+
+        assert plan.claim("rollout").num_nodes == 8
+        assert derive_num_nodes(plan) == 12
+
     def test_online_draft_training_adds_a_dedicated_node(self):
         plan = derive_role_plan(
             _make_config(

@@ -179,13 +179,13 @@ def _rollout_claim(config: dict[str, Any], values: dict[str, Any]) -> ModelRoleC
         * values["inference_engine_pipeline_parallel_size"]
         * values["inference_engine_data_parallel_size"]
     )
-    evaluation_only = _optional_at(config, "entrypoint") == "generate"
     rollout_nodes = (
         values["policy_num_nodes"]
         if rollout_is_local and values["colocate_all"]
-        else (rollout_gpus + values["policy_num_gpus_per_node"] - 1) // values["policy_num_gpus_per_node"]
-        if rollout_is_local and evaluation_only
-        else values["num_inference_engines"]
+        else max(
+            values["num_inference_engines"],
+            (rollout_gpus + values["policy_num_gpus_per_node"] - 1) // values["policy_num_gpus_per_node"],
+        )
         if rollout_is_local
         else 0
     )
