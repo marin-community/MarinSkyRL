@@ -313,6 +313,11 @@ def group_is_fully_excluded_from_training(trajectory_batch: Mapping[str, object]
     return facts.trainable_count == 0 and facts.baseline_contributor_count == 0
 
 
+def group_has_trainable_tokens(trajectory_batch: Mapping[str, object]) -> bool:
+    """Return whether any row in a generated group can contribute policy loss."""
+    return _inspect_group(_BatchGroup(trajectory_batch)).trainable_count > 0
+
+
 class GroupAdmissionPolicy:
     """Evaluate completed groups without mutating async lifecycle state."""
 

@@ -5,7 +5,7 @@ from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol, 
 from collections import defaultdict
 from enum import StrEnum
 import numpy as np
-from skyrl_train.group_admission import group_is_fully_excluded_from_training
+from skyrl_train.group_admission import group_has_trainable_tokens
 from skyrl_train.trajectory_runners.base import (
     TrajectoryBatch,
     TrajectoryRequestBatch,
@@ -708,7 +708,11 @@ def _rollout_logprob_presence(trajectory_batches: List[TrajectoryBatch], *, requ
     if not required:
         return presence
     for output, has_logprobs in zip(trajectory_batches, presence, strict=True):
-        if not has_logprobs and not group_is_fully_excluded_from_training(output):
+        # Behavior logprobs are required only where the policy objective has
+        # trainable tokens. A fully loss-masked failed group may remain eligible
+        # for the reward baseline and is replaced by admission later; rejecting
+        # it here prevents that normal mixed-route replacement path from running.
+        if not has_logprobs and group_has_trainable_tokens(output):
             raise ValueError("rollout_logprobs are required for every generated group")
     return presence
 

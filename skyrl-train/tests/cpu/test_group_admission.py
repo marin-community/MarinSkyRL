@@ -176,6 +176,21 @@ def test_required_logprobs_reject_missing_values_only_for_trainable_group():
     assert decision.primary_rejection is AdmissionRejection.MISSING_ROLLOUT_LOGPROBS
 
 
+def test_required_logprobs_allow_missing_values_for_fully_masked_baseline_group():
+    policy = GroupAdmissionPolicy(
+        GroupAdvantageInvariant.exact_physical(physical_group_size=2),
+        max_staleness_steps=2,
+        rollout_logprobs_required=True,
+    )
+    masked_baseline_group = _group(
+        loss_masks=[[0], [0]],
+        exclude_from_baseline=[False, False],
+        rollout_logprobs=None,
+    )
+    masked_decision = policy.evaluate(masked_baseline_group, global_step=10)
+    assert masked_decision.rejections == (AdmissionRejection.FULLY_MASKED,)
+
+
 def test_required_logprobs_allow_placeholders_only_at_masked_tokens():
     policy = GroupAdmissionPolicy(
         GroupAdvantageInvariant.exact_physical(physical_group_size=2),
