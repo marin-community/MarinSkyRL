@@ -1059,6 +1059,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         student_topk_indices: List[List[List[int]]] = []
         behavior_topk_logprobs: List[List[List[float]]] = []
         routed_experts_rows: list[list[list[list[int]]] | None] = []
+        all_routed_experts_rows: list[list[list[list[int]]] | None] = []
         all_prompt_logprobs: Optional[List] = None
 
         for output in outputs:
@@ -1071,6 +1072,10 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             stop_reasons.append(resp.finish_reason)
             response_ids.append(resp.token_ids)
             routed_experts_rows.append(response_routes(resp.routed_experts, len(resp.token_ids)))
+            if os.environ.get("HERO_REPLAY_DIAGNOSTIC_FULL_ROUTES") == "1":
+                all_routed_experts_rows.append(
+                    resp.routed_experts.tolist() if resp.routed_experts is not None else None
+                )
             _logprobs = None
             selected_ids = []
             selected_scores = []
@@ -1131,6 +1136,10 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             if any(routes is None for routes in routed_experts_rows):
                 raise ValueError("vLLM omitted routed experts for part of a batch")
             result["routed_experts"] = [routes for routes in routed_experts_rows if routes is not None]
+        if all_routed_experts_rows:
+            if any(routes is None for routes in all_routed_experts_rows):
+                raise ValueError("vLLM omitted full routed experts for part of a diagnostic batch")
+            result["all_routed_experts"] = [routes for routes in all_routed_experts_rows if routes is not None]
         return result
 
     def _get_engine(self):
