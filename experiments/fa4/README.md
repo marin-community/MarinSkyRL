@@ -106,3 +106,9 @@ The chosen attention-gate weight update differed by at most `4.77e-6`; the
 layer-3 Q-projection update differed by at most `0.00189`. All compared values
 were finite. The first-step wall times include initialization and JIT; they
 must not be used as steady-state performance evidence.
+
+The first two-H100 CP2 Grug attempt stopped before attention: Marin's Megatron
+wrapper requires sample packing for CP, while the active Grug configuration
+disables packing. The probe now enables packing only when CP2 is requested and
+revalidates the configuration. A resulting CP2 success would establish the
+packed experimental path, not current Grug production support.

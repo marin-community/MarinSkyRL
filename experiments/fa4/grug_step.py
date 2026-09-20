@@ -20,6 +20,7 @@ import torch
 from transformers import AutoTokenizer
 
 from skyrl_train.utils import initialize_ray
+from skyrl_train.utils.utils import validate_cfg
 from tests.gpu.grug_serving import rank0_validation_snapshot
 from tests.gpu.test_grug_megatron import (
     ATTN_GATE_NAME,
@@ -65,8 +66,12 @@ def main() -> None:
         cfg = _config(str(model_path), world_size=args.world_size, pp=1, ep=1)
         cfg.trainer.flash_attn = True
         cfg.trainer.policy.megatron_config.context_parallel_size = args.world_size
+        # The Megatron wrapper requires packed sequences for CP. Grug's active
+        # configuration disables packing, so CP2 here is an experimental gate.
+        cfg.trainer.use_sample_packing = args.world_size > 1
         cfg.trainer.micro_forward_batch_size_per_gpu = 1
         cfg.trainer.micro_train_batch_size_per_gpu = 1
+        validate_cfg(cfg)
         initialize_ray(cfg)
         try:
             expected = ray.get(_hf_response_logprobs.remote(str(model_path), batch))
@@ -101,6 +106,7 @@ def main() -> None:
             result = {
                 "world_size": args.world_size,
                 "context_parallel_size": args.world_size,
+                "sample_packing": bool(cfg.trainer.use_sample_packing),
                 "shape": args.shape,
                 "prompt_length": prompt_length,
                 "response_length": response_length,

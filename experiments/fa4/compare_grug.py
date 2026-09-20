@@ -26,7 +26,15 @@ def main() -> None:
     args = parser.parse_args()
     reference = torch.load(args.reference, map_location="cpu", weights_only=True)
     candidate = torch.load(args.candidate, map_location="cpu", weights_only=True)
-    config_keys = ("world_size", "context_parallel_size", "shape", "prompt_length", "response_length", "steps")
+    config_keys = (
+        "world_size",
+        "context_parallel_size",
+        "sample_packing",
+        "shape",
+        "prompt_length",
+        "response_length",
+        "steps",
+    )
     assert all(reference["result"][key] == candidate["result"][key] for key in config_keys)
     assert torch.equal(reference["response_mask"], candidate["response_mask"])
     assert torch.equal(reference["reference_logprobs"], candidate["reference_logprobs"])
