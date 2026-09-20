@@ -1,10 +1,38 @@
 # Grug Megatron training
 
 `trainer.strategy=megatron` trains Grug through Megatron-Core with pipeline
-parallelism as the primary geometry. Grug's 26 layers split evenly across
+parallelism as the primary geometry. Snowball's 26 layers split evenly across
 PP2 or PP13; TP must stay at one because the model has five KV heads, and
 expert parallelism may be layered on top of PP for the 256 experts. Sample
 packing is not yet validated and should stay disabled.
+
+## Hero architecture
+
+The same provider also accepts Hero schema-v2 exports. Hero retains the stored
+maximum KV-head count in its checkpoint, then selects the leading local or
+global head count for each layer. Its local layers use interleaved half-RoPE;
+global layers skip RoPE. The provider reads the global-layer period from the
+checkpoint instead of assuming every fourth layer.
+
+Hero's routed experts operate on normalized latent projections. The router and
+shared experts still receive the full-width input. Separate shared experts are
+added in checkpoint order after the routed output returns to full width.
+Schema-v2 expert tensors keep their individual names on import and export.
+
+ShortConv runs before the key norm and after the attention and MLP output
+projections. Packed documents have independent convolution histories. With
+context parallelism, ranks exchange only the history tails needed by the
+kernel and preserve Megatron's two-chunk sequence layout. Local attention uses
+Transformer Engine's `a2a` context communication because its `p2p` path rejects
+sliding windows; global attention uses `p2p`. Choose TP and CP so both local and
+global attention head geometry remains valid. Shared-expert overlap and MLP
+chunking are currently unsupported when the Hero modules require them disabled.
+
+The eager Grug model supports Snowball only and rejects Hero configuration. It
+must not be used as a Hero reference. The tiny Hero worker test exercises all
+Hero parameter families, packed training, repeated updates, and checkpoint
+continuation; passing it alone does not establish full-Hero capacity or parity
+with Levanter.
 
 The port lives in two modules:
 
