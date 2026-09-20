@@ -120,7 +120,7 @@ from marinskyrl.resource_locator import (
     model_source_for_path,
 )
 from marinskyrl.runtime_options import GDNBackend, R3Transport
-from marinskyrl.speculative_decoding import SpeculativeDecodingConfig
+from marinskyrl.speculative_decoding import SpeculativeDecodingConfig, SpeculatorModelConfig
 from cloud.iris.rl_config_translation import (
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
@@ -1985,22 +1985,14 @@ def load_config_policy_model_revision(rl_config_path: str) -> str | None:
     return revision
 
 
-def load_config_hugging_face_draft_model(rl_config_path: str) -> CachedHuggingFaceModel | None:
-    """Return the immutable Hub draft model that needs per-node materialization."""
+def load_config_draft_model(rl_config_path: str) -> SpeculatorModelConfig | None:
+    """Return the immutable draft model configured for speculative decoding."""
     raw = _load_rl_config_yaml(rl_config_path)
     generator = raw.get("generator") or {}
     value = generator.get("speculative_decoding")
     if value is None:
         return None
-    config = SpeculativeDecodingConfig.from_mapping(value)
-    model_id = config.model.hugging_face_repo_id
-    if model_id is None:
-        return None
-    return CachedHuggingFaceModel(
-        model_id=model_id,
-        revision=config.model.source_identity,
-        local_path=config.model.node_local_path(),
-    )
+    return SpeculativeDecodingConfig.from_mapping(value).model
 
 
 def load_config_terminal_bench_data(rl_config_path: str) -> list[str]:
@@ -2244,14 +2236,15 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     ]
     if args.model_revision:
         train_cmd.extend(["--model-revision", args.model_revision])
-    draft_model = load_config_hugging_face_draft_model(args.rl_config)
-    if draft_model is not None:
+    draft_model = load_config_draft_model(args.rl_config)
+    if draft_model is not None and draft_model.materialized_path is None:
+        draft_model_path = draft_model.node_local_path()
         train_cmd.extend(
             [
                 "--skyrl_override",
                 format_hydra_arg(
                     "generator.speculative_decoding.model.materialized_path",
-                    draft_model.local_path,
+                    draft_model_path,
                     prefix="++",
                 ),
             ]
@@ -2338,19 +2331,36 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         controller_cmd.extend(["--val-data", args.val_data])
     if args.data_sources_json:
         controller_cmd.extend(["--data-sources-json", args.data_sources_json])
-    if draft_model is not None:
-        controller_cmd.extend(
-            [
-                "--prestage-draft-model",
-                draft_model.model_id,
-                draft_model.revision,
-                draft_model.local_path,
-                "--draft-model-cache-ttl-days",
-                str(args.storage_ttl_days),
-                "--draft-model-cache-source-prefix",
-                storage_paths.checkpoint_root,
-            ]
-        )
+    if draft_model is not None and draft_model.materialized_path is None:
+        draft_model_path = draft_model.node_local_path()
+        draft_model_id = draft_model.hugging_face_repo_id
+        if draft_model_id is None:
+            controller_cmd.extend(
+                [
+                    "--materialize-draft-model",
+                    draft_model.source_uri,
+                    draft_model.source_identity,
+                    draft_model_path,
+                ]
+            )
+        else:
+            cached_draft_model = CachedHuggingFaceModel(
+                model_id=draft_model_id,
+                revision=draft_model.source_identity,
+                local_path=draft_model_path,
+            )
+            controller_cmd.extend(
+                [
+                    "--prestage-draft-model",
+                    cached_draft_model.model_id,
+                    cached_draft_model.revision,
+                    cached_draft_model.local_path,
+                    "--draft-model-cache-ttl-days",
+                    str(args.storage_ttl_days),
+                    "--draft-model-cache-source-prefix",
+                    storage_paths.checkpoint_root,
+                ]
+            )
     terminal_bench_data = load_config_terminal_bench_data(args.rl_config)
     if terminal_bench_data:
         controller_cmd.extend(["--terminal-bench-data", json.dumps(terminal_bench_data)])

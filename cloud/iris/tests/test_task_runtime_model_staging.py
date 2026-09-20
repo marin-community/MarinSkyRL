@@ -32,6 +32,10 @@ def test_model_staging_cli_parses_launcher_payloads() -> None:
             "laion/draft",
             revision,
             "/tmp/draft",
+            "--materialize-draft-model",
+            "s3://models/distilled-draft",
+            "draft-step-1",
+            "/tmp/distilled-draft",
             "--",
             "python",
             "train.py",
@@ -44,4 +48,9 @@ def test_model_staging_cli_parses_launcher_payloads() -> None:
         revision=revision,
         local_path="/tmp/draft",
     )
+    assert args.materialize_draft_model == [
+        "s3://models/distilled-draft",
+        "draft-step-1",
+        "/tmp/distilled-draft",
+    ]
     assert train_argv == ["python", "train.py"]

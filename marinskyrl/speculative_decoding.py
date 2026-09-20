@@ -158,10 +158,8 @@ class SpeculatorModelConfig:
 
     def node_local_path(self) -> str:
         """Return a stable path shared by the controller and rollout workers."""
-        model_id = self.hugging_face_repo_id
-        if model_id is None:
-            raise SpeculativeDecodingConfigError("Only Hugging Face speculators have a node-local cache path")
-        return os.path.join(_DRAFT_MODEL_ROOT, hugging_face_model_cache_key(model_id, self.source_identity))
+        source = self.hugging_face_repo_id or self.source_uri
+        return os.path.join(_DRAFT_MODEL_ROOT, hugging_face_model_cache_key(source, self.source_identity))
 
     def vllm_source_config(self) -> dict[str, Any]:
         """Return the vLLM fields needed to load this draft source."""

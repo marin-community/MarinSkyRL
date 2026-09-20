@@ -421,6 +421,16 @@ def materialize_model_export(source_uri: str, local_path: str, source_identity: 
     )
 
 
+def materialize_draft_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
+    """Copy and validate an object-store EAGLE draft on this allocated node."""
+    source = ArtifactSource(uri=source_uri, local_path=local_path, identity=source_identity)
+    artifact = materialize(source, validate=validate_portable_hf_model_files)
+    _log(
+        f"Draft model staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
+        f"({len(artifact.files)} files, identity={source.identity})"
+    )
+
+
 def materialize_data_sources(data_sources_json: str) -> None:
     """Copy immutable train and validation data locators onto this allocated node."""
     sources = json.loads(data_sources_json)
@@ -2105,6 +2115,13 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         help="Immutable Hugging Face draft model to cache and materialize before Ray starts.",
     )
     parser.add_argument(
+        "--materialize-draft-model",
+        nargs=3,
+        default=None,
+        metavar=("SOURCE_URI", "SOURCE_IDENTITY", "LOCAL_PATH"),
+        help="Immutable object-store draft model to materialize before Ray starts.",
+    )
+    parser.add_argument(
         "--draft-model-cache-ttl-days",
         type=int,
         default=None,
@@ -2208,6 +2225,9 @@ def main() -> None:
         if not args.model_local_path or not args.model_source_identity:
             raise ValueError("--model-source-uri requires --model-local-path and --model-source-identity")
         materialize_model_export(args.model_source_uri, args.model_local_path, args.model_source_identity)
+    if args.materialize_draft_model is not None:
+        source_uri, source_identity, local_path = args.materialize_draft_model
+        materialize_draft_model_export(source_uri, local_path, source_identity)
     # Pre-download the policy weights into the node-local HF cache BEFORE Ray, so the
     # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1. See stage_model.
     if args.prestage_model:

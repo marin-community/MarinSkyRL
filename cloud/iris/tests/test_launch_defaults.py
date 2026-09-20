@@ -867,6 +867,40 @@ generator:
     )
 
 
+def test_object_store_draft_model_is_materialized_before_ray(tmp_path):
+    args = _args(tmp_path, "opencode")
+    Path(args.rl_config).write_text(
+        """\
+trainer:
+  placement:
+    colocate_all: false
+generator:
+  speculative_decoding:
+    method: eagle3
+    model:
+      source_uri: s3://models/distilled-draft
+      source_identity: draft-step-1
+    num_speculative_tokens: 3
+"""
+    )
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    shell = build_task_command(args)[-1]
+    tokens = shlex.split(shell)
+    options = _shell_options(shell)
+    materialize_option = tokens.index("--materialize-draft-model")
+    source_uri, source_identity, local_path = tokens[materialize_option + 1 : materialize_option + 4]
+
+    assert source_uri == "s3://models/distilled-draft"
+    assert source_identity == "draft-step-1"
+    assert re.fullmatch(r"/tmp/marinskyrl-draft-models/[0-9a-f]{64}", local_path)
+    assert any(
+        override == f"++generator.speculative_decoding.model.materialized_path={local_path}"
+        for override in options["--skyrl_override"]
+    )
+
+
 def test_policy_revision_from_config_rejects_task_local_model(tmp_path):
     args = _args(tmp_path, "opencode", ["--model_path", "/models/preloaded-policy"])
     Path(args.rl_config).write_text("trainer:\n  policy:\n    model:\n      revision: immutable-revision\n")
