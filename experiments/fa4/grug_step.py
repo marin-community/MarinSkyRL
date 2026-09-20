@@ -104,6 +104,7 @@ def main() -> None:
                         for name in ("policy_loss", "raw_grad_norm", "policy_update_steps")
                     }
                 )
+                print(f"TRAIN_STATUS {statuses[-1]!r}", flush=True)
                 assert math.isfinite(statuses[-1]["policy_loss"])
                 # Grug disables clipping, so MCore may report zero instead of
                 # computing a norm. The weight-change check below proves update.
