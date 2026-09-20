@@ -41,10 +41,20 @@ so it can use the cluster-injected S3 credentials. Upload the resulting wheel
 to an immutable key in
 `s3://marin-us-east-02a/iris/fa4-experiment/` and preserve the Iris job ID,
 source commit, build script, pinned environment, and SHA-256. This staging key
-is not a runtime wheel source; the lock must later reference a published,
-verified candidate artifact. `download_candidate.py` fetches that exact object
+is not a runtime wheel source; the lock references the published, verified
+candidate artifact. `download_candidate.py` fetches the staged object
 inside an Iris task and refuses a missing or mismatched SHA-256. Like the
 uploader, run it through `uv run --no-project --with boto3==1.42.97 python`.
+
+The x86_64 candidate is now published as a
+[prerelease wheel](https://github.com/marin-community/MarinSkyRL/releases/tag/fa4-te219-cu132-20260920-694f3adf).
+`uv.lock` records SHA-256
+`1eb84026d9617aed8c656d91877d19ff70647697d6a2993de90063e6a6c37d56`;
+the downloaded release asset matched the staged wheel. The
+[H100 build](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-te219-build2-543a0ba8)
+used official TE source `5e52befd5262c06289106338c308079d6adb391f`
+and the pinned Torch 2.13/CUDA 13.2 build environment. This is a candidate,
+not a production-qualified dependency.
 
 The [H100 task preflight](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-b31-h100-preflight-f6fed696)
 completed on `cw-rno2a` with Python 3.12.14, uv 0.10.3, git 2.47.3, GCC
@@ -65,3 +75,13 @@ microprobe is not a substitute for the Grug CP2 optimizer or RL timing gates.
 Torch/TE/FA2/FA4 environment and runs the two 32-token kernel probes with a
 ten-minute bound on each arm. It is an import/backend gate, not a lockfile or
 performance conclusion.
+
+The [H100 backend preflight](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-h100-backend2-694f3adf)
+passed with TE 2.19.0, FA2 2.8.3, FA4 beta31, Torch 2.13.0+cu132, and
+CUTLASS DSL 4.6.2. TE logged selection of FA2 and FA4 respectively. On its
+32-token causal/sliding-window BF16 shape, outputs and Q gradients matched
+exactly; max absolute K/V gradient difference was `3.8147e-6`, and every
+recorded tensor was finite. Two samples per arm are too few for a performance
+claim. The first attempt used the same kernels successfully but failed after
+them because the pointwise comparison loader rejected a saved TorchVersion
+object; commit `694f3adf` corrected that recorder error.
