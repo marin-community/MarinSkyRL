@@ -7,7 +7,6 @@ import torch
 import torch.distributed as dist
 
 from skyrl_train.weight_sync.expert_block.schedule import ExpertBroadcast
-from skyrl_train.weight_sync.expert_block.source_views import expert_source_view
 
 BUCKET_BYTES = 128 * 1024 * 1024
 
@@ -73,7 +72,11 @@ def run_sparse_experts(stream, baseline: dict[str, torch.Tensor] | None) -> Spar
             for item, _ in local:
                 current = stream.source_view(item).view(-1)
                 previous = baseline[item.entry.name]
-                if current.dtype != torch.bfloat16 or current.shape != previous.shape or current.device != previous.device:
+                if (
+                    current.dtype != torch.bfloat16
+                    or current.shape != previous.shape
+                    or current.device != previous.device
+                ):
                     raise ValueError(f"Sparse baseline differs from {item.entry.name}")
                 mask = current.view(torch.int16).ne(previous.view(torch.int16))
                 positions = mask.nonzero(as_tuple=False).view(-1).to(torch.int32)
@@ -84,7 +87,11 @@ def run_sparse_experts(stream, baseline: dict[str, torch.Tensor] | None) -> Spar
             metadata = torch.tensor(counts, dtype=torch.int64, device=stream.device)
             if any(counts):
                 position_parts = [positions for _, positions in patches if positions.numel()]
-                value_parts = [current.index_select(0, positions.to(torch.int64)) for current, positions in patches if positions.numel()]
+                value_parts = [
+                    current.index_select(0, positions.to(torch.int64))
+                    for current, positions in patches
+                    if positions.numel()
+                ]
                 positions = torch.cat(position_parts) if len(position_parts) > 1 else position_parts[0]
                 values = torch.cat(value_parts) if len(value_parts) > 1 else value_parts[0]
             pack_seconds += time.perf_counter() - started
