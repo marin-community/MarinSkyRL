@@ -60,6 +60,10 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         # Four policy ranks share four examples, so each rank has one example.
         cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.policy.fsdp_config.moe_router_replay = True
+    # Use the same serving invariance contract as the full-Hero qualification.
+    # The prior trained control run left this disabled and exposed large
+    # batched-versus-single-sequence prefill differences.
+    cfg.trainer.algorithm.batch_invariant = bool(trained_uri)
     cfg.trainer.policy.grug_query_bias_update_mode = "loss_free"
     cfg.trainer.policy.grug_query_bias_update_rate = 0.001
     cfg.generator.inference_engine_data_parallel_size = 1
@@ -118,6 +122,7 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         score_diagnostic = {
             "phase": "after_score",
             "model": trained_uri or "random Hero schema-v2",
+            "batch_invariant": cfg.trainer.algorithm.batch_invariant,
             "converted_split_expert_tensors": split_tensors,
             "native_response_logprobs": native.tolist(),
             "replay_response_logprobs": replayed.tolist(),
