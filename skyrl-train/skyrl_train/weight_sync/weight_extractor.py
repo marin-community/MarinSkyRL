@@ -46,6 +46,22 @@ def prepare_weight_sync_tensor(
     return tensor.to(target_dtype)
 
 
+def allocate_cuda_ipc_buffer(numel: int, *, device: int, dtype: torch.dtype) -> torch.Tensor:
+    """Allocate a shareable buffer while preserving the training allocator settings."""
+    # Torch 2.13 exports expandable segments as fabric handles on GB200, but
+    # unmapHandles reads those handles as integer file descriptors. Releasing
+    # a shared segment then throws std::bad_variant_access. Only the wire buffer
+    # needs ordinary cudaMalloc storage; model and optimizer allocations can
+    # keep using expandable segments. Do not yield while changing this setting.
+    settings = torch._C._accelerator_getAllocatorSettings()
+    ipc_settings = ",".join(filter(None, (settings, "expandable_segments:False")))
+    torch._C._accelerator_setAllocatorSettings(ipc_settings)
+    try:
+        return torch.empty(numel, device=device, dtype=dtype, requires_grad=False)
+    finally:
+        torch._C._accelerator_setAllocatorSettings(settings)
+
+
 def validate_weight_sync_mode(model_type: str, *, fuse_weights: bool) -> None:
     """Reject transport modes that cannot preserve a model's state contract."""
 

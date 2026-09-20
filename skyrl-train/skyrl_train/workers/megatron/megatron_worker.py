@@ -66,7 +66,7 @@ from skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronPolicyMicroBatch,
 )
 from skyrl_train.utils.profiler import Profiler
-from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode
+from skyrl_train.weight_sync.weight_extractor import allocate_cuda_ipc_buffer, validate_weight_sync_mode
 from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor, MegatronWeightExtractor
 from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 
@@ -746,11 +746,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 total_numel = sum(t.numel() for t in chunk.tensors)
                 chunk_dtypes = {t.dtype for t in chunk.tensors}
                 assert len(chunk_dtypes) == 1, f"packed weight chunk mixes dtypes: {chunk_dtypes}"
-                packed_tensor = torch.empty(
+                packed_tensor = allocate_cuda_ipc_buffer(
                     total_numel,
                     device=device,
                     dtype=chunk_dtypes.pop(),
-                    requires_grad=False,
                 )
 
                 offset = 0

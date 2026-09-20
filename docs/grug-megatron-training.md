@@ -95,6 +95,12 @@ the same names as FSDP2 training and vLLM serving. The router bias becomes
 Megatron's persistent fp32 `expert_bias` buffer and is sent to vLLM in fp32 in
 its own weight-sync bucket; every other tensor is sent in the generator dtype.
 
+Colocated Megatron publication allocates its CUDA IPC packing buffers with
+expandable segments disabled, then immediately restores the training allocator
+settings. In the pinned Torch 2.13 runtime, GB200 fabric-handle cleanup raises
+`std::get: wrong index for variant` after an expandable buffer crosses IPC.
+Model and optimizer allocations can still use expandable segments.
+
 Re-stacking gathers every expert of a layer onto each rank before the tensor
 is sent, which needs a few GiB of headroom beyond the resident model, gradient
 buffers, and optimizer state. On the 67B-A2B snowball checkpoint at PP2 x EP8 x
