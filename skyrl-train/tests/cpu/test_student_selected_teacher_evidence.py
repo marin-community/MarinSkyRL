@@ -317,5 +317,5 @@ def test_student_selected_rollout_scores_survive_group_accumulation_without_sent
     assert merged["behavior_topk_logprobs"] == [[[-0.2, -2.0]], [[-0.2, -2.0]]]
 
     second.pop("behavior_topk_logprobs")
-    with pytest.raises(ValueError, match="missing rollout scores"):
+    with pytest.raises(ValueError, match="top-K IDs and scores must be provided together"):
         concatenate_trajectory_batches([first, second], tis_lcs_alert_threshold=0.005)

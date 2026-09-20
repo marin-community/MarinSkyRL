@@ -1790,7 +1790,7 @@ class RayPPOTrainer:
             )
         distillation_tensors = _validated_distillation_tensors(trajectory_batch, response_masks_tensor)
         score_topk_tensors = {}
-        score_topk_width = int(self.cfg.trainer.algorithm.score_centering_topk)
+        score_topk_width = int(self.cfg.trainer.algorithm.get("score_centering_topk", 0))
         if score_topk_width:
             if rollout_logprobs_tensor is None:
                 raise ValueError("score centering requires sampled-token behavior logprobs on every batch")
@@ -2292,7 +2292,7 @@ class RayPPOTrainer:
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
         data_fwd_pass.metadata["global_step"] = self.global_step
         policy_fwd_pass = data_fwd_pass
-        if self.cfg.trainer.algorithm.score_centering_topk:
+        if self.cfg.trainer.algorithm.get("score_centering_topk", 0):
             policy_fwd_pass = training_input.select(
                 keys=[*fwd_keys, "student_topk_indices"], metadata_keys=["response_length"]
             )
@@ -2387,7 +2387,7 @@ class RayPPOTrainer:
         # NOTE (sumanthrh): The slicing is needed to make sure that the batch dimension doesn't change for the tensordict.
         base_log_probs = base_log_probs[: len(sequences_all)] if base_log_probs is not None else None
         action_log_probs = action_log_probs[: len(sequences_all)]
-        if self.cfg.trainer.algorithm.score_centering_topk:
+        if self.cfg.trainer.algorithm.get("score_centering_topk", 0):
             if old_topk_logprobs is None:
                 raise ValueError("score centering requires old-trainer top-k logprobs from the policy forward")
             old_topk_logprobs = old_topk_logprobs[: len(sequences_all)]

@@ -813,7 +813,7 @@ def validate_cfg(cfg: DictConfig):
             "dual_clip",
         ], "TIS is only implemented for regular and dual_clip policy loss types"
 
-    score_centering_topk = cfg.trainer.algorithm.score_centering_topk
+    score_centering_topk = cfg.trainer.algorithm.get("score_centering_topk", 0)
     if type(score_centering_topk) is not int or score_centering_topk < 0:
         raise ValueError("trainer.algorithm.score_centering_topk must be a nonnegative integer")
     if score_centering_topk:
@@ -998,7 +998,8 @@ def validate_generator_cfg(cfg: DictConfig):
                 or widths != {cfg.generator.sampling_params.logprobs}
             ):
                 raise ValueError(
-                    "positive generator.sampling_params.logprobs must match a student_topk_policy_surrogate teacher top_k"
+                    "positive generator.sampling_params.logprobs requires a matching teacher top_k "
+                    "for a student_topk_policy_surrogate objective"
                 )
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")

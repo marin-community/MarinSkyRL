@@ -88,6 +88,7 @@ async def test_training_failure_log_record_does_not_contain_exception_object():
     trainer._train_loop = AsyncMock(side_effect=_UnpickleableError("GPU worker ran out of memory"))
     trainer._cancel_trajectory_tasks = Mock()
     trainer._teardown = AsyncMock()
+    trainer.tracker = Mock()
     messages = []
     sink_id = logger.add(messages.append, level="ERROR")
 
@@ -102,4 +103,5 @@ async def test_training_failure_log_record_does_not_contain_exception_object():
     assert record["level"].name == "ERROR"
     assert record["exception"] is None
     assert "_UnpickleableError: GPU worker ran out of memory" in record["message"]
+    trainer.tracker.finish.assert_called_once_with(exit_code=1)
     pickle.dumps(record)

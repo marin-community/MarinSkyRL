@@ -494,11 +494,11 @@ class MegatronModelWrapper:
             action_log_probs = token_logprobs[:, -num_actions:]
 
             sparse_student_logprobs = self._distillation_student_logprobs(logits, data)
-            if self.cfg.trainer.algorithm.score_centering_topk and data.score_topk_indices is None:
+            if self.cfg.trainer.algorithm.get("score_centering_topk", 0) and data.score_topk_indices is None:
                 raise ValueError("score centering requires behavior top-k token IDs in every learner microbatch")
             score_current_topk_logprobs = (
                 self._selected_response_logprobs(logits, data.score_topk_indices, num_actions, data.attention_mask)
-                if self.cfg.trainer.algorithm.score_centering_topk
+                if self.cfg.trainer.algorithm.get("score_centering_topk", 0)
                 else None
             )
 
