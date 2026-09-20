@@ -352,6 +352,9 @@ class WorkerWrap:
                         return
                     if module.routed_experts.quant_method.is_monolithic:
                         raise ValueError("Hero one-hot expert trace requires a modular fused MoE kernel")
+                    traces["layer_0_routed_kernel_name"] = type(
+                        module.routed_experts.quant_method.moe_kernel.fused_experts
+                    ).__name__
                     routed_input = kwargs["hidden_states"]
                     router_logits = kwargs["router_logits"]
                     combine, expert_ids = module.router._select_experts(
@@ -361,12 +364,17 @@ class WorkerWrap:
                     )
                     replayed = module.routed_experts.forward_modular(routed_input, combine, expert_ids)
                     onehot = []
+                    weighted_onehot = []
                     for slot in range(expert_ids.shape[1]):
                         slot_weights = torch.zeros_like(combine)
                         slot_weights[:, slot] = 1
                         contribution = module.routed_experts.forward_modular(routed_input, slot_weights, expert_ids)
                         onehot.append(contribution[0].detach().float().cpu())
+                        slot_weights[:, slot] = combine[:, slot]
+                        weighted = module.routed_experts.forward_modular(routed_input, slot_weights, expert_ids)
+                        weighted_onehot.append(weighted[0].detach().float().cpu())
                     traces["layer_0_routed_onehot"] = torch.stack(onehot)
+                    traces["layer_0_routed_weighted_onehot"] = torch.stack(weighted_onehot)
                     traces["layer_0_routed_onehot_ids"] = expert_ids[0].detach().int().cpu()
                     traces["layer_0_routed_replayed"] = replayed[0].detach().float().cpu()
                     traces["layer_0_routed_original"] = output[0].detach().float().cpu()

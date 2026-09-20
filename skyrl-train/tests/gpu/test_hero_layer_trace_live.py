@@ -171,13 +171,16 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
         onehot_ids = vllm_trace["layer_0_routed_onehot_ids"].numpy()
         assert np.array_equal(onehot_ids, selected[0])
         onehot_outputs = vllm_trace["layer_0_routed_onehot"].numpy()
+        weighted_onehot_outputs = vllm_trace["layer_0_routed_weighted_onehot"].numpy()
         routed_original = vllm_trace["layer_0_routed_original"].numpy()
         routed_replayed = vllm_trace["layer_0_routed_replayed"].numpy()
         assert onehot_outputs.shape == (model_config.num_experts_per_tok, model_config.latent_dim)
+        assert weighted_onehot_outputs.shape == onehot_outputs.shape
         assert routed_original.shape == routed_replayed.shape == (model_config.latent_dim,)
         trace_arrays.update(
             {
                 "vllm_layer_0_routed_onehot": onehot_outputs,
+                "vllm_layer_0_routed_weighted_onehot": weighted_onehot_outputs,
                 "vllm_layer_0_routed_onehot_ids": onehot_ids,
                 "vllm_layer_0_routed_replayed": routed_replayed,
                 "vllm_layer_0_routed_original": routed_original,
@@ -249,6 +252,7 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
             "router_combine_rms_by_position": np.sqrt(np.mean(np.square(combine_delta), axis=-1)).tolist(),
             "router_combine_max_abs_by_position": np.max(np.abs(combine_delta), axis=-1).tolist(),
             "vllm_routed_replay_max_abs": float(np.max(np.abs(routed_original - routed_replayed))),
+            "serving_routed_kernel": vllm_trace["layer_0_routed_kernel_name"],
             "response_scores": scores.tolist(),
             "serving_response_scores": rollout_scores.tolist(),
             "max_response_logprob_gap": max_response_gap,
