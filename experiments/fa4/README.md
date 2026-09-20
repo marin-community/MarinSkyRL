@@ -32,8 +32,9 @@ x86_64-only, so GB200/Grace needs an explicit arm64 closure before it can
 support a Grug result. No CPU packaging check proves that GPU gate.
 
 For the native TE 2.19 build, use
-`scripts/wheels/build_native.sh transformer-engine-torch-2.19 <build-dir>` on
-an H100 Iris task. The task image provides CPython 3.12.14, git, and a C++
+`bash scripts/wheels/build_native.sh transformer-engine-torch-2.19 <build-dir>`
+on an H100 Iris task. Iris bundles do not preserve executable script mode, so
+the `bash` prefix matters. The task image provides CPython 3.12.14, git, and a C++
 compiler. Its bare Python lacks `boto3`; run the uploader through
 `uv run --no-project --with boto3==1.42.97 python experiments/fa4/upload_candidate.py`
 so it can use the cluster-injected S3 credentials. Upload the resulting wheel
@@ -48,3 +49,13 @@ completed on `cw-rno2a` with Python 3.12.14, uv 0.10.3, git 2.47.3, GCC
 14.2, and driver 595.71.05. The [storage preflight](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-b31-s3-preflight2-f6fed696)
 confirmed that an isolated `boto3==1.42.97` environment reaches the Marin
 bucket from an Iris task. Neither preflight installed Transformer Engine.
+
+`probe_attention.py` measures a fixed Transformer Engine causal/sliding-window
+GQA forward and backward pass, records ten per-process samples and peak CUDA
+allocation, and writes pointwise outputs and Q/K/V gradients. Run each arm in
+its own process with `NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=2 NVTE_FUSED_ATTN=0
+NVTE_FLASH_ATTN=1` and explicitly set `NVTE_FLASH_ATTN_V4=0` for FA2 or `1`
+for FA4. Inspect the Transformer Engine `Selected backend` log; a package
+version alone is not backend proof. Use `compare_attention.py` on output files
+from matched shapes and hardware to report max/mean/RMS differences. This
+microprobe is not a substitute for the Grug CP2 optimizer or RL timing gates.
