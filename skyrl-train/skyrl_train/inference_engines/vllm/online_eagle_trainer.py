@@ -93,8 +93,6 @@ def capture_rank_directory(capture_root: Path, worker_rank: int) -> Path:
 
 def capture_publication_result(manifest: Mapping[str, Any], path: str) -> dict[str, Any]:
     """Add SkyRL publication state to a sealed vLLM capture manifest."""
-    if "active" in manifest:
-        raise ValueError("vLLM capture manifest contains SkyRL-owned field: active")
     return {**manifest, "active": True, "path": path}
 
 

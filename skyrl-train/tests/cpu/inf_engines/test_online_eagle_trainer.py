@@ -102,6 +102,7 @@ def test_capture_publication_marks_candidate_manifest_active() -> None:
             "captured_rows": 17,
             "windows": [{"request_id": "request-0"}],
             "path": "/tmp/capture/rank-00003",
+            "active": False,
         },
         "s3://bucket/captures/step-1/rank-00003",
     )
