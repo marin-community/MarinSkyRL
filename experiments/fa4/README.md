@@ -31,6 +31,15 @@ repacked wheel is required or published. The current `megatron` extra is
 x86_64-only, so GB200/Grace needs an explicit arm64 closure before it can
 support a Grug result. No CPU packaging check proves that GPU gate.
 
+The [GB200 arm64 TE build](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-te219-arm-build-11082662)
+also succeeded from the same TE source and pinned native build environment.
+Its staged wheel is 980,583 bytes, SHA-256
+`185d4dd78a26623351d7ea22ac3a353d6c675bdee47f19b6d8839618473c82ac`.
+`preflight_gb200.sh <staged-wheel-URI> <SHA-256>` installs a disposable
+Torch/TE/FA4 environment and checks one GB200 kernel forward/backward with
+explicit backend logs. It cannot establish a Grug result while the project
+extra lacks an arm64 Megatron closure and FA2 reference.
+
 For the native TE 2.19 build, use
 `bash scripts/wheels/build_native.sh transformer-engine-torch-2.19 <build-dir>`
 on an H100 Iris task. Iris bundles do not preserve executable script mode, so
