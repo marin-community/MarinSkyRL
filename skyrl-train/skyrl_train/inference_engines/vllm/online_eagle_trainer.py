@@ -697,11 +697,14 @@ def _evaluate(
     )
 
 
+_FROZEN_SERVING_STATE_NAMES = frozenset({"d2t", "t2d", "lm_head.weight"})
+
+
 def _candidate_state(model: nn.Module, *, serving_dtype: torch.dtype) -> dict[str, torch.Tensor]:
     trainable_names = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
     state = {}
     for name, value in model.state_dict().items():
-        if name in trainable_names:
+        if name in trainable_names or name in _FROZEN_SERVING_STATE_NAMES:
             if value.is_floating_point() and value.dtype != serving_dtype:
                 raise ValueError(
                     f"Online EAGLE candidate tensor {name} has dtype {value.dtype}, expected {serving_dtype}"

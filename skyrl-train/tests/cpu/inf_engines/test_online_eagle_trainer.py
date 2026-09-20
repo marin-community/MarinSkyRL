@@ -404,21 +404,26 @@ def test_candidate_gate_enforces_loss_and_agreement_tolerances() -> None:
     assert not candidate_is_acceptable(candidate_loss=1.0, candidate_agreement=0.789, **common)
 
 
-def test_candidate_state_contains_only_trainable_serving_dtype() -> None:
+def test_candidate_state_contains_trainable_and_frozen_serving_tensors() -> None:
     class Draft(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.owned = torch.nn.Linear(2, 2, bias=False)
+            self.lm_head = torch.nn.Linear(2, 2, bias=False)
+            self.lm_head.weight.requires_grad_(False)
             self.frozen = torch.nn.Parameter(torch.ones(2), requires_grad=False)
-            self.register_buffer("vocabulary_map", torch.arange(2))
+            self.register_buffer("d2t", torch.arange(2))
+            self.register_buffer("t2d", torch.tensor([True, True]))
+            self.register_buffer("unrelated_buffer", torch.arange(2))
 
     model = Draft().to(dtype=torch.float32)
     with pytest.raises(ValueError, match=r"dtype torch.float32, expected torch.bfloat16"):
         _candidate_state(model, serving_dtype=torch.bfloat16)
 
     _convert_trainable_parameters(model, torch.bfloat16)
+    model.lm_head.to(dtype=torch.bfloat16)
     state = _candidate_state(model, serving_dtype=torch.bfloat16)
-    assert set(state) == {"owned.weight"}
+    assert set(state) == {"owned.weight", "lm_head.weight", "d2t", "t2d"}
 
 
 def test_optimizer_state_is_offloaded_before_candidate_evaluation() -> None:
