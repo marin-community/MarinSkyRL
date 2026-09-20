@@ -42,7 +42,9 @@ to an immutable key in
 `s3://marin-us-east-02a/iris/fa4-experiment/` and preserve the Iris job ID,
 source commit, build script, pinned environment, and SHA-256. This staging key
 is not a runtime wheel source; the lock must later reference a published,
-verified candidate artifact.
+verified candidate artifact. `download_candidate.py` fetches that exact object
+inside an Iris task and refuses a missing or mismatched SHA-256. Like the
+uploader, run it through `uv run --no-project --with boto3==1.42.97 python`.
 
 The [H100 task preflight](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-b31-h100-preflight-f6fed696)
 completed on `cw-rno2a` with Python 3.12.14, uv 0.10.3, git 2.47.3, GCC
