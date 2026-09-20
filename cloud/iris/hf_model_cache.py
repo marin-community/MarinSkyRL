@@ -116,11 +116,12 @@ def ensure_hugging_face_model_cache(
     try:
         if _is_cache_complete(marker_uri, model_id, revision):
             return cache_uri
-        with lease_refresh(lock), tempfile.TemporaryDirectory(prefix="marinskyrl-hf-model-") as scratch:
-            snapshot = download_hugging_face_snapshot(model_id, revision=revision, destination=Path(scratch))
-            filesystem.makedirs(cache_path, exist_ok=True)
-            _upload_snapshot(filesystem, cache_path, snapshot)
-        write_json(marker_uri, {"model_id": model_id, "revision": revision})
+        with lease_refresh(lock):
+            with tempfile.TemporaryDirectory(prefix="marinskyrl-hf-model-") as scratch:
+                snapshot = download_hugging_face_snapshot(model_id, revision=revision, destination=Path(scratch))
+                filesystem.makedirs(cache_path, exist_ok=True)
+                _upload_snapshot(filesystem, cache_path, snapshot)
+            write_json(marker_uri, {"model_id": model_id, "revision": revision})
         return cache_uri
     finally:
         lock.release()
