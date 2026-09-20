@@ -967,6 +967,9 @@ class WorkerWrap:
         out["slots"] = slots
         return out
 
+    def weight_sync_gpu_uuid(self) -> str:
+        return str(torch.cuda.get_device_properties(self.device).uuid)
+
     def report_host(self):
         """TEST-ONLY (disaggregation proof): this engine worker's hostname (one per
         TP/EP worker via collective_rpc) so the driver can prove the engine node is
@@ -1194,6 +1197,9 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def initialize_worker_numa_affinity(self):
         """Apply affinity on every synchronous vLLM worker."""
         return await set_sync_worker_numa_affinity(self.llm.collective_rpc)
+
+    async def weight_sync_gpu_uuids(self) -> list[str]:
+        return await asyncio.to_thread(self.llm.collective_rpc, "weight_sync_gpu_uuid")
 
     async def report_engine_hosts(self):
         """Wait for the synchronous engine's workers to load before weight sync."""
@@ -1970,6 +1976,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine worker rank). See ``WorkerWrap.read_expert_slots_raw``."""
         engine = self._get_engine()
         return await engine.collective_rpc("read_expert_slots_raw", args=(int(layer_idx),))
+
+    async def weight_sync_gpu_uuids(self) -> list[str]:
+        return await self._get_engine().collective_rpc("weight_sync_gpu_uuid")
 
     async def report_engine_hosts(self):
         """TEST-ONLY (disaggregation proof): hostname of every engine TP/EP worker."""

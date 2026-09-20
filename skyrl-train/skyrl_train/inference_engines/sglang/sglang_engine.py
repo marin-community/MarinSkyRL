@@ -343,6 +343,10 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         # Create weight loader for coordinating weight updates
         self._weight_loader = SGLangWeightLoader(self.engine, self._tp_size)
 
+    async def weight_sync_gpu_uuids(self) -> list[str]:
+        # SGLang currently supports only TP1, with the actor masked to its GPU.
+        return [str(torch.cuda.get_device_properties(0).uuid)]
+
     def tp_size(self):
         return self._tp_size
 

@@ -736,50 +736,53 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 torch.distributed.barrier()
 
         else:
-            # CUDA IPC path: one chunk per bucket (for packing)
+            # Export collectives involve every training rank, but only ranks with
+            # a colocated receiver may create IPC handles. An unconsumed handle
+            # keeps its CUDA allocation alive through PyTorch's IPC refcounter.
+            is_rank0 = torch.distributed.get_rank() == 0
+            receivers = [await inference_engine_client.weight_sync_gpu_uuids() if is_rank0 else None]
+            torch.distributed.broadcast_object_list(receivers, src=0)
+            receiver_uuids = set(receivers[0])
+            assert receiver_uuids and len(receiver_uuids) == len(receivers[0]), (
+                "CUDA IPC weight sync requires one receiver per physical GPU"
+            )
             device = torch.cuda.current_device()
-            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "sizes": [], "extras": []}
+            gpu_uuid = get_physical_gpu_id()
+            sends_weights = gpu_uuid in receiver_uuids
 
             for chunk in self.weight_extractor.extract_weights(generator_dtype):
-                # Each chunk contains all parameters in one bucket
-                # Calculate total size for packing (in number of elements)
-                total_numel = sum(t.numel() for t in chunk.tensors)
-                chunk_dtypes = {t.dtype for t in chunk.tensors}
-                assert len(chunk_dtypes) == 1, f"packed weight chunk mixes dtypes: {chunk_dtypes}"
-                packed_tensor = allocate_cuda_ipc_buffer(
-                    total_numel,
-                    device=device,
-                    dtype=chunk_dtypes.pop(),
-                )
+                sizes = [tensor.numel() for tensor in chunk.tensors]
+                packed_tensor = None
+                ipc_handle = {}
+                if sends_weights:
+                    chunk_dtypes = {tensor.dtype for tensor in chunk.tensors}
+                    assert len(chunk_dtypes) == 1, f"packed weight chunk mixes dtypes: {chunk_dtypes}"
+                    packed_tensor = allocate_cuda_ipc_buffer(sum(sizes), device=device, dtype=chunk_dtypes.pop())
+                    offset = 0
+                    for tensor, size in zip(chunk.tensors, sizes, strict=True):
+                        packed_tensor[offset : offset + size].copy_(tensor.detach().view(-1))
+                        offset += size
+                    ipc_handle = {gpu_uuid: reduce_tensor(packed_tensor)}
 
-                offset = 0
-                # Copy tensors into consolidated buffers
-                for name, tensor, shape, dtype_name in zip(chunk.names, chunk.tensors, chunk.shapes, chunk.dtypes):
-                    size = tensor.numel()
-                    packed_tensor[offset : offset + size].copy_(tensor.detach().view(-1))
-                    offset += size
-                    weights_update_request["names"].append(name)
-                    weights_update_request["dtypes"].append(dtype_name)
-                    weights_update_request["shapes"].append(shape)
-                    weights_update_request["sizes"].append(size)
-
-                ipc_handle = reduce_tensor(packed_tensor)
-                ipc_handle = {get_physical_gpu_id(): ipc_handle}
                 ipc_handle_list = [None] * torch.distributed.get_world_size()
                 torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
-
-                ipc_handles = {}
-                for d in ipc_handle_list:
-                    ipc_handles.update(d)
-
-                weights_update_request["extras"].append({"ipc_handles": ipc_handles})
-                weights_update_request["packed"] = True
-
-                if torch.distributed.get_rank() == 0:
-                    await inference_engine_client.update_named_weights(weights_update_request)
-                    weights_update_request = {"names": [], "dtypes": [], "shapes": [], "sizes": [], "extras": []}
-
-                # force collect any sent tensors if possible to be memory efficient
+                if is_rank0:
+                    ipc_handles = {
+                        key: handle for rank_handles in ipc_handle_list for key, handle in rank_handles.items()
+                    }
+                    assert set(ipc_handles) == receiver_uuids, "CUDA IPC receiver has no colocated training rank"
+                    await inference_engine_client.update_named_weights(
+                        {
+                            "names": chunk.names,
+                            "dtypes": chunk.dtypes,
+                            "shapes": chunk.shapes,
+                            "sizes": sizes,
+                            "extras": [{"ipc_handles": ipc_handles}],
+                            "packed": True,
+                        }
+                    )
+                torch.distributed.barrier()
+                del packed_tensor
                 torch.cuda.ipc_collect()
 
         # Finalize after every transport chunk so vLLM materializes and processes each layer
