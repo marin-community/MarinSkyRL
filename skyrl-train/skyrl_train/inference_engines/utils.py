@@ -244,14 +244,27 @@ def _find_available_rendezvous_port(excluded_ports: Collection[int] = ()) -> int
     raise RuntimeError(f"No free rendezvous port in [{_RENDEZVOUS_PORT_START}, {_RENDEZVOUS_PORT_STOP})")
 
 
-def get_rendezvous_addr_port(placement_group, pg_index: int, excluded_ports: Collection[int] = ()) -> Tuple[str, int]:
-    """
-    Minimal helper to get a rendezvous addr:port in `placement_group`'s bundle at index `pg_index`.
-    """
+def _find_available_rendezvous_ports(port_count: int, excluded_ports: Collection[int] = ()) -> list[int]:
+    ports: list[int] = []
+    unavailable_ports = set(excluded_ports)
+    for _ in range(port_count):
+        port = _find_available_rendezvous_port(unavailable_ports)
+        ports.append(port)
+        unavailable_ports.add(port)
+    return ports
+
+
+def get_rendezvous_addr_ports(
+    placement_group,
+    pg_index: int,
+    port_count: int,
+    excluded_ports: Collection[int] = (),
+) -> Tuple[str, list[int]]:
+    """Choose rendezvous ports on the node containing a placement-group bundle."""
 
     @ray.remote(num_cpus=0, num_gpus=0)
-    def get_addr_port():
-        return ray.util.get_node_ip_address(), _find_available_rendezvous_port(excluded_ports)
+    def get_addr_ports():
+        return ray.util.get_node_ip_address(), _find_available_rendezvous_ports(port_count, excluded_ports)
 
     master_sched = PlacementGroupSchedulingStrategy(
         placement_group=placement_group,
@@ -259,7 +272,4 @@ def get_rendezvous_addr_port(placement_group, pg_index: int, excluded_ports: Col
         placement_group_bundle_index=pg_index,
     )
     # Get DP group rendezvous (addr, port) on the same node as index `pg_index`'s bundle.
-    data_parallel_address, data_parallel_rpc_port = ray.get(
-        get_addr_port.options(scheduling_strategy=master_sched).remote()
-    )
-    return data_parallel_address, data_parallel_rpc_port
+    return ray.get(get_addr_ports.options(scheduling_strategy=master_sched).remote())

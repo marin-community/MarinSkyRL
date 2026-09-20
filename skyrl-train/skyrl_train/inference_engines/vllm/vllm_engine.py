@@ -1596,6 +1596,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await set_async_worker_numa_affinity(self.llm.collective_rpc)
 
     def _create_engine(self, *args, **kwargs):
+        data_parallel_master_ports = kwargs.pop("data_parallel_master_ports", None)
         wrapper_kwargs = pop_vllm_wrapper_kwargs(kwargs)
         # Store sampling params for OpenAI-style requests (Harbor rollouts)
         self._openai_sampling_params = wrapper_kwargs.pop("openai_sampling_params", {})
@@ -1679,7 +1680,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 cur = cur.__cause__ or cur.__context__
             return False
 
-        _MAX_INIT_ATTEMPTS = 5
+        # A data-parallel pool must restart all ranks together. Retrying one
+        # actor leaves its peers attached to the failed coordinator generation.
+        coordinated_data_parallel = kwargs.get("data_parallel_size", 1) > 1
+        _MAX_INIT_ATTEMPTS = 1 if coordinated_data_parallel else 5
         _BACKOFF_BASE_SEC = 15.0
         engine = None
         for _attempt in range(_MAX_INIT_ATTEMPTS):
@@ -1690,7 +1694,18 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             )
             time.sleep(_stagger)
             try:
-                engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
+                if data_parallel_master_ports is None:
+                    engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
+                else:
+                    vllm_config = engine_args.create_engine_config()
+                    vllm_config.parallel_config._data_parallel_master_port_list = data_parallel_master_ports[:-1]
+                    vllm_config.parallel_config.data_parallel_master_port = data_parallel_master_ports[-1]
+                    engine = vllm.AsyncLLMEngine.from_vllm_config(
+                        vllm_config,
+                        stat_loggers=stat_loggers,
+                        enable_log_requests=False,
+                        disable_log_stats=True,
+                    )
                 break
             except (DistNetworkError, RuntimeError, ZMQError) as e:
                 if not _is_port_collision(e):
