@@ -112,6 +112,8 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         native = _score(policy, batch, torch.zeros_like(captured))
         replayed = _score(policy, batch, captured)
         serving = torch.tensor(rollout["response_logprobs"], dtype=torch.float32)
+        prefill = _prefill_response_logprobs(client, prompts, rollout["response_ids"], individual=False)
+        single_prefill = _prefill_response_logprobs(client, prompts, rollout["response_ids"], individual=True)
         valid = batch["response_mask"].bool()
         score_diagnostic = {
             "phase": "after_score",
@@ -120,6 +122,12 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
             "native_response_logprobs": native.tolist(),
             "replay_response_logprobs": replayed.tolist(),
             "serving_response_logprobs": serving.tolist(),
+            "prefill_response_logprobs": prefill.tolist(),
+            "single_prefill_response_logprobs": single_prefill.tolist(),
+            "prefill_vs_decode_max_abs": (prefill - serving)[valid].abs().max().item(),
+            "single_vs_batch_prefill_max_abs": (single_prefill - prefill)[valid].abs().max().item(),
+            "prefill_vs_megatron_native_max_abs": (prefill - native)[valid].abs().max().item(),
+            "prefill_vs_megatron_replay_max_abs": (prefill - replayed)[valid].abs().max().item(),
             "native_replay_max_abs": (native - replayed)[valid].abs().max().item(),
         }
         print("LIVE_HERO_REPLAY_SCORE_STATUS=" + json.dumps(score_diagnostic, sort_keys=True), flush=True)
@@ -238,6 +246,32 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
 def _score(policy, batch, routes: torch.Tensor) -> torch.Tensor:
     batch["rollout_routed_experts"] = routes
     return _megatron_response_logprobs(policy, batch)
+
+
+def _prefill_response_logprobs(client, prompts, responses, *, individual: bool) -> torch.Tensor:
+    """Score the same tokens by vLLM prefill, separate from rollout decoding."""
+
+    sequences = [prompt + response for prompt, response in zip(prompts, responses, strict=True)]
+    sampling_params = {"temperature": 1.0, "max_tokens": 1, "prompt_logprobs": 1}
+    if individual:
+        rows = [
+            asyncio.run(
+                client.generate(InferenceEngineInput(prompt_token_ids=[sequence], sampling_params=sampling_params))
+            )["prompt_logprobs"][0]
+            for sequence in sequences
+        ]
+    else:
+        rows = asyncio.run(
+            client.generate(InferenceEngineInput(prompt_token_ids=sequences, sampling_params=sampling_params))
+        )["prompt_logprobs"]
+    assert rows is not None and len(rows) == len(prompts)
+    return torch.tensor(
+        [
+            [row[len(prompt) + offset][token] for offset, token in enumerate(response)]
+            for row, prompt, response in zip(rows, prompts, responses, strict=True)
+        ],
+        dtype=torch.float32,
+    )
 
 
 def _s3_target(uri: str) -> tuple[str, str]:
