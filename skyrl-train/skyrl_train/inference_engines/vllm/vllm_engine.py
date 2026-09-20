@@ -347,6 +347,32 @@ class WorkerWrap:
                     )
                 )
 
+                def after_routed_experts(module, _args, kwargs, output, *, current=state):
+                    if current["indices"] is None or "layer_0_routed_onehot" in traces:
+                        return
+                    if module.routed_experts.quant_method.is_monolithic:
+                        raise ValueError("Hero one-hot expert trace requires a modular fused MoE kernel")
+                    routed_input = kwargs["hidden_states"]
+                    router_logits = kwargs["router_logits"]
+                    combine, expert_ids = module.router._select_experts(
+                        routed_input,
+                        router_logits,
+                        topk_indices_dtype=module._quant_method.topk_indices_dtype,
+                    )
+                    replayed = module.routed_experts.forward_modular(routed_input, combine, expert_ids)
+                    onehot = []
+                    for slot in range(expert_ids.shape[1]):
+                        slot_weights = torch.zeros_like(combine)
+                        slot_weights[:, slot] = 1
+                        contribution = module.routed_experts.forward_modular(routed_input, slot_weights, expert_ids)
+                        onehot.append(contribution[0].detach().float().cpu())
+                    traces["layer_0_routed_onehot"] = torch.stack(onehot)
+                    traces["layer_0_routed_onehot_ids"] = expert_ids[0].detach().int().cpu()
+                    traces["layer_0_routed_replayed"] = replayed[0].detach().float().cpu()
+                    traces["layer_0_routed_original"] = output[0].detach().float().cpu()
+
+                hooks.append(layer.mlp.experts.register_forward_hook(after_routed_experts, with_kwargs=True))
+
                 for shared_index, shared_expert in enumerate(layer.shared_experts):
 
                     def after_shared(_module, _args, output, *, site=f"shared_{shared_index}", capture_fn=capture):
