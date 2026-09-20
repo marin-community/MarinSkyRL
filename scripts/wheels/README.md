@@ -16,14 +16,16 @@ runtime dependencies pin each published wheel by URL and SHA-256.
 invoke it; they consume the published, hash-pinned wheels.
 
 FlashAttention uses upstream commit
-[`4219765`](https://github.com/Dao-AILab/flash-attention/commit/4219765dfdd8913bfe26134f748dd5ffcedd3c39),
-the merged FA2 and FA4 namespace-coexistence fix. That 2.8.4 source excludes the
-bundled `flash_attn.cute` package written for an older CUTLASS DSL while retaining
-FA2's native interface. The script fetches every source by its exact commit so a
-moving branch or tag cannot change the input tree.
+[`060c9188`](https://github.com/Dao-AILab/flash-attention/commit/060c9188beec3a8b62b33a3bfa6d5d2d44975fab)
+(2.8.3). Transformer Engine 2.11 accepts FA2 through 2.8.3 and rejects 2.8.4.
+The checked-in packaging patch backports the `flash_attn.cute` exclusion from
+[`4219765`](https://github.com/Dao-AILab/flash-attention/commit/4219765dfdd8913bfe26134f748dd5ffcedd3c39).
+It removes the experimental FA4 namespace, which requires an older CUTLASS DSL,
+without changing FA2's native kernels. The script restores the source checkout
+after the build. Every source is fetched by exact commit.
 
 Use CPython 3.12.14 on Linux x86_64 with git, a C++ compiler, and uv. The
-qualified FlashAttention 2.8.4 build used the Iris task image
+qualified FlashAttention 2.8.3 build used the Iris task image
 `ghcr.io/marin-community/iris-task@sha256:ecdb2f7f90f8760a7e74c49b49b67d7ecf44557298860411c148c186706067f2`,
 GCC/G++ `14.2.0-19`, glibc `2.41-12+deb13u3`, git `1:2.47.3-0+deb13u1`, and
 uv `0.10.3`. Install the compiler and git inside the build container. These are
@@ -46,6 +48,9 @@ tracked changes and unexpected untracked files; Git-ignored build outputs remain
 available for cache reuse.
 
 Before publishing a wheel, install its exact bytes in the proposed runtime and
-run its native forward and backward checks on H100. Publish the source commits,
-build environment, and checksums with the wheel assets. Adoption URLs and wheel
-hashes belong in the root dependency manifest and lock.
+run its native forward and backward checks on H100. Megatron also needs a
+context-parallel forward and backward with the FlashAttention backend selected;
+native attention checks alone cannot detect a Transformer Engine version cap.
+Publish the source commits, build environment, and checksums with the wheel
+assets. Adoption URLs and wheel hashes belong in the root dependency manifest
+and lock.

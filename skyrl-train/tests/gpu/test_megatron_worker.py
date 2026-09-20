@@ -27,6 +27,7 @@ from skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.policy_losses import POLICY_CLIP_METRIC_KEYS
+from tests.gpu.grug_gpu_gates import require_hoppers
 
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -34,6 +35,38 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # this might be a model specific mbridge issue - see if this persists when we transition to Megatron-Bridge
 # MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
+
+
+def test_megatron_flash_attention_cp2_forward_backward(ray_init_fixture):
+    """Keep the selected FlashAttention backend usable through a CP2 policy step."""
+    require_hoppers(2)
+    cfg = get_test_actor_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.flash_attn = True
+    cfg.trainer.use_sample_packing = True
+    cfg.trainer.placement.policy_num_gpus_per_node = 2
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+    cfg.trainer.policy.megatron_config.context_parallel_size = 2
+    cfg.trainer.policy.megatron_config.expert_model_parallel_size = 1
+    cfg.trainer.train_batch_size = 4
+    cfg.trainer.policy_mini_batch_size = 4
+    cfg.trainer.micro_forward_batch_size_per_gpu = 1
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    batch = get_test_training_batch(4)
+    batch.metadata["global_step"] = 0
+
+    policy = init_worker_with_type("policy", shared_pg=None, colocate_all=False, num_gpus_per_node=2, cfg=cfg)
+    outputs = ray.get(policy.async_run_ray_method("mesh", "forward", data=batch))
+    logprobs = concatenate_outputs_after_mesh_dispatch(policy.actor_infos, outputs)["output"]
+    assert logprobs.shape[0] == 4
+    assert torch.isfinite(logprobs).all()
+
+    train_outputs = ray.get(policy.async_run_ray_method("pass_through", "ppo_train", batch))
+    assert len(train_outputs) == 2
+    for output in train_outputs:
+        status = output.metadata["train_status"]
+        assert torch.isfinite(torch.tensor(status["policy_loss"]))
 
 
 def get_test_actor_config(model_name=MODEL_NAME) -> DictConfig:
