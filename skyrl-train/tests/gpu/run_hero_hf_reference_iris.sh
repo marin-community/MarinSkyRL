@@ -9,4 +9,5 @@ activation_file="$project_root/.iris-runtime-env"
 
 bash cloud/iris/bootstrap_runtime.sh "$project_root" "$environment" "$activation_file" megatron development
 source "$activation_file"
-python skyrl-train/tests/gpu/hero_trained_hf_reference.py
+cd "$project_root/skyrl-train"
+python -m tests.gpu.hero_trained_hf_reference
