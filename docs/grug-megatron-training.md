@@ -66,7 +66,7 @@ The checkpoint integration restores the inner CPU/GPU master weights and Adam
 step counters, including subsequent GPU updates after resume. The pinned TE
 norm and clipping kernels avoid Megatron's gradient-sized Torch temporary.
 Tiny Hero with half of its optimizer offloaded passes exact continuation at
-512 and 65,536 tokens on H100; full-model capacity must be measured separately.
+512 and 65,536 tokens on H100. Full-model measurements appear below.
 
 For long sequences, enable Megatron's native weighted SwiGLU fusion under the
 same `trainer.policy.megatron_config` section:
@@ -85,6 +85,66 @@ qualify training and serving comparisons with the selected setting. It does
 not require FP8. CPU offload still needs enough host memory for optimizer state
 and staging; increasing its fraction can move an out-of-memory failure from
 the GPU to the host.
+
+### Full Hero capacity
+
+The 535B step-108000 BF16 export completed repeated AdamW updates through
+65,536 tokens on both layouts below. Each layout also saved and restored the
+full model and optimizer, then reproduced the next update bit for bit at
+65,536 tokens. Query bias stayed frozen. Resume used the same parallel layout.
+
+| Setting | H100 | GB200 |
+| --- | --- | --- |
+| GPUs / hosts | 256 / 32 | 64 / 16 |
+| TP / PP / EP / CP | 1 / 8 / 32 / 4 | 1 / 4 / 16 / 4 |
+| CPU optimizer fraction | 1.0 | 0.5 |
+| Host memory request per node | 768 GiB | 768 GiB |
+| OpenMP threads per worker | 4 | 8 |
+| Placement | CP groups within each host | CP groups within each host; one NVLink domain |
+
+Both runs used the precision-aware optimizer and recomputation settings above,
+BF16 gradient reduction, overlapping gradient reduction and parameter gathering,
+deterministic FlashAttention 2.8.3, and `NCCL_NVLS_ENABLE=0`. Training and scoring
+micro-batches were one sequence per worker. The qualification driver used the
+packed worker path with one document per row, a 256-token response, and fixed
+synthetic trajectories. It did not measure a live rollout workload.
+
+The table reports the second and third updates at each batch size. Timings
+include the worker call and memory telemetry. Peak memory is the maximum
+PyTorch allocation across ranks during the three measured updates; it excludes
+allocations made outside PyTorch.
+
+| Hardware | Context | Global batch | Update seconds | Peak GPU GiB |
+| --- | ---: | ---: | ---: | ---: |
+| H100 | 32,768 | 8 | 27.605 / 25.092 | 38.339 |
+| H100 | 65,536 | 8 | 42.461 / 41.777 | 63.147 |
+| H100 | 65,536 | 16 | 46.891 / 42.599 | 64.079 |
+| GB200 | 32,768 | 4 | 13.792 / 13.693 | 138.257 |
+| GB200 | 65,536 | 4 | 22.654 / 22.738 | 154.022 |
+| GB200 | 65,536 | 16 | 37.637 / 36.974 | 145.511 |
+
+Batch 16 ran after checkpoint restore, which changes optimizer and allocator
+lifetimes. Its lower GB200 peak does not establish that larger batches need
+less memory. The H100 32K measurement used 512 GiB/node; that run later failed
+the Ray host-memory guard during 65K restore. The successful restore retry
+used 768 GiB/node. CPU offload therefore needs a host-memory budget for both
+training and checkpoint loading.
+
+Each full model-plus-optimizer checkpoint occupies about 6.82 TiB in S3.
+H100 save/restore took 676/737 seconds; GB200 took 659/1,406 seconds. These
+measurements establish long-context training and restart capacity. They do not
+establish 65K vLLM generation capacity or end-to-end RL iteration throughput.
+
+The immutable reports are under
+`s3://marin-us-east-02a/marin/users/romain/hero-megatron-01a0bca4/`:
+`full-h100-a9/report.json` for H100 32K,
+`full-h100-a10/report.json` for H100 65K and exact resume, and
+`full-gb200-a6/report.json` for GB200. H100 a10 used source `d386f521`; GB200
+used the sealed `7dc88a2b` source bundle. The GB200 report's descriptive source
+field says `development checkout`; its validated runtime identity and archived
+bundle establish the revision. Source bundles and launch arguments are stored
+under `evidence/qualification-20260920/` and
+`evidence/qualification-20260920b/` at the same S3 prefix.
 
 The port lives in two modules:
 
