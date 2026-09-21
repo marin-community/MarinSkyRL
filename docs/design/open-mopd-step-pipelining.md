@@ -42,7 +42,7 @@ follow-up once each variant has a measured baseline.
 
 ## Launcher option surface
 
-Both variants are options on the existing launcher and default to today's behavior. The Hydra overrides for the
+Both variants are options on the existing launcher (colocated: #709, fully asynchronous: the companion PR) and default to today's behavior. The Hydra overrides for the
 default remain byte-identical to `main` so the existing contract tests keep passing unchanged.
 
 ```
@@ -119,11 +119,12 @@ Facts from `config/ppo_base_config.yaml`, `marinskyrl/distillation.py`, and `doc
    are typed but not served by the runtime; making teachers share the pool is stage 2 and only if contained.
    `rotating` placement (three teachers through one drained residency slot) is served and is the cheaper way to
    free GPUs if stage 2 does not land.
-3. Pool sizing. The colocated PR uses the five-GPU pool with all three teachers pinned
-   (`policy_num_gpus_per_node=5`, `num_inference_engines=5`, TP 1). Teacher engines are launched with sleep
-   disabled and `CO_RESIDENT` is rejected by the runtime, so sharing GPUs with teachers is not a contained change;
-   rotating teachers (a seven-GPU pool) is the follow-up if the five-GPU pool leaves the update phase short of
-   memory or compute.
+3. Pool sizing. The colocated PR (#709) uses the five-GPU pool with all three teachers pinned
+   (`policy_num_gpus_per_node=5`, `num_inference_engines=5`, TP 1). Sharing GPUs with teachers is not a contained
+   change: `validate_distillation_runtime_support` rejects `CO_RESIDENT` and `_start_local_teacher_pool` launches
+   teacher engines with `inference_engine_enable_sleep=False`, so it needs a teacher lifecycle and a shared
+   placement-group design first. Rotating teachers (a seven-GPU pool) is the follow-up if the five-GPU pool leaves
+   the update phase short of memory or compute.
 4. Weight sync after each update goes engine-to-engine on the same GPUs; the `sync_weights_to_inference_engines`
    timer captures it. The colocated PR adds `timing/inference_engine_sleep` and `timing/inference_engine_wake`
    around the synchronous trainer's engine transitions.
