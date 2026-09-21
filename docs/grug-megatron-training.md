@@ -164,30 +164,48 @@ under `evidence/qualification-20260920/` and
 
 ### Controlled publication cycle
 
-Full Hero completed a controlled cycle on the 256-H100 layout above with
-64 colocated vLLM ranks at TP1/EP64. It published the initial weights,
-generated eight four-token responses, scored and trained with captured routes,
+Full Hero completed controlled cycles on both layouts above with
+64 colocated vLLM ranks at TP1/EP64. Each published the initial weights,
+generated four-token responses, scored and trained with captured routes,
 saved a checkpoint, made another update, restored, published the restored
 weights, and generated again. Readback matched the selected weight families
 and all 48 FP32 router biases exactly before and after training. The biases
 stayed frozen. Route replay hit and executed-route match fractions were both
-1.0, router gradient norm was 4.185, and the training log-ratio maximum was zero.
+1.0, and the training log-ratio maximum was zero.
 
-Initial and updated publication took 178 and 279 seconds. The replay update
-took 67 seconds; checkpoint save and restore took 671 and 623 seconds. Serving
-used a 128-token maximum context and GPU memory utilization 0.58. These timings
-do not measure long-context generation or steady-state rollout throughput.
+| Cycle measurement | 256 H100 | 64 GB200 |
+| --- | ---: | ---: |
+| Trajectories | 8 | 4 |
+| Host-memory request per node (GiB) | 768 | 928 |
+| vLLM GPU memory utilization | 0.58 | 0.30 |
+| Initial / updated publication (seconds) | 177.502 / 278.934 | 148.362 / 186.829 |
+| Replay update (seconds) | 66.923 | 44.486 |
+| Checkpoint save / restore (seconds) | 670.900 / 622.969 | 665.648 / 1,047.910 |
+| Router gradient norm | 4.185 | 5.287 |
 
-The serving/training log-probability gap was 0.3623 maximum and 0.0324 mean.
-This cycle establishes the training and publication lifecycle; cross-backend
-numerical qualification remains open. A GB200 cycle reached checkpoint restore
-but exceeded its 768-GiB host-memory guard during optimizer offload before the
-second publication. Its full lifecycle is not yet qualified.
+Both used six-token prompts and a 128-token maximum serving context. These
+timings do not measure long-context generation or steady-state rollout
+throughput. An earlier GB200 cycle exceeded its 768-GiB host-memory guard during
+optimizer offload after restore. The successful run used 928 GiB/node and the
+pinned-staging and publication lifetime fixes described below.
+
+The serving/training log-probability gap was 0.3623 maximum and 0.0324 mean on
+H100, and 0.0507 maximum and 0.0174 mean on GB200. These use different batches
+and source revisions, so they are not a matched hardware comparison. An
+additional GB200 diagnostic replayed the original rollout's prompt routes as
+well as response routes; its gap was 0.0233 maximum and 0.0104 mean. Restoring
+response-only replay reproduced the original scores exactly before training.
+These cycles establish the training and publication lifecycle; cross-backend
+numerical qualification remains open.
 
 The successful H100 report is `full-cycle-h100-a6/report.json` under the S3
 prefix above, from SkyRL `bf37e425` and vLLM `9ff94e459611`. Its source bundle,
 launch arguments, and focused memory-lifetime regressions are under
 `evidence/bf37e425/`.
+The successful GB200 report is `full-cycle-gb200-a4/report.json`, from SkyRL
+`00625398` and the same vLLM revision. Its source bundle and launch arguments
+are under `evidence/00625398-prefix/`. The report includes per-token scores and
+both response-only and full-prefix routes for further numerical diagnosis.
 
 The port lives in two modules:
 
