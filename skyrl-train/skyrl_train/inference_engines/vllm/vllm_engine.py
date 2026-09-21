@@ -1002,6 +1002,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
     """Base class containing shared logic between sync and async VLLM engines."""
 
     def __init__(self, *args, bundle_indices: list = None, **kwargs):
+        rendezvous_port_reservation = kwargs.pop("rendezvous_port_reservation", None)
+        if rendezvous_port_reservation is not None:
+            ray.get(rendezvous_port_reservation.release.remote())
         setup_envvars_for_vllm(kwargs, bundle_indices)
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
         logger.info(

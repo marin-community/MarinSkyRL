@@ -16,6 +16,7 @@ from skyrl_train.inference_engines.utils import (
     _RENDEZVOUS_PORT_STOP,
     _find_available_rendezvous_port,
     _find_available_rendezvous_ports,
+    _reserve_available_rendezvous_ports,
     postprocess_completion_request,
     route_prompts_to_engines,
     hash_with_sha256,
@@ -55,6 +56,22 @@ def test_rendezvous_ports_are_distinct_and_respect_exclusions(monkeypatch):
     ports = _find_available_rendezvous_ports(3, excluded_ports=[_RENDEZVOUS_PORT_START])
 
     assert ports == [_RENDEZVOUS_PORT_START + 1, _RENDEZVOUS_PORT_START + 2, _RENDEZVOUS_PORT_START + 3]
+
+
+def test_rendezvous_port_reservations_hold_ports_until_released(monkeypatch):
+    monkeypatch.setattr("skyrl_train.inference_engines.utils.random.shuffle", lambda _ports: None)
+    reservations = _reserve_available_rendezvous_ports(2)
+    ports = [reservation.getsockname()[1] for reservation in reservations]
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as contender:
+        with pytest.raises(OSError):
+            contender.bind(("", ports[0]))
+
+    for reservation in reservations:
+        reservation.close()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as contender:
+        contender.bind(("", ports[0]))
 
 
 class _CommunicatorEngine:

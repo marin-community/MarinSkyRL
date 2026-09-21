@@ -565,14 +565,16 @@ def create_ray_wrapped_inference_engines(
         if data_parallel_size > 1:
             _validate_node_local_dp_ranks(i, engine_pg, dp_rank_bundle_indices)
 
-        data_parallel_address, rendezvous_ports = get_rendezvous_addr_ports(
-            engine_pg,
-            dp_rank_bundle_indices[0],
-            port_count=1 + VLLM_DATA_PARALLEL_MASTER_PORT_COUNT,
-            excluded_ports=allocated_rendezvous_ports,
-        )
-        data_parallel_rpc_port, *data_parallel_master_ports = rendezvous_ports
-        allocated_rendezvous_ports.update(rendezvous_ports)
+        rendezvous_reservation = None
+        if data_parallel_size > 1:
+            data_parallel_address, rendezvous_ports, rendezvous_reservation = get_rendezvous_addr_ports(
+                engine_pg,
+                dp_rank_bundle_indices[0],
+                port_count=1 + VLLM_DATA_PARALLEL_MASTER_PORT_COUNT,
+                excluded_ports=allocated_rendezvous_ports,
+            )
+            data_parallel_rpc_port, *data_parallel_master_ports = rendezvous_ports
+            allocated_rendezvous_ports.update(rendezvous_ports)
 
         if backend == "vllm":
             if async_engine:
@@ -639,6 +641,8 @@ def create_ray_wrapped_inference_engines(
                 )
                 if async_engine and data_parallel_size > 1:
                     dp_kwargs["data_parallel_master_ports"] = data_parallel_master_ports
+                if dp_rank == 0 and rendezvous_reservation is not None:
+                    dp_kwargs["rendezvous_port_reservation"] = rendezvous_reservation
 
                 # The mp executor's TP workers exchange custom-all-reduce IPC handles
                 # under the Ray-actor placement + remapped CUDA_VISIBLE_DEVICES; vLLM's
