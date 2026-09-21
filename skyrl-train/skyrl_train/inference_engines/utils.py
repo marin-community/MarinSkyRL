@@ -1,4 +1,5 @@
 from collections.abc import Collection
+from dataclasses import dataclass
 from typing import Dict, Any, Optional, Union
 import random
 import hashlib
@@ -9,6 +10,7 @@ from typing import List
 from http import HTTPStatus
 from typing import Tuple
 import ray
+from ray.actor import ActorHandle
 from ray.util.placement_group import PlacementGroupSchedulingStrategy
 
 VLLM_DATA_PARALLEL_MASTER_PORT_COUNT = 5
@@ -266,16 +268,6 @@ def get_pg_bundle_node_ips(placement_group, pg_indices: Collection[int]) -> List
     return list(ray.get(refs))
 
 
-def _find_available_rendezvous_ports(port_count: int, excluded_ports: Collection[int] = ()) -> list[int]:
-    ports: list[int] = []
-    unavailable_ports = set(excluded_ports)
-    for _ in range(port_count):
-        port = _find_available_rendezvous_port(unavailable_ports)
-        ports.append(port)
-        unavailable_ports.add(port)
-    return ports
-
-
 def _reserve_available_rendezvous_ports(port_count: int, excluded_ports: Collection[int] = ()) -> list[socket.socket]:
     sockets: list[socket.socket] = []
     unavailable_ports = set(excluded_ports)
@@ -309,12 +301,21 @@ class RendezvousPortReservation:
         self._sockets.clear()
 
 
+@dataclass(frozen=True)
+class ReservedRendezvousPorts:
+    """Node-local ports held until the inference engine starts listening."""
+
+    address: str
+    ports: tuple[int, ...]
+    reservation: ActorHandle
+
+
 def get_rendezvous_addr_ports(
     placement_group,
     pg_index: int,
     port_count: int,
     excluded_ports: Collection[int] = (),
-) -> Tuple[str, list[int], Any]:
+) -> ReservedRendezvousPorts:
     """Reserve rendezvous ports on the node containing a placement-group bundle."""
 
     master_sched = PlacementGroupSchedulingStrategy(
@@ -324,4 +325,4 @@ def get_rendezvous_addr_ports(
     )
     reservation = RendezvousPortReservation.options(scheduling_strategy=master_sched).remote(port_count, excluded_ports)
     address, ports = ray.get(reservation.details.remote())
-    return address, ports, reservation
+    return ReservedRendezvousPorts(address=address, ports=tuple(ports), reservation=reservation)

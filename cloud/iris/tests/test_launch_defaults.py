@@ -851,7 +851,7 @@ generator:
 
     assert source_uri == "hf://laion/snowball-64k-eagle3-draft-r2egym"
     assert staged_revision == revision
-    assert re.fullmatch(r"/tmp/marinskyrl-draft-models/[0-9a-f]{64}", local_path)
+    assert re.fullmatch(r"/tmp/marinskyrl/draft_models/[0-9a-f]{64}", local_path)
     assert set(options["--draft-model-cache-ttl-days"]) == {"7"}
     assert set(options["--draft-model-cache-source-prefix"]) == {args.storage_paths.checkpoint_root}
     assert any(

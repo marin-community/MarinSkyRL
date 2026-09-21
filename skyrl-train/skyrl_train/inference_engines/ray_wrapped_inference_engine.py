@@ -385,6 +385,9 @@ def create_ray_wrapped_inference_engines(
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
+    if backend == "vllm" and data_parallel_size > 1 and not async_engine:
+        raise ValueError("vLLM data-parallel rollout engines require async_engine=True")
+
     inference_engine_actors = []
     weight_sync_relative_rank_offsets = []
     # Qwen3.5/3.6 VLM-shell rollout (tmax Stage 2): materialize the text tower only
@@ -567,14 +570,16 @@ def create_ray_wrapped_inference_engines(
 
         rendezvous_reservation = None
         if data_parallel_size > 1:
-            data_parallel_address, rendezvous_ports, rendezvous_reservation = get_rendezvous_addr_ports(
+            rendezvous = get_rendezvous_addr_ports(
                 engine_pg,
                 dp_rank_bundle_indices[0],
                 port_count=1 + VLLM_DATA_PARALLEL_MASTER_PORT_COUNT,
                 excluded_ports=allocated_rendezvous_ports,
             )
-            data_parallel_rpc_port, *data_parallel_master_ports = rendezvous_ports
-            allocated_rendezvous_ports.update(rendezvous_ports)
+            data_parallel_address = rendezvous.address
+            data_parallel_rpc_port, *data_parallel_master_ports = rendezvous.ports
+            rendezvous_reservation = rendezvous.reservation
+            allocated_rendezvous_ports.update(rendezvous.ports)
 
         if backend == "vllm":
             if async_engine:
@@ -639,7 +644,7 @@ def create_ray_wrapped_inference_engines(
                     if data_parallel_size > 1
                     else {}
                 )
-                if async_engine and data_parallel_size > 1:
+                if data_parallel_size > 1:
                     dp_kwargs["data_parallel_master_ports"] = data_parallel_master_ports
                 if dp_rank == 0 and rendezvous_reservation is not None:
                     dp_kwargs["rendezvous_port_reservation"] = rendezvous_reservation

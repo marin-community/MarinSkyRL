@@ -42,7 +42,7 @@ import threading
 import time
 import uuid
 from typing import Protocol
-from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize
+from cloud.iris.artifacts import ArtifactSource, file_inventory, fs_and_path, materialize
 from cloud.iris.hf_model_cache import (
     CachedHuggingFaceModel,
     download_hugging_face_snapshot,
@@ -448,11 +448,8 @@ def stage_draft_model(
         return
 
     if os.path.isabs(model.source_uri):
-        names = {
-            os.path.relpath(os.path.join(root, filename), model.source_uri)
-            for root, _, filenames in os.walk(model.source_uri)
-            for filename in filenames
-        }
+        filesystem, root = fs_and_path(model.source_uri)
+        names = {entry.path for _, entry in file_inventory(filesystem, root)}
         validate_hf_model_weights(names, model.source_uri)
         return
 
