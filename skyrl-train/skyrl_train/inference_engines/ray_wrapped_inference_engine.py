@@ -502,30 +502,9 @@ def create_ray_wrapped_inference_engines(
     # Per-engine STRICT_PACK forces every engine's bundles onto ONE node (a STRICT_PACK
     # PG is atomic-per-node), restoring the intended "TP=4 = one 4-GPU node, on-node
     # NVLink all-reduce" guarantee. Bundle indices become engine-local (0..n-1).
-    #
-    # *** PLACEMENT-PG-STARVATION FIX (gate STRICT_PACK on tp_pp_size > 1) ***
-    # The per-engine STRICT_PACK above is only NEEDED when an engine owns >1 GPU
-    # (TP>1 or PP>1) — that's the only case with an on-node TP/PP all-reduce to
-    # protect. For TP==PP==1 (single-GPU engines, e.g. lever1's 16 TP=1 engines and
-    # swesmith's 48), each engine is ONE {GPU:1} bundle, so there is no intra-engine
-    # all-reduce to keep on-node, and STRICT_PACK is actively HARMFUL: N independent
-    # 1-bundle STRICT_PACK PGs scatter round-robin across nodes, leaving every node
-    # PARTIALLY used. The downstream policy/ref worker PG (worker.py:_initiate_actors,
-    # `placement_group([{GPU:4,CPU:4}]*policy_num_nodes, strategy="PACK")`) then can't
-    # find its required whole 4-GPU nodes and dies with
-    # `RuntimeError: Failed to create placement group (2 bundles, 8 GPUs) in 180s`
-    # (confirmed: lever1 924882 / swesmith 924888, both multi-node TP=1, post-e5f0ff5).
-    # A flat PACK over all single-GPU bundles packs them DENSELY (fills whole nodes,
-    # leaves whole nodes free), so the policy PACK PG gets its nodes. So: TP==PP==1 ->
-    # restore the original flat PACK; TP*PP>1 -> per-engine STRICT_PACK.
-    # NOTE: the gate is `tp_pp_size > 1`, NOT `per_engine_gpu_count > gpus_per_node` —
-    # #232 is TP=4 on 4-GPU nodes (4 is NOT > 4), which the latter would wrongly send
-    # down the flat-PACK path and re-break the cross-node-TP-split bug.
-    # For the multi-GPU-engine ray/uni case that could still scatter densely-packed
-    # engines onto partially-used nodes (e.g. TP=2 on 4-GPU nodes), the policy PG is
-    # protected independently by the `placement.policy_strict_spread_pg` reserve-first
-    # mechanism (main_base.get_policy_pg), which claims the policy's whole nodes BEFORE
-    # these engine PGs are created.
+    # Multi-GPU engine ranks exchange collectives and must remain node-local. A
+    # single-GPU engine instead shares one flat PACK group so rollout allocation
+    # does not fragment nodes needed by the policy workers.
     per_engine_pgs: list = []
     use_per_engine_strict_pack = use_per_engine_strict_pack_pg(
         use_hybrid_engine=use_hybrid_engine,
@@ -647,19 +626,18 @@ def create_ray_wrapped_inference_engines(
                     # (vLLM forks its workers locally, no per-worker Ray actors). It must land
                     # in ONE bundle holding tp_pp_size GPUs, so the mp PACK PG (built above) is
                     # one {GPU: tp_pp_size} bundle per (engine, DP-rank) and this actor is pinned
-                    # to its own dedicated bundle (index = i*data_parallel_size + dp_rank). The
+                    # to its own dedicated bundle. The
                     # whole-slice bundle keeps all TP workers co-located on one node. bundle_indices
                     # stays None so vLLM does not attempt ray per-worker placement.
                     dp_rank_bundles = None
                     dp_rank_sched = PlacementGroupSchedulingStrategy(
                         placement_group=engine_pg,
                         placement_group_capture_child_tasks=True,
-                        placement_group_bundle_index=i * data_parallel_size + dp_rank,
+                        placement_group_bundle_index=base_dp_pg_index,
                     )
                 else:
                     if use_hybrid_engine:
                         dp_rank_bundles = colocated_engine_bundles[i * data_parallel_size + dp_rank]
-                        base_dp_pg_index = dp_rank_bundles[0]
                     dp_rank_sched = PlacementGroupSchedulingStrategy(
                         placement_group=engine_pg,
                         placement_group_capture_child_tasks=True,
@@ -763,7 +741,6 @@ def create_ray_wrapped_inference_engines(
             if per_engine_gpu_count > 1:
                 if use_hybrid_engine:
                     bundle_indices = colocated_engine_bundles[i * data_parallel_size]
-                    sglang_base_index = bundle_indices[0]
                 else:
                     bundle_indices = list(range(sglang_base_index, sglang_base_index + per_engine_gpu_count))
 
