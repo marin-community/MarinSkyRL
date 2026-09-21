@@ -31,7 +31,7 @@ from tests.gpu.test_grug_megatron import (
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("flash_attention_2", "flash_attention_4"), required=True)
-    parser.add_argument("--mode", choices=("full", "no_moe", "no_attention"), required=True)
+    parser.add_argument("--mode", choices=("full", "no_moe", "no_attention", "fixed_routes"), required=True)
     parser.add_argument("--window", type=int, default=2048)
     parser.add_argument("--prompt-length", type=int, default=2400)
     parser.add_argument("--response-length", type=int, default=300)
@@ -50,10 +50,14 @@ def main() -> None:
                 for layer in model.model.layers:
                     if args.mode == "no_attention":
                         layer.self_attn.o_proj.weight.zero_()
-                    else:
+                    elif args.mode == "no_moe":
                         for name in ("gate_proj", "up_proj", "down_proj"):
                             getattr(layer.mlp.experts, name).weight.zero_()
                             getattr(layer.shared_expert, name).weight.zero_()
+                    else:
+                        # Keep MoE arithmetic while removing top-k flips from small logit differences.
+                        layer.mlp.router.bias.fill_(-1000)
+                        layer.mlp.router.bias[:5] = torch.tensor([1000, 900, 800, 700, 600])
             model.save_pretrained(model_path, safe_serialization=True)
             del model
 
