@@ -43,6 +43,23 @@ context_budget:
     assert parsed.entrypoint == "skyrl_train.entrypoints.terminal_bench"
 
 
+def test_rl_config_resolves_taskcompendium_entrypoint(tmp_path):
+    config = tmp_path / "rl.yaml"
+    config.write_text(
+        """\
+entrypoint: taskcompendium
+context_budget:
+  request_window_tokens: 2
+  max_new_tokens_per_turn: 1
+  max_turns: 1
+"""
+    )
+
+    parsed = parse_rl_config(str(config))
+
+    assert parsed.entrypoint == "skyrl_train.entrypoints.taskcompendium"
+
+
 def test_rl_config_rejects_removed_opd_entrypoint(tmp_path):
     config = tmp_path / "rl.yaml"
     config.write_text(
@@ -185,6 +202,14 @@ def test_terminal_bench_config_group_is_packaged_with_the_trainer():
         cfg = compose(config_name="ppo_base_config", overrides=["+terminal_bench_config=terminal_bench"])
 
     assert cfg.get("terminal_bench_config") is not None
+
+
+def test_taskcompendium_config_group_is_packaged_with_the_trainer():
+    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
+        cfg = compose(config_name="ppo_base_config", overrides=["+taskcompendium_config=taskcompendium"])
+
+    assert cfg.taskcompendium_config.concurrency == 8
+    assert cfg.taskcompendium_config.archive_uri is None
 
 
 def test_terminal_bench_launcher_overrides_compose_with_packaged_group():
