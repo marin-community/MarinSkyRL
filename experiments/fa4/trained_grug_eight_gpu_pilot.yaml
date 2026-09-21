@@ -38,6 +38,11 @@ trainer:
       context_parallel_size: 1
       expert_model_parallel_size: 4
       expert_tensor_parallel_size: 1
+      # Fit the optimizer on eight colocated GB200s; timings are not representative.
+      optimizer_config_kwargs:
+        optimizer_cpu_offload: true
+        optimizer_offload_fraction: 1.0
+        use_precision_aware_optimizer: true
       optimizer_checkpoint_sharding_type: dp_reshardable
       ddp_config:
         overlap_grad_reduce: true
