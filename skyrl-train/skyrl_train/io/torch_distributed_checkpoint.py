@@ -29,6 +29,7 @@ DEFAULT_TENSOR_COPY_AHEAD_BYTES = 2**30
 DEFAULT_S3_MULTIPART_PART_BYTES = 64 * 2**20
 DEFAULT_S3_MULTIPART_CONCURRENCY = 4
 _MINIMUM_S3_MULTIPART_PART_BYTES = 5 * 2**20
+_S3_MULTIPART_PART_MAX_ATTEMPTS = 2
 
 
 @runtime_checkable
@@ -207,7 +208,7 @@ class _ConcurrentS3WriteStream:
                 self.filesystem,
                 self.filesystem.call_s3,
                 "upload_part",
-                max_attempts=2,
+                max_attempts=_S3_MULTIPART_PART_MAX_ATTEMPTS,
                 Bucket=self.bucket,
                 Key=self.key,
                 UploadId=self._upload_id,
