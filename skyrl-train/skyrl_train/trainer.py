@@ -585,7 +585,7 @@ class RayPPOTrainer:
                 self._control.should_evaluate = False
         finally:
             if self.colocate_all:
-                await self.inference_engine_client.sleep()
+                await self._sleep_inference_engines()
                 self.policy_model.backload_to_gpu()
 
             # The interval save may have just written this same step; do not write it twice.
@@ -603,7 +603,7 @@ class RayPPOTrainer:
             await asyncio.to_thread(self.save_checkpoints)
             return
 
-        await self.inference_engine_client.sleep()
+        await self._sleep_inference_engines()
         try:
             self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
             await asyncio.to_thread(self.save_checkpoints)
@@ -656,12 +656,20 @@ class RayPPOTrainer:
             self._control.should_evaluate = False
 
     async def _sync_weights_and_restore_rollout_residency(self) -> None:
-        await self.inference_engine_client.wake_up(tags=["weights"])
+        await self._wake_inference_engines(tags=["weights"])
         with Timer("sync_weights", self.all_timings):
             ray.get(self.sync_policy_weights_to_inference_engines())
         with Timer("offload_policy_model_to_cpu", self.all_timings):
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
-        await self.inference_engine_client.wake_up(tags=["kv_cache"])
+        await self._wake_inference_engines(tags=["kv_cache"])
+
+    async def _sleep_inference_engines(self) -> None:
+        with Timer("inference_engine_sleep", self.all_timings):
+            await self.inference_engine_client.sleep()
+
+    async def _wake_inference_engines(self, *, tags: list[str]) -> None:
+        with Timer("inference_engine_wake", self.all_timings):
+            await self.inference_engine_client.wake_up(tags=tags)
 
     async def _start_draft_trainer(self) -> None:
         """Start the independent one-GPU draft trainer when online updates are enabled."""
@@ -1113,7 +1121,7 @@ class RayPPOTrainer:
 
                     if self.colocate_all:
                         # if we are not continuing sampling, we sleep the inference engine
-                        await self.inference_engine_client.sleep()
+                        await self._sleep_inference_engines()
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_trajectory_batch", self.all_timings):
