@@ -480,14 +480,17 @@ class BasePPOExp:
         trajectory_runner: TrajectoryRunner,
         colocate_pg,
     ):
-        """Initializes the trainer.
+        """Initialize the trainer for the schedule this entrypoint reports.
 
         Returns:
-            RayPPOTrainer: The trainer.
+            RayPPOTrainer: The synchronous trainer, or FullyAsyncRayPPOTrainer when
+            ``uses_fully_async_trainer()`` is true.
         """
+        from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer  # noqa: PLC0415
         from skyrl_train.trainer import RayPPOTrainer  # noqa: PLC0415
 
-        return RayPPOTrainer(
+        trainer_cls = FullyAsyncRayPPOTrainer if self.uses_fully_async_trainer() else RayPPOTrainer
+        return trainer_cls(
             cfg=cfg,
             tracker=tracker,
             tokenizer=tokenizer,

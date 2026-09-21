@@ -43,7 +43,7 @@ class RLEntrypoint(StrEnum):
     """Execution modes supported by Iris RL configurations."""
 
     FULLY_ASYNC = "fully_async"
-    FULLY_ASYNC_GYM = "fully_async_gym"
+    FULLY_ASYNC_IN_PROCESS = "fully_async_in_process"
     GENERATE = "generate"
     MINI_SWE = "mini_swe"
     STANDARD = "standard"
@@ -53,7 +53,7 @@ class RLEntrypoint(StrEnum):
 
 RL_ENTRYPOINT_MODULES = {
     RLEntrypoint.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async",
-    RLEntrypoint.FULLY_ASYNC_GYM: "skyrl_train.entrypoints.fully_async_gym",
+    RLEntrypoint.FULLY_ASYNC_IN_PROCESS: "skyrl_train.entrypoints.fully_async_in_process",
     RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
     RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
     RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
