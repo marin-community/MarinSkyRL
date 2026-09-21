@@ -42,7 +42,7 @@ follow-up once each variant has a measured baseline.
 
 ## Launcher option surface
 
-Both variants are options on the existing launcher (colocated: #709, fully asynchronous: the companion PR) and default to today's behavior. The Hydra overrides for the
+Both variants are options on the existing launcher (colocated: #709, fully asynchronous: #710) and default to today's behavior. The Hydra overrides for the
 default remain byte-identical to `main` so the existing contract tests keep passing unchanged.
 
 ```
