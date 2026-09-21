@@ -14,7 +14,10 @@ samples="${8:-10}"
 window_right="${9:-0}"
 reference="${10:-}"
 
-uv sync --frozen --extra vllm --extra megatron --group dev
+if [[ -z "${FA4_RUNTIME_PYTHON:-}" ]]; then
+    uv sync --frozen --extra vllm --extra megatron --group dev
+    FA4_RUNTIME_PYTHON=.venv/bin/python
+fi
 output_dir="${IRIS_OUTPUT_DIR:-/tmp}"
 common_env=(NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=2 NVTE_FUSED_ATTN=0 NVTE_UNFUSED_ATTN=0 NVTE_FLASH_ATTN=1 NVTE_FLASH_ATTN_V3=0)
 common_args=(
@@ -28,8 +31,8 @@ elif [[ -n "$reference" ]]; then
     echo "unknown reference mode: $reference" >&2
     exit 2
 fi
-env "${common_env[@]}" NVTE_FLASH_ATTN_V2=1 NVTE_FLASH_ATTN_V4=0 timeout 900 .venv/bin/python \
+env "${common_env[@]}" NVTE_FLASH_ATTN_V2=1 NVTE_FLASH_ATTN_V4=0 timeout 900 "$FA4_RUNTIME_PYTHON" \
     experiments/fa4/probe_attention.py --output "$output_dir/fa2-attention.pt" "${common_args[@]}"
-env "${common_env[@]}" NVTE_FLASH_ATTN_V2=0 NVTE_FLASH_ATTN_V4=1 timeout 900 .venv/bin/python \
+env "${common_env[@]}" NVTE_FLASH_ATTN_V2=0 NVTE_FLASH_ATTN_V4=1 timeout 900 "$FA4_RUNTIME_PYTHON" \
     experiments/fa4/probe_attention.py --output "$output_dir/fa4-attention.pt" "${common_args[@]}"
-.venv/bin/python experiments/fa4/compare_attention.py "$output_dir/fa2-attention.pt" "$output_dir/fa4-attention.pt"
+"$FA4_RUNTIME_PYTHON" experiments/fa4/compare_attention.py "$output_dir/fa2-attention.pt" "$output_dir/fa4-attention.pt"
