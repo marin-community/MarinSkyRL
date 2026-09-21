@@ -20,7 +20,7 @@ from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
 from skyrl_train.inference_engines.utils import (
     VLLM_DATA_PARALLEL_MASTER_PORT_COUNT,
     get_pg_bundle_node_ips,
-    get_rendezvous_addr_ports,
+    reserve_rendezvous_ports,
 )
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
 from skyrl_train.env_vars import EnvVarScope, VLLM_USE_V2_MODEL_RUNNER_ENV, managed_environment_names
@@ -570,7 +570,7 @@ def create_ray_wrapped_inference_engines(
 
         rendezvous_reservation = None
         if data_parallel_size > 1:
-            rendezvous = get_rendezvous_addr_ports(
+            rendezvous = reserve_rendezvous_ports(
                 engine_pg,
                 dp_rank_bundle_indices[0],
                 port_count=1 + VLLM_DATA_PARALLEL_MASTER_PORT_COUNT,

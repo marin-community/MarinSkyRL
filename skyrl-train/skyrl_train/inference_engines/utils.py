@@ -293,6 +293,7 @@ class RendezvousPortReservation:
         self._sockets = _reserve_available_rendezvous_ports(port_count, excluded_ports)
 
     def details(self) -> Tuple[str, list[int]]:
+        """Return the node IP address and held port numbers."""
         return ray.util.get_node_ip_address(), [reserved.getsockname()[1] for reserved in self._sockets]
 
     def release(self) -> None:
@@ -310,7 +311,7 @@ class ReservedRendezvousPorts:
     reservation: ActorHandle
 
 
-def get_rendezvous_addr_ports(
+def reserve_rendezvous_ports(
     placement_group,
     pg_index: int,
     port_count: int,

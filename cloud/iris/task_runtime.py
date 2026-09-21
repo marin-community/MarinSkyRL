@@ -447,10 +447,10 @@ def stage_draft_model(
         )
         return
 
-    if os.path.isabs(model.source_uri):
-        filesystem, root = fs_and_path(model.source_uri)
+    if model.local_source_path is not None:
+        filesystem, root = fs_and_path(model.local_source_path)
         names = {entry.path for _, entry in file_inventory(filesystem, root)}
-        validate_hf_model_weights(names, model.source_uri)
+        validate_hf_model_weights(names, model.local_source_path)
         return
 
     source = ArtifactSource(uri=model.source_uri, identity=model.source_identity, local_path=local_path)

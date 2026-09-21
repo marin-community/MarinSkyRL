@@ -276,16 +276,6 @@ def _run_create(monkeypatch, dcp: int, attention_backend: str | None = None):
 
     monkeypatch.setattr(rwie.ray, "get", fake_ray_get)
     monkeypatch.setattr(rwie, "wait_for_inference_engine_startup", lambda *a, **k: None)
-    # DP engines reserve their rendezvous ports before actor startup.
-    monkeypatch.setattr(
-        rwie,
-        "get_rendezvous_addr_ports",
-        lambda pg, idx, port_count, excluded_ports=(): (
-            "127.0.0.1",
-            list(range(12345, 12345 + port_count)),
-            None,
-        ),
-    )
     # The real RayWrappedInferenceEngine wrapper is trivial (it only stores the actor
     # handle as .inference_engine_actor), so use it unmocked — the readiness gate reads
     # engine.inference_engine_actor off it.

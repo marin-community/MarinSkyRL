@@ -7,7 +7,6 @@ from enum import StrEnum
 import math
 import os
 import re
-import tempfile
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
@@ -17,7 +16,7 @@ from marinskyrl.resource_locator import is_cloud_uri, is_hugging_face_repo_id
 
 _HF_SOURCE_SCHEME = "hf"
 _HF_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
-_DRAFT_MODEL_ROOT = os.path.join(tempfile.gettempdir(), "marinskyrl", "draft_models")
+_DRAFT_MODEL_ROOT = "/tmp/marinskyrl/draft_models"
 STANDARD_TRAINING_ENTRYPOINT = "skyrl_train.entrypoints.main_base"
 
 
@@ -143,10 +142,15 @@ class SpeculatorModelConfig:
     def hugging_face_repo_id(self) -> str | None:
         return hugging_face_repo_from_source_uri(self.source_uri)
 
+    @property
+    def local_source_path(self) -> str | None:
+        """Return the source path when this model already exists locally."""
+        return self.source_uri if os.path.isabs(self.source_uri) else None
+
     def node_local_path(self) -> str:
         """Return the standard node-local location for this immutable source."""
-        if os.path.isabs(self.source_uri):
-            return self.source_uri
+        if self.local_source_path is not None:
+            return self.local_source_path
         return os.path.join(
             _DRAFT_MODEL_ROOT,
             immutable_model_cache_key(self.source_uri, self.source_identity),
@@ -154,8 +158,8 @@ class SpeculatorModelConfig:
 
     def vllm_source_config(self) -> dict[str, Any]:
         """Return the vLLM fields needed to load this draft source."""
-        if os.path.isabs(self.source_uri):
-            return {"model": self.source_uri}
+        if self.local_source_path is not None:
+            return {"model": self.local_source_path}
         if model_id := self.hugging_face_repo_id:
             return {"model": model_id, "revision": self.source_identity}
         return {

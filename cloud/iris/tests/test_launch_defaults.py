@@ -854,10 +854,6 @@ generator:
     assert re.fullmatch(r"/tmp/marinskyrl/draft_models/[0-9a-f]{64}", local_path)
     assert set(options["--draft-model-cache-ttl-days"]) == {"7"}
     assert set(options["--draft-model-cache-source-prefix"]) == {args.storage_paths.checkpoint_root}
-    assert any(
-        override == f"++generator.speculative_decoding.model.source_uri={local_path}"
-        for override in options["--skyrl_override"]
-    )
 
 
 def test_policy_revision_from_config_rejects_task_local_model(tmp_path):

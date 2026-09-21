@@ -343,7 +343,7 @@ def _prepare_model(
     )
     from transformers import PreTrainedModel  # noqa: PLC0415
 
-    local_path = draft_model.source_uri if os.path.isabs(draft_model.source_uri) else None
+    local_path = draft_model.local_source_path
     pretrained_path = local_path or draft_model.hugging_face_repo_id
     if pretrained_path is not None:
         revision = None if local_path is not None else draft_model.source_identity
