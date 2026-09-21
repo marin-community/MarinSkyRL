@@ -138,6 +138,7 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         batch = rollout_training_batch(prompts, rollout)
         native = _score(policy, batch, torch.zeros_like(captured))
         replayed = _score(policy, batch, captured)
+        training_routes = captured
         full_prefix_diagnostic = None
         if os.environ.get("HERO_REPLAY_DIAGNOSTIC_FULL_ROUTES") == "1":
             full_routes = torch.tensor(rollout["all_routed_experts"], dtype=torch.int32)
@@ -179,7 +180,8 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
             assert transported_routes is not None
             torch.testing.assert_close(transported_routes.int(), full_routes, rtol=0, atol=0)
             full_prefix_scores = _score(policy, batch, transported_routes)
-            batch["rollout_routed_experts"] = captured
+            training_routes = transported_routes[:, -captured.shape[1] :]
+            torch.testing.assert_close(training_routes.int(), captured, rtol=0, atol=0)
             full_prefix_diagnostic = {
                 "captured_shape": list(full_routes.shape),
                 "response_logprobs": full_prefix_scores.tolist(),
@@ -214,6 +216,7 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         print("LIVE_HERO_REPLAY_SCORE_STATUS=" + json.dumps(score_diagnostic, sort_keys=True), flush=True)
         if result_uri:
             _put_s3_json(result_uri, score_diagnostic)
+        batch["rollout_routed_experts"] = training_routes
         batch["action_log_probs"] = replayed.float()
         status = _train_step(policy, batch)
         after = rank0_validation_snapshot(policy, names)

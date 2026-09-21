@@ -180,9 +180,20 @@ do not measure long-context generation or steady-state rollout throughput.
 
 The serving/training log-probability gap was 0.3623 maximum and 0.0324 mean.
 This cycle establishes the training and publication lifecycle; cross-backend
-numerical qualification remains open. A GB200 cycle reached checkpoint restore
-but exceeded its 768-GiB host-memory guard during optimizer offload before the
-second publication. Its full lifecycle is not yet qualified.
+numerical qualification remains open. A later 64-GB200 cycle (Megatron
+TP1/PP4/EP16/CP4, serving TP1/PP1/EP64/DP64) completed route replay, backward
+and one AdamW step, checkpoint save/restore, updated optimizer offload, updated
+weight publication, and final generation. Replay hit and executed-route match
+were both 1.0, and checked updated weights matched exactly. The full-prefix
+diagnostic reduced the serving/training log-probability gap from 0.0507 maximum
+and 0.0174 mean to 0.0233 maximum and 0.0104 mean. That residual remains a
+numerical qualification gap; the cycle proves the lifecycle, not parity.
+
+The successful GB200 report is
+`s3://marin-us-east-02a/marin/users/romain/hero-megatron-01a0bca4/full-cycle-gb200-a4/report.json`,
+from SkyRL `00625398` and vLLM `9ff94e459611`. It used the frozen query-bias
+policy. The older H100 cycle above remains useful layout evidence, but its
+larger aggregate gap is not a parity bound.
 
 The successful H100 report is `full-cycle-h100-a6/report.json` under the S3
 prefix above, from SkyRL `bf37e425` and vLLM `9ff94e459611`. Its source bundle,
@@ -324,9 +335,14 @@ gains come from the generator rather than the trainer.
 
 ## Query bias
 
-Only the frozen query-bias mode is supported on Megatron. The bias steers
-expert selection exactly as in the HF model but is never updated; the
-`loss_free`, `interpolate`, and `replace` modes remain FSDP2-only.
+Megatron supports the `frozen` and `loss_free` query-bias modes. Frozen bias
+steers expert selection exactly as in the HF model and is never updated. The
+`loss_free` mode requires Grug route replay so the worker can count the routes
+that actually executed; the update is applied after the optimizer step. The
+trained H100 replay gate covers this policy and observes a nonzero bias change.
+The full-Hero GB200 lifecycle above used frozen bias, so it does not qualify
+`loss_free` at 535B. The `interpolate` and `replace` quantile-balancing modes
+remain FSDP2-only.
 
 ## Validation
 
