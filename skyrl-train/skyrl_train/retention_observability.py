@@ -284,19 +284,31 @@ class GenerationRetentionObserver:
         self._last_published = float("-inf")
         self._stop_event: asyncio.Event | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._active_leases = 0
 
     def start(self) -> None:
-        """Start a bounded-cadence heartbeat on the current event loop."""
+        """Acquire a heartbeat lease on the current event loop.
 
-        if self._heartbeat_task is not None:
+        A trajectory runner can share one observer across many concurrent groups.
+        Keep the heartbeat alive until the last overlapping group releases it.
+        """
+
+        self._active_leases += 1
+        if self._active_leases > 1:
             return
-        self._stop_event = asyncio.Event()
-        self._heartbeat_task = asyncio.create_task(self._heartbeat())
+        stop_event = asyncio.Event()
+        self._stop_event = stop_event
+        self._heartbeat_task = asyncio.create_task(self._heartbeat(stop_event))
         self.publish(force=True, boundary="observer_started")
 
     async def stop(self) -> None:
-        """Publish the terminal snapshot and stop the heartbeat."""
+        """Release a heartbeat lease and stop after the last overlapping group."""
 
+        if self._active_leases == 0:
+            return
+        self._active_leases -= 1
+        if self._active_leases > 0:
+            return
         task = self._heartbeat_task
         stop_event = self._stop_event
         if task is None or stop_event is None:
@@ -304,14 +316,16 @@ class GenerationRetentionObserver:
         stop_event.set()
         await task
         self.publish(force=True, boundary="observer_stopped")
-        self._heartbeat_task = None
-        self._stop_event = None
+        # A new lease may have started while this coroutine awaited the old
+        # heartbeat. Never clear the replacement generation's task or event.
+        if self._heartbeat_task is task:
+            self._heartbeat_task = None
+            self._stop_event = None
 
-    async def _heartbeat(self) -> None:
-        assert self._stop_event is not None
-        while not self._stop_event.is_set():
+    async def _heartbeat(self, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=self._publish_interval_seconds)
+                await asyncio.wait_for(stop_event.wait(), timeout=self._publish_interval_seconds)
             except asyncio.TimeoutError:
                 self.publish(force=True)
 

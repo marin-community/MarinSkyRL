@@ -78,6 +78,56 @@ def test_retention_observer_preserves_representation_and_does_not_retain_groups(
     assert group_ref() is None
 
 
+@pytest.mark.asyncio
+async def test_retention_observer_keeps_heartbeat_for_overlapping_leases():
+    snapshots = []
+    observer = GenerationRetentionObserver(
+        publish_interval_seconds=3600,
+        publish=lambda snapshot, boundary: snapshots.append((snapshot, boundary)),
+    )
+
+    observer.start()
+    observer.start()
+
+    await observer.stop()
+
+    assert [boundary for _, boundary in snapshots] == ["observer_started"]
+
+    await observer.stop()
+
+    assert [boundary for _, boundary in snapshots] == ["observer_started", "observer_stopped"]
+
+
+@pytest.mark.asyncio
+async def test_retention_observer_restart_does_not_clear_new_heartbeat_generation():
+    snapshots = []
+
+    def publish(snapshot, boundary):
+        snapshots.append((snapshot, boundary))
+        if boundary == "observer_stopped" and sum(item == "observer_stopped" for _, item in snapshots) <= 2:
+            observer.start()
+
+    observer = GenerationRetentionObserver(
+        publish_interval_seconds=3600,
+        publish=publish,
+    )
+
+    observer.start()
+    observer.start()
+    await asyncio.gather(observer.stop(), observer.stop())
+    await observer.stop()
+    await observer.stop()
+
+    assert [boundary for _, boundary in snapshots] == [
+        "observer_started",
+        "observer_stopped",
+        "observer_started",
+        "observer_stopped",
+        "observer_started",
+        "observer_stopped",
+    ]
+
+
 def test_payload_estimator_is_bounded_and_preserves_deep_input():
     batch = _representative_trajectory_batch()
     batch["rollout_routed_experts"] = [[[list(range(16)) for _ in range(48)] for _ in range(256)] for _ in range(2)]
