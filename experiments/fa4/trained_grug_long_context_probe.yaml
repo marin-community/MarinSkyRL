@@ -1,4 +1,4 @@
-# Four 4xGB200 nodes, sixteen colocated GPUs. A 9,209-token request shape from
+# Four 4xGB200 nodes, sixteen colocated GPUs. A 9,172-token request shape from
 # snowball_megatron_full.yaml; this probe is smaller and colocated, so it is not
 # production throughput evidence.
 entrypoint: standard
