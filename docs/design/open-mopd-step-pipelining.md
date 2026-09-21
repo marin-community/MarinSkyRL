@@ -82,9 +82,11 @@ Facts from `skyrl_train/fully_async_trainer.py`, `entrypoints/fully_async.py`, a
 2. `generator.batched=false`, `generator.async_engine=true`, `colocate_all=false`.
 3. `num_parallel_generation_workers >= policy_mini_batch_size`. Start at `256 * (max_staleness_steps + 1)`, the
    example's convention.
-4. Staleness. Start with `max_staleness_steps=1`. The surrogate already clips the ratio against the learner's
-   pre-update logprobs; truncated importance sampling against the behavior (vLLM) logprobs corrects the remaining
-   gap and needs `sampling_params.logprobs` (already 16). Raising staleness is a measured decision, not a default.
+4. Staleness. `max_staleness_steps=1`. Behavior-logprob corrections (`use_tis`, `policy_loss_type=behavior_clip`)
+   are unavailable: `validate_cfg` requires full-distribution sampling for them and the recipe samples with nucleus
+   0.99, which is part of the method (the top-16 candidate set is taken after that truncation). The clipped
+   surrogate against the learner's pre-update logprobs is therefore the only guard, which is why the bound is one
+   update and raising it is a measured decision against the inline AIME gate, not a default.
 5. Trajectory runner. The existing `skyrl_train.entrypoints.fully_async` pairs the asynchronous trainer with the
    HTTP-backed SkyRL Gym runner. That runner's plain chat path re-tokenizes text and returns no logprobs and no
    student top-k candidates (`OpenAIHTTPModelClient.generate`, `token_provenance=RECONSTRUCTED`), and the entrypoint
@@ -93,7 +95,9 @@ Facts from `skyrl_train/fully_async_trainer.py`, `entrypoints/fully_async.py`, a
    The asynchronous variant therefore adds an entrypoint that pairs `FullyAsyncRayPPOTrainer` with the same
    in-process SkyRL Gym runner the synchronous run uses (capability mode `SKYRL_GYM`: exact sampled completion,
    runtime-validated action tokens). `entrypoints/terminal_bench.py` already pairs the asynchronous trainer with a
-   non-HTTP runner, so this follows an existing pattern rather than adding a new one.
+   non-HTTP runner, so this follows an existing pattern rather than adding a new one. The capability validator
+   gains a rule that `student_selected_topk` evidence requires exact sampled completions, so the HTTP entrypoint is
+   rejected before Ray starts instead of failing at the first teacher request.
 6. Teacher scoring queues: `trainer.fully_async.teacher_scoring.max_queued_per_teacher` and `workers_per_teacher`
    bound work per logical teacher. Defaults (8, 1) are the starting point.
 7. Prompt order. The schedule parquet is pre-weighted 2:2:1 and read with `data.shuffle=false`. The asynchronous
@@ -115,10 +119,14 @@ Facts from `config/ppo_base_config.yaml`, `marinskyrl/distillation.py`, and `doc
    are typed but not served by the runtime; making teachers share the pool is stage 2 and only if contained.
    `rotating` placement (three teachers through one drained residency slot) is served and is the cheaper way to
    free GPUs if stage 2 does not land.
-3. Pool sizing. With three pinned teachers the shared pool is five GPUs (`policy_num_gpus_per_node=5`,
-   `num_inference_engines=5`, TP 1). With rotating teachers it is seven. The PR states which and why.
+3. Pool sizing. The colocated PR uses the five-GPU pool with all three teachers pinned
+   (`policy_num_gpus_per_node=5`, `num_inference_engines=5`, TP 1). Teacher engines are launched with sleep
+   disabled and `CO_RESIDENT` is rejected by the runtime, so sharing GPUs with teachers is not a contained change;
+   rotating teachers (a seven-GPU pool) is the follow-up if the five-GPU pool leaves the update phase short of
+   memory or compute.
 4. Weight sync after each update goes engine-to-engine on the same GPUs; the `sync_weights_to_inference_engines`
-   timer captures it.
+   timer captures it. The colocated PR adds `timing/inference_engine_sleep` and `timing/inference_engine_wake`
+   around the synchronous trainer's engine transitions.
 
 ## Measurement plan
 
@@ -132,7 +140,7 @@ time on the same window. Every number below is already logged unless marked.
 | `timing/policy_train` | trainer timer | down (more learner GPUs) | unchanged |
 | `timing/wait_for_teacher_evidence` | trainer timer | unchanged | down (scoring overlaps) |
 | `timing/offload_policy_model_to_cpu`, `backload_policy_optimizer_to_gpu` | trainer timer | appear; must stay a few percent of step | absent |
-| vLLM sleep/wake | not logged; add | appear | absent |
+| `timing/inference_engine_sleep`, `timing/inference_engine_wake` | added by the colocated PR | appear; must stay a few percent of step | absent |
 | optimizer steps per hour | `global_step` over wall clock | up | up |
 | off-policy staleness | Grafana `rl_runs` "Off-policy staleness" | zero | bounded by `max_staleness_steps` |
 | `generate/tis/*` alignment | rollout metrics | unchanged | exact-match fraction stays ~1.0 |
