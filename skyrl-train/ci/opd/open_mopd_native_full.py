@@ -54,6 +54,13 @@ def placement_arguments(placement: Placement) -> tuple[str, ...]:
     raise ValueError(f"Unsupported Open-MOPD placement: {placement}")
 
 
+def _replace_overrides(base: list[str], replacements: tuple[str, ...]) -> tuple[str, ...]:
+    """Append ``replacements``, dropping any base override for the same key so no key repeats."""
+    replaced_keys = {override.split("=", 1)[0].lstrip("+") for override in replacements}
+    kept = [override for override in base if override.split("=", 1)[0].lstrip("+") not in replaced_keys]
+    return (*kept, *replacements)
+
+
 def hydra_arguments(
     data_path: Path,
     validation_path: Path,
@@ -164,8 +171,7 @@ def hydra_arguments(
             )
         )
     args.append("++teacher_routing.opd.revision=open-mopd-native-200step-v1")
-    args.extend(placement_arguments(placement))
-    return tuple(args)
+    return _replace_overrides(args, placement_arguments(placement))
 
 
 def stage_schedule(source_uri: str, destination: Path) -> None:
