@@ -111,6 +111,7 @@ ADDITIVE_GENERATOR_FIELDS = {
     "r3_transport": "decentral",
     "r3_dispatch_put_timeout_seconds": 600,
     "gdn_backend": "torch",
+    "weight_sync_pause_timeout_seconds": 30.0,
 }
 ADDITIVE_MODEL_FIELDS = {
     "source_uri": None,
