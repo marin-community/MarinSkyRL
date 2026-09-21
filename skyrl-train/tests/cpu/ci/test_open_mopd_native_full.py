@@ -153,3 +153,121 @@ def test_resume_requires_the_same_run_and_a_durable_checkpoint(monkeypatch, tmp_
     assert resumed.trainer.resume_mode == "latest"
     assert resumed.trainer.eval_interval == 2
     assert json.loads(filesystem.cat_file(manifest.removeprefix("s3://")))["status"] == "complete"
+
+
+def _compose(arguments):
+    with initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
+        return compose(config_name="ppo_base_config", overrides=list(arguments))
+
+
+def test_fully_async_schedule_keeps_the_per_prompt_cadence_of_the_synchronous_run():
+    common = (
+        Path("/data/schedule.parquet"),
+        Path("/data/aime24.parquet"),
+        "s3://bucket/users/operator/checkpoints",
+        "s3://bucket/users/operator/exports",
+    )
+    sync_arguments = MODULE.hydra_arguments(*common)
+    async_arguments = MODULE.hydra_arguments(*common, schedule=MODULE.Schedule.FULLY_ASYNC)
+
+    assert sync_arguments == MODULE.hydra_arguments(*common, schedule=MODULE.Schedule.SYNC)
+    keys = [override.split("=", 1)[0] for override in async_arguments]
+    assert len(keys) == len(set(keys))
+
+    sync_config = _compose(sync_arguments)
+    config = _compose(async_arguments)
+    validate_cfg(config)
+    updates_per_rollout_batch = sync_config.trainer.train_batch_size // sync_config.trainer.policy_mini_batch_size
+    assert config.trainer.train_batch_size == config.trainer.policy_mini_batch_size == 256
+    assert config.trainer.max_steps == sync_config.trainer.max_steps * updates_per_rollout_batch
+    assert (
+        config.trainer.ckpt_interval
+        == config.trainer.hf_save_interval
+        == config.trainer.eval_interval
+        == sync_config.trainer.ckpt_interval * updates_per_rollout_batch
+    )
+    assert config.trainer.fully_async.max_staleness_steps == 1
+    assert config.trainer.fully_async.num_parallel_generation_workers >= config.trainer.policy_mini_batch_size
+    assert config.generator.batched is False
+    assert config.generator.async_engine is True
+    assert config.trainer.placement.colocate_all is False
+    assert config.generator.sampling_params.top_p == sync_config.generator.sampling_params.top_p == 0.99
+    assert config.trainer.algorithm.use_tis is False
+    assert config.trainer.algorithm.distillation.objective == sync_config.trainer.algorithm.distillation.objective
+    assert config.trainer.max_ckpts_to_keep == -1
+
+
+def test_fully_async_schedule_needs_the_in_process_runner_for_student_selected_evidence():
+    from skyrl_train.config.trajectory_runner_capabilities import (
+        TrajectoryRunnerMode,
+        validate_trajectory_runner_capabilities,
+    )
+
+    config = _compose(
+        MODULE.hydra_arguments(
+            Path("/data/schedule.parquet"),
+            Path("/data/aime24.parquet"),
+            "s3://bucket/users/operator/checkpoints",
+            "s3://bucket/users/operator/exports",
+            schedule=MODULE.Schedule.FULLY_ASYNC,
+        )
+    )
+    validate_cfg(config)
+
+    validate_trajectory_runner_capabilities(config, TrajectoryRunnerMode.SKYRL_GYM)
+    with pytest.raises(ValueError, match="student-selected top-k teacher evidence"):
+        validate_trajectory_runner_capabilities(config, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM)
+    assert MODULE.ENTRYPOINT_MODULES[MODULE.Schedule.FULLY_ASYNC] == "skyrl_train.entrypoints.fully_async_gym"
+
+
+def test_resume_rejects_a_different_schedule(monkeypatch, tmp_path):
+    filesystem = fsspec.filesystem("memory")
+    prefix = "s3://bucket/users/open-mopd-schedule-test"
+    dataset = f"{prefix}/schedule.parquet"
+    validation = f"{prefix}/aime24.parquet"
+    checkpoints = f"{prefix}/checkpoints"
+    manifest = f"{prefix}/manifest.json"
+    monkeypatch.setattr(MODULE, "fs_and_path", lambda uri: (filesystem, uri.removeprefix("s3://")))
+    schedule_file = tmp_path / "schedule.parquet"
+    validation_file = tmp_path / "aime24.parquet"
+    pq.write_table(pa.table({"prompt": ["first", "second"]}), schedule_file, row_group_size=1)
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "prompt": [{"role": "user", "content": "1 + 0?"}],
+                    "env_class": "aime",
+                    "reward_model": {"ground_truth": "1"},
+                }
+            ]
+            * 30
+        ),
+        validation_file,
+    )
+    monkeypatch.setattr(MODULE, "SCHEDULE_SHA256", hashlib.sha256(schedule_file.read_bytes()).hexdigest())
+    monkeypatch.setattr(MODULE, "SCHEDULE_ROWS", 2)
+    monkeypatch.setattr(MODULE, "SCHEDULE_STEPS", 2)
+    validation_sha256 = hashlib.sha256(validation_file.read_bytes()).hexdigest()
+    sources = {dataset: schedule_file, validation: validation_file}
+    monkeypatch.setattr(MODULE.io, "download_file", lambda source, target: shutil.copyfile(sources[source], target))
+    commands = []
+    monkeypatch.setattr(
+        MODULE.subprocess, "run", lambda command, *, check: commands.append(command) or SimpleNamespace(returncode=1)
+    )
+    run = dict(
+        dataset_uri=dataset,
+        validation_uri=validation,
+        validation_sha256=validation_sha256,
+        checkpoint_uri=checkpoints,
+        export_uri=f"{prefix}/exports",
+        manifest_uri=manifest,
+        source_commit="pinned-commit",
+    )
+
+    assert MODULE.run(**run, schedule=MODULE.Schedule.FULLY_ASYNC) == 1
+    filesystem.pipe_file(f"{checkpoints.removeprefix('s3://')}/latest_ckpt_global_step.txt", b"8")
+    with pytest.raises(ValueError, match="identity differs"):
+        MODULE.run(**run, resume=True)
+    assert MODULE.run(**run, resume=True, schedule=MODULE.Schedule.FULLY_ASYNC) == 1
+    assert [command[2] for command in commands] == ["skyrl_train.entrypoints.fully_async_gym"] * 2
+    assert json.loads(filesystem.cat_file(manifest.removeprefix("s3://")))["schedule"] == "fully_async"

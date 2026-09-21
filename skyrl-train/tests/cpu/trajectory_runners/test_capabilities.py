@@ -210,3 +210,23 @@ def test_explicit_full_tito_accepts_exact_harbor_continuation(agent_name, versio
     cfg.trainer.algorithm.tito_full = True
 
     validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
+
+
+def _student_selected_topk(cfg):
+    cfg.trainer.algorithm.distillation.objective = "student_topk_policy_surrogate"
+    cfg.teachers.primary.evidence = "student_selected_topk"
+    cfg.teachers.primary.top_k = 16
+    return cfg
+
+
+def test_student_selected_evidence_rejects_runners_without_exact_sampled_completions(local_distillation_config):
+    cfg = _student_selected_topk(local_distillation_config(_skyrl_config(use_tis=False)))
+
+    with pytest.raises(ValueError, match="student-selected top-k teacher evidence"):
+        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM)
+
+
+def test_student_selected_evidence_accepts_the_in_process_skyrl_gym_runner(local_distillation_config):
+    cfg = _student_selected_topk(local_distillation_config(_skyrl_config(use_tis=False)))
+
+    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)

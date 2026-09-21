@@ -5,7 +5,7 @@ from enum import StrEnum
 
 from omegaconf import DictConfig
 
-from marinskyrl.distillation import compile_distillation_plan_from_config
+from marinskyrl.distillation import TeacherEvidenceKind, compile_distillation_plan_from_config
 
 from marinskyrl.harbor_agent_names import (
     DEFAULT_HARBOR_AGENT_NAME,
@@ -257,6 +257,10 @@ def validate_trajectory_runner_capabilities(
         if operation is not EntrypointOperation.TRAIN:
             raise ValueError("teacher-scored distillation is training-only and cannot be configured for generation")
         _validate_teacher_scoreable_tokens(capabilities)
+        # The teacher scores the exact candidate IDs the student ranked while sampling, so a
+        # runner that re-tokenizes text or drops the sampled top-k cannot feed this evidence.
+        if any(teacher.evidence is TeacherEvidenceKind.STUDENT_SELECTED_TOPK for teacher in distillation_plan.teachers):
+            _validate_exact_sampled_completion(capabilities, consumer="student-selected top-k teacher evidence")
 
     algorithm = cfg.trainer.algorithm
     behavior_logprobs_required = rollout_logprobs_enabled(algorithm)
