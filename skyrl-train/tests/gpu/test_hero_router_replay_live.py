@@ -1,7 +1,9 @@
 """Replay actual vLLM expert IDs through tiny or trained Hero updates."""
 
 import asyncio
+import base64
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -11,6 +13,7 @@ from urllib.parse import urlsplit
 
 import boto3
 from botocore.config import Config
+import numpy as np
 import pytest
 import ray
 from safetensors import safe_open
@@ -18,7 +21,12 @@ import torch
 
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 from skyrl_train.models.grug_moe import GrugMoeConfig
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    align_full_prefix_routes_to_trainer,
+    extract_full_prefix_routes_from_rollout_details,
+)
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.grug_serving import (
@@ -144,7 +152,37 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
                 model_config.num_hidden_layers,
                 model_config.num_experts_per_tok,
             )
-            full_prefix_scores = _score(policy, batch, full_routes)
+            harbor_routes = []
+            for prompt, response, routes in zip(prompts, rollout["response_ids"], full_routes.numpy(), strict=True):
+                buffer = BytesIO()
+                np.save(buffer, routes.astype(np.uint16), allow_pickle=False)
+                encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+                details = [
+                    {
+                        "prompt_token_ids": [prompt],
+                        "completion_token_ids": [response],
+                        "extra": {"routed_experts": [encoded]},
+                    }
+                ]
+                extracted = extract_full_prefix_routes_from_rollout_details(details)
+                assert extracted is not None
+                extracted_routes, served_tokens = extracted
+                harbor_routes.append(
+                    align_full_prefix_routes_to_trainer(extracted_routes, served_tokens, prompt + response)
+                )
+            transported = convert_prompts_responses_to_batch_tensors(
+                client.tokenizer,
+                prompts,
+                rollout["response_ids"],
+                [[0.0] * len(response) for response in rollout["response_ids"]],
+                [[1] * len(response) for response in rollout["response_ids"]],
+                routed_experts=harbor_routes,
+                num_experts=model_config.num_local_experts,
+            )
+            transported_routes = transported[6]
+            assert transported_routes is not None
+            torch.testing.assert_close(transported_routes.int(), full_routes, rtol=0, atol=0)
+            full_prefix_scores = _score(policy, batch, transported_routes)
             batch["rollout_routed_experts"] = captured
             full_prefix_diagnostic = {
                 "captured_shape": list(full_routes.shape),
