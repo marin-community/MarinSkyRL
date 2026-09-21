@@ -1,4 +1,4 @@
-# Two 4xGB200 nodes, eight colocated GPUs. Short sequences; not throughput evidence.
+# Four 4xGB200 nodes, sixteen colocated GPUs. Short sequences; not throughput evidence.
 entrypoint: standard
 context_budget:
   request_window_tokens: 512
@@ -18,8 +18,8 @@ trainer:
   epochs: 1
   max_steps: 1
   update_epochs_per_batch: 1
-  train_batch_size: 4
-  policy_mini_batch_size: 4
+  train_batch_size: 8
+  policy_mini_batch_size: 8
   eval_batch_size: 64
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
@@ -36,9 +36,9 @@ trainer:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 2
       context_parallel_size: 1
-      expert_model_parallel_size: 4
+      expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
-      # Fit the optimizer on eight colocated GB200s; timings are not representative.
+      # Fit the optimizer on sixteen colocated GB200s; timings are not representative.
       optimizer_config_kwargs:
         optimizer_cpu_offload: true
         optimizer_offload_fraction: 1.0
@@ -53,11 +53,11 @@ trainer:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 2
       context_parallel_size: 1
-      expert_model_parallel_size: 4
+      expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
   placement:
     colocate_all: true
-    policy_num_nodes: 2
+    policy_num_nodes: 4
     policy_num_gpus_per_node: 4
   attn_backend: flash_attention_2
   hf_save_interval: -1
@@ -66,8 +66,8 @@ generator:
   model_dtype: bfloat16
   vllm_attention_backend: FLASH_ATTN
   inference_engine_tensor_parallel_size: 1
-  inference_engine_data_parallel_size: 8
-  inference_engine_expert_parallel_size: 8
+  inference_engine_data_parallel_size: 16
+  inference_engine_expert_parallel_size: 16
   num_inference_engines: 1
   n_samples_per_prompt: 2
   gpu_memory_utilization: 0.75
