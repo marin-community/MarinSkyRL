@@ -132,18 +132,14 @@ def test_live_hero_routes_survive_recompute_and_update(tmp_path, monkeypatch) ->
         replayed = _score(policy, batch, captured)
         full_prefix_diagnostic = None
         if os.environ.get("HERO_REPLAY_DIAGNOSTIC_FULL_ROUTES") == "1":
-            direct = asyncio.run(
-                client.engines[0].generate(InferenceEngineInput(prompt_token_ids=prompts, sampling_params=sampling))
-            )
-            assert direct["response_ids"] == rollout["response_ids"]
-            assert direct["routed_experts"] == rollout["routed_experts"]
-            full_routes = torch.tensor(direct["all_routed_experts"], dtype=torch.int32)
+            full_routes = torch.tensor(rollout["all_routed_experts"], dtype=torch.int32)
             assert full_routes.shape == (
                 len(prompts),
                 len(prompts[0]) + len(rollout["response_ids"][0]) - 1,
                 model_config.num_hidden_layers,
                 model_config.num_experts_per_tok,
             )
+            assert torch.equal(full_routes[:, -captured.shape[1] :], captured)
             full_prefix_scores = _score(policy, batch, full_routes)
             batch["rollout_routed_experts"] = captured
             full_prefix_diagnostic = {

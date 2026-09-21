@@ -45,6 +45,24 @@ ABORT_FINISH_REASON = "abort"
 SESSION_ENGINE_MEMO_MAX_SIZE = 200_000
 
 
+def _validated_all_routed_experts(
+    full_routes: List[List[List[int]]],
+    response_routes: Optional[List[List[List[int]]]],
+    prompt_length: int,
+    response_length: int,
+) -> List[List[List[int]]]:
+    if response_routes is None:
+        raise ValueError("Full routed experts require response routed experts")
+    expected_length = prompt_length + response_length - 1
+    if len(full_routes) != expected_length:
+        raise ValueError(
+            f"Full routed experts have {len(full_routes)} rows; expected {expected_length} prediction positions"
+        )
+    if response_length and full_routes[-response_length:] != response_routes:
+        raise ValueError("Full routed experts do not end with the response routes")
+    return full_routes
+
+
 class InferenceEngineClient(InferenceEngineInterface):
     """
     Client to talk to a set of InferenceEngines.
@@ -332,6 +350,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         response_logprobs: List[Optional[List[float]]] = [None for _ in range(n)]
         response_ids: List[List[int]] = [[] for _ in range(n)]
         routed_experts: List[Optional[List[List[List[int]]]]] = [None for _ in range(n)]
+        all_routed_experts: List[Optional[List[List[List[int]]]]] = [None for _ in range(n)]
         prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
         student_topk_indices: List[Optional[List[List[int]]]] = [None for _ in range(n)]
         behavior_topk_logprobs: List[Optional[List[List[float]]]] = [None for _ in range(n)]
@@ -340,6 +359,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         add_prompt_logprobs = False
         add_student_topk = False
         add_routed_experts = False
+        add_all_routed_experts = False
 
         for indices, result in zip(indices_list, results):
             selected_ids = result.get("student_topk_indices")
@@ -351,10 +371,15 @@ class InferenceEngineClient(InferenceEngineInterface):
                     raise ValueError("Inference engine student top-K rows must align with responses")
                 add_student_topk = True
             captured_routes = result.get("routed_experts")
+            captured_all_routes = result.get("all_routed_experts")
             if captured_routes is not None:
                 if len(captured_routes) != len(indices):
                     raise ValueError("Inference engine routed-expert rows must align with responses")
                 add_routed_experts = True
+            if captured_all_routes is not None:
+                if len(captured_all_routes) != len(indices):
+                    raise ValueError("Inference engine full routed-expert rows must align with responses")
+                add_all_routed_experts = True
             for local_idx, original_idx in enumerate(indices):
                 responses[original_idx] = result["responses"][local_idx]
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
@@ -363,6 +388,13 @@ class InferenceEngineClient(InferenceEngineInterface):
                     if len(captured_routes[local_idx]) != len(response_ids[original_idx]):
                         raise ValueError("Inference engine routed-expert tokens must align with response tokens")
                     routed_experts[original_idx] = captured_routes[local_idx]
+                if captured_all_routes is not None:
+                    all_routed_experts[original_idx] = _validated_all_routed_experts(
+                        captured_all_routes[local_idx],
+                        captured_routes[local_idx] if captured_routes is not None else None,
+                        len(prompt_token_ids[original_idx]),
+                        len(response_ids[original_idx]),
+                    )
                 if result.get("response_logprobs", None):
                     add_resp_logprobs = True
                     response_logprobs[original_idx] = result["response_logprobs"][local_idx]
@@ -393,6 +425,10 @@ class InferenceEngineClient(InferenceEngineInterface):
             if any(routes is None for routes in routed_experts):
                 raise ValueError("Inference engine omitted routed experts for part of a batch")
             output["routed_experts"] = [routes for routes in routed_experts if routes is not None]
+        if add_all_routed_experts:
+            if any(routes is None for routes in all_routed_experts):
+                raise ValueError("Inference engine omitted full routed experts for part of a batch")
+            output["all_routed_experts"] = [routes for routes in all_routed_experts if routes is not None]
         return output
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> List[OnlineEagleResult]:
@@ -589,6 +625,18 @@ class InferenceEngineClient(InferenceEngineInterface):
             output["behavior_topk_logprobs"] = [accum_behavior_topk_logprobs]
         if saw_routed_experts:
             output["routed_experts"] = [accum_routed_experts]
+        if num_turns == 1 and partial_response.get("all_routed_experts") is not None:
+            all_routes = partial_response["all_routed_experts"]
+            if len(all_routes) != 1:
+                raise ValueError("Inference engine full routed experts must contain one row")
+            output["all_routed_experts"] = [
+                _validated_all_routed_experts(
+                    all_routes[0],
+                    accum_routed_experts if saw_routed_experts else None,
+                    len(original_prompt_ids),
+                    len(accum_response_ids),
+                )
+            ]
         return output
 
     async def _chat_completion_with_retry(
