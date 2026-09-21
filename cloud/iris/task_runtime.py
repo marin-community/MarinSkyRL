@@ -61,6 +61,7 @@ from marinskyrl.environment_contract import (
 from cloud.iris.model_paths import unsupported_model_path_message
 from cloud.iris.telemetry_env import telemetry_environment
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
+from marinskyrl.speculative_decoding import SpeculatorModelConfig
 from marinskyrl.distillation import TeacherModelSpec
 from marinskyrl.process_diagnostics import (
     ProcessOutcomeKind,
@@ -421,12 +422,45 @@ def materialize_model_export(source_uri: str, local_path: str, source_identity: 
     )
 
 
-def materialize_draft_model_export(source: ArtifactSource) -> None:
-    """Copy and validate an object-store EAGLE draft on this allocated node."""
+def stage_draft_model(
+    model: SpeculatorModelConfig,
+    *,
+    cache_ttl_days: int | None,
+    cache_source_prefix: str,
+) -> None:
+    """Make one immutable EAGLE draft available at its standard node-local path."""
+    local_path = model.node_local_path()
+    model_id = model.hugging_face_repo_id
+    if model_id is not None:
+        if cache_ttl_days is None or cache_ttl_days <= 0:
+            raise ValueError("--draft-model-cache-ttl-days must be positive for a Hugging Face draft model")
+        if not cache_source_prefix:
+            raise ValueError("--draft-model-cache-source-prefix is required for a Hugging Face draft model")
+        stage_cached_hugging_face_model(
+            CachedHuggingFaceModel(
+                model_id=model_id,
+                revision=model.source_identity,
+                local_path=local_path,
+            ),
+            ttl_days=cache_ttl_days,
+            source_prefix=cache_source_prefix,
+        )
+        return
+
+    if os.path.isabs(model.source_uri):
+        names = {
+            os.path.relpath(os.path.join(root, filename), model.source_uri)
+            for root, _, filenames in os.walk(model.source_uri)
+            for filename in filenames
+        }
+        validate_hf_model_weights(names, model.source_uri)
+        return
+
+    source = ArtifactSource(uri=model.source_uri, identity=model.source_identity, local_path=local_path)
     artifact = materialize(source, validate=validate_hf_model_weights)
     _log(
-        f"Draft model staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
-        f"({len(artifact.files)} files, identity={source.identity})"
+        f"Draft model staged on rank {_rank()}/{_num_tasks()}: {model.source_uri} -> {local_path} "
+        f"({len(artifact.files)} files, identity={model.source_identity})"
     )
 
 
@@ -2101,18 +2135,11 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         help="JSON list of local teacher model paths and immutable revisions to stage before Ray starts.",
     )
     parser.add_argument(
-        "--prestage-draft-model",
-        nargs=3,
+        "--draft-model",
+        nargs=2,
         default=None,
-        metavar=("MODEL_ID", "REVISION", "LOCAL_PATH"),
-        help="Immutable Hugging Face draft model to cache and materialize before Ray starts.",
-    )
-    parser.add_argument(
-        "--materialize-draft-model",
-        nargs=3,
-        default=None,
-        metavar=("SOURCE_URI", "SOURCE_IDENTITY", "LOCAL_PATH"),
-        help="Immutable object-store draft model to materialize before Ray starts.",
+        metavar=("SOURCE_URI", "SOURCE_IDENTITY"),
+        help="Immutable draft model to make available on every node before Ray starts.",
     )
     parser.add_argument(
         "--draft-model-cache-ttl-days",
@@ -2149,18 +2176,15 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         "--prestage-model or --model-local-path. Empty disables the override.",
     )
     args, train_argv = parser.parse_known_args(argv)
-    if args.prestage_draft_model is not None:
+    if args.draft_model is not None:
+        source_uri, source_identity = args.draft_model
         try:
-            args.prestage_draft_model = CachedHuggingFaceModel(*args.prestage_draft_model)
+            args.draft_model = SpeculatorModelConfig.from_mapping(
+                {"source_uri": source_uri, "source_identity": source_identity},
+                context="--draft-model",
+            )
         except ValueError as error:
             parser.error(str(error))
-    if args.materialize_draft_model is not None:
-        source_uri, source_identity, local_path = args.materialize_draft_model
-        args.materialize_draft_model = ArtifactSource(
-            uri=source_uri,
-            identity=source_identity,
-            local_path=local_path,
-        )
     # argparse leaves the `--` separator out of train_argv; strip a leading one
     # if the shell passed it through.
     if train_argv and train_argv[0] == "--":
@@ -2235,20 +2259,13 @@ def main() -> None:
         )
     for teacher_model in args.prestage_teacher_models:
         stage_model(teacher_model.path, revision=teacher_model.revision)
-    draft_model = args.prestage_draft_model
+    draft_model = args.draft_model
     if draft_model is not None:
-        if args.draft_model_cache_ttl_days is None or args.draft_model_cache_ttl_days <= 0:
-            raise ValueError("--draft-model-cache-ttl-days must be positive")
-        if not args.draft_model_cache_source_prefix:
-            raise ValueError("--draft-model-cache-source-prefix is required when pre-staging draft models")
-        stage_cached_hugging_face_model(
+        stage_draft_model(
             draft_model,
-            ttl_days=args.draft_model_cache_ttl_days,
-            source_prefix=args.draft_model_cache_source_prefix,
+            cache_ttl_days=args.draft_model_cache_ttl_days,
+            cache_source_prefix=args.draft_model_cache_source_prefix,
         )
-    materialized_draft = args.materialize_draft_model
-    if materialized_draft is not None:
-        materialize_draft_model_export(materialized_draft)
     # Force the policy chat template onto the staged Hub snapshot or materialized local
     # model on every node before Ray; the training driver's tokenizer may load anywhere.
     if args.policy_chat_template:

@@ -841,48 +841,23 @@ generator:
     shell = build_task_command(args)[-1]
     options = _shell_options(shell)
     tokens = shlex.split(shell)
-    draft_option = tokens.index("--prestage-draft-model")
-    model_id, staged_revision, local_path = tokens[draft_option + 1 : draft_option + 4]
+    draft_option = tokens.index("--draft-model")
+    source_uri, staged_revision = tokens[draft_option + 1 : draft_option + 3]
+    local_path = next(
+        override.removeprefix("++generator.speculative_decoding.model.source_uri=")
+        for override in options["--skyrl_override"]
+        if override.startswith("++generator.speculative_decoding.model.source_uri=")
+    )
 
-    assert model_id == "laion/snowball-64k-eagle3-draft-r2egym"
+    assert source_uri == "hf://laion/snowball-64k-eagle3-draft-r2egym"
     assert staged_revision == revision
     assert re.fullmatch(r"/tmp/marinskyrl-draft-models/[0-9a-f]{64}", local_path)
     assert set(options["--draft-model-cache-ttl-days"]) == {"7"}
     assert set(options["--draft-model-cache-source-prefix"]) == {args.storage_paths.checkpoint_root}
     assert any(
-        override == f"++generator.speculative_decoding.model.materialized_path={local_path}"
+        override == f"++generator.speculative_decoding.model.source_uri={local_path}"
         for override in options["--skyrl_override"]
     )
-
-
-def test_object_store_draft_model_is_materialized_before_ray(tmp_path):
-    args = _args(tmp_path, "opencode")
-    Path(args.rl_config).write_text(
-        """\
-trainer:
-  placement:
-    colocate_all: false
-generator:
-  speculative_decoding:
-    method: eagle3
-    model:
-      source_uri: s3://models/trained-draft
-      source_identity: draft@2026.09.20:fingerprint
-      materialized_path: /tmp/marinskyrl/drafts/trained-draft
-    num_speculative_tokens: 3
-"""
-    )
-    normalize(args)
-    resolve_launch_defaults(args)
-
-    tokens = shlex.split(build_task_command(args)[-1])
-    draft_option = tokens.index("--materialize-draft-model")
-
-    assert tokens[draft_option + 1 : draft_option + 4] == [
-        "s3://models/trained-draft",
-        "draft@2026.09.20:fingerprint",
-        "/tmp/marinskyrl/drafts/trained-draft",
-    ]
 
 
 def test_policy_revision_from_config_rejects_task_local_model(tmp_path):

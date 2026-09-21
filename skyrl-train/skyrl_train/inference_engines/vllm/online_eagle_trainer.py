@@ -343,9 +343,10 @@ def _prepare_model(
     )
     from transformers import PreTrainedModel  # noqa: PLC0415
 
-    pretrained_path = draft_model.materialized_path or draft_model.hugging_face_repo_id
+    local_path = draft_model.source_uri if os.path.isabs(draft_model.source_uri) else None
+    pretrained_path = local_path or draft_model.hugging_face_repo_id
     if pretrained_path is not None:
-        revision = None if draft_model.materialized_path is not None else draft_model.source_identity
+        revision = None if local_path is not None else draft_model.source_identity
         config = Eagle3SpeculatorConfig.from_pretrained(pretrained_path, revision=revision)
     else:
         config = Eagle3SpeculatorConfig.from_dict(
