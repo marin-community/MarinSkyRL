@@ -12,8 +12,7 @@ trainer:
   strategy: megatron
   flash_attn: false
   use_sample_packing: false
-  # Free the remaining optimizer state before waking the colocated vLLM KV cache.
-  offload_optimizer_during_rollouts: true
+  offload_optimizer_during_rollouts: false
   gradient_checkpointing: true
   algorithm:
     advantage_estimator: grpo
@@ -74,7 +73,9 @@ generator:
   inference_engine_expert_parallel_size: 8
   num_inference_engines: 1
   n_samples_per_prompt: 2
-  gpu_memory_utilization: 0.75
+  # Eight policy shards leave less room than the sixteen-GPU probe. This still
+  # provides far more 9,216-token KV slots than the two requests per engine need.
+  gpu_memory_utilization: 0.4
   enforce_eager: false
   run_engines_locally: true
   weight_sync_backend: nccl
