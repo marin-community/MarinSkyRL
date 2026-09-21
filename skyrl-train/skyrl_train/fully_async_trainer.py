@@ -786,7 +786,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # sync weights to inference engines
         with Timer("sync_weights_to_inference_engines", self.all_startup_timings) as weight_update_timer:
-            await self._sync_policy_weights_and_offload_optimizer(sync_phase="initial")
+            await self._sync_initial_policy_weights()
         self._log_weight_update_completed(
             reason="initial",
             duration_seconds=weight_update_timer.duration,
@@ -1197,6 +1197,36 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         await self.inference_engine_client.resume_generation(
             policy_version=self.global_step if self.first_token_admission else None
         )
+
+    async def _sync_initial_policy_weights(self) -> None:
+        # A populated Megatron optimizer restored from a checkpoint is larger than
+        # the freshly initialized state. When rollout-time optimizer offload is
+        # disabled, temporarily move that restored state to CPU while the weight
+        # exporter gathers routed experts. Put it back afterward so the configured
+        # training residency remains unchanged.
+        temporary_restore_offload = (
+            self.global_step > 0
+            and not self.colocate_all
+            and self.cfg.trainer.strategy == "megatron"
+            and not self.cfg.trainer.offload_optimizer_during_rollouts
+        )
+        if temporary_restore_offload:
+            with Timer("offload_policy_optimizer_before_initial_resume_sync", self.all_startup_timings):
+                await asyncio.to_thread(
+                    self.policy_model.offload_to_cpu,
+                    offload_optimizer=True,
+                    offload_model=False,
+                )
+
+        await self._sync_policy_weights_and_offload_optimizer(sync_phase="initial")
+
+        if temporary_restore_offload:
+            with Timer("backload_policy_optimizer_after_initial_resume_sync", self.all_startup_timings):
+                await asyncio.to_thread(
+                    self.policy_model.backload_to_gpu,
+                    backload_optimizer=True,
+                    backload_model=False,
+                )
 
     async def _run_training(self, training_input: TrainingInputBatch):
         # TODO(Charlie): share this code with the one-step-off async trainer.
