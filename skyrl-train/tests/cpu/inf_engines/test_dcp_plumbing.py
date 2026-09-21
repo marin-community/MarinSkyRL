@@ -276,7 +276,7 @@ def _run_create(monkeypatch, dcp: int, attention_backend: str | None = None):
 
     monkeypatch.setattr(rwie.ray, "get", fake_ray_get)
     monkeypatch.setattr(rwie, "wait_for_inference_engine_startup", lambda *a, **k: None)
-    # get_rendezvous_addr_ports is only used for data_parallel_size>1; stub anyway.
+    # Engine construction always allocates a rendezvous address, including DP1.
     monkeypatch.setattr(
         rwie,
         "get_rendezvous_addr_ports",

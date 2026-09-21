@@ -421,9 +421,8 @@ def materialize_model_export(source_uri: str, local_path: str, source_identity: 
     )
 
 
-def materialize_draft_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
+def materialize_draft_model_export(source: ArtifactSource) -> None:
     """Copy and validate an object-store EAGLE draft on this allocated node."""
-    source = ArtifactSource(uri=source_uri, local_path=local_path, identity=source_identity)
     artifact = materialize(source, validate=validate_hf_model_weights)
     _log(
         f"Draft model staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
@@ -2249,11 +2248,7 @@ def main() -> None:
         )
     materialized_draft = args.materialize_draft_model
     if materialized_draft is not None:
-        materialize_draft_model_export(
-            materialized_draft.uri,
-            materialized_draft.local_path,
-            materialized_draft.identity,
-        )
+        materialize_draft_model_export(materialized_draft)
     # Force the policy chat template onto the staged Hub snapshot or materialized local
     # model on every node before Ray; the training driver's tokenizer may load anywhere.
     if args.policy_chat_template:

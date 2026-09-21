@@ -15,7 +15,7 @@ if str(_REPOSITORY_ROOT) not in sys.path:
 
 from cloud.iris import job, runtime_environment  # noqa: E402
 from cloud.iris import runtime_bundle  # noqa: E402
-from cloud.iris.artifacts import write_json  # noqa: E402
+from cloud.iris.artifacts import ArtifactSource, write_json  # noqa: E402
 from cloud.iris.job import JobBackend, execute_job  # noqa: E402
 from cloud.iris.protocol import (  # noqa: E402
     AttemptState,
@@ -533,7 +533,9 @@ def test_materialize_draft_model_export_does_not_require_tokenizer(tmp_path: Pat
     (source / "model.safetensors").write_bytes(b"weights")
     destination = tmp_path / "destination"
 
-    materialize_draft_model_export(source.as_uri(), str(destination), "draft@abc123")
+    materialize_draft_model_export(
+        ArtifactSource(uri=source.as_uri(), local_path=str(destination), identity="draft@abc123")
+    )
 
     assert (destination / "model.safetensors").read_bytes() == b"weights"
 

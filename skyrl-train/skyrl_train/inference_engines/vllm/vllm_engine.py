@@ -88,6 +88,26 @@ import time
 _exact_chat_prompt_token_ids: ContextVar[list[int] | None] = ContextVar("exact_chat_prompt_token_ids", default=None)
 
 
+def _create_async_engine(engine_args, stat_loggers, data_parallel_master_ports):
+    if data_parallel_master_ports is None:
+        return vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
+    if len(data_parallel_master_ports) != VLLM_DATA_PARALLEL_MASTER_PORT_COUNT:
+        raise ValueError(
+            f"vLLM data parallelism requires {VLLM_DATA_PARALLEL_MASTER_PORT_COUNT} master ports, "
+            f"got {len(data_parallel_master_ports)}"
+        )
+    *worker_ports, master_port = data_parallel_master_ports
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.parallel_config._data_parallel_master_port_list = worker_ports
+    vllm_config.parallel_config.data_parallel_master_port = master_port
+    return vllm.AsyncLLMEngine.from_vllm_config(
+        vllm_config,
+        stat_loggers=stat_loggers,
+        enable_log_requests=False,
+        disable_log_stats=True,
+    )
+
+
 class SkyRLOpenAIServingChat(OpenAIServingChat):
     """Substitute exact prompt token IDs while retaining vLLM's chat response parser."""
 
@@ -1669,24 +1689,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             )
             time.sleep(_stagger)
             try:
-                if data_parallel_master_ports is None:
-                    engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
-                else:
-                    if len(data_parallel_master_ports) != VLLM_DATA_PARALLEL_MASTER_PORT_COUNT:
-                        raise ValueError(
-                            f"vLLM data parallelism requires {VLLM_DATA_PARALLEL_MASTER_PORT_COUNT} master ports, "
-                            f"got {len(data_parallel_master_ports)}"
-                        )
-                    *worker_ports, master_port = data_parallel_master_ports
-                    vllm_config = engine_args.create_engine_config()
-                    vllm_config.parallel_config._data_parallel_master_port_list = worker_ports
-                    vllm_config.parallel_config.data_parallel_master_port = master_port
-                    engine = vllm.AsyncLLMEngine.from_vllm_config(
-                        vllm_config,
-                        stat_loggers=stat_loggers,
-                        enable_log_requests=False,
-                        disable_log_stats=True,
-                    )
+                engine = _create_async_engine(engine_args, stat_loggers, data_parallel_master_ports)
                 break
             except (DistNetworkError, RuntimeError, ZMQError) as e:
                 if not is_port_collision(e):
@@ -1696,7 +1699,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     raise
                 _backoff = _BACKOFF_BASE_SEC * (2**_attempt)
                 logger.warning(
-                    f"Engine init hit a port collision (EADDRINUSE / engine-core init) on attempt "
+                    f"Engine init hit a port collision (EADDRINUSE) on attempt "
                     f"{_attempt + 1}/{_MAX_INIT_ATTEMPTS}; retrying in {_backoff:.0f}s: {str(e).splitlines()[0]}"
                 )
                 time.sleep(_backoff)
