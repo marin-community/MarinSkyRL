@@ -371,8 +371,8 @@ def _legacy_role_plan(value: dict[str, Any]) -> SkyRLRolePlan:
             replicas=rollout_replicas,
             tensor_parallel_size=int(value["inference_engine_tensor_parallel_size"]),
             pipeline_parallel_size=1,
-            data_parallel_size=1,
-            expert_parallel_size=1,
+            data_parallel_size=int(value.get("inference_engine_data_parallel_size", 1)),
+            expert_parallel_size=int(value.get("inference_engine_expert_parallel_size", 1)),
         ),
     )
     bundles = (
