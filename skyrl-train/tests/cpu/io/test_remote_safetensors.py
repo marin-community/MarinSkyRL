@@ -1,0 +1,64 @@
+import json
+from pathlib import Path
+
+from safetensors.torch import save_file
+import torch
+
+from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore
+
+
+def _write_index(metadata_dir: Path, weight_map: dict[str, str]) -> None:
+    metadata_dir.mkdir()
+    (metadata_dir / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
+
+
+def test_loads_only_requested_tensor_range_without_local_weight_files(tmp_path: Path) -> None:
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    save_file(
+        {
+            "layer.0.weight": torch.arange(8, dtype=torch.float32),
+            "layer.1.weight": torch.arange(1_000_000, dtype=torch.float32),
+        },
+        remote / "model-00001-of-00001.safetensors",
+    )
+    metadata = tmp_path / "metadata"
+    _write_index(
+        metadata,
+        {
+            "layer.0.weight": "model-00001-of-00001.safetensors",
+            "layer.1.weight": "model-00001-of-00001.safetensors",
+        },
+    )
+
+    store = RemoteSafetensorsTensorStore(str(remote), metadata)
+    loaded = store.load_tensors(["layer.0.weight"])
+
+    torch.testing.assert_close(loaded["layer.0.weight"], torch.arange(8, dtype=torch.float32))
+    assert store.bytes_read < (remote / "model-00001-of-00001.safetensors").stat().st_size
+    assert not tuple(metadata.glob("*.safetensors"))
+
+
+def test_snowball_multinode_records_bounded_s3_reads_and_local_disk(tmp_path: Path) -> None:
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    shard_name = "model-00001-of-00001.safetensors"
+    rank_count = 12
+    save_file(
+        {f"rank.{rank}.weight": torch.arange(100_000, dtype=torch.float32) for rank in range(rank_count)},
+        remote / shard_name,
+    )
+    metadata = tmp_path / "metadata"
+    _write_index(metadata, {f"rank.{rank}.weight": shard_name for rank in range(rank_count)})
+
+    stores = [RemoteSafetensorsTensorStore(str(remote), metadata) for _ in range(rank_count)]
+    for rank, store in enumerate(stores):
+        store.load_tensors([f"rank.{rank}.weight"])
+
+    artifact_bytes = (remote / shard_name).stat().st_size
+    s3_bytes_read = sum(store.bytes_read for store in stores)
+    local_disk_high_water_bytes = sum(path.stat().st_size for path in metadata.rglob("*") if path.is_file())
+
+    assert s3_bytes_read < artifact_bytes * 1.1
+    assert local_disk_high_water_bytes < artifact_bytes * 0.01
+    assert not tuple(metadata.glob("*.safetensors"))

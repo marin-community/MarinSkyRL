@@ -165,6 +165,28 @@ def test_from_config_forwards_policy_revision_to_vllm(monkeypatch):
     assert captured["engine_init_kwargs"]["revision"] == revision
 
 
+def test_from_config_streams_object_store_policy_weights(monkeypatch):
+    pytest.importorskip("hydra")
+    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
+    from skyrl_train.entrypoints import main_base
+    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
+
+    captured = {}
+    monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])
+    cfg = get_default_config()
+    cfg.trainer.policy.model.path = "/tmp/model-metadata"
+    cfg.trainer.policy.model.source_uri = "s3://models/policy"
+    cfg.trainer.policy.model.source_identity = "sha256:" + "a" * 64
+    cfg.trainer.policy.model.revision = "68c46c4b3498877f3ef123c856ecfde50c39f404"
+
+    main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
+
+    assert captured["pretrain"] == "s3://models/policy"
+    assert captured["engine_init_kwargs"]["load_format"] == "runai_streamer"
+    assert captured["engine_init_kwargs"]["_marinskyrl_metadata_path"] == "/tmp/model-metadata"
+    assert "revision" not in captured["engine_init_kwargs"]
+
+
 def test_from_config_reserves_enough_rollout_logprobs(monkeypatch):
     pytest.importorskip("hydra")
     pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")

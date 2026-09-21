@@ -108,7 +108,6 @@ def _job(tmp_path: Path, stage_id: str, teacher_id: str, train: tuple[str, ...],
             model=ModelLocator(
                 uri="hf://org/initial-student",
                 identity="initial-student@revision",
-                local_path="/tmp/student",
                 tokenizer_uri="hf://org/tokenizer",
                 tokenizer_revision="tokenizer-revision",
             ),

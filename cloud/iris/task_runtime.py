@@ -26,13 +26,13 @@ local path — opened via ``fsspec``.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
 import contextlib
 from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
 import glob
 import json
 import os
+from pathlib import Path
 import queue
 import signal
 import socket
@@ -45,11 +45,11 @@ import uuid
 from typing import Protocol
 from cloud.iris.artifacts import ArtifactSource, file_inventory, fs_and_path, materialize
 from cloud.iris.hf_model_cache import (
-    CachedHuggingFaceModel,
     download_hugging_face_snapshot,
-    stage_cached_hugging_face_model,
+    ensure_hugging_face_model_cache,
+    load_model_manifest,
+    stage_model_metadata,
 )
-from marinskyrl.hf_model import validate_hf_model_weights, validate_portable_hf_model_files
 from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
     FR_DUMP_TEMP_FILE_ENV,
@@ -59,7 +59,7 @@ from marinskyrl.environment_contract import (
     ensure_debug_artifact_directories,
     ray_cluster_owner_environment,
 )
-from cloud.iris.model_paths import unsupported_model_path_message
+from marinskyrl.hf_model import validate_hf_model_weights
 from cloud.iris.telemetry_env import telemetry_environment
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculatorModelConfig, SpeculatorModelSourceKind
@@ -376,7 +376,7 @@ def stage_model(model_path: str, warm_source: str | None = None, revision: str |
     Idempotent: ``snapshot_download`` skips already-complete cached files.
     """
     if is_cloud_uri(model_path):
-        raise ValueError(unsupported_model_path_message(model_path))
+        raise ValueError(f"stage_model accepts a Hugging Face repo ID, not object-store model URI {model_path!r}")
     if not model_path or os.path.isdir(model_path):
         _log(f"stage_model: skip (model_path={model_path!r} is empty or a local directory)")
         return
@@ -413,58 +413,108 @@ def stage_model(model_path: str, warm_source: str | None = None, revision: str |
     _log(f"model pre-staged to node-local HF cache: {local_dir}")
 
 
-def _materialize_model_artifact(
-    source_uri: str,
-    local_path: str,
-    source_identity: str,
-    validate: Callable[[set[str], str], None],
-) -> None:
-    source = ArtifactSource(uri=source_uri, local_path=local_path, identity=source_identity)
-    artifact = materialize(source, validate=validate)
-    _log(
-        f"Model artifact staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
-        f"({len(artifact.files)} files, identity={source.identity})"
+def _set_command_option(argv: list[str], option: str, value: str) -> None:
+    """Set one single-value option in an argv assembled by the Iris launcher."""
+    if option in argv:
+        index = argv.index(option)
+        argv[index + 1] = value
+    else:
+        argv.extend((option, value))
+
+
+def _metadata_path(source_uri: str, identity: str) -> str:
+    from marinskyrl.hf_model import immutable_model_cache_key
+
+    return os.path.join(
+        tempfile.gettempdir(), "marinskyrl", "model_metadata", immutable_model_cache_key(source_uri, identity)
     )
 
 
-def materialize_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
-    """Copy and validate an object-store HF export on this allocated node."""
-    _materialize_model_artifact(source_uri, local_path, source_identity, validate_portable_hf_model_files)
+def prepare_policy_model(args: argparse.Namespace, train_argv: list[str]) -> str | None:
+    """Resolve one immutable policy source and stage metadata, never weights."""
+    source_uri = args.model_source_uri
+    source_identity = args.model_source_identity
+    if args.stream_model:
+        source_uri, manifest = ensure_hugging_face_model_cache(
+            args.stream_model,
+            args.model_revision or "main",
+            ttl_days=args.model_cache_ttl_days,
+            source_prefix=args.model_cache_source_prefix,
+        )
+        source_identity = manifest.identity
+    elif source_uri:
+        manifest = load_model_manifest(source_uri)
+        if source_identity and source_identity.startswith("sha256:") and source_identity != manifest.identity:
+            raise ValueError(
+                f"Policy manifest identity mismatch: requested {source_identity}, found {manifest.identity} at {source_uri}"
+            )
+        source_identity = manifest.identity
+    else:
+        return None
+
+    assert source_uri and source_identity
+    local_path = _metadata_path(source_uri, source_identity)
+    stage_model_metadata(source_uri, manifest, local_path)
+    metadata_bytes = sum(path.stat().st_size for path in Path(local_path).rglob("*") if path.is_file())
+    original_model_path = train_argv[train_argv.index("--model_path") + 1]
+    served_model_name = original_model_path.rstrip("/").rsplit("/", 1)[-1]
+    train_argv.extend(("--skyrl_override", f"++generator.engine_init_kwargs.served_model_name={served_model_name}"))
+    _set_command_option(train_argv, "--model_path", local_path)
+    _set_command_option(train_argv, "--model-source-uri", source_uri)
+    _set_command_option(train_argv, "--model-source-identity", source_identity)
+    _log(
+        f"Policy metadata ready on rank {_rank()}/{_num_tasks()}: {source_uri} -> {local_path} "
+        f"(identity={source_identity}; local_disk_high_water_bytes={metadata_bytes}; weight shards remain remote)"
+    )
+    return local_path
 
 
-def stage_draft_model(
+def prepare_draft_model(
     model: SpeculatorModelConfig,
     *,
     cache_ttl_days: int | None,
     cache_source_prefix: str,
-) -> None:
-    """Make one immutable EAGLE draft available at its standard node-local path."""
-    local_path = model.node_local_path()
-    if model.source_kind is SpeculatorModelSourceKind.HUGGING_FACE:
-        assert model.hugging_face_repo_id is not None
-        if cache_ttl_days is None or cache_ttl_days <= 0:
-            raise ValueError("--draft-model-cache-ttl-days must be positive for a Hugging Face draft model")
-        if not cache_source_prefix:
-            raise ValueError("--draft-model-cache-source-prefix is required for a Hugging Face draft model")
-        stage_cached_hugging_face_model(
-            CachedHuggingFaceModel(
-                model_id=model.hugging_face_repo_id,
-                revision=model.source_identity,
-                local_path=local_path,
-            ),
-            ttl_days=cache_ttl_days,
-            source_prefix=cache_source_prefix,
-        )
-        return
-
+) -> SpeculatorModelConfig:
+    """Return an object-store draft locator, mirroring a Hub revision once when needed."""
     if model.source_kind is SpeculatorModelSourceKind.LOCAL:
         assert model.local_source_path is not None
         filesystem, root = fs_and_path(model.local_source_path)
         names = {entry.path for _, entry in file_inventory(filesystem, root)}
         validate_hf_model_weights(names, model.local_source_path)
-        return
+        return model
+    if model.source_kind is SpeculatorModelSourceKind.HUGGING_FACE:
+        if cache_ttl_days is None or cache_ttl_days <= 0:
+            raise ValueError("--draft-model-cache-ttl-days must be positive for a Hugging Face draft model")
+        if not cache_source_prefix:
+            raise ValueError("--draft-model-cache-source-prefix is required for a Hugging Face draft model")
+        assert model.hugging_face_repo_id is not None
+        source_uri, manifest = ensure_hugging_face_model_cache(
+            model.hugging_face_repo_id,
+            model.source_identity,
+            ttl_days=cache_ttl_days,
+            source_prefix=cache_source_prefix,
+        )
+    else:
+        source_uri = model.source_uri
+        manifest = load_model_manifest(source_uri)
+        if model.source_identity.startswith("sha256:") and model.source_identity != manifest.identity:
+            raise ValueError(
+                f"Draft manifest identity mismatch: requested {model.source_identity}, "
+                f"found {manifest.identity} at {source_uri}"
+            )
+    return SpeculatorModelConfig(source_uri=source_uri, source_identity=manifest.identity)
 
-    _materialize_model_artifact(model.source_uri, local_path, model.source_identity, validate_hf_model_weights)
+
+def apply_draft_model_to_command(train_argv: list[str], model: SpeculatorModelConfig) -> None:
+    """Override the managed draft locator after a possible Hub-to-S3 mirror."""
+    train_argv.extend(
+        (
+            "--skyrl_override",
+            f"++generator.speculative_decoding.model.source_uri={model.source_uri}",
+            "--skyrl_override",
+            f"++generator.speculative_decoding.model.source_identity={model.source_identity}",
+        )
+    )
 
 
 def materialize_data_sources(data_sources_json: str) -> None:
@@ -2115,6 +2165,11 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         "instead of each racing HF Hub at init.",
     )
     parser.add_argument(
+        "--stream-model",
+        default="",
+        help="HF repo ID to mirror once and load directly from object storage; only metadata is staged locally.",
+    )
+    parser.add_argument(
         "--model-warm-source",
         default=os.environ.get("OT_AGENT_MODEL_WARM_SOURCE", ""),
         help="Optional in-region CW-object-store prefix (s3://marin-us-east-02a/models/"
@@ -2156,14 +2211,25 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         help="Output prefix used to select the draft-model cache's storage region.",
     )
     parser.add_argument(
+        "--model-cache-ttl-days",
+        type=int,
+        default=None,
+        help="Lifecycle TTL for an immutable Hugging Face policy-model mirror.",
+    )
+    parser.add_argument(
+        "--model-cache-source-prefix",
+        default="",
+        help="Output prefix used to select the policy-model mirror's storage region.",
+    )
+    parser.add_argument(
         "--model-source-uri",
         default="",
-        help="Object-store HF export to materialize on every node before Ray starts.",
+        help="Versioned object-store HF export read directly by policy and rollout workers.",
     )
     parser.add_argument(
         "--model-local-path",
         default="",
-        help="Task-local model directory, either pre-existing or populated from --model-source-uri.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--model-source-identity",
@@ -2248,12 +2314,7 @@ def main() -> None:
         stage_task_data(args.terminal_bench_data, role="terminal-bench sidechannel")
     if args.data_sources_json:
         materialize_data_sources(args.data_sources_json)
-    if args.model_source_uri:
-        if not args.model_local_path or not args.model_source_identity:
-            raise ValueError("--model-source-uri requires --model-local-path and --model-source-identity")
-        materialize_model_export(args.model_source_uri, args.model_local_path, args.model_source_identity)
-    # Pre-download the policy weights into the node-local HF cache BEFORE Ray, so the
-    # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1. See stage_model.
+    policy_metadata_path = prepare_policy_model(args, train_argv)
     if args.prestage_model:
         stage_model(
             args.prestage_model,
@@ -2264,15 +2325,16 @@ def main() -> None:
         stage_model(teacher_model.path, revision=teacher_model.revision)
     draft_model = args.draft_model
     if draft_model is not None:
-        stage_draft_model(
+        draft_model = prepare_draft_model(
             draft_model,
             cache_ttl_days=args.draft_model_cache_ttl_days,
             cache_source_prefix=args.draft_model_cache_source_prefix,
         )
+        apply_draft_model_to_command(train_argv, draft_model)
     # Force the policy chat template onto the staged Hub snapshot or materialized local
     # model on every node before Ray; the training driver's tokenizer may load anywhere.
     if args.policy_chat_template:
-        model_path = policy_chat_template_model(args.prestage_model, args.model_local_path)
+        model_path = policy_metadata_path or policy_chat_template_model(args.prestage_model, args.model_local_path)
         apply_policy_chat_template(model_path, args.policy_chat_template)
     rank = _rank()
     if rank == 0:

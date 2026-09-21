@@ -706,19 +706,20 @@ def test_missing_rl_config_fails_during_normalization():
 
 
 @pytest.mark.parametrize("model_path", ["s3://models/policy", "gs://models/policy", "gcs://models/policy"])
-def test_object_store_model_path_fails_during_normalization(tmp_path, model_path):
+def test_object_store_model_path_becomes_the_direct_model_source(tmp_path, model_path):
     args = _args(tmp_path, "opencode", ["--model_path", model_path])
 
-    with pytest.raises(SystemExit, match="must be a Hugging Face repo ID or a task-local directory"):
-        normalize(args)
+    normalize(args)
+
+    assert args.model_source_uri == model_path
 
 
 def test_controller_rejects_object_store_model_path_before_staging():
-    with pytest.raises(ValueError, match="must be a Hugging Face repo ID or a task-local directory"):
+    with pytest.raises(ValueError, match="object-store model URI"):
         stage_model("s3://models/policy")
 
 
-def test_task_local_model_source_is_materialized_without_hf_prestage(tmp_path):
+def test_megatron_model_source_is_forwarded_without_hf_prestage(tmp_path):
     args = _args(
         tmp_path,
         "opencode",
@@ -732,7 +733,8 @@ def test_task_local_model_source_is_materialized_without_hf_prestage(tmp_path):
         ],
     )
     Path(args.rl_config).write_text(
-        "extra_env:\n  HF_HUB_OFFLINE: '1'\npolicy_chat_template: chat_templates/test.jinja2\n"
+        "trainer:\n  strategy: megatron\nextra_env:\n  HF_HUB_OFFLINE: '1'\n"
+        "policy_chat_template: chat_templates/test.jinja2\n"
     )
     normalize(args)
     resolve_launch_defaults(args)
@@ -818,7 +820,23 @@ def test_policy_revision_from_config_is_staged_before_ray(tmp_path):
     assert set(options["--model-revision"]) == {revision}
 
 
-def test_hugging_face_draft_model_is_cached_and_materialized_before_ray(tmp_path):
+def test_megatron_hugging_face_policy_is_mirrored_and_streamed(tmp_path):
+    revision = "68c46c4b3498877f3ef123c856ecfde50c39f404"
+    args = _args(tmp_path, "opencode", ["--model-revision", revision, "--storage-ttl-days", "7"])
+    Path(args.rl_config).write_text("trainer:\n  strategy: megatron\n")
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert set(options["--stream-model"]) == {"Qwen/Model-30B"}
+    assert set(options["--model-revision"]) == {revision}
+    assert set(options["--model-cache-ttl-days"]) == {"7"}
+    assert set(options["--model-cache-source-prefix"]) == {args.storage_paths.checkpoint_root}
+    assert "--prestage-model" not in options
+
+
+def test_hugging_face_draft_model_is_mirrored_without_a_local_weight_path(tmp_path):
     revision = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
     args = _args(tmp_path, "opencode", ["--storage-ttl-days", "7"])
     Path(args.rl_config).write_text(
@@ -843,15 +861,12 @@ generator:
     tokens = shlex.split(shell)
     draft_option = tokens.index("--draft-model")
     source_uri, staged_revision = tokens[draft_option + 1 : draft_option + 3]
-    local_path = next(
-        override.removeprefix("++generator.speculative_decoding.model.source_uri=")
-        for override in options["--skyrl_override"]
-        if override.startswith("++generator.speculative_decoding.model.source_uri=")
-    )
-
     assert source_uri == "hf://laion/snowball-64k-eagle3-draft-r2egym"
     assert staged_revision == revision
-    assert re.fullmatch(r"/tmp/marinskyrl/draft_models/[0-9a-f]{64}", local_path)
+    assert not any(
+        value.startswith("++generator.speculative_decoding.model.source_uri=/tmp/")
+        for value in options.get("--skyrl_override", [])
+    )
     assert set(options["--draft-model-cache-ttl-days"]) == {"7"}
     assert set(options["--draft-model-cache-source-prefix"]) == {args.storage_paths.checkpoint_root}
 
@@ -899,7 +914,7 @@ def test_hugging_face_model_rejects_ambiguous_object_store_source(tmp_path):
         ],
     )
 
-    with pytest.raises(SystemExit, match="requires a task-local model_path"):
+    with pytest.raises(SystemExit, match="requires a local metadata path"):
         normalize(args)
 
 

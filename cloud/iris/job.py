@@ -214,7 +214,6 @@ def create_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--run-id", required=True, help="Experiment run identifier.")
     build_parser.add_argument("--model-uri", required=True)
     build_parser.add_argument("--model-identity", required=True)
-    build_parser.add_argument("--model-local-path", required=True)
     build_parser.add_argument("--tokenizer-uri", required=True)
     build_parser.add_argument("--tokenizer-revision", required=True)
     build_parser.add_argument(
@@ -280,7 +279,6 @@ def main(argv: list[str] | None = None) -> int:
             run_id=args.run_id,
             model_uri=args.model_uri,
             model_identity=args.model_identity,
-            model_local_path=args.model_local_path,
             tokenizer_uri=args.tokenizer_uri,
             tokenizer_revision=args.tokenizer_revision,
             train_data=json.loads(args.train_data),

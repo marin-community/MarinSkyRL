@@ -47,7 +47,6 @@ class RuntimeIdentity:
 class ModelLocator:
     uri: str
     identity: str
-    local_path: str
     tokenizer_uri: str
     tokenizer_revision: str
 

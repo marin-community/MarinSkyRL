@@ -2,12 +2,11 @@ import os
 from pathlib import Path
 
 import huggingface_hub.constants
+import torch
+from safetensors.torch import save_file
 
 from cloud.iris import hf_model_cache
-from cloud.iris.hf_model_cache import (
-    CachedHuggingFaceModel,
-    stage_cached_hugging_face_model,
-)
+from cloud.iris.hf_model_cache import ensure_hugging_face_model_cache, stage_model_metadata
 
 
 def test_hub_download_temporarily_enables_network_access(tmp_path: Path, monkeypatch) -> None:
@@ -42,20 +41,32 @@ def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, 
     def download_snapshot(model_id: str, *, revision: str, destination: Path) -> Path:
         downloads.append((model_id, revision))
         (destination / "config.json").write_text("{}")
-        (destination / "model.safetensors").write_bytes(b"weights")
+        (destination / "tokenizer.json").write_text("{}")
+        save_file({"weight": torch.arange(4, dtype=torch.float32)}, destination / "model.safetensors")
         return destination
 
     monkeypatch.setattr(hf_model_cache, "marin_temp_bucket", lambda *_args, **_kwargs: str(cache))
     monkeypatch.setattr(hf_model_cache, "download_hugging_face_snapshot", download_snapshot)
-    model = CachedHuggingFaceModel(
-        model_id="laion/draft",
-        revision="4bdb47c08e5b5190bea3c7a93c3e14470230e469",
-        local_path=str(local_model),
+    model_id = "laion/draft"
+    revision = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
+
+    cache_uri, manifest = ensure_hugging_face_model_cache(
+        model_id, revision, ttl_days=14, source_prefix="s3://region/experiments/run"
     )
+    stage_model_metadata(cache_uri, manifest, str(local_model))
+    repeated_uri, repeated_manifest = ensure_hugging_face_model_cache(
+        model_id, revision, ttl_days=14, source_prefix="s3://region/experiments/next-run"
+    )
+    (local_model / "stale.bin").write_bytes(b"stale weights")
+    stage_model_metadata(cache_uri, manifest, str(local_model))
 
-    stage_cached_hugging_face_model(model, ttl_days=14, source_prefix="s3://region/experiments/run")
-    stage_cached_hugging_face_model(model, ttl_days=14, source_prefix="s3://region/experiments/next-run")
-
-    assert downloads == [(model.model_id, model.revision)]
+    assert downloads == [(model_id, revision)]
+    assert repeated_uri == cache_uri
+    assert repeated_manifest == manifest
+    assert manifest.revision == revision
+    assert manifest.identity.startswith("sha256:")
+    assert all(entry.size >= 0 and len(entry.sha256) == 64 for entry in manifest.files)
     assert (local_model / "config.json").read_text() == "{}"
-    assert (local_model / "model.safetensors").read_bytes() == b"weights"
+    assert (local_model / "model.safetensors.index.json").is_file()
+    assert not (local_model / "model.safetensors").exists()
+    assert not (local_model / "stale.bin").exists()
