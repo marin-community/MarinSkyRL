@@ -2705,7 +2705,7 @@ class RayPPOTrainer:
                 self.critic_model.offload_to_cpu()
                 self.policy_model.backload_to_gpu()
 
-        # Save dataloader state
+        # Serialize dataloader state for publication after the rank uploads complete.
         dataloader_save_path = os.path.join(global_step_folder, "data.pt")
         dataloader_payload = None
         try:

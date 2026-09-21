@@ -40,7 +40,10 @@ class PendingDirectoryUpload:
         try:
             upload_directory(self.local_path, self.output_path)
         finally:
-            shutil.rmtree(self.local_path, ignore_errors=True)
+            try:
+                shutil.rmtree(self.local_path)
+            except OSError:
+                logger.exception(f"Failed to remove checkpoint staging directory {self.local_path}")
 
 
 class DeferredLocalWorkDir:
