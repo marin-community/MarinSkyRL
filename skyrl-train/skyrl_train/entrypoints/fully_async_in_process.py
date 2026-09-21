@@ -16,39 +16,16 @@ from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMo
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
 
 
-class FullyAsyncGymExp(BasePPOExp):
+class FullyAsyncInProcessExp(BasePPOExp):
     def uses_fully_async_trainer(self) -> bool:
         return True
 
-    def get_trainer(
-        self,
-        cfg,
-        tracker,
-        tokenizer,
-        train_dataset,
-        eval_dataset,
-        inference_engine_client,
-        trajectory_runner,
-        colocate_pg,
-    ):
-        from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer  # noqa: PLC0415
-
-        return FullyAsyncRayPPOTrainer(
-            cfg=cfg,
-            tracker=tracker,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            inference_engine_client=inference_engine_client,
-            trajectory_runner=trajectory_runner,
-            colocate_pg=colocate_pg,
-        )
 
 
 @ray.remote(num_cpus=1, max_retries=0)
 def skyrl_entrypoint(cfg: DictConfig):
     # The training loop must not run on the head node.
-    FullyAsyncGymExp(cfg).run()
+    FullyAsyncInProcessExp(cfg).run()
 
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)

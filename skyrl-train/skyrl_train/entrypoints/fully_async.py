@@ -5,7 +5,6 @@ Main entrypoint for async training.
 import hydra
 from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
-from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
 from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
@@ -15,28 +14,6 @@ import ray
 class AsyncPPOExp(BasePPOExp):
     def uses_fully_async_trainer(self) -> bool:
         return True
-
-    def get_trainer(
-        self,
-        cfg,
-        tracker,
-        tokenizer,
-        train_dataset,
-        eval_dataset,
-        inference_engine_client,
-        trajectory_runner,
-        colocate_pg,
-    ):
-        return FullyAsyncRayPPOTrainer(
-            cfg=cfg,
-            tracker=tracker,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            inference_engine_client=inference_engine_client,
-            trajectory_runner=trajectory_runner,
-            colocate_pg=colocate_pg,
-        )
 
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
         """Initialize the colocated SkyRL-Gym trajectory runner.
