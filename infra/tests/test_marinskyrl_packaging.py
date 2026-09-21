@@ -11,8 +11,6 @@ import tomllib
 import zipfile
 
 from packaging.requirements import Requirement
-from packaging.specifiers import SpecifierSet
-from packaging.version import Version
 import pytest
 
 
@@ -54,7 +52,7 @@ def test_base_dependencies_are_cpu_only(built_wheel: BuiltWheel) -> None:
     requirements = Parser().parsestr(built_wheel.metadata).get_all("Requires-Dist", [])
     base_requirements = {requirement.partition(";")[0].strip().split("[")[0].split()[0].lower() for requirement in requirements if "extra ==" not in requirement}
 
-    assert base_requirements.isdisjoint({"flash-attn", "torch", "transformer-engine", "vllm"})
+    assert base_requirements.isdisjoint({"flash-attn", "flash-attn-4", "torch", "transformer-engine", "vllm"})
 
 
 def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_wheel: BuiltWheel) -> None:
@@ -151,8 +149,14 @@ def test_gpu_profiles_use_one_cuda132_runtime(extras: tuple[str, ...]) -> None:
         (
             ("megatron", "vllm"),
             "x86_64",
-            {"causal-conv1d", "flash-attn", "mamba-ssm", "megatron-core", "transformer-engine-torch"},
+            {"causal-conv1d", "flash-attn", "flash-attn-4", "mamba-ssm", "megatron-core", "transformer-engine-torch"},
             {"fast-hadamard-transform"},
+        ),
+        (
+            ("megatron", "vllm"),
+            "aarch64",
+            {"flash-attn", "flash-attn-4", "megatron-core", "transformer-engine-torch"},
+            {"flash-linear-attention", "fast-hadamard-transform"},
         ),
     ],
 )
@@ -173,17 +177,17 @@ def test_policy_closures_match_supported_architectures(
     assert vllm.url is not None and vllm.url.endswith(f"manylinux_2_28_{architecture}.whl")
 
 
-def test_megatron_flash_attention_is_supported_by_transformer_engine() -> None:
-    platform = {"sys_platform": "linux", "platform_machine": "x86_64"}
-    names = {
-        requirement.name
-        for requirement in _exported_requirements(("megatron", "vllm"))
-        if requirement.marker is None or requirement.marker.evaluate(platform)
-    }
-    assert {"flash-attn", "transformer-engine"}.issubset(names)
-
+def test_megatron_and_vllm_share_the_qualified_attention_dependency_versions() -> None:
     lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
-    versions = {package["name"]: package["version"] for package in lock["package"] if package["name"] in names}
-    # TE 2.11's accepted range: https://github.com/NVIDIA/TransformerEngine/blob/v2.11/transformer_engine/pytorch/attention/dot_product_attention/utils.py
-    assert versions["transformer-engine"] == "2.11.0"
-    assert Version(versions["flash-attn"]) in SpecifierSet(">=2.1.1,<=2.8.3")
+    versions = {package["name"]: package["version"] for package in lock["package"]}
+    assert {name: versions[name] for name in (
+        "apache-tvm-ffi", "flash-attn", "flash-attn-4", "megatron-core", "tilelang", "transformer-engine", "vllm"
+    )} == {
+        "apache-tvm-ffi": "0.1.12",
+        "flash-attn": "2.8.3",
+        "flash-attn-4": "4.0.0b29",
+        "megatron-core": "0.19.2",
+        "tilelang": "0.1.14",
+        "transformer-engine": "2.19.0",
+        "vllm": "0.0.0.dev20260920+marin.947b2b82fca0.cu132",
+    }

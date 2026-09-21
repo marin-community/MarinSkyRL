@@ -78,7 +78,7 @@ terminal_bench:
 
 trainer:
   strategy: megatron
-  attn_backend: sdpa
+  attn_backend: fused
   flash_attn: false
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: true

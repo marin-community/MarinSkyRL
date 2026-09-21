@@ -9,6 +9,7 @@ import asyncio
 import importlib.util
 import os
 from enum import StrEnum
+from importlib import metadata
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from loguru import logger
@@ -29,6 +30,11 @@ from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config, print_model_size
+from skyrl_train.config.megatron_attention import (
+    MegatronAttentionBackend,
+    resolve_megatron_attention_backend,
+    transformer_engine_attention_environment,
+)
 from skyrl_train.utils.utils import (
     moe_router_replay_requested,
     update_model_config,
@@ -76,7 +82,6 @@ class MegatronWorker:
         model_config_kwargs,
         transformer_config_kwargs,
         bf16=True,
-        flash_attn=False,
         model_revision: str | None = None,
     ):
         """
@@ -86,6 +91,27 @@ class MegatronWorker:
         validate_grug_training_strategy(getattr(hf_config, "model_type", None), "megatron")
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
 
+        configured_backend = str(self.cfg.trainer.attn_backend)
+        backend = resolve_megatron_attention_backend(configured_backend, bool(self.cfg.trainer.flash_attn))
+        os.environ.update(
+            transformer_engine_attention_environment(configured_backend, bool(self.cfg.trainer.flash_attn))
+        )
+        if backend in (MegatronAttentionBackend.FA2, MegatronAttentionBackend.FA4):
+            distribution = "flash-attn-4" if backend is MegatronAttentionBackend.FA4 else "flash-attn"
+            expected_version = "4.0.0b29" if backend is MegatronAttentionBackend.FA4 else "2.8.3"
+            try:
+                installed_version = metadata.version(distribution)
+            except metadata.PackageNotFoundError as error:
+                raise RuntimeError(f"Requested {backend.value} requires {distribution}=={expected_version}") from error
+            if installed_version != expected_version:
+                raise RuntimeError(
+                    f"Requested {backend.value} requires {distribution}=={expected_version}; found {installed_version}"
+                )
+        if backend is MegatronAttentionBackend.FA4 and torch.cuda.get_device_capability() not in ((9, 0), (10, 0)):
+            raise RuntimeError("FlashAttention 4 is qualified here only on H100 (sm90) and GB200 (sm100)")
+        self._attention_backend = backend
+        logger.info("Megatron attention backend: {}", backend.value)
+
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
             "eos_token_id": tokenizer.eos_token_id,
@@ -94,9 +120,10 @@ class MegatronWorker:
         override_config_kwargs.update(model_config_kwargs.get("model_config", {}))
         update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
 
-        # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
         transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
-        transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
+        transformer_config_kwargs["attention_backend"] = (
+            "fused" if backend is MegatronAttentionBackend.FUSED else "flash"
+        )
 
         if not self.cfg.trainer.gradient_checkpointing:
             for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
@@ -111,7 +138,7 @@ class MegatronWorker:
         provider.expert_model_parallel_size = megatron_config.expert_model_parallel_size
         provider.expert_tensor_parallel_size = megatron_config.expert_tensor_parallel_size
         provider.sequence_parallel = megatron_config.tensor_model_parallel_size > 1
-        provider.attention_backend = "flash" if flash_attn else "fused"
+        provider.attention_backend = "fused" if backend is MegatronAttentionBackend.FUSED else "flash"
         provider.variable_seq_lengths = True
         provider.masked_softmax_fusion = True
         provider.moe_token_dispatcher_type = "alltoall"
@@ -372,7 +399,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.cfg.trainer.policy.megatron_config.model_config_kwargs,
             self.cfg.trainer.policy.megatron_config.transformer_config_kwargs,
             bf16=self.cfg.trainer.bf16,
-            flash_attn=self.cfg.trainer.flash_attn,
             model_revision=self.cfg.trainer.policy.model.get("revision"),
         )
 
@@ -585,6 +611,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.profiler.stop_trace()
 
         status_mean = policy_training_metrics(all_metrics, policy_update_steps)
+        if self._attention_backend in (MegatronAttentionBackend.FA2, MegatronAttentionBackend.FA4):
+            status_mean["attention_backend_version"] = (
+                4.0 if self._attention_backend is MegatronAttentionBackend.FA4 else 2.0
+            )
         if status_mean.get("ppo_ratio_exact_unit_fraction") == 1.0 and not self._warned_exact_unit_policy_ratio:
             logger.warning(
                 "Megatron's recomputed old log probabilities exactly match the training forward for every policy "
@@ -730,7 +760,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             raise KeyError(f"missing Grug state entries: {sorted(missing)}")
         return GrugValidationSnapshot(
             rank=torch.distributed.get_rank(),
-            attention_backend=str(self.provider.attention_backend),
+            attention_backend=self._attention_backend.value,
             weights=weights,
         )
 
@@ -793,7 +823,6 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             self.cfg.trainer.ref.megatron_config.model_config_kwargs,
             self.cfg.trainer.ref.megatron_config.transformer_config_kwargs,
             bf16=self.cfg.trainer.bf16,
-            flash_attn=self.cfg.trainer.flash_attn,
             model_revision=self.cfg.trainer.ref.model.get("revision"),
         )
 

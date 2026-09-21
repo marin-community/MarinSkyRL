@@ -19,6 +19,10 @@ from ray.util.placement_group import (
 )
 
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
+from skyrl_train.config.megatron_attention import (
+    resolve_megatron_attention_backend,
+    transformer_engine_attention_environment,
+)
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
 from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
 from skyrl_train.callbacks.types import (
@@ -470,6 +474,8 @@ def validate_megatron_cfg(cfg: DictConfig):
     assert cfg.generator.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
     assert cfg.generator.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
+
+    resolve_megatron_attention_backend(str(cfg.trainer.attn_backend), bool(cfg.trainer.flash_attn))
 
     if cfg.trainer.flash_attn:
         importlib.import_module("flash_attn")
@@ -1367,10 +1373,9 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
         # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
         env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-        if cfg.trainer.flash_attn:
-            # disable fused attention for megatron with flash_attn (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
-            # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
-            env_vars["NVTE_FUSED_ATTN"] = "0"
+        env_vars.update(
+            transformer_engine_attention_environment(str(cfg.trainer.attn_backend), bool(cfg.trainer.flash_attn))
+        )
 
     if cfg.generator.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"

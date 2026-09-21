@@ -140,6 +140,7 @@ def _config(model_path: str, *, world_size: int, pp: int, ep: int):
     cfg.trainer.critic.model.path = None
     cfg.trainer.strategy = "megatron"
     cfg.trainer.flash_attn = False
+    cfg.trainer.attn_backend = "fused"
     cfg.trainer.bf16 = True
     cfg.trainer.gradient_checkpointing = True
     cfg.trainer.use_sample_packing = False
@@ -470,7 +471,8 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
 
 
 @pytest.mark.vllm
-def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollout(tmp_path):
+@pytest.mark.parametrize("attention_backend", ["flash_attention_2", "flash_attention_4"])
+def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollout(tmp_path, attention_backend):
     """Rollout, PP2 Megatron update, mixed-dtype broadcast, serving readback, rollout."""
     policy_world_size = 2
     require_hoppers(policy_world_size + ROLLOUT_WORLD_SIZE)
@@ -478,6 +480,7 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
     model_path.mkdir()
     _write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=policy_world_size, pp=2, ep=1)
+    cfg.trainer.attn_backend = attention_backend
     initialize_ray(cfg)
     client = grug_engine_client(cfg, str(model_path))
     try:
@@ -497,7 +500,8 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
         policy = _init_policy(cfg, policy_world_size)
         names = [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME]
         before = rank0_validation_snapshot(policy, names)
-        _train_step(policy, rollout_training_batch(prompts, first_rollout))
+        status = _train_step(policy, rollout_training_batch(prompts, first_rollout))
+        assert status["attention_backend_version"] == (4.0 if attention_backend == "flash_attention_4" else 2.0)
         training = rank0_validation_snapshot(policy, names)
         for name in PARAMETER_NAMES:
             assert not torch.equal(training[name], before[name]), f"{name} did not update"
@@ -517,6 +521,10 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
         asyncio.run(client.reset_prefix_cache())
         second_logprob = asyncio.run(client.generate(score_input))["prompt_logprobs"][0][-1][first_token]
         assert abs(second_logprob - first_logprob) > 1e-7
+        second_rollout = asyncio.run(
+            client.generate(InferenceEngineInput(prompt_token_ids=prompts, sampling_params=sampling_params))
+        )
+        assert len(second_rollout["response_ids"]) == len(prompts)
     finally:
         ray.shutdown()
 

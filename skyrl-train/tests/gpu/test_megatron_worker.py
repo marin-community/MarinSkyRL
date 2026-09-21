@@ -37,12 +37,14 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 
 
-def test_megatron_flash_attention_cp2_forward_backward(ray_init_fixture):
+@pytest.mark.parametrize("attention_backend", ["flash_attention_2", "flash_attention_4"])
+def test_megatron_flash_attention_cp2_forward_backward(ray_init_fixture, attention_backend):
     """Keep the selected FlashAttention backend usable through a CP2 policy step."""
     require_hoppers(2)
     cfg = get_test_actor_config(logger="console")
     cfg.trainer.strategy = "megatron"
-    cfg.trainer.flash_attn = True
+    cfg.trainer.flash_attn = False
+    cfg.trainer.attn_backend = attention_backend
     cfg.trainer.use_sample_packing = True
     cfg.trainer.placement.policy_num_gpus_per_node = 2
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
@@ -68,6 +70,7 @@ def test_megatron_flash_attention_cp2_forward_backward(ray_init_fixture):
     for output in train_outputs:
         status = output.metadata["train_status"]
         assert status["policy_update_steps"] == 1
+        assert status["attention_backend_version"] == (4.0 if attention_backend == "flash_attention_4" else 2.0)
         assert torch.isfinite(torch.tensor(status["policy_loss"]))
         assert 0 < status["raw_grad_norm"] < float("inf")
 
