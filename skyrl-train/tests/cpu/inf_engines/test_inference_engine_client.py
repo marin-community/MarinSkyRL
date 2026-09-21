@@ -15,6 +15,7 @@ from skyrl_train.inference_engines.utils import (
     _RENDEZVOUS_PORT_START,
     _RENDEZVOUS_PORT_STOP,
     _find_available_rendezvous_port,
+    _find_available_rendezvous_ports,
     postprocess_completion_request,
     route_prompts_to_engines,
     hash_with_sha256,
@@ -46,6 +47,14 @@ def test_rendezvous_port_avoids_ephemeral_range_and_existing_listener(monkeypatc
 def test_rendezvous_port_fails_when_range_is_excluded():
     with pytest.raises(RuntimeError, match="No free rendezvous port"):
         _find_available_rendezvous_port(range(_RENDEZVOUS_PORT_START, _RENDEZVOUS_PORT_STOP))
+
+
+def test_rendezvous_ports_are_distinct_and_respect_exclusions(monkeypatch):
+    monkeypatch.setattr("skyrl_train.inference_engines.utils.random.shuffle", lambda _ports: None)
+
+    ports = _find_available_rendezvous_ports(3, excluded_ports=[_RENDEZVOUS_PORT_START])
+
+    assert ports == [_RENDEZVOUS_PORT_START + 1, _RENDEZVOUS_PORT_START + 2, _RENDEZVOUS_PORT_START + 3]
 
 
 class _CommunicatorEngine:

@@ -1,4 +1,5 @@
 import json
+import errno
 from typing import Any, Dict, Protocol
 
 from skyrl_train.config.behavior_logprobs import (
@@ -12,6 +13,21 @@ class PrefixCacheStatsLike(Protocol):
 
     queries: int
     hits: int
+
+
+def is_port_collision(exc: BaseException) -> bool:
+    """Return whether an exception chain identifies an address-in-use failure."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).lower()
+        if "eaddrinuse" in message or "address already in use" in message:
+            return True
+        if isinstance(current, OSError) and current.errno == errno.EADDRINUSE:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def prefix_cache_hit_rate_percent(stats: PrefixCacheStatsLike) -> float | None:

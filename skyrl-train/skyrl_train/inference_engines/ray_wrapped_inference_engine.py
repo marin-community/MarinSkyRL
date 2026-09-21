@@ -17,7 +17,7 @@ from skyrl_train.inference_engines.base import (
     NamedWeightsUpdateRequest,
 )
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
-from skyrl_train.inference_engines.utils import get_pg_bundle_node_ips, get_rendezvous_addr_port
+from skyrl_train.inference_engines.utils import get_pg_bundle_node_ips, get_rendezvous_addr_ports
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
 from skyrl_train.env_vars import EnvVarScope, VLLM_USE_V2_MODEL_RUNNER_ENV, managed_environment_names
 from skyrl_train.utils import (
@@ -561,10 +561,14 @@ def create_ray_wrapped_inference_engines(
             rendezvous_pg_index = colocated_engine_bundles[i * data_parallel_size][0]
         else:
             rendezvous_pg_index = (i * data_parallel_size) if use_mp_backend else base_pg_index
-        data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(
-            engine_pg, rendezvous_pg_index, allocated_rendezvous_ports
+        data_parallel_address, rendezvous_ports = get_rendezvous_addr_ports(
+            engine_pg,
+            rendezvous_pg_index,
+            port_count=6,
+            excluded_ports=allocated_rendezvous_ports,
         )
-        allocated_rendezvous_ports.add(data_parallel_rpc_port)
+        data_parallel_rpc_port, *data_parallel_master_ports = rendezvous_ports
+        allocated_rendezvous_ports.update(rendezvous_ports)
 
         if backend == "vllm":
             if async_engine:
@@ -629,6 +633,8 @@ def create_ray_wrapped_inference_engines(
                     if data_parallel_size > 1
                     else {}
                 )
+                if async_engine and data_parallel_size > 1:
+                    dp_kwargs["data_parallel_master_ports"] = data_parallel_master_ports
 
                 # The mp executor's TP workers exchange custom-all-reduce IPC handles
                 # under the Ray-actor placement + remapped CUDA_VISIBLE_DEVICES; vLLM's
