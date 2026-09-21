@@ -17,7 +17,11 @@ from skyrl_train.inference_engines.base import (
     NamedWeightsUpdateRequest,
 )
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
-from skyrl_train.inference_engines.utils import get_pg_bundle_node_ips, get_rendezvous_addr_ports
+from skyrl_train.inference_engines.utils import (
+    VLLM_DATA_PARALLEL_MASTER_PORT_COUNT,
+    get_pg_bundle_node_ips,
+    get_rendezvous_addr_ports,
+)
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
 from skyrl_train.env_vars import EnvVarScope, VLLM_USE_V2_MODEL_RUNNER_ENV, managed_environment_names
 from skyrl_train.utils import (
@@ -95,6 +99,36 @@ def resolve_engine_max_model_len(engine_init_kwargs: Dict[str, Any], rope_scalin
         "Please provide rope `original_max_position_embeddings` to compute model max length"
     )
     return int(rope_factor * rope_max_pos)
+
+
+def _dp_rank_bundle_indices(
+    *,
+    engine_index: int,
+    data_parallel_size: int,
+    tensor_pipeline_size: int,
+    per_engine_placement: bool,
+    use_hybrid_engine: bool,
+    use_mp_backend: bool,
+    colocated_engine_bundles: list[list[int]],
+) -> list[int]:
+    if use_hybrid_engine:
+        return [
+            colocated_engine_bundles[engine_index * data_parallel_size + rank][0] for rank in range(data_parallel_size)
+        ]
+    if use_mp_backend:
+        return [engine_index * data_parallel_size + rank for rank in range(data_parallel_size)]
+    base_index = 0 if per_engine_placement else engine_index * tensor_pipeline_size * data_parallel_size
+    return [base_index + rank * tensor_pipeline_size for rank in range(data_parallel_size)]
+
+
+def _validate_node_local_dp_ranks(engine_index: int, placement_group, bundle_indices: list[int]) -> None:
+    node_ips = get_pg_bundle_node_ips(placement_group, bundle_indices)
+    logger.info(f"inference engine {engine_index}: DP rank -> node {dict(enumerate(node_ips))}")
+    if len(set(node_ips)) > 1:
+        raise RuntimeError(
+            f"inference engine {engine_index}: its DP ranks were placed on "
+            f"{len(set(node_ips))} nodes ({dict(enumerate(node_ips))}); a DP/EP group must be node-local"
+        )
 
 
 def _qwen3_5_vlm_engine_kwargs(pretrain: str, *, revision: str | None = None) -> Dict[str, Any]:
@@ -511,60 +545,30 @@ def create_ray_wrapped_inference_engines(
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
 
-    if data_parallel_size > 1:
-        # Every DP rank of an engine must sit on one node: the ranks form a single vLLM
-        # DP/EP group whose expert-parallel all-to-all runs every decode step, and a group
-        # split across nodes runs that collective over the fabric and deadlocks silently at
-        # the first forward under CUDA graphs. Fail here instead, with the layout visible.
-        for i in range(num_inference_engines):
-            if use_hybrid_engine:
-                check_pg = shared_pg
-                check_indices = [
-                    colocated_engine_bundles[i * data_parallel_size + r][0] for r in range(data_parallel_size)
-                ]
-            elif per_engine_pgs:
-                check_pg = per_engine_pgs[i]
-                check_indices = [r * tp_pp_size for r in range(data_parallel_size)]
-            elif use_mp_backend:
-                check_pg = shared_pg
-                check_indices = [i * data_parallel_size + r for r in range(data_parallel_size)]
-            else:
-                check_pg = shared_pg
-                check_indices = [i * per_engine_gpu_count + r * tp_pp_size for r in range(data_parallel_size)]
-            node_ips = get_pg_bundle_node_ips(check_pg, check_indices)
-            logger.info(f"inference engine {i}: DP rank -> node {dict(enumerate(node_ips))}")
-            if len(set(node_ips)) > 1:
-                raise RuntimeError(
-                    f"inference engine {i}: its {data_parallel_size} DP ranks were placed on "
-                    f"{len(set(node_ips))} nodes ({dict(enumerate(node_ips))}); a DP/EP group must be node-local"
-                )
-
     allocated_rendezvous_ports: set[int] = set()
     for i in range(num_inference_engines):
-        # Per-engine STRICT_PACK PGs (ray/uni, multi-GPU engines) are engine-LOCAL: each
-        # has its own bundle index space 0..per_engine_gpu_count-1, so base_pg_index
-        # resets to 0. The mp PACK PG and TP==PP==1 flat PACK PG remain global.
-        # Hybrid engines use colocated_engine_bundles for node-ordered indices.
         use_per_engine_pg = bool(per_engine_pgs)
         if use_per_engine_pg:
             engine_pg = per_engine_pgs[i]
-            base_pg_index = 0
         else:
             engine_pg = shared_pg
-            base_pg_index = i * per_engine_gpu_count
 
-        # Get DP group rendezvous (addr, port) on the same node as DP rank 0 for this engine.
-        # The mp PACK PG has one {GPU: tp_pp_size} bundle per (engine, DP-rank), so the
-        # rendezvous bundle for engine i's DP-rank-0 is at i*data_parallel_size (not the
-        # per-GPU base_pg_index, which would index past the smaller mp bundle list).
-        if use_hybrid_engine:
-            rendezvous_pg_index = colocated_engine_bundles[i * data_parallel_size][0]
-        else:
-            rendezvous_pg_index = (i * data_parallel_size) if use_mp_backend else base_pg_index
+        dp_rank_bundle_indices = _dp_rank_bundle_indices(
+            engine_index=i,
+            data_parallel_size=data_parallel_size,
+            tensor_pipeline_size=tp_pp_size,
+            per_engine_placement=use_per_engine_pg,
+            use_hybrid_engine=use_hybrid_engine,
+            use_mp_backend=use_mp_backend,
+            colocated_engine_bundles=colocated_engine_bundles,
+        )
+        if data_parallel_size > 1:
+            _validate_node_local_dp_ranks(i, engine_pg, dp_rank_bundle_indices)
+
         data_parallel_address, rendezvous_ports = get_rendezvous_addr_ports(
             engine_pg,
-            rendezvous_pg_index,
-            port_count=6,
+            dp_rank_bundle_indices[0],
+            port_count=1 + VLLM_DATA_PARALLEL_MASTER_PORT_COUNT,
             excluded_ports=allocated_rendezvous_ports,
         )
         data_parallel_rpc_port, *data_parallel_master_ports = rendezvous_ports
@@ -594,7 +598,7 @@ def create_ray_wrapped_inference_engines(
             # Launch one actor per DP rank
             for dp_rank in range(data_parallel_size):
                 # TP*PP slice reserved for a single DP rank.
-                base_dp_pg_index = base_pg_index + dp_rank * tp_pp_size
+                base_dp_pg_index = dp_rank_bundle_indices[dp_rank]
                 dp_rank_bundles = (
                     list(range(base_dp_pg_index, base_dp_pg_index + tp_pp_size)) if tp_pp_size > 1 else None
                 )

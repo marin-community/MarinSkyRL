@@ -244,38 +244,15 @@ def use_per_engine_strict_pack_pg(
     use_mp_backend: bool,
     tensor_parallel_size: int,
     pipeline_parallel_size: int,
-    data_parallel_size: int = 1,
+    data_parallel_size: int,
 ) -> bool:
-    """Whether the ray/uni inference backend should build one STRICT_PACK
-    placement group PER ENGINE (vs a single flat PACK PG over all engines).
+    """Return whether each engine needs a node-local placement group.
 
-    Pure (Ray-free) predicate so the placement decision is unit-testable. The
-    per-engine STRICT_PACK guarantees each multi-GPU engine's bundles co-locate
-    on one node — required to avoid the cross-node TP/PP all-reduce decode
-    deadlock (#232) — but is ONLY needed when an engine owns more than one GPU
-    (``tensor_parallel_size * pipeline_parallel_size > 1``).
-
-    For single-GPU engines (TP==PP==1) it must be OFF: N independent 1-bundle
-    STRICT_PACK PGs scatter round-robin across nodes, leaving every node
-    partially used and STARVING the downstream policy/ref PACK PG of its whole
-    nodes (RuntimeError: Failed to create placement group ... in 180s — observed
-    multi-node TP=1 lever1/swesmith). The flat PACK fallback packs single-GPU
-    bundles densely, freeing whole nodes for the policy PG.
-
-    A DP>1 engine (``inference_engine_data_parallel_size > 1``, one single-GPU
-    actor per DP rank) is a multi-GPU engine too: its DP ranks form one vLLM
-    DP/EP group whose expert-parallel all-to-all runs every decode step, and the
-    flat PACK PG gives them no node affinity either. A DP4xEP4 job on 4-GPU
-    nodes landed every engine's DP rank 0 on one node and ranks 1-3 on another,
-    and the cross-node collective deadlocked at the first forward under CUDA
-    graphs with no error. So the gate is ``tp * pp * dp > 1``, and the per-engine
-    PG holds all ``tp * pp * dp`` bundles of the engine (STRICT_PACK = one node).
-
-    The gate is not ``per_engine_gpu_count > gpus_per_node``: #232 is TP=4 on
-    4-GPU nodes, and 4 is not > 4, so that form would wrongly fall back to flat
-    PACK and re-break the cross-node-TP split. The hybrid (colocate_all) and
-    mp-backend paths never use per-engine STRICT_PACK (the mp path's
-    {GPU:tp_pp_size} bundle is already node-atomic).
+    Tensor, pipeline, and data-parallel ranks communicate within an engine and
+    must share a node. A single-GPU engine uses the flat PACK group so many
+    engines fill whole nodes instead of fragmenting the policy allocation.
+    Hybrid placement supplies its own group, and the multiprocessing backend
+    reserves each tensor/pipeline slice in one node-atomic bundle.
     """
     if use_hybrid_engine or use_mp_backend:
         return False

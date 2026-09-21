@@ -52,6 +52,7 @@ def test_ray_uni_backend_gate(tp, pp, expected):
             use_mp_backend=False,
             tensor_parallel_size=tp,
             pipeline_parallel_size=pp,
+            data_parallel_size=1,
         )
         is expected
     )
@@ -90,6 +91,7 @@ def test_tp1_never_strict_pack_so_policy_pg_not_starved():
         use_mp_backend=False,
         tensor_parallel_size=1,
         pipeline_parallel_size=1,
+        data_parallel_size=1,
     )
 
 
@@ -102,6 +104,7 @@ def test_tp4_on_4gpu_node_still_strict_pack():
         use_mp_backend=False,
         tensor_parallel_size=4,
         pipeline_parallel_size=1,
+        data_parallel_size=1,
     )
 
 
@@ -114,6 +117,7 @@ def test_mp_backend_never_per_engine_strict_pack(tp, pp):
         use_mp_backend=True,
         tensor_parallel_size=tp,
         pipeline_parallel_size=pp,
+        data_parallel_size=1,
     )
 
 
@@ -126,6 +130,7 @@ def test_hybrid_engine_never_per_engine_strict_pack(tp, pp):
         use_mp_backend=False,
         tensor_parallel_size=tp,
         pipeline_parallel_size=pp,
+        data_parallel_size=1,
     )
 
 

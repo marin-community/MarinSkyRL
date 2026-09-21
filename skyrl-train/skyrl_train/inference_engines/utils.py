@@ -11,6 +11,8 @@ from typing import Tuple
 import ray
 from ray.util.placement_group import PlacementGroupSchedulingStrategy
 
+VLLM_DATA_PARALLEL_MASTER_PORT_COUNT = 5
+
 
 def get_vllm_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
     stop_val = sampling_params.get("stop", None)
@@ -245,8 +247,7 @@ def _find_available_rendezvous_port(excluded_ports: Collection[int] = ()) -> int
 
 
 def get_pg_bundle_node_ips(placement_group, pg_indices: Collection[int]) -> List[str]:
-    """Node IP of each bundle index of ``placement_group``, resolved by zero-resource probe tasks
-    pinned to the bundles (the same mechanism as ``get_rendezvous_addr_ports``)."""
+    """Return the node IP assigned to each requested placement-group bundle."""
 
     @ray.remote(num_cpus=0, num_gpus=0)
     def get_node_ip():
@@ -292,5 +293,4 @@ def get_rendezvous_addr_ports(
         placement_group_capture_child_tasks=True,
         placement_group_bundle_index=pg_index,
     )
-    # Get DP group rendezvous (addr, port) on the same node as index `pg_index`'s bundle.
     return ray.get(get_addr_ports.options(scheduling_strategy=master_sched).remote())

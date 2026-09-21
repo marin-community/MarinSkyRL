@@ -72,6 +72,7 @@ from skyrl_train.inference_engines.vllm.utils import (
     is_port_collision,
     PrefixCacheHitRateAccumulator,
 )
+from skyrl_train.inference_engines.utils import VLLM_DATA_PARALLEL_MASTER_PORT_COUNT
 from skyrl_train.inference_engines.vllm.stats import (
     IntervalReadMode,
     VLLMCumulativeStats,
@@ -1671,9 +1672,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 if data_parallel_master_ports is None:
                     engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
                 else:
+                    if len(data_parallel_master_ports) != VLLM_DATA_PARALLEL_MASTER_PORT_COUNT:
+                        raise ValueError(
+                            f"vLLM data parallelism requires {VLLM_DATA_PARALLEL_MASTER_PORT_COUNT} master ports, "
+                            f"got {len(data_parallel_master_ports)}"
+                        )
+                    *worker_ports, master_port = data_parallel_master_ports
                     vllm_config = engine_args.create_engine_config()
-                    vllm_config.parallel_config._data_parallel_master_port_list = data_parallel_master_ports[:-1]
-                    vllm_config.parallel_config.data_parallel_master_port = data_parallel_master_ports[-1]
+                    vllm_config.parallel_config._data_parallel_master_port_list = worker_ports
+                    vllm_config.parallel_config.data_parallel_master_port = master_port
                     engine = vllm.AsyncLLMEngine.from_vllm_config(
                         vllm_config,
                         stat_loggers=stat_loggers,
