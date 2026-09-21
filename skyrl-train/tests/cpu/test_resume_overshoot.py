@@ -77,7 +77,7 @@ def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocat
     dl.__len__ = lambda _self: max(total_training_steps, 1)
     trainer.train_dataloader = dl
 
-    trainer.save_checkpoints = MagicMock(name="save_checkpoints")
+    trainer._snapshot_checkpoint = MagicMock(name="snapshot_checkpoint")
     trainer._finish_checkpoint_upload = AsyncMock(name="finish_checkpoint_upload", return_value=(0.0, 0.0))
     trainer.handle_hf_export = MagicMock(name="handle_hf_export")
     trainer.eval = AsyncMock(name="eval", return_value={"eval/accuracy": 0.75})
@@ -161,7 +161,7 @@ def test_train_end_saves_the_last_completed_step(cls):
     requested.should_save_hf_model = True
     trainer.callback_handler = _RecordingCallbackHandler(requested)
     saved_steps = []
-    trainer.save_checkpoints.side_effect = lambda: saved_steps.append(trainer.global_step)
+    trainer._snapshot_checkpoint.side_effect = lambda: saved_steps.append(trainer.global_step)
     trainer.handle_hf_export.side_effect = lambda: saved_steps.append(trainer.global_step)
 
     asyncio.run(trainer._finalize_training(completed_step=16, epoch=0))
@@ -199,7 +199,7 @@ def test_train_end_still_saves_when_the_final_evaluation_fails(cls):
     with pytest.raises(RuntimeError, match="evaluation failed"):
         asyncio.run(trainer._finalize_training(completed_step=16, epoch=0))
 
-    trainer.save_checkpoints.assert_called_once()
+    trainer._snapshot_checkpoint.assert_called_once()
     assert trainer.callback_handler.events == ["on_train_end", "on_save"]
 
 
@@ -222,7 +222,7 @@ def test_handle_resume_at_max_steps_triggers_export_when_requested(cls):
     asyncio.run(trainer._handle_resume_at_max_steps())
 
     assert "on_train_end" in trainer.callback_handler.events
-    trainer.save_checkpoints.assert_called_once()
+    trainer._snapshot_checkpoint.assert_called_once()
     trainer.handle_hf_export.assert_called_once()
 
 
@@ -235,7 +235,7 @@ def test_handle_resume_at_max_steps_no_save_when_not_requested(cls):
 
     asyncio.run(trainer._handle_resume_at_max_steps())
 
-    trainer.save_checkpoints.assert_not_called()
+    trainer._snapshot_checkpoint.assert_not_called()
     trainer.handle_hf_export.assert_not_called()
 
 

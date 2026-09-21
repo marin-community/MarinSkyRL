@@ -591,7 +591,7 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
     monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
     save_observations = []
 
-    def save_checkpoints():
+    def snapshot_checkpoint():
         save_observations.append(
             (
                 trainer.policy_model.model_on_gpu,
@@ -602,7 +602,7 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
         if save_error is not None:
             raise save_error
 
-    trainer.save_checkpoints = save_checkpoints
+    trainer._snapshot_checkpoint = snapshot_checkpoint
 
     if save_error is None:
         asyncio.run(trainer._save_checkpoints_with_residency())

@@ -42,9 +42,6 @@ class PendingDirectoryUpload:
         finally:
             shutil.rmtree(self.local_path, ignore_errors=True)
 
-    def discard(self) -> None:
-        shutil.rmtree(self.local_path, ignore_errors=True)
-
 
 class DeferredLocalWorkDir:
     """Stage cloud output locally while leaving publication to the caller."""

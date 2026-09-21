@@ -752,7 +752,7 @@ class FSDPStrategy(DistributedStrategy):
         tag=None,
         tokenizer=None,
     ):
-        """Save model checkpoint for FSDP"""
+        """Stage an FSDP checkpoint and return its deferred cloud upload, if any."""
         import warnings
         from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDictConfig, StateDictType
 

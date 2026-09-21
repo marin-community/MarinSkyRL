@@ -611,27 +611,27 @@ class RayPPOTrainer:
             # The interval save may have just written this same step; do not write it twice.
             if self._control.should_save and self._last_saved_step != self.global_step:
                 with Timer("save_checkpoints", self.all_timings):
-                    snapshot = await asyncio.to_thread(self.save_checkpoints)
+                    snapshot = await asyncio.to_thread(self._snapshot_checkpoint)
                 try:
                     await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
                 except BaseException:
-                    await self._finish_checkpoint_upload(snapshot, commit=False)
+                    await self._await_checkpoint_upload(snapshot)
                     raise
                 self._start_checkpoint_upload(snapshot, final_state)
-                await self._drain_checkpoint_upload()
-                logger.info("Saved final checkpoint.")
+                if await self._drain_checkpoint_upload():
+                    logger.info("Saved final checkpoint.")
             if self._control.should_save_hf_model:
                 await asyncio.to_thread(self.handle_hf_export)
 
     async def _save_checkpoints_with_residency(self) -> CheckpointSnapshot:
         """Save a checkpoint, swapping colocated training and inference residency when needed."""
         if not self.colocate_all:
-            return await asyncio.to_thread(self.save_checkpoints)
+            return await asyncio.to_thread(self._snapshot_checkpoint)
 
         await self.inference_engine_client.sleep()
         try:
             self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
-            return await asyncio.to_thread(self.save_checkpoints)
+            return await asyncio.to_thread(self._snapshot_checkpoint)
         finally:
             await self._sync_policy_for_rollouts(reason="checkpoint_restore")
 
@@ -660,7 +660,7 @@ class RayPPOTrainer:
         try:
             await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
         except BaseException:
-            await self._finish_checkpoint_upload(snapshot, commit=False)
+            await self._await_checkpoint_upload(snapshot)
             raise
         self._start_checkpoint_upload(snapshot, state)
 
@@ -669,48 +669,50 @@ class RayPPOTrainer:
         task = asyncio.create_task(self._finish_checkpoint_upload(snapshot, commit=True))
         self._pending_checkpoint_upload = (task, state)
 
-    async def _finish_checkpoint_upload(self, snapshot: CheckpointSnapshot, *, commit: bool) -> tuple[float, float]:
+    def _finish_checkpoint_upload_blocking(self, snapshot: CheckpointSnapshot, *, commit: bool) -> tuple[float, float]:
         cleanup_duration = 0.0
         actor_refs = self.policy_model.async_run_ray_method("pass_through", "wait_checkpoint_upload")
         if self.critic_model is not None:
             actor_refs.extend(self.critic_model.async_run_ray_method("pass_through", "wait_checkpoint_upload"))
-        await asyncio.to_thread(ray.get, actor_refs)
+        ray.get(actor_refs)
         if commit:
-            writes = [
-                asyncio.to_thread(io.write_bytes_atomic, snapshot.trainer_state_path, snapshot.trainer_state_payload)
-            ]
+            io.write_bytes_atomic(snapshot.trainer_state_path, snapshot.trainer_state_payload)
             if snapshot.dataloader_payload is not None:
-                writes.append(
-                    asyncio.to_thread(io.write_bytes_atomic, snapshot.dataloader_path, snapshot.dataloader_payload)
-                )
-            await asyncio.gather(*writes)
-            await asyncio.to_thread(io.write_bytes_atomic, snapshot.marker_path, str(snapshot.step).encode())
+                io.write_bytes_atomic(snapshot.dataloader_path, snapshot.dataloader_payload)
+            io.write_bytes_atomic(snapshot.marker_path, str(snapshot.step).encode())
             self._last_saved_step = snapshot.step
             cleanup_started = time.monotonic()
-            await asyncio.to_thread(self._cleanup_old_checkpoints)
+            self._cleanup_old_checkpoints()
             cleanup_duration = time.monotonic() - cleanup_started
         return time.monotonic() - snapshot.upload_started_at, cleanup_duration
 
-    async def _drain_checkpoint_upload(self) -> None:
+    async def _finish_checkpoint_upload(self, snapshot: CheckpointSnapshot, *, commit: bool) -> tuple[float, float]:
+        return await asyncio.to_thread(self._finish_checkpoint_upload_blocking, snapshot, commit=commit)
+
+    async def _await_checkpoint_upload(self, snapshot: CheckpointSnapshot) -> None:
+        await self._finish_checkpoint_upload(snapshot, commit=False)
+
+    async def _drain_checkpoint_upload(self) -> bool:
         pending = getattr(self, "_pending_checkpoint_upload", None)
         if pending is None:
-            return
+            return True
         task, state = pending
         self._pending_checkpoint_upload = None
         try:
             duration, cleanup_duration = await task
         except OSError:
             self._record_checkpoint_save_failure(state)
-            return
+            return False
         except ray.exceptions.RayTaskError as error:
             if not isinstance(error.as_instanceof_cause(), OSError):
                 raise
             self._record_checkpoint_save_failure(state)
-            return
+            return False
         self.all_timings["checkpoint_upload"] = self.all_timings.get("checkpoint_upload", 0.0) + duration
         self.all_timings["cleanup_old_checkpoints"] = (
             self.all_timings.get("cleanup_old_checkpoints", 0.0) + cleanup_duration
         )
+        return True
 
     async def _run_step_end_callbacks(self, state: TrainerState) -> None:
         """Run callback-requested work that belongs to the current training step."""
@@ -2651,9 +2653,18 @@ class RayPPOTrainer:
         actor_info: ActorInfo = model.actor_infos[rank]
         return actor_info.rank
 
-    def save_checkpoints(self) -> CheckpointSnapshot:
+    def save_checkpoints(self) -> None:
+        """Save and publish a complete checkpoint before returning."""
+        snapshot = self._snapshot_checkpoint()
+        upload_duration, cleanup_duration = self._finish_checkpoint_upload_blocking(snapshot, commit=True)
+        self.all_timings["checkpoint_upload"] = self.all_timings.get("checkpoint_upload", 0.0) + upload_duration
+        self.all_timings["cleanup_old_checkpoints"] = (
+            self.all_timings.get("cleanup_old_checkpoints", 0.0) + cleanup_duration
+        )
+
+    def _snapshot_checkpoint(self) -> CheckpointSnapshot:
         """
-        Save the model, optimizer, and training states to disk.
+        Stage model shards and serialize trainer state for later publication.
 
         If colocate_all is True, assumes that the policy model is currently on GPU.
         """
