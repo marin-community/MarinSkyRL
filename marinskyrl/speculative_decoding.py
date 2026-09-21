@@ -31,6 +31,14 @@ class SpeculativeDecodingMethod(StrEnum):
     EAGLE3 = "eagle3"
 
 
+class SpeculatorModelSourceKind(StrEnum):
+    """Storage kinds supported by the draft-model lifecycle."""
+
+    HUGGING_FACE = "hugging_face"
+    LOCAL = "local"
+    ARTIFACT = "artifact"
+
+
 class SpeculativeDecodingConfigError(ValueError):
     """A managed speculative-decoding configuration is invalid."""
 
@@ -147,9 +155,18 @@ class SpeculatorModelConfig:
         """Return the source path when this model already exists locally."""
         return self.source_uri if os.path.isabs(self.source_uri) else None
 
+    @property
+    def source_kind(self) -> SpeculatorModelSourceKind:
+        if self.local_source_path is not None:
+            return SpeculatorModelSourceKind.LOCAL
+        if self.hugging_face_repo_id is not None:
+            return SpeculatorModelSourceKind.HUGGING_FACE
+        return SpeculatorModelSourceKind.ARTIFACT
+
     def node_local_path(self) -> str:
         """Return the standard node-local location for this immutable source."""
-        if self.local_source_path is not None:
+        if self.source_kind is SpeculatorModelSourceKind.LOCAL:
+            assert self.local_source_path is not None
             return self.local_source_path
         return os.path.join(
             _DRAFT_MODEL_ROOT,
@@ -158,9 +175,12 @@ class SpeculatorModelConfig:
 
     def vllm_source_config(self) -> dict[str, Any]:
         """Return the vLLM fields needed to load this draft source."""
-        if self.local_source_path is not None:
+        if self.source_kind is SpeculatorModelSourceKind.LOCAL:
+            assert self.local_source_path is not None
             return {"model": self.local_source_path}
-        if model_id := self.hugging_face_repo_id:
+        if self.source_kind is SpeculatorModelSourceKind.HUGGING_FACE:
+            assert self.hugging_face_repo_id is not None
+            model_id = self.hugging_face_repo_id
             return {"model": model_id, "revision": self.source_identity}
         return {
             "model": runai_model_uri(self.source_uri),

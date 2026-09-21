@@ -23,6 +23,7 @@ from torch import nn
 from marinskyrl.resource_locator import join_resource_path
 from marinskyrl.speculative_decoding import (
     SpeculatorModelConfig,
+    SpeculatorModelSourceKind,
     SpeculatorTrainingConfig,
     runai_model_uri,
 )
@@ -343,10 +344,14 @@ def _prepare_model(
     )
     from transformers import PreTrainedModel  # noqa: PLC0415
 
-    local_path = draft_model.local_source_path
-    pretrained_path = local_path or draft_model.hugging_face_repo_id
+    pretrained_path = None
+    revision = None
+    if draft_model.source_kind is SpeculatorModelSourceKind.LOCAL:
+        pretrained_path = draft_model.local_source_path
+    elif draft_model.source_kind is SpeculatorModelSourceKind.HUGGING_FACE:
+        pretrained_path = draft_model.hugging_face_repo_id
+        revision = draft_model.source_identity
     if pretrained_path is not None:
-        revision = None if local_path is not None else draft_model.source_identity
         config = Eagle3SpeculatorConfig.from_pretrained(pretrained_path, revision=revision)
     else:
         config = Eagle3SpeculatorConfig.from_dict(

@@ -26,6 +26,7 @@ local path — opened via ``fsspec``.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import contextlib
 from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
@@ -61,7 +62,7 @@ from marinskyrl.environment_contract import (
 from cloud.iris.model_paths import unsupported_model_path_message
 from cloud.iris.telemetry_env import telemetry_environment
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
-from marinskyrl.speculative_decoding import SpeculatorModelConfig
+from marinskyrl.speculative_decoding import SpeculatorModelConfig, SpeculatorModelSourceKind
 from marinskyrl.distillation import TeacherModelSpec
 from marinskyrl.process_diagnostics import (
     ProcessOutcomeKind,
@@ -412,14 +413,23 @@ def stage_model(model_path: str, warm_source: str | None = None, revision: str |
     _log(f"model pre-staged to node-local HF cache: {local_dir}")
 
 
-def materialize_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
-    """Copy and validate an object-store HF export on this allocated node."""
+def _materialize_model_artifact(
+    source_uri: str,
+    local_path: str,
+    source_identity: str,
+    validate: Callable[[set[str], str], None],
+) -> None:
     source = ArtifactSource(uri=source_uri, local_path=local_path, identity=source_identity)
-    artifact = materialize(source, validate=validate_portable_hf_model_files)
+    artifact = materialize(source, validate=validate)
     _log(
-        f"Model export staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
+        f"Model artifact staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
         f"({len(artifact.files)} files, identity={source.identity})"
     )
+
+
+def materialize_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
+    """Copy and validate an object-store HF export on this allocated node."""
+    _materialize_model_artifact(source_uri, local_path, source_identity, validate_portable_hf_model_files)
 
 
 def stage_draft_model(
@@ -430,15 +440,15 @@ def stage_draft_model(
 ) -> None:
     """Make one immutable EAGLE draft available at its standard node-local path."""
     local_path = model.node_local_path()
-    model_id = model.hugging_face_repo_id
-    if model_id is not None:
+    if model.source_kind is SpeculatorModelSourceKind.HUGGING_FACE:
+        assert model.hugging_face_repo_id is not None
         if cache_ttl_days is None or cache_ttl_days <= 0:
             raise ValueError("--draft-model-cache-ttl-days must be positive for a Hugging Face draft model")
         if not cache_source_prefix:
             raise ValueError("--draft-model-cache-source-prefix is required for a Hugging Face draft model")
         stage_cached_hugging_face_model(
             CachedHuggingFaceModel(
-                model_id=model_id,
+                model_id=model.hugging_face_repo_id,
                 revision=model.source_identity,
                 local_path=local_path,
             ),
@@ -447,18 +457,14 @@ def stage_draft_model(
         )
         return
 
-    if model.local_source_path is not None:
+    if model.source_kind is SpeculatorModelSourceKind.LOCAL:
+        assert model.local_source_path is not None
         filesystem, root = fs_and_path(model.local_source_path)
         names = {entry.path for _, entry in file_inventory(filesystem, root)}
         validate_hf_model_weights(names, model.local_source_path)
         return
 
-    source = ArtifactSource(uri=model.source_uri, identity=model.source_identity, local_path=local_path)
-    artifact = materialize(source, validate=validate_hf_model_weights)
-    _log(
-        f"Draft model staged on rank {_rank()}/{_num_tasks()}: {model.source_uri} -> {local_path} "
-        f"({len(artifact.files)} files, identity={model.source_identity})"
-    )
+    _materialize_model_artifact(model.source_uri, local_path, model.source_identity, validate_hf_model_weights)
 
 
 def materialize_data_sources(data_sources_json: str) -> None:

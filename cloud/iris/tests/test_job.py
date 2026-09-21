@@ -527,7 +527,7 @@ def test_materialize_model_export_replaces_a_stale_destination(tmp_path: Path) -
     assert (destination / "model.safetensors").read_bytes() == b"new weights"
 
 
-def test_stage_draft_model_copies_object_store_checkpoint_without_tokenizer(
+def test_stage_draft_model_copies_artifact_uri_without_tokenizer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "source"

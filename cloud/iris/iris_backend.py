@@ -119,7 +119,11 @@ from marinskyrl.resource_locator import (
     model_source_for_path,
 )
 from marinskyrl.runtime_options import GDNBackend, R3Transport
-from marinskyrl.speculative_decoding import SpeculativeDecodingConfig, SpeculatorModelConfig
+from marinskyrl.speculative_decoding import (
+    SpeculativeDecodingConfig,
+    SpeculatorModelConfig,
+    SpeculatorModelSourceKind,
+)
 from cloud.iris.rl_config_translation import (
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
@@ -2318,7 +2322,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
                 draft_model.source_identity,
             ]
         )
-        if draft_model.hugging_face_repo_id is not None:
+        if draft_model.source_kind is SpeculatorModelSourceKind.HUGGING_FACE:
             controller_cmd.extend(
                 [
                     "--draft-model-cache-ttl-days",
