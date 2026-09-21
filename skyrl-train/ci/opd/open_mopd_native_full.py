@@ -7,10 +7,10 @@ independent target evaluation.
 
 ``--schedule sync`` (default) runs the synchronous trainer: 200 rollout batches of
 1,024 prompts, four 256-prompt optimizer updates each. ``--schedule fully_async``
-runs ``FullyAsyncRayPPOTrainer`` through ``skyrl_train.entrypoints.fully_async_gym``
+runs ``FullyAsyncRayPPOTrainer`` through ``skyrl_train.entrypoints.fully_async_in_process``
 with the same 256-prompt updates and the same checkpoint, export, and evaluation
-cadence per prompt, so async optimizer step 8 corresponds to sync step 2. See
-``docs/design/open-mopd-step-pipelining.md``.
+cadence per prompt, so async optimizer step 8 corresponds to sync step 2. The design
+is ``docs/design/open-mopd-step-pipelining.md`` (marin-community/MarinSkyRL#707).
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from skyrl_train.io import io
 
 from cloud.iris.artifacts import fs_and_path
 from cloud.iris.open_mopd_fidelity import load_config
+from cloud.iris.rl_config_translation import RL_ENTRYPOINT_MODULES, RLEntrypoint
 from marinskyrl.checkpoint_paths import LATEST_CHECKPOINT_FILE
 from marinskyrl.resource_locator import join_resource_path
 
@@ -52,8 +53,8 @@ class Schedule(StrEnum):
 
 
 ENTRYPOINT_MODULES = {
-    Schedule.SYNC: "skyrl_train.entrypoints.main_base",
-    Schedule.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async_gym",
+    Schedule.SYNC: RL_ENTRYPOINT_MODULES[RLEntrypoint.STANDARD],
+    Schedule.FULLY_ASYNC: RL_ENTRYPOINT_MODULES[RLEntrypoint.FULLY_ASYNC_IN_PROCESS],
 }
 
 
