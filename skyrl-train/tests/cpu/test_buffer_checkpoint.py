@@ -6,10 +6,12 @@ Run with: uv run --isolated --group dev --extra cpu pytest tests/cpu/test_buffer
 import asyncio
 import os
 import tempfile
+from unittest.mock import MagicMock, patch
+
 import pytest
 import torch
 
-from skyrl_train.callbacks.builtin import BufferCheckpointCallback
+from skyrl_train.callbacks.builtin import BufferCheckpointCallback, DataTrackingCallback
 from skyrl_train.async_rollout_state import GeneratedOutputGroup
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer, _GenerationQueues
 from skyrl_train.trajectory_runners.base import TrajectoryID
@@ -177,6 +179,41 @@ def test_consumed_admitted_groups_are_only_included_by_final_flush_snapshot():
 
     assert queues.snapshot().admitted_groups == []
     assert [group.uid for group in queues.shutdown_snapshot().admitted_groups] == ["trained"]
+
+
+def test_async_stage_transition_does_not_restore_prior_data_or_rollouts():
+    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.cfg = MagicMock()
+    trainer.cfg.trainer.restore_dataloader_state = False
+    trainer.data_tracker = MagicMock()
+    trainer.async_train_dataloader = MagicMock()
+    trainer._pending_buffer_restore_path = None
+
+    with patch.object(DataTrackingCallback, "load_from_checkpoint") as load_data_state:
+        restored = trainer._restore_async_dataloader_state("s3://checkpoints/global_step_110")
+
+    assert restored is False
+    trainer.async_train_dataloader.load_state_from_checkpoint.assert_not_called()
+    load_data_state.assert_not_called()
+    assert trainer._pending_buffer_restore_path is None
+
+
+def test_async_resume_restores_prior_data_and_schedules_rollout_restore():
+    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.cfg = MagicMock()
+    trainer.cfg.trainer.restore_dataloader_state = True
+    trainer.data_tracker = MagicMock()
+    trainer.async_train_dataloader = MagicMock()
+    trainer._pending_buffer_restore_path = None
+    checkpoint_path = "s3://checkpoints/global_step_68"
+
+    with patch.object(DataTrackingCallback, "load_from_checkpoint", return_value=True) as load_data_state:
+        restored = trainer._restore_async_dataloader_state(checkpoint_path)
+
+    assert restored is True
+    load_data_state.assert_called_once_with(checkpoint_path, trainer.data_tracker)
+    trainer.async_train_dataloader.load_state_from_checkpoint.assert_called_once_with()
+    assert trainer._pending_buffer_restore_path == checkpoint_path
 
 
 @pytest.mark.asyncio

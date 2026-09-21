@@ -688,6 +688,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             await self.shutdown()
 
+    def _restore_async_dataloader_state(self, checkpoint_path: str) -> bool:
+        """Restore async input progress and queued rollouts when requested."""
+        if not self.cfg.trainer.restore_dataloader_state:
+            logger.info("Starting with fresh async data and generation queues")
+            return False
+
+        loaded = DataTrackingCallback.load_from_checkpoint(checkpoint_path, self.data_tracker)
+        if not loaded:
+            logger.warning(
+                "No data consumption state found in checkpoint — resume may re-train on already-consumed data"
+            )
+
+        self._pending_buffer_restore_path = checkpoint_path
+        self.async_train_dataloader.load_state_from_checkpoint()
+        return loaded
+
     async def _train_loop(self):
         """
         Internal training loop, separated for proper trajectory-runner lifecycle management.
@@ -701,26 +717,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 logger.info(f"Resumed training from global_step {self.global_step}")
 
                 if self.global_step > 0:
-                    # Load data consumption state into the tracker
-                    loaded = DataTrackingCallback.load_from_checkpoint(checkpoint_path, self.data_tracker)
-                    if not loaded:
-                        logger.warning(
-                            "No data consumption state found in checkpoint — "
-                            "resume may re-train on already-consumed data"
-                        )
-
-                    # Store checkpoint path for buffer restore after queue creation
-                    self._pending_buffer_restore_path = checkpoint_path
-
-                    # Reset dataloader iteration for skip-on-resume
-                    self.async_train_dataloader.load_state_from_checkpoint()
+                    restored_data_state = self._restore_async_dataloader_state(checkpoint_path)
                     self._staleness_manager.load_state_from_checkpoint(
                         self.global_step + 1
                     )  # +1 due to we haven't incremented yet
 
                     # Soft validation: log mismatch instead of crashing
                     steps_into_epoch = self.global_step % self.num_steps_per_epoch
-                    if steps_into_epoch != 0:
+                    if restored_data_state and steps_into_epoch != 0:
                         expected_consumed_in_epoch = self.mini_batch_size * steps_into_epoch
                         actual_consumed_in_epoch = self.data_tracker.consumed_in_epoch_count
                         if actual_consumed_in_epoch != expected_consumed_in_epoch:
@@ -808,6 +812,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 asyncio.create_task(self._run_generate_for_a_group_loop(generation_queues))
                 for _ in range(self.num_parallel_generation_workers)
             ]
+
             trajectory_tasks = self._active_trajectory_tasks
 
             for _ in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
