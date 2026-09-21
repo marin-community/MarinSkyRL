@@ -37,7 +37,11 @@ from cloud.iris.protocol import (  # noqa: E402
 from marinskyrl.task_sources import DirectoryDataSource  # noqa: E402
 from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
 from cloud.iris.runtime_environment import RuntimeProfile, task_setup_script  # noqa: E402
-from cloud.iris.task_runtime import materialize_data_sources, materialize_model_export  # noqa: E402
+from cloud.iris.task_runtime import (  # noqa: E402
+    materialize_data_sources,
+    materialize_draft_model_export,
+    materialize_model_export,
+)
 from iris.client.client import JobFailedError  # noqa: E402
 from iris.client.workload_codec import job_status_from_proto  # noqa: E402
 from iris.cluster.types import JobName  # noqa: E402
@@ -520,6 +524,18 @@ def test_materialize_model_export_replaces_a_stale_destination(tmp_path: Path) -
 
     assert not (destination / "stale.bin").exists()
     assert (destination / "model.safetensors").read_bytes() == b"new weights"
+
+
+def test_materialize_draft_model_export_does_not_require_tokenizer(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("{}")
+    (source / "model.safetensors").write_bytes(b"weights")
+    destination = tmp_path / "destination"
+
+    materialize_draft_model_export(source.as_uri(), str(destination), "draft@abc123")
+
+    assert (destination / "model.safetensors").read_bytes() == b"weights"
 
 
 def test_materialize_data_sources_caches_one_exact_file(tmp_path: Path) -> None:

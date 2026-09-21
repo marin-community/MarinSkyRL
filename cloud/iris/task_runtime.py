@@ -48,7 +48,7 @@ from cloud.iris.hf_model_cache import (
     download_hugging_face_snapshot,
     stage_cached_hugging_face_model,
 )
-from marinskyrl.hf_model import validate_portable_hf_model_files
+from marinskyrl.hf_model import validate_hf_model_weights, validate_portable_hf_model_files
 from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
     FR_DUMP_TEMP_FILE_ENV,
@@ -417,6 +417,16 @@ def materialize_model_export(source_uri: str, local_path: str, source_identity: 
     artifact = materialize(source, validate=validate_portable_hf_model_files)
     _log(
         f"Model export staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
+        f"({len(artifact.files)} files, identity={source.identity})"
+    )
+
+
+def materialize_draft_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
+    """Copy and validate an object-store EAGLE draft on this allocated node."""
+    source = ArtifactSource(uri=source_uri, local_path=local_path, identity=source_identity)
+    artifact = materialize(source, validate=validate_hf_model_weights)
+    _log(
+        f"Draft model staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
         f"({len(artifact.files)} files, identity={source.identity})"
     )
 
@@ -2239,7 +2249,7 @@ def main() -> None:
         )
     materialized_draft = args.materialize_draft_model
     if materialized_draft is not None:
-        materialize_model_export(
+        materialize_draft_model_export(
             materialized_draft.uri,
             materialized_draft.local_path,
             materialized_draft.identity,
