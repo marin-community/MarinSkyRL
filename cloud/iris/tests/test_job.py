@@ -262,6 +262,7 @@ def _spec(tmp_path: Path) -> SkyRLJobSpec:
                 resolved_config_uri=(output / "resolved-skyrl.json").as_uri(),
                 terminal_manifest_uri=(output / "terminal.json").as_uri(),
             ),
+            export_hf=True,
             seed=7,
             overrides=("++trainer.max_steps=8",),
         ),
@@ -350,6 +351,30 @@ def test_execute_job_exports_terminal_checkpoint_before_committing_model(tmp_pat
     assert response.state == AttemptState.SUCCEEDED
     assert response.model is not None
     assert response.model.policy_export_uri.endswith("/global_step_8/policy")
+
+
+def test_execute_job_commits_run_without_checkpoint_or_model_export(tmp_path: Path) -> None:
+    envelope = _spec(tmp_path)
+    envelope = replace(envelope, request=replace(envelope.request, export_hf=False))
+    resolved = Path(envelope.request.output.resolved_config_uri.removeprefix("file://"))
+    resolved.parent.mkdir(parents=True)
+    resolved.write_text('{"entrypoint":"skyrl_train.entrypoints.main_base","hydra_args":[]}')
+
+    @dataclass(frozen=True)
+    class RunOnlyBackend(FakeLaunchBackend):
+        def export_terminal_policy(self, _spec: SkyRLJobSpec, _config_path: str) -> None:
+            raise AssertionError("run-only jobs cannot export a terminal policy")
+
+    backend = RunOnlyBackend(IrisLaunchOutcome(job_id="01KTEST", job_state="succeeded", exit_code=0))
+
+    response = execute_job(envelope, backend=backend)
+
+    assert response.state == AttemptState.SUCCEEDED
+    assert response.model is None
+    assert not Path(envelope.request.output.checkpoint_root.removeprefix("file://")).exists()
+    assert not Path(envelope.request.output.export_root.removeprefix("file://")).exists()
+    terminal = json.loads(Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://")).read_text())
+    assert terminal["response"] == asdict(response)
 
 
 def test_execute_job_detaches_without_validating_terminal_artifacts(tmp_path: Path) -> None:

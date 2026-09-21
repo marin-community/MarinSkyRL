@@ -206,6 +206,7 @@ class SkyRLLaunchRequest:
     validation_data: tuple[DataSource, ...]
     topology: SkyRLTopology
     output: SkyRLOutputPaths
+    export_hf: bool
     seed: int
     overrides: tuple[str, ...]
 
@@ -275,6 +276,7 @@ def job_spec(value: dict[str, Any]) -> SkyRLJobSpec:
                 role_plan=_role_plan(request["topology"]["role_plan"]),
             ),
             output=SkyRLOutputPaths(**request["output"]),
+            export_hf=request["export_hf"],
             seed=int(request["seed"]),
             overrides=tuple(request.get("overrides", ())),
         ),
