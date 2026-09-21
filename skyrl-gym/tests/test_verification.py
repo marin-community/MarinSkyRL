@@ -45,6 +45,18 @@ def test_rollout_evidence_rejects_misaligned_behavior_logprobs():
         RolloutEvidence(response_token_ids=(11, 12), behavior_logprobs=(-0.1,))
 
 
+def test_rollout_evidence_accepts_response_or_full_prefix_routes():
+    row = ((1, 2),)
+    response = (11, 12)
+    prompt = (8, 9, 10)
+
+    # These two accepted lengths are the response-only and full-prefix wire contracts.
+    RolloutEvidence(prompt_token_ids=prompt, response_token_ids=response, routed_experts=(row,) * 2)
+    RolloutEvidence(prompt_token_ids=prompt, response_token_ids=response, routed_experts=(row,) * 4)
+    with pytest.raises(ValueError, match="full-prefix prediction positions"):
+        RolloutEvidence(prompt_token_ids=prompt, response_token_ids=response, routed_experts=(row,) * 3)
+
+
 def test_rollout_evidence_requires_aligned_student_topk_pairs():
     with pytest.raises(ValueError, match="provided together"):
         RolloutEvidence(response_token_ids=(11,), student_topk_indices=((2, 3),))

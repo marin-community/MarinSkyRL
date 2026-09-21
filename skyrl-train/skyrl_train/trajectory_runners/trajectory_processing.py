@@ -38,7 +38,11 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
 )
 from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
-from skyrl_train.inference_engines.vllm.route_capture import decode_openai_routes, response_routes
+from skyrl_train.inference_engines.vllm.route_capture import (
+    consistent_full_prefix_routes,
+    decode_openai_routes,
+    response_routes,
+)
 from omegaconf import DictConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
@@ -1558,6 +1562,44 @@ def extract_routed_experts_from_rollout_details(
         else:
             out.append(turn_re)
     return out
+
+
+def extract_full_prefix_routes_from_rollout_details(
+    rollout_details: Optional[List[Dict[str, Any]]],
+) -> Optional[Tuple["np.ndarray", List[int]]]:
+    """Extract one exact full-prefix trace from native Harbor turn streams."""
+    if not rollout_details:
+        return None
+    main_rollout = rollout_details[0]
+    if not isinstance(main_rollout, dict):
+        main_rollout = {
+            "prompt_token_ids": getattr(main_rollout, "prompt_token_ids", None),
+            "completion_token_ids": getattr(main_rollout, "completion_token_ids", None),
+            "extra": getattr(main_rollout, "extra", None),
+        }
+    extra = main_rollout.get("extra")
+    routes = extra.get("routed_experts") if isinstance(extra, dict) else None
+    if not routes:
+        return None
+    prompt_ids = main_rollout.get("prompt_token_ids")
+    completion_ids = main_rollout.get("completion_token_ids")
+    if not isinstance(routes, list) or not isinstance(prompt_ids, list) or not isinstance(completion_ids, list):
+        raise ValueError("full-prefix routes require list-valued Harbor turn streams")
+    if not all(isinstance(route, str) for route in routes):
+        raise ValueError("full-prefix routes require vLLM OpenAI wire payloads")
+    return consistent_full_prefix_routes(routes, prompt_ids, completion_ids)
+
+
+def align_full_prefix_routes_to_trainer(
+    routes: "np.ndarray", served_tokens: List[int], trainer_tokens: List[int]
+) -> "np.ndarray":
+    """Select the exact trainer prefix from a validated served route trace."""
+    if served_tokens[: len(trainer_tokens)] != trainer_tokens:
+        raise ValueError("full-prefix replay served tokens do not match the trainer trajectory")
+    expected_rows = len(trainer_tokens) - 1
+    if expected_rows < 0 or len(routes) < expected_rows:
+        raise ValueError("full-prefix replay ended before the trainer trajectory")
+    return routes[:expected_rows].astype(_ROUTED_EXPERTS_ARRAY_DTYPE, copy=False)
 
 
 SENTINEL_EXPERT_ID = 0  # sentinel for unmatched / non-generated token rows in routed_experts

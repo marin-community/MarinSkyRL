@@ -57,8 +57,10 @@ class RolloutEvidence:
             ):
                 raise ValueError("student top-K IDs and behavior scores must have matching widths")
         if self.routed_experts is not None:
-            if len(self.routed_experts) != len(self.response_token_ids):
-                raise ValueError("routed_experts must align with response_token_ids")
+            response_length = len(self.response_token_ids)
+            full_prefix_length = len(self.prompt_token_ids) + response_length - 1
+            if len(self.routed_experts) not in (response_length, full_prefix_length):
+                raise ValueError("routed_experts must align with response tokens or full-prefix prediction positions")
 
 
 class VerificationStatus(StrEnum):
