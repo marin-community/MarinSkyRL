@@ -92,6 +92,35 @@ def _collate_routed_experts_from_arrays(
     return routed_experts_tensor.to(_re_dtype)
 
 
+def _pad_full_prefix_routed_experts(
+    routed_experts: List["np.ndarray"],
+    prompt_lengths: List[int],
+    response_lengths: List[int],
+    max_prompt_length: int,
+    max_response_length: int,
+) -> List[List["np.ndarray"]]:
+    """Place full or response-only captures at their model-input positions."""
+    sentinel = [[0]]
+    padded = []
+    for sample, (rows, prompt_length, response_length) in enumerate(
+        zip(routed_experts, prompt_lengths, response_lengths, strict=True)
+    ):
+        if prompt_length < 1:
+            raise ValueError("full-prefix route replay requires at least one prompt token")
+        if len(rows) == prompt_length + response_length - 1:
+            left = max_prompt_length - prompt_length
+        elif len(rows) == response_length:
+            left = max_prompt_length - 1
+        else:
+            raise ValueError(
+                f"sample {sample} has {len(rows)} routed rows; expected {response_length} response rows "
+                f"or {prompt_length + response_length - 1} full-prefix rows"
+            )
+        right = max_response_length - response_length
+        padded.append([sentinel] * left + list(rows) + [sentinel] * right)
+    return padded
+
+
 def _verify_inputs(
     prompts: List[List[int]],
     responses: List[List[int]],
@@ -270,18 +299,36 @@ def convert_prompts_responses_to_batch_tensors(
         ]
         logprobs_tensor = torch.tensor(padded_logprobs, dtype=torch.float)
 
-    # MoE router-replay capture rail (Stage 1): right-pad routed_experts on the
-    # response axis exactly like rollout_logprobs, but each per-token element is a
-    # [L, K] expert-index vector. Result: [batch, response_len, L, K] int. Padding
-    # rows are sentinel [L, K] (all zeros). 4-D is accepted by TensorBatch since
-    # _check_consistency only validates dim-0.
+    # Normal captures are right-padded on the response axis. The opt-in Hero
+    # full-prefix diagnostic instead aligns routes to the left-padded prompt and
+    # right-padded response input positions. Every row is an [L, K] expert vector;
+    # padding is the all-zero sentinel.
     routed_experts_tensor = None
     if routed_experts:
+        if len(routed_experts) != len(prompts):
+            raise ValueError("routed expert captures must align with prompt and response samples")
         # Routed expert ids arrive as
         # per-sample np.int16 arrays (Ray-shipped out-of-band, GIL-released), so we
         # collate by slice assignment into a dense NumPy canvas, avoiding the
         # GIL-held element walk of torch.tensor over nested Python integers.
-        routed_experts_tensor = _collate_routed_experts_from_arrays(routed_experts, action_mask.size(1), num_experts)
+        if any(
+            len(rows) != response_length
+            for rows, response_length in zip(routed_experts, response_token_lens, strict=True)
+        ):
+            routed_experts = _pad_full_prefix_routed_experts(
+                routed_experts,
+                prompt_token_lens,
+                response_token_lens,
+                max_input_len,
+                max_output_len,
+            )
+            routed_experts_tensor = _collate_routed_experts_from_arrays(
+                routed_experts, sequences.size(1) - 1, num_experts
+            )
+        else:
+            routed_experts_tensor = _collate_routed_experts_from_arrays(
+                routed_experts, action_mask.size(1), num_experts
+            )
 
     # Loop-behavior reward shaping (Stage B / F5 + F4): right-pad the per-token
     # shaping channel and span tags on the response axis exactly like rewards /

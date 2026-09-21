@@ -45,3 +45,37 @@ def response_routes(captured: np.ndarray | None, num_response_tokens: int) -> li
     if num_response_tokens == 0:
         return []
     return captured[-num_response_tokens:].tolist()
+
+
+def consistent_full_prefix_routes(
+    encoded_turns: list[str],
+    prompt_token_ids: list[list[int]],
+    completion_token_ids: list[list[int]],
+) -> tuple[np.ndarray, list[int]]:
+    """Return one route trace only when every turn agrees on shared positions."""
+    if (
+        not encoded_turns
+        or len(encoded_turns) != len(prompt_token_ids)
+        or len(encoded_turns) != len(completion_token_ids)
+    ):
+        raise ValueError("full-prefix routes require aligned non-empty turn streams")
+
+    previous_stream: list[int] = []
+    previous_routes: np.ndarray | None = None
+    for turn, (encoded, prompt, completion) in enumerate(
+        zip(encoded_turns, prompt_token_ids, completion_token_ids, strict=True)
+    ):
+        if not isinstance(encoded, str) or not prompt or not completion:
+            raise ValueError(f"full-prefix routes are incomplete at turn {turn}")
+        served_stream = list(prompt) + list(completion)
+        routes = decode_openai_routes(encoded)
+        if len(routes) != len(served_stream) - 1:
+            raise ValueError(f"full-prefix route count differs from served tokens at turn {turn}")
+        if previous_stream and list(prompt[: len(previous_stream)]) != previous_stream:
+            raise ValueError(f"served token prefix changed at turn {turn}")
+        if previous_routes is not None and not np.array_equal(routes[: len(previous_routes)], previous_routes):
+            raise ValueError(f"shared causal-prefix routes changed at turn {turn}")
+        previous_stream = served_stream
+        previous_routes = routes
+    assert previous_routes is not None
+    return previous_routes, previous_stream

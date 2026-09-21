@@ -6,7 +6,11 @@ from io import BytesIO
 import numpy as np
 import pytest
 
-from skyrl_train.inference_engines.vllm.route_capture import decode_openai_routes, response_routes
+from skyrl_train.inference_engines.vllm.route_capture import (
+    consistent_full_prefix_routes,
+    decode_openai_routes,
+    response_routes,
+)
 
 
 def _wire_payload(array: np.ndarray) -> str:
@@ -52,3 +56,30 @@ def test_response_routes_reject_incomplete_capture() -> None:
 
     with pytest.raises(ValueError, match="1 routed rows for 2 generated tokens"):
         response_routes(captured, 2)
+
+
+def test_consistent_full_prefix_routes_assembles_multiple_turns() -> None:
+    first = np.arange(4 * 2, dtype=np.uint16).reshape(4, 1, 2)
+    second = np.concatenate((first, np.asarray([[[21, 22]], [[23, 24]], [[25, 26]]], dtype=np.uint16)))
+
+    routes, stream = consistent_full_prefix_routes(
+        [_wire_payload(first), _wire_payload(second)],
+        [[1, 2, 3], [1, 2, 3, 4, 5, 6]],
+        [[4, 5], [7, 8]],
+    )
+
+    np.testing.assert_array_equal(routes, second)
+    assert stream == [1, 2, 3, 4, 5, 6, 7, 8]
+
+
+def test_consistent_full_prefix_routes_rejects_shared_route_change() -> None:
+    first = np.arange(4 * 2, dtype=np.uint16).reshape(4, 1, 2)
+    second = np.concatenate((first, np.asarray([[[21, 22]], [[23, 24]], [[25, 26]]], dtype=np.uint16)))
+    second[1, 0, 0] += 1
+
+    with pytest.raises(ValueError, match="shared causal-prefix routes changed"):
+        consistent_full_prefix_routes(
+            [_wire_payload(first), _wire_payload(second)],
+            [[1, 2, 3], [1, 2, 3, 4, 5, 6]],
+            [[4, 5], [7, 8]],
+        )

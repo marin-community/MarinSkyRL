@@ -38,6 +38,8 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     extract_token_ids_from_rollout_details,
     extract_prompt_token_ids_from_rollout_details,
     extract_routed_experts_from_rollout_details,
+    extract_full_prefix_routes_from_rollout_details,
+    align_full_prefix_routes_to_trainer,
     normalize_token_ids,
     AlignmentStats,
     _sentinel_routed_experts_row,
@@ -1384,7 +1386,9 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                             [[list(layer) for layer in token] for token in output.evidence.routed_experts]
                         )
                     else:
-                        # Sentinel-fill missing samples to match response_ids length.
+                        # Missing samples use response-length sentinels. The collator
+                        # places these at response prediction positions when another
+                        # sample carries an opt-in full-prefix trace.
                         rollout_routed_experts_list.append(
                             [list(sentinel_row) for _ in range(len(output.evidence.response_token_ids))]
                         )
@@ -2277,6 +2281,15 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             rollout_logprobs = rollout_logprobs[:max_response_tokens]
         if rollout_routed_experts is not None:
             rollout_routed_experts = rollout_routed_experts[:max_response_tokens]
+        if os.environ.get("HERO_REPLAY_DIAGNOSTIC_FULL_ROUTES") == "1" and self._moe_router_replay:
+            full_prefix = extract_full_prefix_routes_from_rollout_details(rollout_details)
+            if full_prefix is None:
+                raise ValueError("full-prefix replay requested but Harbor returned no routed experts")
+            full_prefix_routes, served_tokens = full_prefix
+            trainer_tokens = prompt_ids + response_ids
+            rollout_routed_experts = align_full_prefix_routes_to_trainer(
+                full_prefix_routes, served_tokens, trainer_tokens
+            ).tolist()
         if token_level_shaping is not None:
             token_level_shaping = token_level_shaping[:max_response_tokens]
         if response_span_tags is not None:

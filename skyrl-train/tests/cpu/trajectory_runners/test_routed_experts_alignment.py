@@ -18,6 +18,8 @@ from transformers import AutoTokenizer
 
 from skyrl_train.trajectory_runners.trajectory_processing import (
     extract_routed_experts_from_rollout_details,
+    extract_full_prefix_routes_from_rollout_details,
+    align_full_prefix_routes_to_trainer,
     align_routed_experts_with_lcs,
     get_response_ids_and_loss_mask_from_messages,
     get_generation_prompt_ids,
@@ -32,6 +34,12 @@ from unittest.mock import MagicMock
 
 # Synthetic per-token [L, K] routed_experts rows, small L=4, K=2.
 L, K = 4, 2
+
+
+def _wire_payload(array):
+    buffer = BytesIO()
+    np.save(buffer, array, allow_pickle=False)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
 def _real_row(seed):
@@ -181,6 +189,35 @@ def test_extract_routed_experts_from_vllm_openai_payload_requires_completion_ids
         )
 
 
+def test_extract_full_prefix_routes_from_harbor_turns():
+    first = np.asarray([_real_row(seed) for seed in range(4)], dtype=np.uint16)
+    second = np.concatenate((first, np.asarray([_real_row(seed) for seed in range(4, 7)], dtype=np.uint16)))
+
+    details = [
+        {
+            "prompt_token_ids": [[1, 2, 3], [1, 2, 3, 4, 5, 6]],
+            "completion_token_ids": [[4, 5], [7, 8]],
+            "extra": {"routed_experts": [_wire_payload(first), _wire_payload(second)]},
+        }
+    ]
+    routes, served_tokens = extract_full_prefix_routes_from_rollout_details(details)
+
+    np.testing.assert_array_equal(routes, second)
+    assert served_tokens == [1, 2, 3, 4, 5, 6, 7, 8]
+
+
+def test_align_full_prefix_routes_to_trainer_requires_exact_token_prefix():
+    routes = np.asarray([_real_row(seed) for seed in range(5)], dtype=np.uint16)
+
+    selected = align_full_prefix_routes_to_trainer(routes, [1, 2, 3, 4, 5, 6], [1, 2, 3, 4])
+
+    np.testing.assert_array_equal(selected, routes[:3].astype(np.int16))
+    with pytest.raises(ValueError, match="served tokens do not match"):
+        align_full_prefix_routes_to_trainer(routes, [1, 2, 9, 4, 5, 6], [1, 2, 3, 4])
+    with pytest.raises(ValueError, match="ended before"):
+        align_full_prefix_routes_to_trainer(routes[:2], [1, 2, 3, 4], [1, 2, 3, 4])
+
+
 # ---------------------------------------------------------------------------
 # Case 3: packer — [batch, response_len, L, K], right-padded, shape[:2]==loss_mask
 # ---------------------------------------------------------------------------
@@ -238,6 +275,33 @@ def test_packer_shape_and_right_pad(char_tokenizer):
     # Real rows preserved for the un-padded prefix.
     assert routed_experts_tensor[0, 0].tolist() == re0[0]
     assert routed_experts_tensor[1, 4].tolist() == re1[4]
+
+
+def test_packer_places_full_prefix_and_response_only_routes_on_input_positions(char_tokenizer):
+    prompts = [[11, 12, 13], [21, 22, 23, 24, 25]]
+    responses = [[14, 15], [26, 27, 28]]
+    rewards = [[0.0, 0.0], [0.0, 0.0, 0.0]]
+    loss_masks = [[1, 1], [1, 1, 1]]
+    full_routes = [_real_row(seed) for seed in range(4)]  # 3 prompt + 2 response - 1
+    response_routes = [_real_row(seed) for seed in range(10, 13)]
+
+    batch = convert_prompts_responses_to_batch_tensors(
+        char_tokenizer,
+        prompts,
+        responses,
+        rewards,
+        loss_masks,
+        routed_experts=[full_routes, response_routes],
+        num_experts=16,
+    )
+    routes = batch[6]
+
+    assert routes.shape == (2, 7, L, K)  # max prompt 5 + max response 3 - 1
+    assert torch.all(routes[0, :2] == SENTINEL_EXPERT_ID)
+    assert routes[0, 2:6].tolist() == full_routes
+    assert torch.all(routes[0, 6] == SENTINEL_EXPERT_ID)
+    assert torch.all(routes[1, :4] == SENTINEL_EXPERT_ID)
+    assert routes[1, 4:7].tolist() == response_routes
 
 
 # ---------------------------------------------------------------------------
