@@ -1674,8 +1674,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         #
         # Non-DP engines use 5 attempts with exponential backoff
         # (15→30→60→120→240 s) to bridge the TIME_WAIT window while
-        # staying below the outer startup deadline. A DP pool gets one attempt
-        # because all ranks must restart together.
+        # staying below the outer startup deadline.
         import random
         import time
 

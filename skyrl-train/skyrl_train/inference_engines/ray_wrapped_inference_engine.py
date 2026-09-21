@@ -19,6 +19,7 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
 from skyrl_train.inference_engines.utils import (
+    ReservedRendezvousPorts,
     VLLM_DATA_PARALLEL_MASTER_PORT_COUNT,
     get_pg_bundle_node_ips,
     reserve_rendezvous_ports,
@@ -139,6 +140,24 @@ def _validate_node_local_dp_ranks(engine_index: int, placement_group, bundle_ind
             f"inference engine {engine_index}: its DP ranks were placed on "
             f"{len(set(node_ips))} nodes ({dict(enumerate(node_ips))}); a DP/EP group must be node-local"
         )
+
+
+def _reserve_engine_rendezvous(
+    placement_group,
+    bundle_index: int,
+    data_parallel_size: int,
+    allocated_ports: set[int],
+) -> ReservedRendezvousPorts | None:
+    if data_parallel_size == 1:
+        return None
+    rendezvous = reserve_rendezvous_ports(
+        placement_group,
+        bundle_index,
+        port_count=1 + VLLM_DATA_PARALLEL_MASTER_PORT_COUNT,
+        excluded_ports=allocated_ports,
+    )
+    allocated_ports.update(rendezvous.ports)
+    return rendezvous
 
 
 def _qwen3_5_vlm_engine_kwargs(pretrain: str, *, revision: str | None = None) -> Dict[str, Any]:
@@ -583,18 +602,17 @@ def create_ray_wrapped_inference_engines(
         if data_parallel_size > 1:
             _validate_node_local_dp_ranks(i, engine_pg, dp_rank_bundle_indices)
 
+        rendezvous = _reserve_engine_rendezvous(
+            engine_pg,
+            dp_rank_bundle_indices[0],
+            data_parallel_size,
+            allocated_rendezvous_ports,
+        )
         rendezvous_reservation = None
-        if data_parallel_size > 1:
-            rendezvous = reserve_rendezvous_ports(
-                engine_pg,
-                dp_rank_bundle_indices[0],
-                port_count=1 + VLLM_DATA_PARALLEL_MASTER_PORT_COUNT,
-                excluded_ports=allocated_rendezvous_ports,
-            )
+        if rendezvous is not None:
             data_parallel_address = rendezvous.address
             data_parallel_rpc_port, *data_parallel_master_ports = rendezvous.ports
             rendezvous_reservation = rendezvous.reservation
-            allocated_rendezvous_ports.update(rendezvous.ports)
 
         if backend == "vllm":
             if async_engine:
@@ -740,9 +758,7 @@ def create_ray_wrapped_inference_engines(
         elif backend == "sglang":
             # NOTE: there is no async / sync engine distinction in SGLang
 
-            # Per-engine STRICT_PACK PG uses engine-local bundle indices (0-based);
-            # the legacy flat PG keeps the global i*per_engine_gpu_count offset.
-            sglang_base_index = 0 if placement_mode is EnginePlacementMode.PER_ENGINE else i * per_engine_gpu_count
+            sglang_base_index = dp_rank_bundle_indices[0]
             bundle_indices = None
             if per_engine_gpu_count > 1:
                 if use_hybrid_engine:

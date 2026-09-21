@@ -2,10 +2,10 @@
 
 The placement strategy checks verify that the ray/uni backend chooses:
   - per-engine STRICT_PACK ONLY for multi-GPU engines (TP*PP*DP > 1), to keep each
-    engine's TP/PP/DP workers on one node (#232 cross-node all-reduce fix), and
+    engine's TP/PP/DP workers on one node, and
   - the flat PACK fallback for single-GPU engines (TP==PP==DP==1), so single-GPU
     bundles pack densely and leave whole nodes free for the downstream policy
-    PACK PG (the lever1/swesmith multi-node starvation regression fix), and
+    PACK PG, and
   - never per-engine STRICT_PACK on the hybrid (colocate_all) or mp-backend
     paths (the mp {GPU:tp_pp_size} bundle is already node-atomic).
 
@@ -40,7 +40,7 @@ def test_resolve_engine_max_model_len(engine_kwargs, rope_scaling, expected):
     [
         (1, 1, 1, False),  # single-GPU engines -> flat PACK
         (2, 1, 1, True),  # de-risk geometry on ray/uni -> on-node STRICT_PACK
-        (4, 1, 1, True),  # #232 TP=4 -> on-node STRICT_PACK
+        (4, 1, 1, True),  # TP=4 -> on-node STRICT_PACK
         (1, 2, 1, True),  # PP=2 single TP -> multi-GPU engine, still needs on-node
         (2, 2, 1, True),  # TP*PP=4
         (1, 1, 4, True),  # DP4xEP4 on 4-GPU nodes -> on-node STRICT_PACK
