@@ -353,7 +353,9 @@ def test_dump_per_dataset_eval_results_preserves_dataset_and_metrics(tmp_path):
 def test_eval_dump_writes_to_cloud_uri_without_corrupting_scheme(monkeypatch):
     directory = evaluation_dump_dir("s3://bucket/users/exports", 2)
     filesystem = fsspec.filesystem("memory")
-    monkeypatch.setattr(io, "open_file", lambda path, mode: filesystem.open(path.removeprefix("s3://"), mode))
+    monkeypatch.setattr(
+        io, "write_bytes_atomic", lambda path, payload: filesystem.pipe_file(path.removeprefix("s3://"), payload)
+    )
     tokenizer = Mock()
     tokenizer.decode.side_effect = lambda tokens: str(tokens)
     batch = {"prompt_token_ids": [[1]], "response_ids": [[2]], "rewards": [1.0]}
