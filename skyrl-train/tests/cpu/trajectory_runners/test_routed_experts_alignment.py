@@ -8,6 +8,9 @@ Run:
     uv run --isolated --group dev --extra cpu pytest tests/cpu/trajectory_runners/test_routed_experts_alignment.py
 """
 
+import base64
+from io import BytesIO
+
 import pytest
 import numpy as np
 import torch
@@ -147,6 +150,35 @@ def test_extract_routed_experts_from_rollout_details():
     assert extract_routed_experts_from_rollout_details([{"logprobs": [[0.0]]}]) is None
     assert extract_routed_experts_from_rollout_details([{"extra": {}}]) is None
     assert extract_routed_experts_from_rollout_details([{"extra": {"routed_experts": []}}]) is None
+
+
+def test_extract_routed_experts_from_vllm_openai_payload_selects_response_positions():
+    # vLLM's wire payload includes prompt routes. Only the last two rows
+    # predicted the two generated tokens in this Harbor turn.
+    captured = np.asarray([_real_row(seed) for seed in range(5)], dtype=np.uint16)
+    buffer = BytesIO()
+    np.save(buffer, captured, allow_pickle=False)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    details = [{"completion_token_ids": [[101, 102]], "extra": {"routed_experts": [encoded]}}]
+
+    response = extract_routed_experts_from_rollout_details(details)
+
+    assert len(response) == 1
+    np.testing.assert_array_equal(response[0], captured[-2:])
+
+
+def test_extract_routed_experts_from_vllm_openai_payload_requires_completion_ids():
+    buffer = BytesIO()
+    np.save(buffer, np.asarray([_real_row(1)], dtype=np.uint16), allow_pickle=False)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    with pytest.raises(ValueError, match="one completion_token_ids row per turn"):
+        extract_routed_experts_from_rollout_details([{"extra": {"routed_experts": [encoded]}}])
+
+    with pytest.raises(ValueError, match="one completion_token_ids row per turn"):
+        extract_routed_experts_from_rollout_details(
+            [{"completion_token_ids": [[101], [102]], "extra": {"routed_experts": [encoded]}}]
+        )
 
 
 # ---------------------------------------------------------------------------

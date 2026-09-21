@@ -38,6 +38,7 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
 )
 from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
+from skyrl_train.inference_engines.vllm.route_capture import decode_openai_routes, response_routes
 from omegaconf import DictConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
@@ -1494,11 +1495,11 @@ def extract_routed_experts_from_rollout_details(
     """Extract per-turn MoE ``routed_experts`` from Harbor's rollout_details.
 
     Sibling of :func:`extract_logprobs_from_rollout_details`. The vLLM fork emits
-    per-token expert-selection indices ``[gen_len, L, K]`` (L = MoE layers,
-    K = top-k experts) over ``/v1`` non-streaming via ``provider_specific_fields``.
-    Harbor's ``_extract_provider_extra`` lands this in
-    ``RolloutDetail.extra["routed_experts"]`` as a per-turn list (one ``[gen_len, L, K]``
-    entry per assistant turn, aligned with ``completion_token_ids``).
+    full prompt-and-response routes as base64-encoded ``.npy`` data over ``/v1``.
+    Harbor preserves that string in ``RolloutDetail.extra["routed_experts"]``.
+    Select the rows that predicted each completion token before the existing
+    response-axis alignment. Nested response-only rows remain supported for
+    already-decoded captures.
 
     This is Stage 1 of the FSDP2 EP/router-replay port (R3 capture rail). No MoE
     math here — pure data-plane extraction. Returns None when absent so the field
@@ -1536,9 +1537,23 @@ def extract_routed_experts_from_rollout_details(
         return None
 
     logger.debug(f"Extracted routed_experts from rollout_details: {len(routed_experts)} turns")
+    completion_token_ids = (
+        main_rollout.get("completion_token_ids")
+        if isinstance(main_rollout, dict)
+        else getattr(main_rollout, "completion_token_ids", None)
+    )
+    if any(isinstance(turn_re, str) for turn_re in routed_experts) and (
+        not isinstance(completion_token_ids, list) or len(completion_token_ids) != len(routed_experts)
+    ):
+        raise ValueError("vLLM routed experts require one completion_token_ids row per turn")
     out = []
-    for turn_re in routed_experts:
-        if turn_re is not None and len(turn_re) > 0:
+    for turn, turn_re in enumerate(routed_experts):
+        if isinstance(turn_re, str) and turn_re:
+            if not isinstance(completion_token_ids[turn], list):
+                raise ValueError("vLLM routed experts require aligned completion_token_ids")
+            captured = decode_openai_routes(turn_re)
+            out.append(_as_routed_experts_array(response_routes(captured, len(completion_token_ids[turn]))))
+        elif turn_re is not None and len(turn_re) > 0:
             out.append(_as_routed_experts_array(turn_re))
         else:
             out.append(turn_re)
