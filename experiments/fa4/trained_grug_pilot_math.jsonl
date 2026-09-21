@@ -1,0 +1,2 @@
+{"data_source":"fa4-trained-grug-pilot","prompt":[{"role":"user","content":"Compute 12 + 30. Show your work and end with #### followed by the number."}],"env_class":"gsm8k","reward_spec":{"method":"rule","ground_truth":"42"},"extra_info":{"index":0}}
+{"data_source":"fa4-trained-grug-pilot","prompt":[{"role":"user","content":"A box has 8 pencils. Three boxes are bought, then 5 pencils are given away. How many remain? End with #### followed by the number."}],"env_class":"gsm8k","reward_spec":{"method":"rule","ground_truth":"19"},"extra_info":{"index":1}}
