@@ -53,7 +53,13 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.generator.inference_engine_data_parallel_size = 1
     cfg.generator.inference_engine_expert_parallel_size = 1
-    prompts = [[1, 17 + row, 29, 5, 11, 3] for row in range(4)]
+    prompt_bank = os.environ.get("HERO_REPLAY_PROMPT_BANK", "original-v1")
+    if prompt_bank == "original-v1":
+        prompts = [[1, 17 + row, 29, 5, 11, 3] for row in range(4)]
+    elif prompt_bank == "fresh-v1":
+        prompts = [[1, 41 + row, 7, 23, 13, 2] for row in range(4)]
+    else:
+        raise ValueError(f"Unknown HERO_REPLAY_PROMPT_BANK={prompt_bank!r}")
     sampling = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
     sampling.update(temperature=0.0, max_tokens=4, ignore_eos=True, logprobs=1)
     positions = [0, 1, 5, 6, 7, 8]
@@ -296,6 +302,7 @@ def test_trained_hero_full_prefix_layer_trace(tmp_path, monkeypatch) -> None:
         assert max_response_gap < 0.1, max_response_gap
         report = {
             "model": trained_uri,
+            "prompt_bank": prompt_bank,
             "layout": "vLLM TP1/EP1; Megatron TP1/PP1/EP4/CP1",
             "source_commit": os.environ.get("HERO_REPLAY_SOURCE_COMMIT"),
             "row_index": row_index,
