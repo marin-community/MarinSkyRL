@@ -15,6 +15,7 @@ from skyrl_train.inference_engines.utils import (
     _RENDEZVOUS_PORT_START,
     _RENDEZVOUS_PORT_STOP,
     _find_available_rendezvous_port,
+    _reserve_available_rendezvous_ports,
     postprocess_completion_request,
     route_prompts_to_engines,
     hash_with_sha256,
@@ -46,6 +47,22 @@ def test_rendezvous_port_avoids_ephemeral_range_and_existing_listener(monkeypatc
 def test_rendezvous_port_fails_when_range_is_excluded():
     with pytest.raises(RuntimeError, match="No free rendezvous port"):
         _find_available_rendezvous_port(range(_RENDEZVOUS_PORT_START, _RENDEZVOUS_PORT_STOP))
+
+
+def test_rendezvous_port_reservations_hold_ports_until_released(monkeypatch):
+    monkeypatch.setattr("skyrl_train.inference_engines.utils.random.shuffle", lambda _ports: None)
+    reservations = _reserve_available_rendezvous_ports(2)
+    ports = [reservation.getsockname()[1] for reservation in reservations]
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as contender:
+        with pytest.raises(OSError):
+            contender.bind(("", ports[0]))
+
+    for reservation in reservations:
+        reservation.close()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as contender:
+        contender.bind(("", ports[0]))
 
 
 class _CommunicatorEngine:

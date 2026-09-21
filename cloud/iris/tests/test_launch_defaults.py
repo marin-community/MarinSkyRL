@@ -841,18 +841,19 @@ generator:
     shell = build_task_command(args)[-1]
     options = _shell_options(shell)
     tokens = shlex.split(shell)
-    draft_option = tokens.index("--prestage-draft-model")
-    model_id, staged_revision, local_path = tokens[draft_option + 1 : draft_option + 4]
+    draft_option = tokens.index("--draft-model")
+    source_uri, staged_revision = tokens[draft_option + 1 : draft_option + 3]
+    local_path = next(
+        override.removeprefix("++generator.speculative_decoding.model.source_uri=")
+        for override in options["--skyrl_override"]
+        if override.startswith("++generator.speculative_decoding.model.source_uri=")
+    )
 
-    assert model_id == "laion/snowball-64k-eagle3-draft-r2egym"
+    assert source_uri == "hf://laion/snowball-64k-eagle3-draft-r2egym"
     assert staged_revision == revision
-    assert re.fullmatch(r"/tmp/marinskyrl-draft-models/[0-9a-f]{64}", local_path)
+    assert re.fullmatch(r"/tmp/marinskyrl/draft_models/[0-9a-f]{64}", local_path)
     assert set(options["--draft-model-cache-ttl-days"]) == {"7"}
     assert set(options["--draft-model-cache-source-prefix"]) == {args.storage_paths.checkpoint_root}
-    assert any(
-        override == f"++generator.speculative_decoding.model.materialized_path={local_path}"
-        for override in options["--skyrl_override"]
-    )
 
 
 def test_policy_revision_from_config_rejects_task_local_model(tmp_path):

@@ -90,9 +90,9 @@ def test_managed_speculator_reaches_hydra_with_immutable_source_unchanged(tmp_pa
     assert resolved.training.reserved_gpu_memory_gib == 8
 
 
-def test_materialized_speculator_uses_node_local_model_without_hub_resolution() -> None:
+def test_local_speculator_uses_model_without_hub_resolution() -> None:
     value = _base_config()["generator"]["speculative_decoding"]
-    value["model"]["materialized_path"] = "/tmp/draft-model"
+    value["model"]["source_uri"] = "/tmp/draft-model"
 
     resolved = parse_speculative_decoding_config(
         value,
@@ -177,7 +177,7 @@ def test_gcs_alias_is_normalized_for_vllm_runai_loading(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("source_uri", "laion/draft", "must use hf://"),
+        ("source_uri", "laion/draft", "must be an absolute local path or use hf://"),
         ("source_uri", "hf://laion", "must have the form"),
         ("source_identity", "main", "full 40-character"),
     ],

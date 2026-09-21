@@ -17,7 +17,7 @@ from rigging.filesystem.cluster_config import marin_temp_bucket
 from rigging.filesystem.distributed_lock import HEARTBEAT_INTERVAL, DistributedLease, LeaseLostError, create_lock
 
 from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize, read_json, write_json
-from marinskyrl.hf_model import hugging_face_hub_online, hugging_face_model_cache_key, validate_hf_model_weights
+from marinskyrl.hf_model import hugging_face_hub_online, immutable_model_cache_key, validate_hf_model_weights
 from marinskyrl.resource_locator import is_hugging_face_repo_id, join_resource_path
 from marinskyrl.speculative_decoding import is_hugging_face_commit
 
@@ -127,7 +127,7 @@ def ensure_hugging_face_model_cache(
     """Mirror one immutable Hub snapshot and return its region-local cache URI."""
     cache_uri = marin_temp_bucket(
         ttl_days,
-        prefix=f"{_CACHE_PREFIX}/{hugging_face_model_cache_key(model_id, revision)}",
+        prefix=f"{_CACHE_PREFIX}/{immutable_model_cache_key(model_id, revision)}",
         source_prefix=source_prefix,
     ).rstrip("/")
     filesystem, cache_path = fs_and_path(cache_uri)

@@ -34,10 +34,15 @@ from cloud.iris.protocol import (  # noqa: E402
     SkyRLRolePlan,
     SkyRLTopology,
 )
+from marinskyrl.speculative_decoding import SpeculatorModelConfig  # noqa: E402
 from marinskyrl.task_sources import DirectoryDataSource  # noqa: E402
 from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
 from cloud.iris.runtime_environment import RuntimeProfile, task_setup_script  # noqa: E402
-from cloud.iris.task_runtime import materialize_data_sources, materialize_model_export  # noqa: E402
+from cloud.iris.task_runtime import (  # noqa: E402
+    materialize_data_sources,
+    materialize_model_export,
+    stage_draft_model,
+)
 from iris.client.client import JobFailedError  # noqa: E402
 from iris.client.workload_codec import job_status_from_proto  # noqa: E402
 from iris.cluster.types import JobName  # noqa: E402
@@ -520,6 +525,22 @@ def test_materialize_model_export_replaces_a_stale_destination(tmp_path: Path) -
 
     assert not (destination / "stale.bin").exists()
     assert (destination / "model.safetensors").read_bytes() == b"new weights"
+
+
+def test_stage_draft_model_copies_artifact_uri_without_tokenizer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("{}")
+    (source / "model.safetensors").write_bytes(b"weights")
+    monkeypatch.setattr("marinskyrl.speculative_decoding._DRAFT_MODEL_ROOT", str(tmp_path / "drafts"))
+    model = SpeculatorModelConfig(source_uri=source.as_uri(), source_identity="draft@abc123")
+
+    stage_draft_model(model, cache_ttl_days=None, cache_source_prefix="")
+
+    destination = Path(model.node_local_path())
+    assert (destination / "model.safetensors").read_bytes() == b"weights"
 
 
 def test_materialize_data_sources_caches_one_exact_file(tmp_path: Path) -> None:

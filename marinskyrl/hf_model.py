@@ -15,9 +15,9 @@ TOKENIZER_JSON_NAME = "tokenizer.json"
 _OFFLINE_ENVIRONMENT_VARIABLES = (HF_HUB_OFFLINE_ENV, TRANSFORMERS_OFFLINE_ENV)
 
 
-def hugging_face_model_cache_key(model_id: str, revision: str) -> str:
-    """Return a stable cache key for one immutable Hub model revision."""
-    return hashlib.sha256(f"{model_id}@{revision}".encode()).hexdigest()
+def immutable_model_cache_key(source: str, identity: str) -> str:
+    """Return a stable cache key for one immutable model source."""
+    return hashlib.sha256(f"{source}@{identity}".encode()).hexdigest()
 
 
 @contextlib.contextmanager

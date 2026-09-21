@@ -10,13 +10,13 @@ import re
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from marinskyrl.hf_model import hugging_face_model_cache_key
+from marinskyrl.hf_model import immutable_model_cache_key
 from marinskyrl.resource_locator import is_cloud_uri, is_hugging_face_repo_id
 
 
 _HF_SOURCE_SCHEME = "hf"
 _HF_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
-_DRAFT_MODEL_ROOT = "/tmp/marinskyrl-draft-models"
+_DRAFT_MODEL_ROOT = "/tmp/marinskyrl/draft_models"
 STANDARD_TRAINING_ENTRYPOINT = "skyrl_train.entrypoints.main_base"
 
 
@@ -29,6 +29,14 @@ class SpeculativeDecodingMethod(StrEnum):
     """Speculative methods supported by MarinSkyRL's managed lifecycle."""
 
     EAGLE3 = "eagle3"
+
+
+class SpeculatorModelSourceKind(StrEnum):
+    """Storage kinds supported by the draft-model lifecycle."""
+
+    HUGGING_FACE = "hugging_face"
+    LOCAL = "local"
+    ARTIFACT = "artifact"
 
 
 class SpeculativeDecodingConfigError(ValueError):
@@ -97,31 +105,25 @@ def runai_model_uri(source_uri: str) -> str:
 
 @dataclass(frozen=True)
 class SpeculatorModelConfig:
-    """One immutable Hugging Face or object-store draft model."""
+    """One immutable local, Hugging Face, or object-store draft model."""
 
     source_uri: str
     source_identity: str
-    materialized_path: str | None = None
 
     @classmethod
     def from_mapping(cls, value: object, *, context: str) -> "SpeculatorModelConfig":
         mapping = _mapping(value, context)
-        _reject_unknown(mapping, {"source_uri", "source_identity", "materialized_path"}, context)
+        _reject_unknown(mapping, {"source_uri", "source_identity"}, context)
         missing = {field for field in ("source_uri", "source_identity") if not mapping.get(field)}
         if missing:
             raise SpeculativeDecodingConfigError(f"missing {context} fields: {', '.join(sorted(missing))}")
 
         source_uri = mapping["source_uri"]
         source_identity = mapping["source_identity"]
-        materialized_path = mapping.get("materialized_path")
         if not isinstance(source_uri, str):
             raise SpeculativeDecodingConfigError(f"{context}.source_uri must be a string")
         if not isinstance(source_identity, str) or not source_identity.strip():
             raise SpeculativeDecodingConfigError(f"{context}.source_identity must be a nonempty string")
-        if materialized_path is not None and (
-            not isinstance(materialized_path, str) or not os.path.isabs(materialized_path)
-        ):
-            raise SpeculativeDecodingConfigError(f"{context}.materialized_path must be an absolute local path")
 
         hf_repo = hugging_face_repo_from_source_uri(source_uri)
         if hf_repo is not None:
@@ -129,11 +131,12 @@ class SpeculatorModelConfig:
                 raise SpeculativeDecodingConfigError(
                     f"{context}.source_identity must be a full 40-character lowercase commit SHA for {hf_repo}"
                 )
-        elif not is_cloud_uri(source_uri):
+        elif not is_cloud_uri(source_uri) and not os.path.isabs(source_uri):
             raise SpeculativeDecodingConfigError(
-                f"{context}.source_uri must use hf://, s3://, gs://, or gcs://, got {source_uri!r}"
+                f"{context}.source_uri must be an absolute local path or use hf://, s3://, gs://, or gcs://, "
+                f"got {source_uri!r}"
             )
-        else:
+        elif is_cloud_uri(source_uri):
             parsed = urlsplit(source_uri)
             if not parsed.netloc or not parsed.path.strip("/") or parsed.query or parsed.fragment:
                 raise SpeculativeDecodingConfigError(f"{context}.source_uri is not a complete object-store URI")
@@ -141,25 +144,43 @@ class SpeculatorModelConfig:
         return cls(
             source_uri=source_uri,
             source_identity=source_identity,
-            materialized_path=materialized_path,
         )
 
     @property
     def hugging_face_repo_id(self) -> str | None:
         return hugging_face_repo_from_source_uri(self.source_uri)
 
+    @property
+    def local_source_path(self) -> str | None:
+        """Return the source path when this model already exists locally."""
+        return self.source_uri if os.path.isabs(self.source_uri) else None
+
+    @property
+    def source_kind(self) -> SpeculatorModelSourceKind:
+        if self.local_source_path is not None:
+            return SpeculatorModelSourceKind.LOCAL
+        if self.hugging_face_repo_id is not None:
+            return SpeculatorModelSourceKind.HUGGING_FACE
+        return SpeculatorModelSourceKind.ARTIFACT
+
     def node_local_path(self) -> str:
-        """Return a stable path shared by the controller and rollout workers."""
-        model_id = self.hugging_face_repo_id
-        if model_id is None:
-            raise SpeculativeDecodingConfigError("Only Hugging Face speculators have a node-local cache path")
-        return os.path.join(_DRAFT_MODEL_ROOT, hugging_face_model_cache_key(model_id, self.source_identity))
+        """Return the standard node-local location for this immutable source."""
+        if self.source_kind is SpeculatorModelSourceKind.LOCAL:
+            assert self.local_source_path is not None
+            return self.local_source_path
+        return os.path.join(
+            _DRAFT_MODEL_ROOT,
+            immutable_model_cache_key(self.source_uri, self.source_identity),
+        )
 
     def vllm_source_config(self) -> dict[str, Any]:
         """Return the vLLM fields needed to load this draft source."""
-        if self.materialized_path is not None:
-            return {"model": self.materialized_path}
-        if model_id := self.hugging_face_repo_id:
+        if self.source_kind is SpeculatorModelSourceKind.LOCAL:
+            assert self.local_source_path is not None
+            return {"model": self.local_source_path}
+        if self.source_kind is SpeculatorModelSourceKind.HUGGING_FACE:
+            assert self.hugging_face_repo_id is not None
+            model_id = self.hugging_face_repo_id
             return {"model": model_id, "revision": self.source_identity}
         return {
             "model": runai_model_uri(self.source_uri),

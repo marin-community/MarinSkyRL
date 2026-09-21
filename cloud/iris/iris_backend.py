@@ -82,7 +82,6 @@ from iris.resources.state import JobState
 from iris.rpc import job_pb2
 
 from cloud.iris.paths import PROJECT_ROOT
-from cloud.iris.hf_model_cache import CachedHuggingFaceModel
 from cloud.iris.ingress_utils import (
     PARENT_CONTROLLER_CONFIG_ENV,
     PARENT_CONTROLLER_CONFIG_YAML_ENV,
@@ -120,7 +119,11 @@ from marinskyrl.resource_locator import (
     model_source_for_path,
 )
 from marinskyrl.runtime_options import GDNBackend, R3Transport
-from marinskyrl.speculative_decoding import SpeculativeDecodingConfig
+from marinskyrl.speculative_decoding import (
+    SpeculativeDecodingConfig,
+    SpeculatorModelConfig,
+    SpeculatorModelSourceKind,
+)
 from cloud.iris.rl_config_translation import (
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
@@ -1979,22 +1982,14 @@ def load_config_policy_model_revision(rl_config_path: str) -> str | None:
     return revision
 
 
-def load_config_hugging_face_draft_model(rl_config_path: str) -> CachedHuggingFaceModel | None:
-    """Return the immutable Hub draft model that needs per-node materialization."""
+def load_config_draft_model(rl_config_path: str) -> SpeculatorModelConfig | None:
+    """Return the immutable draft model declared by an RL config."""
     raw = _load_rl_config_yaml(rl_config_path)
     generator = raw.get("generator") or {}
     value = generator.get("speculative_decoding")
     if value is None:
         return None
-    config = SpeculativeDecodingConfig.from_mapping(value)
-    model_id = config.model.hugging_face_repo_id
-    if model_id is None:
-        return None
-    return CachedHuggingFaceModel(
-        model_id=model_id,
-        revision=config.model.source_identity,
-        local_path=config.model.node_local_path(),
-    )
+    return SpeculativeDecodingConfig.from_mapping(value).model
 
 
 def load_config_terminal_bench_data(rl_config_path: str) -> list[str]:
@@ -2226,14 +2221,14 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     ]
     if args.model_revision:
         train_cmd.extend(["--model-revision", args.model_revision])
-    draft_model = load_config_hugging_face_draft_model(args.rl_config)
+    draft_model = load_config_draft_model(args.rl_config)
     if draft_model is not None:
         train_cmd.extend(
             [
                 "--skyrl_override",
                 format_hydra_arg(
-                    "generator.speculative_decoding.model.materialized_path",
-                    draft_model.local_path,
+                    "generator.speculative_decoding.model.source_uri",
+                    draft_model.node_local_path(),
                     prefix="++",
                 ),
             ]
@@ -2322,16 +2317,20 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     if draft_model is not None:
         controller_cmd.extend(
             [
-                "--prestage-draft-model",
-                draft_model.model_id,
-                draft_model.revision,
-                draft_model.local_path,
-                "--draft-model-cache-ttl-days",
-                str(args.storage_ttl_days),
-                "--draft-model-cache-source-prefix",
-                storage_paths.checkpoint_root,
+                "--draft-model",
+                draft_model.source_uri,
+                draft_model.source_identity,
             ]
         )
+        if draft_model.source_kind is SpeculatorModelSourceKind.HUGGING_FACE:
+            controller_cmd.extend(
+                [
+                    "--draft-model-cache-ttl-days",
+                    str(args.storage_ttl_days),
+                    "--draft-model-cache-source-prefix",
+                    storage_paths.checkpoint_root,
+                ]
+            )
     terminal_bench_data = load_config_terminal_bench_data(args.rl_config)
     if terminal_bench_data:
         controller_cmd.extend(["--terminal-bench-data", json.dumps(terminal_bench_data)])
