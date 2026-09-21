@@ -41,6 +41,8 @@ install_delta = med(sparse, "timing/expert_block_sync/install_seconds") - med(
 )
 commit_seconds = med(sparse, "timing/expert_block_sync/commit_seconds")
 calibration_latency = 10e-6
+# This residual is fitted from one inter-node H100 operating point. It is not a
+# topology-independent encoding cost, and the direct model has no held-out point.
 fixed_delta = (
     install_delta
     - (messages_sparse - messages_dense) * calibration_latency
@@ -161,11 +163,9 @@ dense_local_128 = statistics.median(
     if row["encoding"] == "dense" and row["size_mib"] == 128 and row["density"] != 0.231647
 )
 dense_storage_coeff = remote_fit["dense"]["storage_seconds"]["coefficients"]
-remote_dense_128 = dense_storage_coeff[0] + dense_storage_coeff[1] * 128 + dense_local_128
-grid = np.linspace(0.025, 0.5, 1000)
-crossing = min(grid, key=lambda density: abs(remote_cpu_indices(float(density)) - remote_dense_128))
+remote_dense_gpu_relay_128 = dense_storage_coeff[0] + dense_storage_coeff[1] * 128 + dense_local_128
 result = {
-    "schema": "sparse-publication-topology-cost-model-v1",
+    "schema": "sparse-publication-topology-cost-model-v2",
     "input_sha256": hashes,
     "calibration": {
         "direct_path": {
@@ -182,6 +182,7 @@ result = {
             "observed_sparse_commit_seconds": commit_seconds,
             "assumed_calibration_message_latency_us": 10,
             "fitted_nonwire_delta_seconds": fixed_delta,
+            "validation": "Single inter-node calibration point; no held-out direct-path density or topology.",
             "formula": "sparse_minus_dense = fitted_nonwire_delta + (sparse_messages-dense_messages)*latency + (3*density-1)*expert_bytes_per_root/bandwidth + (1-commit_overlap)*commit_seconds",
         },
         "cross_region_s3_relay": {
@@ -193,12 +194,11 @@ result = {
     "predictions": {
         "direct_crossover": topology,
         "remote_128mib": {
-            "dense_fitted_seconds": remote_dense_128,
+            "dense_gpu_relay_fitted_seconds": remote_dense_gpu_relay_128,
             "cpu_index_predicted_seconds_at_2p5pct": remote_cpu_indices(0.025),
             "cpu_index_predicted_seconds_at_23pct": remote_cpu_indices(0.23),
-            "cpu_index_crossover_density_fitted": float(crossing),
             "cpu_probe_seconds": cpu_points,
-            "condition": "Sequential 128 MiB two-leg S3 object; no full-model concurrency or overlap assumed. CPU phases from separate one-H100 probe; cross-region receiver was GB200.",
+            "condition": "Sequential 128 MiB two-leg S3 object; no full-model concurrency or overlap assumed. The dense local stages are from the GPU H100-to-GB200 relay, while the sparse local stages are from a separate one-H100 CPU probe. These are different candidate paths, so their fitted times do not define a validated crossover.",
         },
     },
 }
