@@ -10,7 +10,7 @@ trainer:
   strategy: megatron
   flash_attn: false
   use_sample_packing: false
-  offload_optimizer_during_rollouts: true
+  offload_optimizer_during_rollouts: false
   gradient_checkpointing: true
   algorithm:
     advantage_estimator: grpo
@@ -18,8 +18,8 @@ trainer:
   epochs: 1
   max_steps: 1
   update_epochs_per_batch: 1
-  train_batch_size: 2
-  policy_mini_batch_size: 2
+  train_batch_size: 4
+  policy_mini_batch_size: 4
   eval_batch_size: 64
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
