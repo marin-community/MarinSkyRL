@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from botocore.exceptions import ClientError
 import pytest
 from unittest.mock import patch, Mock
 import torch
@@ -16,6 +17,7 @@ from skyrl_train.io.io import (
     makedirs,
     exists,
     open_file,
+    write_bytes_atomic,
     upload_directory,
     download_directory,
     local_work_dir,
@@ -392,7 +394,8 @@ class TestContextManagers:
                 # Mirror fsspec AbstractFileSystem._strip_protocol, which also rstrips separators.
                 return path.removeprefix("s3://").rstrip("/")
 
-            def get(self, source, destination, recursive):
+            def get(self, source, destination, recursive, batch_size):
+                assert batch_size == 1
                 destination_root = Path(destination)
                 if not source.endswith("/"):
                     destination_root /= Path(source).name
@@ -583,6 +586,67 @@ class TestUploadDownload:
         """Test that download_directory validates source is a cloud path."""
         with pytest.raises(ValueError, match="Source must be a cloud path"):
             download_directory("/local/src", "/local/dst")
+
+    @patch("skyrl_train.io.s3fs.time.sleep")
+    @patch("skyrl_train.io.io._get_filesystem")
+    def test_download_directory_limits_s3_parallelism_and_retries_slowdown(self, mock_get_filesystem, _sleep):
+        filesystem = Mock()
+        filesystem._strip_protocol.return_value = "bucket/checkpoint"
+        filesystem.get.side_effect = [
+            ClientError(
+                {"Error": {"Code": "SlowDown"}, "ResponseMetadata": {"HTTPStatusCode": 503}},
+                "GetObject",
+            ),
+            None,
+        ]
+        mock_get_filesystem.return_value = filesystem
+
+        download_directory("s3://bucket/checkpoint", "/tmp/policy")
+
+        assert filesystem.get.call_count == 2
+        filesystem.get.assert_called_with("bucket/checkpoint/", "/tmp/policy", recursive=True, batch_size=1)
+
+    @patch("skyrl_train.io.s3fs.time.sleep")
+    @patch("skyrl_train.io.io._get_filesystem")
+    def test_write_bytes_atomic_retries_s3_failure_on_close(self, mock_get_filesystem, _sleep):
+        class FlakyFilesystem:
+            def __init__(self):
+                self.attempts = 0
+                self.object_bytes = None
+
+            def _strip_protocol(self, path):
+                return path.removeprefix("s3://")
+
+            def open(self, path, mode):
+                assert path == "bucket/eval.jsonl" and mode == "wb"
+                self.attempts += 1
+                filesystem = self
+                should_fail = self.attempts == 1
+
+                class Writer:
+                    def __enter__(self):
+                        return self
+
+                    def write(self, payload):
+                        self.payload = payload
+
+                    def __exit__(self, *_):
+                        if should_fail:
+                            raise ClientError(
+                                {"Error": {"Code": "SlowDown"}, "ResponseMetadata": {"HTTPStatusCode": 503}},
+                                "PutObject",
+                            )
+                        filesystem.object_bytes = self.payload
+
+                return Writer()
+
+        filesystem = FlakyFilesystem()
+        mock_get_filesystem.return_value = filesystem
+
+        write_bytes_atomic("s3://bucket/eval.jsonl", b'{"score": 1}\n')
+
+        assert filesystem.attempts == 2
+        assert filesystem.object_bytes == b'{"score": 1}\n'
 
 
 if __name__ == "__main__":

@@ -354,27 +354,27 @@ def dump_per_dataset_eval_results(
         sanitized_data_source = sanitize_data_source(data_source)
         filename = join_resource_path(dump_dir_path, f"{sanitized_data_source}.jsonl")
 
-        with io.open_file(filename, "w") as f:
-            for i in indices:
-                entry = {
-                    "input_prompt": input_prompts[i],
-                    "output_response": output_responses[i],
-                    "score": trajectory_batch["rewards"][i],
-                    "stop_reason": trajectory_batch.get("stop_reasons", [None] * len(input_prompts))[i],
-                    "exception_type": (trajectory_batch.get("exception_types") or [None] * len(input_prompts))[i],
-                    "error_treatment": (trajectory_batch.get("error_treatments") or [None] * len(input_prompts))[i],
-                    "env_class": concat_all_envs[i],
-                    "env_extras": concat_env_extras[i],
-                    "data_source": data_source,
-                }
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        lines = []
+        for i in indices:
+            entry = {
+                "input_prompt": input_prompts[i],
+                "output_response": output_responses[i],
+                "score": trajectory_batch["rewards"][i],
+                "stop_reason": trajectory_batch.get("stop_reasons", [None] * len(input_prompts))[i],
+                "exception_type": (trajectory_batch.get("exception_types") or [None] * len(input_prompts))[i],
+                "error_treatment": (trajectory_batch.get("error_treatments") or [None] * len(input_prompts))[i],
+                "env_class": concat_all_envs[i],
+                "env_extras": concat_env_extras[i],
+                "data_source": data_source,
+            }
+            lines.append(json.dumps(entry, ensure_ascii=False) + "\n")
+        io.write_bytes_atomic(filename, "".join(lines).encode("utf-8"))
 
         logger.info(f"Dumped eval data for {data_source} to {filename}")
 
     # Dump aggregated results file
     aggregated_filename = join_resource_path(dump_dir_path, "aggregated_results.jsonl")
-    with io.open_file(aggregated_filename, "w") as f:
-        f.write(json.dumps(eval_metrics, ensure_ascii=False) + "\n")
+    io.write_bytes_atomic(aggregated_filename, (json.dumps(eval_metrics, ensure_ascii=False) + "\n").encode("utf-8"))
 
     logger.info(f"Dumped aggregated eval metrics to {aggregated_filename}")
 

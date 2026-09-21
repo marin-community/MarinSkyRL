@@ -62,8 +62,19 @@ def open_file(path: str, mode: str = "rb"):
 def write_bytes_atomic(path: str, payload: bytes) -> None:
     """Write one object; local paths use fsync plus atomic replacement."""
     if is_cloud_path(path):
-        with open_file(path, "wb") as destination:
-            destination.write(payload)
+        if path.startswith("s3://"):
+            # S3 writes can fail when the file closes, after open_file's retry
+            # has finished. Replay the complete PutObject with the same bytes.
+            fs = _get_filesystem(path)
+
+            def write_object() -> None:
+                with fs.open(fs._strip_protocol(path), "wb") as destination:
+                    destination.write(payload)
+
+            call_with_s3_retry(fs, write_object, max_attempts=8)
+        else:
+            with open_file(path, "wb") as destination:
+                destination.write(payload)
         return
 
     destination = Path(path)
@@ -203,7 +214,10 @@ def download_directory(cloud_path: str, local_path: str) -> None:
     # _strip_protocol, which rstrips separators and would silently undo it.
     if cloud_path.startswith("s3://"):
         source_path = fs._strip_protocol(cloud_path) + "/"
-        call_with_s3_retry(fs, fs.get, source_path, local_path, recursive=True)
+        # Checkpoint restore runs on several nodes at once. Keep each node's
+        # recursive download serial so a restart does not burst S3 with tens
+        # of concurrent GetObject calls for the same checkpoint prefix.
+        call_with_s3_retry(fs, fs.get, source_path, local_path, recursive=True, batch_size=1, max_attempts=8)
     else:
         fs.get(cloud_path.rstrip("/") + "/", local_path, recursive=True)
     logger.info(f"Downloaded {cloud_path} to {local_path}")
