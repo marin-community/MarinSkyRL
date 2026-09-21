@@ -19,6 +19,9 @@ if [[ -z "${FA4_RUNTIME_PYTHON:-}" ]]; then
     FA4_RUNTIME_PYTHON=.venv/bin/python
 fi
 output_dir="${IRIS_OUTPUT_DIR:-/tmp}"
+mkdir -p "$output_dir"
+scratch_dir="$(mktemp -d)"
+trap 'rm -rf "$scratch_dir"' EXIT
 common_env=(NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=2 NVTE_FUSED_ATTN=0 NVTE_UNFUSED_ATTN=0 NVTE_FLASH_ATTN=1 NVTE_FLASH_ATTN_V3=0)
 common_args=(
     --batch "$batch" --seq "$seq" --heads "$heads" --kv-heads "$kv_heads"
@@ -32,7 +35,10 @@ elif [[ -n "$reference" ]]; then
     exit 2
 fi
 env "${common_env[@]}" NVTE_FLASH_ATTN_V2=1 NVTE_FLASH_ATTN_V4=0 timeout 900 "$FA4_RUNTIME_PYTHON" \
-    experiments/fa4/probe_attention.py --output "$output_dir/fa2-attention.pt" "${common_args[@]}"
+    experiments/fa4/probe_attention.py --output "$scratch_dir/fa2-attention.pt" "${common_args[@]}" \
+    | tee "$output_dir/fa2-attention.json"
 env "${common_env[@]}" NVTE_FLASH_ATTN_V2=0 NVTE_FLASH_ATTN_V4=1 timeout 900 "$FA4_RUNTIME_PYTHON" \
-    experiments/fa4/probe_attention.py --output "$output_dir/fa4-attention.pt" "${common_args[@]}"
-"$FA4_RUNTIME_PYTHON" experiments/fa4/compare_attention.py "$output_dir/fa2-attention.pt" "$output_dir/fa4-attention.pt"
+    experiments/fa4/probe_attention.py --output "$scratch_dir/fa4-attention.pt" "${common_args[@]}" \
+    | tee "$output_dir/fa4-attention.json"
+"$FA4_RUNTIME_PYTHON" experiments/fa4/compare_attention.py "$scratch_dir/fa2-attention.pt" "$scratch_dir/fa4-attention.pt" \
+    | tee "$output_dir/fa2-fa4-compare.json"
