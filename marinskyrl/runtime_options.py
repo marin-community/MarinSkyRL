@@ -9,6 +9,28 @@ class R3Transport(StrEnum):
     DECENTRAL = "decentral"
 
 
+class WeightSyncTransport(StrEnum):
+    BROADCAST = "broadcast"
+    EXPERT_BLOCK = "expert_block"
+
+
+class ExpertBlockEncoding(StrEnum):
+    DENSE = "dense"
+    SPARSE_INDEX = "sparse_index"
+
+
 class GDNBackend(StrEnum):
     TORCH = "torch"
     FLASHQLA = "flashqla"
+
+
+class NodeLocalPlacement(StrEnum):
+    """Values of ``generator.inference_engine_node_local``.
+
+    ``auto`` packs a replica when that cannot leave nodes partly used. ``require`` packs or
+    refuses the run. ``off`` never packs.
+    """
+
+    AUTO = "auto"
+    REQUIRE = "require"
+    OFF = "off"

@@ -111,6 +111,9 @@ ADDITIVE_GENERATOR_FIELDS = {
     "r3_transport": "decentral",
     "r3_dispatch_put_timeout_seconds": 600,
     "gdn_backend": "torch",
+    "inference_engine_node_local": "auto",
+    "weight_sync_transport": "broadcast",
+    "expert_block_sync": {"encoding": "dense", "timeout_seconds": 600, "verify": False},
     "weight_sync_pause_timeout_seconds": 30.0,
 }
 ADDITIVE_MODEL_FIELDS = {

@@ -22,6 +22,7 @@ marinskyrl/checkpoint_paths.py
 marinskyrl/distillation.py
 marinskyrl/harbor_agent_names.py
 marinskyrl/hf_model.py
+marinskyrl/inference_placement.py
 marinskyrl/iris_harbor_environment.py
 marinskyrl/packed_tasks.py
 marinskyrl/process_diagnostics.py
