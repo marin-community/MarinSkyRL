@@ -16,7 +16,11 @@ from skyrl_train.distributed.megatron.model_utils import (
     vocab_parallel_entropy,
 )
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
-from skyrl_train.distillation import DistillationInput, student_topk_logprobs_for_compacted_response
+from skyrl_train.distillation import (
+    DistillationInput,
+    student_topk_logprobs_for_compacted_response,
+    student_topk_logprobs_from_sampled_action_logprobs,
+)
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
 from skyrl_train.megatron_timing import (
@@ -423,7 +427,14 @@ class MegatronModelWrapper:
         return MegatronForwardResult(log_probs, selected_logprobs)
 
     def _selected_response_logprobs(
-        self, logits: torch.Tensor, token_ids: torch.Tensor, num_actions: int, attention_mask: torch.Tensor
+        self,
+        logits: torch.Tensor,
+        token_ids: torch.Tensor,
+        num_actions: int,
+        attention_mask: torch.Tensor,
+        *,
+        sampled_token_ids: torch.Tensor | None = None,
+        sampled_action_logprobs: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.use_sample_packing or mpu.get_context_parallel_world_size() != 1:
             raise ValueError("selected-ID logprobs on Megatron require unpacked samples and context parallel size one")
@@ -431,6 +442,12 @@ class MegatronModelWrapper:
             raise ValueError("selected-ID logprobs on Megatron require tensor parallel size one")
         if token_ids.shape[:2] != (attention_mask.shape[0], num_actions):
             raise ValueError("selected response IDs must match the padded learner response length")
+        if sampled_action_logprobs is not None:
+            if sampled_token_ids is None:
+                raise ValueError("sampled token IDs are required to reuse sampled action logprobs")
+            return student_topk_logprobs_from_sampled_action_logprobs(
+                logits, token_ids, sampled_token_ids, sampled_action_logprobs, attention_mask
+            )
         return student_topk_logprobs_for_compacted_response(logits, token_ids, attention_mask)
 
     def _distillation_student_logprobs(
@@ -497,7 +514,14 @@ class MegatronModelWrapper:
             if self.cfg.trainer.algorithm.get("score_centering_topk", 0) and data.score_topk_indices is None:
                 raise ValueError("score centering requires behavior top-k token IDs in every learner microbatch")
             score_current_topk_logprobs = (
-                self._selected_response_logprobs(logits, data.score_topk_indices, num_actions, data.attention_mask)
+                self._selected_response_logprobs(
+                    logits,
+                    data.score_topk_indices,
+                    num_actions,
+                    data.attention_mask,
+                    sampled_token_ids=sequences[:, -num_actions:],
+                    sampled_action_logprobs=action_log_probs,
+                )
                 if self.cfg.trainer.algorithm.get("score_centering_topk", 0)
                 else None
             )
