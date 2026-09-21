@@ -2,6 +2,14 @@ name: SkyRL-tx-CPU
 
 on:
   workflow_dispatch:
+    inputs:
+      task:
+        description: Run the regular tests or resolve the root lockfile
+        type: choice
+        options:
+          - test
+          - lock
+        default: test
 
 permissions:
   checks: write
@@ -13,6 +21,7 @@ concurrency:
 
 jobs:
   skyrl_tx_tests:
+    if: inputs.task != 'lock'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -55,3 +64,24 @@ jobs:
     - name: Run engine benchmarks
       run: |
         uv run --extra tinker --extra dev python benchmarks/benchmark_engine.py --base-model trl-internal-testing/tiny-Qwen3ForCausalLM --max-lora-adapters 3 --max-lora-rank 1 --num-warmup-steps 1 --num-steps 1 --num-requests 1 --seq-len 8 --sample-max-tokens 16
+
+  resolve_root_lock:
+    if: inputs.task == 'lock'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: 0.11.21
+      - name: Resolve and check the root lockfile
+        run: |
+          uv lock --python 3.12
+          uv lock --check
+          sha256sum uv.lock
+          wc -c uv.lock
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fa4-root-uv-lock
+          path: uv.lock
+          if-no-files-found: error
+          retention-days: 7
