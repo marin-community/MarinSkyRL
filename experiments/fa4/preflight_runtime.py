@@ -24,6 +24,7 @@ def main() -> None:
         "flash-attn-4": "4.0.0b29",
         "megatron-core": "0.19.2",
         "tilelang": "0.1.14",
+        "tokenspeed": "0.1.9",
         "transformer-engine": "2.19.0",
         "vllm": args.expected_vllm_version,
     }
