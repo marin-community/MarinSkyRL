@@ -394,8 +394,9 @@ class TestContextManagers:
                 # Mirror fsspec AbstractFileSystem._strip_protocol, which also rstrips separators.
                 return path.removeprefix("s3://").rstrip("/")
 
-            def get(self, source, destination, recursive, batch_size):
+            def get(self, source, destination, recursive, batch_size, max_concurrency):
                 assert batch_size == 1
+                assert max_concurrency == 1
                 destination_root = Path(destination)
                 if not source.endswith("/"):
                     destination_root /= Path(source).name
@@ -604,7 +605,9 @@ class TestUploadDownload:
         download_directory("s3://bucket/checkpoint", "/tmp/policy")
 
         assert filesystem.get.call_count == 2
-        filesystem.get.assert_called_with("bucket/checkpoint/", "/tmp/policy", recursive=True, batch_size=1)
+        filesystem.get.assert_called_with(
+            "bucket/checkpoint/", "/tmp/policy", recursive=True, batch_size=1, max_concurrency=1
+        )
 
     @patch("skyrl_train.io.s3fs.time.sleep")
     @patch("skyrl_train.io.io._get_filesystem")

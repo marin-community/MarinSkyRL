@@ -215,9 +215,18 @@ def download_directory(cloud_path: str, local_path: str) -> None:
     if cloud_path.startswith("s3://"):
         source_path = fs._strip_protocol(cloud_path) + "/"
         # Checkpoint restore runs on several nodes at once. Keep each node's
-        # recursive download serial so a restart does not burst S3 with tens
-        # of concurrent GetObject calls for the same checkpoint prefix.
-        call_with_s3_retry(fs, fs.get, source_path, local_path, recursive=True, batch_size=1, max_attempts=8)
+        # file list and large-file range reads serial so a restart does not
+        # burst S3 with concurrent GetObject calls for one checkpoint prefix.
+        call_with_s3_retry(
+            fs,
+            fs.get,
+            source_path,
+            local_path,
+            recursive=True,
+            batch_size=1,
+            max_concurrency=1,
+            max_attempts=8,
+        )
     else:
         fs.get(cloud_path.rstrip("/") + "/", local_path, recursive=True)
     logger.info(f"Downloaded {cloud_path} to {local_path}")
