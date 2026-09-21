@@ -227,10 +227,11 @@ selects the flash backend instead.
 
 ## Weights
 
-The HF checkpoint keeps its stacked `[E, ...]` expert tensors. The bridge maps
-each Megatron per-expert grouped-GEMM weight to one slice of the stacked tensor
-on import and re-stacks on export, so exported checkpoints and weight sync use
-the same names as FSDP2 training and vLLM serving. The router bias becomes
+Snowball schema-v1 checkpoints keep stacked `[E, ...]` expert tensors. The
+bridge maps each Megatron per-expert grouped-GEMM weight to one slice on import
+and re-stacks on export. Hero schema-v2 checkpoints keep individual expert
+tensors; import, export, and publication preserve those split expert names.
+Both layouts use the names expected by vLLM serving. The router bias becomes
 Megatron's persistent fp32 `expert_bias` buffer and is sent to vLLM in fp32 in
 its own weight-sync bucket; every other tensor is sent in the generator dtype.
 
@@ -342,9 +343,12 @@ gains come from the generator rather than the trainer.
 
 ## Query bias
 
-Only the frozen query-bias mode is supported on Megatron. The bias steers
-expert selection exactly as in the HF model but is never updated; the
-`loss_free`, `interpolate`, and `replace` modes remain FSDP2-only.
+Megatron supports `frozen` and `loss_free` query-bias modes. All full-Hero
+measurements above use `frozen`: the checkpoint bias steers expert selection
+and stays unchanged. `loss_free` requires router replay and updates the bias
+from executed-route loads after a successful optimizer step. With replay,
+those loads reflect the captured rollout routes. This mode has not been
+qualified at full Hero scale. `interpolate` and `replace` remain FSDP2-only.
 
 ## Validation
 

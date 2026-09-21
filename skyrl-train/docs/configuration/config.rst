@@ -295,7 +295,7 @@ This section configures the policy model used for training, including optimizer,
      record_memory: false  # Dump memory snapshot for debugging
 
 - ``policy.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
-- ``policy.grug_query_bias_update_mode``: Grug's external router-bias update. ``frozen`` preserves the checkpoint bias, ``replace`` and ``interpolate`` apply Quantile Balancing, and ``loss_free`` applies the signed load-error update from `Loss-Free Balancing <https://arxiv.org/abs/2408.15664>`_. This option applies only to Grug under FSDP2.
+- ``policy.grug_query_bias_update_mode``: Grug's external router-bias update. ``frozen`` preserves the checkpoint bias, ``replace`` and ``interpolate`` apply Quantile Balancing, and ``loss_free`` applies the signed load-error update from `Loss-Free Balancing <https://arxiv.org/abs/2408.15664>`_. Megatron supports ``frozen`` and ``loss_free``; the latter requires router replay and uses executed-route loads. Full-Hero Megatron qualification uses ``frozen``. ``replace`` and ``interpolate`` remain FSDP2-only.
 - ``policy.grug_query_bias_interpolation_weight``: Fraction of the Quantile Balancing target applied after each successful optimizer step. Required only for ``interpolate``.
 - ``policy.grug_query_bias_update_rate``: Positive bias step size used by ``loss_free``. Required only for that mode; the reference implementation uses ``0.001``.
 - ``policy.optimizer_config``: Optimizer configuration for the policy model
