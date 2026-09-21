@@ -12,7 +12,8 @@ trainer:
   strategy: megatron
   flash_attn: false
   use_sample_packing: false
-  offload_optimizer_during_rollouts: false
+  # Free the remaining optimizer state before waking the colocated vLLM KV cache.
+  offload_optimizer_during_rollouts: true
   gradient_checkpointing: true
   algorithm:
     advantage_estimator: grpo
