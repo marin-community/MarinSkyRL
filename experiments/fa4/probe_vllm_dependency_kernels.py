@@ -149,7 +149,9 @@ def probe_tokenspeed_mla() -> dict[str, object]:
         enable_pdl=False,
     )
     torch.cuda.synchronize()
-    prefill_ref = _attention_reference(query, key, value, scale, causal=True)
+    prefill_ref = _attention_reference(query, key, value, scale, causal=True).to(
+        prefill.dtype
+    )
     prefill_error = _error(prefill, prefill_ref)
     torch.testing.assert_close(prefill, prefill_ref, atol=8.0e-2, rtol=8.0e-2)
     assert torch.isfinite(lse).all()
@@ -191,7 +193,7 @@ def probe_tokenspeed_mla() -> dict[str, object]:
         cache_fp8[0, :, None, :kv_lora_rank],
         1.0 / math.sqrt(head_dim),
         causal=False,
-    )
+    ).to(decoded.dtype)
     decode_error = _error(decoded[0], decode_ref)
     torch.testing.assert_close(decoded[0], decode_ref, atol=1.2e-1, rtol=1.2e-1)
     return {
