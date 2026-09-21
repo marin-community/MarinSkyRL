@@ -142,6 +142,7 @@ time on the same window. Every number below is already logged unless marked.
 | `timing/wait_for_teacher_evidence` | trainer timer | unchanged | down (scoring overlaps) |
 | `timing/offload_policy_model_to_cpu`, `backload_policy_optimizer_to_gpu` | trainer timer | appear; must stay a few percent of step | absent |
 | `timing/inference_engine_sleep`, `timing/inference_engine_wake` | added by the colocated PR | appear; must stay a few percent of step | absent |
+| `timing/save_checkpoints` (blocking snapshot) and `timing/checkpoint_upload` (background) | #711 splits the save; the marker is committed after upload | blocking part drops to the local snapshot on even steps | same |
 | optimizer steps per hour | `global_step` over wall clock | up | up |
 | off-policy staleness | Grafana `rl_runs` "Off-policy staleness" | zero | bounded by `max_staleness_steps` |
 | `generate/tis/*` alignment | rollout metrics | unchanged | exact-match fraction stays ~1.0 |
@@ -159,6 +160,12 @@ Decision gates, in order:
 
 ## Out of scope
 
-Sample packing, evidence-assembly vectorization, teacher prefill chunk size, and checkpoint or evaluation cadence are
-separate changes (marin issue #9250 efficiency list, items 2 through 5). They apply to both variants and are measured
-on top of whichever wins.
+Sample packing, evidence-assembly vectorization, teacher prefill chunk size, and evaluation cadence are separate
+changes (marin issue #9250 efficiency list, items 2 through 5). They apply to both variants and are measured on top
+of whichever wins. Background checkpoint upload (#711) is the checkpoint half of item 2: ranks still stage their
+shards synchronously, the cloud upload runs single-flight in the background, colocated inference residency is
+restored before the upload completes, the `latest_ckpt_global_step.txt` marker is committed last, and the fully
+asynchronous shutdown drains the pending upload. The inline AIME evaluation on the same cadence remains on the
+critical path until it moves to its own Iris job. The issue's timing data gives even steps about 1,700 s over odd
+steps for checkpoint plus evaluation together and does not split the two; the first baseline run must report
+`timing/save_checkpoints` and `timing/eval` separately before either change is credited.
