@@ -40,11 +40,12 @@ trainer:
       context_parallel_size: 1
       expert_model_parallel_size: 4
       expert_tensor_parallel_size: 1
-      # The all-GPU eight-GPU pilot missed its first Adam allocation by 26 MiB.
-      # Offload a small fraction rather than filling host RAM with all optimizer state.
+      # The all-GPU and partial-offload pilots both missed their first Adam
+      # allocation by 26 MiB. The 900 GiB job cgroup covers full offload's
+      # measured 727 GiB host peak.
       optimizer_config_kwargs:
         optimizer_cpu_offload: true
-        optimizer_offload_fraction: 0.1
+        optimizer_offload_fraction: 1.0
         use_precision_aware_optimizer: true
       optimizer_checkpoint_sharding_type: dp_reshardable
       ddp_config:
