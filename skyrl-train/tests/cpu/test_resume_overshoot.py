@@ -56,6 +56,7 @@ def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocat
     """
     trainer = cls.__new__(cls)
     trainer._last_saved_step = None
+    trainer._pending_checkpoint_upload = None
     trainer.global_step = global_step
     trainer.total_training_steps = total_training_steps
     trainer.colocate_all = colocate_all
@@ -77,6 +78,7 @@ def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocat
     trainer.train_dataloader = dl
 
     trainer.save_checkpoints = MagicMock(name="save_checkpoints")
+    trainer._finish_checkpoint_upload = AsyncMock(name="finish_checkpoint_upload", return_value=(0.0, 0.0))
     trainer.handle_hf_export = MagicMock(name="handle_hf_export")
     trainer.eval = AsyncMock(name="eval", return_value={"eval/accuracy": 0.75})
     trainer._log_metrics_stdout = MagicMock(name="_log_metrics_stdout")

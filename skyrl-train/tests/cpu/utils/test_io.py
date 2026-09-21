@@ -19,6 +19,7 @@ from skyrl_train.io.io import (
     open_file,
     upload_directory,
     download_directory,
+    DeferredLocalWorkDir,
     local_work_dir,
     local_read_dir,
     node_cached_read_dir,
@@ -339,6 +340,37 @@ class TestContextManagers:
         assert call_args[1] == cloud_path
         # First argument should be the temp directory we worked with
         assert call_args[0] == work_dir  # This will be the temp dir
+
+    @patch("skyrl_train.io.io.upload_directory")
+    @patch("skyrl_train.io.io.is_cloud_path", return_value=True)
+    def test_deferred_work_dir_uploads_only_when_published(self, _mock_is_cloud_path, mock_upload_directory):
+        staging = DeferredLocalWorkDir("s3://bucket/checkpoint")
+        with staging as work_dir:
+            Path(work_dir, "rank.pt").write_bytes(b"checkpoint")
+
+        upload = staging.pending_upload()
+        assert upload is not None
+        assert Path(upload.local_path, "rank.pt").read_bytes() == b"checkpoint"
+        mock_upload_directory.assert_not_called()
+
+        upload.publish()
+
+        mock_upload_directory.assert_called_once_with(upload.local_path, "s3://bucket/checkpoint")
+        assert not Path(upload.local_path).exists()
+
+    @patch("skyrl_train.io.io.upload_directory", side_effect=OSError("upload failed"))
+    @patch("skyrl_train.io.io.is_cloud_path", return_value=True)
+    def test_deferred_work_dir_cleans_staging_after_failed_upload(self, _mock_is_cloud_path, _mock_upload_directory):
+        staging = DeferredLocalWorkDir("s3://bucket/checkpoint")
+        with staging as work_dir:
+            Path(work_dir, "rank.pt").write_bytes(b"checkpoint")
+
+        upload = staging.pending_upload()
+        assert upload is not None
+        with pytest.raises(OSError, match="upload failed"):
+            upload.publish()
+
+        assert not Path(upload.local_path).exists()
 
     def test_local_read_dir_local_path(self):
         """Test local_read_dir with a local path."""

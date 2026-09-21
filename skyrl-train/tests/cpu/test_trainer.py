@@ -4,6 +4,8 @@ uv  run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer.py
 
 import contextlib
 import asyncio
+import threading
+from pathlib import Path
 import collections
 import gc
 import weakref
@@ -14,13 +16,13 @@ import pytest
 from jaxtyping import Float, Integer
 from omegaconf import DictConfig, OmegaConf
 from pytest import approx
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.group_admission import GroupAdmissionStalledError, GroupAdvantageInvariant
 import skyrl_train.trainer as trainer_module
-from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.trainer import CheckpointSnapshot, RayPPOTrainer
 from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.utils.policy_losses import ppo_policy_loss
 from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch, TrainingOutputBatch
@@ -620,6 +622,7 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
     trainer.all_metrics = {}
     trainer.all_timings = {}
     trainer._checkpoint_save_failures = 0.0
+    trainer._pending_checkpoint_upload = None
     attempts = 0
     saved_steps = []
 
@@ -635,6 +638,7 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
         return control
 
     trainer._save_checkpoints_with_residency = save_with_residency
+    trainer._finish_checkpoint_upload = AsyncMock(return_value=(0.0, 0.0))
     trainer.callback_handler = SimpleNamespace(call_event_async=call_event_async)
     trainer._control = SimpleNamespace()
     state = SimpleNamespace(global_step=6)
@@ -650,6 +654,7 @@ def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
     trainer.all_metrics = {}
     trainer.all_timings = {}
     trainer._checkpoint_save_failures = 0.0
+    trainer._pending_checkpoint_upload = None
 
     async def fail_save():
         raise ValueError("invalid checkpoint state")
@@ -661,6 +666,80 @@ def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
         asyncio.run(trainer._save_intermediate_checkpoint(state))
 
     assert trainer.all_metrics == {}
+
+
+def test_checkpoint_marker_waits_for_rank_uploads(monkeypatch, tmp_path):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.policy_model = SimpleNamespace(async_run_ray_method=lambda *_args: [object()])
+    trainer.critic_model = None
+    trainer._last_saved_step = None
+    trainer._cleanup_old_checkpoints = MagicMock()
+    upload_started = threading.Event()
+    release_upload = threading.Event()
+
+    def wait_for_upload(_refs):
+        upload_started.set()
+        assert release_upload.wait(timeout=1)
+
+    monkeypatch.setattr(trainer_module.ray, "get", wait_for_upload)
+    snapshot = CheckpointSnapshot(
+        step=6,
+        upload_started_at=0.0,
+        dataloader_path=str(tmp_path / "global_step_6" / "data.pt"),
+        dataloader_payload=b"data",
+        trainer_state_path=str(tmp_path / "global_step_6" / "trainer_state.pt"),
+        trainer_state_payload=b"trainer",
+        marker_path=str(tmp_path / "latest_ckpt_global_step.txt"),
+    )
+
+    async def finish_upload():
+        task = asyncio.create_task(trainer._finish_checkpoint_upload(snapshot, commit=True))
+        assert await asyncio.to_thread(upload_started.wait, 1)
+        assert not Path(snapshot.marker_path).exists()
+        release_upload.set()
+        await task
+
+    asyncio.run(finish_upload())
+
+    assert Path(snapshot.dataloader_path).read_bytes() == b"data"
+    assert Path(snapshot.trainer_state_path).read_bytes() == b"trainer"
+    assert Path(snapshot.marker_path).read_text() == "6"
+    assert trainer._last_saved_step == 6
+    trainer._cleanup_old_checkpoints.assert_called_once_with()
+
+
+def test_background_checkpoint_failure_does_not_advance_marker(monkeypatch, tmp_path):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.policy_model = SimpleNamespace(async_run_ray_method=lambda *_args: [object()])
+    trainer.critic_model = None
+    trainer._pending_checkpoint_upload = None
+    trainer._checkpoint_save_failures = 0.0
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+
+    def fail_upload(_refs):
+        raise OSError("AccessDenied")
+
+    monkeypatch.setattr(trainer_module.ray, "get", fail_upload)
+    snapshot = CheckpointSnapshot(
+        step=6,
+        upload_started_at=0.0,
+        dataloader_path=str(tmp_path / "global_step_6" / "data.pt"),
+        dataloader_payload=b"data",
+        trainer_state_path=str(tmp_path / "global_step_6" / "trainer_state.pt"),
+        trainer_state_payload=b"trainer",
+        marker_path=str(tmp_path / "latest_ckpt_global_step.txt"),
+    )
+    state = SimpleNamespace(global_step=6)
+
+    async def drain_failure():
+        trainer._start_checkpoint_upload(snapshot, state)
+        await trainer._drain_checkpoint_upload()
+
+    asyncio.run(drain_failure())
+
+    assert not Path(snapshot.marker_path).exists()
+    assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
 
 
 def test_sync_trainer_attaches_global_loss_denominator_before_dispatch(monkeypatch):

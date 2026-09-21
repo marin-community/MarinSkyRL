@@ -1,11 +1,13 @@
 import asyncio
 from dataclasses import replace
+import io as stdlib_io
 import json
 import math
 import os
 import shutil
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
@@ -132,6 +134,18 @@ from skyrl_train.hf_export_schema import (
     TRAINER_STATE_FILENAME,
 )
 
+
+@dataclass(frozen=True)
+class CheckpointSnapshot:
+    step: int
+    upload_started_at: float
+    dataloader_path: str
+    dataloader_payload: bytes | None
+    trainer_state_path: str
+    trainer_state_payload: bytes
+    marker_path: str
+
+
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
 
@@ -220,6 +234,7 @@ class RayPPOTrainer:
         self._shutdown_complete = False
         self.global_step = 0
         self._last_saved_step: int | None = None
+        self._pending_checkpoint_upload: tuple[asyncio.Task[tuple[float, float]], TrainerState] | None = None
         raw_speculative_decoding = cfg.generator.get("speculative_decoding")
         if raw_speculative_decoding is not None:
             raw_speculative_decoding = OmegaConf.to_container(raw_speculative_decoding, resolve=True)
@@ -511,8 +526,11 @@ class RayPPOTrainer:
         """Run trainer teardown once, including after partial startup."""
         if getattr(self, "_shutdown_complete", False):
             return
-        await self._teardown()
-        self._shutdown_complete = True
+        try:
+            await self._drain_checkpoint_upload()
+        finally:
+            await self._teardown()
+            self._shutdown_complete = True
 
     @staticmethod
     def _start_exit_watchdog(timeout: int = 120) -> None:
@@ -567,6 +585,7 @@ class RayPPOTrainer:
 
     async def _finalize_training(self, *, completed_step: int, epoch: int) -> None:
         """Run train-end callbacks, evaluation, and saves at the last completed optimizer step."""
+        await self._drain_checkpoint_upload()
         self.global_step = completed_step
         final_state = self._create_trainer_state(epoch=epoch)
         self._control.reset()
@@ -592,22 +611,27 @@ class RayPPOTrainer:
             # The interval save may have just written this same step; do not write it twice.
             if self._control.should_save and self._last_saved_step != self.global_step:
                 with Timer("save_checkpoints", self.all_timings):
-                    await asyncio.to_thread(self.save_checkpoints)
-                    logger.info("Saved final checkpoint.")
-                await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
+                    snapshot = await asyncio.to_thread(self.save_checkpoints)
+                try:
+                    await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
+                except BaseException:
+                    await self._finish_checkpoint_upload(snapshot, commit=False)
+                    raise
+                self._start_checkpoint_upload(snapshot, final_state)
+                await self._drain_checkpoint_upload()
+                logger.info("Saved final checkpoint.")
             if self._control.should_save_hf_model:
                 await asyncio.to_thread(self.handle_hf_export)
 
-    async def _save_checkpoints_with_residency(self) -> None:
+    async def _save_checkpoints_with_residency(self) -> CheckpointSnapshot:
         """Save a checkpoint, swapping colocated training and inference residency when needed."""
         if not self.colocate_all:
-            await asyncio.to_thread(self.save_checkpoints)
-            return
+            return await asyncio.to_thread(self.save_checkpoints)
 
         await self.inference_engine_client.sleep()
         try:
             self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
-            await asyncio.to_thread(self.save_checkpoints)
+            return await asyncio.to_thread(self.save_checkpoints)
         finally:
             await self._sync_policy_for_rollouts(reason="checkpoint_restore")
 
@@ -620,9 +644,10 @@ class RayPPOTrainer:
 
     async def _save_intermediate_checkpoint(self, state: TrainerState) -> None:
         """Save one requested step checkpoint without terminating training on storage failure."""
+        await self._drain_checkpoint_upload()
         try:
             with Timer("save_checkpoints", self.all_timings):
-                await self._save_checkpoints_with_residency()
+                snapshot = await self._save_checkpoints_with_residency()
         except OSError:
             self._record_checkpoint_save_failure(state)
             return
@@ -632,7 +657,60 @@ class RayPPOTrainer:
             self._record_checkpoint_save_failure(state)
             return
 
-        await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
+        try:
+            await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
+        except BaseException:
+            await self._finish_checkpoint_upload(snapshot, commit=False)
+            raise
+        self._start_checkpoint_upload(snapshot, state)
+
+    def _start_checkpoint_upload(self, snapshot: CheckpointSnapshot, state: TrainerState) -> None:
+        assert getattr(self, "_pending_checkpoint_upload", None) is None
+        task = asyncio.create_task(self._finish_checkpoint_upload(snapshot, commit=True))
+        self._pending_checkpoint_upload = (task, state)
+
+    async def _finish_checkpoint_upload(self, snapshot: CheckpointSnapshot, *, commit: bool) -> tuple[float, float]:
+        cleanup_duration = 0.0
+        actor_refs = self.policy_model.async_run_ray_method("pass_through", "wait_checkpoint_upload")
+        if self.critic_model is not None:
+            actor_refs.extend(self.critic_model.async_run_ray_method("pass_through", "wait_checkpoint_upload"))
+        await asyncio.to_thread(ray.get, actor_refs)
+        if commit:
+            writes = [
+                asyncio.to_thread(io.write_bytes_atomic, snapshot.trainer_state_path, snapshot.trainer_state_payload)
+            ]
+            if snapshot.dataloader_payload is not None:
+                writes.append(
+                    asyncio.to_thread(io.write_bytes_atomic, snapshot.dataloader_path, snapshot.dataloader_payload)
+                )
+            await asyncio.gather(*writes)
+            await asyncio.to_thread(io.write_bytes_atomic, snapshot.marker_path, str(snapshot.step).encode())
+            self._last_saved_step = snapshot.step
+            cleanup_started = time.monotonic()
+            await asyncio.to_thread(self._cleanup_old_checkpoints)
+            cleanup_duration = time.monotonic() - cleanup_started
+        return time.monotonic() - snapshot.upload_started_at, cleanup_duration
+
+    async def _drain_checkpoint_upload(self) -> None:
+        pending = getattr(self, "_pending_checkpoint_upload", None)
+        if pending is None:
+            return
+        task, state = pending
+        self._pending_checkpoint_upload = None
+        try:
+            duration, cleanup_duration = await task
+        except OSError:
+            self._record_checkpoint_save_failure(state)
+            return
+        except ray.exceptions.RayTaskError as error:
+            if not isinstance(error.as_instanceof_cause(), OSError):
+                raise
+            self._record_checkpoint_save_failure(state)
+            return
+        self.all_timings["checkpoint_upload"] = self.all_timings.get("checkpoint_upload", 0.0) + duration
+        self.all_timings["cleanup_old_checkpoints"] = (
+            self.all_timings.get("cleanup_old_checkpoints", 0.0) + cleanup_duration
+        )
 
     async def _run_step_end_callbacks(self, state: TrainerState) -> None:
         """Run callback-requested work that belongs to the current training step."""
@@ -2573,14 +2651,15 @@ class RayPPOTrainer:
         actor_info: ActorInfo = model.actor_infos[rank]
         return actor_info.rank
 
-    def save_checkpoints(self):
+    def save_checkpoints(self) -> CheckpointSnapshot:
         """
         Save the model, optimizer, and training states to disk.
 
         If colocate_all is True, assumes that the policy model is currently on GPU.
         """
         # Create global step folder structure
-        global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
+        step = self.global_step
+        global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{step}")
         policy_save_dir = os.path.join(global_step_folder, POLICY_CHECKPOINT_SUBDIRECTORY)
         critic_save_dir = os.path.join(global_step_folder, "critic")
 
@@ -2617,38 +2696,36 @@ class RayPPOTrainer:
 
         # Save dataloader state
         dataloader_save_path = os.path.join(global_step_folder, "data.pt")
+        dataloader_payload = None
         try:
             dataloader_state_dict = self.train_dataloader.state_dict()
-            with io.open_file(dataloader_save_path, "wb") as f:
-                torch.save(dataloader_state_dict, f)
-            logger.info(f"Saved dataloader state to {dataloader_save_path}")
+            dataloader_buffer = stdlib_io.BytesIO()
+            torch.save(dataloader_state_dict, dataloader_buffer)
+            dataloader_payload = dataloader_buffer.getvalue()
         except Exception as e:
             logger.warning(f"Failed to save dataloader state: {e}")
 
         # Save additional trainer state
         trainer_state = {
-            "global_step": self.global_step,
+            "global_step": step,
             "config": self.cfg,
             "pending_sync_prompts": self._pending_sync_prompts,
             "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
             "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
         }
         trainer_state_path = os.path.join(global_step_folder, TRAINER_STATE_FILENAME)
-        with io.open_file(trainer_state_path, "wb") as f:
-            torch.save(trainer_state, f)
-        logger.info(f"Saved trainer state to {trainer_state_path}")
-
-        # Atomic tracking - write this last after all saves succeed
+        trainer_state_buffer = stdlib_io.BytesIO()
+        torch.save(trainer_state, trainer_state_buffer)
         latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
-        with io.open_file(latest_checkpoint_file, "w") as f:
-            f.write(str(self.global_step))
-
-        logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
-        self._last_saved_step = self.global_step
-
-        # Clean up old checkpoints after successful save
-        with Timer("cleanup_old_checkpoints", self.all_timings):
-            self._cleanup_old_checkpoints()
+        return CheckpointSnapshot(
+            step=step,
+            upload_started_at=time.monotonic(),
+            dataloader_path=dataloader_save_path,
+            dataloader_payload=dataloader_payload,
+            trainer_state_path=trainer_state_path,
+            trainer_state_payload=trainer_state_buffer.getvalue(),
+            marker_path=latest_checkpoint_file,
+        )
 
     def _cleanup_old_checkpoints(self):
         max_ckpts = self.cfg.trainer.max_ckpts_to_keep

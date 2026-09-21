@@ -664,6 +664,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if getattr(self, "_shutdown_complete", False):
             return
         try:
+            await self._drain_checkpoint_upload()
             await self._flush_generation_buffer_on_shutdown()
         finally:
             if self._expert_block_sync is not None:
