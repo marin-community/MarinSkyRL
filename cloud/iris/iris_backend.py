@@ -120,7 +120,7 @@ from marinskyrl.resource_locator import (
     model_source_for_path,
 )
 from marinskyrl.runtime_options import GDNBackend, R3Transport
-from marinskyrl.speculative_decoding import SpeculativeDecodingConfig
+from marinskyrl.speculative_decoding import SpeculativeDecodingConfig, SpeculatorModelConfig
 from cloud.iris.rl_config_translation import (
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
@@ -1997,6 +1997,19 @@ def load_config_hugging_face_draft_model(rl_config_path: str) -> CachedHuggingFa
     )
 
 
+def load_config_materialized_draft_model(rl_config_path: str) -> SpeculatorModelConfig | None:
+    """Return an object-store draft that must be materialized before Ray starts."""
+    raw = _load_rl_config_yaml(rl_config_path)
+    generator = raw.get("generator") or {}
+    value = generator.get("speculative_decoding")
+    if value is None:
+        return None
+    model = SpeculativeDecodingConfig.from_mapping(value).model
+    if model.hugging_face_repo_id is not None or model.materialized_path is None:
+        return None
+    return model
+
+
 def load_config_terminal_bench_data(rl_config_path: str) -> list[str]:
     """Return task datasets used by the mixed Gym/Harbor sidechannel.
 
@@ -2227,6 +2240,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     if args.model_revision:
         train_cmd.extend(["--model-revision", args.model_revision])
     draft_model = load_config_hugging_face_draft_model(args.rl_config)
+    materialized_draft_model = load_config_materialized_draft_model(args.rl_config)
     if draft_model is not None:
         train_cmd.extend(
             [
@@ -2330,6 +2344,15 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
                 str(args.storage_ttl_days),
                 "--draft-model-cache-source-prefix",
                 storage_paths.checkpoint_root,
+            ]
+        )
+    if materialized_draft_model is not None:
+        controller_cmd.extend(
+            [
+                "--materialize-draft-model",
+                materialized_draft_model.source_uri,
+                materialized_draft_model.source_identity,
+                materialized_draft_model.materialized_path,
             ]
         )
     terminal_bench_data = load_config_terminal_bench_data(args.rl_config)

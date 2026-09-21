@@ -2099,6 +2099,13 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         help="Immutable Hugging Face draft model to cache and materialize before Ray starts.",
     )
     parser.add_argument(
+        "--materialize-draft-model",
+        nargs=3,
+        default=None,
+        metavar=("SOURCE_URI", "SOURCE_IDENTITY", "LOCAL_PATH"),
+        help="Immutable object-store draft model to materialize before Ray starts.",
+    )
+    parser.add_argument(
         "--draft-model-cache-ttl-days",
         type=int,
         default=None,
@@ -2138,6 +2145,13 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
             args.prestage_draft_model = CachedHuggingFaceModel(*args.prestage_draft_model)
         except ValueError as error:
             parser.error(str(error))
+    if args.materialize_draft_model is not None:
+        source_uri, source_identity, local_path = args.materialize_draft_model
+        args.materialize_draft_model = ArtifactSource(
+            uri=source_uri,
+            identity=source_identity,
+            local_path=local_path,
+        )
     # argparse leaves the `--` separator out of train_argv; strip a leading one
     # if the shell passed it through.
     if train_argv and train_argv[0] == "--":
@@ -2222,6 +2236,13 @@ def main() -> None:
             draft_model,
             ttl_days=args.draft_model_cache_ttl_days,
             source_prefix=args.draft_model_cache_source_prefix,
+        )
+    materialized_draft = args.materialize_draft_model
+    if materialized_draft is not None:
+        materialize_model_export(
+            materialized_draft.uri,
+            materialized_draft.local_path,
+            materialized_draft.identity,
         )
     # Force the policy chat template onto the staged Hub snapshot or materialized local
     # model on every node before Ray; the training driver's tokenizer may load anywhere.

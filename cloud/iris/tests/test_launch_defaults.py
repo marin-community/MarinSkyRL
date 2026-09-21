@@ -855,6 +855,36 @@ generator:
     )
 
 
+def test_object_store_draft_model_is_materialized_before_ray(tmp_path):
+    args = _args(tmp_path, "opencode")
+    Path(args.rl_config).write_text(
+        """\
+trainer:
+  placement:
+    colocate_all: false
+generator:
+  speculative_decoding:
+    method: eagle3
+    model:
+      source_uri: s3://models/trained-draft
+      source_identity: draft@2026.09.20:fingerprint
+      materialized_path: /tmp/marinskyrl/drafts/trained-draft
+    num_speculative_tokens: 3
+"""
+    )
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    tokens = shlex.split(build_task_command(args)[-1])
+    draft_option = tokens.index("--materialize-draft-model")
+
+    assert tokens[draft_option + 1 : draft_option + 4] == [
+        "s3://models/trained-draft",
+        "draft@2026.09.20:fingerprint",
+        "/tmp/marinskyrl/drafts/trained-draft",
+    ]
+
+
 def test_policy_revision_from_config_rejects_task_local_model(tmp_path):
     args = _args(tmp_path, "opencode", ["--model_path", "/models/preloaded-policy"])
     Path(args.rl_config).write_text("trainer:\n  policy:\n    model:\n      revision: immutable-revision\n")

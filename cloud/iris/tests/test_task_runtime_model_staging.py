@@ -1,5 +1,6 @@
 import pytest
 
+from cloud.iris.artifacts import ArtifactSource
 from cloud.iris.hf_model_cache import CachedHuggingFaceModel
 from cloud.iris.task_runtime import parse_args, policy_chat_template_model
 
@@ -32,6 +33,10 @@ def test_model_staging_cli_parses_launcher_payloads() -> None:
             "laion/draft",
             revision,
             "/tmp/draft",
+            "--materialize-draft-model",
+            "s3://models/trained-draft",
+            "draft@2026.09.20:fingerprint",
+            "/tmp/trained-draft",
             "--",
             "python",
             "train.py",
@@ -43,5 +48,10 @@ def test_model_staging_cli_parses_launcher_payloads() -> None:
         model_id="laion/draft",
         revision=revision,
         local_path="/tmp/draft",
+    )
+    assert args.materialize_draft_model == ArtifactSource(
+        uri="s3://models/trained-draft",
+        identity="draft@2026.09.20:fingerprint",
+        local_path="/tmp/trained-draft",
     )
     assert train_argv == ["python", "train.py"]
