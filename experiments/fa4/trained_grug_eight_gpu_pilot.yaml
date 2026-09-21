@@ -79,4 +79,5 @@ data:
   train_data: []
   val_data: []
 extra_env:
-  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  # GB200 fabric CUDA IPC can fail in PyTorch's expandable-segment cleanup.
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:False
