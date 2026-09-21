@@ -195,8 +195,27 @@ and source revisions, so they are not a matched hardware comparison. An
 additional GB200 diagnostic replayed the original rollout's prompt routes as
 well as response routes; its gap was 0.0233 maximum and 0.0104 mean. Restoring
 response-only replay reproduced the original scores exactly before training.
-These cycles establish the training and publication lifecycle; cross-backend
-numerical qualification remains open.
+These cycles establish the training and publication lifecycle. The numerical
+evidence below has a narrower scope than full-model cross-backend parity.
+
+The numerical investigation separately traced two preselected banks through a
+trained 16-layer Hero fixture with fixed tokens and full-prefix routes. Their
+maximum score gaps were 0.05281 and 0.02919. Independent attention, expert,
+normalization, ShortConv, and final-head calculations localized the differences
+to BF16 operation order. Reconstructing scores from each backend's final hidden
+states reproduced all 16 score differences per bank within 0.000193 and
+0.000110, respectively. No production arithmetic change or test-tolerance
+relaxation was made. The investigation's empirical 0.055 envelope applies only
+to those two fixture banks; it is not a new full-model acceptance threshold.
+
+This evidence explains the residuals in those traced fixtures and supports the
+same interpretation for the measured GB200 full-prefix result. It does not
+establish a numerical bound for unseen 535B prompts, the H100 response-only
+cycle, or a fresh 535B fixed-route bank. Cross-backend score equality remains
+unproven. The immutable trace reports and arrays are under
+`s3://marin-us-east-02a/marin/users/romain/hero-replay-qualification/01a0b566/`,
+with stems `trained-ladder-layertrace-h100-af` and
+`trained-ladder-layertrace-h100-fresh-v1`.
 
 The successful H100 report is `full-cycle-h100-a6/report.json` under the S3
 prefix above, from SkyRL `bf37e425` and vLLM `9ff94e459611`. Its source bundle,
