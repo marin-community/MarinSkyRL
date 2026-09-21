@@ -1672,9 +1672,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # "loses" a restart slot until the next dependency-satisfied slot
         # finally gets a fresh port.
         #
-        # 5 attempts with exponential backoff (15→30→60→120→240 s) bridges
-        # the TIME_WAIT window cleanly while staying well under the outer
-        # wait_for_engine_startup deadline.
+        # Non-DP engines use 5 attempts with exponential backoff
+        # (15→30→60→120→240 s) to bridge the TIME_WAIT window while
+        # staying below the outer startup deadline. A DP pool gets one attempt
+        # because all ranks must restart together.
         import random
         import time
 

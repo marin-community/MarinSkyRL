@@ -38,7 +38,7 @@ def test_resolve_engine_max_model_len(engine_kwargs, rope_scaling, expected):
 @pytest.mark.parametrize(
     "tp,pp,dp,expected",
     [
-        (1, 1, 1, False),  # lever1/swesmith single-GPU engines -> flat PACK
+        (1, 1, 1, False),  # single-GPU engines -> flat PACK
         (2, 1, 1, True),  # de-risk geometry on ray/uni -> on-node STRICT_PACK
         (4, 1, 1, True),  # #232 TP=4 -> on-node STRICT_PACK
         (1, 2, 1, True),  # PP=2 single TP -> multi-GPU engine, still needs on-node

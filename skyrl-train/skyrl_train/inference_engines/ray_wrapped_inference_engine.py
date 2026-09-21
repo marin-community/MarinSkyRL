@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Collection
+from enum import StrEnum
 import os
 from typing import Any, Dict, List
 
@@ -101,23 +102,32 @@ def resolve_engine_max_model_len(engine_init_kwargs: Dict[str, Any], rope_scalin
     return int(rope_factor * rope_max_pos)
 
 
+class EnginePlacementMode(StrEnum):
+    HYBRID = "hybrid"
+    MULTIPROCESSING = "multiprocessing"
+    PER_ENGINE = "per_engine"
+    SHARED = "shared"
+
+
 def _dp_rank_bundle_indices(
     *,
     engine_index: int,
     data_parallel_size: int,
     tensor_pipeline_size: int,
-    per_engine_placement: bool,
-    use_hybrid_engine: bool,
-    use_mp_backend: bool,
+    placement_mode: EnginePlacementMode,
     colocated_engine_bundles: list[list[int]],
 ) -> list[int]:
-    if use_hybrid_engine:
+    if placement_mode is EnginePlacementMode.HYBRID:
         return [
             colocated_engine_bundles[engine_index * data_parallel_size + rank][0] for rank in range(data_parallel_size)
         ]
-    if use_mp_backend:
+    if placement_mode is EnginePlacementMode.MULTIPROCESSING:
         return [engine_index * data_parallel_size + rank for rank in range(data_parallel_size)]
-    base_index = 0 if per_engine_placement else engine_index * tensor_pipeline_size * data_parallel_size
+    base_index = (
+        0
+        if placement_mode is EnginePlacementMode.PER_ENGINE
+        else engine_index * tensor_pipeline_size * data_parallel_size
+    )
     return [base_index + rank * tensor_pipeline_size for rank in range(data_parallel_size)]
 
 
@@ -542,16 +552,23 @@ def create_ray_wrapped_inference_engines(
             # ray/uni backend, single-GPU engines (TP==PP==DP==1): ONE flat PACK PG over
             # all engine {GPU:1} bundles (the original pre-#232 behavior). PACK packs
             # densely -> fills whole nodes -> leaves whole nodes free for the
-            # downstream policy/ref PACK PG. Restores the multi-node disaggregated
-            # behavior that the per-engine STRICT_PACK broke (lever1/swesmith).
+            # downstream policy/ref PACK PG.
             bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
 
+    if use_hybrid_engine:
+        placement_mode = EnginePlacementMode.HYBRID
+    elif use_mp_backend:
+        placement_mode = EnginePlacementMode.MULTIPROCESSING
+    elif per_engine_pgs:
+        placement_mode = EnginePlacementMode.PER_ENGINE
+    else:
+        placement_mode = EnginePlacementMode.SHARED
+
     allocated_rendezvous_ports: set[int] = set()
     for i in range(num_inference_engines):
-        use_per_engine_pg = bool(per_engine_pgs)
-        if use_per_engine_pg:
+        if placement_mode is EnginePlacementMode.PER_ENGINE:
             engine_pg = per_engine_pgs[i]
         else:
             engine_pg = shared_pg
@@ -560,9 +577,7 @@ def create_ray_wrapped_inference_engines(
             engine_index=i,
             data_parallel_size=data_parallel_size,
             tensor_pipeline_size=tp_pp_size,
-            per_engine_placement=use_per_engine_pg,
-            use_hybrid_engine=use_hybrid_engine,
-            use_mp_backend=use_mp_backend,
+            placement_mode=placement_mode,
             colocated_engine_bundles=colocated_engine_bundles,
         )
         if data_parallel_size > 1:
@@ -727,7 +742,7 @@ def create_ray_wrapped_inference_engines(
 
             # Per-engine STRICT_PACK PG uses engine-local bundle indices (0-based);
             # the legacy flat PG keeps the global i*per_engine_gpu_count offset.
-            sglang_base_index = 0 if use_per_engine_pg else i * per_engine_gpu_count
+            sglang_base_index = 0 if placement_mode is EnginePlacementMode.PER_ENGINE else i * per_engine_gpu_count
             bundle_indices = None
             if per_engine_gpu_count > 1:
                 if use_hybrid_engine:
