@@ -29,6 +29,7 @@ DEFAULT_TENSOR_COPY_AHEAD_BYTES = 2**30
 DEFAULT_S3_MULTIPART_PART_BYTES = 64 * 2**20
 DEFAULT_S3_MULTIPART_CONCURRENCY = 4
 _MINIMUM_S3_MULTIPART_PART_BYTES = 5 * 2**20
+_S3_MULTIPART_PART_MAX_ATTEMPTS = 2
 
 
 @runtime_checkable
@@ -79,6 +80,7 @@ class _ConcurrentS3WriteStream:
         self._completed_parts: list[dict[str, int | str]] = []
         self._pending: deque[tuple[int, ConcurrentFuture[dict[str, int | str]]]] = deque()
         self._executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="checkpoint-s3")
+        self._write_error: BaseException | None = None
 
     def writable(self) -> bool:
         return True
@@ -95,12 +97,21 @@ class _ConcurrentS3WriteStream:
             raise ValueError("write to closed checkpoint stream")
         view = memoryview(payload).cast("B")
         payload_bytes = len(view)
-        while view:
-            chunk_bytes = min(self.part_bytes - len(self._buffer), len(view))
-            self._buffer.extend(view[:chunk_bytes])
-            view = view[chunk_bytes:]
-            if len(self._buffer) == self.part_bytes:
-                self._submit_part(bytes(self._buffer))
+        if self._write_error is None:
+            try:
+                while view:
+                    chunk_bytes = min(self.part_bytes - len(self._buffer), len(view))
+                    self._buffer.extend(view[:chunk_bytes])
+                    view = view[chunk_bytes:]
+                    if len(self._buffer) == self.part_bytes:
+                        self._submit_part(bytes(self._buffer))
+                        self._buffer.clear()
+            except BaseException as error:
+                # torch.save replaces exceptions from a Python write callback with
+                # an `unexpected pos` assertion while finalizing its zip stream.
+                # Accept the remaining serialization callbacks, then raise the
+                # initiating storage error from close(), outside the C++ writer.
+                self._write_error = error
                 self._buffer.clear()
         self._position += payload_bytes
         return payload_bytes
@@ -111,6 +122,13 @@ class _ConcurrentS3WriteStream:
         if self._discarded:
             self.closed = True
             return
+        if self._write_error is not None:
+            error = self._write_error
+            try:
+                self.discard()
+            except Exception as cleanup_error:
+                error.add_note(f"Failed to abort multipart upload for {self.path}: {cleanup_error}")
+            raise error
 
         if self._upload_id is None:
             call_with_s3_retry(
@@ -190,7 +208,7 @@ class _ConcurrentS3WriteStream:
                 self.filesystem,
                 self.filesystem.call_s3,
                 "upload_part",
-                max_attempts=1,
+                max_attempts=_S3_MULTIPART_PART_MAX_ATTEMPTS,
                 Bucket=self.bucket,
                 Key=self.key,
                 UploadId=self._upload_id,
