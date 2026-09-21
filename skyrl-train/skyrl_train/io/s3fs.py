@@ -4,6 +4,7 @@ import os
 import random
 import time
 
+from aiohttp import ClientPayloadError
 import fsspec
 from fsspec.exceptions import FSTimeoutError
 from loguru import logger
@@ -16,10 +17,16 @@ try:
     from botocore.exceptions import ClientError, ConnectionError as BotocoreConnectionError, HTTPClientError
 
     _HAS_BOTOCORE = True
-    _TRANSIENT_S3_ERRORS = (FSTimeoutError, TimeoutError, BotocoreConnectionError, HTTPClientError)
+    _TRANSIENT_S3_ERRORS = (
+        FSTimeoutError,
+        TimeoutError,
+        BotocoreConnectionError,
+        HTTPClientError,
+        ClientPayloadError,
+    )
 except Exception:
     _HAS_BOTOCORE = False
-    _TRANSIENT_S3_ERRORS = (FSTimeoutError, TimeoutError)
+    _TRANSIENT_S3_ERRORS = (FSTimeoutError, TimeoutError, ClientPayloadError)
 
     class ClientError(Exception):  # fallback type
         pass
