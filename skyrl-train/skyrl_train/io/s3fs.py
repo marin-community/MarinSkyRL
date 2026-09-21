@@ -186,8 +186,9 @@ def call_with_s3_retry(fs, fn, *args, max_attempts: int = _S3_TRANSFER_MAX_ATTEM
             raise retry_error
         delay = _S3_RETRY_BASE_SECONDS * (2 ** (attempt - 1)) * random.uniform(0.8, 1.2)
         logger.warning(
-            "S3 operation failed with {}; retrying attempt {}/{} in {:.1f}s",
+            "S3 operation failed with {}: {}; retrying attempt {}/{} in {:.1f}s",
             type(retry_error).__name__,
+            retry_error,
             attempt + 1,
             max_attempts,
             delay,
