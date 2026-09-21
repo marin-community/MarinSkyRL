@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Collection
+from enum import StrEnum
 import os
 from typing import Any, Dict, List
 
@@ -17,7 +18,12 @@ from skyrl_train.inference_engines.base import (
     NamedWeightsUpdateRequest,
 )
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
-from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
+from skyrl_train.inference_engines.utils import (
+    ReservedRendezvousPorts,
+    VLLM_DATA_PARALLEL_MASTER_PORT_COUNT,
+    get_pg_bundle_node_ips,
+    reserve_rendezvous_ports,
+)
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
 from skyrl_train.env_vars import EnvVarScope, VLLM_USE_V2_MODEL_RUNNER_ENV, managed_environment_names
 from skyrl_train.utils import (
@@ -95,6 +101,63 @@ def resolve_engine_max_model_len(engine_init_kwargs: Dict[str, Any], rope_scalin
         "Please provide rope `original_max_position_embeddings` to compute model max length"
     )
     return int(rope_factor * rope_max_pos)
+
+
+class EnginePlacementMode(StrEnum):
+    HYBRID = "hybrid"
+    MULTIPROCESSING = "multiprocessing"
+    PER_ENGINE = "per_engine"
+    SHARED = "shared"
+
+
+def _dp_rank_bundle_indices(
+    *,
+    engine_index: int,
+    data_parallel_size: int,
+    tensor_pipeline_size: int,
+    placement_mode: EnginePlacementMode,
+    colocated_engine_bundles: list[list[int]],
+) -> list[int]:
+    if placement_mode is EnginePlacementMode.HYBRID:
+        return [
+            colocated_engine_bundles[engine_index * data_parallel_size + rank][0] for rank in range(data_parallel_size)
+        ]
+    if placement_mode is EnginePlacementMode.MULTIPROCESSING:
+        return [engine_index * data_parallel_size + rank for rank in range(data_parallel_size)]
+    base_index = (
+        0
+        if placement_mode is EnginePlacementMode.PER_ENGINE
+        else engine_index * tensor_pipeline_size * data_parallel_size
+    )
+    return [base_index + rank * tensor_pipeline_size for rank in range(data_parallel_size)]
+
+
+def _validate_node_local_dp_ranks(engine_index: int, placement_group, bundle_indices: list[int]) -> None:
+    node_ips = get_pg_bundle_node_ips(placement_group, bundle_indices)
+    logger.info(f"inference engine {engine_index}: DP rank -> node {dict(enumerate(node_ips))}")
+    if len(set(node_ips)) > 1:
+        raise RuntimeError(
+            f"inference engine {engine_index}: its DP ranks were placed on "
+            f"{len(set(node_ips))} nodes ({dict(enumerate(node_ips))}); a DP/EP group must be node-local"
+        )
+
+
+def _reserve_engine_rendezvous(
+    placement_group,
+    bundle_index: int,
+    data_parallel_size: int,
+    allocated_ports: set[int],
+) -> ReservedRendezvousPorts | None:
+    if data_parallel_size == 1:
+        return None
+    rendezvous = reserve_rendezvous_ports(
+        placement_group,
+        bundle_index,
+        port_count=1 + VLLM_DATA_PARALLEL_MASTER_PORT_COUNT,
+        excluded_ports=allocated_ports,
+    )
+    allocated_ports.update(rendezvous.ports)
+    return rendezvous
 
 
 def _qwen3_5_vlm_engine_kwargs(pretrain: str, *, revision: str | None = None) -> Dict[str, Any]:
@@ -199,7 +262,8 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         return ray.get(self.inference_engine_actor.dp_size.remote())
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        return await self.inference_engine_actor.generate.remote(input_batch=input_batch)
+        actor_task = self.inference_engine_actor.generate.remote(input_batch=input_batch)
+        return await _await_actor_task(actor_task)
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         return await self.inference_engine_actor.wake_up.remote(*args, **kwargs)
@@ -350,6 +414,9 @@ def create_ray_wrapped_inference_engines(
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
+    if backend == "vllm" and data_parallel_size > 1 and not async_engine:
+        raise ValueError("vLLM data-parallel rollout engines require async_engine=True")
+
     inference_engine_actors = []
     weight_sync_relative_rank_offsets = []
     # Qwen3.5/3.6 VLM-shell rollout (tmax Stage 2): materialize the text tower only
@@ -435,36 +502,16 @@ def create_ray_wrapped_inference_engines(
     # Per-engine STRICT_PACK forces every engine's bundles onto ONE node (a STRICT_PACK
     # PG is atomic-per-node), restoring the intended "TP=4 = one 4-GPU node, on-node
     # NVLink all-reduce" guarantee. Bundle indices become engine-local (0..n-1).
-    #
-    # *** PLACEMENT-PG-STARVATION FIX (gate STRICT_PACK on tp_pp_size > 1) ***
-    # The per-engine STRICT_PACK above is only NEEDED when an engine owns >1 GPU
-    # (TP>1 or PP>1) — that's the only case with an on-node TP/PP all-reduce to
-    # protect. For TP==PP==1 (single-GPU engines, e.g. lever1's 16 TP=1 engines and
-    # swesmith's 48), each engine is ONE {GPU:1} bundle, so there is no intra-engine
-    # all-reduce to keep on-node, and STRICT_PACK is actively HARMFUL: N independent
-    # 1-bundle STRICT_PACK PGs scatter round-robin across nodes, leaving every node
-    # PARTIALLY used. The downstream policy/ref worker PG (worker.py:_initiate_actors,
-    # `placement_group([{GPU:4,CPU:4}]*policy_num_nodes, strategy="PACK")`) then can't
-    # find its required whole 4-GPU nodes and dies with
-    # `RuntimeError: Failed to create placement group (2 bundles, 8 GPUs) in 180s`
-    # (confirmed: lever1 924882 / swesmith 924888, both multi-node TP=1, post-e5f0ff5).
-    # A flat PACK over all single-GPU bundles packs them DENSELY (fills whole nodes,
-    # leaves whole nodes free), so the policy PACK PG gets its nodes. So: TP==PP==1 ->
-    # restore the original flat PACK; TP*PP>1 -> per-engine STRICT_PACK.
-    # NOTE: the gate is `tp_pp_size > 1`, NOT `per_engine_gpu_count > gpus_per_node` —
-    # #232 is TP=4 on 4-GPU nodes (4 is NOT > 4), which the latter would wrongly send
-    # down the flat-PACK path and re-break the cross-node-TP-split bug.
-    # For the multi-GPU-engine ray/uni case that could still scatter densely-packed
-    # engines onto partially-used nodes (e.g. TP=2 on 4-GPU nodes), the policy PG is
-    # protected independently by the `placement.policy_strict_spread_pg` reserve-first
-    # mechanism (main_base.get_policy_pg), which claims the policy's whole nodes BEFORE
-    # these engine PGs are created.
+    # Multi-GPU engine ranks exchange collectives and must remain node-local. A
+    # single-GPU engine instead shares one flat PACK group so rollout allocation
+    # does not fragment nodes needed by the policy workers.
     per_engine_pgs: list = []
     use_per_engine_strict_pack = use_per_engine_strict_pack_pg(
         use_hybrid_engine=use_hybrid_engine,
         use_mp_backend=use_mp_backend,
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
+        data_parallel_size=data_parallel_size,
     )
     if not use_hybrid_engine:
         if use_mp_backend:
@@ -484,7 +531,7 @@ def create_ray_wrapped_inference_engines(
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
         elif use_per_engine_strict_pack:
-            # ray/uni backend, multi-GPU engines (TP*PP > 1): one STRICT_PACK PG per
+            # ray/uni backend, multi-GPU engines (TP*PP*DP > 1): one STRICT_PACK PG per
             # engine so each engine's per_engine_gpu_count {GPU:1} bundles are
             # guaranteed co-located on a single node (no cross-node TP all-reduce in
             # decode). #232 fix.
@@ -500,41 +547,51 @@ def create_ray_wrapped_inference_engines(
             # re-selects the engine's own PG in the loop.
             shared_pg = per_engine_pgs[0]
         else:
-            # ray/uni backend, single-GPU engines (TP==PP==1): ONE flat PACK PG over
+            # ray/uni backend, single-GPU engines (TP==PP==DP==1): ONE flat PACK PG over
             # all engine {GPU:1} bundles (the original pre-#232 behavior). PACK packs
             # densely -> fills whole nodes -> leaves whole nodes free for the
-            # downstream policy/ref PACK PG. Restores the multi-node disaggregated
-            # behavior that the per-engine STRICT_PACK broke (lever1/swesmith).
+            # downstream policy/ref PACK PG.
             bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
 
+    if use_hybrid_engine:
+        placement_mode = EnginePlacementMode.HYBRID
+    elif use_mp_backend:
+        placement_mode = EnginePlacementMode.MULTIPROCESSING
+    elif per_engine_pgs:
+        placement_mode = EnginePlacementMode.PER_ENGINE
+    else:
+        placement_mode = EnginePlacementMode.SHARED
+
     allocated_rendezvous_ports: set[int] = set()
     for i in range(num_inference_engines):
-        # Per-engine STRICT_PACK PGs (ray/uni, multi-GPU engines) are engine-LOCAL: each
-        # has its own bundle index space 0..per_engine_gpu_count-1, so base_pg_index
-        # resets to 0. The mp PACK PG and TP==PP==1 flat PACK PG remain global.
-        # Hybrid engines use colocated_engine_bundles for node-ordered indices.
-        use_per_engine_pg = bool(per_engine_pgs)
-        if use_per_engine_pg:
+        if placement_mode is EnginePlacementMode.PER_ENGINE:
             engine_pg = per_engine_pgs[i]
-            base_pg_index = 0
         else:
             engine_pg = shared_pg
-            base_pg_index = i * per_engine_gpu_count
 
-        # Get DP group rendezvous (addr, port) on the same node as DP rank 0 for this engine.
-        # The mp PACK PG has one {GPU: tp_pp_size} bundle per (engine, DP-rank), so the
-        # rendezvous bundle for engine i's DP-rank-0 is at i*data_parallel_size (not the
-        # per-GPU base_pg_index, which would index past the smaller mp bundle list).
-        if use_hybrid_engine:
-            rendezvous_pg_index = colocated_engine_bundles[i * data_parallel_size][0]
-        else:
-            rendezvous_pg_index = (i * data_parallel_size) if use_mp_backend else base_pg_index
-        data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(
-            engine_pg, rendezvous_pg_index, allocated_rendezvous_ports
+        dp_rank_bundle_indices = _dp_rank_bundle_indices(
+            engine_index=i,
+            data_parallel_size=data_parallel_size,
+            tensor_pipeline_size=tp_pp_size,
+            placement_mode=placement_mode,
+            colocated_engine_bundles=colocated_engine_bundles,
         )
-        allocated_rendezvous_ports.add(data_parallel_rpc_port)
+        if data_parallel_size > 1:
+            _validate_node_local_dp_ranks(i, engine_pg, dp_rank_bundle_indices)
+
+        rendezvous = _reserve_engine_rendezvous(
+            engine_pg,
+            dp_rank_bundle_indices[0],
+            data_parallel_size,
+            allocated_rendezvous_ports,
+        )
+        rendezvous_reservation = None
+        if rendezvous is not None:
+            data_parallel_address = rendezvous.address
+            data_parallel_rpc_port, *data_parallel_master_ports = rendezvous.ports
+            rendezvous_reservation = rendezvous.reservation
 
         if backend == "vllm":
             if async_engine:
@@ -560,7 +617,7 @@ def create_ray_wrapped_inference_engines(
             # Launch one actor per DP rank
             for dp_rank in range(data_parallel_size):
                 # TP*PP slice reserved for a single DP rank.
-                base_dp_pg_index = base_pg_index + dp_rank * tp_pp_size
+                base_dp_pg_index = dp_rank_bundle_indices[dp_rank]
                 dp_rank_bundles = (
                     list(range(base_dp_pg_index, base_dp_pg_index + tp_pp_size)) if tp_pp_size > 1 else None
                 )
@@ -569,19 +626,18 @@ def create_ray_wrapped_inference_engines(
                     # (vLLM forks its workers locally, no per-worker Ray actors). It must land
                     # in ONE bundle holding tp_pp_size GPUs, so the mp PACK PG (built above) is
                     # one {GPU: tp_pp_size} bundle per (engine, DP-rank) and this actor is pinned
-                    # to its own dedicated bundle (index = i*data_parallel_size + dp_rank). The
+                    # to its own dedicated bundle. The
                     # whole-slice bundle keeps all TP workers co-located on one node. bundle_indices
                     # stays None so vLLM does not attempt ray per-worker placement.
                     dp_rank_bundles = None
                     dp_rank_sched = PlacementGroupSchedulingStrategy(
                         placement_group=engine_pg,
                         placement_group_capture_child_tasks=True,
-                        placement_group_bundle_index=i * data_parallel_size + dp_rank,
+                        placement_group_bundle_index=base_dp_pg_index,
                     )
                 else:
                     if use_hybrid_engine:
                         dp_rank_bundles = colocated_engine_bundles[i * data_parallel_size + dp_rank]
-                        base_dp_pg_index = dp_rank_bundles[0]
                     dp_rank_sched = PlacementGroupSchedulingStrategy(
                         placement_group=engine_pg,
                         placement_group_capture_child_tasks=True,
@@ -599,6 +655,10 @@ def create_ray_wrapped_inference_engines(
                     if data_parallel_size > 1
                     else {}
                 )
+                if data_parallel_size > 1:
+                    dp_kwargs["data_parallel_master_ports"] = data_parallel_master_ports
+                if dp_rank == 0 and rendezvous_reservation is not None:
+                    dp_kwargs["rendezvous_port_reservation"] = rendezvous_reservation
 
                 # The mp executor's TP workers exchange custom-all-reduce IPC handles
                 # under the Ray-actor placement + remapped CUDA_VISIBLE_DEVICES; vLLM's
@@ -676,14 +736,11 @@ def create_ray_wrapped_inference_engines(
         elif backend == "sglang":
             # NOTE: there is no async / sync engine distinction in SGLang
 
-            # Per-engine STRICT_PACK PG uses engine-local bundle indices (0-based);
-            # the legacy flat PG keeps the global i*per_engine_gpu_count offset.
-            sglang_base_index = 0 if use_per_engine_pg else i * per_engine_gpu_count
+            sglang_base_index = dp_rank_bundle_indices[0]
             bundle_indices = None
             if per_engine_gpu_count > 1:
                 if use_hybrid_engine:
                     bundle_indices = colocated_engine_bundles[i * data_parallel_size]
-                    sglang_base_index = bundle_indices[0]
                 else:
                     bundle_indices = list(range(sglang_base_index, sglang_base_index + per_engine_gpu_count))
 

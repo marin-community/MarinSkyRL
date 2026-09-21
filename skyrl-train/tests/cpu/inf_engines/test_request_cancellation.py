@@ -35,15 +35,16 @@ class RemoteMethod:
     def __init__(self, result):
         self.result = result
 
-    def remote(self, request_payload):
+    def remote(self, *args, **kwargs):
         return self.result
 
 
 class InferenceActor:
-    def __init__(self, chat_completion_result, stream_result=None, tokenize_result=None):
+    def __init__(self, chat_completion_result=None, stream_result=None, tokenize_result=None, generate_result=None):
         self.chat_completion = RemoteMethod(chat_completion_result)
         self.chat_completion_stream = RemoteMethod(stream_result)
         self.tokenize = RemoteMethod(tokenize_result)
+        self.generate = RemoteMethod(generate_result)
 
 
 class ResolvedReference:
@@ -87,30 +88,26 @@ def record_ray_cancellation(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cancelled_chat_completion_cancels_ray_actor_task(record_ray_cancellation):
+@pytest.mark.parametrize(
+    "actor_result_kwarg, engine_method, payload",
+    [
+        ("chat_completion_result", "chat_completion", {"json": {}}),
+        ("tokenize_result", "tokenize", {"json": {"messages": []}}),
+        ("generate_result", "generate", {"prompt_token_ids": [[1, 2, 3]], "sampling_params": {}}),
+    ],
+)
+async def test_cancelled_request_cancels_ray_actor_task(
+    record_ray_cancellation, actor_result_kwarg, engine_method, payload
+):
     reference = PendingReference()
-    engine = RayWrappedInferenceEngine(InferenceActor(reference))
+    engine = RayWrappedInferenceEngine(InferenceActor(**{actor_result_kwarg: reference}))
 
-    request = asyncio.create_task(engine.chat_completion({"json": {}}))
+    task = asyncio.create_task(getattr(engine, engine_method)(payload))
     await reference.started.wait()
-    request.cancel()
+    task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
-        await request
-    assert reference.cancelled
-
-
-@pytest.mark.asyncio
-async def test_cancelled_tokenization_cancels_ray_actor_task(record_ray_cancellation):
-    reference = PendingReference()
-    engine = RayWrappedInferenceEngine(InferenceActor(PendingReference(), tokenize_result=reference))
-
-    request = asyncio.create_task(engine.tokenize({"json": {"messages": []}}))
-    await reference.started.wait()
-    request.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await request
+        await task
     assert reference.cancelled
 
 

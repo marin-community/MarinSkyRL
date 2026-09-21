@@ -2,13 +2,10 @@ import os
 from pathlib import Path
 
 import huggingface_hub.constants
-import pytest
-from rigging.filesystem.distributed_lock import LeaseLostError
 
 from cloud.iris import hf_model_cache
 from cloud.iris.hf_model_cache import (
     CachedHuggingFaceModel,
-    ensure_hugging_face_model_cache,
     stage_cached_hugging_face_model,
 )
 
@@ -35,39 +32,6 @@ def test_hub_download_temporarily_enables_network_access(tmp_path: Path, monkeyp
     assert huggingface_hub.constants.is_offline_mode()
     assert os.environ["HF_HUB_OFFLINE"] == "1"
     assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
-
-
-def test_lost_cache_lease_does_not_publish_completion_marker(tmp_path: Path, monkeypatch) -> None:
-    class LostLease:
-        def try_acquire(self) -> bool:
-            return True
-
-        def refresh(self) -> None:
-            raise LeaseLostError("lost")
-
-        def release(self) -> None:
-            pass
-
-    cache = tmp_path / "region-cache"
-
-    def download_snapshot(_model_id: str, *, revision: str, destination: Path) -> Path:
-        (destination / "config.json").write_text("{}")
-        (destination / "model.safetensors").write_bytes(revision.encode())
-        return destination
-
-    monkeypatch.setattr(hf_model_cache, "marin_temp_bucket", lambda *_args, **_kwargs: str(cache))
-    monkeypatch.setattr(hf_model_cache, "create_lock", lambda _path: LostLease())
-    monkeypatch.setattr(hf_model_cache, "download_hugging_face_snapshot", download_snapshot)
-
-    with pytest.raises(LeaseLostError):
-        ensure_hugging_face_model_cache(
-            "laion/draft",
-            "4bdb47c08e5b5190bea3c7a93c3e14470230e469",
-            ttl_days=14,
-            source_prefix="s3://region/experiments/run",
-        )
-
-    assert not (cache / ".marinskyrl-cache.json").exists()
 
 
 def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, monkeypatch) -> None:

@@ -1,4 +1,5 @@
 from collections.abc import Collection
+from dataclasses import dataclass
 from typing import Dict, Any, Optional, Union
 import random
 import hashlib
@@ -9,7 +10,10 @@ from typing import List
 from http import HTTPStatus
 from typing import Tuple
 import ray
+from ray.actor import ActorHandle
 from ray.util.placement_group import PlacementGroupSchedulingStrategy
+
+VLLM_DATA_PARALLEL_MASTER_PORT_COUNT = 5
 
 
 def get_vllm_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
@@ -244,22 +248,82 @@ def _find_available_rendezvous_port(excluded_ports: Collection[int] = ()) -> int
     raise RuntimeError(f"No free rendezvous port in [{_RENDEZVOUS_PORT_START}, {_RENDEZVOUS_PORT_STOP})")
 
 
-def get_rendezvous_addr_port(placement_group, pg_index: int, excluded_ports: Collection[int] = ()) -> Tuple[str, int]:
-    """
-    Minimal helper to get a rendezvous addr:port in `placement_group`'s bundle at index `pg_index`.
-    """
+def get_pg_bundle_node_ips(placement_group, pg_indices: Collection[int]) -> List[str]:
+    """Return the node IP assigned to each requested placement-group bundle."""
 
     @ray.remote(num_cpus=0, num_gpus=0)
-    def get_addr_port():
-        return ray.util.get_node_ip_address(), _find_available_rendezvous_port(excluded_ports)
+    def get_node_ip():
+        return ray.util.get_node_ip_address()
+
+    refs = [
+        get_node_ip.options(
+            scheduling_strategy=PlacementGroupSchedulingStrategy(
+                placement_group=placement_group,
+                placement_group_capture_child_tasks=True,
+                placement_group_bundle_index=idx,
+            )
+        ).remote()
+        for idx in pg_indices
+    ]
+    return list(ray.get(refs))
+
+
+def _reserve_available_rendezvous_ports(port_count: int, excluded_ports: Collection[int] = ()) -> list[socket.socket]:
+    sockets: list[socket.socket] = []
+    unavailable_ports = set(excluded_ports)
+    try:
+        for _ in range(port_count):
+            port = _find_available_rendezvous_port(unavailable_ports)
+            reserved = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            reserved.bind(("", port))
+            sockets.append(reserved)
+            unavailable_ports.add(port)
+    except Exception:
+        for reserved in sockets:
+            reserved.close()
+        raise
+    return sockets
+
+
+@ray.remote(num_cpus=0, num_gpus=0)
+class RendezvousPortReservation:
+    """Hold node-local listener ports until the vLLM coordinator starts."""
+
+    def __init__(self, port_count: int, excluded_ports: Collection[int]):
+        self._sockets = _reserve_available_rendezvous_ports(port_count, excluded_ports)
+
+    def details(self) -> Tuple[str, list[int]]:
+        """Return the node IP address and held port numbers."""
+        return ray.util.get_node_ip_address(), [reserved.getsockname()[1] for reserved in self._sockets]
+
+    def release(self) -> None:
+        for reserved in self._sockets:
+            reserved.close()
+        self._sockets.clear()
+
+
+@dataclass(frozen=True)
+class ReservedRendezvousPorts:
+    """Node-local ports held until the inference engine starts listening."""
+
+    address: str
+    ports: tuple[int, ...]
+    reservation: ActorHandle
+
+
+def reserve_rendezvous_ports(
+    placement_group,
+    pg_index: int,
+    port_count: int,
+    excluded_ports: Collection[int] = (),
+) -> ReservedRendezvousPorts:
+    """Reserve rendezvous ports on the node containing a placement-group bundle."""
 
     master_sched = PlacementGroupSchedulingStrategy(
         placement_group=placement_group,
         placement_group_capture_child_tasks=True,
         placement_group_bundle_index=pg_index,
     )
-    # Get DP group rendezvous (addr, port) on the same node as index `pg_index`'s bundle.
-    data_parallel_address, data_parallel_rpc_port = ray.get(
-        get_addr_port.options(scheduling_strategy=master_sched).remote()
-    )
-    return data_parallel_address, data_parallel_rpc_port
+    reservation = RendezvousPortReservation.options(scheduling_strategy=master_sched).remote(port_count, excluded_ports)
+    address, ports = ray.get(reservation.details.remote())
+    return ReservedRendezvousPorts(address=address, ports=tuple(ports), reservation=reservation)

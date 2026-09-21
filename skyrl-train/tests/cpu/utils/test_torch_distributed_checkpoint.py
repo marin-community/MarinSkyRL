@@ -3,6 +3,7 @@ import warnings
 
 import fsspec
 from fsspec import AbstractFileSystem
+from fsspec.exceptions import FSTimeoutError
 import pytest
 import torch
 from torch.distributed import checkpoint
@@ -103,8 +104,10 @@ def test_streaming_fsspec_writer_aborts_failed_object():
 class _RecordingMultipartFilesystem:
     protocol = "s3"
 
-    def __init__(self, fail_part: int | None = None) -> None:
+    def __init__(self, fail_part: int | None = None, transient_failures: int = 0) -> None:
         self.fail_part = fail_part
+        self.transient_failures = transient_failures
+        self.upload_attempts = 0
         self.active_uploads = 0
         self.peak_active_uploads = 0
         self.uploaded_parts: dict[int, bytes] = {}
@@ -118,11 +121,21 @@ class _RecordingMultipartFilesystem:
         bucket, key = location.split("/", maxsplit=1)
         return bucket, key, None
 
+    def makedirs(self, _path: str, exist_ok: bool = False) -> None:
+        pass
+
+    def exists(self, _path: str) -> bool:
+        return False
+
     def call_s3(self, method: str, **kwargs):
         if method == "create_multipart_upload":
             return {"UploadId": "upload-1"}
         if method == "upload_part":
             part_number = int(kwargs["PartNumber"])
+            self.upload_attempts += 1
+            if self.transient_failures:
+                self.transient_failures -= 1
+                raise FSTimeoutError("injected transient UploadPart timeout")
             if part_number == self.fail_part:
                 raise OSError("injected UploadPart failure")
             with self._lock:
@@ -180,9 +193,51 @@ def test_concurrent_s3_stream_aborts_failed_part():
         concurrency=1,
     )
 
+    stream.write(b"a" * _MINIMUM_S3_MULTIPART_PART_BYTES)
     with pytest.raises(OSError, match="injected UploadPart failure"):
-        stream.write(b"a" * _MINIMUM_S3_MULTIPART_PART_BYTES)
-    stream.discard()
+        stream.close()
 
     assert filesystem.aborted
     assert stream.closed
+
+
+def test_concurrent_s3_stream_retries_transient_part(monkeypatch):
+    monkeypatch.setattr("skyrl_train.io.s3fs.time.sleep", lambda _delay: None)
+    filesystem = _RecordingMultipartFilesystem(transient_failures=1)
+    stream = _ConcurrentS3WriteStream(
+        filesystem,
+        "s3://bucket/checkpoint/__0_0.distcp",
+        part_bytes=_MINIMUM_S3_MULTIPART_PART_BYTES,
+        concurrency=2,
+    )
+
+    stream.write(b"a" * _MINIMUM_S3_MULTIPART_PART_BYTES + b"b" * _MINIMUM_S3_MULTIPART_PART_BYTES)
+    stream.close()
+
+    assert filesystem.upload_attempts == 3
+    assert filesystem.uploaded_parts == {
+        1: b"a" * _MINIMUM_S3_MULTIPART_PART_BYTES,
+        2: b"b" * _MINIMUM_S3_MULTIPART_PART_BYTES,
+    }
+    assert not filesystem.aborted
+
+
+def test_streaming_fsspec_writer_preserves_upload_part_failure():
+    filesystem = _RecordingMultipartFilesystem(fail_part=1)
+    writer = StreamingFsspecWriter(
+        "s3://bucket/checkpoint",
+        filesystem=filesystem,
+        tensor_copy_ahead_bytes=2**20,
+        multipart_part_bytes=_MINIMUM_S3_MULTIPART_PART_BYTES,
+        multipart_concurrency=1,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with pytest.raises(CheckpointException, match="injected UploadPart failure"):
+            checkpoint.save(
+                {"tensor": torch.arange(_MINIMUM_S3_MULTIPART_PART_BYTES + 1, dtype=torch.uint8)},
+                storage_writer=writer,
+            )
+
+    assert filesystem.aborted

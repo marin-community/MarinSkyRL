@@ -102,13 +102,43 @@ def stub_megatron_modules() -> None:
         },
         "megatron.core.transformer": {},
         "megatron.core.transformer.module": {"Float16Module": type("Float16Module", (), {})},
-        "megatron.core.optimizer": {"ChainedOptimizer": type("ChainedOptimizer", (), {})},
+        "megatron.core.optimizer": {
+            "ChainedOptimizer": type("ChainedOptimizer", (), {}),
+            "DistributedOptimizer": type("DistributedOptimizer", (), {}),
+        },
         "megatron.core.utils": {"get_attr_wrapped_model": lambda *args, **kwargs: None},
         "megatron.core.packed_seq_params": {
             "PackedSeqParams": type(
                 "PackedSeqParams", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}
             )
         },
+        # The checkpoint strategy module imports these at load; tests replace what they call.
+        "megatron.core.dist_checkpointing": {
+            "load": lambda *args, **kwargs: {},
+            "save": lambda *args, **kwargs: None,
+            "load_common_state_dict": lambda *args, **kwargs: {},
+        },
+        "megatron.core.dist_checkpointing.mapping": {"ShardedStateDict": dict},
+        "megatron.core.dist_checkpointing.serialization": {
+            "get_default_load_sharded_strategy": lambda *args, **kwargs: None,
+            "get_default_save_sharded_strategy": lambda *args, **kwargs: None,
+        },
+        "megatron.core.dist_checkpointing.strategies": {},
+        "megatron.core.dist_checkpointing.strategies.base": {},
+        "megatron.core.dist_checkpointing.strategies.async_utils": {
+            "AsyncCallsQueue": type("AsyncCallsQueue", (), {"__init__": lambda self, **kwargs: None})
+        },
+        "megatron.core.dist_checkpointing.strategies.fully_parallel": {
+            "FullyParallelLoadStrategyWrapper": type("FullyParallelLoadStrategyWrapper", (), {}),
+            "FullyParallelSaveStrategyWrapper": type("FullyParallelSaveStrategyWrapper", (), {}),
+        },
+        "megatron.core.dist_checkpointing.strategies.torch": {
+            "TorchDistSaveShardedStrategy": type("TorchDistSaveShardedStrategy", (), {}),
+            "MCoreSavePlanner": type("MCoreSavePlanner", (), {}),
+            "_replace_state_dict_keys_with_sharded_keys": lambda *args, **kwargs: None,
+            "mcore_to_pyt_state_dict": lambda *args, **kwargs: None,
+        },
+        "megatron.core.optimizer_param_scheduler": {"OptimizerParamScheduler": type("OptimizerParamScheduler", (), {})},
     }
     for name, members in stub_attrs.items():
         module = sys.modules.setdefault(name, types.ModuleType(name))

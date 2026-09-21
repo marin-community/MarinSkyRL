@@ -1,11 +1,11 @@
 """Unit tests for inference-engine placement and startup configuration.
 
 The placement strategy checks verify that the ray/uni backend chooses:
-  - per-engine STRICT_PACK ONLY for multi-GPU engines (TP*PP > 1), to keep each
-    engine's TP/PP workers on one node (#232 cross-node all-reduce fix), and
-  - the flat PACK fallback for single-GPU engines (TP==PP==1), so single-GPU
+  - per-engine STRICT_PACK ONLY for multi-GPU engines (TP*PP*DP > 1), to keep each
+    engine's TP/PP/DP workers on one node, and
+  - the flat PACK fallback for single-GPU engines (TP==PP==DP==1), so single-GPU
     bundles pack densely and leave whole nodes free for the downstream policy
-    PACK PG (the lever1/swesmith multi-node starvation regression fix), and
+    PACK PG, and
   - never per-engine STRICT_PACK on the hybrid (colocate_all) or mp-backend
     paths (the mp {GPU:tp_pp_size} bundle is already node-atomic).
 
@@ -36,22 +36,26 @@ def test_resolve_engine_max_model_len(engine_kwargs, rope_scaling, expected):
 
 
 @pytest.mark.parametrize(
-    "tp,pp,expected",
+    "tp,pp,dp,expected",
     [
-        (1, 1, False),  # lever1 (16 TP=1 engines) / swesmith (48) -> flat PACK, dense
-        (2, 1, True),  # de-risk geometry on ray/uni -> on-node STRICT_PACK
-        (4, 1, True),  # #232 TP=4 -> on-node STRICT_PACK (this is the bug it fixed)
-        (1, 2, True),  # PP=2 single TP -> multi-GPU engine, still needs on-node
-        (2, 2, True),  # TP*PP=4
+        (1, 1, 1, False),  # single-GPU engines -> flat PACK
+        (2, 1, 1, True),  # de-risk geometry on ray/uni -> on-node STRICT_PACK
+        (4, 1, 1, True),  # TP=4 -> on-node STRICT_PACK
+        (1, 2, 1, True),  # PP=2 single TP -> multi-GPU engine, still needs on-node
+        (2, 2, 1, True),  # TP*PP=4
+        (1, 1, 4, True),  # DP4xEP4 on 4-GPU nodes -> on-node STRICT_PACK
+        (1, 1, 8, True),  # DP8xEP8 on 8-GPU nodes -> on-node STRICT_PACK
+        (2, 1, 2, True),  # TP2 x DP2
     ],
 )
-def test_ray_uni_backend_gate(tp, pp, expected):
+def test_ray_uni_backend_gate(tp, pp, dp, expected):
     assert (
         use_per_engine_strict_pack_pg(
             use_hybrid_engine=False,
             use_mp_backend=False,
             tensor_parallel_size=tp,
             pipeline_parallel_size=pp,
+            data_parallel_size=dp,
         )
         is expected
     )
@@ -66,6 +70,7 @@ def test_tp1_never_strict_pack_so_policy_pg_not_starved():
         use_mp_backend=False,
         tensor_parallel_size=1,
         pipeline_parallel_size=1,
+        data_parallel_size=1,
     )
 
 
@@ -78,6 +83,7 @@ def test_tp4_on_4gpu_node_still_strict_pack():
         use_mp_backend=False,
         tensor_parallel_size=4,
         pipeline_parallel_size=1,
+        data_parallel_size=1,
     )
 
 
@@ -90,6 +96,7 @@ def test_mp_backend_never_per_engine_strict_pack(tp, pp):
         use_mp_backend=True,
         tensor_parallel_size=tp,
         pipeline_parallel_size=pp,
+        data_parallel_size=1,
     )
 
 
@@ -102,6 +109,7 @@ def test_hybrid_engine_never_per_engine_strict_pack(tp, pp):
         use_mp_backend=False,
         tensor_parallel_size=tp,
         pipeline_parallel_size=pp,
+        data_parallel_size=1,
     )
 
 

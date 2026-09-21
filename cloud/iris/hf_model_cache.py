@@ -2,22 +2,19 @@
 
 from __future__ import annotations
 
-import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 import posixpath
 import tempfile
-import threading
 import time
-from collections.abc import Generator
 
 from fsspec.spec import AbstractFileSystem
 from huggingface_hub import snapshot_download
 from rigging.filesystem.cluster_config import marin_temp_bucket
-from rigging.filesystem.distributed_lock import HEARTBEAT_INTERVAL, DistributedLease, LeaseLostError, create_lock
+from rigging.filesystem.distributed_lock import create_lock, lease_refresh
 
 from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize, read_json, write_json
-from marinskyrl.hf_model import hugging_face_hub_online, hugging_face_model_cache_key, validate_hf_model_weights
+from marinskyrl.hf_model import hugging_face_hub_online, immutable_model_cache_key, validate_hf_model_weights
 from marinskyrl.resource_locator import is_hugging_face_repo_id, join_resource_path
 from marinskyrl.speculative_decoding import is_hugging_face_commit
 
@@ -41,31 +38,6 @@ class CachedHuggingFaceModel:
             raise ValueError("Cached Hugging Face models require a full lowercase commit SHA")
         if not Path(self.local_path).is_absolute():
             raise ValueError("Cached Hugging Face models require an absolute local path")
-
-
-@contextlib.contextmanager
-def _heartbeat(lock: DistributedLease) -> Generator[None, None, None]:
-    stop = threading.Event()
-    error: list[Exception] = []
-
-    def refresh() -> None:
-        while not stop.wait(HEARTBEAT_INTERVAL):
-            try:
-                lock.refresh()
-            except Exception as exc:
-                error.append(exc)
-                stop.set()
-
-    thread = threading.Thread(target=refresh, name="hf-model-cache-heartbeat", daemon=True)
-    thread.start()
-    try:
-        yield
-    finally:
-        stop.set()
-        thread.join()
-    if error:
-        raise LeaseLostError("lost the Hugging Face model-cache lease") from error[0]
-    lock.refresh()
 
 
 def _cache_metadata(marker_uri: str) -> dict[str, object] | None:
@@ -127,7 +99,7 @@ def ensure_hugging_face_model_cache(
     """Mirror one immutable Hub snapshot and return its region-local cache URI."""
     cache_uri = marin_temp_bucket(
         ttl_days,
-        prefix=f"{_CACHE_PREFIX}/{hugging_face_model_cache_key(model_id, revision)}",
+        prefix=f"{_CACHE_PREFIX}/{immutable_model_cache_key(model_id, revision)}",
         source_prefix=source_prefix,
     ).rstrip("/")
     filesystem, cache_path = fs_and_path(cache_uri)
@@ -144,11 +116,12 @@ def ensure_hugging_face_model_cache(
     try:
         if _is_cache_complete(marker_uri, model_id, revision):
             return cache_uri
-        with _heartbeat(lock), tempfile.TemporaryDirectory(prefix="marinskyrl-hf-model-") as scratch:
-            snapshot = download_hugging_face_snapshot(model_id, revision=revision, destination=Path(scratch))
-            filesystem.makedirs(cache_path, exist_ok=True)
-            _upload_snapshot(filesystem, cache_path, snapshot)
-        write_json(marker_uri, {"model_id": model_id, "revision": revision})
+        with lease_refresh(lock):
+            with tempfile.TemporaryDirectory(prefix="marinskyrl-hf-model-") as scratch:
+                snapshot = download_hugging_face_snapshot(model_id, revision=revision, destination=Path(scratch))
+                filesystem.makedirs(cache_path, exist_ok=True)
+                _upload_snapshot(filesystem, cache_path, snapshot)
+            write_json(marker_uri, {"model_id": model_id, "revision": revision})
         return cache_uri
     finally:
         lock.release()

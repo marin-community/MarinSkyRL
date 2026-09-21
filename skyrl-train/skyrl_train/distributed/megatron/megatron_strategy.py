@@ -293,6 +293,12 @@ class MegatronStrategy(DistributedStrategy):
             if optimizer and load_training_state:
                 common_state = dist_checkpointing.load_common_state_dict(read_dir)
                 saved_type = _saved_optimizer_sharding_type(common_state)
+                # Gradients are not checkpointed. Free their GPU buffers now: building the
+                # optimizer's sharded state dict for loading allocates a full set of moments
+                # before optimizer.load_state_dict allocates the checkpointed ones, and with the
+                # gradients resident that second copy is what OOMs a policy that trains fine.
+                # The empty buffers come back after the optimizer state is restored below.
+                offload_megatron_grads_to_cpu(model)
                 sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
                     model_sharded_state_dict,
                     is_loading=True,
@@ -318,9 +324,6 @@ class MegatronStrategy(DistributedStrategy):
             assert "optimizer" in state_dict, (
                 f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             )
-            # Gradients are not checkpointed. Free their GPU buffers while FusedAdam
-            # reconstructs the checkpointed moments, then restore empty buffers for training.
-            offload_megatron_grads_to_cpu(model)
             optimizer.load_state_dict(state_dict.pop("optimizer"))
             load_megatron_grads_to_gpu(model)
             self.log("Loaded optimizer state dict.")

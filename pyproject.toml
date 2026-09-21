@@ -30,7 +30,7 @@ dependencies = [
     "marin-finelog-server",
     "marin-iris",
     "marin-iris-native",
-    "marin-rigging[secrets]",
+    "marin-rigging[secrets]>=0.2.123.dev35633925924",
     "ninja",
     "nvidia-ml-py",
     "omegaconf",
@@ -137,7 +137,7 @@ megatron = [
     "transformer-engine-torch==2.11.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 telemetry = [
-    "marin-rigging[prometheus]",
+    "marin-rigging[prometheus]>=0.2.123.dev35633925924",
     "memray ; sys_platform == 'linux'",
     "ray[default]",
 ]
@@ -162,7 +162,7 @@ docs = [
 dev = [
     { include-group = "analysis" },
     "litellm",
-    "marin-rigging[prometheus]",
+    "marin-rigging[prometheus]>=0.2.123.dev35633925924",
     "marin-style @ git+https://github.com/marin-community/marin-style@5094279da60b47b9a8fa8effaf7f73cd13f1e96f",
     "prometheus-client",
     "pytest>=8.4",
