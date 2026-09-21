@@ -6,6 +6,7 @@ from collections import defaultdict
 from enum import StrEnum
 import numpy as np
 from skyrl_train.group_admission import group_is_fully_excluded_from_training
+from skyrl_train.policy_version import BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY
 from skyrl_train.trajectory_runners.base import (
     TrajectoryBatch,
     TrajectoryRequestBatch,
@@ -778,15 +779,45 @@ def concatenate_trajectory_batches(
     selected_topk_concat = None
     behavior_topk_concat = None
     if any(output.get("student_topk_indices") is not None for output in trajectory_batches):
-        if any(
-            output.get("student_topk_indices") is None or output.get("behavior_topk_logprobs") is None
+        widths = {
+            len(token_ids)
             for output in trajectory_batches
-        ):
-            raise ValueError("student-selected top-K evidence cannot be concatenated with missing rollout scores")
-        selected_topk_concat = [row for output in trajectory_batches for row in output["student_topk_indices"]]
-        behavior_topk_concat = [row for output in trajectory_batches for row in output["behavior_topk_logprobs"]]
+            for row in output.get("student_topk_indices") or []
+            for token_ids in row
+        }
+        if len(widths) != 1 or next(iter(widths)) < 1:
+            raise ValueError("student-selected top-K evidence must have one positive width")
+        topk_width = next(iter(widths))
+        selected_topk_concat = []
+        behavior_topk_concat = []
+        for output in trajectory_batches:
+            ids_rows = output.get("student_topk_indices")
+            scores_rows = output.get("behavior_topk_logprobs")
+            if (ids_rows is None) != (scores_rows is None):
+                raise ValueError("student-selected top-K IDs and scores must be provided together")
+            if ids_rows is None:
+                for response in output["response_ids"]:
+                    selected_topk_concat.append([[-1] * topk_width for _ in response])
+                    behavior_topk_concat.append([[0.0] * topk_width for _ in response])
+            else:
+                if len(ids_rows) != len(output["response_ids"]) or len(scores_rows) != len(ids_rows):
+                    raise ValueError("student-selected top-K rows must align with response rows")
+                selected_topk_concat.extend(ids_rows)
+                behavior_topk_concat.extend(scores_rows)
     elif any(output.get("behavior_topk_logprobs") is not None for output in trajectory_batches):
         raise ValueError("student-selected behavior scores require selected token IDs")
+
+    version_segments_concat = None
+    if any(output.get(BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY) is not None for output in trajectory_batches):
+        version_segments_concat = []
+        for output in trajectory_batches:
+            rows = output.get(BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY)
+            if rows is None:
+                version_segments_concat.extend([[] for _ in output["response_ids"]])
+            elif len(rows) != len(output["response_ids"]):
+                raise ValueError("policy-version span rows must align with response rows")
+            else:
+                version_segments_concat.extend(rows)
 
     unshaped_rewards_concat = None
     unshaped_reward_available_concat = None
@@ -908,6 +939,8 @@ def concatenate_trajectory_batches(
     if selected_topk_concat is not None:
         result["student_topk_indices"] = selected_topk_concat
         result["behavior_topk_logprobs"] = behavior_topk_concat
+    if version_segments_concat is not None:
+        result[BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY] = version_segments_concat
     if token_level_shaping_concat is not None:
         result["token_level_shaping"] = token_level_shaping_concat
     if response_span_tags_concat is not None:
@@ -1140,9 +1173,10 @@ def get_rollout_metrics(
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)
         for i, metrics in enumerate(env_metrics):
-            # Skipped episodes (e.g. over-length prompts) never step the environment and
-            # report an empty dict; per-environment aggregators only see stepped episodes.
-            if metrics:
+            # Skipped episodes report no metrics. Agent-loop failures have a diagnostic
+            # metric but never step the environment, so they also cannot be passed to
+            # an environment aggregator that expects fields from env.step().
+            if metrics and "agent_loop_error" not in metrics:
                 env_to_metrics[env_classes[i]].append(metrics)
         for env_name, metrics in env_to_metrics.items():
             # Aggregate metrics across all trajectories for the same environment

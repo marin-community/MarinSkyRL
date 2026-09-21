@@ -423,7 +423,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         rollout_logprobs: Optional[List[float]] = [] if collect_logprobs else None
         requested_logprobs = current_sampling_params.get("logprobs")
         collect_topk = isinstance(requested_logprobs, int) and requested_logprobs > 0
-        selected_capture_possible = collect_topk and not retokenize_chat_history
+        # A custom chat template still has exact behavior evidence when the
+        # trajectory ends after its sole served assistant turn.
+        selected_capture_possible = collect_topk
         generated_ids: list[int] = []
         generated_topk_ids: list[list[int]] = []
         generated_topk_scores: list[list[float]] = []
@@ -606,6 +608,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             new_obs = env_step_output["observations"]
             if new_obs:
                 sole_sampled_turn = None
+                if retokenize_chat_history:
+                    selected_capture_possible = False
             step_reward: float = env_step_output["reward"]
             verification_results.append(verification_from_env_step(env_step_output))
             done = env_step_output["done"]

@@ -78,6 +78,44 @@ def test_async_weight_sync_respects_optimizer_offload_policy(sync_phase, offload
     ]
 
 
+@pytest.mark.parametrize(
+    ("global_step", "expected_events"),
+    [(0, ["sync"]), (10, ["offload", "sync", "backload"])],
+)
+def test_initial_resume_sync_temporarily_offloads_populated_megatron_optimizer(global_step, expected_events):
+    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.cfg = SimpleNamespace(
+        trainer=SimpleNamespace(
+            strategy="megatron",
+            offload_optimizer_during_rollouts=False,
+        )
+    )
+    trainer.colocate_all = False
+    trainer.global_step = global_step
+    trainer.all_startup_timings = {}
+    events = []
+
+    class Policy:
+        def offload_to_cpu(self, *, offload_optimizer, offload_model):
+            assert offload_optimizer and not offload_model
+            events.append("offload")
+
+        def backload_to_gpu(self, *, backload_optimizer, backload_model):
+            assert backload_optimizer and not backload_model
+            events.append("backload")
+
+    async def sync_weights(*, sync_phase):
+        assert sync_phase == "initial"
+        events.append("sync")
+
+    trainer.policy_model = Policy()
+    trainer._sync_policy_weights_and_offload_optimizer = sync_weights
+
+    asyncio.run(trainer._sync_initial_policy_weights())
+
+    assert events == expected_events
+
+
 def _trainer_at_step(global_step: int, *, first_token_admission: bool) -> FullyAsyncRayPPOTrainer:
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.global_step = global_step

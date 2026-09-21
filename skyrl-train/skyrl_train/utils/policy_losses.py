@@ -30,6 +30,7 @@ from skyrl_train.utils.loss_reduction import (
 from skyrl_train.utils.algorithm_registry import PolicyLossType, register_policy_loss
 from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_delta
 from skyrl_train.utils.policy_math import differentiable_approx_kl
+from skyrl_train.utils.score_centering import masked_topk_tail_mass, ppo_tis_score_centering_correction
 
 
 @dataclass(frozen=True)
@@ -247,6 +248,9 @@ def compute_policy_objective(
     global_loss_denom: Optional[float] = None,
     distillation: Optional[DistillationInput] = None,
     student_topk_logprobs: Optional[torch.Tensor] = None,
+    score_current_topk_logprobs: Optional[torch.Tensor] = None,
+    score_old_topk_logprobs: Optional[torch.Tensor] = None,
+    score_behavior_topk_logprobs: Optional[torch.Tensor] = None,
 ) -> PolicyObjective:
     """Build a policy objective independent of the backend execution loop.
 
@@ -290,6 +294,48 @@ def compute_policy_objective(
             rollout_logprobs=rollout_logprobs,
             global_loss_denom=global_loss_denom,
         )
+        if config.get("score_centering_topk", 0):
+            if any(
+                value is None
+                for value in (score_current_topk_logprobs, score_old_topk_logprobs, score_behavior_topk_logprobs)
+            ):
+                raise ValueError("score centering requires aligned current, old, and behavior top-k logprobs")
+            assert score_current_topk_logprobs is not None
+            assert score_old_topk_logprobs is not None
+            assert score_behavior_topk_logprobs is not None
+            correction = ppo_tis_score_centering_correction(
+                score_current_topk_logprobs,
+                score_old_topk_logprobs,
+                score_behavior_topk_logprobs,
+                advantages,
+                policy_loss_mask,
+                tis_cap=config.tis_imp_ratio_cap,
+                eps_clip_low=config.eps_clip_low,
+                eps_clip_high=config.eps_clip_high,
+            )
+            policy_loss = policy_loss + reduce_loss(
+                correction,
+                policy_loss_mask,
+                config.loss_reduction,
+                config.max_seq_len,
+                global_denom=global_loss_denom,
+            )
+            policy_loss_metrics["score_centering/correction_abs_mean"] = masked_mean(
+                correction.detach().abs(), policy_loss_mask
+            ).item()
+            for name, logprobs in (
+                ("behavior", score_behavior_topk_logprobs),
+                ("old", score_old_topk_logprobs),
+                ("current", score_current_topk_logprobs),
+            ):
+                tail_mass = masked_topk_tail_mass(logprobs, policy_loss_mask)
+                policy_loss_metrics[f"score_centering/{name}_tail_mass_mean"] = masked_mean(
+                    tail_mass, policy_loss_mask
+                ).item()
+                if name == "behavior":
+                    policy_loss_metrics["score_centering/behavior_tail_mass_gt_1pct_fraction"] = masked_mean(
+                        (tail_mass > 0.01).float(), policy_loss_mask
+                    ).item()
 
     if reward_mode is DistillationRewardMode.REPLACE:
         auxiliary = PolicyAuxiliaryTerms(

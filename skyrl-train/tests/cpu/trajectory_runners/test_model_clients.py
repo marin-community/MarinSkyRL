@@ -307,6 +307,48 @@ async def test_http_model_client_returns_the_engines_tokens_logprobs_and_version
 
 
 @pytest.mark.asyncio
+async def test_http_plain_chat_captures_behavior_topk_for_score_centering(http_client):
+    requests = []
+
+    async def complete(request):
+        requests.append(await request.json())
+        return web.json_response(
+            {
+                "prompt_token_ids": [1, 2],
+                "choices": [
+                    {
+                        "message": {"content": "answer"},
+                        "finish_reason": "stop",
+                        "token_ids": [9],
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "logprob": -7.0,
+                                    "top_logprobs": [
+                                        {"token": "token_id:9", "logprob": -7.0},
+                                        {"token": "token_id:3", "logprob": -1.5},
+                                        {"token": "token_id:2", "logprob": -1.2},
+                                    ],
+                                }
+                            ]
+                        },
+                    }
+                ],
+            }
+        )
+
+    async with http_client(complete) as client:
+        output = await client.generate(_plain_request(logprobs=2))
+
+    assert requests[0]["top_logprobs"] == 3
+    assert requests[0]["return_tokens_as_token_ids"] is True
+    assert output["response_ids"] == [[9]]
+    assert output["response_logprobs"] == [[-7.0]]
+    assert output["student_topk_indices"] == [[[2, 3]]]
+    assert output["behavior_topk_logprobs"] == [[[-1.2, -1.5]]]
+
+
+@pytest.mark.asyncio
 async def test_http_model_client_refuses_a_response_without_exact_tokens(http_client):
     async def complete(request):
         return web.json_response({"choices": [{"message": {"content": "answer"}, "finish_reason": "stop"}]})

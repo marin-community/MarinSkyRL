@@ -78,6 +78,9 @@ class Experience:
     # token-reward channel is on; used to down-weight <think> tokens in the loss.
     response_span_tags: Optional[Integer[torch.Tensor, "batch response_len"]] = None
     distillation: Optional[DistillationInput] = None
+    score_topk_indices: Optional[Integer[torch.Tensor, "batch response_len top_k"]] = None
+    score_behavior_topk_logprobs: Optional[Float[torch.Tensor, "batch response_len top_k"]] = None
+    old_topk_logprobs: Optional[Float[torch.Tensor, "batch response_len top_k"]] = None
 
     @torch.no_grad()
     def to_device(self, device: torch.device) -> None:
@@ -105,6 +108,10 @@ class Experience:
             self.response_span_tags = to(self.response_span_tags, device)
         if self.distillation is not None:
             self.distillation = self.distillation.to(device)
+        for name in ("score_topk_indices", "score_behavior_topk_logprobs", "old_topk_logprobs"):
+            value = getattr(self, name)
+            if value is not None:
+                setattr(self, name, to(value, device))
 
     def pin_memory(self):
         self.sequences = pin_memory(self.sequences)
@@ -131,6 +138,10 @@ class Experience:
             self.response_span_tags = self.response_span_tags.pin_memory()
         if self.distillation is not None:
             self.distillation = self.distillation.pin_memory()
+        for name in ("score_topk_indices", "score_behavior_topk_logprobs", "old_topk_logprobs"):
+            value = getattr(self, name)
+            if value is not None:
+                setattr(self, name, pin_memory(value))
         return self
 
 

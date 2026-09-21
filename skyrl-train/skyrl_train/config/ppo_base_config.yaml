@@ -256,6 +256,9 @@ trainer:
     clip_ratio_c: 3.0
     tis_imp_ratio_cap: -1.0
     use_tis: false
+    # Zero disables score centering. A positive value is the required behavior
+    # top-k width and must match generator.sampling_params.logprobs.
+    score_centering_topk: 0
     tito_full: null
     tis_splice: true
     tis_lcs_alert_threshold: 0.005
@@ -312,6 +315,9 @@ trainer:
 
   fully_async:
     max_staleness_steps: 4
+    # Publish learner weights after this many optimizer updates. Evaluation and the
+    # terminal update always publish their weights before scoring or export.
+    weight_sync_interval_steps: 1
 
     num_parallel_generation_workers: 768
     # Finished groups the completed buffer holds before a producer waits with its group in
@@ -391,6 +397,9 @@ trainer:
   logger: "wandb"
   tracker_commit_each_step: false
   dump_data_batch: false
+  mismatch_decomposition:
+    enabled: false
+    sample_rows_per_step: 8
   dump_eval_results: true
   log_level: "INFO"
 
@@ -406,6 +415,8 @@ generator:
   engine_init_timeout_seconds: 1800
   run_engines_locally: true
   num_inference_engines: 1
+  # Physical nodes for local rollout replicas; null keeps one node per engine.
+  rollout_num_nodes: null
   backend: "vllm"
   vllm_attention_backend: null
   weight_sync_backend: "nccl"

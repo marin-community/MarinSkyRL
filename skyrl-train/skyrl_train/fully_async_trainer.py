@@ -13,10 +13,13 @@ High-level notes:
 
 import asyncio
 import collections
+import gzip
+import json
 import os
 import sys
 import time
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
+from marinskyrl.resource_locator import join_resource_path
 from loguru import logger
 from skyrl_train.policy_version import (
     BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY,
@@ -29,6 +32,7 @@ from skyrl_train.utils import Timer, get_system_memory_metrics
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader, async_step_metrics
+from skyrl_train.utils.mismatch_decomposition import mismatch_decomposition_record
 from skyrl_train.utils.logging_utils import log_exception_as_text
 from skyrl_train.trajectory_runners.trajectory_processing import (
     prepare_trajectory_request,
@@ -87,6 +91,14 @@ FIRST_TOKEN_VERSION_MISSING = (
     "token; the vLLM generate() path and the OpenAI chat route through InferenceEngineClient report it, "
     "and this trajectory runner or model client carried none"
 )
+
+
+def should_publish_policy_weights(step: int, interval: int, total_steps: int, eval_interval: int) -> bool:
+    """Publish for the configured cadence and before evaluation or terminal export."""
+    if step < 1 or interval < 1 or total_steps < 1:
+        raise ValueError("weight publication needs positive step counts and interval")
+    return step % interval == 0 or step >= total_steps or (eval_interval > 0 and step % eval_interval == 0)
+
 
 _QueueItem = TypeVar("_QueueItem")
 
@@ -697,6 +709,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         Main fully async training loop for PPO
         """
         self.global_step = 0
+        completed = False
         loop_monitor = (
             asyncio.create_task(monitor_event_loop_lag(step_fn=lambda: self.global_step))
             if self._async_observations_enabled
@@ -709,6 +722,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await async_distillation_runtime.start()
             await self._startup_trajectory_runner()
             await self._train_loop()
+            completed = True
         except Exception as e:
             log_exception_as_text(f"Train loop failed at global_step {self.global_step}", e)
             raise
@@ -719,7 +733,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # (the per-epoch epilogue only runs on normal loop completion).
             self._cancel_trajectory_tasks()
 
-            await self.shutdown()
+            try:
+                await self.shutdown()
+            finally:
+                self.tracker.finish(exit_code=0 if completed else 1)
 
     async def _train_loop(self):
         """
@@ -769,7 +786,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # sync weights to inference engines
         with Timer("sync_weights_to_inference_engines", self.all_startup_timings) as weight_update_timer:
-            await self._sync_policy_weights_and_offload_optimizer(sync_phase="initial")
+            await self._sync_initial_policy_weights()
         self._log_weight_update_completed(
             reason="initial",
             duration_seconds=weight_update_timer.duration,
@@ -970,32 +987,30 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         self._record_group_terminal(group, "consumed")
                     generation_queues.mark_admitted_consumed()
 
-                    # 4. After training: sync weights to the inference engines.
-                    #    The inference engines are a SHARED HTTP backend that every
-                    #    RolloutCoordinator calls, so the STOCK engine-level
-                    #    pause/sync/resume below (fast NCCL broadcast with the
-                    #    engines briefly quiesced) already propagates fresh weights
-                    #    to every coordinator's subsequent requests. We deliberately
-                    #    do NOT barrier-pause/drain the RolloutCoordinators at the
-                    #    trial level: a coordinator-level drain is unnecessary for
-                    #    correctness and defeats async overlap (the hard-drain stalled
-                    #    the step boundary indefinitely when long-running trials never
-                    #    drained). Rollouts in flight across the weight swap simply
-                    #    return as STALE and are bounded by the dispatcher's existing
-                    #    max_staleness_steps accounting — exactly like stock
-                    #    fully_async, which never drains trial orchestration. This
-                    #    block is now byte-identical for fan-out ON and OFF.
-                    with (
-                        Timer("sync_weights", self.all_timings) as weight_update_timer,
-                        async_phase_window(
-                            "weight_sync", step=self.global_step, enabled=self._async_observations_enabled
-                        ),
-                    ):
-                        await self._sync_policy_weights_and_offload_optimizer(sync_phase="training_step")
-                    self._log_weight_update_completed(
-                        reason="training_step",
-                        duration_seconds=weight_update_timer.duration,
+                    # 4. Publish weights on the configured cadence. The shared HTTP
+                    #    engines' pause/sync/resume reaches every RolloutCoordinator;
+                    #    in-flight requests are bounded by the normal staleness rule.
+                    #    Evaluation and the terminal export require the latest weights.
+                    publish_weights = should_publish_policy_weights(
+                        self.global_step,
+                        self.cfg.trainer.fully_async.weight_sync_interval_steps,
+                        self.total_training_steps,
+                        self.cfg.trainer.eval_interval,
                     )
+                    self.all_metrics["async/weight_sync_published"] = float(publish_weights)
+                    self.all_timings["sync_weights"] = 0.0
+                    if publish_weights:
+                        with (
+                            Timer("sync_weights", self.all_timings) as weight_update_timer,
+                            async_phase_window(
+                                "weight_sync", step=self.global_step, enabled=self._async_observations_enabled
+                            ),
+                        ):
+                            await self._sync_policy_weights_and_offload_optimizer(sync_phase="training_step")
+                        self._log_weight_update_completed(
+                            reason="training_step",
+                            duration_seconds=weight_update_timer.duration,
+                        )
 
                     # Core ends here, before the callbacks: checkpointing and evaluation run
                     # inside the step timer but are not the loop's core cycle.
@@ -1183,6 +1198,36 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             policy_version=self.global_step if self.first_token_admission else None
         )
 
+    async def _sync_initial_policy_weights(self) -> None:
+        # A populated Megatron optimizer restored from a checkpoint is larger than
+        # the freshly initialized state. When rollout-time optimizer offload is
+        # disabled, temporarily move that restored state to CPU while the weight
+        # exporter gathers routed experts. Put it back afterward so the configured
+        # training residency remains unchanged.
+        temporary_restore_offload = (
+            self.global_step > 0
+            and not self.colocate_all
+            and self.cfg.trainer.strategy == "megatron"
+            and not self.cfg.trainer.offload_optimizer_during_rollouts
+        )
+        if temporary_restore_offload:
+            with Timer("offload_policy_optimizer_before_initial_resume_sync", self.all_startup_timings):
+                await asyncio.to_thread(
+                    self.policy_model.offload_to_cpu,
+                    offload_optimizer=True,
+                    offload_model=False,
+                )
+
+        await self._sync_policy_weights_and_offload_optimizer(sync_phase="initial")
+
+        if temporary_restore_offload:
+            with Timer("backload_policy_optimizer_after_initial_resume_sync", self.all_startup_timings):
+                await asyncio.to_thread(
+                    self.policy_model.backload_to_gpu,
+                    backload_optimizer=True,
+                    backload_model=False,
+                )
+
     async def _run_training(self, training_input: TrainingInputBatch):
         # TODO(Charlie): share this code with the one-step-off async trainer.
         # Drain the policy workers' event loops to a hard sync point IMMEDIATELY
@@ -1210,6 +1255,58 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # inference and calculate values, log probs, rewards, kl divergence
         with Timer("fwd_logprobs_values_reward", self.all_timings):
             training_input = await asyncio.to_thread(self.fwd_logprobs_values_reward, training_input)
+
+        if self.cfg.trainer.get("mismatch_decomposition", {}).get("enabled", False):
+            if training_input.get("rollout_logprobs") is None or training_input.get("base_action_log_probs") is None:
+                raise ValueError("mismatch decomposition requires behavior and frozen-reference log probabilities")
+            real_rows = training_input.batch_size - training_input.metadata.get("pad_size", 0)
+            if self.global_step == 1:
+                first = {
+                    key: training_input[key].clone()
+                    for key in ("base_action_log_probs", "action_log_probs", "old_topk_logprobs")
+                    if training_input.get(key) is not None
+                }
+                training_input = await asyncio.to_thread(self.fwd_logprobs_values_reward, training_input)
+                selected = training_input["loss_mask"][:real_rows] > 0
+                for key, name in (("base_action_log_probs", "reference"), ("action_log_probs", "policy")):
+                    difference = (training_input[key][:real_rows][selected] - first[key][:real_rows][selected]).abs()
+                    self.all_metrics[f"policy/mismatch_decomposition/repeat_{name}_abs_mean"] = difference.mean().item()
+                    self.all_metrics[f"policy/mismatch_decomposition/repeat_{name}_abs_max"] = difference.max().item()
+                for key, value in first.items():
+                    training_input[key] = value
+
+            record = mismatch_decomposition_record(
+                response_ids=training_input.metadata["mismatch_response_ids"],
+                version_rows=training_input.metadata["mismatch_version_rows"],
+                sequences=training_input["sequences"][:real_rows],
+                attention_mask=training_input["attention_mask"][:real_rows],
+                response_mask=training_input["response_mask"][:real_rows],
+                loss_mask=training_input["loss_mask"][:real_rows],
+                behavior_logprobs=training_input["rollout_logprobs"][:real_rows],
+                reference_logprobs=training_input["base_action_log_probs"][:real_rows],
+                current_logprobs=training_input["action_log_probs"][:real_rows],
+                consuming_step=self.global_step,
+                reference_version=0,
+                tis_cap=self.cfg.trainer.algorithm.tis_imp_ratio_cap,
+                sample_rows=self.cfg.trainer.mismatch_decomposition.sample_rows_per_step,
+            )
+            summary = record["summaries"]["all"]
+            self.all_metrics["policy/mismatch_decomposition/reference_tokens"] = record["reference_tokens"]
+            self.all_metrics["policy/mismatch_decomposition/fresh_version_tokens"] = record["fresh_version_tokens"]
+            self.all_metrics["policy/mismatch_decomposition/matched_tokens"] = record["matched_tokens"]
+            self.all_metrics["policy/mismatch_decomposition/other_version_tokens"] = record["other_version_tokens"]
+            if summary["tokens"]:
+                for component in ("engine", "stale", "combined"):
+                    self.all_metrics[f"policy/mismatch_decomposition/{component}_abs_mean"] = summary[component][
+                        "log_ratio_abs_mean"
+                    ]
+                self.all_metrics["policy/mismatch_decomposition/tis_capped_fraction"] = summary["tis_capped_fraction"]
+            path = join_resource_path(
+                self.cfg.trainer.export_path,
+                "mismatch_decomposition",
+                f"global_step_{self.global_step}.json.gz",
+            )
+            io.write_bytes_atomic(path, gzip.compress(json.dumps(record, allow_nan=False).encode()))
 
         # calculate kl divergence and create experiences
         if self.cfg.trainer.algorithm.use_kl_in_reward:

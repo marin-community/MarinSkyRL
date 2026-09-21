@@ -1064,6 +1064,25 @@ def test_required_rollout_logprobs_allow_fully_excluded_generation_batch():
     assert merged["exclude_from_baseline"] == [False, False, True, True]
 
 
+def test_concatenation_keeps_topk_and_version_rows_when_an_excluded_group_has_no_evidence():
+    excluded = {**_generated_group(1, 1), "loss_masks": [[0, 0]], "exclude_from_baseline": [True]}
+    trainable = {
+        **_generated_group(1, 0),
+        "rollout_logprobs": [[-0.5, -0.5]],
+        "student_topk_indices": [[[2, 4], [3, 4]]],
+        "behavior_topk_logprobs": [[[-0.5, -1.5], [-0.5, -1.5]]],
+        "behavior_policy_version_segments": [[{"start": 0, "token_count": 2, "policy_version": 3}]],
+    }
+
+    merged = concatenate_trajectory_batches(
+        [excluded, trainable], require_rollout_logprobs=True, tis_lcs_alert_threshold=0.005
+    )
+
+    assert merged["student_topk_indices"] == [[[-1, -1], [-1, -1]], [[2, 4], [3, 4]]]
+    assert merged["behavior_topk_logprobs"] == [[[0.0, 0.0], [0.0, 0.0]], [[-0.5, -1.5], [-0.5, -1.5]]]
+    assert merged["behavior_policy_version_segments"] == [[], [{"start": 0, "token_count": 2, "policy_version": 3}]]
+
+
 def test_required_rollout_logprobs_reject_fully_masked_baseline_contributor():
     masked_baseline_contributor = {
         **_generated_group(2, 0),

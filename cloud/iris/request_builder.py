@@ -92,6 +92,10 @@ def _role_plan_values(config: dict[str, Any]) -> dict[str, Any]:
     for dimension in ("pipeline", "data", "expert"):
         field = f"inference_engine_{dimension}_parallel_size"
         values[field] = int(_optional_at(config, f"generator.{field}", 1))
+    declared_rollout_nodes = _optional_at(config, "generator.rollout_num_nodes")
+    values["rollout_num_nodes"] = (
+        values["num_inference_engines"] if declared_rollout_nodes is None else int(declared_rollout_nodes)
+    )
     return values
 
 
@@ -173,7 +177,7 @@ def _rollout_claim(config: dict[str, Any], values: dict[str, Any]) -> ModelRoleC
     rollout_nodes = (
         values["policy_num_nodes"]
         if rollout_is_local and values["colocate_all"]
-        else values["num_inference_engines"]
+        else values["rollout_num_nodes"]
         if rollout_is_local
         else 0
     )

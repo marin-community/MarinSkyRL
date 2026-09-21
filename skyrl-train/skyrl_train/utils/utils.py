@@ -85,17 +85,21 @@ def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
       - `trainer.placement.policy_strict_spread_pg` is enabled (opt-in; default
         false, so every existing run is byte-for-byte unchanged),
       - the run is disaggregated (`colocate_all=false`), and
-      - no reference model is used (`use_kl_loss` and `use_kl_in_reward` both
-        false) — i.e. the policy placement group is NOT shared with a ref model.
+      - no reference model is used, including by the mismatch diagnostic.
     """
     placement = cfg.trainer.placement
     if not bool(getattr(placement, "policy_strict_spread_pg", False)):
         return False
     if placement.colocate_all:
         return False
-    algo = cfg.trainer.algorithm
-    use_ref_model = algo.use_kl_loss or algo.use_kl_in_reward
-    return not use_ref_model
+    return not reference_model_required(cfg)
+
+
+def reference_model_required(cfg: DictConfig) -> bool:
+    """Whether KL training or the frozen-policy diagnostic needs a reference actor."""
+    algorithm = cfg.trainer.algorithm
+    probe_enabled = cfg.trainer.get("mismatch_decomposition", {}).get("enabled", False)
+    return bool(algorithm.use_kl_loss or algorithm.use_kl_in_reward or probe_enabled)
 
 
 def resolve_pinned_local_rank(
@@ -423,7 +427,7 @@ def validate_batch_sizes(cfg: DictConfig):
     # Validate training batch size is larger than the least common multiple of the DP sizes of policy (and ref if used).
     lcm_dp_size = policy_dp_size
 
-    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    use_ref_model = reference_model_required(cfg)
     if use_ref_model:
         ref_world_size = cfg.trainer.placement.ref_num_nodes * cfg.trainer.placement.ref_num_gpus_per_node
         if cfg.trainer.strategy == "megatron":
@@ -685,7 +689,7 @@ def validate_cfg(cfg: DictConfig):
         "use_kl_in_reward and use_kl_loss should be mutually exclusive"
     )
 
-    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    use_ref_model = reference_model_required(cfg)
     colocate_ref = cfg.trainer.placement.colocate_all or cfg.trainer.placement.colocate_policy_ref
     if (
         cfg.trainer.strategy == "fsdp2"
@@ -774,6 +778,8 @@ def validate_cfg(cfg: DictConfig):
         )
 
     fully_async = cfg.trainer.fully_async
+    if type(fully_async.weight_sync_interval_steps) is not int or fully_async.weight_sync_interval_steps < 1:
+        raise ValueError("trainer.fully_async.weight_sync_interval_steps must be a positive integer")
     if fully_async.pause_mode not in tuple(PauseMode):
         raise ValueError(f"trainer.fully_async.pause_mode must be one of {[mode.value for mode in PauseMode]}")
     if type(fully_async.clear_kv_cache_on_weight_sync) is not bool:
@@ -810,6 +816,42 @@ def validate_cfg(cfg: DictConfig):
             "regular",
             "dual_clip",
         ], "TIS is only implemented for regular and dual_clip policy loss types"
+
+    mismatch_probe = cfg.trainer.get("mismatch_decomposition", {"enabled": False, "sample_rows_per_step": 8})
+    if type(mismatch_probe.enabled) is not bool or type(mismatch_probe.sample_rows_per_step) is not int:
+        raise ValueError("trainer.mismatch_decomposition requires boolean enabled and integer sample_rows_per_step")
+    if mismatch_probe.sample_rows_per_step < 0 or mismatch_probe.sample_rows_per_step > 32:
+        raise ValueError("trainer.mismatch_decomposition.sample_rows_per_step must be between zero and 32")
+    if mismatch_probe.enabled:
+        if cfg.trainer.strategy != "megatron" or not cfg.trainer.fully_async.first_token_admission:
+            raise ValueError("mismatch decomposition requires Megatron and first-token policy provenance")
+        if not cfg.trainer.algorithm.use_tis or cfg.generator.sampling_params.logprobs is None:
+            raise ValueError("mismatch decomposition requires sampled-token behavior log probabilities and TIS")
+        if (
+            cfg.trainer.algorithm.use_kl_loss
+            or cfg.trainer.algorithm.use_kl_in_reward
+            or cfg.trainer.ref.model.path != cfg.trainer.policy.model.path
+            or cfg.trainer.update_ref_every_epoch
+        ):
+            raise ValueError("mismatch decomposition requires a frozen matching reference and no KL objective")
+
+    score_centering_topk = cfg.trainer.algorithm.get("score_centering_topk", 0)
+    if type(score_centering_topk) is not int or score_centering_topk < 0:
+        raise ValueError("trainer.algorithm.score_centering_topk must be a nonnegative integer")
+    if score_centering_topk:
+        if distillation_plan is not None:
+            raise ValueError("score centering cannot share selected-token evidence with a distillation objective")
+        if not cfg.trainer.algorithm.use_tis or cfg.trainer.algorithm.policy_loss_type != "regular":
+            raise ValueError("score centering requires regular PPO with use_tis=true")
+        if cfg.trainer.strategy != "megatron" or cfg.trainer.use_sample_packing:
+            raise ValueError("score centering currently requires unpacked Megatron training")
+        megatron = cfg.trainer.policy.megatron_config
+        if megatron.tensor_model_parallel_size != 1 or megatron.context_parallel_size != 1:
+            raise ValueError("score centering currently requires Megatron tensor and context parallel size one")
+        if cfg.generator.sampling_params.logprobs != score_centering_topk:
+            raise ValueError("score centering requires generator.sampling_params.logprobs to match its top-k width")
+        if cfg.generator.backend != "vllm" or not cfg.generator.run_engines_locally:
+            raise ValueError("score centering requires local vLLM behavior top-k capture")
 
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled
@@ -971,15 +1013,15 @@ def validate_generator_cfg(cfg: DictConfig):
         if cfg.generator.sampling_params.logprobs > 0:
             plan = compile_distillation_plan_from_config(cfg)
             widths = {teacher.top_k for teacher in plan.teachers} if plan is not None else set()
-            if (
-                plan is None
-                or plan.objective is not DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
+            if cfg.generator.backend != "vllm":
+                raise ValueError("positive generator.sampling_params.logprobs requires local vLLM")
+            if plan is not None and (
+                plan.objective is not DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
                 or widths != {cfg.generator.sampling_params.logprobs}
-                or cfg.generator.backend != "vllm"
             ):
                 raise ValueError(
-                    "positive generator.sampling_params.logprobs requires a local vLLM "
-                    "student_topk_policy_surrogate plan with matching teacher top_k"
+                    "positive generator.sampling_params.logprobs requires a matching teacher top_k "
+                    "for a student_topk_policy_surrogate objective"
                 )
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")

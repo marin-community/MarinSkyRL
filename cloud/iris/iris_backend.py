@@ -312,6 +312,7 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
         f"++trainer.placement.policy_num_nodes={policy_claim.num_nodes}",
         f"++trainer.placement.policy_num_gpus_per_node={policy_claim.gpus_per_node}",
         f"++generator.num_inference_engines={rollout_claim.replicas}",
+        f"++generator.rollout_num_nodes={rollout_claim.num_nodes}",
         f"++generator.inference_engine_tensor_parallel_size={rollout_claim.tensor_parallel_size}",
         f"++generator.inference_engine_pipeline_parallel_size={rollout_claim.pipeline_parallel_size}",
         f"++generator.inference_engine_data_parallel_size={rollout_claim.data_parallel_size}",

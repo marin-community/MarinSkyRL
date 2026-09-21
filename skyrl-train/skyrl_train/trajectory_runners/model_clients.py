@@ -82,7 +82,7 @@ def _parse_chat_choice(choice: dict[str, Any], *, prompt_ids: Any, logprobs_requ
     )
 
 
-def _assemble_plain_results(results: list[_ChatChoice]) -> ModelClientOutput:
+def _assemble_plain_results(results: list[_ChatChoice], requested_top_k: int | None = None) -> ModelClientOutput:
     logprobs = [result.response_logprobs for result in results]
     segments = [result.policy_version_segments for result in results]
     output = ModelClientOutput(
@@ -96,6 +96,17 @@ def _assemble_plain_results(results: list[_ChatChoice]) -> ModelClientOutput:
     )
     if all(rows is not None for rows in segments):
         output["response_policy_version_segments"] = segments
+    if requested_top_k is not None:
+        selected = []
+        for result in results:
+            items = result.logprob_items or []
+            if len(items) != len(result.response_ids):
+                raise ValueError("plain chat response top-K rows must align with exact token IDs")
+            selected.append(
+                [select_chat_response_topk(item.get("top_logprobs") or [], requested_top_k) for item in items]
+            )
+        output["student_topk_indices"] = [[ids for ids, _ in rows] for rows in selected]
+        output["behavior_topk_logprobs"] = [[scores for _, scores in rows] for rows in selected]
     return output
 
 
@@ -326,7 +337,9 @@ class OpenAIHTTPModelClient:
                 )
             )
 
-        return _assemble_plain_results(responses)
+        requested_top_k = (request.get("sampling_params") or {}).get("logprobs")
+        requested_top_k = requested_top_k if isinstance(requested_top_k, int) and requested_top_k > 0 else None
+        return _assemble_plain_results(responses, requested_top_k)
 
     async def _generate_structured_chat(
         self,
@@ -440,6 +453,11 @@ class OpenAIHTTPModelClient:
         }
         if sampling_params.get("logprobs") is not None:
             payload["logprobs"] = True
+        requested_top_k = sampling_params.get("logprobs")
+        if isinstance(requested_top_k, int) and requested_top_k > 0:
+            # vLLM may include the sampled action outside the natural top K.
+            payload["top_logprobs"] = requested_top_k + 1
+            payload["return_tokens_as_token_ids"] = True
         async with session.post(
             f"{self._base_url}/v1/chat/completions",
             json=payload,

@@ -58,6 +58,7 @@ DEBUG_MODE_TRAINER_FIELDS = {
     "debug_mode": "light",
 }
 RUNTIME_CONFIG_TRAINER_FIELDS = {
+    "mismatch_decomposition": {"enabled": False, "sample_rows_per_step": 8},
     "collective_phase_diagnostics": None,
     "training_metrics": False,
     "policy_train_spans": False,
@@ -89,6 +90,7 @@ RUNTIME_CONFIG_TRAINER_FIELDS = {
 }
 ADDITIVE_ALGORITHM_FIELDS = {
     "batch_invariant": False,
+    "score_centering_topk": 0,
     "ratio_diagnostics": {"position_window": 256, "pooled": None, "exact_quantiles": False},
     "grad_cosine": {"enabled": False, "store": "gpu_fp32"},
 }
@@ -100,6 +102,7 @@ ADDITIVE_GROUP_ADMISSION_FIELDS = {
     "stall_timeout": None,
 }
 ADDITIVE_FULLY_ASYNC_FIELDS = {
+    "weight_sync_interval_steps": 1,
     "max_buffered_groups": None,
     "first_token_admission": False,
     "pause_mode": "abort",
@@ -115,6 +118,7 @@ ADDITIVE_OVERLONG_FIELDS = {
 # Additive generator keys with behavior-preserving disabled defaults. Like the CP
 # fields, they are stripped before comparison with the pre-CP golden.
 ADDITIVE_GENERATOR_FIELDS = {
+    "rollout_num_nodes": None,
     "speculative_decoding": None,
     "inference_engine_decode_context_parallel_size": 1,
     "vllm_attention_backend": None,

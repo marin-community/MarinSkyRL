@@ -884,6 +884,128 @@ def student_topk_logprobs(logits: torch.Tensor, topk_indices: torch.Tensor) -> t
     return normalized.masked_fill(~valid_indices, torch.nan)
 
 
+def student_topk_logprobs_at_positions(
+    logits: torch.Tensor, topk_indices: torch.Tensor, logit_positions: torch.Tensor
+) -> torch.Tensor:
+    """Gather selected logprobs from compacted logits at each response token's actual position.
+
+    Megatron removes left padding and moves each row's remaining tokens to the front.
+    Response IDs remain right-padded in the learner batch, so a shared slice from the
+    end of the compacted logits cannot align every row.
+    """
+    if (
+        logits.ndim != 3
+        or topk_indices.ndim != 3
+        or logit_positions.ndim != 2
+        or logits.shape[0] != topk_indices.shape[0]
+        or topk_indices.shape[:2] != logit_positions.shape
+    ):
+        raise ValueError("selected logprobs require aligned batch, response, and compact-logit positions")
+    if topk_indices.dtype not in (torch.int32, torch.int64) or logit_positions.dtype not in (torch.int32, torch.int64):
+        raise ValueError("selected token IDs and compact-logit positions must have integer dtype")
+    if topk_indices.device != logits.device or logit_positions.device != logits.device:
+        raise ValueError("selected token IDs and compact-logit positions must be on the logits device")
+    valid = topk_indices != INVALID_TOPK_INDEX
+    if torch.any(topk_indices < INVALID_TOPK_INDEX) or torch.any(topk_indices[valid] >= logits.shape[-1]):
+        raise ValueError("selected token IDs are outside the student vocabulary")
+    if torch.any(logit_positions < 0) or torch.any(logit_positions >= logits.shape[1]):
+        raise ValueError("compact-logit positions are outside the model output")
+
+    batch_positions = torch.arange(logits.shape[0], device=logits.device)[:, None, None]
+    safe_ids = topk_indices.masked_fill(~valid, 0).long()
+    float_logits = logits.float()
+    selected = float_logits[batch_positions, logit_positions[:, :, None], safe_ids]
+    log_normalizers = torch.logsumexp(float_logits, dim=-1)
+    normalizers = log_normalizers[batch_positions[:, :, 0], logit_positions]
+    return (selected - normalizers[:, :, None]).masked_fill(~valid, torch.nan)
+
+
+def student_topk_logprobs_for_compacted_response(
+    logits: torch.Tensor, topk_indices: torch.Tensor, attention_mask: torch.Tensor
+) -> torch.Tensor:
+    """Map padded response IDs to logits after Megatron removes left padding."""
+    if (
+        topk_indices.ndim != 3
+        or attention_mask.ndim != 2
+        or attention_mask.shape[0] != topk_indices.shape[0]
+        or attention_mask.device != logits.device
+    ):
+        raise ValueError("selected response IDs and attention mask must share a batch and device")
+    response_len = topk_indices.shape[1]
+    query_start = attention_mask.shape[1] - response_len - 1
+    if query_start < 0:
+        raise ValueError("selected response IDs require at least one prompt token")
+    query_positions = torch.arange(query_start, query_start + response_len, device=attention_mask.device)
+    compact_positions = attention_mask.long().cumsum(dim=1)[:, query_positions] - 1
+    valid_rows = (topk_indices != INVALID_TOPK_INDEX).any(dim=-1)
+    if torch.any(valid_rows & ~attention_mask[:, query_positions].bool()) or torch.any(
+        valid_rows & ~attention_mask[:, query_positions + 1].bool()
+    ):
+        raise ValueError("selected response IDs refer to padded prompt or response positions")
+    compact_positions = compact_positions.masked_fill(~valid_rows, 0)
+    return student_topk_logprobs_at_positions(logits, topk_indices, compact_positions)
+
+
+def student_topk_logprobs_from_sampled_action_logprobs(
+    logits: torch.Tensor,
+    topk_indices: torch.Tensor,
+    sampled_token_ids: torch.Tensor,
+    sampled_action_logprobs: torch.Tensor,
+    attention_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Reuse sampled-token log normalizers instead of copying all vocabulary logits.
+
+    For each response position, log p(selected) equals log p(sampled) plus the
+    difference between their logits. The sampled logprob already has a bounded
+    memory backward, so score centering only needs to gather its selected logits.
+    """
+    if (
+        logits.ndim != 3
+        or topk_indices.ndim != 3
+        or sampled_token_ids.shape != topk_indices.shape[:2]
+        or sampled_action_logprobs.shape != topk_indices.shape[:2]
+        or attention_mask.ndim != 2
+        or attention_mask.shape[0] != topk_indices.shape[0]
+        or any(
+            t.device != logits.device
+            for t in (topk_indices, sampled_token_ids, sampled_action_logprobs, attention_mask)
+        )
+    ):
+        raise ValueError("selected and sampled response tokens must share a batch, response length, and device")
+    if topk_indices.dtype not in (torch.int32, torch.int64) or sampled_token_ids.dtype not in (
+        torch.int32,
+        torch.int64,
+    ):
+        raise ValueError("selected and sampled token IDs must have integer dtype")
+
+    response_len = topk_indices.shape[1]
+    query_start = attention_mask.shape[1] - response_len - 1
+    if query_start < 0:
+        raise ValueError("selected response IDs require at least one prompt token")
+    query_positions = torch.arange(query_start, query_start + response_len, device=logits.device)
+    compact_positions = attention_mask.long().cumsum(dim=1)[:, query_positions] - 1
+    valid = topk_indices != INVALID_TOPK_INDEX
+    valid_rows = valid.any(dim=-1)
+    if torch.any(valid_rows & ~attention_mask[:, query_positions].bool()) or torch.any(
+        valid_rows & ~attention_mask[:, query_positions + 1].bool()
+    ):
+        raise ValueError("selected response IDs refer to padded prompt or response positions")
+    if torch.any(topk_indices < INVALID_TOPK_INDEX) or torch.any(topk_indices[valid] >= logits.shape[-1]):
+        raise ValueError("selected token IDs are outside the student vocabulary")
+    if torch.any(sampled_token_ids < 0) or torch.any(sampled_token_ids >= logits.shape[-1]):
+        raise ValueError("sampled token IDs are outside the student vocabulary")
+
+    compact_positions = compact_positions.masked_fill(~valid_rows, 0)
+    batch_positions = torch.arange(logits.shape[0], device=logits.device)[:, None, None]
+    selected_logits = logits[
+        batch_positions, compact_positions[:, :, None], topk_indices.masked_fill(~valid, 0).long()
+    ].float()
+    sampled_logits = logits[batch_positions[:, :, 0], compact_positions, sampled_token_ids.long()].float()
+    return (sampled_action_logprobs.float().unsqueeze(-1) + selected_logits - sampled_logits.unsqueeze(-1)).masked_fill(
+        ~valid, torch.nan
+    )
+
+
 def sparse_forward_kl_loss(
     student_topk_log_probs: torch.Tensor,
     distillation: SparseForwardKLInput,

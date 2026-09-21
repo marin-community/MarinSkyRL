@@ -138,6 +138,18 @@ def test_behavior_logprobs_reject_multiturn_custom_template_retokenization():
         validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
 
 
+def test_fully_async_single_turn_chat_accepts_runtime_validated_exact_evidence():
+    cfg = _skyrl_config()
+    cfg.generator.chat_template.name_or_path = "qwen3_without_thinking"
+    cfg.generator.max_turns = 1
+
+    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM)
+
+    cfg.generator.max_turns = 2
+    with pytest.raises(ValueError, match="resolved evidence fidelity is retokenized"):
+        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM)
+
+
 def test_distillation_accepts_reconstructed_fully_async_learner_tokens(local_distillation_config):
     cfg = local_distillation_config(_skyrl_config(use_tis=False))
 

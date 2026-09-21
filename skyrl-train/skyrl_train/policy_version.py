@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import TypedDict
 
@@ -119,6 +120,55 @@ def policy_version_bounds(rows: list[list[PolicyVersionSegment]]) -> tuple[int, 
         if segment["token_count"] > 0 and segment["policy_version"] is not None
     ]
     return (min(versions), max(versions)) if versions else None
+
+
+def consumed_token_age_metrics(
+    response_ids: list[list[int]],
+    loss_masks: list[list[int]],
+    version_rows: list[list[PolicyVersionSegment]],
+    consuming_step: int,
+) -> dict[str, float]:
+    """Measure optimizer-consumption age per selected token, including mixed-version responses."""
+    if not (len(response_ids) == len(loss_masks) == len(version_rows)) or consuming_step < 1:
+        raise ValueError("consumed token ages require aligned rows and a positive optimizer step")
+    age_counts: Counter[int] = Counter()
+    for response, mask, segments in zip(response_ids, loss_masks, version_rows, strict=True):
+        validate_policy_version_segments(
+            segments,
+            response_length=len(response),
+            require_known=True,
+            required_mask=[bool(value) for value in mask],
+        )
+        for segment in segments:
+            version = segment["policy_version"]
+            if version is None:
+                continue
+            age = consuming_step - version - 1
+            if age < 0:
+                raise ValueError("sampled policy version is newer than the optimizer-consumption step")
+            start = segment["start"]
+            selected_tokens = sum(bool(value) for value in mask[start : start + segment["token_count"]])
+            age_counts[age] += selected_tokens
+    total = sum(age_counts.values())
+    if total == 0:
+        raise ValueError("consumed token ages require at least one selected token")
+    p90_threshold = 0.9 * total
+    cumulative = 0
+    p90_age = 0
+    for age, count in sorted(age_counts.items()):
+        cumulative += count
+        if cumulative >= p90_threshold:
+            p90_age = age
+            break
+    return {
+        "async/consumed_token_age_mean": sum(age * count for age, count in age_counts.items()) / total,
+        "async/consumed_token_age_p90": float(p90_age),
+        "async/consumed_token_age_max": float(max(age_counts)),
+        "async/consumed_token_age_stale_fraction": sum(count for age, count in age_counts.items() if age > 0) / total,
+        "async/consumed_token_age_at_least_four_fraction": sum(count for age, count in age_counts.items() if age >= 4)
+        / total,
+        "async/consumed_token_age_tokens": float(total),
+    }
 
 
 def truncate_policy_version_segments(

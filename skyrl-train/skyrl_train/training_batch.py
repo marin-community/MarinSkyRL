@@ -365,6 +365,7 @@ class TrainingInput(TypedDict, total=False):
     teacher_retained_mass: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     student_topk_indices: Optional[Integer[torch.Tensor, "batch_size seq_len top_k"]]
     behavior_topk_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len top_k"]]
+    old_topk_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len top_k"]]
     teacher_on_student_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len top_k"]]
     teacher_valid_mask: Optional[Integer[torch.Tensor, "batch_size seq_len"]]
     distillation_loss_weights: Optional[Float[torch.Tensor, "batch_size seq_len"]]
@@ -433,6 +434,9 @@ class TrainingBatchIterator(Iterator[Experience]):
             action_mask=batch["response_mask"],
             num_actions=batch.metadata["response_length"],
             rollout_logprobs=batch.get("rollout_logprobs"),
+            score_topk_indices=batch.get("student_topk_indices"),
+            score_behavior_topk_logprobs=batch.get("behavior_topk_logprobs"),
+            old_topk_logprobs=batch.get("old_topk_logprobs"),
             distillation=distillation_input_from_tensors(
                 teacher_action_log_probs=batch.get("teacher_action_log_probs"),
                 teacher_topk_indices=batch.get("teacher_topk_indices"),
@@ -440,8 +444,14 @@ class TrainingBatchIterator(Iterator[Experience]):
                 teacher_retained_mass=batch.get("teacher_retained_mass"),
                 valid_mask=batch.get("teacher_valid_mask"),
                 loss_weights=batch.get("distillation_loss_weights"),
-                student_topk_indices=batch.get("student_topk_indices"),
-                behavior_topk_logprobs=batch.get("behavior_topk_logprobs"),
+                student_topk_indices=(
+                    batch.get("student_topk_indices") if batch.get("teacher_on_student_logprobs") is not None else None
+                ),
+                behavior_topk_logprobs=(
+                    batch.get("behavior_topk_logprobs")
+                    if batch.get("teacher_on_student_logprobs") is not None
+                    else None
+                ),
                 teacher_on_student_logprobs=batch.get("teacher_on_student_logprobs"),
             ),
             rollout_routed_experts=batch.get("rollout_routed_experts"),

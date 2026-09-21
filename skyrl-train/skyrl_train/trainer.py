@@ -38,6 +38,8 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     validate_trajectory_batch,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
+from skyrl_train.trajectory_runners.selected_topk import collate_behavior_topk
+from skyrl_train.policy_version import BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY, consumed_token_age_metrics
 from skyrl_train.dataset.preprocess import (
     collate_response_token_channel,
     convert_prompts_responses_to_batch_tensors,
@@ -109,6 +111,7 @@ from skyrl_train.utils.utils import (
     moe_router_replay_enabled,
     policy_per_gpu_bundles_enabled,
     policy_force_cvd_mask_enabled,
+    reference_model_required,
 )
 
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
@@ -1360,7 +1363,7 @@ class RayPPOTrainer:
         cfg = self.cfg
         pg = None
 
-        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        use_ref_model = reference_model_required(cfg)
 
         if cfg.trainer.placement.colocate_all:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -1787,6 +1790,29 @@ class RayPPOTrainer:
                 "routed_experts response axis should look like responses"
             )
         distillation_tensors = _validated_distillation_tensors(trajectory_batch, response_masks_tensor)
+        score_topk_tensors = {}
+        score_topk_width = int(self.cfg.trainer.algorithm.get("score_centering_topk", 0))
+        if score_topk_width:
+            if rollout_logprobs_tensor is None:
+                raise ValueError("score centering requires sampled-token behavior logprobs on every batch")
+            topk_ids, topk_scores = collate_behavior_topk(
+                trajectory_batch,
+                response_ids,
+                loss_masks_tensor,
+                score_topk_width,
+                sampled_logprobs=rollout_logprobs_tensor,
+            )
+            score_topk_tensors = {
+                "student_topk_indices": topk_ids,
+                "behavior_topk_logprobs": topk_scores,
+            }
+        version_rows = trajectory_batch.get(BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY)
+        if rollout_staleness is not None and (score_topk_width or version_rows is not None):
+            if version_rows is None:
+                raise ValueError("score-centered async rollouts require sampled-token policy-version spans")
+            self.all_metrics.update(
+                consumed_token_age_metrics(response_ids, loss_masks, version_rows, self.global_step)
+            )
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
@@ -1811,6 +1837,7 @@ class RayPPOTrainer:
         if rollout_routed_experts_tensor is not None:
             training_input["rollout_routed_experts"] = rollout_routed_experts_tensor
         training_input.update(distillation_tensors)
+        training_input.update(score_topk_tensors)
         # Stage B (F5/F4): attach the per-token shaping channel + span tags ONLY
         # when present, so the flag-off batch dict has exactly the same keys as
         # today (TensorBatch.__eq__ compares key sets).
@@ -1827,6 +1854,11 @@ class RayPPOTrainer:
         if loop_advantages_tensor is not None:
             training_input["loop_advantages"] = loop_advantages_tensor
         training_input.metadata = {"uids": uids}
+        if self.cfg.trainer.get("mismatch_decomposition", {}).get("enabled", False):
+            if version_rows is None:
+                raise ValueError("mismatch decomposition requires sampled-token policy-version spans")
+            training_input.metadata["mismatch_response_ids"] = response_ids
+            training_input.metadata["mismatch_version_rows"] = version_rows
         # For RLOO-N: pass through exclude_from_baseline flags if present
         if trajectory_batch.get("exclude_from_baseline") is not None:
             training_input.metadata["exclude_from_baseline"] = np.array(
@@ -2265,6 +2297,12 @@ class RayPPOTrainer:
             fwd_keys.append("rollout_routed_experts")
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
         data_fwd_pass.metadata["global_step"] = self.global_step
+        policy_fwd_pass = data_fwd_pass
+        if self.cfg.trainer.algorithm.get("score_centering_topk", 0):
+            policy_fwd_pass = training_input.select(
+                keys=[*fwd_keys, "student_topk_indices"], metadata_keys=["response_length"]
+            )
+            policy_fwd_pass.metadata["global_step"] = self.global_step
 
         def collect_results(actor_infos, results, key):
             ret_outputs: TrainingOutputBatch = concatenate_outputs_after_mesh_dispatch(actor_infos, results)
@@ -2272,6 +2310,7 @@ class RayPPOTrainer:
 
         base_log_probs = None
         action_log_probs = None
+        old_topk_logprobs = None
         values = None
 
         # calculate critic values
@@ -2306,10 +2345,14 @@ class RayPPOTrainer:
         if self.colocate_all:
             self.policy_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
-        action_log_probs_refs = self.policy_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
+        action_log_probs_refs = self.policy_model.async_run_ray_method("mesh", "forward", data=policy_fwd_pass)
         if self.colocate_all:
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
-            action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
+            policy_output = concatenate_outputs_after_mesh_dispatch(
+                self.policy_model.actor_infos, all_rank_action_log_probs
+            )
+            action_log_probs = policy_output["output"]
+            old_topk_logprobs = policy_output.get("old_topk_logprobs")
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
         # wait all models done
@@ -2332,7 +2375,11 @@ class RayPPOTrainer:
                 values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
 
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
-            action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
+            policy_output = concatenate_outputs_after_mesh_dispatch(
+                self.policy_model.actor_infos, all_rank_action_log_probs
+            )
+            action_log_probs = policy_output["output"]
+            old_topk_logprobs = policy_output.get("old_topk_logprobs")
 
         if not self.colocate_all:
             empty_cache_refs = self.policy_model.async_run_ray_method("pass_through", "empty_cache")
@@ -2346,6 +2393,13 @@ class RayPPOTrainer:
         # NOTE (sumanthrh): The slicing is needed to make sure that the batch dimension doesn't change for the tensordict.
         base_log_probs = base_log_probs[: len(sequences_all)] if base_log_probs is not None else None
         action_log_probs = action_log_probs[: len(sequences_all)]
+        if self.cfg.trainer.algorithm.get("score_centering_topk", 0):
+            if old_topk_logprobs is None:
+                raise ValueError("score centering requires old-trainer top-k logprobs from the policy forward")
+            old_topk_logprobs = old_topk_logprobs[: len(sequences_all)]
+            if old_topk_logprobs.shape != training_input["behavior_topk_logprobs"].shape:
+                raise ValueError("old-trainer top-k logprobs must align with behavior top-k evidence")
+            training_input["old_topk_logprobs"] = old_topk_logprobs
         values = values[: len(sequences_all)] if values is not None else None
 
         training_input["base_action_log_probs"] = base_log_probs
@@ -2903,13 +2957,24 @@ class RayPPOTrainer:
                 f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
             )
 
-        # Match the optimizer residency used when disaggregated checkpoints are
-        # saved. Megatron initializes restore buffers before reading checkpoint
-        # tensors; leaving the optimizer and gradient buffers on GPU can double
-        # their peak allocation and OOM before the first rollout.
-        self._offload_policy_optimizer(
-            getattr(self, "all_startup_timings", {}), timer_label="offload_policy_optimizer_before_checkpoint_load"
+        # Megatron's distributed loader allocates restore buffers in addition to
+        # the initialized optimizer state. Free the old state before loading even
+        # when ordinary rollout-time optimizer offload is disabled. Put the newly
+        # restored state back afterward in that case so training starts with the
+        # configured optimizer residency.
+        restore_only_offload = (
+            not self.colocate_all
+            and self.cfg.trainer.strategy == "megatron"
+            and not self.cfg.trainer.offload_optimizer_during_rollouts
         )
+        startup_timings = getattr(self, "all_startup_timings", {})
+        if restore_only_offload:
+            with Timer("offload_policy_optimizer_before_checkpoint_load", startup_timings):
+                self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
+        else:
+            self._offload_policy_optimizer(
+                startup_timings, timer_label="offload_policy_optimizer_before_checkpoint_load"
+            )
 
         # 3. Load policy checkpoint
         logger.info(f"Loading policy checkpoint from {policy_ckpt_dir}")
@@ -2922,6 +2987,9 @@ class RayPPOTrainer:
             )
         )
         logger.info("Successfully loaded policy checkpoint")
+        if restore_only_offload:
+            with Timer("backload_policy_optimizer_after_checkpoint_load", startup_timings):
+                self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=False)
 
         # 4. Load critic checkpoint if it exists and we have a critic model
         if self.critic_model is not None:
