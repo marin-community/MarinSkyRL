@@ -413,6 +413,28 @@ def test_launcher_argv_includes_staged_data_role_plan_and_seed(tmp_path: Path) -
     assert "++trainer.seed=7" in overrides
 
 
+def test_launcher_argv_preserves_colocate_all_with_remote_rollout(tmp_path: Path) -> None:
+    envelope = _spec(tmp_path)
+    role_plan = envelope.request.topology.role_plan
+    rollout = replace(
+        role_plan.claim(ModelRoleKind.ROLLOUT),
+        execution=RoleExecution.REMOTE,
+        colocation_group=None,
+        num_nodes=0,
+        gpus_per_node=0,
+    )
+    claims = tuple(rollout if claim.kind is ModelRoleKind.ROLLOUT else claim for claim in role_plan.claims)
+    bundles = (replace(role_plan.bundles[0], role_ids=("policy", "reference")),)
+    remote_plan = replace(role_plan, claims=claims, bundles=bundles)
+    topology = replace(envelope.request.topology, role_plan=remote_plan)
+    envelope = replace(envelope, request=replace(envelope.request, topology=topology))
+
+    argv = job_launch_argv(envelope, "config.yaml")
+
+    overrides = [argv[index + 1] for index, value in enumerate(argv) if value == "--skyrl-override"]
+    assert "++trainer.placement.colocate_all=true" in overrides
+
+
 def test_launcher_argv_encodes_lifecycle_storage_as_valid_hydra_values(tmp_path: Path, parse_hydra_overrides) -> None:
     envelope = _spec(tmp_path)
     output = replace(

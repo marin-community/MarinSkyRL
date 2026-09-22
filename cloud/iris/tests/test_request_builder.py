@@ -38,6 +38,10 @@ def _make_config(
     policy_num_gpus_per_node: int = 8,
     num_inference_engines: int = 4,
     tp: int = 4,
+    pp: int = 1,
+    dp: int = 1,
+    ep: int = 1,
+    inference_engine_mp_backend: bool = False,
     strategy: str | None = "fsdp2",
     train_batch_size: int = 64,
     policy_mini_batch_size: int = 32,
@@ -46,6 +50,7 @@ def _make_config(
     online_draft_training: bool = False,
     colocate_policy_ref: bool = True,
     use_reference: bool = True,
+    use_kl_in_reward: bool = False,
     critic: bool = False,
     run_engines_locally: bool = True,
 ) -> dict:
@@ -61,7 +66,7 @@ def _make_config(
                 "critic_num_nodes": policy_num_nodes,
                 "critic_num_gpus_per_node": policy_num_gpus_per_node,
             },
-            "algorithm": {"use_kl_loss": use_reference, "use_kl_in_reward": False},
+            "algorithm": {"use_kl_loss": use_reference, "use_kl_in_reward": use_kl_in_reward},
             "critic": {"model": {"path": "critic" if critic else None}},
             "train_batch_size": train_batch_size,
             "policy_mini_batch_size": policy_mini_batch_size,
@@ -70,9 +75,10 @@ def _make_config(
         "generator": {
             "num_inference_engines": num_inference_engines,
             "inference_engine_tensor_parallel_size": tp,
-            "inference_engine_pipeline_parallel_size": 1,
-            "inference_engine_data_parallel_size": 1,
-            "inference_engine_expert_parallel_size": 1,
+            "inference_engine_pipeline_parallel_size": pp,
+            "inference_engine_data_parallel_size": dp,
+            "inference_engine_expert_parallel_size": ep,
+            "inference_engine_mp_backend": inference_engine_mp_backend,
             "n_samples_per_prompt": n_samples_per_prompt,
             "backend": "vllm",
             "run_engines_locally": run_engines_locally,
@@ -219,9 +225,74 @@ class TestRolePlanAccounting:
         plan = derive_role_plan(_make_config(colocate_all=True, policy_num_nodes=4, num_inference_engines=8, tp=4))
         assert derive_num_nodes(plan) == 4
 
-    def test_disaggregated_adds_inference_engines(self):
-        plan = derive_role_plan(_make_config(colocate_all=False, policy_num_nodes=2, num_inference_engines=4))
-        assert derive_num_nodes(plan) == 6
+    @pytest.mark.parametrize(
+        ("config_overrides", "rollout_nodes", "total_nodes"),
+        [
+            ({"policy_num_nodes": 2, "num_inference_engines": 4}, 2, 4),
+            ({"policy_num_nodes": 2, "num_inference_engines": 6, "tp": 4, "use_reference": False}, 3, 5),
+            (
+                {
+                    "policy_num_nodes": 4,
+                    "num_inference_engines": 8,
+                    "tp": 1,
+                    "dp": 4,
+                    "ep": 4,
+                    "use_reference": False,
+                },
+                4,
+                8,
+            ),
+            ({"policy_num_nodes": 1, "num_inference_engines": 3, "tp": 2, "use_reference": False}, 1, 2),
+            ({"policy_num_nodes": 1, "num_inference_engines": 5, "tp": 3, "use_reference": False}, 3, 4),
+            (
+                {
+                    "policy_num_nodes": 1,
+                    "num_inference_engines": 2,
+                    "tp": 3,
+                    "dp": 3,
+                    "inference_engine_mp_backend": True,
+                    "use_reference": False,
+                },
+                3,
+                4,
+            ),
+        ],
+        ids=["tp4", "qwen-tp4", "snowball-dp4-ep4", "partial-node", "ray-remainder", "mp-remainder"],
+    )
+    def test_disaggregated_rollout_packing(self, config_overrides, rollout_nodes, total_nodes):
+        plan = derive_role_plan(_make_config(colocate_all=False, **config_overrides))
+
+        assert plan.claim("rollout").num_nodes == rollout_nodes
+        assert derive_num_nodes(plan) == total_nodes
+
+    def test_ray_engine_rejects_per_engine_geometry_larger_than_one_node(self):
+        with pytest.raises(ValueError, match="one 8-GPU node"):
+            derive_role_plan(
+                _make_config(
+                    colocate_all=False,
+                    policy_num_nodes=1,
+                    num_inference_engines=1,
+                    tp=4,
+                    dp=4,
+                    use_reference=False,
+                )
+            )
+
+    def test_mp_engine_allows_data_parallel_ranks_on_multiple_nodes(self):
+        plan = derive_role_plan(
+            _make_config(
+                colocate_all=False,
+                policy_num_nodes=1,
+                num_inference_engines=1,
+                tp=4,
+                dp=4,
+                inference_engine_mp_backend=True,
+                use_reference=False,
+            )
+        )
+
+        assert plan.claim("rollout").num_nodes == 2
+        assert derive_num_nodes(plan) == 3
 
     def test_colocated_with_one_engine(self):
         plan = derive_role_plan(_make_config(colocate_all=True, policy_num_nodes=1, num_inference_engines=1, tp=8))
@@ -260,7 +331,7 @@ class TestRolePlanAccounting:
         assert plan.bundles[-1].role_ids == ("draft_trainer",)
         assert derive_num_nodes(plan) == 6
 
-    def test_policy_reference_colocation_and_rollout_resolve_to_ten_nodes(self):
+    def test_policy_reference_colocation_and_rollout_resolve_to_nine_nodes(self):
         plan = derive_role_plan(
             _make_config(
                 colocate_all=False,
@@ -270,13 +341,13 @@ class TestRolePlanAccounting:
             )
         )
 
-        assert derive_num_nodes(plan) == 10
+        assert derive_num_nodes(plan) == 9
         assert [(bundle.name, bundle.role_ids, bundle.num_nodes) for bundle in plan.bundles] == [
             ("policy", ("policy", "reference"), 8),
-            ("rollout", ("rollout",), 2),
+            ("rollout", ("rollout",), 1),
         ]
 
-    def test_disjoint_policy_reference_and_rollout_resolve_to_eighteen_nodes(self):
+    def test_disjoint_policy_reference_and_rollout_resolve_to_seventeen_nodes(self):
         plan = derive_role_plan(
             _make_config(
                 colocate_all=False,
@@ -286,7 +357,7 @@ class TestRolePlanAccounting:
             )
         )
 
-        assert derive_num_nodes(plan) == 18
+        assert derive_num_nodes(plan) == 17
         assert {bundle.name for bundle in plan.bundles} == {"policy", "reference", "rollout"}
 
     def test_inactive_reference_and_critic_do_not_claim_resources(self):
@@ -302,6 +373,22 @@ class TestRolePlanAccounting:
         )
 
         assert {claim.role_id for claim in plan.claims} == {"policy", "rollout"}
+        assert derive_num_nodes(plan) == 4
+
+    def test_kl_in_reward_activates_disjoint_reference_bundle(self):
+        plan = derive_role_plan(
+            _make_config(
+                colocate_all=False,
+                colocate_policy_ref=False,
+                policy_num_nodes=2,
+                num_inference_engines=2,
+                use_reference=False,
+                use_kl_in_reward=True,
+            )
+        )
+
+        assert {claim.role_id for claim in plan.claims} == {"policy", "reference", "rollout"}
+        assert plan.claim("reference").colocation_group == "reference"
         assert derive_num_nodes(plan) == 5
 
     def test_active_critic_receives_a_separate_disaggregated_bundle(self):
@@ -523,12 +610,33 @@ class TestBuildJobSpec:
         spec = _build_basic_spec(
             tmp_path, config_overrides=dict(colocate_all=False, policy_num_nodes=2, num_inference_engines=4)
         )
-        assert spec.request.topology.num_nodes == 6
+        assert spec.request.topology.num_nodes == 4
 
         spec_colo = _build_basic_spec(
             tmp_path, config_overrides=dict(colocate_all=True, policy_num_nodes=4, num_inference_engines=8)
         )
         assert spec_colo.request.topology.num_nodes == 4
+
+    def test_topology_uses_effective_hydra_overrides(self, tmp_path):
+        spec = _build_basic_spec(
+            tmp_path,
+            overrides=[
+                "++trainer.placement.colocate_all=false",
+                "++trainer.algorithm.use_kl_loss=false",
+                "++generator.num_inference_engines=6",
+            ],
+        )
+
+        plan = spec.request.topology.role_plan
+        assert {claim.role_id for claim in plan.claims} == {"policy", "rollout"}
+        assert plan.claim("rollout").replicas == 6
+        assert plan.claim("rollout").num_nodes == 3
+        assert spec.request.topology.num_nodes == 5
+
+    def test_runtime_profile_uses_effective_strategy_override(self, tmp_path):
+        spec = _build_basic_spec(tmp_path, overrides=["++trainer.strategy=megatron"])
+
+        assert spec.request.runtime.profile is RuntimeProfile.MEGATRON
 
     def test_gpus_per_node_from_role_plan(self, tmp_path):
         spec = _build_basic_spec(tmp_path, config_overrides=dict(policy_num_gpus_per_node=8))
