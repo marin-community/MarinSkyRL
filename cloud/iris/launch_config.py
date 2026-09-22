@@ -220,7 +220,7 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
 
 
 def load_launch_config(path: Path) -> DictConfig:
-    """Load one launch document and compose its SkyRL recipe exactly once."""
+    """Load and validate one complete SkyRL launch document."""
     config = compose_launch_config(OmegaConf.load(path))
     if _is_source_recipe(config.skyrl):
         if config.run.mode != RunMode.TRAIN:
