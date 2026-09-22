@@ -436,6 +436,20 @@ class PreparedPolicyModel:
     metadata_path: str
 
 
+@dataclass(frozen=True)
+class PreparedPolicyTokenizer:
+    metadata_path: str
+
+
+TOKENIZER_METADATA_PATTERNS = (
+    "*.json",
+    "*.jinja",
+    "*.model",
+    "*.py",
+    "*.txt",
+)
+
+
 def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None:
     """Resolve one immutable policy source and stage metadata, never weights."""
     source_uri = args.model_source_uri
@@ -477,6 +491,42 @@ def apply_policy_model_to_command(train_argv: list[str], model: PreparedPolicyMo
     _set_command_option(train_argv, "--model_path", model.metadata_path)
     _set_command_option(train_argv, "--model-source-uri", model.source_uri)
     _set_command_option(train_argv, "--model-source-identity", model.source_identity)
+
+
+def prepare_policy_tokenizer(args: argparse.Namespace) -> PreparedPolicyTokenizer | None:
+    """Stage only the explicitly requested tokenizer metadata before Ray starts."""
+    tokenizer_path = args.policy_tokenizer
+    if not tokenizer_path:
+        return None
+    if os.path.isdir(tokenizer_path):
+        return PreparedPolicyTokenizer(tokenizer_path)
+
+    revision = args.policy_tokenizer_revision
+    local_path = _metadata_path(tokenizer_path, revision or "main")
+    if is_cloud_uri(tokenizer_path):
+        manifest = ensure_model_manifest(tokenizer_path)
+        stage_model_metadata(tokenizer_path, manifest, local_path)
+        return PreparedPolicyTokenizer(local_path)
+
+    download_hugging_face_snapshot(
+        tokenizer_path,
+        revision=revision,
+        destination=Path(local_path),
+        allow_patterns=TOKENIZER_METADATA_PATTERNS,
+    )
+    return PreparedPolicyTokenizer(local_path)
+
+
+def apply_policy_tokenizer_to_command(train_argv: list[str], tokenizer: PreparedPolicyTokenizer) -> None:
+    """Use one tokenizer for prompt construction, decoding, and vLLM serving."""
+    train_argv.extend(
+        (
+            "--skyrl_override",
+            format_hydra_arg("trainer.policy.model.tokenizer_path", tokenizer.metadata_path, prefix="++"),
+            "--skyrl_override",
+            "++trainer.policy.model.tokenizer_revision=null",
+        )
+    )
 
 
 def prepare_draft_model(
@@ -2252,6 +2302,16 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         help="Immutable producer identity recorded beside the staged export.",
     )
     parser.add_argument(
+        "--policy-tokenizer",
+        default="",
+        help="Pinned Hugging Face repo ID, object-store export, or local tokenizer directory.",
+    )
+    parser.add_argument(
+        "--policy-tokenizer-revision",
+        default=None,
+        help="Immutable Hugging Face revision for --policy-tokenizer.",
+    )
+    parser.add_argument(
         "--policy-chat-template",
         default=os.environ.get("OT_AGENT_IRIS_POLICY_CHAT_TEMPLATE", ""),
         help="Repo-relative path to a chat-template jinja to FORCE onto the policy "
@@ -2332,6 +2392,9 @@ def main() -> None:
     policy_model = prepare_policy_model(args)
     if policy_model is not None:
         apply_policy_model_to_command(train_argv, policy_model)
+    policy_tokenizer = prepare_policy_tokenizer(args)
+    if policy_tokenizer is not None:
+        apply_policy_tokenizer_to_command(train_argv, policy_tokenizer)
     policy_metadata_path = policy_model.metadata_path if policy_model is not None else None
     if args.prestage_model:
         stage_model(

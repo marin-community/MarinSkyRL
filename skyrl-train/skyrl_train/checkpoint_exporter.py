@@ -212,10 +212,10 @@ def policy_export_workers(cfg: DictConfig) -> RayPolicyExportWorkers:
 
 def export_tokenizer(cfg: DictConfig) -> PreTrainedTokenizerBase:
     return create_tokenizer(
-        model_path=cfg.trainer.policy.model.path,
+        model_path=cfg.trainer.policy.model.tokenizer_path,
         disable_fast_tokenizer=cfg.trainer.disable_fast_tokenizer,
         padding_side="left",
-        revision=cfg.trainer.policy.model.get("revision"),
+        revision=cfg.trainer.policy.model.get("tokenizer_revision"),
     )
 
 

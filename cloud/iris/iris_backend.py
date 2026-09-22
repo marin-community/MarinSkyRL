@@ -368,6 +368,10 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
         config_path,
         "--model_path",
         model.model_path,
+        "--tokenizer-path",
+        request.model.tokenizer_uri,
+        "--tokenizer-revision",
+        request.model.tokenizer_revision,
         *model_source_cli_args(model.source_uri, model.source_identity),
         "--train-data",
         json.dumps([_resolved_data_entry(source) for source in request.train_data]),
@@ -1423,6 +1427,16 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="Immutable Hugging Face commit or tag for the policy model and tokenizer.",
     )
+    parser.add_argument(
+        "--tokenizer-path",
+        default=None,
+        help="Pinned Hugging Face repo ID, object-store export, or local directory for policy tokenization.",
+    )
+    parser.add_argument(
+        "--tokenizer-revision",
+        default=None,
+        help="Immutable Hugging Face revision for --tokenizer-path.",
+    )
 
     parser.add_argument(
         "--model-source-uri",
@@ -2187,6 +2201,10 @@ def _build_task_shell(
 def _model_bootstrap_args(args: argparse.Namespace) -> list[str]:
     """Resolve direct model sources and bounded metadata-cache flags."""
     model_args = model_source_cli_args(args.model_source_uri, args.model_source_identity)
+    if args.tokenizer_path:
+        model_args.extend(["--policy-tokenizer", args.tokenizer_path])
+        if args.tokenizer_revision:
+            model_args.extend(["--policy-tokenizer-revision", args.tokenizer_revision])
     is_hub_model = is_hugging_face_repo_id(args.model_path)
     direct_model_loading = args.runtime_profile in {RuntimeProfile.MEGATRON, RuntimeProfile.MEGATRON_EXPORT}
     if args.model_source_uri and not direct_model_loading:

@@ -397,6 +397,8 @@ def test_launcher_argv_includes_staged_data_role_plan_and_seed(tmp_path: Path) -
     argv = job_launch_argv(envelope, "config.yaml")
 
     assert json.loads(argv[argv.index("--train-data") + 1]) == ["/tmp/iceball-gsm8k/train.parquet"]
+    assert argv[argv.index("--tokenizer-path") + 1] == envelope.request.model.tokenizer_uri
+    assert argv[argv.index("--tokenizer-revision") + 1] == envelope.request.model.tokenizer_revision
     overrides = [argv[index + 1] for index, value in enumerate(argv) if value == "--skyrl-override"]
     assert "++trainer.placement.policy_num_nodes=1" in overrides
     assert "++trainer.placement.ref_num_nodes=1" in overrides

@@ -107,6 +107,8 @@ trainer:
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
       revision: null
+      tokenizer_path: ${trainer.policy.model.path}
+      tokenizer_revision: ${trainer.policy.model.revision}
       source_uri: null
       source_identity: null
       lora:

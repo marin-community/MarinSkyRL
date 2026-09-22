@@ -7,10 +7,12 @@ from cloud.iris import task_runtime
 from cloud.iris.task_runtime import (
     apply_draft_model_to_command,
     apply_policy_model_to_command,
+    apply_policy_tokenizer_to_command,
     parse_args,
     policy_chat_template_model,
     prepare_draft_model,
     prepare_policy_model,
+    prepare_policy_tokenizer,
 )
 from marinskyrl.speculative_decoding import SpeculatorModelConfig
 
@@ -96,6 +98,33 @@ def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(monkeypatch) -> Non
     )
 
     assert prepared == SpeculatorModelConfig(source_uri="s3://models/draft", source_identity=identity)
+
+
+def test_requested_policy_tokenizer_is_staged_and_applied(monkeypatch, tmp_path) -> None:
+    revision = "f0eac008b7fcd67025266a260d8722dbfd36e819"
+    staged = []
+
+    def download(model_id, *, revision, destination, allow_patterns):
+        staged.append((model_id, revision, destination, allow_patterns))
+        destination.mkdir(parents=True)
+        return destination
+
+    monkeypatch.setattr(task_runtime, "download_hugging_face_snapshot", download)
+    monkeypatch.setattr(task_runtime, "_metadata_path", lambda *_args: str(tmp_path / "tokenizer"))
+    args = Namespace(
+        policy_tokenizer="penfever/grug-tokenizer",
+        policy_tokenizer_revision=revision,
+    )
+    command = ["python", "-m", "cloud.iris.training_driver"]
+
+    tokenizer = prepare_policy_tokenizer(args)
+
+    assert tokenizer is not None
+    apply_policy_tokenizer_to_command(command, tokenizer)
+    overrides = [command[index + 1] for index, value in enumerate(command) if value == "--skyrl_override"]
+    assert staged[0][0:2] == ("penfever/grug-tokenizer", revision)
+    assert f"++trainer.policy.model.tokenizer_path={tokenizer.metadata_path}" in overrides
+    assert "++trainer.policy.model.tokenizer_revision=null" in overrides
 
 
 def test_draft_s3_uri_is_quoted_for_hydra() -> None:
