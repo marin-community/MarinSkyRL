@@ -49,6 +49,10 @@ def task_setup_script(commit: str, profile: RuntimeProfile) -> str:
     activation_file = MARINSKYRL_ACTIVATION_FILE
     bootstrap_script = f"{checkout}/{MARINSKYRL_BOOTSTRAP_SCRIPT}"
     return f"""set -euo pipefail
+attempt_id="${{IRIS_TASK_ID##*:}}"
+if [[ "$attempt_id" != "0" ]]; then
+  export UV_CACHE_DIR="$IRIS_WORKDIR/.uv-cache"
+fi
 checkout={shlex.quote(checkout)}
 git init -q "$checkout"
 git -C "$checkout" remote add origin {shlex.quote(MARINSKYRL_REPOSITORY)}
