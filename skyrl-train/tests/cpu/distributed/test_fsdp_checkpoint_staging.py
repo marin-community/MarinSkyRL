@@ -1,5 +1,7 @@
 from contextlib import contextmanager, nullcontext
+import json
 from pathlib import Path
+import struct
 
 import torch
 
@@ -88,12 +90,14 @@ def test_hf_export_serialization_has_no_trailing_barrier(monkeypatch, tmp_path):
     class Config:
         def save_pretrained(self, output_dir):
             Path(output_dir, "config.json").write_text("{}")
+            Path(output_dir, "tokenizer.json").write_text("{}")
 
     class Model(torch.nn.Module):
         config = Config()
 
         def save_pretrained(self, output_dir, **kwargs):
-            Path(output_dir, "model.safetensors").write_bytes(b"weights")
+            header = json.dumps({"weight": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}}).encode()
+            Path(output_dir, "model.safetensors").write_bytes(struct.pack("<Q", len(header)) + header + b"\0" * 4)
 
     strategy = object.__new__(FSDPStrategy)
     monkeypatch.setattr(strategy, "is_rank_0", lambda: True)

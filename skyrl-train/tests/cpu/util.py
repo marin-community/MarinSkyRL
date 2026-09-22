@@ -118,7 +118,11 @@ def stub_megatron_modules() -> None:
             "save": lambda *args, **kwargs: None,
             "load_common_state_dict": lambda *args, **kwargs: {},
         },
-        "megatron.core.dist_checkpointing.mapping": {"ShardedStateDict": dict},
+        "megatron.core.dist_checkpointing.dict_utils": {"nested_values": lambda value: value.values()},
+        "megatron.core.dist_checkpointing.mapping": {
+            "ShardedStateDict": dict,
+            "ShardedTensor": type("ShardedTensor", (), {}),
+        },
         "megatron.core.dist_checkpointing.serialization": {
             "get_default_load_sharded_strategy": lambda *args, **kwargs: None,
             "get_default_save_sharded_strategy": lambda *args, **kwargs: None,
@@ -133,9 +137,14 @@ def stub_megatron_modules() -> None:
             "FullyParallelSaveStrategyWrapper": type("FullyParallelSaveStrategyWrapper", (), {}),
         },
         "megatron.core.dist_checkpointing.strategies.torch": {
+            "TorchDistLoadShardedStrategy": type("TorchDistLoadShardedStrategy", (), {}),
             "TorchDistSaveShardedStrategy": type("TorchDistSaveShardedStrategy", (), {}),
+            "MCoreLoadPlanner": type("MCoreLoadPlanner", (), {}),
             "MCoreSavePlanner": type("MCoreSavePlanner", (), {}),
+            "_replace_sharded_keys_with_state_dict_keys": lambda *args, **kwargs: None,
             "_replace_state_dict_keys_with_sharded_keys": lambda *args, **kwargs: None,
+            "_restore_dict_types": lambda *args, **kwargs: None,
+            "_unwrap_pyt_sharded_tensor": lambda value: value,
             "mcore_to_pyt_state_dict": lambda *args, **kwargs: None,
         },
         "megatron.core.optimizer_param_scheduler": {"OptimizerParamScheduler": type("OptimizerParamScheduler", (), {})},

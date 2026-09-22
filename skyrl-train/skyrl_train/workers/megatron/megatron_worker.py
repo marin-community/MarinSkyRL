@@ -28,7 +28,12 @@ from skyrl_train.distributed.megatron.optimizer import (
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
-from skyrl_train.distributed.megatron.megatron_utils import get_model_config, print_model_size
+from skyrl_train.distributed.megatron.remote_model import install_remote_hf_state
+from skyrl_train.distributed.megatron.megatron_utils import (
+    get_model_config,
+    materialize_megatron_params,
+    print_model_size,
+)
 from skyrl_train.utils.utils import (
     moe_router_replay_requested,
     update_model_config,
@@ -71,6 +76,20 @@ class _MegatronInitMode(StrEnum):
 
 
 class MegatronWorker:
+    def _download_hf_snapshot_if_needed(self, model_path: str, model_config) -> None:
+        """Populate the local Hub cache only for non-streamed remote model IDs."""
+        if model_config.get("source_uri") or self._local_rank != 0 or os.path.exists(model_path):
+            return
+        retry = self.cfg.trainer.model_load_retry
+        revision = model_config.get("revision")
+        load_pretrained_with_retry(
+            lambda: snapshot_download(model_path, revision=revision),
+            model_id=model_path,
+            max_retries=int(retry.max_retries),
+            backoff_base=float(retry.backoff_base_seconds),
+            backoff_cap=float(retry.backoff_cap_seconds),
+        )
+
     def init_configs(
         self,
         model_path,
@@ -80,6 +99,7 @@ class MegatronWorker:
         bf16=True,
         flash_attn=False,
         model_revision: str | None = None,
+        model_source_uri: str | None = None,
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
@@ -105,6 +125,9 @@ class MegatronWorker:
                 transformer_config_kwargs[key] = None
 
         bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True, revision=model_revision)
+        self.remote_hf_state = None
+        if model_source_uri:
+            self.remote_hf_state = install_remote_hf_state(bridge, model_source_uri, model_path)
         provider = bridge.to_megatron_provider()
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
         provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
@@ -376,6 +399,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bf16=self.cfg.trainer.bf16,
             flash_attn=self.cfg.trainer.flash_attn,
             model_revision=self.cfg.trainer.policy.model.get("revision"),
+            model_source_uri=self.cfg.trainer.policy.model.get("source_uri"),
         )
 
         self.actor_module = self.make_megatron_module(
@@ -384,22 +408,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bf16=self.cfg.trainer.bf16,
         )
 
-        if self._local_rank == 0 and not os.path.exists(
-            model_path
-        ):  # if not local path, try downloading model weights from huggingface
-            # Retry transient HF weight-index/safetensors fetch flakes (EOF /
-            # IncompleteRead / dropped connection / spurious "no .safetensors")
-            # that otherwise kill the whole gang at scale; genuine missing/auth
-            # failures still surface. no-op if already downloaded.
-            retry = self.cfg.trainer.model_load_retry
-            load_pretrained_with_retry(
-                lambda: snapshot_download(model_path, revision=self.cfg.trainer.policy.model.get("revision")),
-                model_id=model_path,
-                max_retries=int(retry.max_retries),
-                backoff_base=float(retry.backoff_base_seconds),
-                backoff_cap=float(retry.backoff_cap_seconds),
-            )
+        self._download_hf_snapshot_if_needed(model_path, self.cfg.trainer.policy.model)
         torch.distributed.barrier()
+
+        if self.remote_hf_state is not None:
+            logger.info(
+                "Loaded Megatron policy weights directly from {} (rank range bytes read: {})",
+                self.cfg.trainer.policy.model.source_uri,
+                self.remote_hf_state.store.bytes_read,
+            )
 
         if self._rank == 0:
             print_model_size(self.actor_module[0])
@@ -617,6 +634,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         from torch.multiprocessing.reductions import reduce_tensor
 
         use_prefix_cache = self.cfg.generator.enable_prefix_caching
+        materialize_megatron_params(self.actor_module)
         generator_dtype = str_to_torch_dtype(self.cfg.generator.model_dtype)
         cache_reset_task = None
         if use_prefix_cache and torch.distributed.get_rank() == 0:
@@ -735,6 +753,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """
         if self.strategy.hf_config.model_type != GRUG_MOE_MODEL_TYPE:
             raise ValueError("grug_validation_snapshot is only valid for Grug models")
+        materialize_megatron_params(self.actor_module)
         wanted = set(names)
         is_rank0 = torch.distributed.get_rank() == 0
         weights = {}
@@ -811,6 +830,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             bf16=self.cfg.trainer.bf16,
             flash_attn=self.cfg.trainer.flash_attn,
             model_revision=self.cfg.trainer.ref.model.get("revision"),
+            model_source_uri=self.cfg.trainer.ref.model.get("source_uri"),
         )
 
         self.actor_module = self.make_megatron_module(
@@ -819,22 +839,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             bf16=self.cfg.trainer.bf16,
         )
 
-        # download model weights from huggingface (need to be done for ref worker as well, else errors when colocate_all=False)
-        if self._local_rank == 0 and not os.path.exists(
-            model_path
-        ):  # if not local path, try downloading model weights from huggingface
-            # Retry transient HF weight-index/safetensors fetch flakes (EOF /
-            # IncompleteRead / dropped connection / spurious "no .safetensors")
-            # that otherwise kill the whole gang at scale; genuine missing/auth
-            # failures still surface. no-op if already downloaded.
-            retry = self.cfg.trainer.model_load_retry
-            load_pretrained_with_retry(
-                lambda: snapshot_download(model_path, revision=self.cfg.trainer.ref.model.get("revision")),
-                model_id=model_path,
-                max_retries=int(retry.max_retries),
-                backoff_base=float(retry.backoff_base_seconds),
-                backoff_cap=float(retry.backoff_cap_seconds),
-            )
+        self._download_hf_snapshot_if_needed(model_path, self.cfg.trainer.ref.model)
         torch.distributed.barrier()
 
         # load weights

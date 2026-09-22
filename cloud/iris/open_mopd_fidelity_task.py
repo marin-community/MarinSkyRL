@@ -13,7 +13,8 @@ import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from cloud.iris.artifacts import fs_and_path, read_json, relative_object_key
+from cloud.iris.artifacts import fs_and_path, read_json
+from marinskyrl.resource_locator import relative_resource_path
 from cloud.iris.open_mopd_fidelity import (
     CHECKPOINT_DIRECTORY_NAME,
     DOMAINS,
@@ -443,7 +444,7 @@ def sync_tree(local: Path, output_uri: str) -> None:
     if checkpoint_sources:
         remote_details = filesystem.find(target, detail=True, withdirs=False)
         remote_sizes = {
-            relative_object_key(target, remote_path): int(details["size"])
+            relative_resource_path(target, remote_path): int(details["size"])
             for remote_path, details in remote_details.items()
         }
     for source, relative, _step in upload_entries:
@@ -494,7 +495,7 @@ def restore_latest_checkpoint(output_uri: str, output: Path) -> int | None:
     if not checkpoint_files:
         raise ValueError(f"Checkpoint pointer selects missing {GLOBAL_STEP_PREFIX}{step} under {output_uri}")
     for remote_path in [*sorted(checkpoint_files), pointer]:
-        relative = relative_object_key(target, remote_path)
+        relative = relative_resource_path(target, remote_path)
         destination = output / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         filesystem.get_file(remote_path, str(destination))

@@ -34,15 +34,10 @@ from cloud.iris.protocol import (  # noqa: E402
     SkyRLRolePlan,
     SkyRLTopology,
 )
-from marinskyrl.speculative_decoding import SpeculatorModelConfig  # noqa: E402
 from marinskyrl.task_sources import DirectoryDataSource  # noqa: E402
 from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
 from cloud.iris.runtime_environment import RuntimeProfile, task_setup_script  # noqa: E402
-from cloud.iris.task_runtime import (  # noqa: E402
-    materialize_data_sources,
-    materialize_model_export,
-    stage_draft_model,
-)
+from cloud.iris.task_runtime import materialize_data_sources  # noqa: E402
 from iris.client.client import JobFailedError  # noqa: E402
 from iris.client.workload_codec import job_status_from_proto  # noqa: E402
 from iris.cluster.types import JobName  # noqa: E402
@@ -179,7 +174,6 @@ def _spec(tmp_path: Path) -> SkyRLJobSpec:
             model=ModelLocator(
                 uri=(tmp_path / "input-model").as_uri(),
                 identity="sft-step@abc123",
-                local_path="/tmp/iceball-input-model",
                 tokenizer_uri="Qwen/Qwen3-0.6B-Base",
                 tokenizer_revision="da87bfb",
             ),
@@ -413,6 +407,28 @@ def test_launcher_argv_includes_staged_data_role_plan_and_seed(tmp_path: Path) -
     assert "++trainer.seed=7" in overrides
 
 
+def test_launcher_argv_preserves_colocate_all_with_remote_rollout(tmp_path: Path) -> None:
+    envelope = _spec(tmp_path)
+    role_plan = envelope.request.topology.role_plan
+    rollout = replace(
+        role_plan.claim(ModelRoleKind.ROLLOUT),
+        execution=RoleExecution.REMOTE,
+        colocation_group=None,
+        num_nodes=0,
+        gpus_per_node=0,
+    )
+    claims = tuple(rollout if claim.kind is ModelRoleKind.ROLLOUT else claim for claim in role_plan.claims)
+    bundles = (replace(role_plan.bundles[0], role_ids=("policy", "reference")),)
+    remote_plan = replace(role_plan, claims=claims, bundles=bundles)
+    topology = replace(envelope.request.topology, role_plan=remote_plan)
+    envelope = replace(envelope, request=replace(envelope.request, topology=topology))
+
+    argv = job_launch_argv(envelope, "config.yaml")
+
+    overrides = [argv[index + 1] for index, value in enumerate(argv) if value == "--skyrl-override"]
+    assert "++trainer.placement.colocate_all=true" in overrides
+
+
 def test_launcher_argv_encodes_lifecycle_storage_as_valid_hydra_values(tmp_path: Path, parse_hydra_overrides) -> None:
     envelope = _spec(tmp_path)
     output = replace(
@@ -437,7 +453,8 @@ def test_launcher_argv_satisfies_standalone_required_options(tmp_path: Path) -> 
     args = create_parser().parse_args(argv)
 
     assert args.rl_config == "config.yaml"
-    assert args.model_path == "/tmp/iceball-input-model"
+    assert args.model_path == str(tmp_path / "input-model")
+    assert args.model_source_uri is None
     assert args.cpu == 128
     assert args.memory == "800GB"
     assert args.disk == "4TB"
@@ -445,6 +462,19 @@ def test_launcher_argv_satisfies_standalone_required_options(tmp_path: Path) -> 
     assert argv[argv.index("--rendezvous-dir") + 1] == f"{envelope.request.output.attempts_root}/rendezvous"
     assert argv[argv.index("--ray-spill-dir") + 1] == "/tmp/skyrl-ray-spill"
     assert argv[argv.index("--ray-spill-backend") + 1] == "local"
+
+
+def test_launcher_argv_keeps_s3_model_weights_remote(tmp_path: Path) -> None:
+    envelope = _spec(tmp_path)
+    identity = "sha256:" + "a" * 64
+    model = replace(envelope.request.model, uri="s3://models/policy", identity=identity)
+    envelope = replace(envelope, request=replace(envelope.request, model=model))
+
+    args = create_parser().parse_args(job_launch_argv(envelope, "config.yaml"))
+
+    assert args.model_path == "s3://models/policy"
+    assert args.model_source_uri == "s3://models/policy"
+    assert args.model_source_identity == identity
 
 
 def test_launcher_argv_forwards_detached_submission(tmp_path: Path) -> None:
@@ -514,58 +544,6 @@ def test_execute_job_rejects_overwriting_terminal_manifest(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="immutable and already exists"):
         execute_job(envelope, mode=LaunchMode.PREPARE)
-
-
-def test_materialize_model_export_copies_and_validates_hf_directory(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "config.json").write_text("{}")
-    (source / "model.safetensors").write_bytes(b"weights")
-    (source / "tokenizer.json").write_text("{}")
-    destination = tmp_path / "destination"
-
-    materialize_model_export(source.as_uri(), str(destination), "sft-step@abc123")
-
-    assert (destination / "model.safetensors").read_bytes() == b"weights"
-    manifest = json.loads((destination / ".marinskyrl-source.json").read_text())
-    assert manifest["source_identity"] == "sft-step@abc123"
-    assert {entry["path"] for entry in manifest["files"]} == {
-        "config.json",
-        "model.safetensors",
-        "tokenizer.json",
-    }
-
-
-def test_materialize_model_export_replaces_a_stale_destination(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "config.json").write_text("{}")
-    (source / "model.safetensors").write_bytes(b"new weights")
-    (source / "tokenizer.json").write_text("{}")
-    destination = tmp_path / "destination"
-    destination.mkdir()
-    (destination / "stale.bin").write_bytes(b"old weights")
-
-    materialize_model_export(source.as_uri(), str(destination), "sft-step@new")
-
-    assert not (destination / "stale.bin").exists()
-    assert (destination / "model.safetensors").read_bytes() == b"new weights"
-
-
-def test_stage_draft_model_copies_artifact_uri_without_tokenizer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "config.json").write_text("{}")
-    (source / "model.safetensors").write_bytes(b"weights")
-    monkeypatch.setattr("marinskyrl.speculative_decoding._DRAFT_MODEL_ROOT", str(tmp_path / "drafts"))
-    model = SpeculatorModelConfig(source_uri=source.as_uri(), source_identity="draft@abc123")
-
-    stage_draft_model(model, cache_ttl_days=None, cache_source_prefix="")
-
-    destination = Path(model.node_local_path())
-    assert (destination / "model.safetensors").read_bytes() == b"weights"
 
 
 def test_materialize_data_sources_caches_one_exact_file(tmp_path: Path) -> None:
