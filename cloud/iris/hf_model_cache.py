@@ -49,7 +49,7 @@ def _remote_manifest_entry(filesystem: AbstractFileSystem, path: str, entry: Fil
     return ModelManifestFile(path=entry.path, size=entry.size, sha256=digest)
 
 
-def _snapshot_remote_model_manifest(model_uri: str) -> ModelManifest:
+def _snapshot_remote_model_manifest(model_uri: str, *, tokenizer_mode: Literal["embedded", "policy"]) -> ModelManifest:
     filesystem, root = fs_and_path(model_uri)
     inventory = file_inventory(filesystem, root)
     if not inventory:
@@ -57,7 +57,12 @@ def _snapshot_remote_model_manifest(model_uri: str) -> ModelManifest:
     with ThreadPoolExecutor(max_workers=min(_MANIFEST_HASH_WORKERS, len(inventory))) as executor:
         futures = tuple(executor.submit(_remote_manifest_entry, filesystem, path, entry) for path, entry in inventory)
         entries = tuple(future.result() for future in futures)
-    return model_manifest(tuple(sorted(entries, key=lambda entry: entry.path)), model_id=None, revision=None)
+    return model_manifest(
+        tuple(sorted(entries, key=lambda entry: entry.path)),
+        model_id=None,
+        revision=None,
+        tokenizer_mode=tokenizer_mode,
+    )
 
 
 def _model_manifest_exists(model_uri: str) -> bool:
@@ -65,22 +70,34 @@ def _model_manifest_exists(model_uri: str) -> bool:
     return filesystem.exists(marker_path)
 
 
-def ensure_model_manifest(model_uri: str) -> ModelManifest:
+def _model_manifest_with_tokenizer_mode(model_uri: str, tokenizer_mode: Literal["embedded", "policy"]) -> ModelManifest:
+    manifest = load_model_manifest(model_uri)
+    if manifest.tokenizer_mode != tokenizer_mode:
+        raise ValueError(
+            f"Model manifest tokenizer mode mismatch at {model_uri}: "
+            f"expected {tokenizer_mode}, found {manifest.tokenizer_mode}"
+        )
+    return manifest
+
+
+def ensure_model_manifest(
+    model_uri: str, *, tokenizer_mode: Literal["embedded", "policy"] = "embedded"
+) -> ModelManifest:
     """Read a model manifest, creating one for a legacy object-store export."""
     if _model_manifest_exists(model_uri):
-        return load_model_manifest(model_uri)
+        return _model_manifest_with_tokenizer_mode(model_uri, tokenizer_mode)
 
     lock = create_lock(f"{model_uri}.manifest.lock")
     while not lock.try_acquire():
         if _model_manifest_exists(model_uri):
-            return load_model_manifest(model_uri)
+            return _model_manifest_with_tokenizer_mode(model_uri, tokenizer_mode)
         time.sleep(_CACHE_POLL_INTERVAL)
 
     try:
         if _model_manifest_exists(model_uri):
-            return load_model_manifest(model_uri)
+            return _model_manifest_with_tokenizer_mode(model_uri, tokenizer_mode)
         with lease_refresh(lock):
-            manifest = _snapshot_remote_model_manifest(model_uri)
+            manifest = _snapshot_remote_model_manifest(model_uri, tokenizer_mode=tokenizer_mode)
             write_json(
                 join_resource_path(model_uri, MODEL_MANIFEST_FILENAME),
                 manifest.model_dump(mode="json"),

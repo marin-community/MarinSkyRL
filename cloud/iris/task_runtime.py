@@ -507,7 +507,7 @@ def prepare_draft_model(
         )
     else:
         source_uri = model.source_uri
-        manifest = ensure_model_manifest(source_uri)
+        manifest = ensure_model_manifest(source_uri, tokenizer_mode="policy")
         if model.source_identity.startswith("sha256:") and model.source_identity != manifest.identity:
             raise ValueError(
                 f"Draft manifest identity mismatch: requested {model.source_identity}, "
