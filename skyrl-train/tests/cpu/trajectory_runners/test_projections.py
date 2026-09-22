@@ -60,6 +60,18 @@ def test_whole_trajectory_projection_preserves_one_sample_per_trajectory():
     assert "trajectory_ids" not in output
 
 
+def test_whole_trajectory_projection_preserves_routes_and_fills_missing_rows():
+    routed = _step([3, 4], [0.0, 1.0])
+    routed.evidence = replace(routed.evidence, routed_experts=(((1, 2),), ((3, 4),)))
+
+    output = WholeTrajectoryProjection(_config(), _Tokenizer()).project(
+        [routed, _step([5], [0.0])],
+        {"env_classes": None, "sampling_params": {"logprobs": True}},
+    )
+
+    assert output["rollout_routed_experts"] == [[[[1, 2]], [[3, 4]]], [[[0, 0]]]]
+
+
 def test_whole_trajectory_projection_adapts_masked_scalar_row_to_token_level_rewards():
     failed = _step([0], 0.0)
     failed = replace(
@@ -112,6 +124,22 @@ def test_step_wise_projection_preserves_group_identity_and_final_step():
     assert output["is_last_step"] == [False, True]
     assert output["actual_global_step"] == 5
     assert output["rollout_metrics"]["generate/token_provenance/reconstructed_fraction"] == 0.5
+
+
+def test_step_wise_projection_preserves_routes():
+    step = _step([3, 4], [0.0, 1.0])
+    step.evidence = replace(step.evidence, routed_experts=(((1, 2),), ((3, 4),)))
+
+    output = StepWiseTrajectoryProjection(_config(), _Tokenizer()).project(
+        [[step]],
+        {
+            "env_classes": ["math"],
+            "trajectory_ids": [TrajectoryID("task", 0)],
+            "sampling_params": {"logprobs": True},
+        },
+    )
+
+    assert output["rollout_routed_experts"] == [[[[1, 2]], [[3, 4]]]]
 
 
 def test_step_wise_projection_preserves_student_topk_candidates():

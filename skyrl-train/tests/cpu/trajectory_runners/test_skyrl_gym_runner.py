@@ -577,6 +577,7 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
         "prompt_ids": [[11, 12, 13]],
         "stop_reasons": ["tool_calls"],
         "response_logprobs": [[-0.1, -0.2]],
+        "routed_experts": [[[[1, 2]], [[3, 4]]]],
         "prompt_logprobs": None,
         "assistant_messages": [assistant_message],
         "token_provenance": "engine",
@@ -604,6 +605,7 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
     assert evidence.metadata["assistant_message"] == assistant_message
     assert output.evidence.prompt_token_ids == (11, 12, 13)
     assert output.evidence.response_token_ids == (21, 22)
+    assert output.evidence.routed_experts == (((1, 2),), ((3, 4),))
 
 
 @pytest.mark.asyncio
@@ -916,6 +918,7 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
             "stop_reasons": ["stop"],
             "response_ids": [[10, 4]],
             "response_logprobs": [[-0.1, -0.2]],
+            "routed_experts": [[[[1, 2]], [[3, 4]]]],
             "student_topk_indices": [[[11, 12], [13, 14]]],
             "behavior_topk_logprobs": [[[-0.1, -2.0], [-0.2, -1.9]]],
         },
@@ -924,6 +927,7 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
             "stop_reasons": ["stop"],
             "response_ids": [[20, 4]],
             "response_logprobs": [[-0.3, -0.4]],
+            "routed_experts": [[[[5, 6]], [[7, 8]]]],
             "student_topk_indices": [[[21, 22], [23, 24]]],
             "behavior_topk_logprobs": [[[-0.3, -1.8], [-0.4, -1.7]]],
         },
@@ -947,6 +951,9 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
     assert output["response_ids"] == [[10, 4, *MOCK_TOKENIZER_ENCODED_IDS, 20, 4]]
     assert output["loss_masks"] == [[1, 1, 0, 0, 0, 0, 1, 1]]
     assert output["rollout_logprobs"] == [[-0.1, -0.2, 0.0, 0.0, 0.0, 0.0, -0.3, -0.4]]
+    assert output["rollout_routed_experts"] == [
+        [[[1, 2]], [[3, 4]], [[0, 0]], [[0, 0]], [[0, 0]], [[0, 0]], [[5, 6]], [[7, 8]]]
+    ]
     assert output["student_topk_indices"] == [
         [[11, 12], [13, 14], [-1, -1], [-1, -1], [-1, -1], [-1, -1], [21, 22], [23, 24]]
     ]
