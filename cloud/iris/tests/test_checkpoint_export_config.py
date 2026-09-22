@@ -6,7 +6,6 @@ from omegaconf import OmegaConf
 
 from cloud.iris.export_hf_checkpoint import (
     ExportJobSpec,
-    build_command,
     checkpoint_export_launch_config,
 )
 from skyrl_train.hf_export_schema import HFExportRequest
@@ -74,18 +73,11 @@ def test_checkpoint_export_config_carries_request_fields_as_data() -> None:
     assert config.runtime.entrypoint == "skyrl_train.entrypoints.checkpoint_export"
     assert config.runtime.profile == "fsdp-export"
     assert config.iris.timeout == 7200
+    assert config.iris.allocation.gpu_variant == "H100"
     assert config.skyrl.trainer.placement.policy_num_nodes == 1
     assert config.skyrl.trainer.placement.policy_num_gpus_per_node == 4
     assert config.skyrl.checkpoint_export.checkpoint_path == request.checkpoint_path
     assert config.skyrl.checkpoint_export.export_root == request.export_path
-
-
-def test_export_backend_uses_one_launch_document() -> None:
-    request = _request()
-    command = build_command(_spec(request))
-
-    assert command[:4] == [command[0], "-m", "cloud.iris.launch", "iris"]
-    assert command[-2:] == ["--config", "/tmp/export.yaml"]
 
 
 def test_checkpoint_export_config_preserves_federated_routing() -> None:
@@ -100,3 +92,13 @@ def test_checkpoint_export_config_preserves_federated_routing() -> None:
 
     assert config.iris.target_cluster == "cw-rno2a"
     assert config.iris.parent_cluster_config == "/tmp/marin.yaml"
+
+
+def test_checkpoint_export_config_preserves_saved_policy_geometry_on_whole_nodes() -> None:
+    request = _request()
+    spec = replace(_spec(request), allocation_gpus_per_node=8)
+
+    config = checkpoint_export_launch_config(_training_config(), request, spec)
+
+    assert config.iris.allocation.gpus_per_node == 8
+    assert config.skyrl.trainer.placement.policy_num_gpus_per_node == 4

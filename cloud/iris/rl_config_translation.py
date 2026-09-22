@@ -47,7 +47,6 @@ class RLEntrypoint(StrEnum):
 @dataclass(frozen=True)
 class RLEntrypointSpec:
     module: str
-    function_name: str = "run"
 
 
 RL_ENTRYPOINTS = MappingProxyType(
