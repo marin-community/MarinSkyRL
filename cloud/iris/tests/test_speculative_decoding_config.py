@@ -90,6 +90,26 @@ def test_managed_speculator_reaches_hydra_with_immutable_source_unchanged(tmp_pa
     assert resolved.training.reserved_gpu_memory_gib == 8
 
 
+def test_local_speculator_uses_model_without_hub_resolution() -> None:
+    value = _base_config()["generator"]["speculative_decoding"]
+    value["model"]["source_uri"] = "/tmp/draft-model"
+
+    resolved = parse_speculative_decoding_config(
+        value,
+        backend="vllm",
+        run_engines_locally=True,
+        entrypoint="skyrl_train.entrypoints.main_base",
+        colocate_all=False,
+    )
+
+    assert resolved is not None
+    assert resolved.vllm_speculative_config() == {
+        "method": "eagle3",
+        "model": "/tmp/draft-model",
+        "num_speculative_tokens": 3,
+    }
+
+
 def test_null_speculator_keeps_the_default_disabled() -> None:
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         cfg = compose(config_name="ppo_base_config")
@@ -157,7 +177,7 @@ def test_gcs_alias_is_normalized_for_vllm_runai_loading(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("source_uri", "laion/draft", "must use hf://"),
+        ("source_uri", "laion/draft", "must be an absolute local path or use hf://"),
         ("source_uri", "hf://laion", "must have the form"),
         ("source_identity", "main", "full 40-character"),
     ],

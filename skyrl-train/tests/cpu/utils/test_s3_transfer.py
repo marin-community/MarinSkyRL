@@ -10,6 +10,7 @@ import threading
 import time
 from types import SimpleNamespace
 
+from aiohttp import ClientPayloadError
 from botocore.exceptions import ClientError, ReadTimeoutError
 from fsspec.exceptions import FSTimeoutError
 import pytest
@@ -340,6 +341,7 @@ def test_abort_multipart_uploads_rejects_noncanonical_checkpoint_path():
     [
         (FSTimeoutError("injected fsspec timeout"), 0),
         (ReadTimeoutError(endpoint_url="https://bucket.invalid/shard.pt", error="injected SDK timeout"), 0),
+        (ClientPayloadError("incomplete S3 response body"), 0),
         (OSError(5, "An error occurred (Forbidden) when calling ListObjectsV2: AccessDenied"), 2),
         (
             ClientError(

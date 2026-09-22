@@ -253,9 +253,9 @@ def test_sync_requires_paused_generation(local_store):
         asyncio.run(sync.sync(3))
 
 
-def test_prepare_requires_node_local_placement(local_store):
+def test_prepare_requires_checked_worker_placements(local_store):
     ranks = FakeRanks()
     ranks.engines[1].worker_placements = None
     sync = ExpertBlockSync(policy_model=ranks, inference_engine_client=ranks, timeout_seconds=30)
-    with pytest.raises(ValueError, match="node-local engine replicas"):
+    with pytest.raises(ValueError, match="checked worker placements"):
         asyncio.run(sync.prepare())

@@ -11,6 +11,7 @@ import ray
 import torch
 import asyncio
 import vllm
+from zmq.error import ZMQError
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
@@ -44,7 +45,7 @@ from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 
 from vllm.v1.metrics.loggers import LoggingStatLogger
 from vllm.lora.request import LoRARequest
-from torch.distributed import destroy_process_group
+from torch.distributed import DistNetworkError, destroy_process_group
 from skyrl_train.distributed.utils import init_custom_process_group
 from uuid import uuid4
 import warnings
@@ -72,8 +73,10 @@ from skyrl_train.inference_engines.vllm.utils import (
     pop_vllm_wrapper_kwargs,
     apply_openai_sampling,
     ensure_token_ids_in_sse_chunk,
+    is_port_collision,
     PrefixCacheHitRateAccumulator,
 )
+from skyrl_train.inference_engines.utils import VLLM_DATA_PARALLEL_MASTER_PORT_COUNT
 from skyrl_train.inference_engines.vllm.stats import (
     IntervalReadMode,
     VLLMCumulativeStats,
@@ -87,6 +90,26 @@ import time
 
 
 _exact_chat_prompt_token_ids: ContextVar[list[int] | None] = ContextVar("exact_chat_prompt_token_ids", default=None)
+
+
+def _create_async_engine(engine_args, stat_loggers, data_parallel_master_ports):
+    if data_parallel_master_ports is None:
+        return vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
+    if len(data_parallel_master_ports) != VLLM_DATA_PARALLEL_MASTER_PORT_COUNT:
+        raise ValueError(
+            f"vLLM data parallelism requires {VLLM_DATA_PARALLEL_MASTER_PORT_COUNT} master ports, "
+            f"got {len(data_parallel_master_ports)}"
+        )
+    *worker_ports, master_port = data_parallel_master_ports
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.parallel_config._data_parallel_master_port_list = worker_ports
+    vllm_config.parallel_config.data_parallel_master_port = master_port
+    return vllm.AsyncLLMEngine.from_vllm_config(
+        vllm_config,
+        stat_loggers=stat_loggers,
+        enable_log_requests=False,
+        disable_log_stats=True,
+    )
 
 
 class SkyRLOpenAIServingChat(OpenAIServingChat):
@@ -1016,6 +1039,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
     """Base class containing shared logic between sync and async VLLM engines."""
 
     def __init__(self, *args, bundle_indices: list = None, **kwargs):
+        rendezvous_port_reservation = kwargs.pop("rendezvous_port_reservation", None)
+        if rendezvous_port_reservation is not None:
+            ray.get(rendezvous_port_reservation.release.remote())
         setup_envvars_for_vllm(kwargs, bundle_indices)
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
         logger.info(
@@ -1633,6 +1659,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await set_async_worker_numa_affinity(self.llm.collective_rpc)
 
     def _create_engine(self, *args, **kwargs):
+        data_parallel_master_ports = kwargs.pop("data_parallel_master_ports", None)
         wrapper_kwargs = pop_vllm_wrapper_kwargs(kwargs)
         # Store sampling params for OpenAI-style requests (Harbor rollouts)
         self._openai_sampling_params = wrapper_kwargs.pop("openai_sampling_params", {})
@@ -1682,41 +1709,16 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # "loses" a restart slot until the next dependency-satisfied slot
         # finally gets a fresh port.
         #
-        # 5 attempts with exponential backoff (15→30→60→120→240 s) bridges
-        # the TIME_WAIT window cleanly while staying well under the outer
-        # wait_for_engine_startup deadline.
+        # Non-DP engines use 5 attempts with exponential backoff
+        # (15→30→60→120→240 s) to bridge the TIME_WAIT window while
+        # staying below the outer startup deadline.
         import random
         import time
-        from torch.distributed import DistNetworkError
 
-        def _is_port_collision(exc: BaseException) -> bool:
-            """True if exc (or any cause in its chain) is an EADDRINUSE port race.
-
-            The within-node port collision can surface two ways:
-              - directly as torch DistNetworkError(EADDRINUSE) on the legacy path;
-              - WRAPPED by vLLM V1 as ``RuntimeError("Engine core initialization
-                failed. ...")`` because the bind happens in the EngineCore child
-                process, where the DistNetworkError is logged but the parent only
-                sees the generic wrapper. Match both: the message OR the wrapper.
-            """
-            seen = set()
-            cur: BaseException | None = exc
-            while cur is not None and id(cur) not in seen:
-                seen.add(id(cur))
-                msg = str(cur).lower()
-                if "eaddrinuse" in msg or "address already in use" in msg or "already in use" in msg:
-                    return True
-                if isinstance(cur, DistNetworkError):
-                    return True
-                if isinstance(cur, RuntimeError) and "engine core initialization failed" in msg:
-                    # V1 EngineCore child died during distributed init — the
-                    # overwhelmingly common transient cause on colocated/host-
-                    # network multi-engine starts is a TCPStore port collision.
-                    return True
-                cur = cur.__cause__ or cur.__context__
-            return False
-
-        _MAX_INIT_ATTEMPTS = 5
+        # A data-parallel pool must restart all ranks together. Retrying one
+        # actor leaves its peers attached to the failed coordinator generation.
+        coordinated_data_parallel = kwargs.get("data_parallel_size", 1) > 1
+        _MAX_INIT_ATTEMPTS = 1 if coordinated_data_parallel else 5
         _BACKOFF_BASE_SEC = 15.0
         engine = None
         for _attempt in range(_MAX_INIT_ATTEMPTS):
@@ -1727,17 +1729,17 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             )
             time.sleep(_stagger)
             try:
-                engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
+                engine = _create_async_engine(engine_args, stat_loggers, data_parallel_master_ports)
                 break
-            except (DistNetworkError, RuntimeError) as e:
-                if not _is_port_collision(e):
+            except (DistNetworkError, RuntimeError, ZMQError) as e:
+                if not is_port_collision(e):
                     raise
                 if _attempt == _MAX_INIT_ATTEMPTS - 1:
                     logger.error(f"Engine init still hit EADDRINUSE after {_MAX_INIT_ATTEMPTS} attempts; giving up")
                     raise
                 _backoff = _BACKOFF_BASE_SEC * (2**_attempt)
                 logger.warning(
-                    f"Engine init hit a port collision (EADDRINUSE / engine-core init) on attempt "
+                    f"Engine init hit a port collision (EADDRINUSE) on attempt "
                     f"{_attempt + 1}/{_MAX_INIT_ATTEMPTS}; retrying in {_backoff:.0f}s: {str(e).splitlines()[0]}"
                 )
                 time.sleep(_backoff)

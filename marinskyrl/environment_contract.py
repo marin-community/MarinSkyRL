@@ -12,7 +12,6 @@ import shlex
 import site
 import socket
 import sys
-from contextlib import contextmanager
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -81,11 +80,15 @@ VLLM_BATCH_INVARIANT_ENV = "VLLM_BATCH_INVARIANT"
 VLLM_ALLOW_INSECURE_SERIALIZATION_ENV = "VLLM_ALLOW_INSECURE_SERIALIZATION"
 WANDB_ENTITY_ENV = "WANDB_ENTITY"
 HF_HUB_OFFLINE_ENV = "HF_HUB_OFFLINE"
+TRANSFORMERS_OFFLINE_ENV = "TRANSFORMERS_OFFLINE"
 LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
 NVRTC_HOME_ENV = "NVRTC_HOME"
 CUDA_HOME_ENV = "CUDA_HOME"
 LIBRARY_PATH_ENV = "LIBRARY_PATH"
+MAX_JOBS_ENV = "MAX_JOBS"
 CUDA_WHEEL_NAMESPACE = "cu13"
+# Native CUDA compiler workers can consume about 5 GB each; keep cold JITs near a 40 GB host-memory budget.
+DEFAULT_CUDA_JIT_MAX_JOBS = "8"
 RAY_CLUSTER_OWNER_ENV = "SKYRL_RAY_CLUSTER_OWNER"
 NUMA_AFFINITY_ENV = "SKYRL_ENABLE_NUMA_AFFINITY"
 TELEMETRY_ENDPOINT_ENV = "SKYRL_TELEMETRY_ENDPOINT"
@@ -192,6 +195,12 @@ ENV_VAR_SPECS = (
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
     ),
     EnvVarSpec(
+        MAX_JOBS_ENV,
+        "runtime.bootstrap",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
         RAY_CLUSTER_OWNER_ENV,
         "runtime.ray_cluster",
         EnvVarSource.EXTERNAL,
@@ -262,7 +271,6 @@ _BUILD_BOUNDARIES = {
     "LANG",
     "LANGUAGE",
     "LC_ALL",
-    "MAX_JOBS",
     "MAMBA_FORCE_BUILD",
     "NVCC_THREADS",
     "NVTE_BUILD_MAX_JOBS",
@@ -299,6 +307,7 @@ _RUNTIME_BOUNDARIES = {
     "LOCAL_RANK",
     "MASTER_ADDR",
     "MASTER_PORT",
+    "MAX_JOBS",
     "MLFLOW_TRACKING_URI",
     "NCCL_CUMEM_ENABLE",
     "NCCL_DEBUG",
@@ -339,7 +348,7 @@ _RUNTIME_BOUNDARIES = {
     "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC",
     "TORCH_NCCL_TRACE_CPP_STACK",
     "TRAIN_FILE",
-    "TRANSFORMERS_OFFLINE",
+    TRANSFORMERS_OFFLINE_ENV,
     "UV_USE_IO_URING",
     "VLLM_ALLOW_INSECURE_SERIALIZATION",
     "VLLM_ALLOW_ROUTED_EXPERTS_DCP",
@@ -435,6 +444,7 @@ class EnvVarManager:
             NVRTC_HOME_ENV,
             CUDA_HOME_ENV,
             LIBRARY_PATH_ENV,
+            MAX_JOBS_ENV,
             TELEMETRY_ENDPOINT_ENV,
             RUN_ID_ENV,
             EXECUTION_UID_ENV,
@@ -495,7 +505,7 @@ class EnvVarManager:
         cls,
         site_packages: list[str],
     ) -> "EnvVarManager":
-        """Resolve Python-wheel CUDA library paths for task and Ray worker processes."""
+        """Resolve Python-wheel CUDA paths and a bounded JIT worker pool for task and Ray worker processes."""
         nvidia_roots = [Path(root) / "nvidia" for root in site_packages if (Path(root) / "nvidia").is_dir()]
         library_paths = sorted(path for root in nvidia_roots for path in root.glob("*/lib") if path.is_dir())
         cuda_roots = [
@@ -514,6 +524,7 @@ class EnvVarManager:
                 NVRTC_HOME_ENV: str(cuda_root),
                 CUDA_HOME_ENV: str(cuda_root),
                 LIBRARY_PATH_ENV: str(cuda_root.parents[3]),
+                MAX_JOBS_ENV: DEFAULT_CUDA_JIT_MAX_JOBS,
             }
         )
 
@@ -582,26 +593,6 @@ class EnvVarManager:
         if artifact_root := values.get(DEBUG_ARTIFACT_DIR_ENV):
             ensure_debug_artifact_directories(artifact_root)
         return values
-
-
-@contextmanager
-def temporarily_unset_managed_environment(
-    name: str,
-    scope: EnvVarScope,
-    *,
-    environ: MutableMapping[str, str] | None = None,
-):
-    """Temporarily remove one registered variable and restore its exact prior state."""
-    spec = _SPECS_BY_NAME.get(name)
-    if spec is None or scope not in spec.scopes:
-        raise ValueError(f"{name!r} is not registered for the {scope.value} environment scope")
-    target = os.environ if environ is None else environ
-    previous = target.pop(name, None)
-    try:
-        yield
-    finally:
-        if previous is not None:
-            target[name] = previous
 
 
 def ensure_debug_artifact_directories(artifact_root: str) -> None:

@@ -370,7 +370,8 @@ generator:
   # How weights reach the engines. "broadcast": trainer rank 0 sends every tensor to every engine.
   # "expert_block": each MoE expert matrix is broadcast from a Megatron rank that holds it to the vLLM
   # workers that serve it. Needs FullyAsyncRayPPOTrainer, a Grug MoE on the megatron strategy at TP=1
-  # and ETP=1, node-local vLLM engines, the NCCL weight-sync backend and vLLM's TRITON MoE backend.
+  # and ETP=1, local vLLM engines at TP=1 with EP=DP>1, the NCCL weight-sync backend and vLLM's TRITON
+  # MoE backend.
   weight_sync_transport: "broadcast"
   expert_block_sync:
     timeout_seconds: 600  # For creating the sync groups and for the broadcasts of each sync.
@@ -385,12 +386,6 @@ generator:
   inference_engine_data_parallel_size: 1
   inference_engine_decode_context_parallel_size: 1
   inference_engine_mp_backend: false
-  # Keep each pipeline stage of a DP/EP replica on one node and verify its physical GPUs at startup:
-  # non-colocated async vLLM on the Ray executor with TP=1, DP>1, EP=DP and a stage that fits a node.
-  # "auto" also needs the engine's GPUs to be a whole number of nodes on a multi-node cluster, so its
-  # own group cannot leave nodes partly used, and places any other engine as before. "require" packs
-  # or refuses. "off" never packs.
-  inference_engine_node_local: "auto"
   n_samples_per_prompt: 5
   async_engine: true
   batched: false
@@ -408,6 +403,8 @@ generator:
   enable_http_endpoint: false
   http_endpoint_host: "127.0.0.1"
   http_endpoint_port: 8000
+  # Deadline for every engine to acknowledge a weight-sync pause or resume.
+  weight_sync_pause_timeout_seconds: 30.0
   max_turns: 1
 
   chat_template:
