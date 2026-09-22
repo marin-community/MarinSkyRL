@@ -1002,9 +1002,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
     """Base class containing shared logic between sync and async VLLM engines."""
 
     def __init__(self, *args, bundle_indices: list = None, **kwargs):
-        rendezvous_port_reservation = kwargs.pop("rendezvous_port_reservation", None)
-        if rendezvous_port_reservation is not None:
-            ray.get(rendezvous_port_reservation.release.remote())
+        self._rendezvous_port_reservation = kwargs.pop("rendezvous_port_reservation", None)
         setup_envvars_for_vllm(kwargs, bundle_indices)
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
         logger.info(
@@ -1043,6 +1041,12 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
     def _create_engine(self, *args, **kwargs):
         """Abstract method for subclasses to implement engine creation."""
         raise NotImplementedError("Subclasses must implement _create_engine")
+
+    def _release_rendezvous_port_reservation(self) -> None:
+        if self._rendezvous_port_reservation is None:
+            return
+        ray.get(self._rendezvous_port_reservation.release.remote())
+        self._rendezvous_port_reservation = None
 
     def _preprocess_prompts(self, input_batch: InferenceEngineInput):
         """Common prompt preprocessing logic."""
@@ -1199,6 +1203,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         wrapper_kwargs = pop_vllm_wrapper_kwargs(kwargs)
         self._openai_sampling_params = wrapper_kwargs.pop("openai_sampling_params", {})
         self._validate_rollout_logprob_sampling = wrapper_kwargs.pop(ROLLOUT_LOGPROB_VALIDATION_KEY, False)
+        self._release_rendezvous_port_reservation()
         return vllm.LLM(*args, **kwargs)
 
     async def initialize_worker_numa_affinity(self):
@@ -1656,11 +1661,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         else:
             engine_args = vllm.AsyncEngineArgs(**kwargs)
 
-        # Stagger engine startup to avoid TOCTOU port collisions (EADDRINUSE).
-        # vLLM's get_open_port() queries a free port then releases the socket;
-        # if multiple engines on the same node call it simultaneously, they can
-        # get the same port. A random pre-startup delay desynchronises the
-        # within-job case.
+        # A single engine still relies on vLLM's opportunistic port selection.
+        # Stagger and retry that isolated startup to handle collisions with
+        # other processes on the node.
         #
         # The retry loop below additionally addresses the *cross-job* race
         # we hit on Jupiter A3 RL chain restarts (job 485102, 2026-05-23):
@@ -1672,41 +1675,44 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # "loses" a restart slot until the next dependency-satisfied slot
         # finally gets a fresh port.
         #
-        # Non-DP engines use 5 attempts with exponential backoff
-        # (15→30→60→120→240 s) to bridge the TIME_WAIT window while
-        # staying below the outer startup deadline.
         import random
         import time
 
-        # A data-parallel pool must restart all ranks together. Retrying one
-        # actor leaves its peers attached to the failed coordinator generation.
         coordinated_data_parallel = kwargs.get("data_parallel_size", 1) > 1
-        _MAX_INIT_ATTEMPTS = 1 if coordinated_data_parallel else 5
-        _BACKOFF_BASE_SEC = 15.0
-        engine = None
-        for _attempt in range(_MAX_INIT_ATTEMPTS):
-            _stagger = random.uniform(1.5, 3.0)
-            logger.info(
-                f"Engine startup stagger: sleeping {_stagger:.2f}s "
-                f"(attempt {_attempt + 1}/{_MAX_INIT_ATTEMPTS}) to avoid port collisions"
-            )
-            time.sleep(_stagger)
-            try:
-                engine = _create_async_engine(engine_args, stat_loggers, data_parallel_master_ports)
-                break
-            except (DistNetworkError, RuntimeError, ZMQError) as e:
-                if not is_port_collision(e):
-                    raise
-                if _attempt == _MAX_INIT_ATTEMPTS - 1:
-                    logger.error(f"Engine init still hit EADDRINUSE after {_MAX_INIT_ATTEMPTS} attempts; giving up")
-                    raise
-                _backoff = _BACKOFF_BASE_SEC * (2**_attempt)
-                logger.warning(
-                    f"Engine init hit a port collision (EADDRINUSE) on attempt "
-                    f"{_attempt + 1}/{_MAX_INIT_ATTEMPTS}; retrying in {_backoff:.0f}s: {str(e).splitlines()[0]}"
+        if coordinated_data_parallel:
+            # The driver reserved every DP rendezvous port before launching the
+            # actors. Rank 0 transfers ownership immediately before vLLM binds;
+            # all ranks then either form one generation or fail together.
+            self._release_rendezvous_port_reservation()
+            engine = _create_async_engine(engine_args, stat_loggers, data_parallel_master_ports)
+        else:
+            engine = None
+            _MAX_INIT_ATTEMPTS = 5
+            _BACKOFF_BASE_SEC = 15.0
+            for _attempt in range(_MAX_INIT_ATTEMPTS):
+                _stagger = random.uniform(1.5, 3.0)
+                logger.info(
+                    f"Engine startup stagger: sleeping {_stagger:.2f}s "
+                    f"(attempt {_attempt + 1}/{_MAX_INIT_ATTEMPTS}) to avoid port collisions"
                 )
-                time.sleep(_backoff)
-        assert engine is not None  # loop either breaks with engine set or raises
+                time.sleep(_stagger)
+                try:
+                    engine = _create_async_engine(engine_args, stat_loggers, data_parallel_master_ports)
+                    break
+                except (DistNetworkError, RuntimeError, ZMQError) as e:
+                    if not is_port_collision(e):
+                        raise
+                    if _attempt == _MAX_INIT_ATTEMPTS - 1:
+                        logger.error(f"Engine init still hit EADDRINUSE after {_MAX_INIT_ATTEMPTS} attempts; giving up")
+                        raise
+                    _backoff = _BACKOFF_BASE_SEC * (2**_attempt)
+                    logger.warning(
+                        f"Engine init hit a port collision (EADDRINUSE) on attempt "
+                        f"{_attempt + 1}/{_MAX_INIT_ATTEMPTS}; retrying in {_backoff:.0f}s: "
+                        f"{str(e).splitlines()[0]}"
+                    )
+                    time.sleep(_backoff)
+            assert engine is not None  # loop either breaks with engine set or raises
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
         model_config = engine.model_config
