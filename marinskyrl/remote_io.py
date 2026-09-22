@@ -8,33 +8,16 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import errno
+import logging
 import os
-from typing import Any, cast, Protocol, TypeVar, runtime_checkable
+from typing import Any, cast, Protocol, TYPE_CHECKING, TypeVar, runtime_checkable
 
-import botocore.session
-from fsspec.spec import AbstractFileSystem
-import httpcore
-import httpx
-from huggingface_hub.errors import (
-    EntryNotFoundError,
-    GatedRepoError,
-    HfHubHTTPError,
-    LocalEntryNotFoundError,
-    RepositoryNotFoundError,
-    RevisionNotFoundError,
-)
-from loguru import logger
-import requests
-from rigging.filesystem.factory import filesystem as guarded_filesystem
-from rigging.filesystem.factory import url_to_fs as guarded_url_to_fs
-from rigging.filesystem.s3_compat import s3_python_config_kwargs
-from rigging.filesystem.s3_errors import is_transient_s3_error
-from rigging.filesystem.storage_path import StoragePath
-from rigging.timing import ExponentialBackoff, retry_with_backoff
-import urllib3
+if TYPE_CHECKING:
+    from fsspec.spec import AbstractFileSystem
 
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 MINIMUM_S3_MULTIPART_PART_BYTES = 5 * 2**20
 DEFAULT_S3_MULTIPART_PART_BYTES = 64 * 2**20
@@ -64,17 +47,6 @@ _RETRYABLE_TRANSLATED_ERROR_MARKERS = (
     "serviceunavailable",
     "slowdown",
 )
-_HF_FATAL_ERRORS = (RepositoryNotFoundError, RevisionNotFoundError, GatedRepoError)
-_HF_TRANSIENT_ERRORS = (
-    OSError,
-    httpx.TransportError,
-    httpcore.ProtocolError,
-    requests.exceptions.RequestException,
-    urllib3.exceptions.HTTPError,
-    HfHubHTTPError,
-    EntryNotFoundError,
-    LocalEntryNotFoundError,
-)
 _HF_TRANSIENT_MESSAGE_FRAGMENTS = (
     "incompleteread",
     "incomplete read",
@@ -94,6 +66,8 @@ _S3_FILESYSTEM: AbstractFileSystem | None = None
 
 def create_s3_filesystem(**storage_options: Any) -> AbstractFileSystem:
     """Create an uncached S3 filesystem through Rigging's guarded factory."""
+    from rigging.filesystem.factory import filesystem as guarded_filesystem
+
     return guarded_filesystem("s3", **storage_options)
 
 
@@ -101,6 +75,8 @@ def get_s3_filesystem() -> AbstractFileSystem:
     """Return the shared guarded S3 filesystem with bounded request attempts."""
     global _S3_FILESYSTEM
     if _S3_FILESYSTEM is None:
+        from rigging.filesystem.s3_compat import s3_python_config_kwargs
+
         config_kwargs = s3_python_config_kwargs()
         config_kwargs["retries"] = {"total_max_attempts": _S3_REQUEST_TOTAL_ATTEMPTS, "mode": "standard"}
         config_kwargs["s3"] = {
@@ -117,10 +93,14 @@ def filesystem_and_path(uri: str) -> tuple[AbstractFileSystem, str]:
     if uri.startswith(("s3://", "s3a://")):
         filesystem = get_s3_filesystem()
         return filesystem, filesystem._strip_protocol(uri)
+    from rigging.filesystem.factory import url_to_fs as guarded_url_to_fs
+
     return guarded_url_to_fs(uri)
 
 
 def _s3_expiry_time() -> datetime | None:
+    import botocore.session
+
     credentials = botocore.session.get_session().get_credentials()
     if credentials is None:
         return None
@@ -133,7 +113,7 @@ def _refresh_s3_credentials(filesystem: AbstractFileSystem) -> None:
     try:
         filesystem.connect(refresh=True)
     except Exception:
-        logger.opt(exception=True).warning("Failed to refresh S3 credentials before retry")
+        logger.warning("Failed to refresh S3 credentials before retry", exc_info=True)
 
 
 def refresh_s3_credentials_if_expiring(filesystem: AbstractFileSystem) -> None:
@@ -145,6 +125,8 @@ def refresh_s3_credentials_if_expiring(filesystem: AbstractFileSystem) -> None:
 
 def _classify_s3_error(error: Exception) -> tuple[bool, bool]:
     """Return whether to retry and whether a retry should refresh credentials."""
+    from rigging.filesystem.s3_errors import is_transient_s3_error
+
     response = getattr(error, "response", None)
     if isinstance(response, dict):
         code = str(response.get("Error", {}).get("Code", ""))
@@ -171,6 +153,8 @@ def call_with_s3_retry(
     **kwargs: Any,
 ) -> T:
     """Call one S3 operation using the shared timeout, retry, and credential policy."""
+    from rigging.timing import ExponentialBackoff, retry_with_backoff
+
     if max_attempts < 1:
         raise ValueError("max_attempts must be positive")
 
@@ -213,13 +197,37 @@ def call_with_filesystem_retry(
 
 def is_transient_hugging_face_error(error: BaseException) -> bool:
     """Return whether a Hugging Face failure is safe to retry."""
+    import httpcore
+    import httpx
+    from huggingface_hub.errors import (
+        EntryNotFoundError,
+        GatedRepoError,
+        HfHubHTTPError,
+        LocalEntryNotFoundError,
+        RepositoryNotFoundError,
+        RevisionNotFoundError,
+    )
+    import requests
+    import urllib3
+
+    fatal_errors = (RepositoryNotFoundError, RevisionNotFoundError, GatedRepoError)
+    transient_errors = (
+        OSError,
+        httpx.TransportError,
+        httpcore.ProtocolError,
+        requests.exceptions.RequestException,
+        urllib3.exceptions.HTTPError,
+        HfHubHTTPError,
+        EntryNotFoundError,
+        LocalEntryNotFoundError,
+    )
     seen: set[int] = set()
     current: BaseException | None = error
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, _HF_FATAL_ERRORS):
+        if isinstance(current, fatal_errors):
             return False
-        if isinstance(current, _HF_TRANSIENT_ERRORS):
+        if isinstance(current, transient_errors):
             return True
         message = str(current).lower()
         if any(fragment in message for fragment in _HF_TRANSIENT_MESSAGE_FRAGMENTS):
@@ -242,6 +250,8 @@ def call_with_hugging_face_retry(
     backoff_cap: float = DEFAULT_HF_BACKOFF_CAP_SECONDS,
 ) -> T:
     """Call a Hub operation with the shared transient-failure policy."""
+    from rigging.timing import ExponentialBackoff, retry_with_backoff
+
     return retry_with_backoff(
         call,
         retryable=is_transient_hugging_face_error,
@@ -523,6 +533,8 @@ def open_output_stream(
 
 def abort_multipart_uploads(path: str) -> int:
     """Abort incomplete uploads below a canonical S3 checkpoint prefix."""
+    from rigging.filesystem.storage_path import StoragePath
+
     checkpoint_path = StoragePath(path)
     if checkpoint_path.scheme != "s3" or str(checkpoint_path) != path or not checkpoint_path.key:
         raise ValueError(f"Expected a canonical S3 checkpoint path, got: {path}")
@@ -549,5 +561,5 @@ def abort_multipart_uploads(path: str) -> int:
             UploadId=upload["UploadId"],
         )
     if uploads:
-        logger.warning("Aborted {} stale multipart uploads below {}", len(uploads), path)
+        logger.warning("Aborted %s stale multipart uploads below %s", len(uploads), path)
     return len(uploads)
