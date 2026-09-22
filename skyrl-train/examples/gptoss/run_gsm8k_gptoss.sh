@@ -31,7 +31,6 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_bas
   trainer.flash_attn=false \
   trainer.use_sample_packing=false \
   generator.inference_engine_tensor_parallel_size=4 \
-  generator.enforce_eager=true \
   trainer.epochs=20 \
   trainer.eval_batch_size=32 \
   trainer.eval_before_train=false \

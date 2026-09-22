@@ -115,7 +115,7 @@ def _build(dcp, max_model_len, gpu_util):
     kwargs = dict(
         model=MODEL_NAME,
         tensor_parallel_size=TP,
-        enforce_eager=True,
+        enforce_eager=True,  # Measure KV headroom without CUDA graph allocations changing the memory budget.
         seed=SEED,
         dtype="bfloat16",
         gpu_memory_utilization=gpu_util,
