@@ -437,7 +437,11 @@ generator:
   chat_template:
     source: "name"
     name_or_path: null
-  
+
+  # Require every environment row to use the structured-chat transport, which
+  # preserves sampled token IDs and exact prefixes across turns.
+  require_exact_chat_transport: false
+
   chat_template_kwargs: {}
 
   engine_init_kwargs: {}

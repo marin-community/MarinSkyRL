@@ -123,6 +123,10 @@ class _CanonicalizedChatPrefix:
     per_step_rewards: List[Tuple[float, Optional[int]]]
 
 
+class ExactChatTransportError(RuntimeError):
+    """The configured exact structured-chat contract was violated at runtime."""
+
+
 class SkyRLGymTrajectoryRunner(TrajectoryRunner):
     def __init__(
         self,
@@ -159,6 +163,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         self.projection = pipeline.projection
         self.max_turns = trajectory_runner_cfg.max_turns
         self.batched = trajectory_runner_cfg.batched
+        self.require_exact_chat_transport = trajectory_runner_cfg.get("require_exact_chat_transport", False) is True
         self.use_conversation_multi_turn = trajectory_runner_cfg.use_conversation_multi_turn
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
         self.custom_chat_template = get_custom_chat_template(trajectory_runner_cfg.chat_template)
@@ -220,7 +225,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         index: int,
         error: Exception,
     ) -> AgentLoopOutput:
-        """Turn one environment-loop failure into an aligned, fully masked row."""
+        """Mask an ordinary environment failure, or propagate an exact-chat contract violation."""
+        if isinstance(error, ExactChatTransportError):
+            raise error
         exception_type = type(error).__name__
         trajectory_ids = request.get("trajectory_ids")
         trajectory_id = trajectory_ids[index] if trajectory_ids is not None else None
@@ -314,11 +321,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             We ensure token-in-token-out generation. With three exceptions:
             - When calling Env.step() and BaseTextEnvStepOutput["postprocessed_action"] is not None.
               This will likely be deprecated soon.
-            - When custom_chat_template = True and use_conversation_multi_turn = True. We always
-              re-tokenize the entire chat history every turn and at the end. This is used for cases
-              like removing Qwen3 thinking tokens in non-last-round assistant message.
+            - When custom_chat_template = True and use_conversation_multi_turn = True, an environment
+              without structured-chat metadata re-tokenizes the entire history every turn and at the end.
             - When the inference backend canonicalizes a structured tool call while rendering the
-              next turn. The re-rendered prior context is retained but excluded from optimization.
+              next turn, the re-rendered prior context is retained but excluded from optimization unless
+              exact structured-chat transport is required.
 
         Args:
             prompt: ConversationType
@@ -334,8 +341,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             prompt_token_ids: List[int]
             rollout_logprobs: Optional[List[float]]
         """
-        retokenize_chat_history = self.use_conversation_multi_turn and self.custom_chat_template
-
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
@@ -350,6 +355,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         chat_completion_params = init_metadata.get("chat_completion_params")
         if chat_completion_params is not None and not isinstance(chat_completion_params, dict):
             raise TypeError("environment chat_completion_params metadata must be a mapping")
+        if chat_completion_params is None:
+            self._reject_inexact_chat("the environment did not provide chat_completion_params")
+        # Structured chat preserves the backend's served token IDs across turns;
+        # the legacy custom-template path reconstructs them from message text.
+        retokenize_chat_history = (
+            self.use_conversation_multi_turn and self.custom_chat_template and chat_completion_params is None
+        )
         initial_chat_history_length = len(chat_history)
         chat_end_index = len(chat_history)
         input_ids = normalize_token_ids(
@@ -358,7 +370,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 # If retokenize_chat_history==True, avoid including the generation prompt in both the
                 # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
                 add_generation_prompt=not retokenize_chat_history,
-                chat_template=self.custom_chat_template if retokenize_chat_history else None,
+                chat_template=self.custom_chat_template if retokenize_chat_history or chat_completion_params else None,
                 tokenize=True,
                 **self.trajectory_runner_cfg.chat_template_kwargs,
             )
@@ -449,6 +461,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 )
             engine_output = await self.model_client.generate(engine_input)
             if engine_output["token_provenance"] == TokenProvenance.RECONSTRUCTED:
+                self._reject_inexact_chat("the model client returned reconstructed token IDs")
                 token_provenance = TokenProvenance.RECONSTRUCTED
             # Capture global_step after first inference returns — at this point the vLLM
             # engine has definitively served the request with its current weights.
@@ -496,6 +509,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     raise RuntimeError("chat generation must return the structured assistant message")
                 if per_step_rewards:
                     if input_ids != rendered_prompt_ids[0][: len(input_ids)]:
+                        self._reject_inexact_chat("the model client did not preserve the served token prefix")
                         canonical_prefix = self._mask_canonicalized_chat_prefix(
                             input_ids,
                             rendered_prompt_ids[0],
@@ -579,6 +593,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 )
                 output = env_step_output["postprocessed_action"]
                 postprocessed_output_ids = self.tokenizer.encode(output, add_special_tokens=False)
+                if postprocessed_output_ids != output_ids:
+                    self._reject_inexact_chat(
+                        "the environment changed sampled token IDs while postprocessing an action"
+                    )
                 if collect_logprobs and response_logprobs is not None and postprocessed_output_ids != output_ids:
                     logger.warning(
                         "Discarding rollout logprobs because postprocessed_action changed the generated token IDs"
@@ -977,6 +995,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     diagnostics={"agent": (ultra_at(index) or {})["agent"], "genrm_metrics": metrics},
                 )
                 outputs[index].env_metrics.update({f"genrm/{name}": value for name, value in metrics.items()})
+
+    def _reject_inexact_chat(self, message: str) -> None:
+        if self.require_exact_chat_transport:
+            raise ExactChatTransportError(f"exact structured-chat transport failed: {message}")
 
     @staticmethod
     def _mask_canonicalized_chat_prefix(
