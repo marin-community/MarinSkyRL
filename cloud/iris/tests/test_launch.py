@@ -17,13 +17,15 @@ class RecordingBackend:
     outcome: IrisLaunchOutcome = IrisLaunchOutcome("/user/job", "succeeded", 0)
     validated: bool = False
     launched: bool = False
+    launched_config: dict | None = None
     exported: bool = False
 
     def validate(self, _config_path: Path) -> None:
         self.validated = True
 
-    def launch(self, _config_path: Path) -> IrisLaunchOutcome:
+    def launch(self, config_path: Path) -> IrisLaunchOutcome:
         self.launched = True
+        self.launched_config = yaml.safe_load(config_path.read_text())
         return self.outcome
 
     def export_terminal_policy(self, _config_path: Path) -> None:
@@ -33,6 +35,15 @@ class RecordingBackend:
 def _config_path(tmp_path: Path, *, submission: str = "wait") -> Path:
     config = _raw_config()
     config["run"]["submission"] = submission
+    config["inputs"]["train_data"] = [
+        {
+            "uri": "s3://data/gsm8k",
+            "identity": "sha256:gsm8k",
+            "local_path": "/tmp/data/gsm8k",
+            "relative_path": "train.parquet",
+            "kind": "directory",
+        }
+    ]
     path = tmp_path / "launch.yaml"
     path.write_text(yaml.safe_dump(config, sort_keys=False))
     return path
@@ -74,6 +85,8 @@ def test_wait_launches_exports_and_records_the_terminal_model(tmp_path: Path, mo
     assert result.state is LaunchState.SUCCEEDED
     assert result.model == model
     assert backend.launched and backend.exported
+    assert backend.launched_config is not None
+    assert backend.launched_config["inputs"]["train_data"][0]["kind"] == "directory"
     assert [uri for uri, _ in writes] == [
         "s3://runs/smoke/attempts/attempt-1.json",
         "s3://runs/smoke/terminal.json",

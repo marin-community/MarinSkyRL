@@ -91,7 +91,7 @@ def _prepared_sources(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     distinct_environment_count=summary.distinct_environment_count,
                 ),
             )
-        prepared.append(asdict(source))
+        prepared.append(json.loads(json.dumps(asdict(source))))
     return prepared
 
 
