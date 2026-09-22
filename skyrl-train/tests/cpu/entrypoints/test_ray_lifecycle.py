@@ -152,6 +152,26 @@ def test_generate_only_distillation_rejection_happens_before_ray_initialization(
     initialize_ray.assert_not_called()
 
 
+def test_generate_only_skips_training_validation(monkeypatch):
+    cfg = get_default_config()
+    cfg.trainer.placement.colocate_all = True
+    cfg.trainer.offload_optimizer_during_rollouts = True
+    validation_complete = RuntimeError("generation validation complete")
+    monkeypatch.setattr(
+        main_base,
+        "validate_trajectory_runner_capabilities",
+        Mock(side_effect=validation_complete),
+    )
+
+    with pytest.raises(RuntimeError, match="generation validation complete"):
+        run_ray_driver(
+            cfg,
+            Mock(),
+            TrajectoryRunnerMode.SKYRL_GYM,
+            operation=EntrypointOperation.GENERATE,
+        )
+
+
 @pytest.mark.usefixtures("ray_init")
 def test_entrypoint_node_resolution_selects_live_matching_node():
     node_ip = ray.util.get_node_ip_address()

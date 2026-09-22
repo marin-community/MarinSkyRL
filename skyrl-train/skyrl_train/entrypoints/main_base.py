@@ -672,12 +672,15 @@ def run_ray_driver(
     from skyrl_train.entrypoints.ray_lifecycle import exit_without_ray_destructors, shutdown_ray  # noqa: PLC0415
     from marinskyrl.process_diagnostics import write_exception_receipt  # noqa: PLC0415
     from skyrl_train.telemetry import DRIVER_ROLE, process_telemetry  # noqa: PLC0415
-    from skyrl_train.utils import validate_cfg  # noqa: PLC0415
+    from skyrl_train.utils import validate_cfg, validate_generation_cfg  # noqa: PLC0415
     from skyrl_train.utils.logging_utils import log_exception_as_text  # noqa: PLC0415
     from skyrl_train.utils.progress import configure_progress  # noqa: PLC0415 - keep launcher imports Torch-free
     from skyrl_train.utils.utils import initialize_ray  # noqa: PLC0415
 
-    validate_cfg(cfg)
+    if operation is EntrypointOperation.GENERATE:
+        validate_generation_cfg(cfg)
+    else:
+        validate_cfg(cfg)
     validate_trajectory_runner_capabilities(cfg, runner_mode, operation)
     configure_progress(cfg.trainer.progress)
 

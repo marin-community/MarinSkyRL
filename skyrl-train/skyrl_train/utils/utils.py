@@ -664,6 +664,8 @@ def validate_cfg(cfg: DictConfig):
     if cfg.generator.gdn_backend not in set(GDNBackend):
         raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
     validate_generator_cfg(cfg)
+    if cfg.trainer.strategy == "megatron":
+        validate_megatron_cfg(cfg)
     validate_batch_invariant_config(cfg)
     validate_moe_router_replay_config(cfg)
     validate_hf_export_config(cfg)
@@ -867,6 +869,46 @@ def validate_cfg(cfg: DictConfig):
         raise ValueError("generator.engine_init_timeout_seconds must be greater than zero")
 
 
+def validate_generation_cfg(cfg: DictConfig) -> None:
+    """Validate settings consumed by an evaluation-only generation run."""
+    runtime_values = {
+        "trainer.distributed.placement_group_timeout_seconds": cfg.trainer.distributed.placement_group_timeout_seconds,
+        "trainer.progress.min_interval_seconds": cfg.trainer.progress.min_interval_seconds,
+        "trainer.progress.heartbeat_seconds": cfg.trainer.progress.heartbeat_seconds,
+        "trainer.progress.percent_step": cfg.trainer.progress.percent_step,
+        "trainer.progress.count_step": cfg.trainer.progress.count_step,
+        "generator.r3_dispatch_put_timeout_seconds": cfg.generator.r3_dispatch_put_timeout_seconds,
+        "trajectory_runner.process_pool.num_coordinators": cfg.trajectory_runner.process_pool.num_coordinators,
+        "trajectory_runner.process_pool.cpus_per_coordinator": cfg.trajectory_runner.process_pool.cpus_per_coordinator,
+        "trajectory_runner.process_pool.executor_workers": cfg.trajectory_runner.process_pool.executor_workers,
+    }
+    for path, value in runtime_values.items():
+        if value <= 0:
+            raise ValueError(f"{path} must be positive; got {value}")
+
+    if cfg.trainer.progress.mode not in {"auto", "tqdm", "logging"}:
+        raise ValueError(f"trainer.progress.mode must be one of auto, tqdm, logging; got {cfg.trainer.progress.mode!r}")
+    if cfg.generator.r3_transport not in set(R3Transport):
+        raise ValueError(
+            f"generator.r3_transport must be one of by_value, resident, decentral; got {cfg.generator.r3_transport!r}"
+        )
+    if cfg.generator.gdn_backend not in set(GDNBackend):
+        raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
+
+    validate_generator_cfg(cfg)
+
+    if cfg.trainer.placement.colocate_all:
+        validate_colocated_engine_geometry(
+            tensor_pipeline_size=(
+                cfg.generator.inference_engine_tensor_parallel_size
+                * cfg.generator.inference_engine_pipeline_parallel_size
+            ),
+            gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+        )
+    if cfg.generator.engine_init_timeout_seconds <= 0:
+        raise ValueError("generator.engine_init_timeout_seconds must be greater than zero")
+
+
 def validate_batch_invariant_config(cfg: DictConfig) -> None:
     """Validate that trainer and rollout kernels are controlled together."""
 
@@ -954,8 +996,6 @@ def validate_generator_cfg(cfg: DictConfig):
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
 
-    if cfg.trainer.strategy == "megatron":
-        validate_megatron_cfg(cfg)
     if cfg.generator.backend == "sglang":
         # Some sampling parameters are not supported in SGLang when `skip_tokenizer_init` is True.
         if cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None:
