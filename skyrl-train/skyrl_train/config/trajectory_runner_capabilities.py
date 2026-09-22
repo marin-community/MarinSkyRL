@@ -173,7 +173,7 @@ def trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRunnerMode) 
         return _harbor_capabilities(cfg)
     if mode is TrajectoryRunnerMode.TASKCOMPENDIUM:
         return TrajectoryRunnerCapabilities(
-            runner="TaskCompendium Harbor",
+            runner="TaskCompendium native/Harbor router",
             sampled_completion=EvidenceFidelity.RETOKENIZED,
             full_context_continuation=EvidenceFidelity.UNAVAILABLE,
             action_tokens=ActionTokenHandling.RETOKENIZED,
