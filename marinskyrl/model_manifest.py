@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import struct
+from typing import Literal, Self
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from marinskyrl.hf_model import normalize_fast_tokenizer_metadata, validate_portable_hf_model_files
 
@@ -14,77 +16,51 @@ MODEL_MANIFEST_FILENAME = ".marinskyrl-model-manifest.json"
 HF_WEIGHT_INDEX_FILENAME = "model.safetensors.index.json"
 
 
-@dataclass(frozen=True)
-class ModelManifestFile:
+class ModelManifestFile(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     path: str
-    size: int
-    sha256: str
+    size: int = Field(ge=0, strict=True)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if value in ("", ".") or path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"model file path must be relative and contained: {value!r}")
+        return value
 
 
-@dataclass(frozen=True)
-class ModelManifest:
+class ModelManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     model_id: str | None
     revision: str | None
-    identity: str
-    files: tuple[ModelManifestFile, ...]
-    format_version: int = 1
+    identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    files: tuple[ModelManifestFile, ...] = Field(min_length=1)
+    format_version: Literal[1] = 1
 
     @classmethod
-    def from_mapping(cls, value: object, source: str) -> "ModelManifest":
-        if not isinstance(value, dict):
-            raise ValueError(f"Invalid model manifest at {source}")
+    def from_mapping(cls, value: object, source: str) -> Self:
         try:
-            files = tuple(ModelManifestFile(**entry) for entry in value["files"])
-            manifest = cls(
-                model_id=value.get("model_id"),
-                revision=value.get("revision"),
-                identity=value["identity"],
-                files=files,
-                format_version=value["format_version"],
-            )
-        except (KeyError, TypeError) as error:
-            raise ValueError(f"Invalid model manifest at {source}") from error
-        manifest.validate(source)
-        return manifest
+            return cls.model_validate(value, context={"source": source})
+        except ValidationError as error:
+            raise ValueError(f"Invalid model manifest at {source}: {error}") from error
 
-    def validate(self, source: str) -> None:
-        if (
-            type(self.format_version) is not int
-            or self.format_version != 1
-            or not isinstance(self.identity, str)
-            or not self.identity.startswith("sha256:")
-            or not self.files
-            or (self.model_id is not None and not isinstance(self.model_id, str))
-            or (self.revision is not None and not isinstance(self.revision, str))
-        ):
-            raise ValueError(f"Invalid model manifest at {source}")
-        if any(
-            not isinstance(entry.path, str) or type(entry.size) is not int or not isinstance(entry.sha256, str)
-            for entry in self.files
-        ):
-            raise ValueError(f"Invalid model manifest at {source}")
+    @model_validator(mode="after")
+    def validate_manifest(self, info: ValidationInfo) -> Self:
+        source = (info.context or {}).get("source", "model manifest")
         paths = [entry.path for entry in self.files]
         if len(paths) != len(set(paths)):
             raise ValueError(f"Model manifest contains duplicate paths: {source}")
-        for entry in self.files:
-            path = PurePosixPath(entry.path)
-            invalid_checksum = len(entry.sha256) != 64 or any(
-                character not in "0123456789abcdef" for character in entry.sha256
-            )
-            if (
-                entry.path in ("", ".")
-                or path.is_absolute()
-                or ".." in path.parts
-                or entry.size < 0
-                or invalid_checksum
-            ):
-                raise ValueError(f"Invalid model manifest entry {entry!r}: {source}")
         expected = _manifest_identity(self.model_id, self.revision, self.files)
         if self.identity != expected:
             raise ValueError(f"Model manifest identity mismatch at {source}: {self.identity} != {expected}")
         validate_portable_hf_model_files(set(paths), source)
         if HF_WEIGHT_INDEX_FILENAME not in paths:
             raise ValueError(f"Model manifest is missing {HF_WEIGHT_INDEX_FILENAME}: {source}")
+        return self
 
 
 def sha256_file(path: Path) -> str:
@@ -101,7 +77,7 @@ def _manifest_identity(
     files: tuple[ModelManifestFile, ...],
 ) -> str:
     value = {
-        "files": [asdict(entry) for entry in files],
+        "files": [entry.model_dump(mode="json") for entry in files],
         "format_version": 1,
         "model_id": model_id,
         "revision": revision,
@@ -183,5 +159,5 @@ def write_local_model_manifest(
     if marker.exists():
         marker.unlink()
     manifest = snapshot_model_manifest(root, model_id, revision)
-    marker.write_text(json.dumps(asdict(manifest), indent=2, sort_keys=True) + "\n")
+    marker.write_text(json.dumps(manifest.model_dump(mode="json"), indent=2, sort_keys=True) + "\n")
     return manifest

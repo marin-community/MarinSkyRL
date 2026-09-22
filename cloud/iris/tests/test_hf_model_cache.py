@@ -9,6 +9,7 @@ from safetensors.numpy import save_file
 
 from cloud.iris import hf_model_cache
 from cloud.iris.hf_model_cache import ensure_hugging_face_model_cache, stage_model_metadata
+from marinskyrl.model_manifest import ModelManifest, snapshot_model_manifest
 
 
 def test_hub_download_temporarily_enables_network_access(tmp_path: Path, monkeypatch) -> None:
@@ -88,3 +89,15 @@ def test_corrupt_completed_cache_fails_instead_of_remirroring(tmp_path: Path, mo
 
     with pytest.raises(json.JSONDecodeError):
         ensure_hugging_face_model_cache("laion/draft", revision, ttl_days=14, source_prefix="s3://region/run")
+
+
+def test_model_manifest_rejects_metadata_paths_outside_the_model_root(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "tokenizer.json").write_text("{}")
+    save_file({"weight": np.arange(4, dtype=np.float32)}, tmp_path / "model.safetensors")
+    manifest = snapshot_model_manifest(tmp_path, model_id="laion/draft", revision="pinned")
+    value = manifest.model_dump(mode="json")
+    value["files"][0]["path"] = "../config.json"
+
+    with pytest.raises(ValueError, match="relative and contained"):
+        ModelManifest.from_mapping(value, "memory://models/draft")

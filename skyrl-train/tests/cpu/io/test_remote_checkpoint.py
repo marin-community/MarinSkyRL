@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from skyrl_train.io import remote_checkpoint
 
 
@@ -33,3 +35,16 @@ def test_remote_checkpoint_metadata_never_downloads_rank_tensor_shards(tmp_path:
         "bucket/checkpoints/global_step_7/policy/.metadata",
         "bucket/checkpoints/global_step_7/policy/common.pt",
     ]
+
+
+def test_remote_checkpoint_metadata_rejects_objects_outside_the_checkpoint_prefix(tmp_path: Path, monkeypatch) -> None:
+    checkpoint = "s3://bucket/checkpoints/global_step_7/policy"
+    monkeypatch.setattr(
+        remote_checkpoint.io,
+        "find_files",
+        lambda _path: {"bucket/checkpoints/global_step_7/other/common.pt": 12},
+    )
+
+    with pytest.raises(ValueError, match="is not below root"):
+        with remote_checkpoint.remote_checkpoint_metadata(checkpoint):
+            pass

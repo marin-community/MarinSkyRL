@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
 from pathlib import Path
 import posixpath
@@ -126,7 +125,7 @@ def ensure_hugging_face_model_cache(
                 manifest = snapshot_model_manifest(snapshot, model_id, revision)
                 filesystem.makedirs(cache_path, exist_ok=True)
                 _upload_snapshot(filesystem, cache_path, snapshot)
-            write_json(join_resource_path(cache_uri, MODEL_MANIFEST_FILENAME), asdict(manifest))
+            write_json(join_resource_path(cache_uri, MODEL_MANIFEST_FILENAME), manifest.model_dump(mode="json"))
         return cache_uri, manifest
     finally:
         lock.release()
@@ -164,4 +163,6 @@ def stage_model_metadata(model_uri: str, manifest: ModelManifest, local_path: st
             filesystem.get_file(posixpath.join(root, entry.path), str(destination))
             if destination.stat().st_size != entry.size or sha256_file(destination) != entry.sha256:
                 raise ValueError(f"Model metadata checksum mismatch for {entry.path}: {model_uri}")
-        (staging / MODEL_MANIFEST_FILENAME).write_text(json.dumps(asdict(manifest), indent=2, sort_keys=True) + "\n")
+        (staging / MODEL_MANIFEST_FILENAME).write_text(
+            json.dumps(manifest.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
+        )

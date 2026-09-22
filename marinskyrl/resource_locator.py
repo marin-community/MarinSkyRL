@@ -29,6 +29,18 @@ def join_resource_path(root: str, *parts: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, joined_path, parsed.query, parsed.fragment))
 
 
+def relative_resource_path(root: str, path: str) -> str:
+    """Return a path below a local or object-store root, rejecting escapes."""
+    parsed_root = urlsplit(root)
+    parsed_path = urlsplit(path)
+    root_path = f"{parsed_root.netloc}{parsed_root.path}" if parsed_root.scheme else root
+    candidate_path = f"{parsed_path.netloc}{parsed_path.path}" if parsed_path.scheme else path
+    relative = posixpath.relpath(posixpath.normpath(candidate_path), posixpath.normpath(root_path))
+    if relative == ".." or relative.startswith("../") or posixpath.isabs(relative):
+        raise ValueError(f"Resource path {path!r} is not below root {root!r}")
+    return relative
+
+
 def is_hugging_face_repo_id(repo_id: str) -> bool:
     """Return whether a value has Hugging Face's ``namespace/repository`` form."""
     if not repo_id or repo_id.count("/") != 1 or HF_SELECTOR_SUBDIR_SEPARATOR in repo_id:

@@ -15,7 +15,7 @@ from typing import Any, Iterator
 
 import fsspec
 from fsspec.spec import AbstractFileSystem
-from marinskyrl.resource_locator import join_resource_path
+from marinskyrl.resource_locator import join_resource_path, relative_resource_path
 
 CHECKPOINT_MARKER_FILENAME = "latest_ckpt_global_step.txt"
 SOURCE_MANIFEST_FILENAME = ".marinskyrl-source.json"
@@ -84,16 +84,6 @@ def terminal_checkpoint_step(checkpoint_root: str) -> int:
         return int(source.read().strip())
 
 
-def relative_object_key(root: str, path: str) -> str:
-    """Return ``path`` below ``root`` or reject a non-descendant object key."""
-    normalized_root = posixpath.normpath(root)
-    normalized_path = posixpath.normpath(path)
-    relative = posixpath.relpath(normalized_path, normalized_root)
-    if relative == ".." or relative.startswith("../") or posixpath.isabs(relative):
-        raise ValueError(f"Object key {path!r} is not below source root {root!r}")
-    return relative
-
-
 def file_inventory(filesystem: AbstractFileSystem, root: str) -> tuple[tuple[str, FileEntry], ...]:
     """List files below a storage root using metadata returned by the listing."""
     files = filesystem.find(root, detail=True)
@@ -101,7 +91,7 @@ def file_inventory(filesystem: AbstractFileSystem, root: str) -> tuple[tuple[str
         sorted(
             (
                 path,
-                FileEntry(path=relative_object_key(root, path), size=int(info["size"])),
+                FileEntry(path=relative_resource_path(root, path), size=int(info["size"])),
             )
             for path, info in files.items()
             if info["type"] == "file"
