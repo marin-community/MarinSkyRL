@@ -37,9 +37,11 @@ from marinskyrl.task_sources import data_source
 from cloud.iris.runtime_bundle import LauncherSource, resolve_launcher_source
 from cloud.iris.runtime_environment import RuntimeProfile, runtime_profile_for_strategy
 
-# Dotted YAML path -> SkyRLRolePlan field name.  These become ``++`` Hydra overrides
-# inside ``job_launch_argv``, so a transcription error would silently change the
-# experiment's geometry rather than fail.  Missing keys raise rather than default.
+# Dotted YAML path -> SkyRLRolePlan field name. These are topology-sensitive inputs: the launcher reads them before
+# scheduling and ``job_launch_argv`` replays them as ``++`` Hydra overrides for the in-cluster runtime. Adding a
+# behavioral flag here makes it part of the launch topology contract; do so only when both phases must consume the
+# same compiled value. A transcription error would silently change the experiment's geometry rather than fail.
+# Missing keys raise rather than default.
 _ROLE_PLAN_PATHS: dict[str, str] = {
     "trainer.placement.colocate_all": "colocate_all",
     "trainer.placement.policy_num_nodes": "policy_num_nodes",
@@ -53,6 +55,8 @@ _ROLE_PLAN_PATHS: dict[str, str] = {
     "generator.n_samples_per_prompt": "n_samples_per_prompt",
 }
 _BOOLEAN_ROLE_PLAN_FIELDS = frozenset({"colocate_all", "colocate_policy_ref", "run_engines_locally"})
+# ROLE-SENSITIVE: use_kl_loss activates the reference claim, while generator.backend labels the rollout claim.
+# Wrappers that change either must recompile the complete role plan rather than patching only the runtime config.
 _ROLE_ACTIVATION_PATHS = (
     "trainer.algorithm.use_kl_loss",
     "generator.backend",
