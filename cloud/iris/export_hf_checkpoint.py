@@ -74,6 +74,7 @@ class ExportJobSpec:
     rl_config: str
     cluster: str
     priority: str
+    gpu_variant: str
     job_name: str | None
     timeout: int
     no_wait: bool
@@ -123,6 +124,8 @@ def build_command(spec: ExportJobSpec) -> list[str]:
         str(request.num_nodes),
         "--gpus-per-node",
         str(spec.allocated_gpus_per_node),
+        "--gpu-variant",
+        spec.gpu_variant,
         "--cluster",
         spec.cluster,
         "--entrypoint",
@@ -178,6 +181,7 @@ def argument_parser() -> argparse.ArgumentParser:
     ap.add_argument("--storage-user")
     ap.add_argument("--num-nodes", type=int)
     ap.add_argument("--gpus-per-node", type=int)
+    ap.add_argument("--gpu-variant", required=True)
     ap.add_argument(
         "--allocation-gpus-per-node",
         type=int,
@@ -243,6 +247,7 @@ def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_w
         rl_config=args.rl_config,
         cluster=args.cluster,
         priority=args.priority,
+        gpu_variant=args.gpu_variant,
         job_name=args.job_name,
         timeout=args.timeout,
         no_wait=no_wait,
