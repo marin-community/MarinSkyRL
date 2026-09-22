@@ -1436,21 +1436,6 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--model-warm-source",
-        "--model_warm_source",
-        dest="model_warm_source",
-        default=None,
-        help="In-region CW-object-store prefix seeded (once, via scripts/iris/"
-        "mirror_hf_to_s3.py) with the model weights, so the controller SYNCS them "
-        "from there into each node's HF cache instead of cold-pulling ~160 GB per "
-        "node from HF Hub (the flaky path behind the 80B r4a/r4b bring-up failures). "
-        "Default: AUTO-DERIVE s3://marin-us-east-02a/models/<org>--<name> from the "
-        "repo id (a missing/empty source is a clean no-op -> HF prestage fallback, "
-        "byte-identical to today). Pass 'none'/'off' to DISABLE the warm path (pure "
-        "HF prestage). Only used when the config runs HF_HUB_OFFLINE=1 with a "
-        "repo-id model_path (same gate as --prestage-model).",
-    )
-    parser.add_argument(
         "--train_data",
         default=EMPTY_JSON_LIST,
         help="Training data paths as a JSON list (e.g., '[\"org/dataset\"]').",
@@ -2213,13 +2198,6 @@ def _model_bootstrap_args(args: argparse.Namespace) -> list[str]:
         )
     elif is_hub_model and (offline or policy_chat_template or policy_model_revision):
         model_args.extend(["--prestage-model", args.model_path])
-        warm_source = args.model_warm_source
-        if warm_source is None:
-            warm_source = f"s3://marin-us-east-02a/models/{args.model_path.replace('/', '--')}"
-        elif warm_source.strip().lower() in ("none", "off", ""):
-            warm_source = None
-        if warm_source:
-            model_args.extend(["--model-warm-source", warm_source])
         if policy_model_revision:
             model_args.extend(["--model-revision", policy_model_revision])
     if policy_chat_template:
