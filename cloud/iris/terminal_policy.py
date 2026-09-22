@@ -6,10 +6,8 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Mapping
-from urllib.parse import urlparse
 
-from cloud.iris.artifacts import fs_and_path, terminal_checkpoint_step
+from cloud.iris.artifacts import resource_exists, terminal_checkpoint_step
 from cloud.iris.paths import PROJECT_ROOT
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, HF_EXPORT_REQUEST_FILENAME
 from marinskyrl.resource_locator import join_resource_path
@@ -20,13 +18,7 @@ class TerminalPolicyExport:
     """Inputs needed to export one terminal policy checkpoint."""
 
     checkpoint_root: str
-    export_root: str
     config_path: str
-    model_path: str
-    model_source_uri: str | None
-    model_source_identity: str | None
-    policy_num_nodes: int
-    policy_num_gpus_per_node: int
     gpu_variant: str
     cluster: str
     priority: str
@@ -37,37 +29,6 @@ class TerminalPolicyExport:
     cpu: float | None = None
     memory: str | None = None
     disk: str | None = None
-    storage_user: str | None = None
-
-
-def storage_user_from_resource_path(path: str) -> str | None:
-    """Return the user segment from a canonical storage-policy path."""
-    parts = tuple(part for part in urlparse(path).path.split("/") if part)
-    for index, part in enumerate(parts[:-1]):
-        if part == "users":
-            return parts[index + 1]
-    return None
-
-
-def policy_export_geometry(
-    config: Mapping[str, object],
-    *,
-    default_num_nodes: int,
-    default_gpus_per_node: int,
-) -> tuple[int, int]:
-    """Return the policy worker geometry required to restore a checkpoint."""
-    trainer = config.get("trainer")
-    placement = trainer.get("placement") if isinstance(trainer, dict) else None
-    configured_nodes = placement.get("policy_num_nodes") if isinstance(placement, dict) else None
-    configured_gpus = placement.get("policy_num_gpus_per_node") if isinstance(placement, dict) else None
-    nodes = configured_nodes
-    gpus = configured_gpus
-    nodes_text = str(nodes)
-    gpus_text = str(gpus)
-    return (
-        int(nodes_text) if nodes_text.isdigit() and int(nodes_text) > 0 else default_num_nodes,
-        int(gpus_text) if gpus_text.isdigit() and int(gpus_text) > 0 else default_gpus_per_node,
-    )
 
 
 def _resolved_config_path(config_path: str) -> str:
@@ -108,11 +69,8 @@ def submit_terminal_policy_export(spec: TerminalPolicyExport) -> None:
         command.extend(["--memory", spec.memory])
     if spec.disk:
         command.extend(["--disk", spec.disk])
-    if spec.storage_user:
-        command.extend(["--storage-user", spec.storage_user])
     export_request_uri = join_resource_path(checkpoint_path, HF_EXPORT_REQUEST_FILENAME)
-    export_filesystem, export_request_path = fs_and_path(export_request_uri)
-    if not export_filesystem.exists(export_request_path):
+    if not resource_exists(export_request_uri):
         raise ValueError(
             f"checkpoint {checkpoint_path} has no {HF_EXPORT_REQUEST_FILENAME}; "
             "config-native terminal export requires a training-created export request"

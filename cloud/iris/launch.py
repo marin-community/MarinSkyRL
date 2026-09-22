@@ -17,14 +17,14 @@ from iris.client.client import JobFailedError
 from iris.resources.state import JobState
 from omegaconf import DictConfig, OmegaConf
 
-from cloud.iris.artifacts import fs_and_path, terminal_checkpoint_step, write_json
+from cloud.iris.artifacts import resource_exists, resource_file_names, terminal_checkpoint_step, write_json
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome
 from cloud.iris.launch_config import load_launch_config
 from cloud.iris.runtime_bundle import runtime_bundle_inputs
 from marinskyrl.checkpoint_paths import policy_export_path
 from marinskyrl.hf_model import validate_portable_hf_model_files
 from marinskyrl.packed_tasks import select_task_references
-from marinskyrl.resource_locator import relative_resource_path
+from marinskyrl.resource_locator import join_resource_path
 from marinskyrl.task_sources import TaskTroveParquetSource, TaskTroveSelectionSnapshot, data_source
 
 
@@ -69,8 +69,7 @@ class LaunchBackend(Protocol):
 
 
 def _path_exists(uri: str) -> bool:
-    filesystem, path = fs_and_path(uri)
-    return filesystem.exists(path)
+    return resource_exists(uri)
 
 
 def _prepared_sources(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -104,9 +103,7 @@ def _exported_policy(config: DictConfig) -> ExportedPolicy:
     checkpoint_root = str(config.artifacts.checkpoint_root)
     global_step = terminal_checkpoint_step(checkpoint_root)
     policy_uri = policy_export_path(str(config.artifacts.export_root), global_step)
-    filesystem, policy_path = fs_and_path(policy_uri)
-    files = sorted(path for path in filesystem.find(policy_path) if not filesystem.isdir(path))
-    names = {relative_resource_path(policy_path, path) for path in files}
+    names = resource_file_names(policy_uri)
     validate_portable_hf_model_files(names, policy_uri)
     return ExportedPolicy(
         policy_export_uri=policy_uri,
@@ -152,7 +149,7 @@ def _record_failure(
     failure: str,
 ) -> LaunchResult:
     result = _result(config, LaunchState.FAILED, outcome=outcome, failure=failure)
-    attempt_uri = f"{str(config.artifacts.attempts_root).rstrip('/')}/{config.run.attempt_id}.json"
+    attempt_uri = join_resource_path(str(config.artifacts.attempts_root), f"{config.run.attempt_id}.json")
     write_json(attempt_uri, _manifest(config, result))
     return result
 
@@ -203,7 +200,7 @@ def execute_launch(config_path: Path, *, backend: LaunchBackend | None = None) -
         )
     result = _result(config, LaunchState.SUCCEEDED, outcome=outcome, model=model)
     payload = _manifest(config, result)
-    attempt_uri = f"{str(config.artifacts.attempts_root).rstrip('/')}/{config.run.attempt_id}.json"
+    attempt_uri = join_resource_path(str(config.artifacts.attempts_root), f"{config.run.attempt_id}.json")
     write_json(attempt_uri, payload)
     write_json(terminal_manifest_uri, payload)
     return result

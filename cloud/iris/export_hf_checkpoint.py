@@ -40,6 +40,7 @@ from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, policy_export_path
 from marinskyrl.resource_locator import ModelLocatorError
+from marinskyrl.resource_locator import join_resource_path
 from omegaconf import DictConfig, OmegaConf
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_EXPORT_TIMEOUT,
@@ -87,7 +88,6 @@ class ExportJobSpec:
     cpu: float | None = None
     memory: str | None = None
     disk: str | None = None
-    storage_user: str | None = None
     allocation_gpus_per_node: int | None = None
     launch_config_path: str | None = None
 
@@ -137,10 +137,10 @@ def checkpoint_export_launch_config(
         config.iris.allocation.disk = spec.disk
     config.artifacts.checkpoint_root = request.checkpoint_base_path
     config.artifacts.export_root = request.export_path
-    export_attempt_root = f"{str(config.artifacts.attempts_root).rstrip('/')}/export-{request.step}"
+    export_attempt_root = join_resource_path(str(config.artifacts.attempts_root), f"export-{request.step}")
     config.artifacts.attempts_root = export_attempt_root
-    config.artifacts.resolved_config_uri = f"{export_attempt_root}/resolved.yaml"
-    config.artifacts.terminal_manifest_uri = f"{export_attempt_root}/terminal.json"
+    config.artifacts.resolved_config_uri = join_resource_path(export_attempt_root, "resolved.yaml")
+    config.artifacts.terminal_manifest_uri = join_resource_path(export_attempt_root, "terminal.json")
 
     # Export is policy-only. Keep the role-plan inputs internally consistent so
     # launch validation derives exactly the saved policy gang, without reserving
@@ -189,15 +189,14 @@ def checkpoint_export_launch_config(
 
 
 def write_checkpoint_export_config(
-    training_config_path: str | Path,
+    training_config_path: Path,
     request: HFExportRequest,
     spec: ExportJobSpec,
 ) -> Path:
     """Write one temporary config-only export document for the Iris CLI boundary."""
-    source = Path(training_config_path)
-    training_config = load_launch_config(source)
+    training_config = load_launch_config(training_config_path)
     config = checkpoint_export_launch_config(training_config, request, spec)
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()[:16]
+    digest = hashlib.sha256(training_config_path.read_bytes()).hexdigest()[:16]
     destination = Path(tempfile.gettempdir()) / "marinskyrl" / f"checkpoint-export-{request.step}-{digest}.yaml"
     destination.parent.mkdir(parents=True, exist_ok=True)
     OmegaConf.save(config, destination, resolve=True)
@@ -236,7 +235,6 @@ def argument_parser() -> argparse.ArgumentParser:
     ap.add_argument("--cpu", type=float)
     ap.add_argument("--memory")
     ap.add_argument("--disk")
-    ap.add_argument("--storage-user")
     ap.add_argument("--num-nodes", type=int)
     ap.add_argument("--gpus-per-node", type=int)
     ap.add_argument("--gpu-variant", required=True)
@@ -297,7 +295,7 @@ def request_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> E
     if request is None:
         parser.error(f"no hf_export_request.json found under {args.request}")
     spec = operational_spec(args, request, no_wait=False)
-    return replace(spec, launch_config_path=str(write_checkpoint_export_config(args.rl_config, request, spec)))
+    return replace(spec, launch_config_path=str(write_checkpoint_export_config(Path(args.rl_config), request, spec)))
 
 
 def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_wait: bool) -> ExportJobSpec:
@@ -316,7 +314,6 @@ def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_w
         cpu=args.cpu,
         memory=args.memory,
         disk=args.disk,
-        storage_user=args.storage_user,
         allocation_gpus_per_node=args.allocation_gpus_per_node,
     )
 
@@ -353,7 +350,7 @@ def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Ex
     except ModelLocatorError as error:
         parser.error(str(error))
     spec = operational_spec(args, request, no_wait=args.no_wait)
-    return replace(spec, launch_config_path=str(write_checkpoint_export_config(args.rl_config, request, spec)))
+    return replace(spec, launch_config_path=str(write_checkpoint_export_config(Path(args.rl_config), request, spec)))
 
 
 def _run_export(spec: ExportJobSpec, command: list[str]) -> None:

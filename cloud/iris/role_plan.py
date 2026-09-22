@@ -129,11 +129,10 @@ class SkyRLRolePlan:
         if len(gpu_widths) > 1:
             raise ValueError(f"Iris role bundles require one GPUs-per-node value; got {sorted(gpu_widths)}")
 
-    def claim(self, role_id: str | ModelRoleKind) -> ModelRoleClaim:
-        normalized_role_id = role_id.value if isinstance(role_id, ModelRoleKind) else role_id
-        matches = [claim for claim in self.claims if claim.role_id == normalized_role_id]
+    def claim(self, role_id: str) -> ModelRoleClaim:
+        matches = [claim for claim in self.claims if claim.role_id == role_id]
         if len(matches) != 1:
-            raise ValueError(f"role plan must contain exactly one {normalized_role_id!r} claim; found {len(matches)}")
+            raise ValueError(f"role plan must contain exactly one {role_id!r} claim; found {len(matches)}")
         return matches[0]
 
     @property
@@ -151,29 +150,31 @@ class SkyRLRolePlan:
         return len(groups) == 1
 
 
-# Dotted YAML path -> SkyRLRolePlan field name. These are topology-sensitive inputs:
-# the launch host and in-task runtime derive geometry from the same SkyRL subtree.
-# Adding a behavioral flag here makes it part of that topology contract.
-# Missing keys raise rather than default.
-_ROLE_PLAN_PATHS: dict[str, str] = {
-    "trainer.placement.colocate_all": "colocate_all",
-    "trainer.placement.policy_num_nodes": "policy_num_nodes",
-    "trainer.placement.policy_num_gpus_per_node": "policy_num_gpus_per_node",
-    "generator.run_engines_locally": "run_engines_locally",
-    "generator.num_inference_engines": "num_inference_engines",
-    "generator.inference_engine_tensor_parallel_size": "inference_engine_tensor_parallel_size",
-    "trainer.train_batch_size": "train_batch_size",
-    "trainer.policy_mini_batch_size": "policy_mini_batch_size",
-    "trainer.micro_train_batch_size_per_gpu": "micro_train_batch_size_per_gpu",
-    "generator.n_samples_per_prompt": "n_samples_per_prompt",
-}
-_BOOLEAN_ROLE_PLAN_FIELDS = frozenset({"colocate_all", "colocate_policy_ref", "run_engines_locally"})
 # ROLE-SENSITIVE: use_kl_loss activates the reference claim, while generator.backend labels the rollout claim.
 # Wrappers that change either must recompile the complete role plan rather than patching only the runtime config.
 _ROLE_ACTIVATION_PATHS = (
     "trainer.algorithm.use_kl_loss",
     "generator.backend",
 )
+
+
+@dataclass(frozen=True)
+class _RolePlanValues:
+    colocate_all: bool
+    colocate_policy_ref: bool
+    policy_num_nodes: int
+    policy_num_gpus_per_node: int
+    run_engines_locally: bool
+    num_inference_engines: int
+    inference_engine_tensor_parallel_size: int
+    inference_engine_pipeline_parallel_size: int
+    inference_engine_data_parallel_size: int
+    inference_engine_expert_parallel_size: int
+    inference_engine_mp_backend: bool
+    train_batch_size: int
+    policy_mini_batch_size: int
+    micro_train_batch_size_per_gpu: int
+    n_samples_per_prompt: int
 
 
 def _at(config: dict[str, Any], path: str) -> Any:
@@ -195,31 +196,44 @@ def _optional_at(config: dict[str, Any], path: str, default: Any = None) -> Any:
     return node
 
 
-def _role_plan_values(config: dict[str, Any]) -> dict[str, Any]:
-    values = {}
-    for path, field in _ROLE_PLAN_PATHS.items():
-        raw = _at(config, path)
-        values[field] = bool(raw) if field in _BOOLEAN_ROLE_PLAN_FIELDS else int(raw)
-    values["colocate_policy_ref"] = bool(_optional_at(config, "trainer.placement.colocate_policy_ref", True))
-    for dimension in ("pipeline", "data", "expert"):
-        field = f"inference_engine_{dimension}_parallel_size"
-        values[field] = int(_optional_at(config, f"generator.{field}", 1))
-    values["inference_engine_mp_backend"] = bool(_optional_at(config, "generator.inference_engine_mp_backend", False))
-    return values
+def _role_plan_values(config: dict[str, Any]) -> _RolePlanValues:
+    return _RolePlanValues(
+        colocate_all=bool(_at(config, "trainer.placement.colocate_all")),
+        colocate_policy_ref=bool(_optional_at(config, "trainer.placement.colocate_policy_ref", True)),
+        policy_num_nodes=int(_at(config, "trainer.placement.policy_num_nodes")),
+        policy_num_gpus_per_node=int(_at(config, "trainer.placement.policy_num_gpus_per_node")),
+        run_engines_locally=bool(_at(config, "generator.run_engines_locally")),
+        num_inference_engines=int(_at(config, "generator.num_inference_engines")),
+        inference_engine_tensor_parallel_size=int(_at(config, "generator.inference_engine_tensor_parallel_size")),
+        inference_engine_pipeline_parallel_size=int(
+            _optional_at(config, "generator.inference_engine_pipeline_parallel_size", 1)
+        ),
+        inference_engine_data_parallel_size=int(
+            _optional_at(config, "generator.inference_engine_data_parallel_size", 1)
+        ),
+        inference_engine_expert_parallel_size=int(
+            _optional_at(config, "generator.inference_engine_expert_parallel_size", 1)
+        ),
+        inference_engine_mp_backend=bool(_optional_at(config, "generator.inference_engine_mp_backend", False)),
+        train_batch_size=int(_at(config, "trainer.train_batch_size")),
+        policy_mini_batch_size=int(_at(config, "trainer.policy_mini_batch_size")),
+        micro_train_batch_size_per_gpu=int(_at(config, "trainer.micro_train_batch_size_per_gpu")),
+        n_samples_per_prompt=int(_at(config, "generator.n_samples_per_prompt")),
+    )
 
 
-def _core_model_claims(config: dict[str, Any], values: dict[str, Any]) -> list[ModelRoleClaim]:
+def _core_model_claims(config: dict[str, Any], values: _RolePlanValues) -> list[ModelRoleClaim]:
     placement = _at(config, "trainer.placement")
     use_reference = bool(_at(config, "trainer.algorithm.use_kl_loss")) or bool(
         _optional_at(config, "trainer.algorithm.use_kl_in_reward", False)
     )
     use_critic = bool(_optional_at(config, "trainer.critic.model.path"))
     strategy = derive_strategy(config) or "fsdp2"
-    ref_num_nodes = int(placement.get("ref_num_nodes") or values["policy_num_nodes"])
-    ref_num_gpus_per_node = int(placement.get("ref_num_gpus_per_node") or values["policy_num_gpus_per_node"])
+    ref_num_nodes = int(placement.get("ref_num_nodes") or values.policy_num_nodes)
+    ref_num_gpus_per_node = int(placement.get("ref_num_gpus_per_node") or values.policy_num_gpus_per_node)
 
     shared_group = ALL_ROLES_COLOCATION_GROUP
-    policy_group = shared_group if values["colocate_all"] else ModelRoleKind.POLICY.value
+    policy_group = shared_group if values.colocate_all else ModelRoleKind.POLICY.value
     claims = [
         ModelRoleClaim(
             role_id=ModelRoleKind.POLICY.value,
@@ -227,18 +241,18 @@ def _core_model_claims(config: dict[str, Any], values: dict[str, Any]) -> list[M
             execution=RoleExecution.LOCAL,
             backend=strategy,
             colocation_group=policy_group,
-            num_nodes=values["policy_num_nodes"],
-            gpus_per_node=values["policy_num_gpus_per_node"],
-            replicas=values["policy_num_nodes"] * values["policy_num_gpus_per_node"],
+            num_nodes=values.policy_num_nodes,
+            gpus_per_node=values.policy_num_gpus_per_node,
+            replicas=values.policy_num_nodes * values.policy_num_gpus_per_node,
             tensor_parallel_size=1,
             pipeline_parallel_size=1,
-            data_parallel_size=values["policy_num_nodes"] * values["policy_num_gpus_per_node"],
+            data_parallel_size=values.policy_num_nodes * values.policy_num_gpus_per_node,
             expert_parallel_size=1,
         )
     ]
     if use_reference:
         reference_group = (
-            policy_group if values["colocate_all"] or values["colocate_policy_ref"] else ModelRoleKind.REFERENCE.value
+            policy_group if values.colocate_all or values.colocate_policy_ref else ModelRoleKind.REFERENCE.value
         )
         claims.append(
             ModelRoleClaim(
@@ -265,7 +279,7 @@ def _core_model_claims(config: dict[str, Any], values: dict[str, Any]) -> list[M
                 kind=ModelRoleKind.CRITIC,
                 execution=RoleExecution.LOCAL,
                 backend=strategy,
-                colocation_group=shared_group if values["colocate_all"] else ModelRoleKind.CRITIC.value,
+                colocation_group=shared_group if values.colocate_all else ModelRoleKind.CRITIC.value,
                 num_nodes=critic_num_nodes,
                 gpus_per_node=critic_num_gpus_per_node,
                 replicas=critic_num_nodes * critic_num_gpus_per_node,
@@ -315,21 +329,21 @@ def _minimum_disaggregated_rollout_nodes(
     return (placement_atoms + atoms_per_node - 1) // atoms_per_node
 
 
-def _rollout_claim(config: dict[str, Any], values: dict[str, Any]) -> ModelRoleClaim:
+def _rollout_claim(config: dict[str, Any], values: _RolePlanValues) -> ModelRoleClaim:
     rollout_backend = _at(config, "generator.backend")
     if not isinstance(rollout_backend, str) or not rollout_backend.strip():
         raise ValueError("generator.backend must be a non-empty string")
-    rollout_is_local = values["run_engines_locally"]
+    rollout_is_local = values.run_engines_locally
     rollout_nodes = (
-        values["policy_num_nodes"]
-        if rollout_is_local and values["colocate_all"]
+        values.policy_num_nodes
+        if rollout_is_local and values.colocate_all
         else _minimum_disaggregated_rollout_nodes(
-            replicas=values["num_inference_engines"],
-            tensor_parallel_size=values["inference_engine_tensor_parallel_size"],
-            pipeline_parallel_size=values["inference_engine_pipeline_parallel_size"],
-            data_parallel_size=values["inference_engine_data_parallel_size"],
-            gpus_per_node=values["policy_num_gpus_per_node"],
-            multiprocessing_backend=values["inference_engine_mp_backend"],
+            replicas=values.num_inference_engines,
+            tensor_parallel_size=values.inference_engine_tensor_parallel_size,
+            pipeline_parallel_size=values.inference_engine_pipeline_parallel_size,
+            data_parallel_size=values.inference_engine_data_parallel_size,
+            gpus_per_node=values.policy_num_gpus_per_node,
+            multiprocessing_backend=values.inference_engine_mp_backend,
         )
         if rollout_is_local
         else 0
@@ -339,23 +353,23 @@ def _rollout_claim(config: dict[str, Any], values: dict[str, Any]) -> ModelRoleC
         kind=ModelRoleKind.ROLLOUT,
         execution=RoleExecution.LOCAL if rollout_is_local else RoleExecution.REMOTE,
         backend=rollout_backend,
-        colocation_group=(ALL_ROLES_COLOCATION_GROUP if values["colocate_all"] else ModelRoleKind.ROLLOUT.value)
+        colocation_group=(ALL_ROLES_COLOCATION_GROUP if values.colocate_all else ModelRoleKind.ROLLOUT.value)
         if rollout_is_local
         else None,
         num_nodes=rollout_nodes,
-        gpus_per_node=values["policy_num_gpus_per_node"] if rollout_is_local else 0,
-        replicas=values["num_inference_engines"],
-        tensor_parallel_size=values["inference_engine_tensor_parallel_size"],
-        pipeline_parallel_size=values["inference_engine_pipeline_parallel_size"],
-        data_parallel_size=values["inference_engine_data_parallel_size"],
-        expert_parallel_size=values["inference_engine_expert_parallel_size"],
+        gpus_per_node=values.policy_num_gpus_per_node if rollout_is_local else 0,
+        replicas=values.num_inference_engines,
+        tensor_parallel_size=values.inference_engine_tensor_parallel_size,
+        pipeline_parallel_size=values.inference_engine_pipeline_parallel_size,
+        data_parallel_size=values.inference_engine_data_parallel_size,
+        expert_parallel_size=values.inference_engine_expert_parallel_size,
     )
     if claim.execution is RoleExecution.LOCAL:
         rollout_gpus = (
             claim.replicas * claim.tensor_parallel_size * claim.pipeline_parallel_size * claim.data_parallel_size
         )
         rollout_capacity = claim.num_nodes * claim.gpus_per_node
-        if values["colocate_all"] and rollout_gpus != rollout_capacity:
+        if values.colocate_all and rollout_gpus != rollout_capacity:
             raise ValueError(
                 "colocated rollout geometry must consume the policy bundle exactly: "
                 f"{claim.replicas} replicas x TP {claim.tensor_parallel_size} x PP {claim.pipeline_parallel_size} "
@@ -387,10 +401,10 @@ def derive_role_plan(config: dict[str, Any]) -> SkyRLRolePlan:
     return SkyRLRolePlan(
         claims=tuple(claims),
         bundles=bundles,
-        train_batch_size=values["train_batch_size"],
-        policy_mini_batch_size=values["policy_mini_batch_size"],
-        micro_train_batch_size_per_gpu=values["micro_train_batch_size_per_gpu"],
-        n_samples_per_prompt=values["n_samples_per_prompt"],
+        train_batch_size=values.train_batch_size,
+        policy_mini_batch_size=values.policy_mini_batch_size,
+        micro_train_batch_size_per_gpu=values.micro_train_batch_size_per_gpu,
+        n_samples_per_prompt=values.n_samples_per_prompt,
     )
 
 
@@ -445,7 +459,7 @@ def _teacher_claims(config: dict[str, Any]) -> tuple[ModelRoleClaim, ...]:
     return tuple(claims)
 
 
-def _draft_trainer_claims(config: dict[str, Any], values: dict[str, Any]) -> tuple[ModelRoleClaim, ...]:
+def _draft_trainer_claims(config: dict[str, Any], values: _RolePlanValues) -> tuple[ModelRoleClaim, ...]:
     speculative_decoding = _optional_at(config, "generator.speculative_decoding")
     if not isinstance(speculative_decoding, dict) or speculative_decoding.get("training") is None:
         return ()
@@ -457,7 +471,7 @@ def _draft_trainer_claims(config: dict[str, Any], values: dict[str, Any]) -> tup
             backend="torch",
             colocation_group=ModelRoleKind.DRAFT_TRAINER.value,
             num_nodes=1,
-            gpus_per_node=values["policy_num_gpus_per_node"],
+            gpus_per_node=values.policy_num_gpus_per_node,
             replicas=1,
             tensor_parallel_size=1,
             pipeline_parallel_size=1,

@@ -142,7 +142,7 @@ def test_runner_resolves_and_records_training_and_validation_selectors(monkeypat
             launch_config=launch_config,
         )
     )
-    monkeypatch.setattr(runner, "_setup_environment", lambda _args: None)
+    monkeypatch.setattr(runner, "_setup_environment", lambda: None)
     monkeypatch.setattr(runner, "_ingress_context", contextlib.nullcontext)
     monkeypatch.setattr(runner, "_run_skyrl", lambda _config: 0)
 

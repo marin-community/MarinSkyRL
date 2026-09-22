@@ -1,5 +1,7 @@
 """Behavior tests for config-native checkpoint export derivation."""
 
+from dataclasses import replace
+
 from omegaconf import OmegaConf
 
 from cloud.iris.export_hf_checkpoint import (
@@ -85,3 +87,17 @@ def test_export_backend_uses_one_launch_document() -> None:
 
     assert command[:4] == [command[0], "-m", "cloud.iris.launch", "iris"]
     assert command[-2:] == ["--config", "/tmp/export.yaml"]
+
+
+def test_checkpoint_export_config_preserves_federated_routing() -> None:
+    request = _request()
+    spec = replace(
+        _spec(request),
+        target_cluster="cw-rno2a",
+        parent_cluster_config="/tmp/marin.yaml",
+    )
+
+    config = checkpoint_export_launch_config(_training_config(), request, spec)
+
+    assert config.iris.target_cluster == "cw-rno2a"
+    assert config.iris.parent_cluster_config == "/tmp/marin.yaml"
