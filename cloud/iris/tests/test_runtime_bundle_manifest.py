@@ -12,18 +12,16 @@ if str(_REPOSITORY_ROOT) not in sys.path:
 from cloud.iris.runtime_bundle import BUNDLE_FILE_MANIFEST, read_manifest_paths  # noqa: E402
 
 
-def test_every_marinskyrl_module_is_in_the_runtime_bundle() -> None:
-    """Every .py file under marinskyrl/ must be listed in the bundle manifest.
-
-    PR #357 added marinskyrl/hf_model.py and marinskyrl/checkpoint_paths.py without
-    updating the manifest, causing ModuleNotFoundError at runtime.  This test forces
-    a deliberate choice when adding a new module: list it in the manifest or add an
-    explicit exclusion in the test.
-    """
+def test_every_runtime_module_is_in_the_runtime_bundle() -> None:
+    """Ship both Python packages imported by the task runtime."""
     manifest = set(read_manifest_paths(_REPOSITORY_ROOT))
-    on_disk = {p.relative_to(_REPOSITORY_ROOT).as_posix() for p in (_REPOSITORY_ROOT / "marinskyrl").rglob("*.py")}
+    on_disk = {
+        path.relative_to(_REPOSITORY_ROOT).as_posix()
+        for package in ("cloud/iris", "marinskyrl")
+        for path in (_REPOSITORY_ROOT / package).glob("*.py")
+    }
     missing = on_disk - manifest
     assert not missing, (
-        f"modules under marinskyrl/ not shipped to Iris tasks: {sorted(missing)}. "
+        f"runtime modules not shipped to Iris tasks: {sorted(missing)}. "
         f"Add them to {BUNDLE_FILE_MANIFEST} or add an explicit exclusion in this test."
     )
