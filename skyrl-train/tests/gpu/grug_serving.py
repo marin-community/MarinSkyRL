@@ -110,9 +110,14 @@ def assert_engine_weights(
             per_rank = [per_rank]
         for rank_values in per_rank:
             serving_ep_rank = int(rank_values["__ranks__"]["ep_rank"])
+            # A pipeline stage does not hold the weights of other stages' layers. The check at the
+            # end still requires every name to be found on some stage.
+            staged = int(rank_values["__ranks__"]["pp_size"]) > 1
             for name in names:
                 entry = rank_values[name]
                 if entry.get("skip"):
+                    continue
+                if staged and not entry["found"] and "error" not in entry:
                     continue
                 assert entry["found"], (name, entry)
                 found[name] = True

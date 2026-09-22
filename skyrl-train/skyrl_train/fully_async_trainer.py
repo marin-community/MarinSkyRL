@@ -1273,6 +1273,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 timings.expert_seconds,
                 timings.dense_seconds,
             )
+            if self.cfg.generator.expert_block_sync.verify:
+                self.all_timings.update(await self._expert_block_sync.verify(self.global_step))
             return None
         return await self.policy_model.async_run_method(
             "pass_through", "broadcast_to_inference_engines", self.inference_engine_client

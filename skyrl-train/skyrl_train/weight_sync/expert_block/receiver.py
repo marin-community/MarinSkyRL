@@ -17,6 +17,7 @@ from skyrl_train.weight_sync.expert_block.groups import Rendezvous, destroy_grou
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, from_wire
 from skyrl_train.weight_sync.expert_block.source_views import LAYER_PREFIX, ROUTED_EXPERTS, dtype_name
 from skyrl_train.weight_sync.expert_block.stream import Stream, bind, storage_identity
+from skyrl_train.weight_sync.expert_block.verify_weights import replay
 
 SUPPORTED_MODEL_TYPE = "grug_moe"
 # The only backend tested. TRITON keeps the trainer's [gate;up] order in w13_weight. FlashInfer
@@ -147,6 +148,12 @@ class ExpertBlockReceiver:
         if storage_identity(dict(self.model.named_parameters())) != self.identity:
             raise RuntimeError("Model parameter storage changed since the expert-block receiver was initialised")
         return asdict(self.stream.run(update_info["version"]))
+
+    def verify(self, update_info: dict) -> dict:
+        """Replay the sync and count the bytes that differ from the installed weights."""
+        if self.stream is None:
+            raise RuntimeError("Expert-block receiver is not initialised")
+        return asdict(replay(self.stream, update_info["version"]))
 
     def shutdown(self) -> None:
         destroy_groups(self.groups)

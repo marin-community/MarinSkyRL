@@ -4,6 +4,9 @@ Each process is one participant. Trainer ranks hold Megatron-layout parameters w
 unique to each position and describe them with conversion tasks, as in production. Receivers
 compare what they received with an independent reference conversion. There are two topologies:
 equal EP with one receiver stage and two replicas, and unequal EP with two receiver stages.
+
+Each topology then verifies the sync. A replay finds no differing byte, then exactly the one byte
+flipped on one receiver, and the peer comparison finds the one byte flipped on one data-parallel rank.
 """
 
 from dataclasses import dataclass
@@ -17,9 +20,10 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, create_groups, destroy_groups, warm_groups
-from skyrl_train.weight_sync.expert_block.schedule import ReceiverRank, TrainerRank, build_schedule
+from skyrl_train.weight_sync.expert_block.schedule import Group, ReceiverRank, TrainerRank, build_schedule
 from skyrl_train.weight_sync.expert_block.source_views import local_expert_sources, local_source_slices
 from skyrl_train.weight_sync.expert_block.stream import Stream
+from skyrl_train.weight_sync.expert_block.verify_weights import compare_replicas, replay
 from tests.cpu.weight_sync.expert_block.megatron_layout import (
     HIDDEN,
     INTERMEDIATE,
@@ -247,6 +251,34 @@ def participant_main(rank, topology, port, directory):
             check_trainer(rank, plan, groups, report, before, local.sources)
         else:
             check_receiver(rank, topology, plan, report, parameters, maps, padded_head, dense, experts)
+        # --- A replay matches every installed byte and covers every parameter byte ---
+        replayed = replay(stream, 7)
+        if rank >= trainer_count:
+            assert replayed.mismatched_bytes == 0
+            assert replayed.compared_bytes == dict(plan.receiver_bytes)[rank] == replayed.parameter_bytes
+        # Flip one installed byte on one receiver. The next replay finds it, and only on that receiver.
+        if rank == trainer_count:
+            next(iter(parameters.values())).view(-1).view(torch.uint8)[1] ^= 0xFF
+        replayed = replay(stream, 7)
+        if rank >= trainer_count:
+            assert replayed.mismatched_bytes == (1 if rank == trainer_count else 0)
+        # --- Data-parallel peers hold the same bytes; a flipped byte on one of them is counted ---
+        if rank < trainer_count and topology.trainer_dp == 2:
+            trainer = topology.trainers()[rank]
+            peers = tuple(row.rank for row in topology.trainers() if (row.pp, row.ep) == (trainer.pp, trainer.ep))
+            peer_group = create_groups(
+                rank, (Group(f"peers-{trainer.pp}-{trainer.ep}", peers),), rendezvous, backend="gloo"
+            )
+            replica_groups = dict.fromkeys(local.sources, next(iter(peer_group.values())))
+            try:
+                # The chunk is smaller than any parameter, so every tensor is compared in pieces.
+                compare = lambda: compare_replicas(local.sources, replica_groups, rank, 7, chunk_bytes=8)  # noqa: E731
+                assert compare().mismatched_bytes == 0
+                if trainer.dp == 1:
+                    next(iter(local.sources.values())).view(-1).view(torch.uint8)[-1] ^= 0xFF
+                assert compare().mismatched_bytes == 1
+            finally:
+                destroy_groups(peer_group)
     finally:
         destroy_groups(groups)
         dist.destroy_process_group()

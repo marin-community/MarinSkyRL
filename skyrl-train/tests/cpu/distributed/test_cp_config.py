@@ -114,7 +114,7 @@ ADDITIVE_GENERATOR_FIELDS = {
     "gdn_backend": "torch",
     "weight_sync_pause_timeout_seconds": 30.0,
     "weight_sync_transport": "broadcast",
-    "expert_block_sync": {"timeout_seconds": 600},
+    "expert_block_sync": {"timeout_seconds": 600, "verify": False},
 }
 ADDITIVE_MODEL_FIELDS = {
     "source_uri": None,
