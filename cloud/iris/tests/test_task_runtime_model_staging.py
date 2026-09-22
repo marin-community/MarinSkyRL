@@ -5,6 +5,7 @@ import pytest
 
 from cloud.iris import task_runtime
 from cloud.iris.task_runtime import (
+    apply_draft_model_to_command,
     apply_policy_model_to_command,
     parse_args,
     policy_chat_template_model,
@@ -95,3 +96,17 @@ def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(monkeypatch) -> Non
     )
 
     assert prepared == SpeculatorModelConfig(source_uri="s3://models/draft", source_identity=identity)
+
+
+def test_draft_s3_uri_is_quoted_for_hydra() -> None:
+    command = ["python", "train.py"]
+
+    apply_draft_model_to_command(
+        command,
+        SpeculatorModelConfig(
+            source_uri="s3://models/tmp/ttl=14d/draft",
+            source_identity="sha256:" + "a" * 64,
+        ),
+    )
+
+    assert "++generator.speculative_decoding.model.source_uri='s3://models/tmp/ttl=14d/draft'" in command

@@ -77,6 +77,7 @@ from cloud.iris.ray_storage import (
     resolve_ray_spill_target,
     validate_ray_spill_dir,
 )
+from cloud.iris.rl_config_translation import format_hydra_arg
 from cloud.iris.runtime_bundle import validate_bundled_runtime
 
 try:
@@ -520,9 +521,13 @@ def apply_draft_model_to_command(train_argv: list[str], model: SpeculatorModelCo
     train_argv.extend(
         (
             "--skyrl_override",
-            f"++generator.speculative_decoding.model.source_uri={model.source_uri}",
+            format_hydra_arg("generator.speculative_decoding.model.source_uri", model.source_uri, prefix="++"),
             "--skyrl_override",
-            f"++generator.speculative_decoding.model.source_identity={model.source_identity}",
+            format_hydra_arg(
+                "generator.speculative_decoding.model.source_identity",
+                model.source_identity,
+                prefix="++",
+            ),
         )
     )
 
