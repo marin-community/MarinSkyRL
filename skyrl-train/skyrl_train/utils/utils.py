@@ -589,6 +589,50 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
             )
 
 
+def _validate_rollout_runtime_cfg(cfg: DictConfig) -> None:
+    runtime_values = {
+        "trainer.distributed.placement_group_timeout_seconds": cfg.trainer.distributed.placement_group_timeout_seconds,
+        "trainer.progress.min_interval_seconds": cfg.trainer.progress.min_interval_seconds,
+        "trainer.progress.heartbeat_seconds": cfg.trainer.progress.heartbeat_seconds,
+        "trainer.progress.percent_step": cfg.trainer.progress.percent_step,
+        "trainer.progress.count_step": cfg.trainer.progress.count_step,
+        "generator.r3_dispatch_put_timeout_seconds": cfg.generator.r3_dispatch_put_timeout_seconds,
+        "trajectory_runner.process_pool.num_coordinators": cfg.trajectory_runner.process_pool.num_coordinators,
+        "trajectory_runner.process_pool.cpus_per_coordinator": cfg.trajectory_runner.process_pool.cpus_per_coordinator,
+        "trajectory_runner.process_pool.executor_workers": cfg.trajectory_runner.process_pool.executor_workers,
+    }
+    for path, value in runtime_values.items():
+        if value <= 0:
+            raise ValueError(f"{path} must be positive; got {value}")
+
+    if cfg.trainer.progress.mode not in {"auto", "tqdm", "logging"}:
+        raise ValueError(f"trainer.progress.mode must be one of auto, tqdm, logging; got {cfg.trainer.progress.mode!r}")
+    if cfg.generator.r3_transport not in set(R3Transport):
+        raise ValueError(
+            f"generator.r3_transport must be one of by_value, resident, decentral; got {cfg.generator.r3_transport!r}"
+        )
+    if cfg.generator.gdn_backend not in set(GDNBackend):
+        raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
+
+    validate_generator_cfg(cfg)
+
+
+def _validate_rollout_geometry(cfg: DictConfig) -> None:
+    if cfg.trainer.placement.colocate_all:
+        validate_colocated_engine_geometry(
+            tensor_pipeline_size=(
+                cfg.generator.inference_engine_tensor_parallel_size
+                * cfg.generator.inference_engine_pipeline_parallel_size
+            ),
+            gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+        )
+
+
+def _validate_engine_init_timeout(cfg: DictConfig) -> None:
+    if cfg.generator.engine_init_timeout_seconds <= 0:
+        raise ValueError("generator.engine_init_timeout_seconds must be greater than zero")
+
+
 def validate_cfg(cfg: DictConfig):
     distillation_plan = compile_distillation_plan_from_config(cfg)
     validate_distillation_runtime_support(distillation_plan)
@@ -621,20 +665,12 @@ def validate_cfg(cfg: DictConfig):
         raise ValueError(
             f"GSPO requires trainer.algorithm.loss_reduction=sequence_mean; got {cfg.trainer.algorithm.loss_reduction}"
         )
+    _validate_rollout_runtime_cfg(cfg)
     runtime_values = {
-        "trainer.distributed.placement_group_timeout_seconds": cfg.trainer.distributed.placement_group_timeout_seconds,
         "trainer.distributed.worker_collective_timeout_seconds": cfg.trainer.distributed.worker_collective_timeout_seconds,
         "trainer.policy.host_memory_monitor.interval_seconds": cfg.trainer.policy.host_memory_monitor.interval_seconds,
         "trainer.model_load_retry.backoff_base_seconds": cfg.trainer.model_load_retry.backoff_base_seconds,
         "trainer.model_load_retry.backoff_cap_seconds": cfg.trainer.model_load_retry.backoff_cap_seconds,
-        "trainer.progress.min_interval_seconds": cfg.trainer.progress.min_interval_seconds,
-        "trainer.progress.heartbeat_seconds": cfg.trainer.progress.heartbeat_seconds,
-        "trainer.progress.percent_step": cfg.trainer.progress.percent_step,
-        "trainer.progress.count_step": cfg.trainer.progress.count_step,
-        "generator.r3_dispatch_put_timeout_seconds": cfg.generator.r3_dispatch_put_timeout_seconds,
-        "trajectory_runner.process_pool.num_coordinators": cfg.trajectory_runner.process_pool.num_coordinators,
-        "trajectory_runner.process_pool.cpus_per_coordinator": cfg.trajectory_runner.process_pool.cpus_per_coordinator,
-        "trajectory_runner.process_pool.executor_workers": cfg.trajectory_runner.process_pool.executor_workers,
         "trainer.policy.fsdp_config.expert_loader_chunk_rows": cfg.trainer.policy.fsdp_config.expert_loader_chunk_rows,
     }
     for path, value in runtime_values.items():
@@ -655,15 +691,6 @@ def validate_cfg(cfg: DictConfig):
             "trainer.algorithm.tis_lcs_alert_threshold must be non-negative; "
             f"got {cfg.trainer.algorithm.tis_lcs_alert_threshold}"
         )
-    if cfg.trainer.progress.mode not in {"auto", "tqdm", "logging"}:
-        raise ValueError(f"trainer.progress.mode must be one of auto, tqdm, logging; got {cfg.trainer.progress.mode!r}")
-    if cfg.generator.r3_transport not in set(R3Transport):
-        raise ValueError(
-            f"generator.r3_transport must be one of by_value, resident, decentral; got {cfg.generator.r3_transport!r}"
-        )
-    if cfg.generator.gdn_backend not in set(GDNBackend):
-        raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
-    validate_generator_cfg(cfg)
     if cfg.trainer.strategy == "megatron":
         validate_megatron_cfg(cfg)
     validate_batch_invariant_config(cfg)
@@ -840,11 +867,7 @@ def validate_cfg(cfg: DictConfig):
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:
-        tp_pp_size = (
-            cfg.generator.inference_engine_tensor_parallel_size * cfg.generator.inference_engine_pipeline_parallel_size
-        )
-        gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
-        validate_colocated_engine_geometry(tensor_pipeline_size=tp_pp_size, gpus_per_node=gpus_per_node)
+        _validate_rollout_geometry(cfg)
         num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
         num_rollout_gpus = (
             cfg.generator.num_inference_engines
@@ -864,49 +887,14 @@ def validate_cfg(cfg: DictConfig):
             assert cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node, (
                 f"policy_num_gpus_per_node ({cfg.trainer.placement.policy_num_gpus_per_node}) and ref_num_gpus_per_node ({cfg.trainer.placement.ref_num_gpus_per_node}) must be the same when colocate policy and ref model."
             )
-
-    if cfg.generator.engine_init_timeout_seconds <= 0:
-        raise ValueError("generator.engine_init_timeout_seconds must be greater than zero")
+    _validate_engine_init_timeout(cfg)
 
 
 def validate_generation_cfg(cfg: DictConfig) -> None:
     """Validate settings consumed by an evaluation-only generation run."""
-    runtime_values = {
-        "trainer.distributed.placement_group_timeout_seconds": cfg.trainer.distributed.placement_group_timeout_seconds,
-        "trainer.progress.min_interval_seconds": cfg.trainer.progress.min_interval_seconds,
-        "trainer.progress.heartbeat_seconds": cfg.trainer.progress.heartbeat_seconds,
-        "trainer.progress.percent_step": cfg.trainer.progress.percent_step,
-        "trainer.progress.count_step": cfg.trainer.progress.count_step,
-        "generator.r3_dispatch_put_timeout_seconds": cfg.generator.r3_dispatch_put_timeout_seconds,
-        "trajectory_runner.process_pool.num_coordinators": cfg.trajectory_runner.process_pool.num_coordinators,
-        "trajectory_runner.process_pool.cpus_per_coordinator": cfg.trajectory_runner.process_pool.cpus_per_coordinator,
-        "trajectory_runner.process_pool.executor_workers": cfg.trajectory_runner.process_pool.executor_workers,
-    }
-    for path, value in runtime_values.items():
-        if value <= 0:
-            raise ValueError(f"{path} must be positive; got {value}")
-
-    if cfg.trainer.progress.mode not in {"auto", "tqdm", "logging"}:
-        raise ValueError(f"trainer.progress.mode must be one of auto, tqdm, logging; got {cfg.trainer.progress.mode!r}")
-    if cfg.generator.r3_transport not in set(R3Transport):
-        raise ValueError(
-            f"generator.r3_transport must be one of by_value, resident, decentral; got {cfg.generator.r3_transport!r}"
-        )
-    if cfg.generator.gdn_backend not in set(GDNBackend):
-        raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
-
-    validate_generator_cfg(cfg)
-
-    if cfg.trainer.placement.colocate_all:
-        validate_colocated_engine_geometry(
-            tensor_pipeline_size=(
-                cfg.generator.inference_engine_tensor_parallel_size
-                * cfg.generator.inference_engine_pipeline_parallel_size
-            ),
-            gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
-        )
-    if cfg.generator.engine_init_timeout_seconds <= 0:
-        raise ValueError("generator.engine_init_timeout_seconds must be greater than zero")
+    _validate_rollout_runtime_cfg(cfg)
+    _validate_rollout_geometry(cfg)
+    _validate_engine_init_timeout(cfg)
 
 
 def validate_batch_invariant_config(cfg: DictConfig) -> None:

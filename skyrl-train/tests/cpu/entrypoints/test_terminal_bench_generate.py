@@ -1,21 +1,29 @@
-import asyncio
+from pathlib import Path
 
-import pytest
+from omegaconf import OmegaConf
 
-from skyrl_train.entrypoints import terminal_bench_generate
 from skyrl_train.entrypoints.terminal_bench_generate import TerminalBenchGenerateExp
 
 
-def test_terminal_bench_generate_uses_shared_evaluation_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_terminal_bench_generate_reads_validation_tasks(tmp_path: Path) -> None:
+    task_dir = tmp_path / "tasks" / "task-a"
+    task_dir.mkdir(parents=True)
+    (task_dir / "instruction.md").write_text("Do the task")
+
     experiment = object.__new__(TerminalBenchGenerateExp)
-    expected = {"eval/all/avg_score": 0.5}
-
-    async def fake_run_evaluation_only(candidate):
-        await asyncio.sleep(0)
-        assert candidate is experiment
-        return expected
-
-    monkeypatch.setattr(terminal_bench_generate, "run_evaluation_only", fake_run_evaluation_only)
+    experiment.cfg = OmegaConf.create(
+        {
+            "trainer": {"eval_interval": 1},
+            "data": {"train_data": [], "val_data": [str(tmp_path / "tasks")]},
+        }
+    )
 
     assert experiment.get_train_dataset() is None
-    assert experiment.run() == expected
+    assert list(experiment.get_eval_dataset()) == [
+        {
+            "prompt": str(task_dir),
+            "env_class": None,
+            "env_extras": {"data_source": str(task_dir)},
+            "uid": "task-a",
+        }
+    ]

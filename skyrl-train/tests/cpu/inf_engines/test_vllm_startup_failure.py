@@ -16,7 +16,7 @@ def test_port_collision_retryability(cause, expected):
 
 def test_independent_engine_retries_port_collisions(monkeypatch):
     pytest.importorskip("vllm")
-    from skyrl_train.inference_engines.vllm import vllm_engine
+    from skyrl_train.inference_engines.vllm import vllm_engine  # noqa: PLC0415
 
     engine = object()
     create_attempts = iter((RuntimeError("EADDRINUSE"), engine))
@@ -40,7 +40,7 @@ def test_independent_engine_retries_port_collisions(monkeypatch):
 
 def test_independent_engine_does_not_retry_other_failures(monkeypatch):
     pytest.importorskip("vllm")
-    from skyrl_train.inference_engines.vllm import vllm_engine
+    from skyrl_train.inference_engines.vllm import vllm_engine  # noqa: PLC0415
 
     attempts = 0
 

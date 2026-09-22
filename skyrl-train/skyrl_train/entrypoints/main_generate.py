@@ -5,7 +5,7 @@ Main entrypoint for evaluation-only.
 import asyncio
 import time
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 import hydra
 import ray
@@ -48,7 +48,7 @@ async def load_initial_policy_adapter(inference_engine_client: PolicyAdapterClie
     await inference_engine_client.update_named_weights(lora_disk_load_request(str(path)))
 
 
-async def run_evaluation_only(exp: BasePPOExp) -> dict[str, Any]:
+async def run_evaluation_only(exp: BasePPOExp) -> dict[str, float]:
     """Run one measured evaluation and release all rollout resources."""
     assert exp.eval_dataset is not None, "The evaluation only entrypoint requires an eval dataset is provided"
 
@@ -58,7 +58,7 @@ async def run_evaluation_only(exp: BasePPOExp) -> dict[str, Any]:
         await inference_engine_client.wake_up()
         await load_initial_policy_adapter(inference_engine_client, exp.cfg)
         started_at = time.monotonic()
-        results: dict[str, Any] = await evaluate(
+        results = await evaluate(
             eval_dataloader=build_dataloader(exp.cfg, exp.eval_dataset, is_train=False),
             trajectory_runner=trajectory_runner,
             cfg=exp.cfg,
@@ -89,7 +89,7 @@ class EvalOnlyEntrypoint(BasePPOExp):
         """Override to avoid requiring a train dataset for eval-only runs."""
         return None
 
-    async def run(self) -> dict[str, Any]:
+    async def run(self) -> dict[str, float]:
         return await run_evaluation_only(self)
 
 

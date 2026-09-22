@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import random
 import tempfile
 import threading
 from typing import List, Any, Dict, Optional, Tuple, Iterator, AsyncGenerator
@@ -110,8 +111,6 @@ def _create_async_engine(engine_args, stat_loggers, data_parallel_master_ports):
 
 def _create_async_engine_with_port_collision_retries(engine_args, stat_loggers):
     """Start one independent engine, retrying opportunistically selected ports."""
-    import random
-
     max_attempts = 5
     backoff_base_seconds = 15.0
     for attempt in range(max_attempts):
