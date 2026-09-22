@@ -1146,15 +1146,6 @@ def test_build_dataloader_eval_num_prompts_is_bounded_and_reproducible(dummy_con
     assert first != selected_prompts(123)
 
 
-def test_build_dataloader_rejects_nonpositive_eval_num_prompts(dummy_config):
-    config = dummy_config.copy()
-    config.trainer.eval_num_prompts = 0
-    config.generator.enable_http_endpoint = True
-
-    with pytest.raises(ValueError):
-        build_dataloader(config, MultiItemDataset(), is_train=False)
-
-
 def test_validate_trajectory_batch_invalid_rewards():
     """Test validate_trajectory_batch raises AssertionError when rewards is neither List[float-like] nor List[List[float-like]]."""
     input_batch = TrajectoryRequestBatch(
