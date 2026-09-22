@@ -13,6 +13,7 @@ from typing import Literal, Sequence
 from fsspec.spec import AbstractFileSystem
 from huggingface_hub import HfApi, HfFileSystem, snapshot_download
 from huggingface_hub.hf_api import RepoFile
+from loguru import logger
 from rigging.filesystem.cluster_config import marin_temp_bucket
 from rigging.filesystem.distributed_lock import create_lock, lease_refresh
 
@@ -219,7 +220,7 @@ def _stream_snapshot_file(
     destination_path: str,
     *,
     safetensors: bool = False,
-) -> tuple[ModelManifestFile, tuple[str, ...]]:
+) -> tuple[ModelManifestFile, tuple[str, ...], bool]:
     """Mirror one file without a disk copy and optionally collect tensor names."""
     if _destination_matches(
         destination_filesystem,
@@ -240,6 +241,7 @@ def _stream_snapshot_file(
         return (
             ModelManifestFile(path=snapshot_file.path, size=snapshot_file.size, sha256=snapshot_file.sha256),
             keys,
+            True,
         )
 
     def transfer() -> tuple[ModelManifestFile, tuple[str, ...]]:
@@ -270,7 +272,11 @@ def _stream_snapshot_file(
                     )
         return ModelManifestFile(path=snapshot_file.path, size=transferred, sha256=actual_sha256), keys
 
-    return call_with_hugging_face_retry(transfer, operation=f"stream Hugging Face file {snapshot_file.path}")
+    entry, keys = call_with_hugging_face_retry(
+        transfer,
+        operation=f"stream Hugging Face file {snapshot_file.path}",
+    )
+    return entry, keys, False
 
 
 def _remove_unexpected_files(filesystem: AbstractFileSystem, root: str, expected_paths: set[str]) -> None:
@@ -315,13 +321,19 @@ def publish_hugging_face_snapshot(
     manifest_files: dict[str, ModelManifestFile] = {}
     shard_headers: dict[str, tuple[int, tuple[str, ...]]] = {}
     deferred_metadata = {"config.json", "tokenizer.json", "tokenizer_config.json", HF_WEIGHT_INDEX_FILENAME}
+    streamed_files = 0
+    streamed_bytes = 0
+    streamed_weight_bytes = 0
+    reused_files = 0
+    reused_bytes = 0
+    reused_weight_bytes = 0
 
     for path, snapshot_file in sorted(files_by_path.items()):
         if path in deferred_metadata:
             continue
         source_path = posixpath.join(source_root, path)
         destination_path = posixpath.join(destination_root, path)
-        entry, keys = _stream_snapshot_file(
+        entry, keys, reused = _stream_snapshot_file(
             source_filesystem,
             source_path,
             snapshot_file,
@@ -330,6 +342,16 @@ def publish_hugging_face_snapshot(
             safetensors=path.endswith(".safetensors"),
         )
         manifest_files[path] = entry
+        if reused:
+            reused_files += 1
+            reused_bytes += entry.size
+            if _is_weight(path):
+                reused_weight_bytes += entry.size
+        else:
+            streamed_files += 1
+            streamed_bytes += entry.size
+            if _is_weight(path):
+                streamed_weight_bytes += entry.size
         if path.endswith(".safetensors"):
             shard_headers[path] = (entry.size, keys)
 
@@ -389,6 +411,23 @@ def publish_hugging_face_snapshot(
     _remove_unexpected_files(destination_filesystem, destination_root, expected_paths)
     manifest_bytes = (json.dumps(manifest.model_dump(mode="json"), indent=2, sort_keys=True) + "\n").encode()
     _write_bytes(destination_filesystem, marker_path, manifest_bytes)
+    logger.info(
+        "Hugging Face mirror published: model={} revision={} uri={} files={} artifact_bytes={} "
+        "streamed_files={} streamed_bytes={} streamed_weight_bytes={} reused_files={} reused_bytes={} "
+        "reused_weight_bytes={} local_weight_disk_bytes=0 identity={}",
+        model_id,
+        revision,
+        destination_uri,
+        manifest.file_count,
+        manifest.total_bytes,
+        streamed_files,
+        streamed_bytes,
+        streamed_weight_bytes,
+        reused_files,
+        reused_bytes,
+        reused_weight_bytes,
+        manifest.identity,
+    )
     return manifest
 
 
