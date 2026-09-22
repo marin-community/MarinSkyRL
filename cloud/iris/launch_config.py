@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 import tempfile
 from typing import Any, Mapping
@@ -22,6 +23,11 @@ from marinskyrl.resource_locator import join_resource_path
 from marinskyrl.task_sources import data_source
 
 
+class RunMode(StrEnum):
+    TRAIN = "train"
+    CHECKPOINT_EXPORT = "checkpoint_export"
+
+
 @dataclass
 class RunConfig:
     """Experiment identity and reproducibility inputs."""
@@ -29,7 +35,7 @@ class RunConfig:
     id: str = MISSING
     attempt_id: str = MISSING
     seed: int = 42
-    mode: str = "train"
+    mode: str = RunMode.TRAIN.value
     submission: str = "wait"
     export_hf: bool = True
 
@@ -208,7 +214,7 @@ def load_launch_config(path: Path) -> DictConfig:
     """Load one launch document and compose its SkyRL recipe exactly once."""
     config = compose_launch_config(OmegaConf.load(path))
     if _is_source_recipe(config.skyrl):
-        if config.run.mode != "train":
+        if config.run.mode != RunMode.TRAIN:
             raise ValueError("checkpoint_export launch configs must already contain a composed SkyRL subtree")
         config = _compose_source_recipe(config)
     validate_launch_config(config)
@@ -252,7 +258,7 @@ def derive_iris_allocation(config: DictConfig | Mapping[str, Any]) -> IrisAlloca
     plan = derive_role_plan(skyrl)
     allocation = raw["iris"]["allocation"]
     policy = plan.claim("policy")
-    checkpoint_export = raw["run"]["mode"] == "checkpoint_export"
+    checkpoint_export = raw["run"]["mode"] == RunMode.CHECKPOINT_EXPORT
     expected_nodes = policy.num_nodes if checkpoint_export else derive_num_nodes(plan)
     if allocation["num_nodes"] != expected_nodes:
         raise ValueError(
@@ -277,7 +283,7 @@ def validate_launch_config(config: DictConfig | Mapping[str, Any]) -> LaunchTopo
     raw = _resolved_config(config)
     if raw["schema_version"] != 1:
         raise ValueError(f"unsupported SkyRL launch schema_version: {raw['schema_version']!r}")
-    if raw["run"]["mode"] not in {"train", "checkpoint_export"}:
+    if raw["run"]["mode"] not in set(RunMode):
         raise ValueError(f"unsupported run.mode: {raw['run']['mode']!r}")
     if raw["run"]["submission"] not in {"prepare", "detach", "wait"}:
         raise ValueError(f"unsupported run.submission: {raw['run']['submission']!r}")
@@ -312,7 +318,7 @@ def validate_launch_config(config: DictConfig | Mapping[str, Any]) -> LaunchTopo
     rl_entrypoint_spec(entrypoint)
     expected_profile = runtime_profile_for_strategy(
         skyrl.get("trainer", {}).get("strategy"),
-        mode=RuntimeMode.CHECKPOINT_EXPORT if run["mode"] == "checkpoint_export" else RuntimeMode.TRAINING,
+        mode=RuntimeMode.CHECKPOINT_EXPORT if run["mode"] == RunMode.CHECKPOINT_EXPORT else RuntimeMode.TRAINING,
     )
     if runtime["profile"] != expected_profile.value:
         raise ValueError(
@@ -327,6 +333,9 @@ def validate_launch_config(config: DictConfig | Mapping[str, Any]) -> LaunchTopo
         trainer = skyrl.get("trainer", {})
         if trainer.get("train_batch_size") != trainer.get("policy_mini_batch_size"):
             raise ValueError("fully async SkyRL requires trainer.train_batch_size == trainer.policy_mini_batch_size")
+    trainer_seed = skyrl.get("trainer", {}).get("seed")
+    if trainer_seed != run["seed"]:
+        raise ValueError(f"run.seed={run['seed']} does not match skyrl.trainer.seed={trainer_seed!r}")
     return LaunchTopology(
         num_nodes=allocation.num_nodes,
         gpus_per_node=allocation.gpus_per_node,

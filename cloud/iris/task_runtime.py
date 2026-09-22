@@ -79,7 +79,7 @@ from cloud.iris.ray_storage import (
     resolve_ray_spill_target,
     validate_ray_spill_dir,
 )
-from cloud.iris.launch_config import load_launch_config
+from cloud.iris.launch_config import RunMode, load_launch_config
 from cloud.iris.rl_config_translation import TaskLocalSkyRLValues, apply_task_local_values
 from cloud.iris.runtime_bundle import validate_bundled_runtime
 
@@ -1923,7 +1923,7 @@ def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
     """Project the typed launch document into the controller's private runtime state."""
     model = config.inputs.model
     skyrl = config.skyrl
-    checkpoint_export = config.run.mode == "checkpoint_export"
+    checkpoint_export = config.run.mode == RunMode.CHECKPOINT_EXPORT
     task_env = {str(key): str(value) for key, value in config.runtime.task_env.items()}
     model_uri = str(model.uri)
     model_identity = str(model.identity)

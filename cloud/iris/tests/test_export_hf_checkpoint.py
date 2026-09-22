@@ -25,7 +25,6 @@ def test_export_command_uses_config_path_for_lifecycle_values() -> None:
     )
     spec = ExportJobSpec(
         request=request,
-        rl_config="config.yaml",
         cluster="cw-rno2a",
         priority="batch",
         gpu_variant="H100",

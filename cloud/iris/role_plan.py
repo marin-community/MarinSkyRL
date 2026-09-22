@@ -152,12 +152,6 @@ class SkyRLRolePlan:
 
 # ROLE-SENSITIVE: use_kl_loss activates the reference claim, while generator.backend labels the rollout claim.
 # Wrappers that change either must recompile the complete role plan rather than patching only the runtime config.
-_ROLE_ACTIVATION_PATHS = (
-    "trainer.algorithm.use_kl_loss",
-    "generator.backend",
-)
-
-
 @dataclass(frozen=True)
 class _RolePlanValues:
     colocate_all: bool

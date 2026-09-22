@@ -17,7 +17,7 @@ def run_config(config_path: Path) -> None:
     """Load one launch config and call its registered SkyRL function."""
     config = load_launch_config(config_path)
     spec = rl_entrypoint_spec(str(config.runtime.entrypoint))
-    run = cast(Callable[[DictConfig], None], getattr(importlib.import_module(spec.module), spec.callable))
+    run = cast(Callable[[DictConfig], None], getattr(importlib.import_module(spec.module), spec.function_name))
     run(config.skyrl)
 
 

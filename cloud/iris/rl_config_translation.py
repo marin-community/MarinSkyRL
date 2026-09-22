@@ -47,7 +47,7 @@ class RLEntrypoint(StrEnum):
 @dataclass(frozen=True)
 class RLEntrypointSpec:
     module: str
-    callable: str = "run"
+    function_name: str = "run"
 
 
 RL_ENTRYPOINTS = MappingProxyType(
@@ -696,9 +696,9 @@ class CompiledSkyRLConfig:
 class TaskLocalSkyRLValues:
     """Values resolved only after an Iris task has staged its inputs."""
 
-    train_data: tuple[str | dict[str, Any], ...]
-    validation_data: tuple[str | dict[str, Any], ...]
-    terminal_bench_data: tuple[str | dict[str, Any], ...]
+    train_data: tuple[str, ...]
+    validation_data: tuple[str, ...]
+    terminal_bench_data: tuple[str, ...]
     agent_api_base: str | None
     literal_log_path: str | None
     policy_model_path: str | None = None

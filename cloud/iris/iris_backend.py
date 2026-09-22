@@ -113,9 +113,7 @@ class RLStoragePaths:
     export_root: str
     trace_root: str
     trajectory_root: str
-    rendezvous_root: str
     ray_log_root: str
-    resolved_config_uri: str
     resume_checkpoint_count: int
 
 
@@ -272,23 +270,16 @@ def _gpu_constraints(
     return constraints
 
 
-@dataclass(frozen=True)
-class _ModelCliReference:
-    model_path: str
-    source_uri: str | None = None
-    source_identity: str | None = None
-
-
-def _model_cli_reference(uri: str, identity: str) -> _ModelCliReference:
+def _model_path(uri: str) -> str:
     """Resolve a typed model URI into the task runtime's model reference."""
     if is_cloud_uri(uri):
-        return _ModelCliReference(model_path=uri, source_uri=uri, source_identity=identity)
+        return uri
     parsed = urlparse(uri)
     if parsed.scheme == "file":
         if parsed.netloc not in ("", "localhost"):
             raise ValueError(f"Model file URI must be local: {uri!r}")
-        return _ModelCliReference(model_path=unquote(parsed.path))
-    return _ModelCliReference(model_path=uri)
+        return unquote(parsed.path)
+    return uri
 
 
 def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNamespace:
@@ -305,7 +296,7 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
     inputs = raw["inputs"]
     skyrl = raw["skyrl"]
     model = inputs["model"]
-    model_reference = _model_cli_reference(model["uri"], model["identity"])
+    model_path = _model_path(model["uri"])
     terminal_bench = skyrl.get("terminal_bench_config") or {}
     trajectory_retention = (skyrl.get("generator") or {}).get("trajectory_retention") or {}
     contents = config_path.read_bytes()
@@ -320,7 +311,7 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
         rl_config=str(config_path),
         rl_config_launch=task_config,
         entrypoint=runtime["entrypoint"],
-        model_path=model_reference.model_path,
+        model_path=model_path,
         resume_checkpoints_to_keep=int(artifacts["resume_checkpoint_count"]),
         num_nodes=int(allocation["num_nodes"]),
         gpus_per_node=int(allocation["gpus_per_node"]),
@@ -332,8 +323,6 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
         ray_spill_dir=ray["spill_dir"],
         ray_spill_backend=RaySpillBackend(ray["spill_backend"]),
         rendezvous_dir=ray["rendezvous_dir"],
-        rendezvous_timeout=int(ray["rendezvous_timeout"]),
-        driver_liveness_timeout=int(ray["driver_liveness_timeout"]),
         cluster=iris["cluster"],
         cluster_config=iris["cluster_config"],
         runtime_commit=runtime["launcher_commit"],
@@ -356,9 +345,7 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
         trace_root=terminal_bench.get("trials_dir") or join_resource_path(artifacts["attempts_root"], "trace_jobs"),
         trajectory_root=trajectory_retention.get("output_path")
         or join_resource_path(artifacts["attempts_root"], "trajectories"),
-        rendezvous_root=ray["rendezvous_dir"],
         ray_log_root=ray["log_dir"],
-        resolved_config_uri=artifacts["resolved_config_uri"],
         resume_checkpoint_count=args.resume_checkpoints_to_keep,
     )
     validate_controller_ingress_reachability(args)
