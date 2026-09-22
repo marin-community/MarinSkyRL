@@ -20,6 +20,8 @@ from skyrl_train.telemetry import TelemetryConfig
 
 VLLM_MAX_RECORDS_PER_ENGINE = 512
 PUBLICATION_LOSS_METRIC = "metric_publication_dropped_records"
+VLLM_GENERATION_TOKENS_TOTAL_METRIC = "vllm/generation_tokens_total"
+VLLM_PROMPT_TOKENS_TOTAL_METRIC = "vllm/prompt_tokens_total"
 
 
 class InferenceMetricsSink(Protocol):
@@ -64,6 +66,8 @@ def _engine_trainer_metrics(engines: tuple[VLLMEngineStatsSnapshot, ...]) -> dic
     spec_drafts = sum(item.spec_decode_drafts for item in cumulative)
     spec_draft_tokens = sum(item.spec_decode_draft_tokens for item in cumulative)
     spec_accepted_tokens = sum(item.spec_decode_accepted_tokens for item in cumulative)
+    prompt_tokens = sum(item.prompt_tokens for item in cumulative)
+    generation_tokens = sum(item.generation_tokens for item in cumulative)
 
     def average(name: str) -> float:
         return sum(float(getattr(item, name)) for item in intervals) / count
@@ -101,6 +105,8 @@ def _engine_trainer_metrics(engines: tuple[VLLMEngineStatsSnapshot, ...]) -> dic
         "vllm/total_preempted_reqs": float(sum(item.preempted_reqs for item in intervals)),
         "vllm/total_samples": float(sum(item.samples for item in intervals)),
         "vllm/total_active_samples": float(sum(item.active_samples for item in intervals)),
+        VLLM_PROMPT_TOKENS_TOTAL_METRIC: float(prompt_tokens),
+        VLLM_GENERATION_TOKENS_TOTAL_METRIC: float(generation_tokens),
         "vllm/spec_decode_drafts_total": float(spec_drafts),
         "vllm/spec_decode_draft_tokens_total": float(spec_draft_tokens),
         "vllm/spec_decode_accepted_tokens_total": float(spec_accepted_tokens),
