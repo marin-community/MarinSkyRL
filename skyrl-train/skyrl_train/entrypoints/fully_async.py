@@ -54,6 +54,13 @@ class AsyncPPOExp(BasePPOExp):
             base_url=f"http://{cfg.generator.http_endpoint_host}:{cfg.generator.http_endpoint_port}",
             model_name=inference_engine_client.model_name,
             tokenizer=tokenizer,
+            # Async trajectory loops also perform environment and judge work, so their count can greatly exceed the
+            # serving working set. Admit only as many HTTP requests as the vLLM replicas can actively execute.
+            max_concurrent_requests=(
+                cfg.generator.num_inference_engines
+                * cfg.generator.inference_engine_data_parallel_size
+                * cfg.generator.max_num_seqs
+            ),
         )
         runner = SkyRLGymTrajectoryRunner(
             trajectory_runner_cfg=cfg.generator,

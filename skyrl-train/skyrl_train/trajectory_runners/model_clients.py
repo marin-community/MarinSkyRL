@@ -2,7 +2,9 @@
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Protocol
+from collections.abc import Awaitable, Callable
+from functools import partial
+from typing import Any, Protocol, TypeVar
 
 import aiohttp
 from transformers import PreTrainedTokenizerBase
@@ -15,6 +17,7 @@ from skyrl_train.trajectory_runners.types import TokenProvenance
 
 
 _CHAT_SAMPLING_EXCLUSIONS = frozenset({"max_generate_length", "logprobs", "stop"})
+_T = TypeVar("_T")
 
 
 class ModelClientOutput(InferenceEngineOutput):
@@ -224,10 +227,22 @@ class DirectModelClient:
 class OpenAIHTTPModelClient:
     """Call an OpenAI-compatible chat endpoint and normalize its response."""
 
-    def __init__(self, *, base_url: str, model_name: str, tokenizer: PreTrainedTokenizerBase):
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model_name: str,
+        tokenizer: PreTrainedTokenizerBase,
+        max_concurrent_requests: int,
+    ):
         self._base_url = base_url.rstrip("/")
         self._model_name = model_name
         self._tokenizer = tokenizer
+        self._request_slots = asyncio.Semaphore(max_concurrent_requests)
+
+    async def _with_request_slot(self, operation: Callable[[], Awaitable[_T]]) -> _T:
+        async with self._request_slots:
+            return await operation()
 
     async def generate(self, request: InferenceEngineInput) -> ModelClientOutput:
         prompts = request.get("prompts")
@@ -250,13 +265,16 @@ class OpenAIHTTPModelClient:
             if chat_options is not None:
                 results = await asyncio.gather(
                     *(
-                        self._generate_structured_chat(
-                            session,
-                            messages=messages,
-                            session_id=session_id,
-                            sampling_params=request.get("sampling_params") or {},
-                            chat_options=options,
-                            continuation=continuation,
+                        self._with_request_slot(
+                            partial(
+                                self._generate_structured_chat,
+                                session,
+                                messages=messages,
+                                session_id=session_id,
+                                sampling_params=request.get("sampling_params") or {},
+                                chat_options=options,
+                                continuation=continuation,
+                            )
                         )
                         for messages, session_id, options, continuation in zip(
                             prompts, session_ids, chat_options, continuations, strict=True
@@ -266,11 +284,14 @@ class OpenAIHTTPModelClient:
                 return _assemble_chat_results(results)
             responses = await asyncio.gather(
                 *(
-                    self._generate_one(
-                        session,
-                        messages=messages,
-                        session_id=session_id,
-                        sampling_params=request.get("sampling_params") or {},
+                    self._with_request_slot(
+                        partial(
+                            self._generate_one,
+                            session,
+                            messages=messages,
+                            session_id=session_id,
+                            sampling_params=request.get("sampling_params") or {},
+                        )
                     )
                     for messages, session_id in zip(prompts, session_ids)
                 )
