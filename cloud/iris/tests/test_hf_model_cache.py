@@ -83,17 +83,34 @@ def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, 
     assert (local_model / "model.safetensors.index.json").is_file()
     assert not (local_model / "model.safetensors").exists()
     assert not (local_model / "stale.bin").exists()
-    messages = [record.getMessage() for record in caplog.records if record.name == hf_model_cache.__name__]
-    output = "\n".join(messages)
-    assert any("role=publisher" in message and "hf_token_present=True" in message for message in messages)
+    records = [record for record in caplog.records if record.name == hf_model_cache.__name__]
+    output = "\n".join(record.getMessage() for record in records)
     assert any(
-        "s3_endpoint_env_source=FSSPEC_S3 s3_endpoint_env_class=coreweave_in_cluster" in message for message in messages
+        getattr(record, "cache_role", None) == "publisher"
+        and getattr(record, "cache_status", None) == "started"
+        and record.hf_token_present
+        and record.s3_endpoint_env_source == "FSSPEC_S3"
+        and record.s3_endpoint_env_class == "coreweave_in_cluster"
+        for record in records
     )
-    assert any("role=hit" in message for message in messages)
+    assert any(getattr(record, "cache_role", None) == "hit" for record in records)
     for phase in ("prepare", "download", "manifest", "publication"):
-        assert any(f"phase={phase} status=started" in message for message in messages)
-        assert any(f"phase={phase} status=completed" in message and "seconds=" in message for message in messages)
-    assert any("role=publisher status=completed" in message and "total_seconds=" in message for message in messages)
+        assert any(
+            getattr(record, "cache_phase", None) == phase and record.cache_status == "started" for record in records
+        )
+        assert any(
+            getattr(record, "cache_phase", None) == phase
+            and record.cache_status == "completed"
+            and record.cache_seconds >= 0
+            for record in records
+        )
+    assert any(
+        getattr(record, "cache_role", None) == "publisher"
+        and record.cache_status == "completed"
+        and record.cache_total_seconds >= 0
+        for record in records
+    )
+    assert any(getattr(record, "cache_file_count", None) == 4 and record.cache_size_bytes > 0 for record in records)
     assert "sentinel-hf-token" not in output
     assert "sentinel-s3-key" not in output
     assert "sentinel-url" not in output
@@ -130,11 +147,22 @@ def test_cold_cache_failure_reports_phase_and_safe_endpoint_class(
             "laion/draft", "4bdb47c08e5b5190bea3c7a93c3e14470230e469", ttl_days=14, source_prefix="s3://region/run"
         )
 
-    output = "\n".join(record.getMessage() for record in caplog.records if record.name == hf_model_cache.__name__)
-    assert f"s3_endpoint_env_source={expected_source} s3_endpoint_env_class={expected_class}" in output
-    assert "phase=download status=started" in output
-    assert "phase=download status=completed" not in output
-    assert "role=publisher status=completed" not in output
+    records = [record for record in caplog.records if record.name == hf_model_cache.__name__]
+    output = "\n".join(record.getMessage() for record in records)
+    assert any(
+        getattr(record, "s3_endpoint_env_source", None) == expected_source
+        and record.s3_endpoint_env_class == expected_class
+        for record in records
+    )
+    assert any(
+        getattr(record, "cache_phase", None) == "download" and record.cache_status == "started" for record in records
+    )
+    assert not any(
+        getattr(record, "cache_phase", None) == "download" and record.cache_status == "completed" for record in records
+    )
+    assert not any(
+        getattr(record, "cache_role", None) == "publisher" and record.cache_status == "completed" for record in records
+    )
     assert "sentinel-hf-token" not in output
 
 
