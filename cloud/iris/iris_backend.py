@@ -41,7 +41,7 @@ from iris.resources.state import JobState
 from iris.rpc import job_pb2
 
 from cloud.iris.paths import PROJECT_ROOT
-from cloud.iris.launch_config import SubmissionMode, load_launch_config, validate_launch_config
+from cloud.iris.launch_config import SubmissionMode, load_launch_config
 from cloud.iris.export_hf_checkpoint import export_terminal_policy
 from cloud.iris.ingress_utils import (
     PARENT_CONTROLLER_CONFIG_ENV,
@@ -227,7 +227,6 @@ def _model_path(uri: str) -> str:
 
 def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNamespace:
     """Build the in-memory Iris launch state from one validated Hydra config."""
-    validate_launch_config(config)
     raw = OmegaConf.to_container(config, resolve=True, throw_on_missing=True)
     assert isinstance(raw, dict)
     run = raw["run"]
@@ -252,8 +251,8 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
     )
     submission = run["submission"]
     args = SimpleNamespace(
-        rl_config=str(config_path),
-        rl_config_launch=task_config,
+        launch_config=str(config_path),
+        launch_config_bundle=task_config,
         entrypoint=runtime["entrypoint"],
         model_path=model_path,
         resume_checkpoints_to_keep=int(artifacts["resume_checkpoint_count"]),
@@ -686,7 +685,7 @@ def _purge_stale_daytona_snapshots(api_key: str) -> None:
 
 
 def _effective_gdn_backend(args: SimpleNamespace) -> str:
-    raw_config = _load_skyrl_config(args.rl_config)
+    raw_config = _load_skyrl_config(args.launch_config)
     return str((raw_config.get("generator") or {}).get("gdn_backend", "torch")).lower()
 
 
@@ -894,7 +893,7 @@ def prepare_federated_parent_credentials(args: SimpleNamespace) -> FederatedPare
 
 def build_debug_launch_env(args: SimpleNamespace) -> dict[str, str]:
     """Resolve the effective debug preset after the job name and RL config exist."""
-    raw = _load_skyrl_config(args.rl_config)
+    raw = _load_skyrl_config(args.launch_config)
     trainer = raw.get("trainer") or {}
     mode = str(trainer.get("debug_mode", DebugMode.LIGHT.value))
     try:
@@ -1045,7 +1044,7 @@ def _build_task_shell(
 
 def build_config_task_command(args: SimpleNamespace) -> list[str]:
     """Build the replica-controller command for the resolved launch config."""
-    launch_config = args.rl_config_launch
+    launch_config = args.launch_config_bundle
     if not isinstance(launch_config, BundledLaunchConfig):
         raise RuntimeError("resolved launch config payload is missing")
     controller_cmd = [
@@ -1071,7 +1070,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> IrisLaunchOu
     # (file overrides shell; same semantics as the iris launchers).
     load_secrets_env_into_os_environ(args.secrets_env)
 
-    if not _is_checkpoint_export(args) and _rl_config_is_agentic(args.rl_config):
+    if not _is_checkpoint_export(args) and _rl_config_is_agentic(args.launch_config):
         daytona_api_key = _resolve_daytona_rl_api_key()
         os.environ["DAYTONA_API_KEY"] = daytona_api_key
         # The purge deletes stale snapshots across the shared RL org, so skip it on a
@@ -1110,7 +1109,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> IrisLaunchOu
     )
     print(f"[rl-iris] Per node:   cpu={args.cpu} memory={args.memory} disk={args.disk}", flush=True)
     print(f"[rl-iris] Priority:   {args.priority}", flush=True)
-    print(f"[rl-iris] RL config:  {args.rl_config}  model={args.model_path}", flush=True)
+    print(f"[rl-iris] Launch config:  {args.launch_config}  model={args.model_path}", flush=True)
     storage_paths = args.storage_paths
     if not _is_checkpoint_export(args):
         print(
@@ -1175,10 +1174,9 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> IrisLaunchOu
     # Env: secrets file values + the standard RL/iris-serve signals. iris injects
     # IRIS_TASK_ID / IRIS_NUM_TASKS / IRIS_ADVERTISE_HOST per task automatically.
     env_vars: dict[str, str] = {}
-    # Forward the RL config YAML's top-level `extra_env:` block (the Iris analog of
-    # the SLURM container.extra_env exports — see load_config_extra_env). The
-    # launcher's own signals (rendezvous/secrets, below) win on any collision.
-    config_extra_env = load_config_extra_env(args.rl_config)
+    # Forward runtime.task_env; launcher-owned rendezvous and secret values below
+    # win on collision.
+    config_extra_env = load_config_extra_env(args.launch_config)
     if config_extra_env:
         env_vars.update(config_extra_env)
         print(f"[rl-iris] Config extra_env: {', '.join(sorted(config_extra_env))}", flush=True)
@@ -1189,7 +1187,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> IrisLaunchOu
             f"[rl-iris] Debug mode {debug_env[DEBUG_MODE_ENV]}: artifacts -> {debug_env[DEBUG_ARTIFACT_DIR_ENV]}",
             flush=True,
         )
-    env_vars.update(args.rl_config_launch.task_environment())
+    env_vars.update(args.launch_config_bundle.task_environment())
     # ── Per-cluster infra-env DEFAULTS (fill-gap belt for cluster-specific footguns) ──────────
     # Some clusters need a specific network/NCCL interface that a cluster-AGNOSTIC RL config
     # won't (and shouldn't) carry. Fill it in here, keyed on --target-cluster, only if the

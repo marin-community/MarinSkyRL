@@ -483,11 +483,11 @@ def resolve_rl_config_path(raw_path: str) -> Path:
     )
 
 
-def materialize_rl_config(
+def materialize_launch_config(
     config_path: str,
     environment: Mapping[str, str] | None = None,
 ) -> str:
-    """Materialize a launcher-forwarded RL config inside the task container."""
+    """Materialize the launcher-forwarded document inside the task container."""
     environment = os.environ if environment is None else environment
     payload = environment.get(RL_CONFIG_PAYLOAD_ENV)
     if payload is None:
