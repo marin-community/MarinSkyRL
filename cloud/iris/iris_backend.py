@@ -314,7 +314,6 @@ class IrisBackend:
             return launch(args, config.runtime.launcher_commit)
 
     def export_terminal_policy(self, config_path: Path) -> None:
-        """Export the terminal checkpoint described by a completed training config."""
         export_terminal_policy(config_path)
 
 

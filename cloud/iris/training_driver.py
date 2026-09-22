@@ -332,8 +332,7 @@ class LocalRLRunner:
                 # LLM-judge verifiers on the worker read it), so overloading it with a vLLM
                 # endpoint would silently misroute every judge call to vLLM.
                 os.environ["HARBOR_MODEL_ENDPOINT"] = api_base
-                # Also thread the minted URL through the SkyRL Hydra cfg. run() injects
-                # ``++terminal_bench_config.agent_api_base=<api_base>`` from this, so the
+                # Also thread the minted URL through the structured SkyRL config so the
                 # value reaches the Ray tasks/actors (skyrl_entrypoint, RolloutCoordinator)
                 # where HarborTrajectoryRunner is built. The env var alone is insufficient:
                 # this runner ATTACHES to a Ray cluster the controller started BEFORE the
