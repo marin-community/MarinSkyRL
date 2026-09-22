@@ -1157,6 +1157,108 @@ generator:
         resolve_launch_defaults(args)
 
 
+def _packed_rollout_config(tmp_path: Path) -> Path:
+    path = tmp_path / "packed-rollout.yaml"
+    path.write_text(
+        """\
+trainer:
+  placement:
+    colocate_all: false
+    colocate_policy_ref: false
+    policy_num_nodes: 2
+    ref_num_nodes: 2
+    policy_num_gpus_per_node: 8
+    ref_num_gpus_per_node: 8
+  train_batch_size: 8
+  policy_mini_batch_size: 8
+  micro_train_batch_size_per_gpu: 1
+  algorithm:
+    use_kl_loss: false
+    use_kl_in_reward: false
+  critic:
+    model:
+      path: null
+generator:
+  run_engines_locally: true
+  num_inference_engines: 6
+  inference_engine_tensor_parallel_size: 4
+  inference_engine_pipeline_parallel_size: 1
+  inference_engine_data_parallel_size: 1
+  inference_engine_expert_parallel_size: 4
+  n_samples_per_prompt: 1
+  backend: vllm
+"""
+    )
+    return path
+
+
+def _topology_args(tmp_path: Path, config: Path, num_nodes: int, overrides: list[str] | None = None):
+    argv = [
+        "--rl_config",
+        str(config),
+        "--model_path",
+        "model",
+        "--cluster-config",
+        str(_cluster_config(tmp_path)),
+        "--num-nodes",
+        str(num_nodes),
+        "--cpu",
+        "12",
+        "--memory",
+        "100Gi",
+        "--disk",
+        "100Gi",
+    ]
+    for override in overrides or []:
+        argv.extend(["--skyrl_override", override])
+    return create_parser().parse_args(argv)
+
+
+def test_resolve_launch_defaults_accepts_packed_disaggregated_engines(tmp_path):
+    args = _topology_args(tmp_path, _packed_rollout_config(tmp_path), num_nodes=5)
+
+    resolve_launch_defaults(args)
+
+    assert args.num_nodes == 5
+
+
+def test_resolve_launch_defaults_accepts_unused_cluster_headroom(tmp_path):
+    args = _topology_args(tmp_path, _packed_rollout_config(tmp_path), num_nodes=6)
+
+    resolve_launch_defaults(args)
+
+    assert args.num_nodes == 6
+
+
+def test_resolve_launch_defaults_rejects_override_that_exceeds_cluster(tmp_path):
+    config = _packed_rollout_config(tmp_path)
+    args = _topology_args(
+        tmp_path,
+        config,
+        num_nodes=5,
+        overrides=["++generator.num_inference_engines=8"],
+    )
+
+    with pytest.raises(SystemExit, match=r"requires at least 6 nodes"):
+        resolve_launch_defaults(args)
+
+
+def test_resolve_launch_defaults_applies_override_that_disables_reference(tmp_path):
+    config = _packed_rollout_config(tmp_path)
+    contents = config.read_text().replace("use_kl_loss: false", "use_kl_loss: true")
+    config.write_text(contents)
+    args = _topology_args(
+        tmp_path,
+        config,
+        num_nodes=5,
+        overrides=["++trainer.algorithm.use_kl_loss=false"],
+    )
+
+    resolve_launch_defaults(args)
+
+    assert args.num_nodes == 5
+
+
 def test_checkpoint_export_rejects_including_reference_nodes_in_its_gang(tmp_path):
     rl_config = tmp_path / "placed.yaml"
     rl_config.write_text(
