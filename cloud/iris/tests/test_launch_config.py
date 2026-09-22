@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ import yaml
 from omegaconf.errors import ConfigKeyError
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
+from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
 
 
 def _raw_config() -> dict[str, Any]:
@@ -141,3 +143,16 @@ def test_colocated_rollout_parallelism_must_fit_the_allocated_bundle() -> None:
 
     with pytest.raises(ValueError, match="colocated rollout geometry"):
         validate_launch_config(compose_launch_config(raw))
+
+
+def test_task_materializes_the_forwarded_launch_document(tmp_path: Path) -> None:
+    destination = tmp_path / "launch.yaml"
+    contents = yaml.safe_dump(_raw_config()).encode()
+
+    path = materialize_launch_config(
+        str(destination),
+        {RL_CONFIG_PAYLOAD_ENV: base64.b64encode(contents).decode("ascii")},
+    )
+
+    assert path == str(destination)
+    assert destination.read_bytes() == contents

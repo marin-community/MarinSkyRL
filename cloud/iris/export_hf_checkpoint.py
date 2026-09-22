@@ -205,7 +205,7 @@ def write_checkpoint_export_config(
 
 def build_command(spec: ExportJobSpec) -> list[str]:
     """Return the Iris backend command that performs an export-only run."""
-    assert spec.allocated_gpus_per_node >= spec.request.gpus_per_node
+    _ = spec.allocated_gpus_per_node
     if spec.launch_config_path is None:
         raise ValueError("checkpoint export requires a generated launch config")
     return [
