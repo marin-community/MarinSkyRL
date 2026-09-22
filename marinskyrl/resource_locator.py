@@ -29,6 +29,18 @@ def join_resource_path(root: str, *parts: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, joined_path, parsed.query, parsed.fragment))
 
 
+def relative_resource_path(root: str, path: str) -> str:
+    """Return a path below a local or object-store root, rejecting escapes."""
+    parsed_root = urlsplit(root)
+    parsed_path = urlsplit(path)
+    root_path = f"{parsed_root.netloc}{parsed_root.path}" if parsed_root.scheme else root
+    candidate_path = f"{parsed_path.netloc}{parsed_path.path}" if parsed_path.scheme else path
+    relative = posixpath.relpath(posixpath.normpath(candidate_path), posixpath.normpath(root_path))
+    if relative == ".." or relative.startswith("../") or posixpath.isabs(relative):
+        raise ValueError(f"Resource path {path!r} is not below root {root!r}")
+    return relative
+
+
 def is_hugging_face_repo_id(repo_id: str) -> bool:
     """Return whether a value has Hugging Face's ``namespace/repository`` form."""
     if not repo_id or repo_id.count("/") != 1 or HF_SELECTOR_SUBDIR_SEPARATOR in repo_id:
@@ -79,7 +91,7 @@ def parse_hf_dataset_selector(value: str) -> HFDatasetSelector | None:
 
 @dataclass(frozen=True)
 class ModelSource:
-    """Immutable object-store source for a task-local model materialization."""
+    """Immutable object-store source for direct model reads."""
 
     uri: str
     identity: str
@@ -103,10 +115,18 @@ def model_source_for_path(
     model_source_uri: str | None,
     model_source_identity: str | None,
 ) -> ModelSource | None:
-    """Parse a source and reject ambiguous Hub-ID plus object-store combinations."""
+    """Parse the direct model source carried alongside a metadata path."""
+    if is_cloud_uri(model_path):
+        if model_source_uri is not None and model_source_uri != model_path:
+            raise ModelLocatorError(
+                f"model_path {model_path!r} and model_source_uri {model_source_uri!r} identify different objects"
+            )
+        if model_source_identity is None:
+            return None
+        return ModelSource(uri=model_path, identity=model_source_identity)
     source = ModelSource.optional(model_source_uri, model_source_identity)
     if source and is_hugging_face_repo_id(model_path):
-        raise ModelLocatorError("model_source_uri requires a task-local model_path, not a Hugging Face repo ID")
+        raise ModelLocatorError("model_source_uri requires a local metadata path, not a Hugging Face repo ID")
     return source
 
 
@@ -117,7 +137,7 @@ def validate_replayable_model_reference(
 ) -> None:
     """Reject model locators that a later task cannot reconstruct."""
     source = model_source_for_path(model_path, model_source_uri, model_source_identity)
-    if is_hugging_face_repo_id(model_path) or source:
+    if is_hugging_face_repo_id(model_path) or is_cloud_uri(model_path) or source:
         return
     raise ModelLocatorError(
         f"task-local model_path {model_path!r} requires model_source_uri and model_source_identity "

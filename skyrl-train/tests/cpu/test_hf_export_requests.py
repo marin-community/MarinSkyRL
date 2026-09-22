@@ -68,6 +68,7 @@ def _export_command(request):
             rl_config="config.yaml",
             cluster="cw-rno2a",
             priority="batch",
+            gpu_variant="H100",
             job_name="export-step-10",
             timeout=7200,
             no_wait=False,
@@ -299,7 +300,18 @@ def test_request_rejects_operator_override_instead_of_ignoring_it(tmp_path):
         )
     )
     parser = argument_parser()
-    args = parser.parse_args(["--request", str(checkpoint), "--rl_config", "config.yaml", "--num-nodes", "8"])
+    args = parser.parse_args(
+        [
+            "--request",
+            str(checkpoint),
+            "--rl_config",
+            "config.yaml",
+            "--gpu-variant",
+            "H100",
+            "--num-nodes",
+            "8",
+        ]
+    )
 
     with pytest.raises(SystemExit):
         request_spec(args, parser)
@@ -324,7 +336,7 @@ def test_request_mode_rejects_task_local_model_without_source_before_submission(
         )
     )
     parser = argument_parser()
-    args = parser.parse_args(["--request", str(checkpoint), "--rl_config", "config.yaml"])
+    args = parser.parse_args(["--request", str(checkpoint), "--rl_config", "config.yaml", "--gpu-variant", "H100"])
 
     with pytest.raises(SystemExit):
         request_spec(args, parser)
@@ -342,6 +354,8 @@ def test_manual_export_requires_explicit_checkpoint_geometry():
             "org/model",
             "--rl_config",
             "config.yaml",
+            "--gpu-variant",
+            "H100",
         ]
     )
 
@@ -373,6 +387,8 @@ def test_export_request_records_lifecycle_result(tmp_path, monkeypatch, exit_cod
             "config.yaml",
             "--timeout",
             "7200",
+            "--gpu-variant",
+            "H100",
         ],
     )
 
@@ -405,6 +421,7 @@ def _export_job_spec(tmp_path, *, no_wait: bool) -> tuple[HFExportRequest, Expor
         rl_config="config.yaml",
         cluster="cw-rno2a",
         priority="batch",
+        gpu_variant="H100",
         job_name=None,
         timeout=7200,
         no_wait=no_wait,

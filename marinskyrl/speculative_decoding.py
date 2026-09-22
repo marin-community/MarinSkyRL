@@ -10,13 +10,11 @@ import re
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from marinskyrl.hf_model import immutable_model_cache_key
 from marinskyrl.resource_locator import is_cloud_uri, is_hugging_face_repo_id
 
 
 _HF_SOURCE_SCHEME = "hf"
 _HF_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
-_DRAFT_MODEL_ROOT = "/tmp/marinskyrl/draft_models"
 STANDARD_TRAINING_ENTRYPOINT = "skyrl_train.entrypoints.main_base"
 
 
@@ -162,16 +160,6 @@ class SpeculatorModelConfig:
         if self.hugging_face_repo_id is not None:
             return SpeculatorModelSourceKind.HUGGING_FACE
         return SpeculatorModelSourceKind.ARTIFACT
-
-    def node_local_path(self) -> str:
-        """Return the standard node-local location for this immutable source."""
-        if self.source_kind is SpeculatorModelSourceKind.LOCAL:
-            assert self.local_source_path is not None
-            return self.local_source_path
-        return os.path.join(
-            _DRAFT_MODEL_ROOT,
-            immutable_model_cache_key(self.source_uri, self.source_identity),
-        )
 
     def vllm_source_config(self) -> dict[str, Any]:
         """Return the vLLM fields needed to load this draft source."""

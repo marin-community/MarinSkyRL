@@ -32,6 +32,9 @@ class ModelRoleKind(StrEnum):
     TEACHER = "teacher"
 
 
+ALL_ROLES_COLOCATION_GROUP = "all"
+
+
 class RoleExecution(StrEnum):
     LOCAL = "local"
     REMOTE = "remote"
@@ -47,7 +50,6 @@ class RuntimeIdentity:
 class ModelLocator:
     uri: str
     identity: str
-    local_path: str
     tokenizer_uri: str
     tokenizer_revision: str
 
@@ -331,8 +333,8 @@ def _legacy_role_plan(value: dict[str, Any]) -> SkyRLRolePlan:
     gpus_per_node = int(value["policy_num_gpus_per_node"])
     rollout_replicas = int(value["num_inference_engines"])
     colocate_all = bool(value["colocate_all"])
-    policy_group = "all" if colocate_all else ModelRoleKind.POLICY.value
-    rollout_group = "all" if colocate_all else ModelRoleKind.ROLLOUT.value
+    policy_group = ALL_ROLES_COLOCATION_GROUP if colocate_all else ModelRoleKind.POLICY.value
+    rollout_group = ALL_ROLES_COLOCATION_GROUP if colocate_all else ModelRoleKind.ROLLOUT.value
     claims = (
         ModelRoleClaim(
             role_id=ModelRoleKind.POLICY.value,

@@ -24,6 +24,7 @@ marinskyrl/harbor_agent_names.py
 marinskyrl/hf_model.py
 marinskyrl/inference_placement.py
 marinskyrl/iris_harbor_environment.py
+marinskyrl/model_manifest.py
 marinskyrl/packed_tasks.py
 marinskyrl/process_diagnostics.py
 marinskyrl/resource_locator.py

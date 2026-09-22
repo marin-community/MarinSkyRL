@@ -105,6 +105,7 @@ ADDITIVE_OVERLONG_FIELDS = {
 # fields, they are stripped before comparison with the pre-CP golden.
 ADDITIVE_GENERATOR_FIELDS = {
     "speculative_decoding": None,
+    "require_exact_chat_transport": False,
     "inference_engine_decode_context_parallel_size": 1,
     "vllm_attention_backend": None,
     "engine_init_timeout_seconds": 1800,
