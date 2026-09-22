@@ -20,6 +20,8 @@ from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer, get_system_memory_metrics
+from marinskyrl.runtime_options import WeightSyncTransport
+from skyrl_train.weight_sync.expert_block.driver import ExpertBlockSync
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader
@@ -444,6 +446,9 @@ class _AsyncDataloader:
 
 
 class FullyAsyncRayPPOTrainer(RayPPOTrainer):
+    # Set at startup when generator.weight_sync_transport is expert_block.
+    _expert_block_sync: ExpertBlockSync | None = None
+
     def __init__(self, *args, **kwargs):
         # Extract cfg before base init so we can initialize async-specific knobs used by our overrides.
         cfg = kwargs.get("cfg", args[0] if len(args) > 0 else None)
@@ -661,6 +666,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         try:
             await self._flush_generation_buffer_on_shutdown()
         finally:
+            if self._expert_block_sync is not None:
+                try:
+                    await self._expert_block_sync.close()
+                except Exception:
+                    logger.exception("Closing the expert-block weight sync failed during shutdown")
             async_distillation_runtime = getattr(self, "_async_distillation_runtime", None)
             if async_distillation_runtime is not None:
                 await self._close_distillation_runtime(async_distillation_runtime)
@@ -732,7 +742,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # Initialize weight sync state
         with Timer("init_weight_sync_state", self.all_startup_timings):
-            self.init_weight_sync_state()
+            if self.cfg.generator.weight_sync_transport == WeightSyncTransport.EXPERT_BLOCK:
+                self._expert_block_sync = ExpertBlockSync(
+                    policy_model=self.policy_model,
+                    inference_engine_client=self.inference_engine_client,
+                    timeout_seconds=self.cfg.generator.expert_block_sync.timeout_seconds,
+                )
+                for phase, seconds in (await self._expert_block_sync.prepare()).items():
+                    self.all_startup_timings[f"expert_block_sync/{phase}"] = seconds
+            else:
+                self.init_weight_sync_state()
 
         # sync weights to inference engines
         with Timer("sync_weights_to_inference_engines", self.all_startup_timings) as weight_update_timer:
@@ -1051,7 +1070,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     async def _sync_policy_weights_and_offload_optimizer(
         self, *, sync_phase: Literal["initial", "training_step"]
     ) -> None:
-        if sync_phase == "training_step":
+        # Expert-block sync writes into live engine parameters, so the first sync pauses generation too.
+        pause = sync_phase == "training_step" or self._expert_block_sync is not None
+        if pause:
             await self.inference_engine_client.pause_generation()
         # The shared training path backloads optimizer state before every step when
         # offload_optimizer_during_rollouts is enabled. Offload after each update,
@@ -1062,7 +1083,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         await self.async_sync_policy_weights_to_inference_engines()
         # A hard sync point leaves every policy rank free before the next forward.
         await self._drain_policy_event_loops()
-        if sync_phase == "training_step":
+        if pause:
             await self.inference_engine_client.resume_generation()
 
     async def _run_training(self, training_input: TrainingInputBatch):
@@ -1239,6 +1260,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # the call sites + the ppo_train entry barrier (worker.py); reuses the proven
         # async-loop-safe barrier_all (WORLD PG >> the 600s submesh default).
         await self._drain_policy_event_loops()
+        if self._expert_block_sync is not None:
+            timings = await self._expert_block_sync.sync(self.global_step)
+            self.all_timings.update(timings.as_metrics())
+            logger.info(
+                "Expert-block sync: step={} install_seconds={:.3f} policy_seconds={:.3f} receiver_seconds={:.3f} "
+                "expert_seconds={:.3f} dense_seconds={:.3f}",
+                self.global_step,
+                timings.install_seconds,
+                timings.policy_seconds,
+                timings.receiver_seconds,
+                timings.expert_seconds,
+                timings.dense_seconds,
+            )
+            if self.cfg.generator.expert_block_sync.verify:
+                self.all_timings.update(await self._expert_block_sync.verify(self.global_step))
+            return None
         return await self.policy_model.async_run_method(
             "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
         )

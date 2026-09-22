@@ -28,6 +28,7 @@ from skyrl_train.config.trajectory_runner_capabilities import (
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
 )
+from marinskyrl.inference_placement import validate_expert_block_trainer
 from marinskyrl.speculative_decoding import (
     STANDARD_TRAINING_ENTRYPOINT,
     parse_speculative_decoding_config,
@@ -533,6 +534,7 @@ class BasePPOExp:
         Returns:
             RayPPOTrainer: The trainer.
         """
+        validate_expert_block_trainer(self.cfg, uses_fully_async_trainer=self.uses_fully_async_trainer())
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
