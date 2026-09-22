@@ -127,14 +127,14 @@ def test_legacy_model_export_gets_a_manifest(tmp_path: Path) -> None:
 def test_legacy_draft_export_gets_a_shared_tokenizer_manifest(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text("{}")
     save_file({"weight": np.arange(4, dtype=np.float32)}, tmp_path / "model.safetensors")
-    (tmp_path / "model.safetensors.index.json").write_text(
-        json.dumps({"metadata": {"total_size": 16}, "weight_map": {"weight": "model.safetensors"}})
-    )
 
     manifest = ensure_model_manifest(str(tmp_path), tokenizer_mode="policy")
 
     assert manifest.tokenizer_mode == "policy"
     assert manifest == hf_model_cache.load_model_manifest(str(tmp_path))
+    assert json.loads((tmp_path / "model.safetensors.index.json").read_text())["weight_map"] == {
+        "weight": "model.safetensors"
+    }
 
 
 def test_draft_manifest_can_share_the_policy_tokenizer(tmp_path: Path, monkeypatch) -> None:

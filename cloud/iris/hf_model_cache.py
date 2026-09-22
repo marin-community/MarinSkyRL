@@ -21,10 +21,12 @@ from marinskyrl.hf_model import (
     immutable_model_cache_key,
 )
 from marinskyrl.model_manifest import (
+    HF_WEIGHT_INDEX_FILENAME,
     MODEL_MANIFEST_FILENAME,
     ModelManifest,
     ModelManifestFile,
     model_manifest,
+    safetensors_keys,
     sha256_file,
     sha256_stream,
     snapshot_model_manifest,
@@ -49,8 +51,41 @@ def _remote_manifest_entry(filesystem: AbstractFileSystem, path: str, entry: Fil
     return ModelManifestFile(path=entry.path, size=entry.size, sha256=digest)
 
 
+def _ensure_remote_weight_index(model_uri: str, filesystem: AbstractFileSystem, root: str) -> None:
+    index_uri = join_resource_path(model_uri, HF_WEIGHT_INDEX_FILENAME)
+    _, index_path = fs_and_path(index_uri)
+    if filesystem.exists(index_path):
+        return
+
+    shards = tuple(
+        (path, entry) for path, entry in file_inventory(filesystem, root) if entry.path.endswith(".safetensors")
+    )
+    if not shards:
+        raise ValueError(f"Model export requires safetensors weights: {model_uri}")
+    weight_map: dict[str, str] = {}
+    for path, entry in shards:
+        with filesystem.open(path, "rb") as source:
+            keys = safetensors_keys(source, path)
+        for key in keys:
+            if key in weight_map:
+                raise ValueError(f"Duplicate tensor {key!r} in {model_uri}")
+            weight_map[key] = entry.path
+    if not weight_map:
+        raise ValueError(f"Model export has no indexed tensors: {model_uri}")
+    write_json(
+        index_uri,
+        {
+            "metadata": {"total_size": sum(entry.size for _, entry in shards)},
+            "weight_map": weight_map,
+        },
+        overwrite=False,
+    )
+    filesystem.invalidate_cache(root)
+
+
 def _snapshot_remote_model_manifest(model_uri: str, *, tokenizer_mode: Literal["embedded", "policy"]) -> ModelManifest:
     filesystem, root = fs_and_path(model_uri)
+    _ensure_remote_weight_index(model_uri, filesystem, root)
     inventory = file_inventory(filesystem, root)
     if not inventory:
         raise ValueError(f"Model export contains no files: {model_uri}")

@@ -104,15 +104,14 @@ def _manifest_identity(
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
-def _safetensors_keys(path: Path) -> tuple[str, ...]:
-    with path.open("rb") as source:
-        prefix = source.read(8)
-        if len(prefix) != 8:
-            raise ValueError(f"Truncated safetensors header: {path}")
-        header_size = struct.unpack("<Q", prefix)[0]
-        header = json.loads(source.read(header_size))
+def safetensors_keys(source: BinaryIO, source_name: str) -> tuple[str, ...]:
+    prefix = source.read(8)
+    if len(prefix) != 8:
+        raise ValueError(f"Truncated safetensors header: {source_name}")
+    header_size = struct.unpack("<Q", prefix)[0]
+    header = json.loads(source.read(header_size))
     if not isinstance(header, dict):
-        raise ValueError(f"Invalid safetensors header: {path}")
+        raise ValueError(f"Invalid safetensors header: {source_name}")
     return tuple(sorted(key for key in header if key != "__metadata__"))
 
 
@@ -122,7 +121,9 @@ def _ensure_weight_index(snapshot: Path) -> None:
         raise ValueError(f"Hugging Face mirror requires safetensors weights: {snapshot}")
     weight_map: dict[str, str] = {}
     for shard in shards:
-        for key in _safetensors_keys(shard):
+        with shard.open("rb") as source:
+            keys = safetensors_keys(source, str(shard))
+        for key in keys:
             if key in weight_map:
                 raise ValueError(f"Duplicate tensor {key!r} in {snapshot}")
             weight_map[key] = shard.name
