@@ -15,7 +15,7 @@ from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
 from cloud.iris.rl_config_translation import (
     compose_skyrl_config,
     parse_rl_config,
-    rl_entrypoint_spec,
+    registered_rl_entrypoint_module,
     validate_tp_divides_heads,
 )
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
@@ -210,7 +210,7 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
         OmegaConf.resolve(compiled.config)
     resolved = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
     OmegaConf.set_struct(resolved, False)
-    resolved.runtime.entrypoint = compiled.entrypoint.module
+    resolved.runtime.entrypoint = compiled.entrypoint
     resolved.inputs.data_kind = parsed.data_kind
     resolved.skyrl = compiled.config
     return compose_launch_config(resolved)
@@ -321,7 +321,7 @@ def validate_launch_config(config: DictConfig | Mapping[str, Any]) -> LaunchTopo
     run = raw["run"]
     runtime = raw["runtime"]
     entrypoint = runtime["entrypoint"]
-    rl_entrypoint_spec(entrypoint)
+    registered_rl_entrypoint_module(entrypoint)
     expected_profile = runtime_profile_for_strategy(
         skyrl.get("trainer", {}).get("strategy"),
         mode=RuntimeMode.CHECKPOINT_EXPORT if run["mode"] == RunMode.CHECKPOINT_EXPORT else RuntimeMode.TRAINING,

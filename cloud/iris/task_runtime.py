@@ -1893,7 +1893,6 @@ def run_worker(args: argparse.Namespace) -> int:
 
 
 def _container(value: Any) -> Any:
-    """Convert one OmegaConf value into ordinary Python data."""
     return OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value
 
 

@@ -44,22 +44,17 @@ class RLEntrypoint(StrEnum):
     TERMINAL_BENCH_GENERATE = "terminal_bench_generate"
 
 
-@dataclass(frozen=True)
-class RLEntrypointSpec:
-    module: str
-
-
 RL_ENTRYPOINTS = MappingProxyType(
     {
-        RLEntrypoint.FULLY_ASYNC: RLEntrypointSpec("skyrl_train.entrypoints.fully_async"),
-        RLEntrypoint.GENERATE: RLEntrypointSpec("skyrl_train.entrypoints.main_generate"),
-        RLEntrypoint.MINI_SWE: RLEntrypointSpec("skyrl_train.entrypoints.mini_swe"),
-        RLEntrypoint.STANDARD: RLEntrypointSpec(STANDARD_TRAINING_ENTRYPOINT),
-        RLEntrypoint.TERMINAL_BENCH: RLEntrypointSpec("skyrl_train.entrypoints.terminal_bench"),
-        RLEntrypoint.TERMINAL_BENCH_GENERATE: RLEntrypointSpec("skyrl_train.entrypoints.terminal_bench_generate"),
+        RLEntrypoint.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async",
+        RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
+        RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
+        RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
+        RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
+        RLEntrypoint.TERMINAL_BENCH_GENERATE: "skyrl_train.entrypoints.terminal_bench_generate",
     }
 )
-CHECKPOINT_EXPORT_ENTRYPOINT = RLEntrypointSpec(CHECKPOINT_EXPORT_MODULE)
+CHECKPOINT_EXPORT_ENTRYPOINT = CHECKPOINT_EXPORT_MODULE
 
 
 def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
@@ -74,15 +69,14 @@ def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
             "Python module paths are not accepted in RL configs."
         ) from error
 
-    return RL_ENTRYPOINTS[entrypoint].module
+    return RL_ENTRYPOINTS[entrypoint]
 
 
-def rl_entrypoint_spec(module: str) -> RLEntrypointSpec:
-    """Return the registered direct-call entrypoint for a module."""
-    matches = [spec for spec in (*RL_ENTRYPOINTS.values(), CHECKPOINT_EXPORT_ENTRYPOINT) if spec.module == module]
-    if len(matches) != 1:
+def registered_rl_entrypoint_module(module: str) -> str:
+    """Validate and return one registered direct-call module."""
+    if module not in (*RL_ENTRYPOINTS.values(), CHECKPOINT_EXPORT_ENTRYPOINT):
         raise ValueError(f"SkyRL entrypoint module is not registered: {module!r}")
-    return matches[0]
+    return module
 
 
 class HPCGeometry(Protocol):
@@ -531,8 +525,7 @@ def parse_rl_config(
     data = dict(raw.get("data", {}))
     environment = raw.get("environment", {})
     trajectory_runner = raw.get("trajectory_runner", {})
-    # data.kind is a launcher-only routing key (parquet vs. terminal_bench tasks); pop it
-    # so it never leaks into the flattened Hydra args (SkyRL's `data` has no `kind` field).
+    # data.kind selects launcher staging and is not part of SkyRL's data config.
     data_kind = data.pop("kind", "tasks")
 
     # Validate engine_init_kwargs doesn't contain SkyRL-internal keys.
@@ -687,7 +680,7 @@ def _role_gpus_per_node(
 class CompiledSkyRLConfig:
     """A registered entrypoint and its fully composed SkyRL configuration."""
 
-    entrypoint: RLEntrypointSpec
+    entrypoint: str
     config: DictConfig
 
 
@@ -900,7 +893,7 @@ def compose_skyrl_config(
     config = _compose_base_config(parsed.config_groups)
     _merge_config_mapping(config, _skyrl_config_sections(parsed, exp_args, hpc))
     return CompiledSkyRLConfig(
-        entrypoint=rl_entrypoint_spec(parsed.entrypoint),
+        entrypoint=registered_rl_entrypoint_module(parsed.entrypoint),
         config=config,
     )
 

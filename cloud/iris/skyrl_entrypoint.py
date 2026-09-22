@@ -10,14 +10,14 @@ from typing import Callable, cast
 from omegaconf import DictConfig
 
 from cloud.iris.launch_config import load_launch_config
-from cloud.iris.rl_config_translation import rl_entrypoint_spec
+from cloud.iris.rl_config_translation import registered_rl_entrypoint_module
 
 
 def run_config(config_path: Path) -> None:
     """Load one launch config and call its registered SkyRL function."""
     config = load_launch_config(config_path)
-    spec = rl_entrypoint_spec(str(config.runtime.entrypoint))
-    run = cast(Callable[[DictConfig], None], getattr(importlib.import_module(spec.module), "run"))
+    module = registered_rl_entrypoint_module(str(config.runtime.entrypoint))
+    run = cast(Callable[[DictConfig], None], getattr(importlib.import_module(module), "run"))
     run(config.skyrl)
 
 
