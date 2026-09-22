@@ -64,10 +64,22 @@ _HF_TRANSIENT_MESSAGE_FRAGMENTS = (
 _S3_FILESYSTEM: AbstractFileSystem | None = None
 
 
+def guarded_filesystem(protocol: str, **storage_options: Any) -> AbstractFileSystem:
+    """Call Rigging's guarded factory without importing the S3 closure eagerly."""
+    from rigging.filesystem.factory import filesystem
+
+    return filesystem(protocol, **storage_options)
+
+
+def s3_python_config_kwargs() -> dict[str, Any]:
+    """Load Rigging's bounded botocore request configuration on first S3 use."""
+    from rigging.filesystem.s3_compat import s3_python_config_kwargs as load_config
+
+    return load_config()
+
+
 def create_s3_filesystem(**storage_options: Any) -> AbstractFileSystem:
     """Create an uncached S3 filesystem through Rigging's guarded factory."""
-    from rigging.filesystem.factory import filesystem as guarded_filesystem
-
     return guarded_filesystem("s3", **storage_options)
 
 
@@ -75,8 +87,6 @@ def get_s3_filesystem() -> AbstractFileSystem:
     """Return the shared guarded S3 filesystem with bounded request attempts."""
     global _S3_FILESYSTEM
     if _S3_FILESYSTEM is None:
-        from rigging.filesystem.s3_compat import s3_python_config_kwargs
-
         config_kwargs = s3_python_config_kwargs()
         config_kwargs["retries"] = {"total_max_attempts": _S3_REQUEST_TOTAL_ATTEMPTS, "mode": "standard"}
         config_kwargs["s3"] = {
