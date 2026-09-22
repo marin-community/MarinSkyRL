@@ -724,7 +724,11 @@ class RayPPOTrainer:
             self._control.should_save = False
 
         if self._control.should_save_hf_model:
-            await asyncio.to_thread(self.handle_hf_export)
+            # HF export reads the committed checkpoint. When checkpoint and HF
+            # export share a cadence, wait for the background shard uploads and
+            # marker publication before asking the exporter to consume it.
+            if await self._drain_checkpoint_upload():
+                await asyncio.to_thread(self.handle_hf_export)
             self._control.should_save_hf_model = False
 
         if self._control.should_evaluate and self.eval_dataset is not None:

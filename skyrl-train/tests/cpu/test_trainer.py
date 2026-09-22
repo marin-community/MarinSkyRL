@@ -742,6 +742,46 @@ def test_background_checkpoint_failure_does_not_advance_marker(monkeypatch, tmp_
     assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
 
 
+def test_step_end_waits_for_checkpoint_upload_before_hf_export():
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    control = MagicMock()
+    control.should_save = False
+    control.should_save_hf_model = True
+    control.should_evaluate = False
+    trainer._control = control
+    trainer.eval_dataset = None
+    trainer.callback_handler = SimpleNamespace(call_event_async=AsyncMock(return_value=control))
+    events = []
+
+    async def drain_upload():
+        events.append("checkpoint_committed")
+        return True
+
+    trainer._drain_checkpoint_upload = drain_upload
+    trainer.handle_hf_export = lambda: events.append("hf_export")
+
+    asyncio.run(trainer._run_step_end_callbacks(SimpleNamespace()))
+
+    assert events == ["checkpoint_committed", "hf_export"]
+
+
+def test_step_end_skips_hf_export_after_checkpoint_upload_failure():
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    control = MagicMock()
+    control.should_save = False
+    control.should_save_hf_model = True
+    control.should_evaluate = False
+    trainer._control = control
+    trainer.eval_dataset = None
+    trainer.callback_handler = SimpleNamespace(call_event_async=AsyncMock(return_value=control))
+    trainer._drain_checkpoint_upload = AsyncMock(return_value=False)
+    trainer.handle_hf_export = MagicMock()
+
+    asyncio.run(trainer._run_step_end_callbacks(SimpleNamespace()))
+
+    trainer.handle_hf_export.assert_not_called()
+
+
 def test_sync_trainer_attaches_global_loss_denominator_before_dispatch(monkeypatch):
     trainer = object.__new__(RayPPOTrainer)
     trainer.cfg = OmegaConf.create(
