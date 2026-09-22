@@ -120,7 +120,10 @@ def create_ray_wrapped_inference_engines_from_config(
         InferenceEngineRoleConfig,
         inference_engine_kwargs_from_config,
     )
-    from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
+    from skyrl_train.inference_engines.ray_wrapped_inference_engine import (
+        MODEL_METADATA_PATH_KEY,
+        create_ray_wrapped_inference_engines,
+    )
 
     raw_speculative_decoding = cfg.generator.get("speculative_decoding")
     speculative_decoding = parse_speculative_decoding_config(
@@ -143,7 +146,7 @@ def create_ray_wrapped_inference_engines_from_config(
     rollout_model_path = runai_model_uri(policy_source_uri) if policy_source_uri else cfg.trainer.policy.model.path
     if policy_source_uri is not None:
         engine_init_kwargs["load_format"] = "runai_streamer"
-        engine_init_kwargs["_marinskyrl_metadata_path"] = cfg.trainer.policy.model.path
+        engine_init_kwargs[MODEL_METADATA_PATH_KEY] = cfg.trainer.policy.model.path
     if speculative_decoding is not None:
         engine_init_kwargs["speculative_config"] = speculative_decoding.vllm_speculative_config()
         if speculative_decoding.training is not None:

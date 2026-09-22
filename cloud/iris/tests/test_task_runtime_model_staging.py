@@ -4,7 +4,12 @@ from types import SimpleNamespace
 import pytest
 
 from cloud.iris import task_runtime
-from cloud.iris.task_runtime import parse_args, policy_chat_template_model, prepare_policy_model
+from cloud.iris.task_runtime import (
+    apply_policy_model_to_command,
+    parse_args,
+    policy_chat_template_model,
+    prepare_policy_model,
+)
 
 
 @pytest.mark.parametrize(
@@ -59,11 +64,12 @@ def test_s3_policy_stages_metadata_and_rewrites_driver_without_materializing_wei
     )
     command = ["python", "-m", "cloud.iris.training_driver", "--model_path", "s3://models/policy"]
 
-    metadata_path = prepare_policy_model(args, command)
+    policy_model = prepare_policy_model(args)
 
-    assert metadata_path is not None
-    assert staged == [("s3://models/policy", manifest, metadata_path)]
-    assert command[command.index("--model_path") + 1] == metadata_path
+    assert policy_model is not None
+    apply_policy_model_to_command(command, policy_model)
+    assert staged == [("s3://models/policy", manifest, policy_model.metadata_path)]
+    assert command[command.index("--model_path") + 1] == policy_model.metadata_path
     assert command[command.index("--model-source-uri") + 1] == "s3://models/policy"
     assert command[command.index("--model-source-identity") + 1] == identity
     assert "++generator.engine_init_kwargs.served_model_name=policy" in command

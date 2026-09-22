@@ -35,6 +35,7 @@ from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECO
 from skyrl_train.utils.utils import use_per_engine_strict_pack_pg
 from skyrl_train.inference_engines.placement import colocated_engine_bundle_layout
 
+MODEL_METADATA_PATH_KEY = "_marinskyrl_metadata_path"
 
 # ---------------------------------------------------------------------------
 # #232 FIX B — NCCL flight-recorder observability env -> vLLM engine workers.
@@ -400,7 +401,7 @@ def create_ray_wrapped_inference_engines(
         non-colocated engines (each engine owns its own GPUs); colocated/hybrid engines
         still require the ray backend for shared-GPU resource management.
     """
-    model_metadata_path = engine_init_kwargs.pop("_marinskyrl_metadata_path", pretrain)
+    model_metadata_path = engine_init_kwargs.pop(MODEL_METADATA_PATH_KEY, pretrain)
     if backend == "vllm":
         import vllm
         from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor

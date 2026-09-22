@@ -11,6 +11,7 @@ import struct
 from marinskyrl.hf_model import normalize_fast_tokenizer_metadata, validate_portable_hf_model_files
 
 MODEL_MANIFEST_FILENAME = ".marinskyrl-model-manifest.json"
+HF_WEIGHT_INDEX_FILENAME = "model.safetensors.index.json"
 
 
 @dataclass(frozen=True)
@@ -58,9 +59,7 @@ class ModelManifest:
         ):
             raise ValueError(f"Invalid model manifest at {source}")
         if any(
-            not isinstance(entry.path, str)
-            or type(entry.size) is not int
-            or not isinstance(entry.sha256, str)
+            not isinstance(entry.path, str) or type(entry.size) is not int or not isinstance(entry.sha256, str)
             for entry in self.files
         ):
             raise ValueError(f"Invalid model manifest at {source}")
@@ -69,7 +68,9 @@ class ModelManifest:
             raise ValueError(f"Model manifest contains duplicate paths: {source}")
         for entry in self.files:
             path = PurePosixPath(entry.path)
-            invalid_checksum = len(entry.sha256) != 64 or any(character not in "0123456789abcdef" for character in entry.sha256)
+            invalid_checksum = len(entry.sha256) != 64 or any(
+                character not in "0123456789abcdef" for character in entry.sha256
+            )
             if (
                 entry.path in ("", ".")
                 or path.is_absolute()
@@ -82,8 +83,8 @@ class ModelManifest:
         if self.identity != expected:
             raise ValueError(f"Model manifest identity mismatch at {source}: {self.identity} != {expected}")
         validate_portable_hf_model_files(set(paths), source)
-        if "model.safetensors.index.json" not in paths:
-            raise ValueError(f"Model manifest is missing model.safetensors.index.json: {source}")
+        if HF_WEIGHT_INDEX_FILENAME not in paths:
+            raise ValueError(f"Model manifest is missing {HF_WEIGHT_INDEX_FILENAME}: {source}")
 
 
 def sha256_file(path: Path) -> str:
@@ -137,7 +138,7 @@ def _ensure_weight_index(snapshot: Path) -> None:
         "metadata": {"total_size": sum(path.stat().st_size for path in shards)},
         "weight_map": weight_map,
     }
-    index_path = snapshot / "model.safetensors.index.json"
+    index_path = snapshot / HF_WEIGHT_INDEX_FILENAME
     if index_path.is_file():
         existing = json.loads(index_path.read_text())
         if existing.get("weight_map") != weight_map:

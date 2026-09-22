@@ -59,7 +59,7 @@ from marinskyrl.environment_contract import (
     ensure_debug_artifact_directories,
     ray_cluster_owner_environment,
 )
-from marinskyrl.hf_model import validate_hf_model_weights
+from marinskyrl.hf_model import immutable_model_cache_key, validate_hf_model_weights
 from cloud.iris.telemetry_env import telemetry_environment
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculatorModelConfig, SpeculatorModelSourceKind
@@ -423,14 +423,19 @@ def _set_command_option(argv: list[str], option: str, value: str) -> None:
 
 
 def _metadata_path(source_uri: str, identity: str) -> str:
-    from marinskyrl.hf_model import immutable_model_cache_key
-
     return os.path.join(
         tempfile.gettempdir(), "marinskyrl", "model_metadata", immutable_model_cache_key(source_uri, identity)
     )
 
 
-def prepare_policy_model(args: argparse.Namespace, train_argv: list[str]) -> str | None:
+@dataclass(frozen=True)
+class PreparedPolicyModel:
+    source_uri: str
+    source_identity: str
+    metadata_path: str
+
+
+def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None:
     """Resolve one immutable policy source and stage metadata, never weights."""
     source_uri = args.model_source_uri
     source_identity = args.model_source_identity
@@ -456,17 +461,21 @@ def prepare_policy_model(args: argparse.Namespace, train_argv: list[str]) -> str
     local_path = _metadata_path(source_uri, source_identity)
     stage_model_metadata(source_uri, manifest, local_path)
     metadata_bytes = sum(path.stat().st_size for path in Path(local_path).rglob("*") if path.is_file())
-    original_model_path = train_argv[train_argv.index("--model_path") + 1]
-    served_model_name = original_model_path.rstrip("/").rsplit("/", 1)[-1]
-    train_argv.extend(("--skyrl_override", f"++generator.engine_init_kwargs.served_model_name={served_model_name}"))
-    _set_command_option(train_argv, "--model_path", local_path)
-    _set_command_option(train_argv, "--model-source-uri", source_uri)
-    _set_command_option(train_argv, "--model-source-identity", source_identity)
     _log(
         f"Policy metadata ready on rank {_rank()}/{_num_tasks()}: {source_uri} -> {local_path} "
         f"(identity={source_identity}; local_disk_high_water_bytes={metadata_bytes}; weight shards remain remote)"
     )
-    return local_path
+    return PreparedPolicyModel(source_uri, source_identity, local_path)
+
+
+def apply_policy_model_to_command(train_argv: list[str], model: PreparedPolicyModel) -> None:
+    """Point policy and rollout consumers at staged metadata plus remote weights."""
+    original_model_path = train_argv[train_argv.index("--model_path") + 1]
+    served_model_name = original_model_path.rstrip("/").rsplit("/", 1)[-1]
+    train_argv.extend(("--skyrl_override", f"++generator.engine_init_kwargs.served_model_name={served_model_name}"))
+    _set_command_option(train_argv, "--model_path", model.metadata_path)
+    _set_command_option(train_argv, "--model-source-uri", model.source_uri)
+    _set_command_option(train_argv, "--model-source-identity", model.source_identity)
 
 
 def prepare_draft_model(
@@ -475,7 +484,7 @@ def prepare_draft_model(
     cache_ttl_days: int | None,
     cache_source_prefix: str,
 ) -> SpeculatorModelConfig:
-    """Return an object-store draft locator, mirroring a Hub revision once when needed."""
+    """Resolve a draft locator, mirroring a Hub revision once when needed."""
     if model.source_kind is SpeculatorModelSourceKind.LOCAL:
         assert model.local_source_path is not None
         filesystem, root = fs_and_path(model.local_source_path)
@@ -2314,7 +2323,10 @@ def main() -> None:
         stage_task_data(args.terminal_bench_data, role="terminal-bench sidechannel")
     if args.data_sources_json:
         materialize_data_sources(args.data_sources_json)
-    policy_metadata_path = prepare_policy_model(args, train_argv)
+    policy_model = prepare_policy_model(args)
+    if policy_model is not None:
+        apply_policy_model_to_command(train_argv, policy_model)
+    policy_metadata_path = policy_model.metadata_path if policy_model is not None else None
     if args.prestage_model:
         stage_model(
             args.prestage_model,
@@ -2331,8 +2343,8 @@ def main() -> None:
             cache_source_prefix=args.draft_model_cache_source_prefix,
         )
         apply_draft_model_to_command(train_argv, draft_model)
-    # Force the policy chat template onto the staged Hub snapshot or materialized local
-    # model on every node before Ray; the training driver's tokenizer may load anywhere.
+    # Force the policy chat template onto staged metadata or a local model on every
+    # node before Ray; the training driver's tokenizer may load anywhere.
     if args.policy_chat_template:
         model_path = policy_metadata_path or policy_chat_template_model(args.prestage_model, args.model_local_path)
         apply_policy_chat_template(model_path, args.policy_chat_template)

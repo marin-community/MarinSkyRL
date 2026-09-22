@@ -4,6 +4,8 @@ from pathlib import Path
 from safetensors.torch import save_file
 import torch
 
+from cloud.iris.hf_model_cache import stage_model_metadata
+from marinskyrl.model_manifest import snapshot_model_manifest
 from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore
 
 
@@ -39,7 +41,7 @@ def test_loads_only_requested_tensor_range_without_local_weight_files(tmp_path: 
     assert not tuple(metadata.glob("*.safetensors"))
 
 
-def test_snowball_multinode_records_bounded_s3_reads_and_local_disk(tmp_path: Path) -> None:
+def test_twelve_rank_simulation_records_bounded_remote_reads_and_local_disk(tmp_path: Path) -> None:
     remote = tmp_path / "remote"
     remote.mkdir()
     shard_name = "model-00001-of-00001.safetensors"
@@ -48,17 +50,23 @@ def test_snowball_multinode_records_bounded_s3_reads_and_local_disk(tmp_path: Pa
         {f"rank.{rank}.weight": torch.arange(100_000, dtype=torch.float32) for rank in range(rank_count)},
         remote / shard_name,
     )
-    metadata = tmp_path / "metadata"
-    _write_index(metadata, {f"rank.{rank}.weight": shard_name for rank in range(rank_count)})
+    (remote / "config.json").write_text("{}")
+    (remote / "tokenizer.json").write_text("{}")
+    manifest = snapshot_model_manifest(remote, model_id="snowball/policy", revision="pinned")
 
-    stores = [RemoteSafetensorsTensorStore(str(remote), metadata) for _ in range(rank_count)]
+    metadata_dirs = [tmp_path / f"rank-{rank}" for rank in range(rank_count)]
+    for metadata in metadata_dirs:
+        stage_model_metadata(str(remote), manifest, str(metadata))
+    stores = [RemoteSafetensorsTensorStore(str(remote), metadata) for metadata in metadata_dirs]
     for rank, store in enumerate(stores):
         store.load_tensors([f"rank.{rank}.weight"])
 
     artifact_bytes = (remote / shard_name).stat().st_size
     s3_bytes_read = sum(store.bytes_read for store in stores)
-    local_disk_high_water_bytes = sum(path.stat().st_size for path in metadata.rglob("*") if path.is_file())
+    local_disk_high_water_bytes = sum(
+        path.stat().st_size for metadata in metadata_dirs for path in metadata.rglob("*") if path.is_file()
+    )
 
     assert s3_bytes_read < artifact_bytes * 1.1
     assert local_disk_high_water_bytes < artifact_bytes * 0.01
-    assert not tuple(metadata.glob("*.safetensors"))
+    assert not tuple(tmp_path.glob("rank-*/*.safetensors"))

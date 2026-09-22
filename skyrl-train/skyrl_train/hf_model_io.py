@@ -9,13 +9,12 @@ from pathlib import Path
 
 from loguru import logger
 from marinskyrl.hf_model import normalize_fast_tokenizer_metadata
-from marinskyrl.model_manifest import MODEL_MANIFEST_FILENAME, write_local_model_manifest
+from marinskyrl.model_manifest import HF_WEIGHT_INDEX_FILENAME, MODEL_MANIFEST_FILENAME, write_local_model_manifest
 from marinskyrl.resource_locator import join_resource_path
 
 from skyrl_train.io import io
 
 HF_WEIGHT_FILENAME = "model.safetensors"
-HF_WEIGHT_INDEX_FILENAME = "model.safetensors.index.json"
 
 
 def verify_hf_model_export(export_path: str) -> None:

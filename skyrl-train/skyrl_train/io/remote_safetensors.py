@@ -11,6 +11,7 @@ import struct
 import torch
 
 from marinskyrl.resource_locator import join_resource_path
+from marinskyrl.model_manifest import HF_WEIGHT_INDEX_FILENAME
 from skyrl_train.io import io
 
 
@@ -40,7 +41,7 @@ class RemoteSafetensorsTensorStore:
 
     def __init__(self, source_uri: str, metadata_dir: str | Path) -> None:
         self.source_uri = source_uri.rstrip("/")
-        index_path = Path(metadata_dir) / "model.safetensors.index.json"
+        index_path = Path(metadata_dir) / HF_WEIGHT_INDEX_FILENAME
         try:
             index = json.loads(index_path.read_text())
             weight_map = index["weight_map"]

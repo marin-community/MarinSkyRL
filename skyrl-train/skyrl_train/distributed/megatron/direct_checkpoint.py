@@ -57,6 +57,7 @@ class DirectS3TorchDistLoadShardedStrategy(TorchDistLoadShardedStrategy):
         self.checkpoint_dir = checkpoint_dir
 
     def load(self, sharded_state_dict: ShardedStateDict, _checkpoint_dir: Path, async_strategy: str = "mcore"):
+        del async_strategy  # Required by the Megatron sharded-load strategy interface.
         original = sharded_state_dict
         tensors = [value for value in nested_values(original) if isinstance(value, ShardedTensor)]
         converted, flat_mapping, rename_mapping = _replace_state_dict_keys_with_sharded_keys(original)

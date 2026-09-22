@@ -12,7 +12,9 @@ def test_remote_checkpoint_metadata_never_downloads_rank_tensor_shards(tmp_path:
         "bucket/checkpoints/global_step_7/policy/__1_0.distcp": b"rank one tensors",
     }
     reads = []
-    monkeypatch.setattr(remote_checkpoint.io, "find_files", lambda _path: {key: len(value) for key, value in objects.items()})
+    monkeypatch.setattr(
+        remote_checkpoint.io, "find_files", lambda _path: {key: len(value) for key, value in objects.items()}
+    )
 
     def read_bytes(path: str) -> bytes:
         key = path.removeprefix("s3://")

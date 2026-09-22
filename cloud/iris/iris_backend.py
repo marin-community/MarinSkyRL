@@ -294,25 +294,30 @@ def _resolved_data_entry(source: DataSource) -> str | dict[str, Any]:
     return asdict(source)
 
 
-def _model_cli_reference(uri: str, identity: str) -> tuple[str, str | None, str | None]:
+@dataclass(frozen=True)
+class _ModelCliReference:
+    model_path: str
+    source_uri: str | None = None
+    source_identity: str | None = None
+
+
+def _model_cli_reference(uri: str, identity: str) -> _ModelCliReference:
     """Resolve a typed model URI into the standalone launcher's model flags."""
     if is_cloud_uri(uri):
-        return uri, uri, identity
+        return _ModelCliReference(model_path=uri, source_uri=uri, source_identity=identity)
     parsed = urlparse(uri)
     if parsed.scheme == "file":
         if parsed.netloc not in ("", "localhost"):
             raise ValueError(f"Model file URI must be local: {uri!r}")
-        return unquote(parsed.path), None, None
-    return uri, None, None
+        return _ModelCliReference(model_path=unquote(parsed.path))
+    return _ModelCliReference(model_path=uri)
 
 
 def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = LaunchMode.WAIT) -> list[str]:
     """Adapt the typed job request to the legacy Iris launcher CLI."""
     request = spec.request
     execution = spec.execution
-    model_path, model_source_uri, model_source_identity = _model_cli_reference(
-        request.model.uri, request.model.identity
-    )
+    model = _model_cli_reference(request.model.uri, request.model.identity)
     data_sources = [asdict(locator) for locator in (*request.train_data, *request.validation_data)]
     role_plan = request.topology.role_plan
     policy_claim = role_plan.claim(ModelRoleKind.POLICY)
@@ -355,8 +360,8 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
         "--rl_config",
         config_path,
         "--model_path",
-        model_path,
-        *model_source_cli_args(model_source_uri, model_source_identity),
+        model.model_path,
+        *model_source_cli_args(model.source_uri, model.source_identity),
         "--train-data",
         json.dumps([_resolved_data_entry(source) for source in request.train_data]),
         "--val-data",
@@ -441,17 +446,15 @@ class IrisBackend:
         request = spec.request
         execution = spec.execution
         policy_claim = request.topology.role_plan.claim(ModelRoleKind.POLICY)
-        model_path, model_source_uri, model_source_identity = _model_cli_reference(
-            request.model.uri, request.model.identity
-        )
+        model = _model_cli_reference(request.model.uri, request.model.identity)
         submit_terminal_policy_export(
             TerminalPolicyExport(
                 checkpoint_root=request.output.checkpoint_root,
                 export_root=request.output.export_root,
                 config_path=config_path,
-                model_path=model_path,
-                model_source_uri=model_source_uri,
-                model_source_identity=model_source_identity,
+                model_path=model.model_path,
+                model_source_uri=model.source_uri,
+                model_source_identity=model.source_identity,
                 policy_num_nodes=policy_claim.num_nodes,
                 policy_num_gpus_per_node=policy_claim.gpus_per_node,
                 cluster=execution.cluster,

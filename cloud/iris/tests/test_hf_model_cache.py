@@ -1,7 +1,9 @@
+import json
 import os
 from pathlib import Path
 
 import huggingface_hub.constants
+import pytest
 import torch
 from safetensors.torch import save_file
 
@@ -65,8 +67,24 @@ def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, 
     assert repeated_manifest == manifest
     assert manifest.revision == revision
     assert manifest.identity.startswith("sha256:")
-    assert all(entry.size >= 0 and len(entry.sha256) == 64 for entry in manifest.files)
+    assert {entry.path for entry in manifest.files} == {
+        "config.json",
+        "model.safetensors",
+        "model.safetensors.index.json",
+        "tokenizer.json",
+    }
     assert (local_model / "config.json").read_text() == "{}"
     assert (local_model / "model.safetensors.index.json").is_file()
     assert not (local_model / "model.safetensors").exists()
     assert not (local_model / "stale.bin").exists()
+
+
+def test_corrupt_completed_cache_fails_instead_of_remirroring(tmp_path: Path, monkeypatch) -> None:
+    cache = tmp_path / "region-cache"
+    cache.mkdir()
+    (cache / ".marinskyrl-model-manifest.json").write_text("not json")
+    monkeypatch.setattr(hf_model_cache, "marin_temp_bucket", lambda *_args, **_kwargs: str(cache))
+    revision = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
+
+    with pytest.raises(json.JSONDecodeError):
+        ensure_hugging_face_model_cache("laion/draft", revision, ttl_days=14, source_prefix="s3://region/run")

@@ -74,6 +74,20 @@ class _MegatronInitMode(StrEnum):
 
 
 class MegatronWorker:
+    def _download_hf_snapshot_if_needed(self, model_path: str, model_config) -> None:
+        """Populate the local Hub cache only for non-streamed remote model IDs."""
+        if model_config.get("source_uri") or self._local_rank != 0 or os.path.exists(model_path):
+            return
+        retry = self.cfg.trainer.model_load_retry
+        revision = model_config.get("revision")
+        load_pretrained_with_retry(
+            lambda: snapshot_download(model_path, revision=revision),
+            model_id=model_path,
+            max_retries=int(retry.max_retries),
+            backoff_base=float(retry.backoff_base_seconds),
+            backoff_cap=float(retry.backoff_cap_seconds),
+        )
+
     def init_configs(
         self,
         model_path,
@@ -392,23 +406,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bf16=self.cfg.trainer.bf16,
         )
 
-        if (
-            not self.cfg.trainer.policy.model.get("source_uri")
-            and self._local_rank == 0
-            and not os.path.exists(model_path)
-        ):  # if not local path, try downloading model weights from huggingface
-            # Retry transient HF weight-index/safetensors fetch flakes (EOF /
-            # IncompleteRead / dropped connection / spurious "no .safetensors")
-            # that otherwise kill the whole gang at scale; genuine missing/auth
-            # failures still surface. no-op if already downloaded.
-            retry = self.cfg.trainer.model_load_retry
-            load_pretrained_with_retry(
-                lambda: snapshot_download(model_path, revision=self.cfg.trainer.policy.model.get("revision")),
-                model_id=model_path,
-                max_retries=int(retry.max_retries),
-                backoff_base=float(retry.backoff_base_seconds),
-                backoff_cap=float(retry.backoff_cap_seconds),
-            )
+        self._download_hf_snapshot_if_needed(model_path, self.cfg.trainer.policy.model)
         torch.distributed.barrier()
 
         if self.remote_hf_state is not None:
@@ -825,24 +823,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             bf16=self.cfg.trainer.bf16,
         )
 
-        # download model weights from huggingface (need to be done for ref worker as well, else errors when colocate_all=False)
-        if (
-            not self.cfg.trainer.ref.model.get("source_uri")
-            and self._local_rank == 0
-            and not os.path.exists(model_path)
-        ):  # if not local path, try downloading model weights from huggingface
-            # Retry transient HF weight-index/safetensors fetch flakes (EOF /
-            # IncompleteRead / dropped connection / spurious "no .safetensors")
-            # that otherwise kill the whole gang at scale; genuine missing/auth
-            # failures still surface. no-op if already downloaded.
-            retry = self.cfg.trainer.model_load_retry
-            load_pretrained_with_retry(
-                lambda: snapshot_download(model_path, revision=self.cfg.trainer.ref.model.get("revision")),
-                model_id=model_path,
-                max_retries=int(retry.max_retries),
-                backoff_base=float(retry.backoff_base_seconds),
-                backoff_cap=float(retry.backoff_cap_seconds),
-            )
+        self._download_hf_snapshot_if_needed(model_path, self.cfg.trainer.ref.model)
         torch.distributed.barrier()
 
         # load weights

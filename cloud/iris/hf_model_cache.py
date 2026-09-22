@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
-import os
 from pathlib import Path
 import posixpath
-import shutil
 import tempfile
 import time
 
@@ -16,7 +14,7 @@ from huggingface_hub import HfApi, snapshot_download
 from rigging.filesystem.cluster_config import marin_temp_bucket
 from rigging.filesystem.distributed_lock import create_lock, lease_refresh
 
-from cloud.iris.artifacts import fs_and_path, read_json, write_json
+from cloud.iris.artifacts import atomic_directory_update, fs_and_path, read_json, write_json
 from marinskyrl.hf_model import (
     hugging_face_hub_online,
     immutable_model_cache_key,
@@ -41,10 +39,11 @@ def load_model_manifest(model_uri: str) -> ModelManifest:
 
 
 def _cached_manifest(cache_uri: str, model_id: str, revision: str) -> ModelManifest | None:
-    try:
-        manifest = load_model_manifest(cache_uri)
-    except ValueError:
+    marker_uri = join_resource_path(cache_uri, MODEL_MANIFEST_FILENAME)
+    filesystem, marker_path = fs_and_path(marker_uri)
+    if not filesystem.exists(marker_path):
         return None
+    manifest = load_model_manifest(cache_uri)
     if manifest.model_id != model_id or manifest.revision != revision:
         raise ValueError(
             f"Hugging Face model-cache identity mismatch at {cache_uri}: "
@@ -156,10 +155,8 @@ def stage_model_metadata(model_uri: str, manifest: ModelManifest, local_path: st
 
     if matches():
         return
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.metadata-", dir=target.parent))
-    backup: Path | None = None
-    try:
+    with atomic_directory_update(target, staging_prefix=f".{target.name}.metadata-") as staging:
+        staging.mkdir()
         filesystem, root = fs_and_path(model_uri)
         for entry in metadata_files:
             destination = staging / entry.path
@@ -168,17 +165,3 @@ def stage_model_metadata(model_uri: str, manifest: ModelManifest, local_path: st
             if destination.stat().st_size != entry.size or sha256_file(destination) != entry.sha256:
                 raise ValueError(f"Model metadata checksum mismatch for {entry.path}: {model_uri}")
         (staging / MODEL_MANIFEST_FILENAME).write_text(json.dumps(asdict(manifest), indent=2, sort_keys=True) + "\n")
-        if target.exists():
-            backup = Path(tempfile.mkdtemp(prefix=f".{target.name}.old-", dir=target.parent))
-            backup.rmdir()
-            os.replace(target, backup)
-        os.replace(staging, target)
-    except BaseException:
-        if backup is not None and backup.exists() and not target.exists():
-            os.replace(backup, target)
-        raise
-    finally:
-        if staging.exists():
-            shutil.rmtree(staging)
-        if backup is not None and backup.exists():
-            shutil.rmtree(backup)

@@ -7,10 +7,11 @@ import os
 import posixpath
 import shutil
 import tempfile
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Iterator
 
 import fsspec
 from fsspec.spec import AbstractFileSystem
@@ -150,6 +151,31 @@ def copy_tree(source_uri: str, destination: Path) -> tuple[FileEntry, ...]:
     return copy_file_inventory(filesystem, inventory, destination)
 
 
+@contextmanager
+def atomic_directory_update(target: Path, *, staging_prefix: str) -> Iterator[Path]:
+    """Build and atomically install a replacement directory, restoring failures."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=staging_prefix, dir=target.parent))
+    staging.rmdir()
+    backup: Path | None = None
+    try:
+        yield staging
+        if target.exists():
+            backup = Path(tempfile.mkdtemp(prefix=f".{target.name}.old-", dir=target.parent))
+            backup.rmdir()
+            os.replace(target, backup)
+        os.replace(staging, target)
+    except BaseException:
+        if backup is not None and backup.exists() and not target.exists():
+            os.replace(backup, target)
+        raise
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+        if backup is not None and backup.exists():
+            shutil.rmtree(backup)
+
+
 def _materialization_matches(target: Path, source: ArtifactSource, inventory: tuple[FileEntry, ...]) -> bool:
     manifest_path = target / SOURCE_MANIFEST_FILENAME
     if not manifest_path.is_file():
@@ -176,11 +202,7 @@ def _materialization_matches(target: Path, source: ArtifactSource, inventory: tu
     )
 
 
-def materialize(
-    source: ArtifactSource,
-    *,
-    validate: Callable[[set[str], str], None] | None = None,
-) -> MaterializedArtifact:
+def materialize(source: ArtifactSource) -> MaterializedArtifact:
     """Materialize one immutable artifact into its declared node-local path."""
     _, remote_inventory = _source_inventory(source.uri)
     inventory = tuple(entry for _, entry in remote_inventory)
@@ -188,34 +210,14 @@ def materialize(
     if _materialization_matches(target, source, inventory):
         return MaterializedArtifact(source=source, files=inventory)
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.staging-", dir=target.parent))
-    backup: Path | None = None
-    try:
-        staging.rmdir()
+    with atomic_directory_update(target, staging_prefix=f".{target.name}.staging-") as staging:
         copied_inventory = copy_tree(source.uri, staging)
         if copied_inventory != inventory:
             raise ValueError(f"Artifact source changed while it was being staged: {source.uri}")
-        if validate is not None:
-            validate({entry.path for entry in inventory}, source.uri)
         manifest = {
             "source_uri": source.uri,
             "source_identity": source.identity,
             "files": [asdict(entry) for entry in inventory],
         }
         (staging / SOURCE_MANIFEST_FILENAME).write_text(json.dumps(manifest, sort_keys=True))
-        if target.exists():
-            backup = Path(tempfile.mkdtemp(prefix=f".{target.name}.old-", dir=target.parent))
-            backup.rmdir()
-            os.replace(target, backup)
-        os.replace(staging, target)
-    except BaseException:
-        if backup is not None and backup.exists() and not target.exists():
-            os.replace(backup, target)
-        raise
-    finally:
-        if staging.exists():
-            shutil.rmtree(staging)
-        if backup is not None and backup.exists():
-            shutil.rmtree(backup)
     return MaterializedArtifact(source=source, files=inventory)
