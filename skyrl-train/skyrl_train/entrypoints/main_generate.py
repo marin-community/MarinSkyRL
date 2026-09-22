@@ -48,44 +48,49 @@ async def load_initial_policy_adapter(inference_engine_client: PolicyAdapterClie
     await inference_engine_client.update_named_weights(lora_disk_load_request(str(path)))
 
 
+async def run_evaluation_only(exp: BasePPOExp) -> dict[str, Any]:
+    """Run one measured evaluation and release all rollout resources."""
+    assert exp.eval_dataset is not None, "The evaluation only entrypoint requires an eval dataset is provided"
+
+    inference_engine_client = exp.create_inference_engine_client()
+    trajectory_runner = exp.get_trajectory_runner(exp.cfg, exp.tokenizer, inference_engine_client)
+    try:
+        await inference_engine_client.wake_up()
+        await load_initial_policy_adapter(inference_engine_client, exp.cfg)
+        started_at = time.monotonic()
+        results: dict[str, Any] = await evaluate(
+            eval_dataloader=build_dataloader(exp.cfg, exp.eval_dataset, is_train=False),
+            trajectory_runner=trajectory_runner,
+            cfg=exp.cfg,
+            global_step=None,
+            tokenizer=exp.tokenizer,
+        )
+        elapsed = time.monotonic() - started_at
+        snapshot = await inference_engine_client.get_stats(read_mode=IntervalReadMode.PEEK)
+        inference_metrics = trainer_metrics(snapshot)
+        generation_tokens = inference_metrics.get(VLLM_GENERATION_TOKENS_TOTAL_METRIC, 0.0)
+        results.update(inference_metrics)
+        results["eval/all/wall_time_seconds"] = elapsed
+        results["eval/all/generation_tokens_per_second"] = generation_tokens / elapsed
+
+        if inference_metrics:
+            logger.info(format_console_summary(inference_metrics, step=0))
+        tracker = exp.get_tracker()
+        tracker.log(results, step=0, commit=True)
+        return results
+    finally:
+        inference_engine_client.shutdown_http_endpoint()
+        await trajectory_runner.shutdown()
+        await inference_engine_client.teardown()
+
+
 class EvalOnlyEntrypoint(BasePPOExp):
     def get_train_dataset(self):
         """Override to avoid requiring a train dataset for eval-only runs."""
         return None
 
     async def run(self) -> dict[str, Any]:
-        assert self.eval_dataset is not None, "The evaluation only entrypoint requires an eval dataset is provided"
-
-        inference_engine_client = self.create_inference_engine_client()
-        trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
-        try:
-            await inference_engine_client.wake_up()
-            await load_initial_policy_adapter(inference_engine_client, self.cfg)
-            started_at = time.monotonic()
-            results: dict[str, Any] = await evaluate(
-                eval_dataloader=build_dataloader(self.cfg, self.eval_dataset, is_train=False),
-                trajectory_runner=trajectory_runner,
-                cfg=self.cfg,
-                global_step=None,
-                tokenizer=self.tokenizer,
-            )
-            elapsed = time.monotonic() - started_at
-            snapshot = await inference_engine_client.get_stats(read_mode=IntervalReadMode.PEEK)
-            inference_metrics = trainer_metrics(snapshot)
-            generation_tokens = inference_metrics.get(VLLM_GENERATION_TOKENS_TOTAL_METRIC, 0.0)
-            results.update(inference_metrics)
-            results["eval/all/wall_time_seconds"] = elapsed
-            results["eval/all/generation_tokens_per_second"] = generation_tokens / elapsed
-
-            if inference_metrics:
-                logger.info(format_console_summary(inference_metrics, step=0))
-            tracker = self.get_tracker()
-            tracker.log(results, step=0, commit=True)
-            return results
-        finally:
-            inference_engine_client.shutdown_http_endpoint()
-            await trajectory_runner.shutdown()
-            await inference_engine_client.teardown()
+        return await run_evaluation_only(self)
 
 
 @ray.remote(num_cpus=1, max_retries=0)
