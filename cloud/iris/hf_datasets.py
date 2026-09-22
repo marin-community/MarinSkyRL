@@ -46,27 +46,37 @@ def is_raw_tasks_directory(snapshot_dir) -> bool:
 
 def resolve_hf_dataset_selector(value: str) -> HFDatasetSelector:
     """Resolve a dataset selector's revision to an immutable Hub commit."""
+    from marinskyrl.remote_io import call_with_hugging_face_retry
+
     selector = parse_hf_dataset_selector(value)
     if selector is None:
         raise ValueError(f"Invalid Hugging Face dataset selector: {value!r}")
-    info = huggingface_hub.HfApi().dataset_info(selector.repo_id, revision=selector.revision)
+    info = call_with_hugging_face_retry(
+        lambda: huggingface_hub.HfApi().dataset_info(selector.repo_id, revision=selector.revision),
+        operation=f"resolve Hugging Face dataset {selector.repo_id}@{selector.revision or 'main'}",
+    )
     return HFDatasetSelector(selector.repo_id, info.sha, selector.subdir)
 
 
 def download_hf_dataset(selector_value: str, revision: Optional[str] = None) -> str:
     """Download a dataset selector and return its selected local directory."""
+    from marinskyrl.remote_io import load_hugging_face_with_retry
+
     selector = parse_hf_dataset_selector(selector_value)
     if selector is None:
         raise ValueError(f"Invalid Hugging Face dataset selector: {selector_value!r}")
     if revision is not None and selector.revision is not None and revision != selector.revision:
         raise ValueError("revision conflicts with the revision embedded in the dataset selector")
     cache_path = os.environ.get("HF_CACHE_DIR", os.path.expanduser("~/.cache/huggingface/hub"))
-    snapshot = snapshot_download(
-        repo_id=selector.repo_id,
-        cache_dir=str(cache_path),
-        revision=revision or selector.revision,
-        repo_type="dataset",
-        allow_patterns=[f"{selector.subdir}/**"] if selector.subdir else None,
+    snapshot = load_hugging_face_with_retry(
+        lambda: snapshot_download(
+            repo_id=selector.repo_id,
+            cache_dir=str(cache_path),
+            revision=revision or selector.revision,
+            repo_type="dataset",
+            allow_patterns=[f"{selector.subdir}/**"] if selector.subdir else None,
+        ),
+        model_id=selector.repo_id,
     )
     selected = Path(snapshot) / selector.subdir if selector.subdir else Path(snapshot)
     if not selected.is_dir():

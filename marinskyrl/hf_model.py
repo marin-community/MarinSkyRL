@@ -15,6 +15,17 @@ TOKENIZER_JSON_NAME = "tokenizer.json"
 _OFFLINE_ENVIRONMENT_VARIABLES = (HF_HUB_OFFLINE_ENV, TRANSFORMERS_OFFLINE_ENV)
 
 
+def normalize_fast_tokenizer_metadata_bytes(payload: bytes, *, has_tokenizer_json: bool, source: str) -> bytes:
+    """Rewrite Transformers 5 fast-tokenizer metadata for Transformers 4."""
+    config = json.loads(payload)
+    if config.get("tokenizer_class") != "TokenizersBackend":
+        return payload
+    if not has_tokenizer_json:
+        raise ValueError(f"TokenizersBackend export is missing {TOKENIZER_JSON_NAME}: {source}")
+    config["tokenizer_class"] = "PreTrainedTokenizerFast"
+    return (json.dumps(config, ensure_ascii=False, indent=2) + "\n").encode()
+
+
 def immutable_model_cache_key(source: str, identity: str) -> str:
     """Return a stable cache key for one immutable model source."""
     return hashlib.sha256(f"{source}@{identity}".encode()).hexdigest()
@@ -40,13 +51,15 @@ def normalize_fast_tokenizer_metadata(model_dir: Path) -> bool:
     config_path = model_dir / TOKENIZER_CONFIG_NAME
     if not config_path.is_file():
         return False
-    config = json.loads(config_path.read_text())
-    if config.get("tokenizer_class") != "TokenizersBackend":
+    original = config_path.read_bytes()
+    normalized = normalize_fast_tokenizer_metadata_bytes(
+        original,
+        has_tokenizer_json=(model_dir / TOKENIZER_JSON_NAME).is_file(),
+        source=str(model_dir),
+    )
+    if normalized == original:
         return False
-    if not (model_dir / TOKENIZER_JSON_NAME).is_file():
-        raise ValueError(f"TokenizersBackend export is missing {TOKENIZER_JSON_NAME}: {model_dir}")
-    config["tokenizer_class"] = "PreTrainedTokenizerFast"
-    config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+    config_path.write_bytes(normalized)
     return True
 
 

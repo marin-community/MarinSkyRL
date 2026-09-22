@@ -19,10 +19,14 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
-import fsspec
 from loguru import logger
+from marinskyrl.remote_io import (
+    call_with_s3_retry,
+    filesystem_and_path,
+    get_s3_filesystem,
+    refresh_s3_credentials_if_expiring,
+)
 from marinskyrl.resource_locator import is_cloud_uri
-from .s3fs import get_s3_fs, s3_refresh_if_expiring, call_with_s3_retry
 
 
 class DirectoryPublisher(Protocol):
@@ -37,23 +41,20 @@ def is_cloud_path(path: str) -> bool:
 def _get_filesystem(path: str):
     """Get the appropriate filesystem for the given path."""
     if not is_cloud_path(path):
-        return fsspec.filesystem("file")
+        return filesystem_and_path(path)[0]
 
     proto = path.split("://", 1)[0]
     if proto == "s3":
-        fs = get_s3_fs()
-        s3_refresh_if_expiring(fs)
+        fs = get_s3_filesystem()
+        refresh_s3_credentials_if_expiring(fs)
         return fs
-    return fsspec.filesystem(proto)
+    return filesystem_and_path(path)[0]
 
 
 def open_file(path: str, mode: str = "rb"):
     """Open a file using fsspec, works with both local and cloud paths."""
-    if not is_cloud_path(path):
-        return fsspec.open(path, mode)
-
     fs = _get_filesystem(path)
-    norm = fs._strip_protocol(path)
+    norm = fs._strip_protocol(path) if is_cloud_path(path) else path
     if path.startswith("s3://"):
         return call_with_s3_retry(fs, fs.open, norm, mode)
     return fs.open(norm, mode)

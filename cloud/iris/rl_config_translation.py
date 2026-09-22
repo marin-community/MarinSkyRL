@@ -16,7 +16,6 @@ from __future__ import annotations
 import base64
 import binascii
 import copy
-import fsspec
 import json
 import math
 import os
@@ -32,6 +31,7 @@ from marinskyrl.distillation import DistillationPlan, compile_distillation_plan,
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
+from marinskyrl.remote_io import filesystem_and_path, open_output_stream
 
 # Directory containing the bundled example RL config YAML files.
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
@@ -385,8 +385,9 @@ def write_resolved_context_budget(budget: ContextBudget, destination: Path | str
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(payload)
         return destination
-    with fsspec.open(destination, "w") as artifact:
-        artifact.write(payload)
+    filesystem, path = filesystem_and_path(destination)
+    with open_output_stream(filesystem, path) as artifact:
+        artifact.write(payload.encode())
     return destination
 
 

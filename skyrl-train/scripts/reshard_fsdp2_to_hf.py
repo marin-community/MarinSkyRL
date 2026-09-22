@@ -19,9 +19,9 @@ from pathlib import Path
 import torch
 import torch._tensor as _tt
 import torch._utils as _tu
-import s3fs
 from huggingface_hub import HfApi
 from marinskyrl.hf_model import normalize_fast_tokenizer_metadata
+from marinskyrl.remote_io import call_with_hugging_face_retry, call_with_s3_retry, create_s3_filesystem
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 
@@ -84,7 +84,7 @@ def _extract_shard(path):
 
 
 def download_shards(s3_prefix, world_size, local_dir, endpoint_url):
-    """Fetch the ws model shards + huggingface/ config dir from S3 via s3fs.
+    """Fetch the ws model shards + huggingface/ config dir through shared S3 I/O.
 
     Credentials are read from ``CW_AKID``/``CW_SECRET`` when set, otherwise the
     standard AWS environment variables. The endpoint defaults to ``cwobject.com``.
@@ -104,7 +104,7 @@ def download_shards(s3_prefix, world_size, local_dir, endpoint_url):
     key = os.environ.get("CW_AKID") or os.environ["AWS_ACCESS_KEY_ID"]
     secret = os.environ.get("CW_SECRET") or os.environ["AWS_SECRET_ACCESS_KEY"]
     print(f"[reshard] s3fs endpoint={ep} region={region}", flush=True)
-    fs = s3fs.S3FileSystem(
+    fs = create_s3_filesystem(
         key=key,
         secret=secret,
         endpoint_url=ep,
@@ -124,14 +124,19 @@ def download_shards(s3_prefix, world_size, local_dir, endpoint_url):
         "chat_template.jinja",
     ]
     for fn in hf_files:
-        fs.get_file(f"{prefix}/huggingface/{fn}", os.path.join(local_dir, "huggingface", fn))
+        call_with_s3_retry(
+            fs,
+            fs.get_file,
+            f"{prefix}/huggingface/{fn}",
+            os.path.join(local_dir, "huggingface", fn),
+        )
         print(f"[reshard] downloaded huggingface/{fn}", flush=True)
     for r in range(world_size):
         fn = f"model_world_size_{world_size}_rank_{r}.pt"
         dst = os.path.join(local_dir, fn)
         if os.path.exists(dst) and os.path.getsize(dst) > 0:
             continue
-        fs.get_file(f"{prefix}/{fn}", dst)
+        call_with_s3_retry(fs, fs.get_file, f"{prefix}/{fn}", dst)
         print(f"[reshard] downloaded {fn} ({os.path.getsize(dst) / 1e9:.2f} GB)", flush=True)
 
 
@@ -261,15 +266,25 @@ def main():
     # ---- upload ----
     os.environ.pop("HF_HUB_OFFLINE", None)
     api = HfApi(token=os.environ["HF_TOKEN"])
-    api.create_repo(args.hf_repo, repo_type="model", private=False, exist_ok=True)
-    api.upload_folder(
-        folder_path=args.out_dir,
-        repo_id=args.hf_repo,
-        repo_type="model",
-        commit_message="Consolidate FSDP2 checkpoint as HF safetensors",
+    call_with_hugging_face_retry(
+        lambda: api.create_repo(args.hf_repo, repo_type="model", private=False, exist_ok=True),
+        operation=f"create Hugging Face repository {args.hf_repo}",
+    )
+    call_with_hugging_face_retry(
+        lambda: api.upload_folder(
+            folder_path=args.out_dir,
+            repo_id=args.hf_repo,
+            repo_type="model",
+            commit_message="Consolidate FSDP2 checkpoint as HF safetensors",
+        ),
+        operation=f"upload Hugging Face model {args.hf_repo}",
     )
     print(f"[reshard] UPLOADED to https://huggingface.co/{args.hf_repo}", flush=True)
-    print("[reshard] HF repo files:", sorted(api.list_repo_files(args.hf_repo)), flush=True)
+    remote_files = call_with_hugging_face_retry(
+        lambda: api.list_repo_files(args.hf_repo),
+        operation=f"list Hugging Face repository {args.hf_repo}",
+    )
+    print("[reshard] HF repo files:", sorted(remote_files), flush=True)
 
     # ---- verification: load the uploaded artifact (from local out_dir == uploaded bytes) ----
     del model  # free the consolidated model before loading a fresh copy

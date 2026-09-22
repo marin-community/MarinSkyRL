@@ -31,7 +31,7 @@ from skyrl_train.distributed.megatron.direct_checkpoint import (
     DirectS3TorchDistSaveShardedStrategy,
 )
 from skyrl_train.distributed.megatron.checkpoint_metadata import remote_checkpoint_metadata
-from skyrl_train.io.s3fs import abort_multipart_uploads
+from marinskyrl.remote_io import abort_multipart_uploads
 
 from megatron.core.dist_checkpointing.strategies import base as ckpt_base
 from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue

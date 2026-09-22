@@ -1,10 +1,8 @@
 from collections.abc import Generator
-from collections import deque
-from concurrent.futures import Future as ConcurrentFuture, ThreadPoolExecutor
 from contextlib import contextmanager
 import io
 import os
-from typing import cast, Protocol, runtime_checkable
+from typing import Any, cast, Protocol, runtime_checkable
 
 from fsspec import AbstractFileSystem
 from loguru import logger
@@ -22,14 +20,16 @@ from torch.distributed.checkpoint.planner import WriteItem, WriteItemType
 from torch.distributed.checkpoint.storage import WriteResult
 from torch.futures import Future
 
-from skyrl_train.io.s3fs import call_with_s3_retry
+from marinskyrl.remote_io import (
+    DEFAULT_S3_MULTIPART_CONCURRENCY,
+    DEFAULT_S3_MULTIPART_PART_BYTES,
+    MINIMUM_S3_MULTIPART_PART_BYTES,
+    MultipartS3FileSystem,
+    S3MultipartWriteStream,
+)
 
 
 DEFAULT_TENSOR_COPY_AHEAD_BYTES = 2**30
-DEFAULT_S3_MULTIPART_PART_BYTES = 64 * 2**20
-DEFAULT_S3_MULTIPART_CONCURRENCY = 4
-_MINIMUM_S3_MULTIPART_PART_BYTES = 5 * 2**20
-_S3_MULTIPART_PART_MAX_ATTEMPTS = 2
 
 
 @runtime_checkable
@@ -39,47 +39,14 @@ class _AbortableWriteStream(Protocol):
     def discard(self) -> None: ...
 
 
-@runtime_checkable
-class _MultipartS3FileSystem(Protocol):
-    protocol: str | tuple[str, ...]
+class _DeferredWriteErrorStream:
+    """Preserve Python write errors that torch.save would otherwise replace."""
 
-    def split_path(self, path: str) -> tuple[str, str, str | None]: ...
-
-    def call_s3(self, method: str, *args, **kwargs): ...
-
-
-class _ConcurrentS3WriteStream:
-    """Bounded file-like multipart writer with concurrent UploadPart calls."""
-
-    def __init__(
-        self,
-        filesystem: _MultipartS3FileSystem,
-        path: str,
-        *,
-        part_bytes: int,
-        concurrency: int,
-    ) -> None:
-        if part_bytes < _MINIMUM_S3_MULTIPART_PART_BYTES:
-            raise ValueError(f"part_bytes must be at least {_MINIMUM_S3_MULTIPART_PART_BYTES}")
-        if concurrency <= 0:
-            raise ValueError("concurrency must be positive")
-
-        bucket, key, _version_id = filesystem.split_path(path)
-        self.filesystem = filesystem
-        self.bucket = bucket
-        self.key = key
-        self.path = path
-        self.part_bytes = part_bytes
-        self.concurrency = concurrency
+    def __init__(self, stream: S3MultipartWriteStream) -> None:
+        self.stream = stream
+        self.path = stream.path
         self.closed = False
-        self._discarded = False
         self._position = 0
-        self._buffer = bytearray()
-        self._upload_id: str | None = None
-        self._next_part_number = 1
-        self._completed_parts: list[dict[str, int | str]] = []
-        self._pending: deque[tuple[int, ConcurrentFuture[dict[str, int | str]]]] = deque()
-        self._executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="checkpoint-s3")
         self._write_error: BaseException | None = None
 
     def writable(self) -> bool:
@@ -91,36 +58,26 @@ class _ConcurrentS3WriteStream:
     def flush(self) -> None:
         if self.closed:
             raise ValueError("flush of closed checkpoint stream")
+        if self._write_error is None:
+            self.stream.flush()
 
-    def write(self, payload) -> int:
+    def write(self, payload: Any) -> int:
         if self.closed:
             raise ValueError("write to closed checkpoint stream")
-        view = memoryview(payload).cast("B")
-        payload_bytes = len(view)
+        payload_bytes = len(memoryview(payload).cast("B"))
         if self._write_error is None:
             try:
-                while view:
-                    chunk_bytes = min(self.part_bytes - len(self._buffer), len(view))
-                    self._buffer.extend(view[:chunk_bytes])
-                    view = view[chunk_bytes:]
-                    if len(self._buffer) == self.part_bytes:
-                        self._submit_part(bytes(self._buffer))
-                        self._buffer.clear()
+                self.stream.write(payload)
             except BaseException as error:
                 # torch.save replaces exceptions from a Python write callback with
                 # an `unexpected pos` assertion while finalizing its zip stream.
-                # Accept the remaining serialization callbacks, then raise the
-                # initiating storage error from close(), outside the C++ writer.
+                # Accept the remaining callbacks and raise the storage error at close.
                 self._write_error = error
-                self._buffer.clear()
         self._position += payload_bytes
         return payload_bytes
 
     def close(self) -> None:
         if self.closed:
-            return
-        if self._discarded:
-            self.closed = True
             return
         if self._write_error is not None:
             error = self._write_error
@@ -129,100 +86,14 @@ class _ConcurrentS3WriteStream:
             except Exception as cleanup_error:
                 error.add_note(f"Failed to abort multipart upload for {self.path}: {cleanup_error}")
             raise error
-
-        if self._upload_id is None:
-            call_with_s3_retry(
-                self.filesystem,
-                self.filesystem.call_s3,
-                "put_object",
-                max_attempts=1,
-                Bucket=self.bucket,
-                Key=self.key,
-                Body=bytes(self._buffer),
-            )
-            self._buffer.clear()
-            self._executor.shutdown(wait=True, cancel_futures=True)
-            self.closed = True
-            return
-
-        if self._buffer:
-            self._submit_part(bytes(self._buffer))
-            self._buffer.clear()
-        while self._pending:
-            self._finish_oldest_part()
-        self._executor.shutdown(wait=True)
-        call_with_s3_retry(
-            self.filesystem,
-            self.filesystem.call_s3,
-            "complete_multipart_upload",
-            max_attempts=1,
-            Bucket=self.bucket,
-            Key=self.key,
-            UploadId=self._upload_id,
-            MultipartUpload={"Parts": sorted(self._completed_parts, key=lambda part: int(part["PartNumber"]))},
-        )
+        self.stream.close()
         self.closed = True
 
     def discard(self) -> None:
-        if self.closed or self._discarded:
+        if self.closed:
             return
-        self._discarded = True
-        for _part_number, future in self._pending:
-            future.cancel()
-        if self._upload_id is not None:
-            call_with_s3_retry(
-                self.filesystem,
-                self.filesystem.call_s3,
-                "abort_multipart_upload",
-                max_attempts=1,
-                Bucket=self.bucket,
-                Key=self.key,
-                UploadId=self._upload_id,
-            )
-        self._executor.shutdown(wait=True, cancel_futures=True)
-        self._buffer.clear()
+        self.stream.discard()
         self.closed = True
-
-    def _submit_part(self, payload: bytes) -> None:
-        if self._upload_id is None:
-            response = call_with_s3_retry(
-                self.filesystem,
-                self.filesystem.call_s3,
-                "create_multipart_upload",
-                max_attempts=1,
-                Bucket=self.bucket,
-                Key=self.key,
-            )
-            self._upload_id = str(response["UploadId"])
-
-        part_number = self._next_part_number
-        self._next_part_number += 1
-        future = self._executor.submit(self._upload_part, part_number, payload)
-        self._pending.append((part_number, future))
-        if len(self._pending) >= self.concurrency:
-            self._finish_oldest_part()
-
-    def _upload_part(self, part_number: int, payload: bytes) -> dict[str, int | str]:
-        try:
-            response = call_with_s3_retry(
-                self.filesystem,
-                self.filesystem.call_s3,
-                "upload_part",
-                max_attempts=_S3_MULTIPART_PART_MAX_ATTEMPTS,
-                Bucket=self.bucket,
-                Key=self.key,
-                UploadId=self._upload_id,
-                PartNumber=part_number,
-                Body=payload,
-            )
-        except BaseException as error:
-            error.add_note(f"Multipart upload failed for {self.path}: upload_id={self._upload_id} part={part_number}")
-            raise
-        return {"PartNumber": part_number, "ETag": str(response["ETag"])}
-
-    def _finish_oldest_part(self) -> None:
-        _part_number, future = self._pending.popleft()
-        self._completed_parts.append(future.result())
 
 
 class _AbortableFsspecFileSystem(FsspecFileSystem):
@@ -250,13 +121,15 @@ class _AbortableFsspecFileSystem(FsspecFileSystem):
         protocol = self.fs.protocol
         protocols = (protocol,) if isinstance(protocol, str) else protocol
         if mode == "wb" and object_path.endswith(DEFAULT_SUFFIX) and "s3" in protocols:
-            if not isinstance(self.fs, _MultipartS3FileSystem):
+            if not isinstance(self.fs, MultipartS3FileSystem):
                 raise TypeError("S3 checkpoint filesystem does not provide multipart operations")
-            stream = _ConcurrentS3WriteStream(
-                self.fs,
-                object_path,
-                part_bytes=self.multipart_part_bytes,
-                concurrency=self.multipart_concurrency,
+            stream = _DeferredWriteErrorStream(
+                S3MultipartWriteStream(
+                    self.fs,
+                    object_path,
+                    part_bytes=self.multipart_part_bytes,
+                    concurrency=self.multipart_concurrency,
+                )
             )
         else:
             stream = self.fs.open(object_path, mode)
@@ -288,8 +161,8 @@ class StreamingFsspecWriter(FileSystemWriter):
     ) -> None:
         if tensor_copy_ahead_bytes <= 0:
             raise ValueError("tensor_copy_ahead_bytes must be positive")
-        if multipart_part_bytes < _MINIMUM_S3_MULTIPART_PART_BYTES:
-            raise ValueError(f"multipart_part_bytes must be at least {_MINIMUM_S3_MULTIPART_PART_BYTES}")
+        if multipart_part_bytes < MINIMUM_S3_MULTIPART_PART_BYTES:
+            raise ValueError(f"multipart_part_bytes must be at least {MINIMUM_S3_MULTIPART_PART_BYTES}")
         if multipart_concurrency <= 0:
             raise ValueError("multipart_concurrency must be positive")
         super().__init__(

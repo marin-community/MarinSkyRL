@@ -576,10 +576,9 @@ def apply_policy_chat_template(model_path: str, template_repo_rel: str) -> None:
     # Import transformers/hf lazily (matches wait_for_nodes' local `import ray` and
     # stage_model): the controller bootstraps Ray on every node and must not pull these
     # heavy ML deps into the fast bootstrap path for configs that set no chat-template.
-    from huggingface_hub import snapshot_download
     from transformers import AutoTokenizer
 
-    snap = model_path if os.path.isdir(model_path) else snapshot_download(model_path)
+    snap = model_path if os.path.isdir(model_path) else download_hugging_face_snapshot(model_path, revision=None)
     tc_path = os.path.join(snap, "tokenizer_config.json")
     jinja_path = os.path.join(snap, "chat_template.jinja")
 

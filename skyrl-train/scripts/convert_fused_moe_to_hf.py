@@ -217,13 +217,17 @@ def _resolve_src(src: str, cache_dir: str | None) -> Path:
         return p
     # treat as HF repo id
     from huggingface_hub import snapshot_download
+    from marinskyrl.remote_io import load_hugging_face_with_retry
 
     token = os.environ.get("HF_TOKEN")
-    local = snapshot_download(
-        repo_id=src,
-        cache_dir=cache_dir,
-        token=token,
-        allow_patterns=["*.safetensors", "*.json", "*.txt", "*.model", "tokenizer*"],
+    local = load_hugging_face_with_retry(
+        lambda: snapshot_download(
+            repo_id=src,
+            cache_dir=cache_dir,
+            token=token,
+            allow_patterns=["*.safetensors", "*.json", "*.txt", "*.model", "tokenizer*"],
+        ),
+        model_id=src,
     )
     return Path(local)
 

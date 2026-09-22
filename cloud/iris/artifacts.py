@@ -13,13 +13,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-import fsspec
 from fsspec.spec import AbstractFileSystem
+from marinskyrl.remote_io import call_with_filesystem_retry, filesystem_and_path, open_output_stream
 from marinskyrl.resource_locator import join_resource_path, relative_resource_path
 
 CHECKPOINT_MARKER_FILENAME = "latest_ckpt_global_step.txt"
 SOURCE_MANIFEST_FILENAME = ".marinskyrl-source.json"
-S3_ADDRESSING_STYLE_ENV = "OT_AGENT_S3_ADDRESSING_STYLE"
 FILE_COPY_WORKERS = 16
 
 
@@ -43,50 +42,53 @@ class MaterializedArtifact:
 
 
 def fs_and_path(uri: str) -> tuple[AbstractFileSystem, str]:
-    """Resolve a URI, using virtual-hosted addressing for Marin's S3 store."""
-    storage_options = None
-    if uri.startswith(("s3://", "s3a://")):
-        style = os.environ.get(S3_ADDRESSING_STYLE_ENV, "virtual")
-        storage_options = {"config_kwargs": {"s3": {"addressing_style": style}}}
-    filesystem, _, paths = fsspec.get_fs_token_paths(uri, storage_options=storage_options)
-    return filesystem, paths[0]
+    """Resolve a URI through the shared guarded remote-I/O factory."""
+    return filesystem_and_path(uri)
 
 
 def write_json(uri: str, value: dict[str, Any], *, overwrite: bool = True) -> None:
     """Write JSON to a local or object-store URI."""
     filesystem, path = fs_and_path(uri)
-    if not overwrite and filesystem.exists(path):
+    if not overwrite and call_with_filesystem_retry(filesystem, filesystem.exists, path):
         raise ValueError(f"JSON artifact already exists: {uri}")
     parent = posixpath.dirname(path)
     if parent:
-        filesystem.makedirs(parent, exist_ok=True)
-    with filesystem.open(path, "w") as destination:
-        json.dump(value, destination, indent=2, sort_keys=True)
-        destination.write("\n")
+        call_with_filesystem_retry(filesystem, filesystem.makedirs, parent, exist_ok=True)
+    payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+    with open_output_stream(filesystem, path) as destination:
+        destination.write(payload)
 
 
 def read_json(uri: str) -> dict[str, Any] | None:
     """Read a JSON object, returning ``None`` when the URI does not exist."""
     filesystem, path = fs_and_path(uri)
-    if not filesystem.exists(path):
+    if not call_with_filesystem_retry(filesystem, filesystem.exists, path):
         return None
-    with filesystem.open(path) as source:
-        return json.load(source)
+
+    def read() -> dict[str, Any]:
+        with filesystem.open(path) as source:
+            return json.load(source)
+
+    return call_with_filesystem_retry(filesystem, read)
 
 
 def terminal_checkpoint_step(checkpoint_root: str) -> int:
     """Return the latest committed checkpoint step."""
     marker_uri = join_resource_path(checkpoint_root, CHECKPOINT_MARKER_FILENAME)
     filesystem, marker_path = fs_and_path(marker_uri)
-    if not filesystem.exists(marker_path):
+    if not call_with_filesystem_retry(filesystem, filesystem.exists, marker_path):
         raise ValueError(f"Successful Iris job did not commit a checkpoint marker: {marker_uri}")
-    with filesystem.open(marker_path, "r") as source:
-        return int(source.read().strip())
+
+    def read() -> int:
+        with filesystem.open(marker_path, "r") as source:
+            return int(source.read().strip())
+
+    return call_with_filesystem_retry(filesystem, read)
 
 
 def file_inventory(filesystem: AbstractFileSystem, root: str) -> tuple[tuple[str, FileEntry], ...]:
     """List files below a storage root using metadata returned by the listing."""
-    files = filesystem.find(root, detail=True)
+    files = call_with_filesystem_retry(filesystem, filesystem.find, root, detail=True)
     return tuple(
         sorted(
             (
@@ -101,7 +103,7 @@ def file_inventory(filesystem: AbstractFileSystem, root: str) -> tuple[tuple[str
 
 def _source_inventory(uri: str) -> tuple[AbstractFileSystem, tuple[tuple[str, FileEntry], ...]]:
     filesystem, source_path = fs_and_path(uri)
-    source_info = filesystem.info(source_path)
+    source_info = call_with_filesystem_retry(filesystem, filesystem.info, source_path)
     if source_info["type"] == "file":
         entry = FileEntry(path=posixpath.basename(source_path), size=int(source_info["size"]))
         return filesystem, ((source_path, entry),)
@@ -125,7 +127,7 @@ def copy_file_inventory(
         source_path, entry = item
         local_path = destination / entry.path
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        filesystem.get_file(source_path, str(local_path))
+        call_with_filesystem_retry(filesystem, filesystem.get_file, source_path, str(local_path))
         actual_size = local_path.stat().st_size
         if actual_size != entry.size:
             raise ValueError(f"Staging size mismatch for {entry.path}: expected {entry.size}, found {actual_size}")

@@ -9,11 +9,8 @@ import torch
 from torch.distributed import checkpoint
 from torch.distributed.checkpoint.api import CheckpointException
 
-from skyrl_train.io.torch_distributed_checkpoint import (
-    _ConcurrentS3WriteStream,
-    _MINIMUM_S3_MULTIPART_PART_BYTES,
-    StreamingFsspecWriter,
-)
+from marinskyrl.remote_io import MINIMUM_S3_MULTIPART_PART_BYTES, S3MultipartWriteStream
+from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
 
 
 def test_streaming_fsspec_writer_round_trips_one_aggregated_object_per_rank():
@@ -163,8 +160,8 @@ class _RecordingMultipartFilesystem:
 
 def test_concurrent_s3_stream_bounds_and_parallelizes_parts():
     filesystem = _RecordingMultipartFilesystem()
-    part_bytes = _MINIMUM_S3_MULTIPART_PART_BYTES
-    stream = _ConcurrentS3WriteStream(
+    part_bytes = MINIMUM_S3_MULTIPART_PART_BYTES
+    stream = S3MultipartWriteStream(
         filesystem,
         "s3://bucket/checkpoint/__0_0.distcp",
         part_bytes=part_bytes,
@@ -186,38 +183,37 @@ def test_concurrent_s3_stream_bounds_and_parallelizes_parts():
 
 def test_concurrent_s3_stream_aborts_failed_part():
     filesystem = _RecordingMultipartFilesystem(fail_part=1)
-    stream = _ConcurrentS3WriteStream(
+    stream = S3MultipartWriteStream(
         filesystem,
         "s3://bucket/checkpoint/__0_0.distcp",
-        part_bytes=_MINIMUM_S3_MULTIPART_PART_BYTES,
+        part_bytes=MINIMUM_S3_MULTIPART_PART_BYTES,
         concurrency=1,
     )
 
-    stream.write(b"a" * _MINIMUM_S3_MULTIPART_PART_BYTES)
     with pytest.raises(OSError, match="injected UploadPart failure"):
-        stream.close()
+        stream.write(b"a" * MINIMUM_S3_MULTIPART_PART_BYTES)
 
     assert filesystem.aborted
     assert stream.closed
 
 
 def test_concurrent_s3_stream_retries_transient_part(monkeypatch):
-    monkeypatch.setattr("skyrl_train.io.s3fs.time.sleep", lambda _delay: None)
+    monkeypatch.setattr("rigging.timing.time.sleep", lambda _delay: None)
     filesystem = _RecordingMultipartFilesystem(transient_failures=1)
-    stream = _ConcurrentS3WriteStream(
+    stream = S3MultipartWriteStream(
         filesystem,
         "s3://bucket/checkpoint/__0_0.distcp",
-        part_bytes=_MINIMUM_S3_MULTIPART_PART_BYTES,
+        part_bytes=MINIMUM_S3_MULTIPART_PART_BYTES,
         concurrency=2,
     )
 
-    stream.write(b"a" * _MINIMUM_S3_MULTIPART_PART_BYTES + b"b" * _MINIMUM_S3_MULTIPART_PART_BYTES)
+    stream.write(b"a" * MINIMUM_S3_MULTIPART_PART_BYTES + b"b" * MINIMUM_S3_MULTIPART_PART_BYTES)
     stream.close()
 
     assert filesystem.upload_attempts == 3
     assert filesystem.uploaded_parts == {
-        1: b"a" * _MINIMUM_S3_MULTIPART_PART_BYTES,
-        2: b"b" * _MINIMUM_S3_MULTIPART_PART_BYTES,
+        1: b"a" * MINIMUM_S3_MULTIPART_PART_BYTES,
+        2: b"b" * MINIMUM_S3_MULTIPART_PART_BYTES,
     }
     assert not filesystem.aborted
 
@@ -228,7 +224,7 @@ def test_streaming_fsspec_writer_preserves_upload_part_failure():
         "s3://bucket/checkpoint",
         filesystem=filesystem,
         tensor_copy_ahead_bytes=2**20,
-        multipart_part_bytes=_MINIMUM_S3_MULTIPART_PART_BYTES,
+        multipart_part_bytes=MINIMUM_S3_MULTIPART_PART_BYTES,
         multipart_concurrency=1,
     )
 
@@ -236,7 +232,7 @@ def test_streaming_fsspec_writer_preserves_upload_part_failure():
         warnings.simplefilter("ignore", UserWarning)
         with pytest.raises(CheckpointException, match="injected UploadPart failure"):
             checkpoint.save(
-                {"tensor": torch.arange(_MINIMUM_S3_MULTIPART_PART_BYTES + 1, dtype=torch.uint8)},
+                {"tensor": torch.arange(MINIMUM_S3_MULTIPART_PART_BYTES + 1, dtype=torch.uint8)},
                 storage_writer=writer,
             )
 

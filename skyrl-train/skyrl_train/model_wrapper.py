@@ -43,15 +43,14 @@ from skyrl_train.utils.flash_attention import (
 from packaging.version import Version
 from marinskyrl.runtime_options import GDNBackend
 
-# Rank-0 HF weight-index resolution retry (transient EOF flake). The helper now
-# lives in skyrl_train.utils.hf_load_retry (dependency-light) so the Megatron
-# worker can share it without importing this heavy module. Re-exported under the
-# original private names to keep this module's call sites + any importers stable.
-from skyrl_train.utils.hf_load_retry import (  # noqa: E402
-    DEFAULT_BACKOFF_BASE_SECONDS,
-    DEFAULT_BACKOFF_CAP_SECONDS,
-    DEFAULT_MAX_RETRIES,
-    load_pretrained_with_retry as _load_pretrained_with_retry,
+# Rank-0 HF weight-index resolution retry (transient EOF flake). The helper lives
+# in the shared remote-I/O module so model mirroring and every training backend
+# use the same failure classifier and backoff policy.
+from marinskyrl.remote_io import (  # noqa: E402
+    DEFAULT_HF_BACKOFF_BASE_SECONDS as DEFAULT_BACKOFF_BASE_SECONDS,
+    DEFAULT_HF_BACKOFF_CAP_SECONDS as DEFAULT_BACKOFF_CAP_SECONDS,
+    DEFAULT_HF_MAX_RETRIES as DEFAULT_MAX_RETRIES,
+    load_hugging_face_with_retry as _load_pretrained_with_retry,
 )
 
 

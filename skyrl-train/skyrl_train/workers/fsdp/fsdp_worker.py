@@ -650,13 +650,17 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
         # Resolve the on-disk HF checkpoint shards (local cache or download).
         from huggingface_hub import snapshot_download
+        from marinskyrl.remote_io import load_hugging_face_with_retry
         from safetensors import safe_open
 
         local_dir = model_path
         if not (os.path.isdir(model_path) and os.path.exists(os.path.join(model_path, "config.json"))):
-            local_dir = snapshot_download(
-                model_path,
-                allow_patterns=["*.safetensors", "*.json"],
+            local_dir = load_hugging_face_with_retry(
+                lambda: snapshot_download(
+                    model_path,
+                    allow_patterns=["*.safetensors", "*.json"],
+                ),
+                model_id=model_path,
             )
 
         # Build name -> shard-file index.
