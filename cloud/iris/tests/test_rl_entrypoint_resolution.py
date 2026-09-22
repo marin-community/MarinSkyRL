@@ -1,20 +1,105 @@
 import json
+import logging
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from cloud.iris.iris_backend import create_parser, normalize
 from cloud.iris.rl_config_translation import build_skyrl_hydra_args, parse_rl_config
 from marinskyrl.distillation import TeacherSource
-from cloud.iris.training_driver import parse_list_arg
+from cloud.iris.training_driver import LocalRLConfig, LocalRLRunner, parse_list_arg
 from skyrl_train.entrypoints.main_base import config_dir
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+FULLY_ASYNC_MODULE = "skyrl_train.entrypoints.fully_async"
+GENERATE_MODULE = "skyrl_train.entrypoints.main_generate"
+SYNC_MODULE = "skyrl_train.entrypoints.main_base"
+SYNCHRONOUS_CONFIG = _REPO_ROOT / "cloud" / "iris" / "configs" / "delphi_math_rl.yaml"
+TRANSLATION_LOGGER = "cloud.iris.rl_config_translation"
+
+
+def _config_with(tmp_path: Path, entrypoint: str | None = "sync", **sections) -> Path:
+    raw = yaml.safe_load(SYNCHRONOUS_CONFIG.read_text())
+    if entrypoint is None:
+        raw.pop("entrypoint")
+    else:
+        raw["entrypoint"] = entrypoint
+    for section, values in sections.items():
+        raw.setdefault(section, {}).update(values)
+    config = tmp_path / "rl.yaml"
+    config.write_text(yaml.safe_dump(raw, sort_keys=False))
+    return config
+
+
+def _translation_warnings(caplog) -> list[logging.LogRecord]:
+    return [
+        record for record in caplog.records if record.name == TRANSLATION_LOGGER and record.levelno >= logging.WARNING
+    ]
+
+
+@pytest.mark.parametrize(
+    "entrypoint,trainer,warned",
+    [
+        ("sync", {"fully_async": {"max_staleness_steps": 4}}, True),
+        ("sync", {}, False),
+        ("fully_async", {"fully_async": {"max_staleness_steps": 4}}, False),
+        ("terminal_bench", {"fully_async": {"max_staleness_steps": 4}, "placement": {"colocate_all": False}}, False),
+        ("terminal_bench", {"fully_async": {"max_staleness_steps": 4}, "placement": {"colocate_all": True}}, True),
+    ],
+)
+def test_fully_async_settings_are_reported_inert_only_when_the_fully_async_trainer_never_runs(
+    tmp_path, caplog, entrypoint, trainer, warned
+):
+    config = _config_with(tmp_path, entrypoint, trainer=trainer)
+
+    parse_rl_config(str(config))
+
+    assert bool(_translation_warnings(caplog)) is warned
+
+
+def test_the_old_entrypoint_name_still_resolves_and_warns_once(tmp_path, caplog):
+    config = _config_with(tmp_path, "standard")
+
+    parsed = parse_rl_config(str(config))
+
+    assert parsed.entrypoint == SYNC_MODULE
+    assert len(_translation_warnings(caplog)) == 1
+
+
+def _dry_run(tmp_path: Path, config: Path, entrypoint: str | None) -> str:
+    resolved = tmp_path / "resolved.json"
+    runner = LocalRLRunner(
+        LocalRLConfig(
+            rl_config_path=str(config),
+            job_name="guard",
+            model_path="Qwen/Qwen3-8B",
+            entrypoint=entrypoint,
+            experiments_dir=str(tmp_path / "experiments"),
+            resolved_config_uri=str(resolved),
+            dry_run=True,
+        )
+    )
+    assert runner.run() == 0
+    return json.loads(resolved.read_text())["entrypoint"]
+
+
+def test_a_launcher_entrypoint_matching_the_config_launches(tmp_path):
+    assert _dry_run(tmp_path, _config_with(tmp_path), SYNC_MODULE) == SYNC_MODULE
+
+
+def test_a_non_training_launcher_entrypoint_overrides_a_sync_config(tmp_path):
+    assert _dry_run(tmp_path, _config_with(tmp_path), GENERATE_MODULE) == GENERATE_MODULE
+
+
+def test_a_launcher_entrypoint_naming_another_training_loop_fails(tmp_path):
+    with pytest.raises(ValueError, match="contradicts the RL config's entrypoint"):
+        _dry_run(tmp_path, _config_with(tmp_path), FULLY_ASYNC_MODULE)
 
 
 def test_external_rl_config_rejects_deleted_module_path_before_dry_run(tmp_path):
@@ -81,7 +166,7 @@ def test_rl_config_translates_distillation_only_replace_mode(tmp_path):
     config = tmp_path / "rl.yaml"
     config.write_text(
         """\
-entrypoint: standard
+entrypoint: sync
 context_budget:
   request_window_tokens: 2
   max_new_tokens_per_turn: 1
@@ -133,7 +218,7 @@ def test_supported_local_teacher_plan_crosses_cli_and_hydra_boundaries(tmp_path)
     config = tmp_path / "rl.yaml"
     config.write_text(
         """\
-entrypoint: standard
+entrypoint: sync
 context_budget:
   request_window_tokens: 2
   max_new_tokens_per_turn: 1

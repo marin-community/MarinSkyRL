@@ -21,7 +21,9 @@ def _config():
     )
 
 
-def _step(response_ids, reward, *, captured_global_step=None, token_provenance="engine"):
+def _step(
+    response_ids, reward, *, captured_global_step=None, token_provenance="engine", first_token_policy_version=None
+):
     outcome = float(sum(reward) if isinstance(reward, list) else reward)
     return AgentLoopOutput(
         evidence=RolloutEvidence(
@@ -40,6 +42,7 @@ def _step(response_ids, reward, *, captured_global_step=None, token_provenance="
         loss_mask=[1] * len(response_ids),
         env_metrics={"score": outcome},
         captured_global_step=captured_global_step,
+        first_token_policy_version=first_token_policy_version,
         token_provenance=token_provenance,
     )
 
@@ -188,3 +191,17 @@ def test_projection_derives_mask_baseline_and_token_credit_from_contracts():
     assert output["error_treatments"] == ["passthrough"]
     assert output["unshaped_rewards"] == [0.0]
     assert output["unshaped_reward_available"] == [False]
+
+
+def test_whole_trajectory_projection_takes_the_oldest_first_token_version_of_the_group():
+    projection = WholeTrajectoryProjection(_config(), _Tokenizer())
+    output = projection.project(
+        [
+            _step([3], [1.0], first_token_policy_version=5),
+            _step([4], [0.0], first_token_policy_version=None),
+            _step([5], [0.0], first_token_policy_version=2),
+        ],
+        {"env_classes": None, "sampling_params": {"logprobs": True}},
+    )
+
+    assert output["first_token_policy_version"] == 2

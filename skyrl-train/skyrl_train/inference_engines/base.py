@@ -1,5 +1,8 @@
 from abc import ABC, abstractmethod
+from enum import StrEnum
 from typing import List, Dict, TypedDict, Any, Optional, Hashable, NotRequired
+
+from skyrl_train.policy_version import PolicyVersionSegment
 
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
@@ -31,6 +34,13 @@ class InferenceEngineInput(TypedDict):
     chat_continuations: NotRequired[List[ChatContinuation | None]]
 
 
+class PauseMode(StrEnum):
+    """What the engines do with in-flight requests while weights are reloaded."""
+
+    ABORT = "abort"
+    KEEP = "keep"
+
+
 class InferenceEngineOutput(TypedDict):
     # We always return both tokens and text outputs. The tokens are the outputs
     # of inference engine, and the text is the decoded text output. Therefore,
@@ -48,6 +58,9 @@ class InferenceEngineOutput(TypedDict):
     # also be returned by vLLM, but is not forced into these top-K rows.
     student_topk_indices: NotRequired[List[List[List[int]]]]
     behavior_topk_logprobs: NotRequired[List[List[List[float]]]]
+    # Compact spans aligned with response_ids. A None version means the engine reported
+    # none, and fully async training rejects it.
+    response_policy_version_segments: NotRequired[List[List[PolicyVersionSegment]]]
     # prompt_logprobs: per-prompt-token top-K logprobs from vLLM (for teacher scoring).
     # Format: List[List[Optional[Dict[int, float]]]] — outer list is batch,
     # inner list is prompt positions, dict maps token_id → logprob.
@@ -167,15 +180,16 @@ class InferenceEngineInterface(ABC):
     @abstractmethod
     async def pause_generation(self) -> None:
         """
-        Pause the scheduler for a weight update after aborting all running and waiting
-        requests. Running requests return their generated tokens with stop_reason "abort";
-        waiting requests return zero completion tokens.
+        Pause the scheduler for a weight update. In abort mode running and waiting requests
+        are cancelled first: running requests return their generated tokens with stop_reason
+        "abort" and waiting requests return zero completion tokens. In keep mode they stay
+        queued and resume after the update.
         """
         raise NotImplementedError()
 
     @abstractmethod
-    async def resume_generation(self) -> None:
-        """Resume the scheduler after a weight update."""
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        """Resume after a weight update, optionally naming the installed policy."""
         raise NotImplementedError()
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> OnlineEagleResult:

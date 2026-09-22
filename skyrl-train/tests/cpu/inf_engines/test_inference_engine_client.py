@@ -1081,6 +1081,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
                     response_ids=[[21, 22]],
                     stop_reasons=["abort"],
                     response_logprobs=[[-0.1, -0.2]],
+                    response_policy_version_segments=[[{"start": 0, "token_count": 2, "policy_version": 0}]],
                 ),
                 # 2) abort with 0 tokens (should be ignored)
                 InferenceEngineOutput(
@@ -1095,6 +1096,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
                     response_ids=[[23, 24]],
                     stop_reasons=["stop"],
                     response_logprobs=[[-0.3, -0.4]],
+                    response_policy_version_segments=[[{"start": 0, "token_count": 2, "policy_version": 1}]],
                 ),
             ]
 
@@ -1150,6 +1152,12 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
     assert out["response_ids"] == [expected_final_response_ids]
     assert out["stop_reasons"] == ["stop"]
     assert out["response_logprobs"] == [[-0.1, -0.2, -0.3, -0.4]]
+    assert out["response_policy_version_segments"] == [
+        [
+            {"start": 0, "token_count": 2, "policy_version": 0},
+            {"start": 2, "token_count": 2, "policy_version": 1},
+        ]
+    ]
 
 
 @pytest.mark.asyncio
@@ -1285,6 +1293,7 @@ class _MockWeightSyncEngine:
         self.scheduler_paused = False
         self.outstanding_requests = 388
         self.reloads = 0
+        self.resumed_policy_version = None
 
     async def pause_generation(self):
         self.scheduler_paused = True
@@ -1295,7 +1304,8 @@ class _MockWeightSyncEngine:
             raise RuntimeError("reshape_and_cache_flash attempted to run with Meta tensors")
         self.reloads += 1
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_version=None):
+        self.resumed_policy_version = policy_version
         self.scheduler_paused = False
 
 
@@ -1311,8 +1321,9 @@ async def test_weight_sync_pauses_loaded_scheduler_until_reload_finishes():
     assert engine.outstanding_requests == 0
     assert engine.reloads == 1
 
-    await client.resume_generation()
+    await client.resume_generation(policy_version=7)
     assert not engine.scheduler_paused
+    assert engine.resumed_policy_version == 7
 
 
 @pytest.mark.asyncio
@@ -1599,6 +1610,197 @@ async def test_completion_single_prompt_is_unaffected_when_never_paused():
     assert result["choices"][0]["text"] == "done"
     assert len(engines[0].calls) == 1
     assert "session_id" not in engines[0].calls[0], "session_id must be stripped before it reaches the engine"
+
+
+# -------------------------------------------
+# policy version spans across engines and weight syncs
+# --------------------------------------------
+
+
+class _VersionedEngine:
+    def __init__(self, outputs):
+        self.outputs = list(outputs)
+        self.calls = []
+        self.resumed_with = []
+
+    async def generate(self, request):
+        self.calls.append(deepcopy(request))
+        return deepcopy(self.outputs[len(self.calls) - 1])
+
+    async def pause_generation(self):
+        pass
+
+    async def resume_generation(self, policy_version=None):
+        self.resumed_with.append(policy_version)
+
+
+@pytest.mark.asyncio
+async def test_batched_generate_keeps_each_row_spans():
+    engine = _VersionedEngine(
+        [
+            InferenceEngineOutput(
+                responses=["a", ""],
+                response_ids=[[5], []],
+                stop_reasons=["stop", "stop"],
+                response_logprobs=None,
+                response_policy_version_segments=[[{"start": 0, "token_count": 1, "policy_version": 2}], []],
+            )
+        ]
+    )
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+
+    output = await client.generate(InferenceEngineInput(prompt_token_ids=[[1], [2]], sampling_params={"max_tokens": 4}))
+
+    assert output["response_policy_version_segments"] == [[{"start": 0, "token_count": 1, "policy_version": 2}], []]
+
+
+@pytest.mark.asyncio
+async def test_batched_generate_synthesizes_an_unknown_span_for_an_engine_reporting_none():
+    stamping = _VersionedEngine(
+        [
+            InferenceEngineOutput(
+                responses=["a"],
+                response_ids=[[5]],
+                stop_reasons=["stop"],
+                response_logprobs=None,
+                response_policy_version_segments=[[{"start": 0, "token_count": 1, "policy_version": 2}]],
+            )
+        ]
+    )
+    silent = _VersionedEngine(
+        [InferenceEngineOutput(responses=["bc"], response_ids=[[6, 7]], stop_reasons=["stop"], response_logprobs=None)]
+    )
+    client = InferenceEngineClient(engines=[stamping, silent], tokenizer=object(), full_config=_make_min_cfg())
+
+    output = await client.generate(InferenceEngineInput(prompt_token_ids=[[1], [2]], sampling_params={"max_tokens": 4}))
+
+    assert output["response_ids"] == [[5], [6, 7]]
+    assert output["response_policy_version_segments"] == [
+        [{"start": 0, "token_count": 1, "policy_version": 2}],
+        [{"start": 0, "token_count": 2, "policy_version": None}],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resume_names_the_installed_version_on_every_live_engine():
+    engines = [_VersionedEngine([]), _VersionedEngine([])]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+
+    await client.pause_generation()
+    await client.resume_generation(policy_version=7)
+    await client.pause_generation()
+    await client.resume_generation()
+
+    assert [engine.resumed_with for engine in engines] == [[7, None], [7, None]]
+
+
+# -------------------------------------------
+# chat attempts stamped with the installed policy version
+# --------------------------------------------
+
+
+def _chat_partial(content, finish_reason, token_ids):
+    return {
+        "id": "cmpl",
+        "object": "chat.completion",
+        "model": "dummy-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": finish_reason,
+                "token_ids": list(token_ids),
+            }
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": len(token_ids), "total_tokens": 5 + len(token_ids)},
+    }
+
+
+class _StampedChatEngine:
+    def __init__(self, responses, during_attempt=None):
+        self.responses = list(responses)
+        self.calls = []
+        self.during_attempt = during_attempt
+
+    async def chat_completion(self, request_payload):
+        self.calls.append(deepcopy(request_payload))
+        attempt = len(self.calls) - 1
+        if self.during_attempt is not None:
+            await self.during_attempt(attempt)
+        return deepcopy(self.responses[attempt])
+
+    async def pause_generation(self):
+        pass
+
+    async def resume_generation(self, policy_version=None):
+        pass
+
+
+def _chat_request():
+    return {
+        "json": {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "q"}],
+            "max_tokens": 16,
+            "session_id": "s",
+        },
+        "headers": {},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("version_installed_before_send", "expected_first_span_version"),
+    [(3, 3), (None, None)],
+    ids=["installed_version_stamps_the_first_attempt", "tokens_sampled_before_any_version_carry_none"],
+)
+async def test_chat_attempts_are_stamped_with_the_version_installed_when_they_were_sent(
+    version_installed_before_send, expected_first_span_version
+):
+    client = None
+
+    async def sync_during(attempt):
+        if attempt == 0:
+            await client.pause_generation()
+            await client.resume_generation(policy_version=4)
+
+    engine = _StampedChatEngine(
+        [_chat_partial("A", "abort", [11]), _chat_partial("BC", "stop", [12, 13])], during_attempt=sync_during
+    )
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    if version_installed_before_send is not None:
+        await client.pause_generation()
+        await client.resume_generation(policy_version=version_installed_before_send)
+
+    out = await client.chat_completion(_chat_request())
+
+    assert out["choices"][0]["token_ids"] == [11, 12, 13]
+    assert out["choices"][0]["policy_version_segments"] == [
+        {"start": 0, "token_count": 1, "policy_version": expected_first_span_version},
+        {"start": 1, "token_count": 2, "policy_version": 4},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_single_attempt_carries_one_span_of_the_installed_version():
+    engine = _StampedChatEngine([_chat_partial("AB", "stop", [11, 12])])
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    await client.pause_generation()
+    await client.resume_generation(policy_version=5)
+
+    out = await client.chat_completion(_chat_request())
+
+    assert out["choices"][0]["policy_version_segments"] == [{"start": 0, "token_count": 2, "policy_version": 5}]
+
+
+@pytest.mark.asyncio
+async def test_chat_responses_carry_no_span_until_a_version_is_named():
+    engine = _StampedChatEngine([_chat_partial("AB", "stop", [11, 12])])
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+
+    out = await client.chat_completion(_chat_request())
+
+    assert "policy_version_segments" not in out["choices"][0]
 
 
 # -------------------------------------------

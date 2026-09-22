@@ -34,6 +34,7 @@ from marinskyrl.speculative_decoding import (
     parse_speculative_decoding_config,
     runai_model_uri,
 )
+from skyrl_train.inference_engines.vllm.utils import CLEAR_KV_CACHE_ON_WEIGHT_SYNC_KEY, PAUSE_MODE_KEY
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -142,6 +143,8 @@ def create_ray_wrapped_inference_engines_from_config(
     engine_init_kwargs = {
         **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
         "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
+        PAUSE_MODE_KEY: str(cfg.trainer.fully_async.pause_mode),
+        CLEAR_KV_CACHE_ON_WEIGHT_SYNC_KEY: bool(cfg.trainer.fully_async.clear_kv_cache_on_weight_sync),
     }
     policy_source_uri = cfg.trainer.policy.model.get("source_uri")
     rollout_model_path = runai_model_uri(policy_source_uri) if policy_source_uri else cfg.trainer.policy.model.path

@@ -452,7 +452,8 @@ class SGLangInferenceEngine(InferenceEngineInterface):
     async def pause_generation(self) -> None:
         raise NotImplementedError("Pausing generation is not supported for SGLang inference engines.")
 
-    async def resume_generation(self) -> None:
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        del policy_version
         raise NotImplementedError("Resuming generation is not supported for SGLang inference engines.")
 
 

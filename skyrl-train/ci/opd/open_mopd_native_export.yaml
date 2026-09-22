@@ -1,6 +1,6 @@
 # Policy geometry and model class for converting the native Open-MOPD FSDP2
 # checkpoints. Training itself uses skyrl-train/ci/opd/open_mopd_native_full.py.
-entrypoint: standard
+entrypoint: sync
 
 trainer:
   strategy: fsdp2
