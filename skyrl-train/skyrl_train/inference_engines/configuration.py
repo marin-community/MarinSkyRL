@@ -8,8 +8,6 @@ from typing import Any
 from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizerBase
 
-from marinskyrl.runtime_options import NodeLocalPlacement
-
 
 @dataclass(frozen=True)
 class InferenceEngineRoleConfig:
@@ -63,9 +61,6 @@ def inference_engine_kwargs_from_config(
         "max_logprobs": role.max_logprobs,
         "mp_backend": cfg.generator.get("inference_engine_mp_backend", False),
         "placement_group_timeout_seconds": int(cfg.trainer.distributed.placement_group_timeout_seconds),
-        "node_local_placement": NodeLocalPlacement(
-            cfg.generator.get("inference_engine_node_local", NodeLocalPlacement.AUTO)
-        ),
     }
     if (rope_scaling := cfg.generator.get("rope_scaling", None)) is not None:
         kwargs["rope_scaling"] = OmegaConf.to_container(rope_scaling, resolve=True)

@@ -206,6 +206,7 @@ class SkyRLLaunchRequest:
     validation_data: tuple[DataSource, ...]
     topology: SkyRLTopology
     output: SkyRLOutputPaths
+    export_hf: bool
     seed: int
     overrides: tuple[str, ...]
 
@@ -275,6 +276,7 @@ def job_spec(value: dict[str, Any]) -> SkyRLJobSpec:
                 role_plan=_role_plan(request["topology"]["role_plan"]),
             ),
             output=SkyRLOutputPaths(**request["output"]),
+            export_hf=request["export_hf"],
             seed=int(request["seed"]),
             overrides=tuple(request.get("overrides", ())),
         ),
@@ -371,8 +373,8 @@ def _legacy_role_plan(value: dict[str, Any]) -> SkyRLRolePlan:
             replicas=rollout_replicas,
             tensor_parallel_size=int(value["inference_engine_tensor_parallel_size"]),
             pipeline_parallel_size=1,
-            data_parallel_size=1,
-            expert_parallel_size=1,
+            data_parallel_size=int(value.get("inference_engine_data_parallel_size", 1)),
+            expert_parallel_size=int(value.get("inference_engine_expert_parallel_size", 1)),
         ),
     )
     bundles = (

@@ -3,6 +3,7 @@ cloud/iris/__init__.py
 cloud/iris/artifacts.py
 cloud/iris/extract_tasks_from_parquet.py
 cloud/iris/hf_datasets.py
+cloud/iris/hf_model_cache.py
 cloud/iris/ingress_utils.py
 cloud/iris/literal_proxy_utils.py
 cloud/iris/model_paths.py

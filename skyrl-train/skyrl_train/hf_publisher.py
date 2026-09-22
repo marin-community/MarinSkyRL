@@ -2,27 +2,13 @@
 
 from __future__ import annotations
 
-import contextlib
 from dataclasses import dataclass
 
-import huggingface_hub.constants
 from huggingface_hub import HfApi
 
-from skyrl_train.env_vars import HF_HUB_OFFLINE_ENV, EnvVarScope, temporarily_unset_managed_environment
+from marinskyrl.hf_model import hugging_face_hub_online
 from skyrl_train.hf_export_schema import DEFAULT_HF_HUB_REVISION, DEFAULT_HF_UPLOAD_MODE, HFUploadMode
 from skyrl_train.io import io
-
-
-@contextlib.contextmanager
-def hf_hub_online():
-    """Temporarily allow an explicit Hub publication from an offline training environment."""
-    previous_constant = huggingface_hub.constants.HF_HUB_OFFLINE
-    with temporarily_unset_managed_environment(HF_HUB_OFFLINE_ENV, EnvVarScope.DRIVER):
-        huggingface_hub.constants.HF_HUB_OFFLINE = False
-        try:
-            yield
-        finally:
-            huggingface_hub.constants.HF_HUB_OFFLINE = previous_constant
 
 
 @dataclass(frozen=True)
@@ -39,7 +25,7 @@ class HuggingFacePublisher:
         if not io.exists(export_path):
             raise FileNotFoundError(f"HF export not found: {export_path}")
         api = self.api or HfApi()
-        with hf_hub_online():
+        with hugging_face_hub_online():
             api.create_repo(repo_id=self.repo_id, repo_type="model", private=self.private, exist_ok=True)
             with io.local_read_dir(export_path) as local_dir:
                 api.upload_folder(

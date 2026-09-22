@@ -34,10 +34,15 @@ from cloud.iris.protocol import (  # noqa: E402
     SkyRLRolePlan,
     SkyRLTopology,
 )
+from marinskyrl.speculative_decoding import SpeculatorModelConfig  # noqa: E402
 from marinskyrl.task_sources import DirectoryDataSource  # noqa: E402
 from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
 from cloud.iris.runtime_environment import RuntimeProfile, task_setup_script  # noqa: E402
-from cloud.iris.task_runtime import materialize_data_sources, materialize_model_export  # noqa: E402
+from cloud.iris.task_runtime import (  # noqa: E402
+    materialize_data_sources,
+    materialize_model_export,
+    stage_draft_model,
+)
 from iris.client.client import JobFailedError  # noqa: E402
 from iris.client.workload_codec import job_status_from_proto  # noqa: E402
 from iris.cluster.types import JobName  # noqa: E402
@@ -257,6 +262,7 @@ def _spec(tmp_path: Path) -> SkyRLJobSpec:
                 resolved_config_uri=(output / "resolved-skyrl.json").as_uri(),
                 terminal_manifest_uri=(output / "terminal.json").as_uri(),
             ),
+            export_hf=True,
             seed=7,
             overrides=("++trainer.max_steps=8",),
         ),
@@ -345,6 +351,30 @@ def test_execute_job_exports_terminal_checkpoint_before_committing_model(tmp_pat
     assert response.state == AttemptState.SUCCEEDED
     assert response.model is not None
     assert response.model.policy_export_uri.endswith("/global_step_8/policy")
+
+
+def test_execute_job_commits_run_without_checkpoint_or_model_export(tmp_path: Path) -> None:
+    envelope = _spec(tmp_path)
+    envelope = replace(envelope, request=replace(envelope.request, export_hf=False))
+    resolved = Path(envelope.request.output.resolved_config_uri.removeprefix("file://"))
+    resolved.parent.mkdir(parents=True)
+    resolved.write_text('{"entrypoint":"skyrl_train.entrypoints.main_base","hydra_args":[]}')
+
+    @dataclass(frozen=True)
+    class RunOnlyBackend(FakeLaunchBackend):
+        def export_terminal_policy(self, _spec: SkyRLJobSpec, _config_path: str) -> None:
+            raise AssertionError("run-only jobs cannot export a terminal policy")
+
+    backend = RunOnlyBackend(IrisLaunchOutcome(job_id="01KTEST", job_state="succeeded", exit_code=0))
+
+    response = execute_job(envelope, backend=backend)
+
+    assert response.state == AttemptState.SUCCEEDED
+    assert response.model is None
+    assert not Path(envelope.request.output.checkpoint_root.removeprefix("file://")).exists()
+    assert not Path(envelope.request.output.export_root.removeprefix("file://")).exists()
+    terminal = json.loads(Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://")).read_text())
+    assert terminal["response"] == asdict(response)
 
 
 def test_execute_job_detaches_without_validating_terminal_artifacts(tmp_path: Path) -> None:
@@ -520,6 +550,22 @@ def test_materialize_model_export_replaces_a_stale_destination(tmp_path: Path) -
 
     assert not (destination / "stale.bin").exists()
     assert (destination / "model.safetensors").read_bytes() == b"new weights"
+
+
+def test_stage_draft_model_copies_artifact_uri_without_tokenizer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("{}")
+    (source / "model.safetensors").write_bytes(b"weights")
+    monkeypatch.setattr("marinskyrl.speculative_decoding._DRAFT_MODEL_ROOT", str(tmp_path / "drafts"))
+    model = SpeculatorModelConfig(source_uri=source.as_uri(), source_identity="draft@abc123")
+
+    stage_draft_model(model, cache_ttl_days=None, cache_source_prefix="")
+
+    destination = Path(model.node_local_path())
+    assert (destination / "model.safetensors").read_bytes() == b"weights"
 
 
 def test_materialize_data_sources_caches_one_exact_file(tmp_path: Path) -> None:

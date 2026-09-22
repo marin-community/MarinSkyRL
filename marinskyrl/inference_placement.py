@@ -1,99 +1,13 @@
-"""Node-local placement of vLLM inference replicas.
+"""Where each vLLM inference worker runs, as the worker itself reports it.
 
-A replica is one vLLM data-parallel group. It is node-local when the data-parallel
-ranks of each pipeline stage share a node. This module decides when to use that
-placement and checks the workers Ray started. It imports nothing from the trainer,
-because config validation imports it before any model module.
+A TP=1 engine with DP>1 is one replica in its own placement group. Each worker reports its
+host, GPU UUID and ranks, and the engine factory checks the reports against the bundles Ray
+allocated. This module imports nothing from the trainer, because config validation imports
+it before any model module.
 """
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
-
-from marinskyrl.runtime_options import NodeLocalPlacement
-
-
-def node_local_blocker(
-    *,
-    mode: NodeLocalPlacement,
-    backend: str,
-    async_engine: bool,
-    colocated: bool,
-    remote: bool,
-    mp_executor: bool,
-    tensor_parallel_size: int,
-    pipeline_parallel_size: int,
-    data_parallel_size: int,
-    expert_parallel_size: int,
-    num_inference_engines: int,
-    node_gpu_capacities: Sequence[int] | None = None,
-) -> str | None:
-    """Return why an engine is not placed node-locally, or None if it is.
-
-    ``node_gpu_capacities`` is the GPU count of each live GPU node. Config validation does not
-    know the cluster and passes None; the engine factory passes it.
-    """
-    if mode is NodeLocalPlacement.OFF:
-        return "generator.inference_engine_node_local is off"
-    if backend != "vllm" or not async_engine or colocated or remote:
-        return "it needs local, non-colocated async vLLM engines"
-    if mp_executor:
-        return "the mp executor places its own workers"
-    if tensor_parallel_size != 1:
-        return "it needs TP=1"
-    if data_parallel_size < 2:
-        return "a DP=1 engine has no replica to pack"
-    if expert_parallel_size != data_parallel_size:
-        return "it needs EP equal to DP"
-    if node_gpu_capacities is None:
-        return None
-    node_size = max(node_gpu_capacities, default=0)
-    if data_parallel_size > node_size:
-        return f"a replica stage needs {data_parallel_size} GPUs but the largest node has {node_size}"
-    stages = num_inference_engines * pipeline_parallel_size
-    if sum(capacity // data_parallel_size for capacity in node_gpu_capacities) < stages:
-        return f"the cluster's nodes cannot hold {stages} replica stages of {data_parallel_size} GPUs"
-    engine_gpus = data_parallel_size * pipeline_parallel_size
-    if mode is NodeLocalPlacement.AUTO and len(node_gpu_capacities) > 1 and engine_gpus % node_size:
-        # Groups that each fill part of a node can scatter, leaving the policy group no whole
-        # nodes (see use_per_engine_strict_pack_pg).
-        return (
-            f"an engine's {engine_gpus} GPUs are not a whole number of {node_size}-GPU nodes, so a group of "
-            "its own could leave nodes partly used; generator.inference_engine_node_local=require packs it anyway"
-        )
-    return None
-
-
-def validate_node_local_config(config: Mapping[str, Any]) -> None:
-    """Reject an unknown mode, and ``require`` for an engine that can never be node-local."""
-    generator = config["generator"]
-    mode = NodeLocalPlacement(generator.get("inference_engine_node_local", NodeLocalPlacement.AUTO))
-    if mode is not NodeLocalPlacement.REQUIRE:
-        return
-    blocker = node_local_blocker(**node_local_engine_shape(config, mode))
-    if blocker is not None:
-        raise ValueError(f"generator.inference_engine_node_local=require cannot be honoured: {blocker}")
-
-
-def node_local_engine_shape(config: Mapping[str, Any], mode: NodeLocalPlacement) -> dict[str, Any]:
-    """The ``node_local_blocker`` arguments taken from a training config."""
-    generator = config["generator"]
-    tp_pp_size = (
-        generator["inference_engine_tensor_parallel_size"] * generator["inference_engine_pipeline_parallel_size"]
-    )
-    return dict(
-        mode=mode,
-        backend=generator["backend"],
-        async_engine=generator["async_engine"],
-        colocated=config["trainer"]["placement"]["colocate_all"],
-        remote=not generator["run_engines_locally"],
-        mp_executor=bool(generator.get("inference_engine_mp_backend", False)) and tp_pp_size > 1,
-        tensor_parallel_size=generator["inference_engine_tensor_parallel_size"],
-        pipeline_parallel_size=generator["inference_engine_pipeline_parallel_size"],
-        data_parallel_size=generator["inference_engine_data_parallel_size"],
-        expert_parallel_size=generator["inference_engine_expert_parallel_size"],
-        num_inference_engines=generator["num_inference_engines"],
-    )
 
 
 @dataclass(frozen=True)
