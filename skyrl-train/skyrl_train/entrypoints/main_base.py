@@ -142,13 +142,21 @@ def create_ray_wrapped_inference_engines_from_config(
         **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
         "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
     }
+    data_parallel_size = cfg.generator.inference_engine_data_parallel_size
     policy_source_uri = cfg.trainer.policy.model.get("source_uri")
     rollout_model_path = runai_model_uri(policy_source_uri) if policy_source_uri else cfg.trainer.policy.model.path
     if policy_source_uri is not None:
         engine_init_kwargs["load_format"] = "runai_streamer"
         engine_init_kwargs[MODEL_METADATA_PATH_KEY] = cfg.trainer.policy.model.path
+        if data_parallel_size > 1:
+            loader_config = dict(engine_init_kwargs.get("model_loader_extra_config", {}))
+            loader_config.setdefault("distributed", True)
+            engine_init_kwargs["model_loader_extra_config"] = loader_config
     if speculative_decoding is not None:
-        engine_init_kwargs["speculative_config"] = speculative_decoding.vllm_speculative_config()
+        speculative_config = speculative_decoding.vllm_speculative_config()
+        if data_parallel_size > 1 and "draft_load_config" in speculative_config:
+            speculative_config["draft_load_config"]["model_loader_extra_config"] = {"distributed": True}
+        engine_init_kwargs["speculative_config"] = speculative_config
         if speculative_decoding.training is not None:
             # ``async_engine`` selects SkyRL's actor/API wrapper. vLLM separately
             # enables its asynchronous scheduler by default, but online EAGLE
@@ -168,7 +176,7 @@ def create_ray_wrapped_inference_engines_from_config(
         num_inference_engines=cfg.generator.num_inference_engines,
         tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
         pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
-        data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
+        data_parallel_size=data_parallel_size,
         expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
         # vLLM Decode Context Parallel (DCP). Default 1 (disabled) -> forwarded as the
         # signature default and (per ray_wrapped_inference_engine) NOT passed to the vLLM
