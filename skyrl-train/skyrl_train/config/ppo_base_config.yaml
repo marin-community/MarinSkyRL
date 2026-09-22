@@ -355,6 +355,9 @@ trainer:
   # for the export's gathered expert tensors and for a colocated reference model.
   offload_optimizer_during_rollouts: false
   eval_batch_size: 1024
+  # Deterministically sample this many validation prompts. Null evaluates the
+  # complete validation dataset.
+  eval_num_prompts: null
   eval_before_train: true
   eval_interval: 5
   preflight_gate:
