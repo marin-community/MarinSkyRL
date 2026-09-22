@@ -1,6 +1,9 @@
 from pathlib import Path
 from types import SimpleNamespace
+import contextlib
 import json
+
+from omegaconf import OmegaConf
 
 from cloud.iris import hf_datasets, rl_data
 from cloud.iris.training_driver import LocalRLConfig, LocalRLRunner
@@ -101,7 +104,7 @@ def test_revision_resolution_uses_the_requested_revision(monkeypatch):
     assert calls == [("fixture-org/fixture-trove", "rev-1")]
 
 
-def test_runner_resolves_and_records_training_and_validation_selectors(monkeypatch, tmp_path, parse_hydra_overrides):
+def test_runner_resolves_and_records_training_and_validation_selectors(monkeypatch, tmp_path):
     resolved = {
         "fixture-org/fixture-trove::train": rl_data.ResolvedRLData(
             paths=("/tasks/train",),
@@ -118,24 +121,35 @@ def test_runner_resolves_and_records_training_and_validation_selectors(monkeypat
         return resolved[values[0]]
 
     monkeypatch.setattr("cloud.iris.training_driver.resolve_rl_train_data_with_sources", resolve)
+    launch_config = OmegaConf.create(
+        {
+            "run": {"mode": "train"},
+            "inputs": {"data_kind": "parquet"},
+            "skyrl": {
+                "data": {"train_data": [], "val_data": [], "terminal_bench_data": []},
+                "terminal_bench_config": {"agent_api_base": None, "literal_log_path": None},
+            },
+        }
+    )
     runner = LocalRLRunner(
         LocalRLConfig(
-            rl_config_path=str(Path(__file__).parents[1] / "configs" / "delphi_math_rl.yaml"),
             job_name="job",
             model_path="org/model",
             train_data=["fixture-org/fixture-trove::train"],
             val_data=["fixture-org/fixture-trove::validation"],
             experiments_dir=str(tmp_path / "experiments"),
             resolved_config_uri=(tmp_path / "resolved.json").as_uri(),
-            dry_run=True,
+            launch_config=launch_config,
         )
     )
+    monkeypatch.setattr(runner, "_setup_environment", lambda _args: None)
+    monkeypatch.setattr(runner, "_ingress_context", contextlib.nullcontext)
+    monkeypatch.setattr(runner, "_run_skyrl", lambda _config: 0)
 
     assert runner.run() == 0
 
     recorded = json.loads((tmp_path / "resolved.json").read_text())
     assert recorded["train_data_sources"] == ["fixture-org/fixture-trove@immutable-sha::train"]
     assert recorded["val_data_sources"] == ["fixture-org/fixture-trove@immutable-sha::validation"]
-    hydra = parse_hydra_overrides(recorded["hydra_args"])
-    assert hydra["data.train_data"] == ["/tasks/train"]
-    assert hydra["data.val_data"] == ["/tasks/validation"]
+    assert recorded["config"]["skyrl"]["data"]["train_data"] == ["/tasks/train"]
+    assert recorded["config"]["skyrl"]["data"]["val_data"] == ["/tasks/validation"]

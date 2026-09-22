@@ -27,17 +27,20 @@ training run's Hub destination, the export-only job publishes the completed arti
 """
 
 import argparse
+import hashlib
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from cloud.iris.model_paths import model_source_cli_args
-from cloud.iris.rl_config_translation import format_hydra_arg
+from cloud.iris.launch_config import load_launch_config
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT
+from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, policy_export_path
 from marinskyrl.resource_locator import ModelLocatorError
+from omegaconf import DictConfig, OmegaConf
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_EXPORT_TIMEOUT,
     DEFAULT_HF_HUB_REVISION,
@@ -86,6 +89,7 @@ class ExportJobSpec:
     disk: str | None = None
     storage_user: str | None = None
     allocation_gpus_per_node: int | None = None
+    launch_config_path: str | None = None
 
     @property
     def allocated_gpus_per_node(self) -> int:
@@ -97,69 +101,123 @@ class ExportJobSpec:
         return allocation
 
 
+def checkpoint_export_launch_config(
+    training_config: DictConfig,
+    request: HFExportRequest,
+    spec: ExportJobSpec,
+) -> DictConfig:
+    """Derive the config-only checkpoint-export document from a training launch."""
+    config = OmegaConf.create(OmegaConf.to_container(training_config, resolve=False))
+    OmegaConf.set_struct(config, False)
+
+    strategy = str(config.skyrl.trainer.strategy)
+    config.run.mode = "checkpoint_export"
+    config.run.export_hf = False
+    config.run.submission = "detach" if spec.no_wait else "wait"
+    config.run.attempt_id = f"{config.run.attempt_id}-export-{request.step}"
+    config.runtime.entrypoint = CHECKPOINT_EXPORT_ENTRYPOINT
+    config.runtime.profile = runtime_profile_for_strategy(strategy, mode=RuntimeMode.CHECKPOINT_EXPORT).value
+    config.iris.job_name = spec.job_name or f"{config.iris.job_name}-export-step-{request.step}"
+    config.iris.cluster = spec.cluster
+    if spec.cluster_config is not None:
+        config.iris.cluster_config = spec.cluster_config
+    config.iris.priority = spec.priority
+    config.iris.max_retries = 0
+    config.iris.timeout = spec.timeout
+    config.iris.target_cluster = spec.target_cluster
+    config.iris.parent_cluster_config = spec.parent_cluster_config
+    config.iris.allocation.num_nodes = request.num_nodes
+    config.iris.allocation.gpus_per_node = spec.allocated_gpus_per_node
+    config.iris.allocation.gpu_variant = spec.gpu_variant
+    if spec.cpu is not None:
+        config.iris.allocation.cpu = spec.cpu
+    if spec.memory is not None:
+        config.iris.allocation.memory = spec.memory
+    if spec.disk is not None:
+        config.iris.allocation.disk = spec.disk
+    config.artifacts.checkpoint_root = request.checkpoint_base_path
+    config.artifacts.export_root = request.export_path
+    export_attempt_root = f"{str(config.artifacts.attempts_root).rstrip('/')}/export-{request.step}"
+    config.artifacts.attempts_root = export_attempt_root
+    config.artifacts.resolved_config_uri = f"{export_attempt_root}/resolved.yaml"
+    config.artifacts.terminal_manifest_uri = f"{export_attempt_root}/terminal.json"
+
+    # Export is policy-only. Keep the role-plan inputs internally consistent so
+    # launch validation derives exactly the saved policy gang, without reserving
+    # rollout/reference/critic/teacher bundles that the export entrypoint never uses.
+    config.skyrl.trainer.placement.colocate_all = True
+    config.skyrl.trainer.placement.colocate_policy_ref = True
+    algorithm = config.skyrl.trainer.setdefault("algorithm", {})
+    algorithm["use_kl_loss"] = False
+    algorithm["use_kl_in_reward"] = False
+    critic = config.skyrl.trainer.setdefault("critic", {})
+    critic["model"] = critic.get("model", {})
+    critic["model"]["path"] = None
+    config.skyrl.pop("teachers", None)
+    config.skyrl.pop("teacher_routing", None)
+    if config.skyrl.generator.get("speculative_decoding") is not None:
+        config.skyrl.generator.speculative_decoding.training = None
+
+    config.skyrl.trainer.placement.policy_num_nodes = request.num_nodes
+    config.skyrl.trainer.placement.policy_num_gpus_per_node = request.gpus_per_node
+    tensor_parallel_size = int(config.skyrl.generator.get("inference_engine_tensor_parallel_size", 1))
+    pipeline_parallel_size = int(config.skyrl.generator.get("inference_engine_pipeline_parallel_size", 1))
+    data_parallel_size = int(config.skyrl.generator.get("inference_engine_data_parallel_size", 1))
+    engine_width = tensor_parallel_size * pipeline_parallel_size * data_parallel_size
+    total_policy_gpus = request.num_nodes * request.gpus_per_node
+    if total_policy_gpus % engine_width:
+        raise ValueError("checkpoint export policy geometry must divide rollout engine parallelism")
+    config.skyrl.generator.run_engines_locally = True
+    config.skyrl.generator.num_inference_engines = total_policy_gpus // engine_width
+    config.skyrl.trainer.policy.model.path = request.model_path
+    if request.model_source_uri is not None:
+        config.inputs.model.uri = request.model_source_uri
+        config.inputs.model.identity = request.model_source_identity
+        config.skyrl.trainer.policy.model.source_uri = request.model_source_uri
+    if request.model_source_identity is not None:
+        config.skyrl.trainer.policy.model.source_identity = request.model_source_identity
+    config.skyrl.checkpoint_export = {
+        "step": request.step,
+        "checkpoint_path": request.checkpoint_path,
+        "export_root": request.export_path,
+        "hf_hub_repo_id": request.hf_hub_repo_id,
+        "hf_hub_private": request.hf_hub_private,
+        "hf_hub_revision": request.hf_hub_revision,
+        "hf_upload_mode": request.hf_upload_mode.value,
+    }
+    return config
+
+
+def write_checkpoint_export_config(
+    training_config_path: str | Path,
+    request: HFExportRequest,
+    spec: ExportJobSpec,
+) -> Path:
+    """Write one temporary config-only export document for the Iris CLI boundary."""
+    source = Path(training_config_path)
+    training_config = load_launch_config(source)
+    config = checkpoint_export_launch_config(training_config, request, spec)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()[:16]
+    destination = Path(tempfile.gettempdir()) / "marinskyrl" / f"checkpoint-export-{request.step}-{digest}.yaml"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    OmegaConf.save(config, destination, resolve=True)
+    return destination
+
+
 def build_command(spec: ExportJobSpec) -> list[str]:
     """Return the Iris backend command that performs an export-only run."""
-    request = spec.request
-
-    overrides = [
-        format_hydra_arg("trainer.placement.policy_num_gpus_per_node", request.gpus_per_node),
-        format_hydra_arg("checkpoint_export.step", request.step, prefix="++"),
-        format_hydra_arg("checkpoint_export.checkpoint_path", request.checkpoint_path, prefix="++"),
-        format_hydra_arg("checkpoint_export.export_root", request.export_path, prefix="++"),
-        format_hydra_arg("checkpoint_export.hf_hub_repo_id", request.hf_hub_repo_id or "null", prefix="++"),
-        format_hydra_arg("checkpoint_export.hf_hub_private", request.hf_hub_private, prefix="++"),
-        format_hydra_arg("checkpoint_export.hf_hub_revision", request.hf_hub_revision, prefix="++"),
-        format_hydra_arg("checkpoint_export.hf_upload_mode", request.hf_upload_mode, prefix="++"),
-    ]
-
-    cmd = [
+    assert spec.allocated_gpus_per_node >= spec.request.gpus_per_node
+    if spec.launch_config_path is None:
+        raise ValueError("checkpoint export requires a generated launch config")
+    return [
         sys.executable,
         "-m",
-        "cloud.iris.iris_backend",
-        "--rl_config",
-        spec.rl_config,
-        "--model_path",
-        request.model_path,
-        "--num-nodes",
-        str(request.num_nodes),
-        "--gpus-per-node",
-        str(spec.allocated_gpus_per_node),
-        "--gpu-variant",
-        spec.gpu_variant,
-        "--cluster",
-        spec.cluster,
-        "--entrypoint",
-        CHECKPOINT_EXPORT_ENTRYPOINT,
-        "--priority",
-        spec.priority,
-        # An export job must not be retried into a second export.
-        "--max-retries",
-        "0",
-        "--timeout",
-        str(spec.timeout),
+        "cloud.iris.launch",
+        "iris",
+        "launch",
+        "--config",
+        spec.launch_config_path,
     ]
-    if spec.cluster_config:
-        cmd += ["--cluster-config", spec.cluster_config]
-    if spec.target_cluster:
-        cmd += ["--target-cluster", spec.target_cluster]
-    if spec.parent_cluster_config:
-        cmd += ["--parent-cluster-config", spec.parent_cluster_config]
-    if spec.cpu is not None:
-        cmd += ["--cpu", str(spec.cpu)]
-    if spec.memory:
-        cmd += ["--memory", spec.memory]
-    if spec.disk:
-        cmd += ["--disk", spec.disk]
-    if spec.storage_user:
-        cmd += ["--storage-user", spec.storage_user]
-    cmd.extend(model_source_cli_args(request.model_source_uri, request.model_source_identity))
-    if spec.no_wait:
-        cmd.append("--no-wait")
-    if spec.job_name:
-        cmd += ["--job-name", spec.job_name]
-    for override in overrides:
-        cmd += ["--skyrl_override", override]
-    return cmd
 
 
 def argument_parser() -> argparse.ArgumentParser:
@@ -238,7 +296,8 @@ def request_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> E
         parser.error(f"invalid HF export request: {error}")
     if request is None:
         parser.error(f"no hf_export_request.json found under {args.request}")
-    return operational_spec(args, request, no_wait=False)
+    spec = operational_spec(args, request, no_wait=False)
+    return replace(spec, launch_config_path=str(write_checkpoint_export_config(args.rl_config, request, spec)))
 
 
 def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_wait: bool) -> ExportJobSpec:
@@ -293,7 +352,8 @@ def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Ex
         )
     except ModelLocatorError as error:
         parser.error(str(error))
-    return operational_spec(args, request, no_wait=args.no_wait)
+    spec = operational_spec(args, request, no_wait=args.no_wait)
+    return replace(spec, launch_config_path=str(write_checkpoint_export_config(args.rl_config, request, spec)))
 
 
 def _run_export(spec: ExportJobSpec, command: list[str]) -> None:

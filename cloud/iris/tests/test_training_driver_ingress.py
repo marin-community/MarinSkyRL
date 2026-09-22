@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from omegaconf import OmegaConf
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
@@ -58,7 +59,6 @@ def _patch_ingress(monkeypatch) -> None:
 
 def _runner() -> LocalRLRunner:
     cfg = LocalRLConfig(
-        rl_config_path="x.yaml",
         job_name="test-job",
         model_path="Qwen/Qwen3-8B",
         ingress_mode="controller",
@@ -102,7 +102,6 @@ def test_direct_ingress_still_publishes_agent_dummy_key(monkeypatch):
     needed here since the direct path calls no ingress helpers."""
     monkeypatch.delenv(ingress_utils.AGENT_DUMMY_KEY_VAR, raising=False)
     cfg = LocalRLConfig(
-        rl_config_path="x.yaml",
         job_name="test-job",
         model_path="Qwen/Qwen3-8B",
         ingress_mode="direct",
@@ -116,7 +115,6 @@ def test_direct_ingress_never_clobbers_a_real_openai_api_key(monkeypatch):
     """The dummy-key injection only setdefaults OPENAI_API_KEY (real host key preserved)."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-real-host-key")
     cfg = LocalRLConfig(
-        rl_config_path="x.yaml",
         job_name="test-job",
         model_path="Qwen/Qwen3-8B",
         ingress_mode="direct",
@@ -127,13 +125,18 @@ def test_direct_ingress_never_clobbers_a_real_openai_api_key(monkeypatch):
 
 
 def test_checkpoint_export_entrypoint_bypasses_rollout_environment(monkeypatch):
-    config_path = _REPO_ROOT / "cloud" / "iris" / "configs" / "delphi_math_rl.yaml"
+    launch_config = OmegaConf.create(
+        {
+            "run": {"mode": "checkpoint_export"},
+            "runtime": {"entrypoint": "skyrl_train.entrypoints.checkpoint_export"},
+            "skyrl": {"trainer": {"policy": {"model": {"path": "/tmp/policy"}}}},
+        }
+    )
     cfg = LocalRLConfig(
-        rl_config_path=str(config_path),
         job_name="checkpoint-export",
         model_path="Qwen/Qwen3-8B",
-        entrypoint="skyrl_train.entrypoints.checkpoint_export",
         gpus=4,
+        launch_config=launch_config,
     )
     runner = LocalRLRunner(cfg)
     invocation = {}
@@ -145,16 +148,10 @@ def test_checkpoint_export_entrypoint_bypasses_rollout_environment(monkeypatch):
     )
     monkeypatch.setattr(
         runner,
-        "_run_skyrl",
-        lambda entrypoint, hydra_args: invocation.update(entrypoint=entrypoint, hydra_args=hydra_args) or 0,
+        "_write_resolved_config",
+        lambda config: invocation.update(written=config),
     )
+    monkeypatch.setattr(runner, "_run_skyrl", lambda config: invocation.update(run=config) or 0)
 
     assert runner.run() == 0
-    assert invocation["entrypoint"] == "skyrl_train.entrypoints.checkpoint_export"
-    assert invocation["hydra_args"]
-    assert "trainer.placement.policy_num_gpus_per_node=4" in invocation["hydra_args"]
-    assert not any(
-        argument.startswith(("data.", "generator.", "environment.")) for argument in invocation["hydra_args"]
-    )
-    assert not any("trainer.ckpt_path=" in argument for argument in invocation["hydra_args"])
-    assert not any("trainer.export_path=" in argument for argument in invocation["hydra_args"])
+    assert invocation == {"written": launch_config, "run": launch_config}

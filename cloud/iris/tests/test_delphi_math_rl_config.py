@@ -21,7 +21,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from cloud.iris.rl_config_translation import (  # noqa: E402
-    build_skyrl_hydra_args,
+    compose_skyrl_config,
     parse_rl_config,
     validate_tp_divides_heads,
 )
@@ -52,34 +52,28 @@ def test_delphi_config_parses_to_main_base_non_agentic():
     assert parsed.raw["model_num_attention_heads"] == 42
 
 
-def test_delphi_config_flattens_environment_and_caps_into_hydra_args():
+def test_delphi_config_composes_environment_and_caps_into_hydra_config():
     parsed = parse_rl_config(_CONFIG)
     exp_args = {"job_name": "delphi-math-rl-test", "experiments_dir": "/tmp/exp", "num_nodes": 4}
-    args = build_skyrl_hydra_args(parsed, exp_args, _HPCStub())
-
-    # environment.env_class must be flattened (regression guard: the flatten loop
-    # historically covered only trainer/generator/data).
-    assert "environment.env_class=aime" in args
-    # engine_init_kwargs is an "optional" (++) section, so the key carries a ++ prefix.
-    assert any(a.endswith("generator.engine_init_kwargs.max_model_len=4096") for a in args)
-    assert "trainer.algorithm.advantage_estimator=grpo" in args
-    # Launcher-only keys must NOT leak into Hydra.
-    assert not any("data.kind" in a for a in args)
-    assert not any("policy_chat_template" in a for a in args)
-    assert not any("model_num_attention_heads" in a for a in args)
+    cfg = compose_skyrl_config(parsed, exp_args, _HPCStub()).config
+    assert cfg.environment.env_class == "aime"
+    assert cfg.generator.engine_init_kwargs.max_model_len == 4096
+    assert cfg.trainer.algorithm.advantage_estimator == "grpo"
+    assert "kind" not in cfg.data
+    assert "policy_chat_template" not in cfg
+    assert "model_num_attention_heads" not in cfg
 
 
 def test_iris_derives_durable_training_trajectory_path():
     parsed = parse_rl_config(_CONFIG)
-    args = build_skyrl_hydra_args(
+    cfg = compose_skyrl_config(
         parsed,
         {"job_name": "retained-run", "experiments_dir": "s3://bucket/iris/", "num_nodes": 4},
         _HPCStub(),
-    )
-
+    ).config
     assert (
-        "generator.trajectory_retention.output_path='s3://bucket/iris/retained-run/trace_jobs/training_trajectories'"
-        in args
+        cfg.generator.trajectory_retention.output_path
+        == "s3://bucket/iris/retained-run/trace_jobs/training_trajectories"
     )
 
 
@@ -93,17 +87,16 @@ def test_model_source_locator_reaches_trainer_config():
         "num_nodes": 4,
     }
 
-    args = build_skyrl_hydra_args(parsed, exp_args, _HPCStub())
-
-    assert "trainer.policy.model.source_uri='s3://models/policy'" in args
-    assert "trainer.policy.model.source_identity='policy@abc123'" in args
+    cfg = compose_skyrl_config(parsed, exp_args, _HPCStub()).config
+    assert cfg.trainer.policy.model.source_uri == "s3://models/policy"
+    assert cfg.trainer.policy.model.source_identity == "policy@abc123"
 
 
 def test_policy_revision_override_reaches_trainer_config():
     parsed = parse_rl_config(_CONFIG)
     revision = "68c46c4b3498877f3ef123c856ecfde50c39f404"
 
-    args = build_skyrl_hydra_args(
+    cfg = compose_skyrl_config(
         parsed,
         {
             "job_name": "revision-pinned-run",
@@ -112,9 +105,8 @@ def test_policy_revision_override_reaches_trainer_config():
             "num_nodes": 4,
         },
         _HPCStub(),
-    )
-
-    assert f"trainer.policy.model.revision={revision}" in args
+    ).config
+    assert cfg.trainer.policy.model.revision == revision
 
 
 def test_partial_model_source_is_rejected_during_config_translation():
@@ -127,7 +119,7 @@ def test_partial_model_source_is_rejected_during_config_translation():
     }
 
     with pytest.raises(ValueError, match="must be provided together"):
-        build_skyrl_hydra_args(parsed, exp_args, _HPCStub())
+        compose_skyrl_config(parsed, exp_args, _HPCStub())
 
 
 def test_tp_guard_rejects_tp8_on_42_heads():

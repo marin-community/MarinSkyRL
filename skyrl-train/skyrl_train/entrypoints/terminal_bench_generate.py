@@ -49,8 +49,7 @@ def skyrl_entrypoint(cfg: DictConfig):
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
+def run(cfg: DictConfig) -> None:
     run_ray_driver(
         cfg,
         skyrl_entrypoint,
@@ -58,6 +57,11 @@ def main(cfg: DictConfig) -> None:
         operation=EntrypointOperation.GENERATE,
         failure_message="Generation failed",
     )
+
+
+@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
+def main(cfg: DictConfig) -> None:
+    run(cfg)
 
 
 if __name__ == "__main__":

@@ -144,7 +144,7 @@ telemetry = [
 ]
 
 [project.scripts]
-marinskyrl = "cloud.iris.job:main"
+marinskyrl = "cloud.iris.launch:main"
 
 [dependency-groups]
 analysis = [

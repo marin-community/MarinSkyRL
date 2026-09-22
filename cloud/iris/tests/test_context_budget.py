@@ -16,12 +16,10 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from cloud.iris.rl_config_translation import (  # noqa: E402
-    apply_context_budget_overrides,
-    build_skyrl_hydra_args,
+    compose_skyrl_config,
     parse_rl_config,
     write_resolved_context_budget,
 )
-from cloud.iris.training_driver import LocalRLConfig, LocalRLRunner  # noqa: E402
 
 
 @dataclass
@@ -178,19 +176,19 @@ def test_snowball_ultra_phase_two_resumes_training_with_fresh_data(
 
 def test_context_budget_derives_all_hydra_length_arguments():
     parsed = parse_rl_config(str(_REPO_ROOT / "cloud/iris/configs/tasktrove_dq_sweep_30b.yaml"))
-    args = build_skyrl_hydra_args(parsed, {"job_name": "context-test", "num_nodes": 4}, _HPCStub())
+    cfg = compose_skyrl_config(parsed, {"job_name": "context-test", "num_nodes": 4}, _HPCStub()).config
 
-    assert "trainer.max_prompt_length=114688" in args
-    assert "generator.max_input_length=114688" in args
-    assert "generator.max_turns=90" in args
-    assert "generator.sampling_params.max_generate_length=16384" in args
-    assert any(arg.endswith("generator.engine_init_kwargs.max_model_len=131072") for arg in args)
-    assert "++terminal_bench_config.model_info.max_input_tokens=114688" in args
-    assert "++terminal_bench_config.model_info.max_output_tokens=16384" in args
-    assert "++terminal_bench_config.harbor.max_turns=90" in args
-    assert "++terminal_bench_config.harbor.llm_call_kwargs.max_tokens=16384" in args
-    assert "generator.trajectory_reward_shaping.overlong.l_max=65536" in args
-    assert "generator.trajectory_reward_shaping.overlong.l_cache=16384" in args
+    assert cfg.trainer.max_prompt_length == 114688
+    assert cfg.generator.max_input_length == 114688
+    assert cfg.generator.max_turns == 90
+    assert cfg.generator.sampling_params.max_generate_length == 16384
+    assert cfg.generator.engine_init_kwargs.max_model_len == 131072
+    assert cfg.terminal_bench_config.model_info.max_input_tokens == 114688
+    assert cfg.terminal_bench_config.model_info.max_output_tokens == 16384
+    assert cfg.terminal_bench_config.harbor.max_turns == 90
+    assert cfg.terminal_bench_config.harbor.llm_call_kwargs.max_tokens == 16384
+    assert cfg.generator.trajectory_reward_shaping.overlong.l_max == 65536
+    assert cfg.generator.trajectory_reward_shaping.overlong.l_cache == 16384
 
 
 @pytest.mark.parametrize(
@@ -324,31 +322,6 @@ def test_context_budget_rejects_impossible_and_legacy_config_fields(tmp_path):
         parse_rl_config(str(legacy))
 
 
-def test_context_budget_override_rederives_lengths_and_rejects_low_level_fields():
-    parsed = parse_rl_config(str(_REPO_ROOT / "cloud/iris/configs/tasktrove_dq_sweep_30b.yaml"))
-    overridden, passthrough = apply_context_budget_overrides(
-        parsed,
-        ["context_budget.max_new_tokens_per_turn=2048", "trainer.logger=console"],
-    )
-
-    assert overridden.context_budget.max_input_tokens == 129024
-    assert overridden.generator["sampling_params"]["max_generate_length"] == 2048
-    assert overridden.terminal_bench["model_info"]["max_output_tokens"] == 2048
-    assert passthrough == ["trainer.logger=console"]
-
-    overlong_override, _ = apply_context_budget_overrides(
-        parsed,
-        ["context_budget.generated_budget_fraction=0.375", "context_budget.overlong_cache_fraction=0.25"],
-    )
-    assert overlong_override.generator["trajectory_reward_shaping"]["overlong"] == {
-        "l_max": 49152,
-        "l_cache": 12288,
-    }
-
-    with pytest.raises(ValueError, match="derived from context_budget"):
-        apply_context_budget_overrides(parsed, ["generator.engine_init_kwargs.max_model_len=65536"])
-
-
 def test_resolved_context_budget_artifact_is_reproducible(tmp_path):
     parsed = parse_rl_config(str(_REPO_ROOT / "cloud/iris/configs/tasktrove_dq_sweep_30b.yaml"))
     artifact = write_resolved_context_budget(
@@ -379,25 +352,6 @@ def test_resolved_context_budget_artifact_is_reproducible(tmp_path):
     assert remote_artifact == "memory://context-budget/resolved-context-budget.json"
     with fsspec.open(remote_artifact) as artifact_file:
         assert json.load(artifact_file)["context_budget"]["request_window_tokens"] == 131072
-
-
-def test_context_budget_artifact_decodes_quoted_lifecycle_trace_path(tmp_path):
-    parsed = parse_rl_config(str(_REPO_ROOT / "cloud/iris/configs/delphi_math_rl.yaml"))
-    runner = LocalRLRunner(
-        LocalRLConfig(
-            rl_config_path=str(parsed.config_path),
-            job_name="quoted-storage",
-            model_path="Qwen/Qwen3-0.6B",
-            experiments_dir=str(tmp_path),
-        )
-    )
-
-    destination = runner._context_budget_artifact_destination(
-        parsed,
-        ["++terminal_bench_config.trials_dir='s3://example/tmp/ttl=14d/run/trace_jobs'"],
-    )
-
-    assert destination == "s3://example/tmp/ttl=14d/run/trace_jobs/resolved-context-budget.json"
 
 
 def test_opencode_limit_context_mirrors_harbor_formula():
