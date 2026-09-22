@@ -134,8 +134,13 @@ from cloud.iris.rl_config_translation import (
 from marinskyrl.distillation import LocalInferenceTeacherSpec, compile_distillation_plan
 from cloud.iris.secrets_env import default_secrets_env, load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
-from cloud.iris.protocol import LaunchMode, ModelRoleKind, SkyRLJobSpec
-from cloud.iris.request_builder import derive_num_nodes, derive_role_plan, role_plan_is_configured
+from cloud.iris.protocol import ALL_ROLES_COLOCATION_GROUP, LaunchMode, ModelRoleKind, SkyRLJobSpec
+from cloud.iris.request_builder import (
+    apply_hydra_value_overrides,
+    derive_num_nodes,
+    derive_role_plan,
+    role_plan_is_configured,
+)
 from marinskyrl.task_sources import DataSource, DirectoryDataSource, TaskTroveParquetSource
 from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
@@ -307,7 +312,7 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
     # These flags change runtime behavior as well as physical placement. Recover colocate_all from the policy claim
     # rather than RolePlan.colocate_all: a remote rollout has no Iris bundle but must not silently make a sync config
     # async. Leave colocate_policy_ref untouched when no reference is active because it has no physical consequence.
-    configured_colocate_all = policy_claim.colocation_group == "all"
+    configured_colocate_all = policy_claim.colocation_group == ALL_ROLES_COLOCATION_GROUP
     role_overrides = [
         f"++trainer.placement.colocate_all={str(configured_colocate_all).lower()}",
         f"++trainer.placement.policy_num_nodes={policy_claim.num_nodes}",
@@ -916,7 +921,7 @@ def _purge_stale_daytona_snapshots(api_key: str) -> None:
 
 
 def _validate_rl_config_topology(args: argparse.Namespace) -> None:
-    """Reject a gang too small for the effective SkyRL role plan."""
+    """Validate the requested gang against the effective SkyRL role plan."""
     try:
         with open(args.rl_config) as f:
             config = yaml.safe_load(f) or {}
@@ -927,9 +932,10 @@ def _validate_rl_config_topology(args: argparse.Namespace) -> None:
     # User overrides are applied after the YAML by Hydra and may activate a reference/critic, resize rollout engines,
     # or change colocation. Validate the same effective values that the in-cluster trainer will receive.
     overrides = tuple(args.skyrl_override or ())
-    if not role_plan_is_configured(config, overrides):
+    effective_config = apply_hydra_value_overrides(config, overrides)
+    if not role_plan_is_configured(effective_config):
         return
-    plan = derive_role_plan(config, overrides=overrides)
+    plan = derive_role_plan(effective_config)
     checkpoint_export = _is_checkpoint_export(args)
     policy_claim = plan.claim(ModelRoleKind.POLICY)
     expected_nodes = policy_claim.num_nodes if checkpoint_export else derive_num_nodes(plan)

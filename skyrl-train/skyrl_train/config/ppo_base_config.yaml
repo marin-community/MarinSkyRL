@@ -388,8 +388,8 @@ generator:
   # TOPOLOGY-SENSITIVE: switching between local and remote engines adds or removes the local rollout resource pool.
   # Wrappers must update endpoint configuration and the compiled physical plan at the same time.
   run_engines_locally: true
-  # TOPOLOGY-SENSITIVE: this is logically a replica count, but the current disaggregated launcher also treats it as
-  # the rollout node count. Wrappers must not assume that changing replicas leaves the requested gang unchanged.
+  # TOPOLOGY-SENSITIVE: this is a replica count; local disaggregated launchers compile replica geometry into a packed
+  # whole-node rollout pool. Wrappers must not assume that changing replicas leaves the requested gang unchanged.
   num_inference_engines: 1
   backend: "vllm"
   vllm_attention_backend: null

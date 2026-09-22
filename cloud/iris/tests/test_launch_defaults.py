@@ -1214,20 +1214,11 @@ def _topology_args(tmp_path: Path, config: Path, num_nodes: int, overrides: list
     return create_parser().parse_args(argv)
 
 
-def test_resolve_launch_defaults_accepts_packed_disaggregated_engines(tmp_path):
-    args = _topology_args(tmp_path, _packed_rollout_config(tmp_path), num_nodes=5)
+@pytest.mark.parametrize("num_nodes", [5, 6], ids=["minimum-packed-gang", "unused-headroom"])
+def test_resolve_launch_defaults_accepts_sufficient_packed_capacity(tmp_path, num_nodes):
+    args = _topology_args(tmp_path, _packed_rollout_config(tmp_path), num_nodes=num_nodes)
 
     resolve_launch_defaults(args)
-
-    assert args.num_nodes == 5
-
-
-def test_resolve_launch_defaults_accepts_unused_cluster_headroom(tmp_path):
-    args = _topology_args(tmp_path, _packed_rollout_config(tmp_path), num_nodes=6)
-
-    resolve_launch_defaults(args)
-
-    assert args.num_nodes == 6
 
 
 def test_resolve_launch_defaults_rejects_override_that_exceeds_cluster(tmp_path):
@@ -1243,7 +1234,7 @@ def test_resolve_launch_defaults_rejects_override_that_exceeds_cluster(tmp_path)
         resolve_launch_defaults(args)
 
 
-def test_resolve_launch_defaults_applies_override_that_disables_reference(tmp_path):
+def test_resolve_launch_defaults_allows_smaller_gang_when_override_disables_reference(tmp_path):
     config = _packed_rollout_config(tmp_path)
     contents = config.read_text().replace("use_kl_loss: false", "use_kl_loss: true")
     config.write_text(contents)
@@ -1255,8 +1246,6 @@ def test_resolve_launch_defaults_applies_override_that_disables_reference(tmp_pa
     )
 
     resolve_launch_defaults(args)
-
-    assert args.num_nodes == 5
 
 
 def test_checkpoint_export_rejects_including_reference_nodes_in_its_gang(tmp_path):

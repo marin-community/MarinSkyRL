@@ -16,6 +16,7 @@ import yaml
 from hydra.core.override_parser.overrides_parser import OverridesParser
 
 from cloud.iris.protocol import (
+    ALL_ROLES_COLOCATION_GROUP,
     IrisLaunchOptions,
     ModelLocator,
     ModelRoleClaim,
@@ -84,7 +85,7 @@ def _optional_at(config: dict[str, Any], path: str, default: Any = None) -> Any:
     return node
 
 
-def _config_with_overrides(config: dict[str, Any], overrides: tuple[str, ...] | list[str]) -> dict[str, Any]:
+def apply_hydra_value_overrides(config: dict[str, Any], overrides: tuple[str, ...] | list[str]) -> dict[str, Any]:
     """Apply value overrides before compiling roles, matching Hydra's last-value-wins behavior."""
     effective = deepcopy(config)
     for override in OverridesParser.create().parse_overrides(list(overrides)):
@@ -106,10 +107,9 @@ def _config_with_overrides(config: dict[str, Any], overrides: tuple[str, ...] | 
     return effective
 
 
-def role_plan_is_configured(config: dict[str, Any], overrides: tuple[str, ...] | list[str] = ()) -> bool:
+def role_plan_is_configured(config: dict[str, Any]) -> bool:
     """Whether a direct-launch config carries the complete typed-plan inputs."""
-    effective = _config_with_overrides(config, overrides)
-    return all(_optional_at(effective, path) is not None for path in (*_ROLE_PLAN_PATHS, *_ROLE_ACTIVATION_PATHS))
+    return all(_optional_at(config, path) is not None for path in (*_ROLE_PLAN_PATHS, *_ROLE_ACTIVATION_PATHS))
 
 
 def _role_plan_values(config: dict[str, Any]) -> dict[str, Any]:
@@ -135,7 +135,7 @@ def _core_model_claims(config: dict[str, Any], values: dict[str, Any]) -> list[M
     ref_num_nodes = int(placement.get("ref_num_nodes") or values["policy_num_nodes"])
     ref_num_gpus_per_node = int(placement.get("ref_num_gpus_per_node") or values["policy_num_gpus_per_node"])
 
-    shared_group = "all"
+    shared_group = ALL_ROLES_COLOCATION_GROUP
     policy_group = shared_group if values["colocate_all"] else ModelRoleKind.POLICY.value
     claims = [
         ModelRoleClaim(
@@ -195,14 +195,17 @@ def _core_model_claims(config: dict[str, Any], values: dict[str, Any]) -> list[M
     return claims
 
 
-def _minimum_disaggregated_rollout_nodes(values: dict[str, Any]) -> int:
+def _minimum_disaggregated_rollout_nodes(
+    *,
+    replicas: int,
+    tensor_parallel_size: int,
+    pipeline_parallel_size: int,
+    data_parallel_size: int,
+    gpus_per_node: int,
+    multiprocessing_backend: bool,
+) -> int:
     """Return the smallest whole-node pool that SkyRL's current Ray placement can realize."""
-    replicas = values["num_inference_engines"]
-    tensor_pipeline_size = (
-        values["inference_engine_tensor_parallel_size"] * values["inference_engine_pipeline_parallel_size"]
-    )
-    data_parallel_size = values["inference_engine_data_parallel_size"]
-    gpus_per_node = values["policy_num_gpus_per_node"]
+    tensor_pipeline_size = tensor_parallel_size * pipeline_parallel_size
     per_engine_gpus = tensor_pipeline_size * data_parallel_size
 
     if tensor_pipeline_size > gpus_per_node:
@@ -211,12 +214,12 @@ def _minimum_disaggregated_rollout_nodes(values: dict[str, Any]) -> int:
         )
     # Mirror the runtime's placement atoms, including otherwise wasted GPUs when an atom does not divide a node.
     # The ray/uni path STRICT_PACKs each multi-GPU engine; the mp path packs node-atomic TP*PP actors per DP rank.
-    if not values["inference_engine_mp_backend"] and per_engine_gpus > gpus_per_node:
+    if not multiprocessing_backend and per_engine_gpus > gpus_per_node:
         raise ValueError(
             f"each ray-backed rollout engine requires {per_engine_gpus} GPUs in one {gpus_per_node}-GPU node; "
             "reduce TP*PP*DP or use generator.inference_engine_mp_backend=true"
         )
-    if values["inference_engine_mp_backend"]:
+    if multiprocessing_backend:
         placement_atom_gpus = tensor_pipeline_size
         placement_atoms = replicas * data_parallel_size
     elif per_engine_gpus > 1:
@@ -237,7 +240,14 @@ def _rollout_claim(config: dict[str, Any], values: dict[str, Any]) -> ModelRoleC
     rollout_nodes = (
         values["policy_num_nodes"]
         if rollout_is_local and values["colocate_all"]
-        else _minimum_disaggregated_rollout_nodes(values)
+        else _minimum_disaggregated_rollout_nodes(
+            replicas=values["num_inference_engines"],
+            tensor_parallel_size=values["inference_engine_tensor_parallel_size"],
+            pipeline_parallel_size=values["inference_engine_pipeline_parallel_size"],
+            data_parallel_size=values["inference_engine_data_parallel_size"],
+            gpus_per_node=values["policy_num_gpus_per_node"],
+            multiprocessing_backend=values["inference_engine_mp_backend"],
+        )
         if rollout_is_local
         else 0
     )
@@ -246,7 +256,7 @@ def _rollout_claim(config: dict[str, Any], values: dict[str, Any]) -> ModelRoleC
         kind=ModelRoleKind.ROLLOUT,
         execution=RoleExecution.LOCAL if rollout_is_local else RoleExecution.REMOTE,
         backend=rollout_backend,
-        colocation_group=("all" if values["colocate_all"] else ModelRoleKind.ROLLOUT.value)
+        colocation_group=(ALL_ROLES_COLOCATION_GROUP if values["colocate_all"] else ModelRoleKind.ROLLOUT.value)
         if rollout_is_local
         else None,
         num_nodes=rollout_nodes,
@@ -276,7 +286,7 @@ def _rollout_claim(config: dict[str, Any], values: dict[str, Any]) -> ModelRoleC
     return claim
 
 
-def derive_role_plan(config: dict[str, Any], *, overrides: tuple[str, ...] | list[str] = ()) -> SkyRLRolePlan:
+def derive_role_plan(config: dict[str, Any]) -> SkyRLRolePlan:
     """Derive every role-plan field from the RL config.
 
     Required geometry raises before submission, while omitted reference dimensions
@@ -285,14 +295,11 @@ def derive_role_plan(config: dict[str, Any], *, overrides: tuple[str, ...] | lis
     remote roles receive no Iris bundle, and each local colocation group becomes one
     physical whole-node footprint.
     """
-    # Hydra applies wrapper-supplied overrides after the YAML. Compile the physical plan from that same effective
-    # configuration so changing a role activator or geometry flag cannot bypass launch-time capacity validation.
-    effective_config = _config_with_overrides(config, overrides)
-    values = _role_plan_values(effective_config)
-    claims = _core_model_claims(effective_config, values)
-    claims.append(_rollout_claim(effective_config, values))
-    claims.extend(_teacher_claims(effective_config))
-    claims.extend(_draft_trainer_claims(effective_config, values))
+    values = _role_plan_values(config)
+    claims = _core_model_claims(config, values)
+    claims.append(_rollout_claim(config, values))
+    claims.extend(_teacher_claims(config))
+    claims.extend(_draft_trainer_claims(config, values))
     bundles = _physical_bundles(tuple(claims))
     return SkyRLRolePlan(
         claims=tuple(claims),
@@ -489,7 +496,9 @@ def build_job_spec(
     config_yaml = Path(config_path).read_text()
     config: dict[str, Any] = yaml.safe_load(config_yaml)
     effective_overrides = tuple(overrides or ())
-    effective_config = _config_with_overrides(config, effective_overrides)
+    # Hydra applies wrapper-supplied overrides after the YAML. Compile topology and runtime dependencies from the
+    # same effective config so a role activator or strategy override cannot bypass launch-time validation.
+    effective_config = apply_hydra_value_overrides(config, effective_overrides)
     plan = derive_role_plan(effective_config)
     num_nodes = derive_num_nodes(plan)
     policy_claim = plan.claim(ModelRoleKind.POLICY)

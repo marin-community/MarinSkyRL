@@ -225,82 +225,45 @@ class TestRolePlanAccounting:
         plan = derive_role_plan(_make_config(colocate_all=True, policy_num_nodes=4, num_inference_engines=8, tp=4))
         assert derive_num_nodes(plan) == 4
 
-    def test_disaggregated_packs_engine_gpu_slices_into_nodes(self):
-        plan = derive_role_plan(_make_config(colocate_all=False, policy_num_nodes=2, num_inference_engines=4))
-        assert plan.claim("rollout").num_nodes == 2
-        assert derive_num_nodes(plan) == 4
+    @pytest.mark.parametrize(
+        ("config_overrides", "rollout_nodes", "total_nodes"),
+        [
+            ({"policy_num_nodes": 2, "num_inference_engines": 4}, 2, 4),
+            ({"policy_num_nodes": 2, "num_inference_engines": 6, "tp": 4, "use_reference": False}, 3, 5),
+            (
+                {
+                    "policy_num_nodes": 4,
+                    "num_inference_engines": 8,
+                    "tp": 1,
+                    "dp": 4,
+                    "ep": 4,
+                    "use_reference": False,
+                },
+                4,
+                8,
+            ),
+            ({"policy_num_nodes": 1, "num_inference_engines": 3, "tp": 2, "use_reference": False}, 1, 2),
+            ({"policy_num_nodes": 1, "num_inference_engines": 5, "tp": 3, "use_reference": False}, 3, 4),
+            (
+                {
+                    "policy_num_nodes": 1,
+                    "num_inference_engines": 2,
+                    "tp": 3,
+                    "dp": 3,
+                    "inference_engine_mp_backend": True,
+                    "use_reference": False,
+                },
+                3,
+                4,
+            ),
+        ],
+        ids=["tp4", "qwen-tp4", "snowball-dp4-ep4", "partial-node", "ray-remainder", "mp-remainder"],
+    )
+    def test_disaggregated_rollout_packing(self, config_overrides, rollout_nodes, total_nodes):
+        plan = derive_role_plan(_make_config(colocate_all=False, **config_overrides))
 
-    def test_qwen_tp4_engines_pack_two_per_eight_gpu_node_without_reference(self):
-        plan = derive_role_plan(
-            _make_config(
-                colocate_all=False,
-                policy_num_nodes=2,
-                num_inference_engines=6,
-                tp=4,
-                use_reference=False,
-            )
-        )
-
-        assert plan.claim("rollout").num_nodes == 3
-        assert derive_num_nodes(plan) == 5
-
-    def test_snowball_ep4_engines_pack_two_per_eight_gpu_node_without_reference(self):
-        plan = derive_role_plan(
-            _make_config(
-                colocate_all=False,
-                policy_num_nodes=4,
-                num_inference_engines=8,
-                tp=1,
-                dp=4,
-                ep=4,
-                use_reference=False,
-            )
-        )
-
-        assert plan.claim("rollout").num_nodes == 4
-        assert derive_num_nodes(plan) == 8
-
-    def test_disaggregated_rollout_uses_partial_final_node(self):
-        plan = derive_role_plan(
-            _make_config(
-                colocate_all=False,
-                policy_num_nodes=1,
-                num_inference_engines=3,
-                tp=2,
-                use_reference=False,
-            )
-        )
-
-        assert plan.claim("rollout").num_nodes == 1
-        assert derive_num_nodes(plan) == 2
-
-    def test_node_atomic_ray_engines_account_for_unusable_gpus(self):
-        plan = derive_role_plan(
-            _make_config(
-                colocate_all=False,
-                policy_num_nodes=1,
-                num_inference_engines=5,
-                tp=3,
-                use_reference=False,
-            )
-        )
-
-        assert plan.claim("rollout").num_nodes == 3
-
-    def test_node_atomic_mp_slices_account_for_unusable_gpus(self):
-        plan = derive_role_plan(
-            _make_config(
-                colocate_all=False,
-                policy_num_nodes=1,
-                num_inference_engines=2,
-                tp=3,
-                dp=3,
-                inference_engine_mp_backend=True,
-                use_reference=False,
-            )
-        )
-
-        assert plan.claim("rollout").num_nodes == 3
+        assert plan.claim("rollout").num_nodes == rollout_nodes
+        assert derive_num_nodes(plan) == total_nodes
 
     def test_ray_engine_rejects_per_engine_geometry_larger_than_one_node(self):
         with pytest.raises(ValueError, match="one 8-GPU node"):
