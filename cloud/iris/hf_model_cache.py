@@ -35,20 +35,14 @@ _CACHE_POLL_INTERVAL = 10.0
 _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth")
 
 
-def _s3_endpoint_environment() -> str:
-    """Classify the environment hint, never the storage client's actual endpoint."""
-    endpoint = os.environ.get("AWS_ENDPOINT_URL")
-    if "FSSPEC_S3" in os.environ:
-        try:
-            settings = json.loads(os.environ["FSSPEC_S3"])
-        except (TypeError, ValueError):
-            return "unknown"
-        if not isinstance(settings, dict):
-            return "unknown"
-        if settings.get("endpoint_url") not in (None, ""):
-            endpoint = settings["endpoint_url"]
-
-    if endpoint in (None, ""):
+def _s3_endpoint_environment(filesystem: AbstractFileSystem) -> str:
+    """Classify the configured endpoint hint without exposing its URL."""
+    endpoint = (
+        getattr(filesystem, "endpoint_url", None)
+        or (getattr(filesystem, "client_kwargs", None) or {}).get("endpoint_url")
+        or os.environ.get("AWS_ENDPOINT_URL")
+    )
+    if endpoint is None or endpoint == "":
         return "unset"
     if not isinstance(endpoint, str):
         return "unknown"
@@ -171,7 +165,7 @@ def ensure_hugging_face_model_cache(
             return cache_uri, manifest
         log(
             f"role=publisher hf_token_present={bool(os.environ.get('HF_TOKEN'))} "
-            f"s3_endpoint_env_class={_s3_endpoint_environment()}"
+            f"s3_endpoint_env_class={_s3_endpoint_environment(filesystem)}"
         )
         with lease_refresh(lock):
             if filesystem.exists(cache_path):
