@@ -87,10 +87,15 @@ Facts from `skyrl_train/fully_async_trainer.py`, `entrypoints/fully_async.py`, a
    objectives take `old_action_log_probs` (the learner's pre-update forward) as the behavior term, never the
    rollout engine's `rollout_logprobs` (`skyrl_train/distillation.py`, `sampled_reverse_kl_loss` and the student
    top-k surrogate). Independently, `validate_cfg` requires full-distribution sampling for `use_tis` and the recipe
-   samples with nucleus 0.99. So the clipped surrogate against the learner's own pre-update logprobs is the only
-   guard against stale rollouts, which is why the bound is one update, why the first asynchronous run must be
-   compared against a synchronized baseline at matched prompt count, and why raising the bound needs a separate
-   validation of the behavior denominator, per-turn policy-version provenance, and ratio tails, not a config change.
+   samples with nucleus 0.99. Two consequences. `max_staleness_steps=1` bounds policy age only; it corrects nothing. And the
+   clipping that exists is not a staleness guard: `student_topk_policy_surrogate_loss` dual-clips the ratio
+   `exp(action_log_probs - old_action_log_probs)` with `eps_clip_low` 0.2, `eps_clip_high` 0.28, and
+   `clip_ratio_c`, where both terms are learner forwards, so the ratio never involves the sampler and the drift
+   between a stale rollout and the learner is neither corrected nor clipped; `sampled_reverse_kl_loss` clips
+   nothing at all. The OPD off-policy bias therefore stays uncorrected under any staleness above zero. The first
+   asynchronous run must be compared against a synchronized baseline at matched prompt count, and raising the bound
+   needs a separate validation of the behavior denominator, per-turn policy-version provenance, and ratio tails,
+   not a config change.
 5. Trajectory runner. The existing `skyrl_train.entrypoints.fully_async` pairs the asynchronous trainer with the
    HTTP-backed SkyRL Gym runner. That runner's plain chat path re-tokenizes text and returns no logprobs and no
    student top-k candidates (`OpenAIHTTPModelClient.generate`, `token_provenance=RECONSTRUCTED`), and the entrypoint
