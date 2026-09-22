@@ -40,10 +40,11 @@ SCHEDULE_ROWS = 204_800
 SCHEDULE_STEPS = 200
 POLICY_GPUS = 4
 CHECKPOINT_INTERVAL = load_config(FIDELITY_CONFIG).training.save_every
-# Rollouts may come from a policy at most this many optimizer updates behind the learner. The
-# distillation objectives take the learner's pre-update logprobs as the behavior term and never
-# see the rollout engine's logprobs (reward_mode=replace also skips the TIS-capable policy loss),
-# so the clipped surrogate is the only guard against that staleness and the bound stays at one.
+# Rollouts may come from a policy at most this many optimizer updates behind the learner. This
+# bounds policy age only. The distillation objectives take the learner's pre-update logprobs as
+# the behavior term and never see the rollout engine's logprobs (reward_mode=replace also skips
+# the TIS-capable policy loss); the surrogate's dual clip acts on the learner-vs-learner ratio, so
+# drift between a stale rollout and the learner is neither corrected nor clipped.
 FULLY_ASYNC_MAX_STALENESS_STEPS = 1
 
 
