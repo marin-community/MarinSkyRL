@@ -8,12 +8,10 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 import logging
 import os
-from typing import Any, cast, Protocol, TypeVar, runtime_checkable
+from typing import Any, cast, Protocol, TYPE_CHECKING, TypeVar, runtime_checkable
 
-from fsspec.spec import AbstractFileSystem
-from rigging.filesystem.factory import filesystem as guarded_filesystem
-from rigging.filesystem.factory import url_to_fs as guarded_url_to_fs
-from rigging.filesystem.storage_path import StoragePath
+if TYPE_CHECKING:
+    from fsspec.spec import AbstractFileSystem
 
 
 T = TypeVar("T")
@@ -42,12 +40,16 @@ _HF_TRANSIENT_MESSAGE_FRAGMENTS = (
 
 def create_s3_filesystem(**storage_options: Any) -> AbstractFileSystem:
     """Create an S3 filesystem with Rigging's request bounds and retries."""
-    return guarded_filesystem("s3", **storage_options)
+    from rigging.filesystem.factory import filesystem
+
+    return filesystem("s3", **storage_options)
 
 
 def filesystem_and_path(uri: str) -> tuple[AbstractFileSystem, str]:
     """Resolve a URI through Rigging's guarded fsspec factory."""
-    return guarded_url_to_fs(uri)
+    from rigging.filesystem.factory import url_to_fs
+
+    return url_to_fs(uri)
 
 
 def is_transient_hugging_face_error(error: BaseException) -> bool:
@@ -354,6 +356,8 @@ def open_output_stream(
 
 def abort_multipart_uploads(path: str) -> int:
     """Abort incomplete uploads below a canonical S3 checkpoint prefix."""
+    from rigging.filesystem.storage_path import StoragePath
+
     checkpoint_path = StoragePath(path)
     if checkpoint_path.scheme != "s3" or str(checkpoint_path) != path or not checkpoint_path.key:
         raise ValueError(f"Expected a canonical S3 checkpoint path, got: {path}")
