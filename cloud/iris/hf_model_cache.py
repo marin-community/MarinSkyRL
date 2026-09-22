@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-import hashlib
 import json
 from pathlib import Path
 import posixpath
@@ -16,7 +15,7 @@ from huggingface_hub import HfApi, snapshot_download
 from rigging.filesystem.cluster_config import marin_temp_bucket
 from rigging.filesystem.distributed_lock import create_lock, lease_refresh
 
-from cloud.iris.artifacts import atomic_directory_update, fs_and_path, read_json, write_json
+from cloud.iris.artifacts import FileEntry, atomic_directory_update, file_inventory, fs_and_path, read_json, write_json
 from marinskyrl.hf_model import (
     hugging_face_hub_online,
     immutable_model_cache_key,
@@ -27,6 +26,7 @@ from marinskyrl.model_manifest import (
     ModelManifestFile,
     model_manifest,
     sha256_file,
+    sha256_stream,
     snapshot_model_manifest,
 )
 from marinskyrl.resource_locator import join_resource_path
@@ -43,53 +43,49 @@ def load_model_manifest(model_uri: str) -> ModelManifest:
     return ModelManifest.from_mapping(read_json(marker_uri), marker_uri)
 
 
-def _remote_manifest_entry(filesystem: AbstractFileSystem, root: str, path: str, size: int) -> ModelManifestFile:
-    digest = hashlib.sha256()
+def _remote_manifest_entry(filesystem: AbstractFileSystem, path: str, entry: FileEntry) -> ModelManifestFile:
     with filesystem.open(path, "rb") as source:
-        while chunk := source.read(8 * 1024 * 1024):
-            digest.update(chunk)
-    return ModelManifestFile(path=posixpath.relpath(path, root), size=size, sha256=digest.hexdigest())
+        digest = sha256_stream(source)
+    return ModelManifestFile(path=entry.path, size=entry.size, sha256=digest)
 
 
 def _snapshot_remote_model_manifest(model_uri: str) -> ModelManifest:
     filesystem, root = fs_and_path(model_uri)
-    marker_path = posixpath.join(root, MODEL_MANIFEST_FILENAME)
-    inventory = filesystem.find(root, detail=True)
-    files = tuple(
-        (path, int(info["size"])) for path, info in inventory.items() if info["type"] == "file" and path != marker_path
-    )
-    if not files:
+    inventory = file_inventory(filesystem, root)
+    if not inventory:
         raise ValueError(f"Model export contains no files: {model_uri}")
-    with ThreadPoolExecutor(max_workers=min(_MANIFEST_HASH_WORKERS, len(files))) as executor:
-        entries = tuple(executor.map(lambda item: _remote_manifest_entry(filesystem, root, *item), files))
+    with ThreadPoolExecutor(max_workers=min(_MANIFEST_HASH_WORKERS, len(inventory))) as executor:
+        futures = tuple(executor.submit(_remote_manifest_entry, filesystem, path, entry) for path, entry in inventory)
+        entries = tuple(future.result() for future in futures)
     return model_manifest(tuple(sorted(entries, key=lambda entry: entry.path)), model_id=None, revision=None)
+
+
+def _model_manifest_exists(model_uri: str) -> bool:
+    filesystem, marker_path = fs_and_path(join_resource_path(model_uri, MODEL_MANIFEST_FILENAME))
+    return filesystem.exists(marker_path)
 
 
 def ensure_model_manifest(model_uri: str) -> ModelManifest:
     """Read a model manifest, creating one for a legacy object-store export."""
-    try:
+    if _model_manifest_exists(model_uri):
         return load_model_manifest(model_uri)
-    except ValueError:
-        pass
 
     lock = create_lock(f"{model_uri}.manifest.lock")
     while not lock.try_acquire():
-        try:
+        if _model_manifest_exists(model_uri):
             return load_model_manifest(model_uri)
-        except ValueError:
-            time.sleep(_CACHE_POLL_INTERVAL)
+        time.sleep(_CACHE_POLL_INTERVAL)
 
     try:
-        try:
+        if _model_manifest_exists(model_uri):
             return load_model_manifest(model_uri)
-        except ValueError:
-            with lease_refresh(lock):
-                manifest = _snapshot_remote_model_manifest(model_uri)
-                write_json(
-                    join_resource_path(model_uri, MODEL_MANIFEST_FILENAME),
-                    manifest.model_dump(mode="json"),
-                )
-            return manifest
+        with lease_refresh(lock):
+            manifest = _snapshot_remote_model_manifest(model_uri)
+            write_json(
+                join_resource_path(model_uri, MODEL_MANIFEST_FILENAME),
+                manifest.model_dump(mode="json"),
+            )
+        return manifest
     finally:
         lock.release()
 

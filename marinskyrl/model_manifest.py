@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import struct
-from typing import Literal, Self
+from typing import BinaryIO, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
@@ -72,12 +72,16 @@ class ModelManifest(BaseModel):
         return self
 
 
-def sha256_file(path: Path) -> str:
+def sha256_stream(source: BinaryIO) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(8 * 1024 * 1024):
-            digest.update(chunk)
+    while chunk := source.read(8 * 1024 * 1024):
+        digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    with path.open("rb") as source:
+        return sha256_stream(source)
 
 
 def _manifest_identity(
