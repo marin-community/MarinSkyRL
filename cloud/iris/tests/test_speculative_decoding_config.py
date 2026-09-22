@@ -14,7 +14,7 @@ for source_root in (_REPO_ROOT, _REPO_ROOT / "skyrl-train"):
     if str(source_root) not in sys.path:
         sys.path.insert(0, str(source_root))
 
-from cloud.iris.rl_config_translation import build_skyrl_hydra_args, parse_rl_config  # noqa: E402
+from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_config  # noqa: E402
 from marinskyrl.speculative_decoding import (  # noqa: E402
     SpeculativeDecodingConfigError,
     parse_speculative_decoding_config,
@@ -67,9 +67,7 @@ def test_managed_speculator_reaches_hydra_with_immutable_source_unchanged(tmp_pa
     assert speculator["model"]["source_uri"] == "hf://laion/snowball-64k-eagle3-draft-r2egym"
     assert speculator["model"]["source_identity"] == _DRAFT_REVISION
 
-    hydra_args = build_skyrl_hydra_args(parsed, {"num_nodes": 2}, SimpleNamespace(gpus_per_node=8))
-    with initialize_config_dir(config_dir=config_dir, version_base=None):
-        cfg = compose(config_name="ppo_base_config", overrides=hydra_args)
+    cfg = compose_skyrl_config(parsed, {"num_nodes": 2}, SimpleNamespace(gpus_per_node=8)).config
 
     resolved = parse_speculative_decoding_config(
         OmegaConf.to_container(cfg.generator.speculative_decoding, resolve=True),

@@ -4,11 +4,10 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
-from hydra.core.override_parser.overrides_parser import OverridesParser
 from omegaconf import OmegaConf
 
 from cloud.iris import export_hf_checkpoint
-from cloud.iris.export_hf_checkpoint import ExportJobSpec, argument_parser, build_command, manual_spec, request_spec
+from cloud.iris.export_hf_checkpoint import ExportJobSpec, argument_parser, manual_spec, request_spec
 from skyrl_train.callbacks.base import TrainerControl, TrainerState
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler
 from skyrl_train.config.utils import get_default_config
@@ -17,7 +16,7 @@ from skyrl_train.hf_export import (
     read_hf_export_request,
     write_hf_export_request,
 )
-from skyrl_train.hf_export_schema import HFExportRequest, HFExportStatus, HFUploadMode
+from skyrl_train.hf_export_schema import HFExportRequest, HFExportStatus
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.trainer_utils import cleanup_old_checkpoints
 from skyrl_train.utils.utils import validate_hf_export_config
@@ -59,31 +58,6 @@ def _queue_export(tmp_path, **config_overrides):
     (checkpoint / "trainer_state.pt").write_bytes(b"complete")
     trainer.handle_hf_export()
     return checkpoint
-
-
-def _export_command(request):
-    return build_command(
-        ExportJobSpec(
-            request=request,
-            rl_config="config.yaml",
-            cluster="cw-rno2a",
-            priority="batch",
-            gpu_variant="H100",
-            job_name="export-step-10",
-            timeout=7200,
-            no_wait=False,
-        )
-    )
-
-
-def _command_options(command):
-    return {command[index]: command[index + 1] for index in range(len(command) - 1) if command[index].startswith("--")}
-
-
-def _hydra_overrides(command):
-    encoded = [value for index, value in enumerate(command) if index > 0 and command[index - 1] == "--skyrl_override"]
-    parsed = OverridesParser.create().parse_overrides(encoded)
-    return {override.key_or_group: override.value() for override in parsed}
 
 
 def test_normal_hf_save_records_rerunnable_request_without_live_export(tmp_path):
@@ -236,55 +210,6 @@ def test_default_hf_export_interval_tracks_checkpoint_override():
     validate_hf_export_config(cfg)
 
 
-def test_export_job_owns_timeout_and_waits_for_completion():
-    request = HFExportRequest(
-        step=10,
-        checkpoint_base_path="s3://bucket/run/checkpoints",
-        checkpoint_path="s3://bucket/run/checkpoints/global_step_10",
-        export_path="s3://bucket/run/exports",
-        model_path="org/model",
-        num_nodes=8,
-        gpus_per_node=8,
-        hf_hub_repo_id="org/exported-model",
-        hf_hub_private=True,
-        hf_hub_revision="main",
-        hf_upload_mode=HFUploadMode.LATEST,
-    )
-    command = _export_command(request)
-    options = _command_options(command)
-    overrides = _hydra_overrides(command)
-
-    assert options["--entrypoint"] == "skyrl_train.entrypoints.checkpoint_export"
-    assert overrides["checkpoint_export.step"] == 10
-    assert overrides["checkpoint_export.checkpoint_path"] == request.checkpoint_path
-    assert overrides["checkpoint_export.export_root"] == request.export_path
-    assert not any(key.startswith("trainer.callbacks") for key in overrides)
-    assert options["--timeout"] == "7200"
-    assert "--no-wait" not in command
-    assert overrides["checkpoint_export.hf_hub_repo_id"] == "org/exported-model"
-
-
-def test_export_job_materializes_request_model_source():
-    request = HFExportRequest(
-        step=10,
-        checkpoint_base_path="s3://bucket/run/checkpoints",
-        checkpoint_path="s3://bucket/run/checkpoints/global_step_10",
-        export_path="s3://bucket/run/exports",
-        model_path="/tmp/materialized-model",
-        model_source_uri="s3://models/policy",
-        model_source_identity="policy@abc123",
-        num_nodes=8,
-        gpus_per_node=8,
-    )
-
-    command = _export_command(request)
-    options = _command_options(command)
-
-    assert options["--model_path"] == "/tmp/materialized-model"
-    assert options["--model-source-uri"] == "s3://models/policy"
-    assert options["--model-source-identity"] == "policy@abc123"
-
-
 def test_request_rejects_operator_override_instead_of_ignoring_it(tmp_path):
     checkpoint = tmp_path / "checkpoints" / "global_step_10"
     checkpoint.mkdir(parents=True)
@@ -377,6 +302,11 @@ def test_export_request_records_lifecycle_result(tmp_path, monkeypatch, exit_cod
         export.mkdir(parents=True)
         (export / "model.safetensors").write_bytes(b"weights")
     monkeypatch.setattr(export_hf_checkpoint.subprocess, "call", lambda *args, **kwargs: exit_code)
+    monkeypatch.setattr(
+        export_hf_checkpoint,
+        "write_checkpoint_export_config",
+        lambda *_args: tmp_path / "checkpoint-export.yaml",
+    )
     monkeypatch.setattr(
         "sys.argv",
         [

@@ -14,7 +14,7 @@ from cloud.iris.terminal_policy import (
 from skyrl_train.hf_export_schema import HFExportRequest
 
 
-def test_export_command_encodes_lifecycle_storage_as_valid_hydra_values(parse_hydra_overrides) -> None:
+def test_export_command_uses_config_path_for_lifecycle_values() -> None:
     request = HFExportRequest(
         step=1,
         checkpoint_base_path="s3://example/tmp/ttl=14d/run/checkpoints",
@@ -38,21 +38,12 @@ def test_export_command_encodes_lifecycle_storage_as_valid_hydra_values(parse_hy
         memory="1600GB",
         disk="800GB",
         storage_user="alice",
+        launch_config_path="/tmp/checkpoint-export.yaml",
     )
 
     command = build_command(spec)
-    encoded = [command[index + 1] for index, value in enumerate(command) if value == "--skyrl_override"]
-    overrides = parse_hydra_overrides(encoded)
 
-    assert command[command.index("--cluster-config") + 1] == spec.cluster_config
-    assert command[command.index("--cpu") + 1] == str(spec.cpu)
-    assert command[command.index("--memory") + 1] == spec.memory
-    assert command[command.index("--disk") + 1] == spec.disk
-    assert command[command.index("--storage-user") + 1] == spec.storage_user
-    assert command[command.index("--gpu-variant") + 1] == spec.gpu_variant
-    assert "--target-cluster" not in command
-    assert overrides["checkpoint_export.checkpoint_path"] == request.checkpoint_path
-    assert overrides["checkpoint_export.export_root"] == request.export_path
+    assert command[-2:] == ["--config", "/tmp/checkpoint-export.yaml"]
 
 
 def test_export_command_preserves_federated_submission_configs() -> None:
@@ -77,13 +68,12 @@ def test_export_command_preserves_federated_submission_configs() -> None:
         cluster_config="/tmp/cw-rno2a.yaml",
         target_cluster="cw-rno2a",
         parent_cluster_config="/tmp/marin.yaml",
+        launch_config_path="/tmp/checkpoint-export.yaml",
     )
 
     command = build_command(spec)
 
-    assert command[command.index("--cluster-config") + 1] == spec.cluster_config
-    assert command[command.index("--target-cluster") + 1] == spec.target_cluster
-    assert command[command.index("--parent-cluster-config") + 1] == spec.parent_cluster_config
+    assert command[-2:] == ["--config", "/tmp/checkpoint-export.yaml"]
 
 
 def test_storage_user_is_derived_from_policy_paths() -> None:
@@ -125,7 +115,7 @@ def test_terminal_policy_export_preserves_gpu_variant(monkeypatch) -> None:
     assert command[command.index("--gpu-variant") + 1] == "GB200"
 
 
-def test_requested_four_rank_export_reserves_whole_eight_gpu_node(monkeypatch, parse_hydra_overrides) -> None:
+def test_requested_four_rank_export_reserves_whole_eight_gpu_node(monkeypatch) -> None:
     request = HFExportRequest(
         step=2,
         checkpoint_base_path="s3://bucket/marin/users/alice/run/checkpoints",
@@ -136,6 +126,11 @@ def test_requested_four_rank_export_reserves_whole_eight_gpu_node(monkeypatch, p
         gpus_per_node=4,
     )
     monkeypatch.setattr(export_hf_checkpoint, "_read_hf_export_request", lambda _path: request)
+    monkeypatch.setattr(
+        export_hf_checkpoint,
+        "write_checkpoint_export_config",
+        lambda _path, _request, _spec: "/tmp/checkpoint-export.yaml",
+    )
     parser = export_hf_checkpoint.argument_parser()
     args = parser.parse_args(
         [
@@ -152,11 +147,9 @@ def test_requested_four_rank_export_reserves_whole_eight_gpu_node(monkeypatch, p
 
     spec = export_hf_checkpoint.request_spec(args, parser)
     command = build_command(spec)
-    encoded = [command[index + 1] for index, value in enumerate(command) if value == "--skyrl_override"]
-    overrides = parse_hydra_overrides(encoded)
 
     assert spec.request.gpus_per_node == 4
-    assert command[command.index("--gpus-per-node") + 1] == "8"
-    assert overrides["trainer.placement.policy_num_gpus_per_node"] == 4
+    assert spec.allocated_gpus_per_node == 8
+    assert command[-2:] == ["--config", "/tmp/checkpoint-export.yaml"]
     with pytest.raises(ValueError, match="fewer GPUs than the saved policy geometry"):
         build_command(replace(spec, allocation_gpus_per_node=2))

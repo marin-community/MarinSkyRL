@@ -42,7 +42,10 @@ import tempfile
 import threading
 import time
 import uuid
-from typing import Protocol
+from typing import Any, Mapping, Protocol
+
+from omegaconf import DictConfig, OmegaConf
+
 from cloud.iris.artifacts import ArtifactSource, file_inventory, fs_and_path, materialize
 from cloud.iris.hf_model_cache import (
     download_hugging_face_snapshot,
@@ -71,13 +74,13 @@ from marinskyrl.process_diagnostics import (
 )
 from cloud.iris.paths import resolve_repo_path
 from cloud.iris.ray_storage import (
-    DEFAULT_RAY_SPILL_DIR,
     RaySpillBackend,
     RaySpillTarget,
     resolve_ray_spill_target,
     validate_ray_spill_dir,
 )
-from cloud.iris.rl_config_translation import format_hydra_arg
+from cloud.iris.launch_config import load_launch_config
+from cloud.iris.rl_config_translation import TaskLocalSkyRLValues, apply_task_local_values
 from cloud.iris.runtime_bundle import validate_bundled_runtime
 
 try:
@@ -263,15 +266,6 @@ def stage_model(model_path: str, revision: str | None = None) -> None:
     _log(f"model pre-staged to node-local HF cache: {local_dir}")
 
 
-def _set_command_option(argv: list[str], option: str, value: str) -> None:
-    """Set one single-value option in an argv assembled by the Iris launcher."""
-    if option in argv:
-        index = argv.index(option)
-        argv[index + 1] = value
-    else:
-        argv.extend((option, value))
-
-
 def _metadata_path(source_uri: str, identity: str) -> str:
     return os.path.join(
         tempfile.gettempdir(), "marinskyrl", "model_metadata", immutable_model_cache_key(source_uri, identity)
@@ -318,16 +312,6 @@ def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None
     return PreparedPolicyModel(source_uri, source_identity, local_path)
 
 
-def apply_policy_model_to_command(train_argv: list[str], model: PreparedPolicyModel) -> None:
-    """Point policy and rollout consumers at staged metadata plus remote weights."""
-    original_model_path = train_argv[train_argv.index("--model_path") + 1]
-    served_model_name = original_model_path.rstrip("/").rsplit("/", 1)[-1]
-    train_argv.extend(("--skyrl_override", f"++generator.engine_init_kwargs.served_model_name={served_model_name}"))
-    _set_command_option(train_argv, "--model_path", model.metadata_path)
-    _set_command_option(train_argv, "--model-source-uri", model.source_uri)
-    _set_command_option(train_argv, "--model-source-identity", model.source_identity)
-
-
 def prepare_draft_model(
     model: SpeculatorModelConfig,
     *,
@@ -363,22 +347,6 @@ def prepare_draft_model(
                 f"found {manifest.identity} at {source_uri}"
             )
     return SpeculatorModelConfig(source_uri=source_uri, source_identity=manifest.identity)
-
-
-def apply_draft_model_to_command(train_argv: list[str], model: SpeculatorModelConfig) -> None:
-    """Override the managed draft locator after a possible Hub-to-S3 mirror."""
-    train_argv.extend(
-        (
-            "--skyrl_override",
-            format_hydra_arg("generator.speculative_decoding.model.source_uri", model.source_uri, prefix="++"),
-            "--skyrl_override",
-            format_hydra_arg(
-                "generator.speculative_decoding.model.source_identity",
-                model.source_identity,
-                prefix="++",
-            ),
-        )
-    )
 
 
 def materialize_data_sources(data_sources_json: str) -> None:
@@ -1610,13 +1578,18 @@ class DriverStalled:
     silence: float
 
 
-def launch_training_driver(train_argv: list[str], env: dict[str, str]) -> subprocess.Popen:
+def training_driver_command(config_path: Path) -> list[str]:
+    """Return the config-only training-driver command."""
+    return [sys.executable, "-m", "cloud.iris.training_driver", "--config", str(config_path)]
+
+
+def launch_training_driver(config_path: Path, env: dict[str, str]) -> subprocess.Popen:
     """Start the driver from the immutable runtime checkout, not the bootstrap bundle."""
     runtime_checkout = env.get("SKYRL_HOME")
     if not runtime_checkout:
         raise RuntimeError("SKYRL_HOME must identify the immutable MarinSkyRL runtime checkout")
     return subprocess.Popen(
-        train_argv,
+        training_driver_command(config_path),
         env=env,
         cwd=runtime_checkout,
         start_new_session=True,
@@ -1689,7 +1662,7 @@ def _persist_failure_artifacts_bounded(action, timeout: float) -> None:
         _log(f"Failure artifact upload exceeded {timeout}s; continuing task teardown")
 
 
-def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifname: str | None = None) -> int:
+def run_head(args: argparse.Namespace, config_path: Path, derived_gloo_ifname: str | None = None) -> int:
     num_tasks = _num_tasks()
     gang_epoch = uuid.uuid4().hex
     head_ip = _own_ip()
@@ -1779,13 +1752,13 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         env["PYTHONUNBUFFERED"] = "1"
 
         _log("Launching MarinSkyRL training driver:")
-        _log("  " + " ".join(train_argv))
+        _log("  " + " ".join(training_driver_command(config_path)))
         sys.stdout.flush()
         sys.stderr.flush()
 
         # The SIGTERM/SIGINT handler is already installed at the top of run_head; assigning
         # `process` here arms its driver-teardown path (the closure reads this value).
-        process = launch_training_driver(train_argv, env)
+        process = launch_training_driver(config_path, env)
         driver_activity = DriverOutputActivity()
         output_thread = start_driver_output_tee(process, driver_activity)
         if args.driver_liveness_timeout > 0:
@@ -1920,199 +1893,149 @@ def run_worker(args: argparse.Namespace) -> int:
     return 128 + termination_signal
 
 
-def teacher_model_specs_from_json(value: str) -> tuple[TeacherModelSpec, ...]:
-    """Decode immutable local-teacher model identities from the launcher boundary."""
-    raw_models = json.loads(value)
-    if not isinstance(raw_models, list):
-        raise ValueError("--prestage-teacher-models-json must encode a list")
-    models = []
-    for raw_model in raw_models:
-        if not isinstance(raw_model, dict):
-            raise ValueError("each pre-staged teacher model must be a JSON object")
-        try:
-            models.append(TeacherModelSpec(**raw_model))
-        except TypeError as error:
-            raise ValueError("each pre-staged teacher model must contain only path and revision") from error
+def _container(value: Any) -> Any:
+    """Convert one OmegaConf value into ordinary Python data."""
+    return OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value
+
+
+def _json_list(value: Any) -> str:
+    values = _container(value)
+    if not isinstance(values, list):
+        raise ValueError("launch config data fields must be lists")
+    return json.dumps(values, sort_keys=True)
+
+
+def _local_teacher_models(skyrl: DictConfig) -> tuple[TeacherModelSpec, ...]:
+    raw_teachers = _container(skyrl.get("teachers", {}))
+    if not isinstance(raw_teachers, Mapping):
+        return ()
+    models: list[TeacherModelSpec] = []
+    for teacher in raw_teachers.values():
+        if not isinstance(teacher, Mapping):
+            continue
+        model = teacher.get("model")
+        if not isinstance(model, Mapping) or not model.get("path") or not model.get("revision"):
+            continue
+        models.append(TeacherModelSpec(path=str(model["path"]), revision=str(model["revision"])))
     return tuple(models)
 
 
-def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
-    parser = argparse.ArgumentParser(
-        description="Bootstrap one cross-node Ray cluster on an iris GPU slice and run "
-        "the MarinSkyRL training driver on rank 0. Everything after `--` is the "
-        "training command (e.g. `python -m skyrl_train.entrypoints.main_base <hydra args>`).",
+def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
+    """Project the typed launch document into the controller's private runtime state."""
+    model = config.inputs.model
+    skyrl = config.skyrl
+    checkpoint_export = config.run.mode == "checkpoint_export"
+    task_env = {str(key): str(value) for key, value in config.runtime.task_env.items()}
+    model_uri = str(model.uri)
+    model_identity = str(model.identity)
+    train_data = [] if checkpoint_export else _container(config.inputs.train_data)
+    validation_data = [] if checkpoint_export else _container(config.inputs.validation_data)
+    data_kind = str(config.inputs.data_kind)
+    data_sources = train_data + validation_data if data_kind == "tasks" else []
+    typed_sources = bool(data_sources) and all(
+        isinstance(value, Mapping) and {"uri", "identity", "local_path"}.issubset(value) for value in data_sources
     )
-    parser.add_argument(
-        "--ray-port",
-        type=int,
-        default=int(os.environ.get("OT_AGENT_IRIS_RAY_PORT", "6379")),
-        help="Port the Ray head binds (default 6379).",
+    generator = skyrl.get("generator", {})
+    speculative = generator.get("speculative_decoding", {}) if isinstance(generator, DictConfig) else {}
+    draft_mapping = speculative.get("model") if isinstance(speculative, DictConfig) and not checkpoint_export else None
+    draft_model = None
+    if draft_mapping:
+        draft_model = SpeculatorModelConfig.from_mapping(
+            _container(draft_mapping), context="generator.speculative_decoding.model"
+        )
+    offline = task_env.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes", "on"}
+    prestage_model = model_uri if not is_cloud_uri(model_uri) and (model.chat_template or offline) else ""
+    return argparse.Namespace(
+        ray_port=int(config.ray.port),
+        ray_spill_dir=validate_ray_spill_dir(str(config.ray.spill_dir)),
+        ray_spill_backend=RaySpillBackend(str(config.ray.spill_backend)),
+        rendezvous_dir=str(config.ray.rendezvous_dir),
+        ray_log_dir=str(config.ray.log_dir),
+        rendezvous_timeout=int(config.ray.rendezvous_timeout),
+        cluster_join_timeout=int(config.ray.cluster_join_timeout),
+        driver_liveness_timeout=int(config.ray.driver_liveness_timeout),
+        run_id=str(config.run.id),
+        task_env=task_env,
+        train_data="" if typed_sources else _json_list(train_data),
+        val_data="" if typed_sources else _json_list(validation_data),
+        terminal_bench_data=_json_list(skyrl.get("data", {}).get("terminal_bench_data", [])),
+        data_sources_json=_json_list(data_sources) if typed_sources else "",
+        prestage_model=prestage_model,
+        model_warm_source=task_env.get("OT_AGENT_MODEL_WARM_SOURCE", ""),
+        model_revision="",
+        prestage_teacher_models=() if checkpoint_export else _local_teacher_models(skyrl),
+        stream_model="",
+        model_cache_ttl_days=None,
+        model_cache_source_prefix=str(config.artifacts.checkpoint_root),
+        model_source_uri=model_uri if is_cloud_uri(model_uri) else "",
+        model_local_path=str(model.local_path),
+        model_source_identity=model_identity if is_cloud_uri(model_uri) else "",
+        policy_chat_template=str(model.chat_template or ""),
+        draft_model=draft_model,
+        draft_model_cache_ttl_days=None,
+        draft_model_cache_source_prefix=str(config.artifacts.checkpoint_root),
     )
-    parser.add_argument(
-        "--ray-spill-dir",
-        type=validate_ray_spill_dir,
-        default=DEFAULT_RAY_SPILL_DIR,
-        help=f"Node-local Ray object-spill directory for the local backend (default {DEFAULT_RAY_SPILL_DIR}).",
+
+
+def _final_config_path(config: DictConfig) -> Path:
+    def safe(value: str) -> str:
+        return "".join(character if character.isalnum() or character in "-_." else "_" for character in value)
+
+    return (
+        Path(tempfile.gettempdir())
+        / "marinskyrl"
+        / f"{safe(str(config.run.id))}-{safe(str(config.run.attempt_id))}.yaml"
     )
-    parser.add_argument(
-        "--ray-spill-backend",
-        type=RaySpillBackend,
-        choices=list(RaySpillBackend),
-        default=RaySpillBackend.LOCAL,
-        help="Ray object-spill backend (default local; r2 requires an s3:// rendezvous directory).",
+
+
+def _write_final_config(
+    config: DictConfig,
+    *,
+    policy_model: PreparedPolicyModel | None,
+    draft_model: SpeculatorModelConfig | None,
+) -> Path:
+    """Persist the post-staging root document consumed by the training subprocess."""
+    root = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
+    original_model_path = str(root.skyrl.get("trainer", {}).get("policy", {}).get("model", {}).get("path", ""))
+    if not original_model_path:
+        original_model_path = str(root.inputs.model.uri)
+    values = TaskLocalSkyRLValues(
+        train_data=(),
+        validation_data=(),
+        terminal_bench_data=(),
+        agent_api_base=None,
+        literal_log_path=None,
+        policy_model_path=policy_model.metadata_path if policy_model else None,
+        draft_model_uri=draft_model.source_uri if draft_model else None,
     )
-    parser.add_argument(
-        "--rendezvous-dir",
-        default=os.environ.get("OT_AGENT_IRIS_RENDEZVOUS_DIR"),
-        help="Shared object-store/dir for the head/worker rendezvous (gs://, s3://, "
-        "or a shared path). Defaults to $OT_AGENT_IRIS_RENDEZVOUS_DIR.",
-    )
-    parser.add_argument(
-        "--ray-log-dir",
-        default=os.environ.get("OT_AGENT_RAY_LOG_DIR"),
-        help="Durable object-store root for per-node Ray session logs. Defaults to $OT_AGENT_RAY_LOG_DIR.",
-    )
-    parser.add_argument(
-        "--rendezvous-timeout",
-        type=int,
-        default=DEFAULT_RENDEZVOUS_TIMEOUT,
-        help=f"Seconds workers poll for the head rendezvous (default {DEFAULT_RENDEZVOUS_TIMEOUT}).",
-    )
-    parser.add_argument(
-        "--cluster-join-timeout",
-        type=int,
-        default=DEFAULT_CLUSTER_JOIN_TIMEOUT,
-        help=f"Seconds to wait for all nodes to join the Ray cluster (default {DEFAULT_CLUSTER_JOIN_TIMEOUT}).",
-    )
-    parser.add_argument(
-        "--driver-liveness-timeout",
-        type=int,
-        default=DEFAULT_DRIVER_LIVENESS_TIMEOUT,
-        help="Maximum driver stdout/stderr silence before the controller records diagnostics, "
-        f"kills the driver, and exits nonzero (default {DEFAULT_DRIVER_LIVENESS_TIMEOUT}; zero disables).",
-    )
-    parser.add_argument(
-        "--train-data",
-        default=os.environ.get("OT_AGENT_IRIS_TRAIN_DATA", ""),
-        help="JSON list of train_data HF dataset(s) to stage (extract to the node-local "
-        "task dir) on EVERY node before Ray starts. Required for agentic terminal_bench "
-        "rollouts on a multi-node slice with no shared filesystem.",
-    )
-    parser.add_argument(
-        "--val-data",
-        default=os.environ.get("OT_AGENT_IRIS_VAL_DATA", ""),
-        help="JSON list of validation datasets to stage in node-local task storage on every node before Ray starts.",
-    )
-    parser.add_argument(
-        "--terminal-bench-data",
-        default="",
-        help="JSON list of mixed-run terminal task datasets to stage on every node.",
-    )
-    parser.add_argument(
-        "--data-sources-json",
-        default="",
-        help="Immutable object-store data locators to materialize before Ray starts.",
-    )
-    parser.add_argument(
-        "--run-id",
-        default=None,
-        help="Experiment identity telemetry rows join on. Defaults to the Iris job id.",
-    )
-    parser.add_argument(
-        "--prestage-model",
-        default=os.environ.get("OT_AGENT_IRIS_PRESTAGE_MODEL", ""),
-        help="HF repo ID of the policy model to pre-download into the node-local HF "
-        "cache on EVERY node before Ray starts. Object-store URIs are unsupported. "
-        "Set by the launcher when the config "
-        "runs HF_HUB_OFFLINE=1, so the FSDP ranks load from a warm node-local cache "
-        "instead of each racing HF Hub at init.",
-    )
-    parser.add_argument(
-        "--stream-model",
-        default="",
-        help="HF repo ID to mirror once and load directly from object storage; only metadata is staged locally.",
-    )
-    parser.add_argument(
-        "--model-revision",
-        default="",
-        help="Immutable Hugging Face revision used to pre-stage the policy model.",
-    )
-    parser.add_argument(
-        "--prestage-teacher-models-json",
-        dest="prestage_teacher_models",
-        type=teacher_model_specs_from_json,
-        default=(),
-        help="JSON list of local teacher model paths and immutable revisions to stage before Ray starts.",
-    )
-    parser.add_argument(
-        "--draft-model",
-        nargs=2,
-        default=None,
-        metavar=("SOURCE_URI", "SOURCE_IDENTITY"),
-        help="Immutable draft model to make available on every node before Ray starts.",
-    )
-    parser.add_argument(
-        "--draft-model-cache-ttl-days",
-        type=int,
-        default=None,
-        help="Lifecycle TTL for immutable Hugging Face draft-model mirrors.",
-    )
-    parser.add_argument(
-        "--draft-model-cache-source-prefix",
-        default="",
-        help="Output prefix used to select the draft-model cache's storage region.",
-    )
-    parser.add_argument(
-        "--model-cache-ttl-days",
-        type=int,
-        default=None,
-        help="Lifecycle TTL for an immutable Hugging Face policy-model mirror.",
-    )
-    parser.add_argument(
-        "--model-cache-source-prefix",
-        default="",
-        help="Output prefix used to select the policy-model mirror's storage region.",
-    )
-    parser.add_argument(
-        "--model-source-uri",
-        default="",
-        help="Versioned object-store HF export read directly by policy and rollout workers.",
-    )
-    parser.add_argument(
-        "--model-local-path",
-        default="",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--model-source-identity",
-        default="",
-        help="Immutable producer identity recorded beside the staged export.",
-    )
-    parser.add_argument(
-        "--policy-chat-template",
-        default=os.environ.get("OT_AGENT_IRIS_POLICY_CHAT_TEMPLATE", ""),
-        help="Repo-relative path to a chat-template jinja to FORCE onto the policy "
-        "tokenizer's cached tokenizer_config.json + chat_template.jinja on EVERY node "
-        "before Ray (delphi single-turn RLVR: the SFT repo ships no template). Requires "
-        "--prestage-model or --model-local-path. Empty disables the override.",
-    )
-    args, train_argv = parser.parse_known_args(argv)
-    if args.draft_model is not None:
-        source_uri, source_identity = args.draft_model
-        try:
-            args.draft_model = SpeculatorModelConfig.from_mapping(
-                {"source_uri": source_uri, "source_identity": source_identity},
-                context="--draft-model",
-            )
-        except ValueError as error:
-            parser.error(str(error))
-    # argparse leaves the `--` separator out of train_argv; strip a leading one
-    # if the shell passed it through.
-    if train_argv and train_argv[0] == "--":
-        train_argv = train_argv[1:]
-    if not train_argv:
-        parser.error("No training command given. Pass it after `--`.")
-    return args, train_argv
+    skyrl = apply_task_local_values(root.skyrl, values)
+    if policy_model is not None:
+        OmegaConf.update(skyrl, "trainer.policy.model.source_uri", policy_model.source_uri, force_add=True)
+        OmegaConf.update(skyrl, "trainer.policy.model.source_identity", policy_model.source_identity, force_add=True)
+        OmegaConf.update(
+            skyrl,
+            "generator.engine_init_kwargs.served_model_name",
+            original_model_path.rstrip("/").rsplit("/", 1)[-1],
+            force_add=True,
+        )
+    if draft_model is not None:
+        OmegaConf.update(
+            skyrl,
+            "generator.speculative_decoding.model.source_identity",
+            draft_model.source_identity,
+            force_add=True,
+        )
+    root.skyrl = skyrl
+    destination = _final_config_path(config)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    OmegaConf.save(root, destination, resolve=True)
+    return destination
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Bootstrap Ray and run one typed MarinSkyRL launch config.")
+    parser.add_argument("--config", required=True, type=Path)
+    return parser.parse_args(argv)
 
 
 def _print_env_snapshot() -> None:
@@ -2134,7 +2057,10 @@ def _print_env_snapshot() -> None:
 
 def main() -> None:
     validate_bundled_runtime()
-    args, train_argv = parse_args()
+    cli_args = parse_args()
+    launch_config = load_launch_config(cli_args.config)
+    args = _runtime_namespace(launch_config)
+    os.environ.update(args.task_env)
     _print_env_snapshot()
     # Pin virtual-hosted S3 addressing for the boto3 path (Ray object-spill IO workers)
     # BEFORE any `ray start`, on head + every worker — CoreWeave R2 rejects path-style.
@@ -2158,17 +2084,15 @@ def main() -> None:
     # Stage task datasets on THIS node before Ray bootstrap (head + every worker).
     # Without this, only rank-0 has the extracted tasks and the rollout workers die
     # with FileNotFoundError on task.toml. See stage_task_data docstring.
+    if args.data_sources_json:
+        materialize_data_sources(args.data_sources_json)
     if args.train_data:
         stage_task_data(args.train_data, role="training")
     if args.val_data:
         stage_task_data(args.val_data, role="validation")
     if args.terminal_bench_data:
         stage_task_data(args.terminal_bench_data, role="terminal-bench sidechannel")
-    if args.data_sources_json:
-        materialize_data_sources(args.data_sources_json)
     policy_model = prepare_policy_model(args)
-    if policy_model is not None:
-        apply_policy_model_to_command(train_argv, policy_model)
     policy_metadata_path = policy_model.metadata_path if policy_model is not None else None
     if args.prestage_model:
         stage_model(
@@ -2184,7 +2108,6 @@ def main() -> None:
             cache_ttl_days=args.draft_model_cache_ttl_days,
             cache_source_prefix=args.draft_model_cache_source_prefix,
         )
-        apply_draft_model_to_command(train_argv, draft_model)
     # Force the policy chat template onto staged metadata or a local model on every
     # node before Ray; the training driver's tokenizer may load anywhere.
     if args.policy_chat_template:
@@ -2192,7 +2115,8 @@ def main() -> None:
         apply_policy_chat_template(model_path, args.policy_chat_template)
     rank = _rank()
     if rank == 0:
-        exit_code = run_head(args, train_argv, derived_gloo_ifname)
+        final_config_path = _write_final_config(launch_config, policy_model=policy_model, draft_model=draft_model)
+        exit_code = run_head(args, final_config_path, derived_gloo_ifname)
     else:
         exit_code = run_worker(args)
     if exit_code != 0:
@@ -2201,3 +2125,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

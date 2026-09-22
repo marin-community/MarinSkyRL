@@ -763,9 +763,13 @@ def run_ray_driver(
     exit_without_ray_destructors()
 
 
+def run(cfg: DictConfig) -> None:
+    run_ray_driver(cfg, skyrl_entrypoint, TrajectoryRunnerMode.SKYRL_GYM)
+
+
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    run_ray_driver(cfg, skyrl_entrypoint, TrajectoryRunnerMode.SKYRL_GYM)
+    run(cfg)
 
 
 if __name__ == "__main__":
