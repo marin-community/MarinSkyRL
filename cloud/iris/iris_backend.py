@@ -42,7 +42,8 @@ from iris.resources.state import JobState
 from iris.rpc import job_pb2
 
 from cloud.iris.paths import PROJECT_ROOT
-from cloud.iris.launch_config import load_launch_config, validate_launch_config
+from cloud.iris.launch_config import SubmissionMode, load_launch_config, validate_launch_config
+from cloud.iris.export_hf_checkpoint import export_terminal_policy
 from cloud.iris.ingress_utils import (
     PARENT_CONTROLLER_CONFIG_ENV,
     PARENT_CONTROLLER_CONFIG_YAML_ENV,
@@ -54,10 +55,6 @@ from cloud.iris.ray_storage import (
     resolve_ray_spill_target,
 )
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR
-from cloud.iris.terminal_policy import (
-    TerminalPolicyExport,
-    submit_terminal_policy_export,
-)
 from marinskyrl.resource_locator import (
     is_cloud_uri,
     join_resource_path,
@@ -241,6 +238,7 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
     ray = raw["ray"]
     artifacts = raw["artifacts"]
     inputs = raw["inputs"]
+    ingress = raw["ingress"]
     skyrl = raw["skyrl"]
     model = inputs["model"]
     model_path = _model_path(model["uri"])
@@ -278,9 +276,11 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
         priority=iris["priority"],
         max_retries=int(iris["max_retries"]),
         timeout=int(iris["timeout"]),
-        no_wait=submission == "detach",
-        dry_run=submission == "prepare",
+        no_wait=submission == SubmissionMode.DETACH,
+        dry_run=submission == SubmissionMode.PREPARE,
         preemptible=None,
+        ingress_mode=ingress["mode"],
+        ingress_host=ingress["host"] or None,
         target_cluster=iris["target_cluster"],
         parent_cluster_config=iris["parent_cluster_config"],
         secrets_env=None,
@@ -308,14 +308,14 @@ class IrisBackend:
     def launch(self, config_path: Path) -> IrisLaunchOutcome:
         config = load_launch_config(config_path)
         args = _iris_submission_state(config_path, config)
-        if config.run.submission == "prepare":
+        if config.run.submission == SubmissionMode.PREPARE:
             raise ValueError("Prepare mode validates a launch without submitting it")
         with contextlib.redirect_stdout(sys.stderr):
             return launch(args, config.runtime.launcher_commit)
 
     def export_terminal_policy(self, config_path: Path) -> None:
         """Export the terminal checkpoint described by a completed training config."""
-        export_terminal_policy(_iris_submission_state(config_path, load_launch_config(config_path)))
+        export_terminal_policy(config_path)
 
 
 def _pod_resource_request_gib(pod: dict[str, Any], resource: str) -> float:
@@ -957,10 +957,12 @@ def _load_yaml_mapping(config_path: str) -> dict[str, Any]:
 
 
 def _load_rl_config_yaml(config_path: str) -> dict[str, Any]:
-    """Return the SkyRL subtree from a launch document or a standalone recipe."""
+    """Return the SkyRL subtree from a validated launch document."""
     raw = _load_yaml_mapping(config_path)
     skyrl = raw.get("skyrl")
-    return skyrl if isinstance(skyrl, dict) else raw
+    if not isinstance(skyrl, dict):
+        raise ValueError(f"{config_path}: launch config must contain a skyrl mapping")
+    return skyrl
 
 
 def load_config_extra_env(rl_config_path: str) -> dict[str, str]:
@@ -1492,27 +1494,6 @@ def _ambient_in_cluster_client(workspace: Path) -> IrisClient | None:
     if not controller_url:
         return None
     return IrisClient.in_cluster(controller_url, workspace=workspace)
-
-
-def export_terminal_policy(args: SimpleNamespace) -> None:
-    """Export the terminal checkpoint from a successful direct launcher run."""
-    storage_paths = args.storage_paths
-    submit_terminal_policy_export(
-        TerminalPolicyExport(
-            checkpoint_root=storage_paths.checkpoint_root,
-            config_path=args.rl_config,
-            gpu_variant=args.gpu_variant,
-            cluster=args.cluster,
-            priority=args.priority,
-            job_name=args.job_name,
-            cluster_config=args.cluster_config,
-            target_cluster=args.target_cluster,
-            parent_cluster_config=args.parent_cluster_config,
-            cpu=args.cpu,
-            memory=args.memory,
-            disk=args.disk,
-        )
-    )
 
 
 def _seconds_to_duration(secs: int):

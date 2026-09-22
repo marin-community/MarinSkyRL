@@ -28,6 +28,12 @@ class RunMode(StrEnum):
     CHECKPOINT_EXPORT = "checkpoint_export"
 
 
+class SubmissionMode(StrEnum):
+    PREPARE = "prepare"
+    DETACH = "detach"
+    WAIT = "wait"
+
+
 @dataclass
 class RunConfig:
     """Experiment identity and reproducibility inputs."""
@@ -36,7 +42,7 @@ class RunConfig:
     attempt_id: str = MISSING
     seed: int = 42
     mode: str = RunMode.TRAIN.value
-    submission: str = "wait"
+    submission: str = SubmissionMode.WAIT.value
     export_hf: bool = True
 
 
@@ -285,7 +291,7 @@ def validate_launch_config(config: DictConfig | Mapping[str, Any]) -> LaunchTopo
         raise ValueError(f"unsupported SkyRL launch schema_version: {raw['schema_version']!r}")
     if raw["run"]["mode"] not in set(RunMode):
         raise ValueError(f"unsupported run.mode: {raw['run']['mode']!r}")
-    if raw["run"]["submission"] not in {"prepare", "detach", "wait"}:
+    if raw["run"]["submission"] not in set(SubmissionMode):
         raise ValueError(f"unsupported run.submission: {raw['run']['submission']!r}")
     if raw["inputs"]["data_kind"] not in {"tasks", "parquet"}:
         raise ValueError(f"unsupported inputs.data_kind: {raw['inputs']['data_kind']!r}")

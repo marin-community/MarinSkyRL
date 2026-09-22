@@ -41,7 +41,7 @@ def _config_path(tmp_path: Path, *, submission: str = "wait") -> Path:
 def test_prepare_validates_without_submitting(tmp_path: Path, monkeypatch) -> None:
     backend = RecordingBackend()
     monkeypatch.setattr("cloud.iris.launch.runtime_bundle_inputs", lambda _commit: ())
-    monkeypatch.setattr("cloud.iris.launch._path_exists", lambda _uri: False)
+    monkeypatch.setattr("cloud.iris.launch.StoragePath.exists", lambda _path: False)
 
     result = execute_launch(_config_path(tmp_path, submission="prepare"), backend=backend)
 
@@ -63,8 +63,8 @@ def test_wait_launches_exports_and_records_the_terminal_model(tmp_path: Path, mo
     )
     monkeypatch.setattr("cloud.iris.launch.runtime_bundle_inputs", lambda _commit: ())
     monkeypatch.setattr(
-        "cloud.iris.launch._path_exists",
-        lambda uri: uri.endswith("resolved.yaml"),
+        "cloud.iris.launch.StoragePath.exists",
+        lambda path: str(path).endswith("resolved.yaml"),
     )
     monkeypatch.setattr("cloud.iris.launch._exported_policy", lambda _config: model)
     monkeypatch.setattr("cloud.iris.launch.write_json", lambda uri, payload: writes.append((uri, payload)))
@@ -83,7 +83,7 @@ def test_wait_launches_exports_and_records_the_terminal_model(tmp_path: Path, mo
 def test_detach_submits_without_exporting(tmp_path: Path, monkeypatch) -> None:
     backend = RecordingBackend()
     monkeypatch.setattr("cloud.iris.launch.runtime_bundle_inputs", lambda _commit: ())
-    monkeypatch.setattr("cloud.iris.launch._path_exists", lambda _uri: False)
+    monkeypatch.setattr("cloud.iris.launch.StoragePath.exists", lambda _path: False)
 
     result = execute_launch(_config_path(tmp_path, submission="detach"), backend=backend)
 

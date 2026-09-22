@@ -348,7 +348,6 @@ def _export_job_spec(tmp_path, *, no_wait: bool) -> tuple[HFExportRequest, Expor
     )
     return request, ExportJobSpec(
         request=request,
-        rl_config="config.yaml",
         cluster="cw-rno2a",
         priority="batch",
         gpu_variant="H100",

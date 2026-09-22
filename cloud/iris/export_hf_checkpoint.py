@@ -35,7 +35,8 @@ import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from cloud.iris.launch_config import RunMode, load_launch_config
+from cloud.iris.artifacts import terminal_checkpoint_step
+from cloud.iris.launch_config import RunMode, SubmissionMode, load_launch_config
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, policy_export_path
@@ -112,7 +113,7 @@ def checkpoint_export_launch_config(
     strategy = str(config.skyrl.trainer.strategy)
     config.run.mode = RunMode.CHECKPOINT_EXPORT
     config.run.export_hf = False
-    config.run.submission = "detach" if spec.no_wait else "wait"
+    config.run.submission = SubmissionMode.DETACH if spec.no_wait else SubmissionMode.WAIT
     config.run.attempt_id = f"{config.run.attempt_id}-export-{request.step}"
     config.runtime.entrypoint = CHECKPOINT_EXPORT_ENTRYPOINT
     config.runtime.profile = runtime_profile_for_strategy(strategy, mode=RuntimeMode.CHECKPOINT_EXPORT).value
@@ -375,6 +376,39 @@ def submit_requested_export(spec: ExportJobSpec, command: list[str]) -> None:
         _write_hf_export_request(request.with_status(HFExportStatus.PENDING, last_exit_code=exit_code))
         raise
     _write_hf_export_request(request.with_status(HFExportStatus.COMPLETE, last_exit_code=0))
+
+
+def export_terminal_policy(training_config_path: Path) -> None:
+    """Derive and run the terminal policy export from one training launch document."""
+    training_config = load_launch_config(training_config_path)
+    checkpoint_root = str(training_config.artifacts.checkpoint_root)
+    step = terminal_checkpoint_step(checkpoint_root)
+    checkpoint_path = join_resource_path(checkpoint_root, f"{GLOBAL_STEP_PREFIX}{step}")
+    request = _read_hf_export_request(checkpoint_path)
+    if request is None:
+        raise ValueError(f"checkpoint {checkpoint_path} has no hf_export_request.json")
+    if request.status is HFExportStatus.COMPLETE:
+        return
+    allocation = training_config.iris.allocation
+    spec = ExportJobSpec(
+        request=request,
+        cluster=str(training_config.iris.cluster),
+        priority=str(training_config.iris.priority),
+        gpu_variant=str(allocation.gpu_variant),
+        job_name=f"{training_config.iris.job_name}-export-{step}",
+        timeout=DEFAULT_HF_EXPORT_TIMEOUT,
+        no_wait=False,
+        cluster_config=str(training_config.iris.cluster_config),
+        target_cluster=training_config.iris.target_cluster,
+        parent_cluster_config=training_config.iris.parent_cluster_config,
+        cpu=float(allocation.cpu),
+        memory=str(allocation.memory),
+        disk=str(allocation.disk),
+        allocation_gpus_per_node=int(allocation.gpus_per_node),
+    )
+    export_config_path = write_checkpoint_export_config(training_config_path, request, spec)
+    resolved_spec = replace(spec, launch_config_path=str(export_config_path))
+    submit_requested_export(resolved_spec, build_command(resolved_spec))
 
 
 def main() -> None:

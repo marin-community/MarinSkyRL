@@ -16,15 +16,15 @@ from typing import Any, Protocol
 from iris.client.client import JobFailedError
 from omegaconf import DictConfig, OmegaConf
 
-from cloud.iris.artifacts import resource_exists, resource_file_names, terminal_checkpoint_step, write_json
-from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome
-from cloud.iris.launch_config import load_launch_config
+from cloud.iris.artifacts import terminal_checkpoint_step, write_json
+from cloud.iris.launch_config import SubmissionMode, load_launch_config
 from cloud.iris.runtime_bundle import runtime_bundle_inputs
 from marinskyrl.checkpoint_paths import policy_export_path
 from marinskyrl.hf_model import validate_portable_hf_model_files
 from marinskyrl.packed_tasks import select_task_references
 from marinskyrl.resource_locator import join_resource_path
 from marinskyrl.task_sources import TaskTroveParquetSource, TaskTroveSelectionSnapshot, data_source
+from rigging.filesystem.storage_path import StoragePath
 
 
 class LaunchState(StrEnum):
@@ -32,6 +32,15 @@ class LaunchState(StrEnum):
     SUBMITTED = "submitted"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class LaunchOutcome:
+    """Result of one launcher backend submission."""
+
+    job_id: str
+    job_state: str
+    exit_code: int
 
 
 @dataclass(frozen=True)
@@ -62,13 +71,9 @@ class LaunchBackend(Protocol):
 
     def validate(self, config_path: Path) -> None: ...
 
-    def launch(self, config_path: Path) -> IrisLaunchOutcome: ...
+    def launch(self, config_path: Path) -> LaunchOutcome: ...
 
     def export_terminal_policy(self, config_path: Path) -> None: ...
-
-
-def _path_exists(uri: str) -> bool:
-    return resource_exists(uri)
 
 
 def _prepared_sources(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -102,7 +107,8 @@ def _exported_policy(config: DictConfig) -> ExportedPolicy:
     checkpoint_root = str(config.artifacts.checkpoint_root)
     global_step = terminal_checkpoint_step(checkpoint_root)
     policy_uri = policy_export_path(str(config.artifacts.export_root), global_step)
-    names = resource_file_names(policy_uri)
+    root = StoragePath(policy_uri)
+    names = {(directory / name).relative_to(root) for directory, _, files in root.walk() for name in files}
     validate_portable_hf_model_files(names, policy_uri)
     return ExportedPolicy(
         policy_export_uri=policy_uri,
@@ -118,7 +124,7 @@ def _result(
     config: DictConfig,
     state: LaunchState,
     *,
-    outcome: IrisLaunchOutcome | None = None,
+    outcome: LaunchOutcome | None = None,
     model: ExportedPolicy | None = None,
     failure: str | None = None,
 ) -> LaunchResult:
@@ -144,7 +150,7 @@ def _manifest(config: DictConfig, result: LaunchResult) -> dict[str, Any]:
 
 def _record_failure(
     config: DictConfig,
-    outcome: IrisLaunchOutcome,
+    outcome: LaunchOutcome,
     failure: str,
 ) -> LaunchResult:
     result = _result(config, LaunchState.FAILED, outcome=outcome, failure=failure)
@@ -158,24 +164,31 @@ def execute_launch(config_path: Path, *, backend: LaunchBackend | None = None) -
     config = _prepare_config(load_launch_config(config_path))
     runtime_bundle_inputs(str(config.runtime.launcher_commit))
     terminal_manifest_uri = str(config.artifacts.terminal_manifest_uri)
-    if _path_exists(terminal_manifest_uri):
+    if StoragePath(terminal_manifest_uri).exists():
         raise ValueError(f"Terminal manifest is immutable and already exists: {terminal_manifest_uri}")
 
-    active_backend = backend or IrisBackend()
+    if backend is None:
+        # The concrete Iris backend imports the training/export stack. Keep it
+        # outside the CPU-only config validation and launcher import boundary.
+        from cloud.iris.iris_backend import IrisBackend  # noqa: PLC0415
+
+        active_backend: LaunchBackend = IrisBackend()
+    else:
+        active_backend = backend
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", encoding="utf-8") as resolved_file:
         OmegaConf.save(config, resolved_file.name, resolve=False)
         resolved_path = Path(resolved_file.name)
-        if config.run.submission == "prepare":
+        if config.run.submission == SubmissionMode.PREPARE:
             active_backend.validate(resolved_path)
             return _result(config, LaunchState.PREPARED)
         try:
             outcome = active_backend.launch(resolved_path)
         except JobFailedError as error:
-            outcome = IrisLaunchOutcome(job_id=str(error.job_id), job_state=error.status.state.value, exit_code=1)
+            outcome = LaunchOutcome(job_id=str(error.job_id), job_state=error.status.state.value, exit_code=1)
 
         if outcome.exit_code != 0:
             return _record_failure(config, outcome, f"Iris job reached {outcome.job_state}")
-        if config.run.submission == "detach":
+        if config.run.submission == SubmissionMode.DETACH:
             return _result(config, LaunchState.SUBMITTED, outcome=outcome)
         if config.run.export_hf:
             try:
@@ -189,7 +202,7 @@ def execute_launch(config_path: Path, *, backend: LaunchBackend | None = None) -
             model = _exported_policy(config)
         except ValueError as error:
             return _record_failure(config, outcome, str(error))
-    if not _path_exists(str(config.artifacts.resolved_config_uri)):
+    if not StoragePath(str(config.artifacts.resolved_config_uri)).exists():
         return _record_failure(
             config,
             outcome,

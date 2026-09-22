@@ -109,20 +109,9 @@ case "$STRATEGY" in
   ) ;;
 esac
 START=$(date +%s)
-# The same entrypoint every marin-launched job uses, so this gates the real launch path. It
-# resolves the telemetry environment, starts a Ray head on the pinned metrics port, opens the Ray
-# collector, and supervises the driver. It stages nothing here: this lane passes no data or model
-# flags, so the policy still loads from the Hub cache. It refuses to start without the
-# runtime-bundle identity, which the workflow stamps on the runner -- the pod cannot produce one,
-# because Iris strips .git from the bundle it uploads.
-#
-# ELAPSED now covers Ray bring-up and teardown too, tens of seconds against a 1500s ceiling.
-# SKYRL_HOME names the runtime checkout the driver starts from; the entrypoint will not guess.
-export SKYRL_HOME="$REPOSITORY_ROOT"
-"$PYTHON" "$REPOSITORY_ROOT/cloud/iris/task_runtime.py" \
-  --run-id "$RUN_ID" \
-  -- \
-  "$PYTHON" -m skyrl_train.entrypoints.main_base \
+# This lane runs the standalone Hydra entrypoint inside its already-allocated one-GPU Iris task.
+# Marin-launched jobs exercise the config-native task runtime in their own smoke workflows.
+"$PYTHON" -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator=grpo \
