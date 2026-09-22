@@ -403,6 +403,22 @@ def test_task_command_stages_training_and_validation_selectors_on_every_node(tmp
     assert options["--val-data"] == [json.dumps([val_selector])]
 
 
+def test_task_command_leaves_parquet_data_resolution_to_the_training_driver(tmp_path):
+    args = _args(
+        tmp_path,
+        "standard",
+        ["--train-data", '["org/math:test"]', "--val-data", '["org/math:validation"]'],
+    )
+    Path(args.rl_config).write_text("data:\n  kind: parquet\n")
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert "--train-data" not in options
+    assert "--val-data" not in options
+
+
 def test_task_command_stages_terminal_bench_sidechannel_on_every_node(tmp_path):
     selector = "fixture-org/nemotron-ultra-swe@immutable::train"
     args = _args(tmp_path, "opencode")

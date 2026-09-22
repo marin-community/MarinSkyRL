@@ -2326,14 +2326,18 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         controller_cmd.extend(["--rendezvous-timeout", str(args.rendezvous_timeout)])
     if args.driver_liveness_timeout is not None:
         controller_cmd.extend(["--driver-liveness-timeout", str(args.driver_liveness_timeout)])
-    # Per-node task-dataset staging. The training driver resolves these selectors only
-    # on rank 0, while Ray may schedule rollout and evaluation workers on any node.
-    # Forward both roles to the controller so every pod has identical task-local data.
-    # Object-store locators use the separate typed materialization path below.
-    if args.train_data and args.train_data != EMPTY_JSON_LIST and not args.data_sources_json:
-        controller_cmd.extend(["--train-data", args.train_data])
-    if args.val_data and args.val_data != EMPTY_JSON_LIST and not args.data_sources_json:
-        controller_cmd.extend(["--val-data", args.val_data])
+    # Task directories must exist on every node before Ray schedules agent rollouts.
+    # Standard parquet data is consumed by the rank-0 training driver instead; sending
+    # it through this path both duplicates staging and misclassifies HF dataset specs
+    # as packed task archives.
+    raw_config = _load_rl_config_yaml(args.rl_config)
+    data_config = raw_config.get("data") if isinstance(raw_config, dict) else None
+    data_kind = data_config.get("kind", "tasks") if isinstance(data_config, dict) else "tasks"
+    if data_kind == "tasks" and not args.data_sources_json:
+        if args.train_data and args.train_data != EMPTY_JSON_LIST:
+            controller_cmd.extend(["--train-data", args.train_data])
+        if args.val_data and args.val_data != EMPTY_JSON_LIST:
+            controller_cmd.extend(["--val-data", args.val_data])
     if args.data_sources_json:
         controller_cmd.extend(["--data-sources-json", args.data_sources_json])
     if draft_model is not None:
