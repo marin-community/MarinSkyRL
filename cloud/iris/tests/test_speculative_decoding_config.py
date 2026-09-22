@@ -155,6 +155,18 @@ def test_frozen_object_store_speculator_is_supported(tmp_path: Path) -> None:
     }
 
 
+def test_frozen_speculator_can_use_all_gpus_for_generation(tmp_path: Path) -> None:
+    config = _base_config()
+    config["entrypoint"] = "terminal_bench_generate"
+    config["trainer"]["placement"]["colocate_all"] = True
+    config["generator"]["speculative_decoding"]["training"] = None
+
+    parsed = parse_rl_config(str(_write_config(tmp_path, config)))
+
+    assert parsed.entrypoint == "skyrl_train.entrypoints.terminal_bench_generate"
+    assert parsed.generator["speculative_decoding"]["training"] is None
+
+
 def test_gcs_alias_is_normalized_for_vllm_runai_loading(tmp_path: Path) -> None:
     config = _base_config()
     model = config["generator"]["speculative_decoding"]["model"]
