@@ -16,6 +16,7 @@ from typing import Any, Iterator
 import fsspec
 from fsspec.spec import AbstractFileSystem
 from marinskyrl.resource_locator import join_resource_path, relative_resource_path
+from rigging.filesystem.storage_path import StoragePath
 
 CHECKPOINT_MARKER_FILENAME = "latest_ckpt_global_step.txt"
 SOURCE_MANIFEST_FILENAME = ".marinskyrl-source.json"
@@ -76,14 +77,13 @@ def read_json(uri: str) -> dict[str, Any] | None:
 
 def resource_exists(uri: str) -> bool:
     """Return whether a local or object-store resource exists."""
-    filesystem, path = fs_and_path(uri)
-    return filesystem.exists(path)
+    return StoragePath(uri).exists()
 
 
 def resource_file_names(uri: str) -> set[str]:
     """Return the relative names of every file below a resource root."""
-    filesystem, root = fs_and_path(uri)
-    return {entry.path for _, entry in file_inventory(filesystem, root)}
+    root = StoragePath(uri)
+    return {(directory / name).relative_to(root) for directory, _, files in root.walk() for name in files}
 
 
 def terminal_checkpoint_step(checkpoint_root: str) -> int:

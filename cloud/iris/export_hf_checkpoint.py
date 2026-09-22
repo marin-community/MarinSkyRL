@@ -35,7 +35,7 @@ import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from cloud.iris.launch_config import load_launch_config
+from cloud.iris.launch_config import RunMode, load_launch_config
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, policy_export_path
@@ -75,7 +75,6 @@ def _verify_hf_model_export(export_path: str) -> None:
 @dataclass(frozen=True)
 class ExportJobSpec:
     request: HFExportRequest
-    rl_config: str
     cluster: str
     priority: str
     gpu_variant: str
@@ -111,7 +110,7 @@ def checkpoint_export_launch_config(
     OmegaConf.set_struct(config, False)
 
     strategy = str(config.skyrl.trainer.strategy)
-    config.run.mode = "checkpoint_export"
+    config.run.mode = RunMode.CHECKPOINT_EXPORT
     config.run.export_hf = False
     config.run.submission = "detach" if spec.no_wait else "wait"
     config.run.attempt_id = f"{config.run.attempt_id}-export-{request.step}"
@@ -301,7 +300,6 @@ def request_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> E
 def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_wait: bool) -> ExportJobSpec:
     return ExportJobSpec(
         request=request,
-        rl_config=args.rl_config,
         cluster=args.cluster,
         priority=args.priority,
         gpu_variant=args.gpu_variant,

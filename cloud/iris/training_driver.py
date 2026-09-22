@@ -31,7 +31,7 @@ from cloud.iris.rl_data import (
 )
 from marinskyrl.process_diagnostics import ProcessOutcomeKind, write_process_outcome
 from marinskyrl.resource_locator import model_source_for_path
-from cloud.iris.launch_config import load_launch_config
+from cloud.iris.launch_config import RunMode, load_launch_config
 from cloud.iris.rl_config_translation import TaskLocalSkyRLValues, apply_task_local_values
 
 
@@ -48,13 +48,11 @@ class LocalRLConfig:
     experiments_dir: str = "experiments"
     resolved_config_uri: str | None = None
     gpus: int = 4
-    cpus: int = 0  # 0 = auto-detect
     # Multi-node placement. The external controller has already bootstrapped one
     # cross-node Ray cluster and exported RAY_ADDRESS; this runner ATTACHES to it,
     # and gpus_per_node drives the SkyRL placement + num_inference_engines.
     num_nodes: int = 1
     gpus_per_node: int = 0  # 0 = use `gpus`
-    ray_port: int = 6379
     # --- Cross-cluster ingress (Exp2 opencode-RL literal capture) ---
     # All default to the OFF/direct value so an all-defaults run stands up NO proxy,
     # registers NO endpoint, and touches NO env — byte-identical to today.
@@ -120,9 +118,6 @@ class LocalRLRunner:
         experiments_dir = Path(self.config.experiments_dir).expanduser().resolve()
         experiments_dir.mkdir(parents=True, exist_ok=True)
         self.config.experiments_dir = str(experiments_dir)
-
-        if self.config.cpus <= 0:
-            self.config.cpus = os.cpu_count() or 16
 
         self._setup_signal_handlers()
 
@@ -191,7 +186,7 @@ class LocalRLRunner:
         if launch_config is None:
             raise ValueError("training driver requires a loaded launch config")
         skyrl_config = OmegaConf.create(OmegaConf.to_container(launch_config.skyrl, resolve=False))
-        if launch_config.run.mode == "checkpoint_export":
+        if launch_config.run.mode == RunMode.CHECKPOINT_EXPORT:
             self._write_resolved_config(launch_config)
             return self._run_skyrl(launch_config)
         self._resolve_data_inputs(str(launch_config.inputs.data_kind))
@@ -472,10 +467,8 @@ def main() -> None:
         experiments_dir=str(launch_config.runtime.experiments_dir),
         resolved_config_uri=str(launch_config.artifacts.resolved_config_uri),
         gpus=int(allocation.num_nodes * allocation.gpus_per_node),
-        cpus=int(allocation.cpu),
         num_nodes=int(allocation.num_nodes),
         gpus_per_node=int(allocation.gpus_per_node),
-        ray_port=int(launch_config.ray.port),
         tensor_parallel_size=int(launch_config.skyrl.generator.inference_engine_tensor_parallel_size),
         ingress_mode=str(launch_config.ingress.mode),
         ingress_host=str(launch_config.ingress.host),

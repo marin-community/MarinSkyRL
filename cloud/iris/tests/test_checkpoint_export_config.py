@@ -56,7 +56,6 @@ def _request() -> HFExportRequest:
 def _spec(request: HFExportRequest) -> ExportJobSpec:
     return ExportJobSpec(
         request=request,
-        rl_config="training.yaml",
         cluster="cw-rno2a",
         priority="batch",
         gpu_variant="H100",

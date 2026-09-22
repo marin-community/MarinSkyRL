@@ -78,6 +78,7 @@ def _raw_config() -> dict[str, Any]:
             },
             "model_num_attention_heads": 8,
             "trainer": {
+                "seed": 42,
                 "strategy": "fsdp2",
                 "algorithm": {"use_kl_loss": False},
                 "placement": {
