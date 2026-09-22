@@ -12,6 +12,7 @@ from skyrl_train.utils.trainer_utils import (
     validate_consistency_for_latest_checkpoint,
     sanitize_data_source,
     calculate_per_dataset_metrics,
+    evaluation_response_metrics,
     dump_per_dataset_eval_results,
     handle_dynamic_sampling,
     handle_replace_sampling,
@@ -233,6 +234,49 @@ def test_sanitize_data_source_normal_string():
     assert result == "normal_dataset"
 
 
+def test_evaluation_response_metrics_report_work_and_stop_contributions():
+    batch = {
+        "response_ids": [[1, 2, 3], [4], [5, 6]],
+        "rewards": [1.0, 0.0, 1.0],
+        "stop_reasons": ["stop", "length", "stop"],
+    }
+    metrics = evaluation_response_metrics(batch)
+    assert metrics["response_tokens"] == 6
+    assert metrics["response_tokens_mean"] == pytest.approx(2.0)
+    assert metrics["response_tokens_max"] == 3
+    assert metrics["stop_reason_coverage"] == 1
+    assert metrics["completed_stop_fraction"] == pytest.approx(2 / 3)
+    # Contributions divide by every evaluated response.
+    assert metrics["completed_stop_score_contribution"] == pytest.approx(2 / 3)
+    assert metrics["length_stop_score_contribution"] == 0
+
+
+def test_evaluation_response_metrics_suppress_fractions_without_full_stop_coverage():
+    batch = {"response_ids": [[1, 2], [3]], "rewards": [1.0, 1.0], "stop_reasons": ["stop", None]}
+    metrics = evaluation_response_metrics(batch)
+    assert metrics["stop_reason_coverage"] < 1
+    assert "completed_stop_fraction" not in metrics
+    assert "completed_stop_score_contribution" not in metrics
+    assert metrics["response_tokens"] == 3
+    with pytest.raises(ValueError):
+        evaluation_response_metrics({"response_ids": [], "rewards": []})
+
+
+def test_per_dataset_response_metrics_appear_only_behind_the_telemetry_gate():
+    batch = {
+        "rewards": [0.5, 0.9],
+        "prompt_token_ids": [[1, 2], [3, 4]],
+        "response_ids": [[10, 11], [12]],
+        "stop_reasons": ["stop", "stop"],
+    }
+    arguments = (batch, ["uid1", "uid2"], ["dataset1", "dataset1"], 1)
+    off = calculate_per_dataset_metrics(*arguments, telemetry_enabled=False)
+    on = calculate_per_dataset_metrics(*arguments, telemetry_enabled=True)
+    assert set(on) - set(off) == {f"eval/dataset1/{key}" for key in evaluation_response_metrics(batch)}
+    assert all(off[key] == on[key] for key in off)
+    assert on["eval/dataset1/response_tokens"] == 3
+
+
 def test_calculate_per_dataset_metrics_single_source():
     """Test calculate_per_dataset_metrics with single data source."""
     # Create test data
@@ -244,7 +288,7 @@ def test_calculate_per_dataset_metrics_single_source():
     uids = ["uid1", "uid2", "uid3"]
     data_sources = ["dataset1", "dataset1", "dataset1"]
 
-    result = calculate_per_dataset_metrics(trajectory_batches, uids, data_sources, 2)
+    result = calculate_per_dataset_metrics(trajectory_batches, uids, data_sources, 2, telemetry_enabled=False)
 
     # Verify results - actual computed values
     # Mean reward: (0.5 + 0.7 + 0.9) / 3 = 0.7
@@ -266,7 +310,7 @@ def test_calculate_per_dataset_metrics_multiple_sources():
     uids = ["uid1", "uid2", "uid3", "uid4"]
     data_sources = ["dataset1", None, "dataset1", None]
 
-    result = calculate_per_dataset_metrics(trajectory_batches, uids, data_sources, 2)
+    result = calculate_per_dataset_metrics(trajectory_batches, uids, data_sources, 2, telemetry_enabled=False)
 
     # Verify results for both datasets - actual computed values
     # dataset1: indices 0, 2 -> rewards [0.5, 0.9] -> mean = 0.7, pass@n = 2/2 = 1.0

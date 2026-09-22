@@ -63,7 +63,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Sequence
 from urllib.parse import unquote, urlparse
 
 import yaml
@@ -127,9 +127,12 @@ from marinskyrl.speculative_decoding import (
 from cloud.iris.rl_config_translation import (
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
+    RL_ENTRYPOINT_NAMES_BY_MODULE,
     format_hydra_arg,
+    parse_rl_entrypoint,
     resolve_rl_entrypoint,
     resolve_rl_config_path,
+    training_loop_for_entrypoint,
 )
 from marinskyrl.distillation import LocalInferenceTeacherSpec, compile_distillation_plan
 from cloud.iris.secrets_env import default_secrets_env, load_secrets_env_into_os_environ
@@ -148,6 +151,7 @@ from marinskyrl.environment_contract import (
     DebugMode,
     EnvVarManager,
     EnvVarScope,
+    TrainingLoop,
     wandb_launch_environment,
 )
 from cloud.iris.runtime_environment import (
@@ -2020,6 +2024,20 @@ def load_config_policy_model_revision(rl_config_path: str) -> str | None:
     return revision
 
 
+def load_config_training_loop(
+    rl_config_path: str, entrypoint_module: str | None, overrides: Sequence[str]
+) -> TrainingLoop | None:
+    """The loop the launched entrypoint trains with; None for one that trains nothing or an unregistered override."""
+    raw = _load_rl_config_yaml(rl_config_path)
+    if entrypoint_module is None:
+        entrypoint = parse_rl_entrypoint(raw.get("entrypoint"), config_path=Path(rl_config_path))
+    else:
+        entrypoint = RL_ENTRYPOINT_NAMES_BY_MODULE.get(entrypoint_module)
+        if entrypoint is None:
+            return None
+    return training_loop_for_entrypoint(entrypoint, raw, overrides)
+
+
 def load_config_draft_model(rl_config_path: str) -> SpeculatorModelConfig | None:
     """Return the immutable draft model declared by an RL config."""
     raw = _load_rl_config_yaml(rl_config_path)
@@ -2383,6 +2401,9 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # The job name is sanitized, so the pod cannot recover the run id.
     if args.run_id:
         controller_cmd.extend(["--run-id", args.run_id])
+    training_loop = load_config_training_loop(args.rl_config, args.entrypoint, args.skyrl_override or [])
+    if training_loop is not None:
+        controller_cmd.extend(["--training-loop", training_loop.value])
     controller_cmd.extend(_model_bootstrap_args(args))
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)

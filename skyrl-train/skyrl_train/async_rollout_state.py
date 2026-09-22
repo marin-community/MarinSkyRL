@@ -15,6 +15,13 @@ class GeneratedOutputGroup:
     earliest_model_step: int
     source_prompts: List[dict]
 
+    # Observations of this attempt only. Checkpoints skip them, so a resumed run starts
+    # without them.
+    completed_at: float | None = None
+    telemetry_attempt_id: str | None = None
+    admitted_at: float | None = None
+    telemetry_finished: bool = False
+
 
 @dataclass
 class GenerationBufferState:
