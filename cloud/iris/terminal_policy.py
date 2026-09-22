@@ -29,6 +29,7 @@ class TerminalPolicyExport:
     model_source_identity: str | None
     policy_num_nodes: int
     policy_num_gpus_per_node: int
+    gpu_variant: str
     cluster: str
     priority: str
     job_name: str
@@ -93,6 +94,8 @@ def submit_terminal_policy_export(spec: TerminalPolicyExport) -> None:
         spec.cluster,
         "--priority",
         spec.priority,
+        "--gpu-variant",
+        spec.gpu_variant,
         "--job-name",
         f"{spec.job_name}-export-{global_step}",
     ]
