@@ -37,7 +37,9 @@ _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth")
 logger = logging.getLogger(__name__)
 # Mirroring runs during task setup, before the trainer configures root logging.
 if not logger.handlers:
-    logger.addHandler(logging.StreamHandler())
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 logger.propagate = False
 
@@ -46,7 +48,8 @@ def _s3_endpoint_environment() -> tuple[str, str]:
     """Return the S3 hint's source and safe class, never its URL or credentials.
 
     The class is one of ``coreweave_in_cluster``, ``other``, ``unset``, or
-    ``unknown``. A missing source is reported as ``none``.
+    ``unknown``. A missing source is reported as ``none``. An ``AWS_ENDPOINT_URL``
+    value supplies the hint when ``FSSPEC_S3`` has no endpoint of its own.
     """
     if "FSSPEC_S3" in os.environ:
         source = "FSSPEC_S3"
@@ -57,6 +60,9 @@ def _s3_endpoint_environment() -> tuple[str, str]:
         if not isinstance(settings, dict):
             return source, "unknown"
         endpoint = settings.get("endpoint_url")
+        if (endpoint is None or endpoint == "") and "AWS_ENDPOINT_URL" in os.environ:
+            source = "AWS_ENDPOINT_URL"
+            endpoint = os.environ[source]
     elif "AWS_ENDPOINT_URL" in os.environ:
         source = "AWS_ENDPOINT_URL"
         endpoint = os.environ[source]
@@ -84,7 +90,6 @@ def _log_cache_result(role: str, model_id: str, revision: str, started: float) -
         model_id,
         revision,
         elapsed,
-        extra={"cache_role": role, "cache_status": "completed", "cache_total_seconds": elapsed},
     )
 
 
@@ -95,7 +100,6 @@ def _start_phase(phase: str, model_id: str, revision: str) -> float:
         phase,
         model_id,
         revision,
-        extra={"cache_phase": phase, "cache_status": "started"},
     )
     return started
 
@@ -108,7 +112,6 @@ def _end_phase(phase: str, model_id: str, revision: str, started: float) -> None
         model_id,
         revision,
         elapsed,
-        extra={"cache_phase": phase, "cache_status": "completed", "cache_seconds": elapsed},
     )
 
 
@@ -209,7 +212,6 @@ def ensure_hugging_face_model_cache(
                 "HF model cache role=waiting model=%s revision=%s",
                 model_id,
                 revision,
-                extra={"cache_role": "waiting", "cache_status": "started"},
             )
             waited = True
         if manifest := _cached_manifest(cache_uri, model_id, revision, tokenizer_mode):
@@ -231,13 +233,6 @@ def ensure_hugging_face_model_cache(
             hf_token_present,
             endpoint_source,
             endpoint_class,
-            extra={
-                "cache_role": "publisher",
-                "cache_status": "started",
-                "hf_token_present": hf_token_present,
-                "s3_endpoint_env_source": endpoint_source,
-                "s3_endpoint_env_class": endpoint_class,
-            },
         )
         phase_started = _start_phase("prepare", model_id, revision)
         with lease_refresh(lock):
@@ -264,10 +259,6 @@ def ensure_hugging_face_model_cache(
                     revision,
                     file_count,
                     size_bytes,
-                    extra={
-                        "cache_file_count": file_count,
-                        "cache_size_bytes": size_bytes,
-                    },
                 )
                 phase_started = _start_phase("publication", model_id, revision)
                 filesystem.makedirs(cache_path, exist_ok=True)

@@ -12,6 +12,14 @@ from cloud.iris.hf_model_cache import ensure_hugging_face_model_cache, stage_mod
 from marinskyrl.model_manifest import ModelManifest, snapshot_model_manifest
 
 
+def _cache_events(caplog) -> list[dict[str, str]]:
+    return [
+        dict(field.split("=", 1) for field in record.getMessage().split() if "=" in field)
+        for record in caplog.records
+        if record.name == hf_model_cache.__name__
+    ]
+
+
 def test_hub_download_temporarily_enables_network_access(tmp_path: Path, monkeypatch) -> None:
     def snapshot_download(*_args, **_kwargs):
         assert not huggingface_hub.constants.is_offline_mode()
@@ -83,34 +91,27 @@ def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, 
     assert (local_model / "model.safetensors.index.json").is_file()
     assert not (local_model / "model.safetensors").exists()
     assert not (local_model / "stale.bin").exists()
-    records = [record for record in caplog.records if record.name == hf_model_cache.__name__]
-    output = "\n".join(record.getMessage() for record in records)
+    events = _cache_events(caplog)
+    output = "\n".join(record.getMessage() for record in caplog.records if record.name == hf_model_cache.__name__)
     assert any(
-        getattr(record, "cache_role", None) == "publisher"
-        and getattr(record, "cache_status", None) == "started"
-        and record.hf_token_present
-        and record.s3_endpoint_env_source == "FSSPEC_S3"
-        and record.s3_endpoint_env_class == "coreweave_in_cluster"
-        for record in records
+        event.get("role") == "publisher"
+        and event.get("hf_token_present") == "True"
+        and event.get("s3_endpoint_env_source") == "FSSPEC_S3"
+        and event.get("s3_endpoint_env_class") == "coreweave_in_cluster"
+        for event in events
     )
-    assert any(getattr(record, "cache_role", None) == "hit" for record in records)
+    assert any(event.get("role") == "hit" for event in events)
     for phase in ("prepare", "download", "manifest", "publication"):
+        assert any(event.get("phase") == phase and event.get("status") == "started" for event in events)
         assert any(
-            getattr(record, "cache_phase", None) == phase and record.cache_status == "started" for record in records
-        )
-        assert any(
-            getattr(record, "cache_phase", None) == phase
-            and record.cache_status == "completed"
-            and record.cache_seconds >= 0
-            for record in records
+            event.get("phase") == phase and event.get("status") == "completed" and float(event["seconds"]) >= 0
+            for event in events
         )
     assert any(
-        getattr(record, "cache_role", None) == "publisher"
-        and record.cache_status == "completed"
-        and record.cache_total_seconds >= 0
-        for record in records
+        event.get("role") == "publisher" and event.get("status") == "completed" and float(event["total_seconds"]) >= 0
+        for event in events
     )
-    assert any(getattr(record, "cache_file_count", None) == 4 and record.cache_size_bytes > 0 for record in records)
+    assert any(event.get("files") == "4" and int(event["bytes"]) > 0 for event in events)
     assert "sentinel-hf-token" not in output
     assert "sentinel-s3-key" not in output
     assert "sentinel-url" not in output
@@ -122,6 +123,12 @@ def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, 
         (None, None, "none", "unset"),
         (None, "https://cwobject.com", "AWS_ENDPOINT_URL", "other"),
         ('{"endpoint_url":"http://cwlota.com"}', None, "FSSPEC_S3", "coreweave_in_cluster"),
+        (
+            '{"config_kwargs":{"s3":{"addressing_style":"virtual"}}}',
+            "http://cwlota.com",
+            "AWS_ENDPOINT_URL",
+            "coreweave_in_cluster",
+        ),
         ("not json", None, "FSSPEC_S3", "unknown"),
     ],
 )
@@ -130,7 +137,10 @@ def test_cold_cache_failure_reports_phase_and_safe_endpoint_class(
 ) -> None:
     cache = tmp_path / "region-cache"
     monkeypatch.setattr(hf_model_cache, "marin_temp_bucket", lambda *_args, **_kwargs: str(cache))
-    monkeypatch.setenv("HF_TOKEN", "sentinel-hf-token")
+    if expected_source == "none":
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("HF_TOKEN", "sentinel-hf-token")
     monkeypatch.setattr(hf_model_cache.logger, "propagate", True)
     for name, value in (("FSSPEC_S3", fsspec_value), ("AWS_ENDPOINT_URL", aws_value)):
         if value is None:
@@ -147,22 +157,16 @@ def test_cold_cache_failure_reports_phase_and_safe_endpoint_class(
             "laion/draft", "4bdb47c08e5b5190bea3c7a93c3e14470230e469", ttl_days=14, source_prefix="s3://region/run"
         )
 
-    records = [record for record in caplog.records if record.name == hf_model_cache.__name__]
-    output = "\n".join(record.getMessage() for record in records)
+    events = _cache_events(caplog)
+    output = "\n".join(record.getMessage() for record in caplog.records if record.name == hf_model_cache.__name__)
     assert any(
-        getattr(record, "s3_endpoint_env_source", None) == expected_source
-        and record.s3_endpoint_env_class == expected_class
-        for record in records
+        event.get("s3_endpoint_env_source") == expected_source and event.get("s3_endpoint_env_class") == expected_class
+        for event in events
     )
-    assert any(
-        getattr(record, "cache_phase", None) == "download" and record.cache_status == "started" for record in records
-    )
-    assert not any(
-        getattr(record, "cache_phase", None) == "download" and record.cache_status == "completed" for record in records
-    )
-    assert not any(
-        getattr(record, "cache_role", None) == "publisher" and record.cache_status == "completed" for record in records
-    )
+    assert any(event.get("hf_token_present") == ("False" if expected_source == "none" else "True") for event in events)
+    assert any(event.get("phase") == "download" and event.get("status") == "started" for event in events)
+    assert not any(event.get("phase") == "download" and event.get("status") == "completed" for event in events)
+    assert not any(event.get("role") == "publisher" and event.get("status") == "completed" for event in events)
     assert "sentinel-hf-token" not in output
 
 
