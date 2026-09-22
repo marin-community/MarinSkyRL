@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from pathlib import Path
 import posixpath
 import tempfile
 import time
 from typing import Literal
+from urllib.parse import urlsplit
 
 from fsspec.spec import AbstractFileSystem
 from huggingface_hub import HfApi, snapshot_download
@@ -31,6 +34,41 @@ from marinskyrl.speculative_decoding import is_hugging_face_commit
 _CACHE_PREFIX = "marinskyrl/hf-models"
 _CACHE_POLL_INTERVAL = 10.0
 _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth")
+logger = logging.getLogger(__name__)
+# Mirroring runs during task setup, before the trainer configures root logging.
+logger.addHandler(logging.StreamHandler())
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+
+def _s3_endpoint_environment() -> tuple[str, str]:
+    """Classify the S3 environment hint without exposing its URL or credentials."""
+    if "FSSPEC_S3" in os.environ:
+        source = "FSSPEC_S3"
+        try:
+            settings = json.loads(os.environ[source])
+        except (TypeError, ValueError):
+            return source, "unknown"
+        if not isinstance(settings, dict):
+            return source, "unknown"
+        endpoint = settings.get("endpoint_url")
+    elif "AWS_ENDPOINT_URL" in os.environ:
+        source = "AWS_ENDPOINT_URL"
+        endpoint = os.environ[source]
+    else:
+        return "none", "unset"
+
+    if endpoint is None or endpoint == "":
+        return source, "unset"
+    if not isinstance(endpoint, str):
+        return source, "unknown"
+    try:
+        parsed = urlsplit(endpoint)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return source, "unknown"
+    except ValueError:
+        return source, "unknown"
+    return source, "coreweave_in_cluster" if parsed.hostname == "cwlota.com" else "other"
 
 
 def load_model_manifest(model_uri: str) -> ModelManifest:
@@ -109,6 +147,7 @@ def ensure_hugging_face_model_cache(
     tokenizer_mode: Literal["embedded", "policy"] = "embedded",
 ) -> tuple[str, ModelManifest]:
     """Mirror one immutable Hub snapshot once and return its URI and manifest."""
+    started = time.monotonic()
     revision = resolve_hugging_face_revision(model_id, revision)
     cache_identity = model_id if tokenizer_mode == "embedded" else f"{model_id}#tokenizer={tokenizer_mode}"
     cache_uri = marin_temp_bucket(
@@ -118,31 +157,104 @@ def ensure_hugging_face_model_cache(
     ).rstrip("/")
     filesystem, cache_path = fs_and_path(cache_uri)
     if manifest := _cached_manifest(cache_uri, model_id, revision, tokenizer_mode):
+        logger.info(
+            "HF model cache role=hit model=%s revision=%s total_seconds=%.3f",
+            model_id,
+            revision,
+            time.monotonic() - started,
+        )
         return cache_uri, manifest
 
     lock = create_lock(f"{cache_uri}.lock")
+    waited = False
     while not lock.try_acquire():
+        if not waited:
+            logger.info("HF model cache role=waiting model=%s revision=%s", model_id, revision)
+            waited = True
         if manifest := _cached_manifest(cache_uri, model_id, revision, tokenizer_mode):
+            logger.info(
+                "HF model cache role=waiter_hit model=%s revision=%s total_seconds=%.3f",
+                model_id,
+                revision,
+                time.monotonic() - started,
+            )
             return cache_uri, manifest
         time.sleep(_CACHE_POLL_INTERVAL)
 
     try:
         if manifest := _cached_manifest(cache_uri, model_id, revision, tokenizer_mode):
+            logger.info(
+                "HF model cache role=lock_hit model=%s revision=%s total_seconds=%.3f",
+                model_id,
+                revision,
+                time.monotonic() - started,
+            )
             return cache_uri, manifest
+        endpoint_source, endpoint_class = _s3_endpoint_environment()
+        logger.info(
+            "HF model cache role=publisher model=%s revision=%s hf_token_present=%s "
+            "s3_endpoint_env_source=%s s3_endpoint_env_class=%s",
+            model_id,
+            revision,
+            bool(os.environ.get("HF_TOKEN")),
+            endpoint_source,
+            endpoint_class,
+        )
+        phase_started = time.monotonic()
+        logger.info("HF model cache phase=prepare status=started model=%s revision=%s", model_id, revision)
         with lease_refresh(lock):
             if filesystem.exists(cache_path):
                 filesystem.rm(cache_path, recursive=True)
+            logger.info(
+                "HF model cache phase=prepare status=completed model=%s revision=%s seconds=%.3f",
+                model_id,
+                revision,
+                time.monotonic() - phase_started,
+            )
             with tempfile.TemporaryDirectory(prefix="marinskyrl-hf-model-") as scratch:
+                phase_started = time.monotonic()
+                logger.info("HF model cache phase=download status=started model=%s revision=%s", model_id, revision)
                 snapshot = download_hugging_face_snapshot(model_id, revision=revision, destination=Path(scratch))
+                logger.info(
+                    "HF model cache phase=download status=completed model=%s revision=%s seconds=%.3f",
+                    model_id,
+                    revision,
+                    time.monotonic() - phase_started,
+                )
+                phase_started = time.monotonic()
+                logger.info("HF model cache phase=manifest status=started model=%s revision=%s", model_id, revision)
                 manifest = snapshot_model_manifest(
                     snapshot,
                     model_id,
                     revision,
                     tokenizer_mode=tokenizer_mode,
                 )
+                logger.info(
+                    "HF model cache phase=manifest status=completed model=%s revision=%s seconds=%.3f "
+                    "files=%d bytes=%d",
+                    model_id,
+                    revision,
+                    time.monotonic() - phase_started,
+                    len(manifest.files),
+                    sum(entry.size for entry in manifest.files),
+                )
+                phase_started = time.monotonic()
+                logger.info("HF model cache phase=publication status=started model=%s revision=%s", model_id, revision)
                 filesystem.makedirs(cache_path, exist_ok=True)
                 _upload_snapshot(filesystem, cache_path, snapshot)
             write_json(join_resource_path(cache_uri, MODEL_MANIFEST_FILENAME), manifest.model_dump(mode="json"))
+            logger.info(
+                "HF model cache phase=publication status=completed model=%s revision=%s seconds=%.3f",
+                model_id,
+                revision,
+                time.monotonic() - phase_started,
+            )
+        logger.info(
+            "HF model cache role=publisher status=completed model=%s revision=%s total_seconds=%.3f",
+            model_id,
+            revision,
+            time.monotonic() - started,
+        )
         return cache_uri, manifest
     finally:
         lock.release()

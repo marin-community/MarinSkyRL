@@ -36,7 +36,7 @@ def test_hub_download_temporarily_enables_network_access(tmp_path: Path, monkeyp
     assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
 
 
-def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, monkeypatch) -> None:
+def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, monkeypatch, caplog) -> None:
     cache = tmp_path / "region-cache"
     local_model = tmp_path / "node" / "draft"
     downloads = []
@@ -50,16 +50,21 @@ def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, 
 
     monkeypatch.setattr(hf_model_cache, "marin_temp_bucket", lambda *_args, **_kwargs: str(cache))
     monkeypatch.setattr(hf_model_cache, "download_hugging_face_snapshot", download_snapshot)
+    monkeypatch.setenv("HF_TOKEN", "sentinel-hf-token")
+    monkeypatch.setenv("FSSPEC_S3", '{"endpoint_url":"http://cwlota.com","key":"sentinel-s3-key"}')
+    monkeypatch.setenv("AWS_ENDPOINT_URL", "https://other.example/sentinel-url")
+    monkeypatch.setattr(hf_model_cache.logger, "propagate", True)
     model_id = "laion/draft"
     revision = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
 
-    cache_uri, manifest = ensure_hugging_face_model_cache(
-        model_id, revision, ttl_days=14, source_prefix="s3://region/experiments/run"
-    )
-    stage_model_metadata(cache_uri, manifest, str(local_model))
-    repeated_uri, repeated_manifest = ensure_hugging_face_model_cache(
-        model_id, revision, ttl_days=14, source_prefix="s3://region/experiments/next-run"
-    )
+    with caplog.at_level("INFO", logger=hf_model_cache.__name__):
+        cache_uri, manifest = ensure_hugging_face_model_cache(
+            model_id, revision, ttl_days=14, source_prefix="s3://region/experiments/run"
+        )
+        stage_model_metadata(cache_uri, manifest, str(local_model))
+        repeated_uri, repeated_manifest = ensure_hugging_face_model_cache(
+            model_id, revision, ttl_days=14, source_prefix="s3://region/experiments/next-run"
+        )
     (local_model / "stale.bin").write_bytes(b"stale weights")
     stage_model_metadata(cache_uri, manifest, str(local_model))
 
@@ -78,6 +83,59 @@ def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, 
     assert (local_model / "model.safetensors.index.json").is_file()
     assert not (local_model / "model.safetensors").exists()
     assert not (local_model / "stale.bin").exists()
+    messages = [record.getMessage() for record in caplog.records if record.name == hf_model_cache.__name__]
+    output = "\n".join(messages)
+    assert any("role=publisher" in message and "hf_token_present=True" in message for message in messages)
+    assert any(
+        "s3_endpoint_env_source=FSSPEC_S3 s3_endpoint_env_class=coreweave_in_cluster" in message for message in messages
+    )
+    assert any("role=hit" in message for message in messages)
+    for phase in ("prepare", "download", "manifest", "publication"):
+        assert any(f"phase={phase} status=started" in message for message in messages)
+        assert any(f"phase={phase} status=completed" in message and "seconds=" in message for message in messages)
+    assert any("role=publisher status=completed" in message and "total_seconds=" in message for message in messages)
+    assert "sentinel-hf-token" not in output
+    assert "sentinel-s3-key" not in output
+    assert "sentinel-url" not in output
+
+
+@pytest.mark.parametrize(
+    "fsspec_value, aws_value, expected_source, expected_class",
+    [
+        (None, None, "none", "unset"),
+        (None, "https://cwobject.com", "AWS_ENDPOINT_URL", "other"),
+        ('{"endpoint_url":"http://cwlota.com"}', None, "FSSPEC_S3", "coreweave_in_cluster"),
+        ("not json", None, "FSSPEC_S3", "unknown"),
+    ],
+)
+def test_cold_cache_failure_reports_phase_and_safe_endpoint_class(
+    tmp_path: Path, monkeypatch, caplog, fsspec_value, aws_value, expected_source, expected_class
+) -> None:
+    cache = tmp_path / "region-cache"
+    monkeypatch.setattr(hf_model_cache, "marin_temp_bucket", lambda *_args, **_kwargs: str(cache))
+    monkeypatch.setenv("HF_TOKEN", "sentinel-hf-token")
+    monkeypatch.setattr(hf_model_cache.logger, "propagate", True)
+    for name, value in (("FSSPEC_S3", fsspec_value), ("AWS_ENDPOINT_URL", aws_value)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+    def fail_download(*_args, **_kwargs) -> Path:
+        raise RuntimeError("download failed")
+
+    monkeypatch.setattr(hf_model_cache, "download_hugging_face_snapshot", fail_download)
+    with caplog.at_level("INFO", logger=hf_model_cache.__name__), pytest.raises(RuntimeError, match="download failed"):
+        ensure_hugging_face_model_cache(
+            "laion/draft", "4bdb47c08e5b5190bea3c7a93c3e14470230e469", ttl_days=14, source_prefix="s3://region/run"
+        )
+
+    output = "\n".join(record.getMessage() for record in caplog.records if record.name == hf_model_cache.__name__)
+    assert f"s3_endpoint_env_source={expected_source} s3_endpoint_env_class={expected_class}" in output
+    assert "phase=download status=started" in output
+    assert "phase=download status=completed" not in output
+    assert "role=publisher status=completed" not in output
+    assert "sentinel-hf-token" not in output
 
 
 def test_corrupt_completed_cache_is_repaired_under_the_distributed_lock(tmp_path: Path, monkeypatch) -> None:
