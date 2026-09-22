@@ -229,7 +229,7 @@ def test_request_rejects_operator_override_instead_of_ignoring_it(tmp_path):
         [
             "--request",
             str(checkpoint),
-            "--rl_config",
+            "--launch-config",
             "config.yaml",
             "--gpu-variant",
             "H100",
@@ -261,7 +261,7 @@ def test_request_mode_rejects_task_local_model_without_source_before_submission(
         )
     )
     parser = argument_parser()
-    args = parser.parse_args(["--request", str(checkpoint), "--rl_config", "config.yaml", "--gpu-variant", "H100"])
+    args = parser.parse_args(["--request", str(checkpoint), "--launch-config", "config.yaml", "--gpu-variant", "H100"])
 
     with pytest.raises(SystemExit):
         request_spec(args, parser)
@@ -277,7 +277,7 @@ def test_manual_export_requires_explicit_checkpoint_geometry():
             "10",
             "--model_path",
             "org/model",
-            "--rl_config",
+            "--launch-config",
             "config.yaml",
             "--gpu-variant",
             "H100",
@@ -313,7 +313,7 @@ def test_export_request_records_lifecycle_result(tmp_path, monkeypatch, exit_cod
             "export_hf_checkpoint.py",
             "--request",
             str(checkpoint),
-            "--rl_config",
+            "--launch-config",
             "config.yaml",
             "--timeout",
             "7200",

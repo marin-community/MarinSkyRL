@@ -224,7 +224,11 @@ def argument_parser() -> argparse.ArgumentParser:
     ap.add_argument("--request", help="global_step_N checkpoint directory containing hf_export_request.json")
     ap.add_argument("--ckpt_path", help="checkpoint root holding global_step_N/")
     ap.add_argument("--step", type=int, help="checkpoint step to export")
-    ap.add_argument("--rl_config", required=True, help="the RL config the run was trained with")
+    ap.add_argument(
+        "--launch-config",
+        required=True,
+        help="the complete resolved launch document for the training run",
+    )
     ap.add_argument("--model_path", help="base model path, as at training time")
     ap.add_argument("--model-source-uri", help="object-store model source for a task-local --model_path")
     ap.add_argument("--model-source-identity", help="immutable identity for --model-source-uri")
@@ -295,7 +299,10 @@ def request_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> E
     if request is None:
         parser.error(f"no hf_export_request.json found under {args.request}")
     spec = operational_spec(args, request, no_wait=False)
-    return replace(spec, launch_config_path=str(write_checkpoint_export_config(Path(args.rl_config), request, spec)))
+    return replace(
+        spec,
+        launch_config_path=str(write_checkpoint_export_config(Path(args.launch_config), request, spec)),
+    )
 
 
 def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_wait: bool) -> ExportJobSpec:
@@ -349,7 +356,10 @@ def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Ex
     except ModelLocatorError as error:
         parser.error(str(error))
     spec = operational_spec(args, request, no_wait=args.no_wait)
-    return replace(spec, launch_config_path=str(write_checkpoint_export_config(Path(args.rl_config), request, spec)))
+    return replace(
+        spec,
+        launch_config_path=str(write_checkpoint_export_config(Path(args.launch_config), request, spec)),
+    )
 
 
 def _run_export(spec: ExportJobSpec, command: list[str]) -> None:
