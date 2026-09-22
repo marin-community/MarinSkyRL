@@ -1731,7 +1731,6 @@ class DriverStalled:
 
 
 def training_driver_command(config_path: Path) -> list[str]:
-    """Return the config-only training-driver command."""
     return [sys.executable, "-m", "cloud.iris.training_driver", "--config", str(config_path)]
 
 

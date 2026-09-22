@@ -19,7 +19,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterator, List
+from typing import Any, Iterator, List
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -170,7 +170,7 @@ class LocalRLRunner:
                 sort_keys=True,
             )
 
-    def _resolve_data_inputs(self, data_kind: str, exp_args: Dict[str, Any]) -> None:
+    def _resolve_data_inputs(self, data_kind: str) -> None:
         for role, attribute in (("train", "train_data"), ("validation", "val_data")):
             values = getattr(self.config, attribute)
             if not values:
@@ -181,7 +181,6 @@ class LocalRLRunner:
             sources = list(resolved.sources)
             setattr(self.config, attribute, paths)
             setattr(self, f"_{attribute}_sources", sources)
-            exp_args[attribute] = paths
             print(f"Resolved {role} data: {paths}")
 
     def run(self) -> int:
@@ -195,14 +194,13 @@ class LocalRLRunner:
         if launch_config.run.mode == "checkpoint_export":
             self._write_resolved_config(launch_config)
             return self._run_skyrl(launch_config)
-        exp_args = self._build_exp_args()
-        self._resolve_data_inputs(str(launch_config.inputs.data_kind), exp_args)
+        self._resolve_data_inputs(str(launch_config.inputs.data_kind))
         terminal_bench_data = skyrl_config.get("data", {}).get("terminal_bench_data", ())
         if terminal_bench_data:
             terminal_bench_data = tuple(
                 resolve_rl_train_data_with_sources(list(terminal_bench_data), kind="tasks").paths
             )
-        self._setup_environment(exp_args)
+        self._setup_environment()
         # Cross-cluster ingress (opencode-RL literal capture): when enabled, stand up
         # the co-located RecordProxy + register the endpoint + mint the (parent, when
         # federated) capability URL and publish it as HARBOR_MODEL_ENDPOINT BEFORE the
@@ -371,22 +369,7 @@ class LocalRLRunner:
         """GPUs per node, defaulting to total `gpus` for the single-node case."""
         return self.config.gpus_per_node or self.config.gpus
 
-    def _build_exp_args(self) -> Dict[str, Any]:
-        return {
-            "job_name": self.config.job_name,
-            "experiments_dir": self.config.experiments_dir,
-            "model_path": self.config.model_path,
-            "model_source_uri": self.config.model_source_uri,
-            "model_source_identity": self.config.model_source_identity,
-            "train_data": self.config.train_data,
-            "val_data": self.config.val_data,
-            "num_nodes": self.config.num_nodes,
-            "gpus_per_node": self._gpus_per_node(),
-            "cpus_per_node": self.config.cpus,
-            "ray_port": self.config.ray_port,
-        }
-
-    def _setup_environment(self, exp_args: Dict[str, Any]) -> None:
+    def _setup_environment(self) -> None:
         """Configure environment variables for RL training."""
         os.environ["TENSOR_PARALLEL_SIZE"] = str(self.config.tensor_parallel_size)
         os.environ["NUM_INFERENCE_ENGINES"] = str(

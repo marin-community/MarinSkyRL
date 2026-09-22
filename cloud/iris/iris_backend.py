@@ -54,14 +54,13 @@ from cloud.iris.ray_storage import (
     resolve_ray_spill_target,
 )
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR
-from cloud.iris.storage_policy import RLStoragePaths
 from cloud.iris.terminal_policy import (
     TerminalPolicyExport,
-    policy_export_geometry,
     submit_terminal_policy_export,
 )
 from marinskyrl.resource_locator import (
     is_cloud_uri,
+    join_resource_path,
 )
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle
@@ -103,6 +102,20 @@ DISK_RESOURCE = "ephemeral-storage"
 # Leave the remainder of live allocatable RAM and disk to kubelet, daemonsets,
 # and filesystem overhead.
 NODE_RESOURCE_FRACTION = 0.80
+
+
+@dataclass(frozen=True)
+class RLStoragePaths:
+    """Resolved storage paths used for launch diagnostics and retention."""
+
+    checkpoint_root: str
+    export_root: str
+    trace_root: str
+    trajectory_root: str
+    rendezvous_root: str
+    ray_log_root: str
+    resolved_config_uri: str
+    resume_checkpoint_count: int
 
 
 def _is_checkpoint_export(args: SimpleNamespace) -> bool:
@@ -237,17 +250,11 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
     ray = raw["ray"]
     artifacts = raw["artifacts"]
     inputs = raw["inputs"]
-    ingress = raw["ingress"]
     skyrl = raw["skyrl"]
     model = inputs["model"]
     model_reference = _model_cli_reference(model["uri"], model["identity"])
-    trainer = skyrl.get("trainer") or {}
-    policy = trainer.get("policy") or {}
-    policy_model = policy.get("model") or {}
     terminal_bench = skyrl.get("terminal_bench_config") or {}
     trajectory_retention = (skyrl.get("generator") or {}).get("trajectory_retention") or {}
-    train_data = inputs["train_data"]
-    validation_data = inputs["validation_data"]
     contents = config_path.read_bytes()
     digest = hashlib.sha256(contents).hexdigest()[:16]
     suffix = config_path.suffix or ".yaml"
@@ -255,28 +262,13 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
         task_path=f"{RL_CONFIG_TASK_DIR}/{digest}{suffix}",
         payload=base64.b64encode(contents).decode("ascii"),
     )
-    storage_user = _sanitize_job_name_component(os.environ.get("USER") or os.environ.get("USERNAME") or "user")
     submission = run["submission"]
     args = SimpleNamespace(
         rl_config=str(config_path),
         rl_config_launch=task_config,
         entrypoint=runtime["entrypoint"],
         model_path=model_reference.model_path,
-        model_revision=policy_model.get("revision"),
-        model_source_uri=model_reference.source_uri,
-        model_source_identity=model_reference.source_identity,
-        model_warm_source=None,
-        train_data=json.dumps(train_data),
-        val_data=json.dumps(validation_data),
-        run_id=run["id"],
-        data_sources_json=json.dumps([*train_data, *validation_data], sort_keys=True),
-        experiments_dir=runtime["experiments_dir"],
-        resolved_config_uri=artifacts["resolved_config_uri"],
-        storage_user=storage_user,
-        durable_output_root=artifacts["export_root"].removesuffix("/exports"),
-        temporary_output_root=artifacts["checkpoint_root"].removesuffix("/checkpoints"),
-        storage_ttl_days=14,
-        resume_checkpoints_to_keep=int(trainer.get("max_ckpts_to_keep", 2)),
+        resume_checkpoints_to_keep=int(artifacts["resume_checkpoint_count"]),
         num_nodes=int(allocation["num_nodes"]),
         gpus_per_node=int(allocation["gpus_per_node"]),
         gpu_variant=allocation["gpu_variant"],
@@ -289,7 +281,6 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
         rendezvous_dir=ray["rendezvous_dir"],
         rendezvous_timeout=int(ray["rendezvous_timeout"]),
         driver_liveness_timeout=int(ray["driver_liveness_timeout"]),
-        trials_dir=terminal_bench.get("trials_dir", "auto"),
         cluster=iris["cluster"],
         cluster_config=iris["cluster_config"],
         runtime_commit=runtime["launcher_commit"],
@@ -301,22 +292,17 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
         no_wait=submission == "detach",
         dry_run=submission == "prepare",
         preemptible=None,
-        ingress_mode=ingress["mode"],
-        ingress_host=ingress["host"] or None,
         target_cluster=iris["target_cluster"],
         parent_cluster_config=iris["parent_cluster_config"],
-        record_literal=bool(ingress["record_literal"]),
-        parent_controller_config_in_pod=None,
         secrets_env=None,
         wandb_entity=iris["wandb_entity"],
     )
     args.storage_paths = RLStoragePaths(
-        storage_user=storage_user,
         checkpoint_root=artifacts["checkpoint_root"],
         export_root=artifacts["export_root"],
-        trace_root=terminal_bench.get("trials_dir") or f"{artifacts['attempts_root'].rstrip('/')}/trace_jobs",
+        trace_root=terminal_bench.get("trials_dir") or join_resource_path(artifacts["attempts_root"], "trace_jobs"),
         trajectory_root=trajectory_retention.get("output_path")
-        or f"{artifacts['attempts_root'].rstrip('/')}/trajectories",
+        or join_resource_path(artifacts["attempts_root"], "trajectories"),
         rendezvous_root=ray["rendezvous_dir"],
         ray_log_root=ray["log_dir"],
         resolved_config_uri=artifacts["resolved_config_uri"],
@@ -341,7 +327,7 @@ class IrisBackend:
             return launch(args, config.runtime.launcher_commit)
 
     def export_terminal_policy(self, config_path: Path) -> None:
-        """Run the export derived from a completed training config."""
+        """Export the terminal checkpoint described by a completed training config."""
         export_terminal_policy(_iris_submission_state(config_path, load_launch_config(config_path)))
 
 
@@ -973,19 +959,7 @@ def build_debug_launch_env(args: SimpleNamespace) -> dict[str, str]:
     ).environment_for(EnvVarScope.TASK_RUNTIME)
 
 
-def _load_rl_config_yaml(rl_config_path: str) -> dict:
-    """Return the SkyRL subtree from a resolved launch config.
-
-    Raises on an unreadable/invalid file; callers that want a soft default wrap this."""
-    full = PROJECT_ROOT / rl_config_path
-    path = full if full.exists() else Path(rl_config_path)
-    with open(path) as f:
-        raw = yaml.safe_load(f) or {}
-    skyrl = raw.get("skyrl") if isinstance(raw, dict) else None
-    return skyrl if isinstance(skyrl, dict) else raw
-
-
-def _load_launch_config_yaml(config_path: str) -> dict[str, Any]:
+def _load_yaml_mapping(config_path: str) -> dict[str, Any]:
     full = PROJECT_ROOT / config_path
     path = full if full.exists() else Path(config_path)
     with path.open() as source:
@@ -993,6 +967,13 @@ def _load_launch_config_yaml(config_path: str) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: launch config must contain a mapping")
     return raw
+
+
+def _load_rl_config_yaml(config_path: str) -> dict[str, Any]:
+    """Return the SkyRL subtree from a launch document or a standalone recipe."""
+    raw = _load_yaml_mapping(config_path)
+    skyrl = raw.get("skyrl")
+    return skyrl if isinstance(skyrl, dict) else raw
 
 
 def load_config_extra_env(rl_config_path: str) -> dict[str, str]:
@@ -1003,7 +984,7 @@ def load_config_extra_env(rl_config_path: str) -> dict[str, str]:
     overrides.
     """
     try:
-        launch = _load_launch_config_yaml(rl_config_path)
+        launch = _load_yaml_mapping(rl_config_path)
     except Exception as exc:  # noqa: BLE001
         print(f"[rl-iris] WARNING: could not read extra_env from {rl_config_path}: {exc}", file=sys.stderr)
         return {}
@@ -1113,7 +1094,7 @@ def _build_task_shell(
 
 
 def build_config_task_command(args: SimpleNamespace) -> list[str]:
-    """Run the replica controller with the same resolved launch config."""
+    """Build the replica-controller command for the resolved launch config."""
     launch_config = args.rl_config_launch
     if not isinstance(launch_config, BundledLaunchConfig):
         raise RuntimeError("resolved launch config payload is missing")
@@ -1528,22 +1509,11 @@ def _ambient_in_cluster_client(workspace: Path) -> IrisClient | None:
 
 def export_terminal_policy(args: SimpleNamespace) -> None:
     """Export the terminal checkpoint from a successful direct launcher run."""
-    policy_num_nodes, policy_num_gpus_per_node = policy_export_geometry(
-        _load_rl_config_yaml(args.rl_config),
-        default_num_nodes=args.num_nodes,
-        default_gpus_per_node=args.gpus_per_node,
-    )
     storage_paths = args.storage_paths
     submit_terminal_policy_export(
         TerminalPolicyExport(
             checkpoint_root=storage_paths.checkpoint_root,
-            export_root=storage_paths.export_root,
             config_path=args.rl_config,
-            model_path=args.model_path,
-            model_source_uri=args.model_source_uri,
-            model_source_identity=args.model_source_identity,
-            policy_num_nodes=policy_num_nodes,
-            policy_num_gpus_per_node=policy_num_gpus_per_node,
             gpu_variant=args.gpu_variant,
             cluster=args.cluster,
             priority=args.priority,
@@ -1554,7 +1524,6 @@ def export_terminal_policy(args: SimpleNamespace) -> None:
             cpu=args.cpu,
             memory=args.memory,
             disk=args.disk,
-            storage_user=args.storage_user,
         )
     )
 

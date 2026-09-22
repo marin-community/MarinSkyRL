@@ -74,6 +74,18 @@ def read_json(uri: str) -> dict[str, Any] | None:
         return json.load(source)
 
 
+def resource_exists(uri: str) -> bool:
+    """Return whether a local or object-store resource exists."""
+    filesystem, path = fs_and_path(uri)
+    return filesystem.exists(path)
+
+
+def resource_file_names(uri: str) -> set[str]:
+    """Return the relative names of every file below a resource root."""
+    filesystem, root = fs_and_path(uri)
+    return {entry.path for _, entry in file_inventory(filesystem, root)}
+
+
 def terminal_checkpoint_step(checkpoint_root: str) -> int:
     """Return the latest committed checkpoint step."""
     marker_uri = join_resource_path(checkpoint_root, CHECKPOINT_MARKER_FILENAME)

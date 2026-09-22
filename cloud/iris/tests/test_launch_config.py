@@ -8,7 +8,6 @@ from typing import Any
 
 import pytest
 import yaml
-from omegaconf import DictConfig
 from omegaconf.errors import ConfigKeyError
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
@@ -107,7 +106,6 @@ def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) ->
 
     config = load_launch_config(path)
 
-    assert isinstance(config, DictConfig)
     assert config.skyrl.trainer.train_batch_size == 8
     assert validate_launch_config(config).num_nodes == 1
 

@@ -6,18 +6,21 @@ import base64
 import binascii
 import copy
 import fsspec
+from importlib.resources import files
 import json
 import math
 import os
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Dict, Mapping, Optional, Protocol
 
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
 from cloud.iris.paths import resolve_paths_in_dict
+from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT as CHECKPOINT_EXPORT_MODULE
 from marinskyrl.distillation import DistillationPlan, compile_distillation_plan, validate_distillation_runtime_support
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
@@ -46,15 +49,17 @@ class RLEntrypointSpec:
     callable: str = "run"
 
 
-RL_ENTRYPOINTS = {
-    RLEntrypoint.FULLY_ASYNC: RLEntrypointSpec("skyrl_train.entrypoints.fully_async"),
-    RLEntrypoint.GENERATE: RLEntrypointSpec("skyrl_train.entrypoints.main_generate"),
-    RLEntrypoint.MINI_SWE: RLEntrypointSpec("skyrl_train.entrypoints.mini_swe"),
-    RLEntrypoint.STANDARD: RLEntrypointSpec(STANDARD_TRAINING_ENTRYPOINT),
-    RLEntrypoint.TERMINAL_BENCH: RLEntrypointSpec("skyrl_train.entrypoints.terminal_bench"),
-    RLEntrypoint.TERMINAL_BENCH_GENERATE: RLEntrypointSpec("skyrl_train.entrypoints.terminal_bench_generate"),
-}
-CHECKPOINT_EXPORT_ENTRYPOINT = RLEntrypointSpec("skyrl_train.entrypoints.checkpoint_export")
+RL_ENTRYPOINTS = MappingProxyType(
+    {
+        RLEntrypoint.FULLY_ASYNC: RLEntrypointSpec("skyrl_train.entrypoints.fully_async"),
+        RLEntrypoint.GENERATE: RLEntrypointSpec("skyrl_train.entrypoints.main_generate"),
+        RLEntrypoint.MINI_SWE: RLEntrypointSpec("skyrl_train.entrypoints.mini_swe"),
+        RLEntrypoint.STANDARD: RLEntrypointSpec(STANDARD_TRAINING_ENTRYPOINT),
+        RLEntrypoint.TERMINAL_BENCH: RLEntrypointSpec("skyrl_train.entrypoints.terminal_bench"),
+        RLEntrypoint.TERMINAL_BENCH_GENERATE: RLEntrypointSpec("skyrl_train.entrypoints.terminal_bench_generate"),
+    }
+)
+CHECKPOINT_EXPORT_ENTRYPOINT = RLEntrypointSpec(CHECKPOINT_EXPORT_MODULE)
 
 
 def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
@@ -683,7 +688,6 @@ class CompiledSkyRLConfig:
 
     entrypoint: RLEntrypointSpec
     config: DictConfig
-    source_config: Path
 
 
 @dataclass(frozen=True)
@@ -699,15 +703,17 @@ class TaskLocalSkyRLValues:
     draft_model_uri: str | None = None
 
 
-TASK_LOCAL_SKYRL_FIELDS = {
-    "train_data": "data.train_data",
-    "validation_data": "data.val_data",
-    "terminal_bench_data": "data.terminal_bench_data",
-    "agent_api_base": "terminal_bench_config.agent_api_base",
-    "literal_log_path": "terminal_bench_config.literal_log_path",
-    "policy_model_path": "trainer.policy.model.path",
-    "draft_model_uri": "generator.speculative_decoding.model.source_uri",
-}
+TASK_LOCAL_SKYRL_FIELDS = MappingProxyType(
+    {
+        "train_data": "data.train_data",
+        "validation_data": "data.val_data",
+        "terminal_bench_data": "data.terminal_bench_data",
+        "agent_api_base": "terminal_bench_config.agent_api_base",
+        "literal_log_path": "terminal_bench_config.literal_log_path",
+        "policy_model_path": "trainer.policy.model.path",
+        "draft_model_uri": "generator.speculative_decoding.model.source_uri",
+    }
+)
 
 
 def _checkpoint_export_trainer(
@@ -732,10 +738,7 @@ def _checkpoint_export_trainer(
 def _data_override(value: Any) -> Any:
     if not isinstance(value, str) or not value.startswith("["):
         return value
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return value
+    return json.loads(value)
 
 
 def _apply_trajectory_retention_path(generator: Dict[str, Any], experiments_dir: str, job_name: str) -> None:
@@ -857,7 +860,7 @@ def _path_allows_new_keys(path: str) -> bool:
 
 
 def _merge_config_mapping(config: DictConfig, values: Mapping[str, Any], prefix: str = "") -> None:
-    """Merge launcher values without converting them to Hydra override strings."""
+    """Merge launch values into declared SkyRL config paths."""
     for key, value in values.items():
         if value is None or isinstance(value, Mapping) and not value:
             continue
@@ -879,8 +882,6 @@ def _merge_config_mapping(config: DictConfig, values: Mapping[str, Any], prefix:
 
 
 def _compose_base_config(config_groups: Mapping[str, str]) -> DictConfig:
-    from importlib.resources import files
-
     config_dir = Path(str(files("skyrl_train.config"))).resolve()
     group_overrides = [f"+{group_name}={config_name}" for group_name, config_name in config_groups.items()]
     with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
@@ -894,13 +895,12 @@ def compose_skyrl_config(
     exp_args: Mapping[str, Any],
     hpc: HPCGeometry,
 ) -> CompiledSkyRLConfig:
-    """Compose the final SkyRL subtree without dotted command-line arguments."""
+    """Compose the final SkyRL subtree from its config groups and launch values."""
     config = _compose_base_config(parsed.config_groups)
     _merge_config_mapping(config, _skyrl_config_sections(parsed, exp_args, hpc))
     return CompiledSkyRLConfig(
         entrypoint=rl_entrypoint_spec(parsed.entrypoint),
         config=config,
-        source_config=parsed.config_path,
     )
 
 
@@ -915,7 +915,6 @@ def compose_checkpoint_export_config(
     return CompiledSkyRLConfig(
         entrypoint=CHECKPOINT_EXPORT_ENTRYPOINT,
         config=config,
-        source_config=parsed.config_path,
     )
 
 

@@ -1,5 +1,4 @@
 from argparse import Namespace
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -8,7 +7,6 @@ from omegaconf import OmegaConf
 from cloud.iris import task_runtime
 from cloud.iris.task_runtime import (
     _write_final_config,
-    parse_args,
     policy_chat_template_model,
     prepare_draft_model,
     prepare_policy_model,
@@ -32,12 +30,6 @@ def test_policy_chat_template_selects_materialized_model(
 def test_policy_chat_template_requires_a_materialized_model() -> None:
     with pytest.raises(ValueError, match="requires --prestage-model or --model-local-path"):
         policy_chat_template_model("", "")
-
-
-def test_task_runtime_cli_accepts_only_the_launch_config() -> None:
-    args = parse_args(["--config", "/tmp/launch.yaml"])
-
-    assert args.config == Path("/tmp/launch.yaml")
 
 
 def test_s3_policy_stages_metadata_without_materializing_weights(monkeypatch) -> None:

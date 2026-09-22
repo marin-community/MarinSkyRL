@@ -18,6 +18,7 @@ from cloud.iris.rl_config_translation import (
     validate_tp_divides_heads,
 )
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
+from marinskyrl.resource_locator import join_resource_path
 from marinskyrl.task_sources import data_source
 
 
@@ -141,7 +142,7 @@ class InputsConfig:
 
 @dataclass
 class SkyRLLaunchConfig:
-    """Complete resolved launch document handed from Marin to MarinSkyRL."""
+    """Source or resolved launch document handed from Marin to MarinSkyRL."""
 
     schema_version: int = MISSING
     run: RunConfig = field(default_factory=RunConfig)
@@ -188,8 +189,8 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
                 "checkpoint_root": str(config.artifacts.checkpoint_root),
                 "export_root": str(config.artifacts.export_root),
                 "resume_checkpoint_count": int(config.artifacts.resume_checkpoint_count),
-                "trace_root": f"{str(config.artifacts.attempts_root).rstrip('/')}/trace_jobs",
-                "trajectory_root": f"{str(config.artifacts.attempts_root).rstrip('/')}/trajectories",
+                "trace_root": join_resource_path(str(config.artifacts.attempts_root), "trace_jobs"),
+                "trajectory_root": join_resource_path(str(config.artifacts.attempts_root), "trajectories"),
                 "seed": int(config.run.seed),
             },
             config.iris.allocation,
@@ -305,7 +306,6 @@ def validate_launch_config(config: DictConfig | Mapping[str, Any]) -> LaunchTopo
     )
     allocation = derive_iris_allocation(raw)
     skyrl = raw["skyrl"]
-    plan = derive_role_plan(skyrl)
     run = raw["run"]
     runtime = raw["runtime"]
     entrypoint = runtime["entrypoint"]
@@ -316,8 +316,7 @@ def validate_launch_config(config: DictConfig | Mapping[str, Any]) -> LaunchTopo
     )
     if runtime["profile"] != expected_profile.value:
         raise ValueError(
-            f"runtime.profile={runtime['profile']!r} does not match SkyRL trainer strategy "
-            f"({expected_profile.value!r})"
+            f"runtime.profile={runtime['profile']!r} does not match SkyRL trainer strategy ({expected_profile.value!r})"
         )
     generator = skyrl.get("generator", {})
     validate_tp_divides_heads(
