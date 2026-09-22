@@ -53,7 +53,12 @@ from cloud.iris.ray_storage import (
     RaySpillBackend,
     resolve_ray_spill_target,
 )
-from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR
+from cloud.iris.rl_config_translation import (
+    RL_CONFIG_PAYLOAD_ENV,
+    RL_CONFIG_TASK_DIR,
+    RL_ENTRYPOINTS,
+    RLEntrypoint,
+)
 from marinskyrl.resource_locator import (
     is_cloud_uri,
     join_resource_path,
@@ -706,15 +711,18 @@ def _cluster_dashboard_host(cluster_config_path: Optional[str]) -> Optional[str]
         return None
 
 
-def _rl_config_is_agentic(rl_config: Optional[str]) -> bool:
-    """True when the rl_config drives an in-sandbox agent (opencode/harbor/terminal_bench)
-    that must call BACK to the served model. Best-effort text scan."""
+def _rl_config_uses_daytona(rl_config: Optional[str]) -> bool:
+    """Return whether the resolved launch uses a Daytona-backed entrypoint."""
     try:
         if not rl_config or not os.path.isfile(rl_config):
             return False
         with open(rl_config, "r") as f:
-            text = f.read().lower()
-        return any(k in text for k in ("terminal_bench", "harbor", "opencode"))
+            config = yaml.safe_load(f) or {}
+        entrypoint = config.get("runtime", {}).get("entrypoint")
+        return entrypoint in {
+            RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH],
+            RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH_GENERATE],
+        }
     except OSError:
         return False
 
@@ -1070,7 +1078,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> IrisLaunchOu
     # (file overrides shell; same semantics as the iris launchers).
     load_secrets_env_into_os_environ(args.secrets_env)
 
-    if not _is_checkpoint_export(args) and _rl_config_is_agentic(args.launch_config):
+    if not _is_checkpoint_export(args) and _rl_config_uses_daytona(args.launch_config):
         daytona_api_key = _resolve_daytona_rl_api_key()
         os.environ["DAYTONA_API_KEY"] = daytona_api_key
         # The purge deletes stale snapshots across the shared RL org, so skip it on a
