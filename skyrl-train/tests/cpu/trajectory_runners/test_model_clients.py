@@ -1,8 +1,10 @@
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import web
 
+from skyrl_train.trajectory_runners import model_clients
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, OpenAIHTTPModelClient
 
 
@@ -252,7 +254,12 @@ async def test_http_model_client_normalizes_chat_completion():
             return [7, 8]
 
     try:
-        client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=Tokenizer())
+        client = OpenAIHTTPModelClient(
+            base_url=f"http://127.0.0.1:{port}",
+            model_name="policy",
+            tokenizer=Tokenizer(),
+            max_concurrent_requests=8,
+        )
         output = await client.generate(
             {
                 "prompts": [[{"role": "user", "content": "question"}]],
@@ -280,6 +287,67 @@ async def test_http_model_client_normalizes_chat_completion():
         "prompt_logprobs": None,
         "token_provenance": "reconstructed",
     }
+
+
+@pytest.mark.asyncio
+async def test_http_model_client_limits_requests_across_concurrent_generation_calls(monkeypatch):
+    saturated = asyncio.Event()
+    release = asyncio.Event()
+    active_requests = 0
+    peak_requests = 0
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            nonlocal active_requests, peak_requests
+            active_requests += 1
+            peak_requests = max(peak_requests, active_requests)
+            if active_requests == 2:
+                saturated.set()
+            await release.wait()
+            return self
+
+        async def __aexit__(self, *_args):
+            nonlocal active_requests
+            active_requests -= 1
+
+        async def json(self):
+            return {"choices": [{"message": {"content": "answer"}, "finish_reason": "stop"}]}
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(model_clients.aiohttp, "ClientSession", FakeSession)
+    tokenizer = MagicMock()
+    tokenizer.encode.return_value = [1]
+    client = OpenAIHTTPModelClient(
+        base_url="http://inference.test",
+        model_name="policy",
+        tokenizer=tokenizer,
+        max_concurrent_requests=2,
+    )
+    generations = [
+        asyncio.create_task(client.generate({"prompts": [[{"role": "user", "content": str(index)}]]}))
+        for index in range(6)
+    ]
+
+    await saturated.wait()
+    assert peak_requests == 2
+    release.set()
+    outputs = await asyncio.gather(*generations)
+
+    assert [output["responses"] for output in outputs] == [["answer"]] * 6
 
 
 @pytest.mark.asyncio
@@ -338,7 +406,12 @@ async def test_http_structured_chat_continues_from_sampled_tool_call_tokens():
     port = site._server.sockets[0].getsockname()[1]
     tokenizer = MagicMock()
     tokenizer.decode.side_effect = lambda ids, **_: "tool call" if ids == [21, 22] else "done"
-    client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=tokenizer)
+    client = OpenAIHTTPModelClient(
+        base_url=f"http://127.0.0.1:{port}",
+        model_name="policy",
+        tokenizer=tokenizer,
+        max_concurrent_requests=8,
+    )
 
     try:
         first = await client.generate(
@@ -393,7 +466,12 @@ async def test_http_model_client_preserves_server_error_details():
     port = site._server.sockets[0].getsockname()[1]
 
     try:
-        client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=MagicMock())
+        client = OpenAIHTTPModelClient(
+            base_url=f"http://127.0.0.1:{port}",
+            model_name="policy",
+            tokenizer=MagicMock(),
+            max_concurrent_requests=8,
+        )
         with pytest.raises(RuntimeError, match="HTTP 400.*unsupported field"):
             await client.generate({"prompts": [[{"role": "user", "content": "question"}]]})
     finally:
