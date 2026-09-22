@@ -3,9 +3,9 @@ import os
 from pathlib import Path
 
 import huggingface_hub.constants
+import numpy as np
 import pytest
-import torch
-from safetensors.torch import save_file
+from safetensors.numpy import save_file
 
 from cloud.iris import hf_model_cache
 from cloud.iris.hf_model_cache import ensure_hugging_face_model_cache, stage_model_metadata
@@ -44,7 +44,7 @@ def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, 
         downloads.append((model_id, revision))
         (destination / "config.json").write_text("{}")
         (destination / "tokenizer.json").write_text("{}")
-        save_file({"weight": torch.arange(4, dtype=torch.float32)}, destination / "model.safetensors")
+        save_file({"weight": np.arange(4, dtype=np.float32)}, destination / "model.safetensors")
         return destination
 
     monkeypatch.setattr(hf_model_cache, "marin_temp_bucket", lambda *_args, **_kwargs: str(cache))
