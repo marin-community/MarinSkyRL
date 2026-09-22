@@ -2,7 +2,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 import io
 import os
-from typing import Any, cast, Protocol, runtime_checkable
+from typing import Any, cast
 
 from fsspec import AbstractFileSystem
 from loguru import logger
@@ -24,19 +24,14 @@ from marinskyrl.remote_io import (
     DEFAULT_S3_MULTIPART_CONCURRENCY,
     DEFAULT_S3_MULTIPART_PART_BYTES,
     MINIMUM_S3_MULTIPART_PART_BYTES,
-    MultipartS3FileSystem,
+    OutputStream,
     S3MultipartWriteStream,
+    create_output_stream,
+    manage_output_stream,
 )
 
 
 DEFAULT_TENSOR_COPY_AHEAD_BYTES = 2**30
-
-
-@runtime_checkable
-class _AbortableWriteStream(Protocol):
-    closed: bool
-
-    def discard(self) -> None: ...
 
 
 class _DeferredWriteErrorStream:
@@ -113,38 +108,30 @@ class _AbortableFsspecFileSystem(FsspecFileSystem):
         return path
 
     @contextmanager
-    def create_stream(self, path: str | os.PathLike, mode: str) -> Generator[io.IOBase, None, None]:
+    def create_stream(
+        self,
+        path: str | os.PathLike,
+        mode: str,
+    ) -> Generator[io.IOBase | OutputStream, None, None]:
         if self.fs is None:
             raise AssertionError("filesystem has not been initialized")
 
         object_path = os.fspath(path)
-        protocol = self.fs.protocol
-        protocols = (protocol,) if isinstance(protocol, str) else protocol
-        if mode == "wb" and object_path.endswith(DEFAULT_SUFFIX) and "s3" in protocols:
-            if not isinstance(self.fs, MultipartS3FileSystem):
-                raise TypeError("S3 checkpoint filesystem does not provide multipart operations")
-            stream = _DeferredWriteErrorStream(
-                S3MultipartWriteStream(
-                    self.fs,
-                    object_path,
-                    part_bytes=self.multipart_part_bytes,
-                    concurrency=self.multipart_concurrency,
-                )
+        if mode == "wb":
+            stream = create_output_stream(
+                self.fs,
+                object_path,
+                part_bytes=self.multipart_part_bytes,
+                concurrency=self.multipart_concurrency,
             )
-        else:
-            stream = self.fs.open(object_path, mode)
-        try:
-            yield stream
-            stream.close()
-        except BaseException as error:
-            if any(character in mode for character in "w+a") and isinstance(stream, _AbortableWriteStream):
-                try:
-                    stream.discard()
-                    stream.closed = True
-                except Exception as cleanup_error:
-                    error.add_note(f"Failed to abort multipart upload for {path}: {cleanup_error}")
-            error.add_note(f"Object write failed for {path}")
-            raise
+            if object_path.endswith(DEFAULT_SUFFIX) and isinstance(stream, S3MultipartWriteStream):
+                stream = _DeferredWriteErrorStream(stream)
+            with manage_output_stream(stream, object_path) as managed:
+                yield managed
+            return
+
+        with self.fs.open(object_path, mode) as stream:
+            yield cast(io.IOBase, stream)
 
 
 class StreamingFsspecWriter(FileSystemWriter):

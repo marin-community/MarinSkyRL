@@ -4,7 +4,10 @@ import socket
 from collections import Counter
 from dataclasses import dataclass
 
+from huggingface_hub import snapshot_download
 from loguru import logger
+from marinskyrl.remote_io import load_hugging_face_with_retry
+from safetensors import safe_open
 from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
 import ray
 import torch
@@ -649,10 +652,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         }
 
         # Resolve the on-disk HF checkpoint shards (local cache or download).
-        from huggingface_hub import snapshot_download
-        from marinskyrl.remote_io import load_hugging_face_with_retry
-        from safetensors import safe_open
-
         local_dir = model_path
         if not (os.path.isdir(model_path) and os.path.exists(os.path.join(model_path, "config.json"))):
             local_dir = load_hugging_face_with_retry(
@@ -660,7 +659,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                     model_path,
                     allow_patterns=["*.safetensors", "*.json"],
                 ),
-                model_id=model_path,
+                resource_id=model_path,
+                resource_kind="model snapshot",
             )
 
         # Build name -> shard-file index.

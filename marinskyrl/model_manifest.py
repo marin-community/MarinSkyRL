@@ -27,15 +27,17 @@ class ModelManifestFile(BaseModel):
 
     path: str
     size: int = Field(ge=0, strict=True)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sha256: str
 
     @field_validator("path")
     @classmethod
     def validate_path(cls, value: str) -> str:
-        path = PurePosixPath(value)
-        if value in ("", ".") or path.is_absolute() or ".." in path.parts:
-            raise ValueError(f"model file path must be relative and contained: {value!r}")
-        return value
+        return validate_model_file_path(value)
+
+    @field_validator("sha256")
+    @classmethod
+    def validate_sha256(cls, value: str) -> str:
+        return validate_sha256_digest(value)
 
 
 class ModelManifest(BaseModel):
@@ -64,14 +66,37 @@ class ModelManifest(BaseModel):
         expected = _manifest_identity(self.model_id, self.revision, self.files, self.tokenizer_mode)
         if self.identity != expected:
             raise ValueError(f"Model manifest identity mismatch at {source}: {self.identity} != {expected}")
-        names = set(paths)
-        if self.tokenizer_mode == "embedded":
-            validate_portable_hf_model_files(names, source)
-        else:
-            validate_hf_model_weights(names, source)
+        validate_model_file_names(set(paths), source, self.tokenizer_mode)
         if HF_WEIGHT_INDEX_FILENAME not in paths:
             raise ValueError(f"Model manifest is missing {HF_WEIGHT_INDEX_FILENAME}: {source}")
         return self
+
+
+def validate_model_file_path(value: str) -> str:
+    """Validate one relative path stored in a model manifest."""
+    path = PurePosixPath(value)
+    if value in ("", ".") or path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"model file path must be relative and contained: {value!r}")
+    return value
+
+
+def validate_sha256_digest(value: str) -> str:
+    """Validate and return a lowercase SHA-256 digest."""
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError(f"invalid SHA-256 digest: {value!r}")
+    return value
+
+
+def validate_model_file_names(
+    names: set[str],
+    source: str,
+    tokenizer_mode: Literal["embedded", "policy"],
+) -> None:
+    """Validate a model file inventory for its tokenizer contract."""
+    if tokenizer_mode == "embedded":
+        validate_portable_hf_model_files(names, source)
+    else:
+        validate_hf_model_weights(names, source)
 
 
 def sha256_file(path: Path) -> str:
@@ -207,10 +232,7 @@ def snapshot_model_manifest(
         path for path in snapshot.rglob("*") if path.is_file() and path.relative_to(snapshot).parts[0] != ".cache"
     )
     names = {path.relative_to(snapshot).as_posix() for path in paths}
-    if tokenizer_mode == "embedded":
-        validate_portable_hf_model_files(names, str(snapshot))
-    else:
-        validate_hf_model_weights(names, str(snapshot))
+    validate_model_file_names(names, str(snapshot), tokenizer_mode)
     files = tuple(
         ModelManifestFile(
             path=path.relative_to(snapshot).as_posix(),

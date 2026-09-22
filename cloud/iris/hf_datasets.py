@@ -13,6 +13,7 @@ from typing import Optional
 import huggingface_hub
 from huggingface_hub import snapshot_download
 
+from marinskyrl.remote_io import call_with_hugging_face_retry, load_hugging_face_with_retry
 from marinskyrl.resource_locator import HFDatasetSelector, parse_hf_dataset_selector
 
 
@@ -46,8 +47,6 @@ def is_raw_tasks_directory(snapshot_dir) -> bool:
 
 def resolve_hf_dataset_selector(value: str) -> HFDatasetSelector:
     """Resolve a dataset selector's revision to an immutable Hub commit."""
-    from marinskyrl.remote_io import call_with_hugging_face_retry
-
     selector = parse_hf_dataset_selector(value)
     if selector is None:
         raise ValueError(f"Invalid Hugging Face dataset selector: {value!r}")
@@ -60,8 +59,6 @@ def resolve_hf_dataset_selector(value: str) -> HFDatasetSelector:
 
 def download_hf_dataset(selector_value: str, revision: Optional[str] = None) -> str:
     """Download a dataset selector and return its selected local directory."""
-    from marinskyrl.remote_io import load_hugging_face_with_retry
-
     selector = parse_hf_dataset_selector(selector_value)
     if selector is None:
         raise ValueError(f"Invalid Hugging Face dataset selector: {selector_value!r}")
@@ -76,7 +73,8 @@ def download_hf_dataset(selector_value: str, revision: Optional[str] = None) -> 
             repo_type="dataset",
             allow_patterns=[f"{selector.subdir}/**"] if selector.subdir else None,
         ),
-        model_id=selector.repo_id,
+        resource_id=selector.repo_id,
+        resource_kind="dataset snapshot",
     )
     selected = Path(snapshot) / selector.subdir if selector.subdir else Path(snapshot)
     if not selected.is_dir():

@@ -84,7 +84,8 @@ class MegatronWorker:
         revision = model_config.get("revision")
         load_hugging_face_with_retry(
             lambda: snapshot_download(model_path, revision=revision),
-            model_id=model_path,
+            resource_id=model_path,
+            resource_kind="model snapshot",
             max_retries=int(retry.max_retries),
             backoff_base=float(retry.backoff_base_seconds),
             backoff_cap=float(retry.backoff_cap_seconds),

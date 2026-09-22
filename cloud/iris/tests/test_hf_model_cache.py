@@ -13,6 +13,7 @@ from safetensors.numpy import save, save_file
 
 from cloud.iris import hf_model_cache
 from cloud.iris.hf_model_cache import (
+    HuggingFaceSnapshot,
     HuggingFaceSnapshotFile,
     ensure_hugging_face_model_cache,
     publish_hugging_face_snapshot,
@@ -260,7 +261,7 @@ def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, 
 
     def open_snapshot(model_id: str, revision: str):
         snapshots.append((model_id, revision))
-        return source, source_root, files
+        return HuggingFaceSnapshot(source, source_root, files)
 
     monkeypatch.setattr(hf_model_cache, "marin_temp_bucket", lambda *_args, **_kwargs: str(cache))
     monkeypatch.setattr(hf_model_cache, "_open_hugging_face_snapshot", open_snapshot)
@@ -309,7 +310,7 @@ def test_corrupt_completed_cache_is_repaired_under_the_distributed_lock(tmp_path
     monkeypatch.setattr(
         hf_model_cache,
         "_open_hugging_face_snapshot",
-        lambda _model_id, _revision: (source, source_root, files),
+        lambda _model_id, _revision: HuggingFaceSnapshot(source, source_root, files),
     )
 
     cache_uri, manifest = ensure_hugging_face_model_cache(
@@ -336,11 +337,7 @@ def test_draft_manifest_can_share_the_policy_tokenizer(tmp_path: Path, monkeypat
     monkeypatch.setattr(
         hf_model_cache,
         "_open_hugging_face_snapshot",
-        lambda _model_id, revision: (
-            source,
-            source_root,
-            files,
-        ),
+        lambda _model_id, revision: HuggingFaceSnapshot(source, source_root, files),
     )
 
     cache_uri, manifest = ensure_hugging_face_model_cache(

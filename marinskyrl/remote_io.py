@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Generator
+from collections.abc import Buffer, Callable, Generator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import errno
 import os
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import Any, cast, Protocol, TypeVar, runtime_checkable
 
+import botocore.session
 from fsspec.spec import AbstractFileSystem
 import httpcore
 import httpx
+from huggingface_hub.errors import (
+    EntryNotFoundError,
+    GatedRepoError,
+    HfHubHTTPError,
+    LocalEntryNotFoundError,
+    RepositoryNotFoundError,
+    RevisionNotFoundError,
+)
 from loguru import logger
 import requests
 from rigging.filesystem.factory import filesystem as guarded_filesystem
@@ -55,28 +64,17 @@ _RETRYABLE_TRANSLATED_ERROR_MARKERS = (
     "serviceunavailable",
     "slowdown",
 )
-_HF_FATAL_ERRORS: tuple[type[BaseException], ...] = ()
+_HF_FATAL_ERRORS = (RepositoryNotFoundError, RevisionNotFoundError, GatedRepoError)
 _HF_TRANSIENT_ERRORS = (
     OSError,
     httpx.TransportError,
     httpcore.ProtocolError,
     requests.exceptions.RequestException,
     urllib3.exceptions.HTTPError,
+    HfHubHTTPError,
+    EntryNotFoundError,
+    LocalEntryNotFoundError,
 )
-try:
-    from huggingface_hub.errors import (
-        EntryNotFoundError,
-        GatedRepoError,
-        HfHubHTTPError,
-        LocalEntryNotFoundError,
-        RepositoryNotFoundError,
-        RevisionNotFoundError,
-    )
-
-    _HF_FATAL_ERRORS = (RepositoryNotFoundError, RevisionNotFoundError, GatedRepoError)
-    _HF_TRANSIENT_ERRORS += (HfHubHTTPError, EntryNotFoundError, LocalEntryNotFoundError)
-except ImportError:
-    pass
 _HF_TRANSIENT_MESSAGE_FRAGMENTS = (
     "incompleteread",
     "incomplete read",
@@ -123,15 +121,10 @@ def filesystem_and_path(uri: str) -> tuple[AbstractFileSystem, str]:
 
 
 def _s3_expiry_time() -> datetime | None:
-    try:
-        import botocore.session
-
-        credentials = botocore.session.get_session().get_credentials()
-        if credentials is None:
-            return None
-        return getattr(credentials, "expiry_time", None) or getattr(credentials, "_expiry_time", None)
-    except Exception:
+    credentials = botocore.session.get_session().get_credentials()
+    if credentials is None:
         return None
+    return getattr(credentials, "expiry_time", None) or getattr(credentials, "_expiry_time", None)
 
 
 def _refresh_s3_credentials(filesystem: AbstractFileSystem) -> None:
@@ -261,16 +254,17 @@ def call_with_hugging_face_retry(
 def load_hugging_face_with_retry(
     call: Callable[[], T],
     *,
-    model_id: str,
+    resource_id: str,
+    resource_kind: str,
     max_retries: int = DEFAULT_HF_MAX_RETRIES,
     backoff_base: float = DEFAULT_HF_BACKOFF_BASE_SECONDS,
     backoff_cap: float = DEFAULT_HF_BACKOFF_CAP_SECONDS,
 ) -> T:
-    """Load one model through the shared Hugging Face retry policy."""
+    """Load one Hub resource through the shared Hugging Face retry policy."""
     rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "?"))
     return call_with_hugging_face_retry(
         call,
-        operation=f"load Hugging Face model {model_id} on rank {rank}",
+        operation=f"load Hugging Face {resource_kind} {resource_id} on rank {rank}",
         max_retries=max_retries,
         backoff_base=backoff_base,
         backoff_cap=backoff_cap,
@@ -284,6 +278,21 @@ class MultipartS3FileSystem(Protocol):
     def split_path(self, path: str) -> tuple[str, str, str | None]: ...
 
     def call_s3(self, method: str, *args: Any, **kwargs: Any) -> Any: ...
+
+
+class OutputStream(Protocol):
+    closed: bool
+
+    def write(self, payload: Buffer) -> int: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class DiscardableStream(Protocol):
+    closed: bool
+
+    def discard(self) -> None: ...
 
 
 class S3MultipartWriteStream:
@@ -329,7 +338,7 @@ class S3MultipartWriteStream:
         if self.closed:
             raise ValueError("flush of closed remote stream")
 
-    def write(self, payload: Any) -> int:
+    def write(self, payload: Buffer) -> int:
         if self.closed:
             raise ValueError("write to closed remote stream")
         view = memoryview(payload).cast("B")
@@ -459,6 +468,45 @@ class S3MultipartWriteStream:
         self._completed_parts.append(future.result())
 
 
+def create_output_stream(
+    filesystem: AbstractFileSystem,
+    path: str,
+    *,
+    part_bytes: int = DEFAULT_S3_MULTIPART_PART_BYTES,
+    concurrency: int = DEFAULT_S3_MULTIPART_CONCURRENCY,
+) -> OutputStream:
+    """Create a write stream, using bounded multipart transfer for S3."""
+    protocol = getattr(filesystem, "protocol", ())
+    protocols = protocol if isinstance(protocol, tuple) else (protocol,)
+    if "s3" in protocols or "s3a" in protocols:
+        if not isinstance(filesystem, MultipartS3FileSystem):
+            raise TypeError("S3 filesystem does not provide multipart operations")
+        return S3MultipartWriteStream(filesystem, path, part_bytes=part_bytes, concurrency=concurrency)
+    return cast(OutputStream, filesystem.open(path, "wb"))
+
+
+@contextmanager
+def manage_output_stream(stream: OutputStream, path: str) -> Generator[OutputStream, None, None]:
+    """Close a successful output stream or discard a failed partial write."""
+    try:
+        yield stream
+        stream.close()
+    except BaseException as error:
+        if isinstance(stream, DiscardableStream):
+            try:
+                stream.discard()
+                stream.closed = True
+            except Exception as cleanup_error:
+                error.add_note(f"Failed to discard remote write for {path}: {cleanup_error}")
+        else:
+            try:
+                stream.close()
+            except Exception as cleanup_error:
+                error.add_note(f"Failed to close remote write for {path}: {cleanup_error}")
+        error.add_note(f"Object write failed for {path}")
+        raise
+
+
 @contextmanager
 def open_output_stream(
     filesystem: AbstractFileSystem,
@@ -466,29 +514,11 @@ def open_output_stream(
     *,
     part_bytes: int = DEFAULT_S3_MULTIPART_PART_BYTES,
     concurrency: int = DEFAULT_S3_MULTIPART_CONCURRENCY,
-) -> Generator[Any, None, None]:
-    """Open a write stream, using bounded multipart transfer for S3."""
-    protocol = getattr(filesystem, "protocol", ())
-    protocols = protocol if isinstance(protocol, tuple) else (protocol,)
-    if "s3" in protocols or "s3a" in protocols:
-        if not isinstance(filesystem, MultipartS3FileSystem):
-            raise TypeError("S3 filesystem does not provide multipart operations")
-        stream = S3MultipartWriteStream(filesystem, path, part_bytes=part_bytes, concurrency=concurrency)
-    else:
-        stream = filesystem.open(path, "wb")
-    try:
-        yield stream
-        stream.close()
-    except BaseException as error:
-        if hasattr(stream, "discard"):
-            try:
-                stream.discard()
-            except Exception as cleanup_error:
-                error.add_note(f"Failed to discard remote write for {path}: {cleanup_error}")
-        else:
-            stream.close()
-        error.add_note(f"Object write failed for {path}")
-        raise
+) -> Generator[OutputStream, None, None]:
+    """Open a managed output stream with bounded multipart transfer for S3."""
+    stream = create_output_stream(filesystem, path, part_bytes=part_bytes, concurrency=concurrency)
+    with manage_output_stream(stream, path) as managed:
+        yield managed
 
 
 def abort_multipart_uploads(path: str) -> int:

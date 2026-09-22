@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import posixpath
 import time
 from typing import Literal, Sequence
@@ -19,11 +19,11 @@ from rigging.filesystem.distributed_lock import create_lock, lease_refresh
 
 from cloud.iris.artifacts import atomic_directory_update, fs_and_path, read_json
 from marinskyrl.hf_model import (
+    TOKENIZER_CONFIG_NAME,
+    TOKENIZER_JSON_NAME,
     hugging_face_hub_online,
     immutable_model_cache_key,
     normalize_fast_tokenizer_metadata_bytes,
-    validate_hf_model_weights,
-    validate_portable_hf_model_files,
 )
 from marinskyrl.model_manifest import (
     HF_WEIGHT_INDEX_FILENAME,
@@ -34,6 +34,9 @@ from marinskyrl.model_manifest import (
     build_safetensors_weight_index,
     read_safetensors_header,
     sha256_file,
+    validate_model_file_names,
+    validate_model_file_path,
+    validate_sha256_digest,
 )
 from marinskyrl.remote_io import (
     call_with_filesystem_retry,
@@ -42,7 +45,7 @@ from marinskyrl.remote_io import (
     load_hugging_face_with_retry,
     open_output_stream,
 )
-from marinskyrl.resource_locator import join_resource_path
+from marinskyrl.resource_locator import join_resource_path, relative_resource_path
 from marinskyrl.speculative_decoding import is_hugging_face_commit
 
 _CACHE_PREFIX = "marinskyrl/hf-models"
@@ -50,6 +53,8 @@ _CACHE_POLL_INTERVAL = 10.0
 _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth")
 _STREAM_CHUNK_BYTES = 8 * 2**20
 _MAX_METADATA_BYTES = 256 * 2**20
+_MODEL_CONFIG_NAME = "config.json"
+_MODEL_METADATA_FILES = (_MODEL_CONFIG_NAME, TOKENIZER_JSON_NAME, TOKENIZER_CONFIG_NAME)
 
 
 @dataclass(frozen=True)
@@ -61,15 +66,42 @@ class HuggingFaceSnapshotFile:
     sha256: str | None = None
 
     def __post_init__(self) -> None:
-        path = PurePosixPath(self.path)
-        if self.path in ("", ".") or path.is_absolute() or ".." in path.parts:
-            raise ValueError(f"Hugging Face snapshot path must be relative and contained: {self.path!r}")
+        validate_model_file_path(self.path)
         if self.size < 0:
             raise ValueError(f"Hugging Face snapshot size must be non-negative: {self.path}")
-        if self.sha256 is not None and (
-            len(self.sha256) != 64 or any(character not in "0123456789abcdef" for character in self.sha256)
-        ):
-            raise ValueError(f"Invalid Hugging Face snapshot SHA256: {self.path}")
+        if self.sha256 is not None:
+            validate_sha256_digest(self.sha256)
+
+
+@dataclass(frozen=True)
+class HuggingFaceSnapshot:
+    filesystem: AbstractFileSystem
+    root: str
+    files: tuple[HuggingFaceSnapshotFile, ...]
+
+
+@dataclass(frozen=True)
+class _MirroredSnapshotFile:
+    entry: ModelManifestFile
+    tensor_keys: tuple[str, ...]
+    reused: bool
+
+
+@dataclass(frozen=True)
+class _MirrorTransferStats:
+    streamed_files: int
+    streamed_bytes: int
+    streamed_weight_bytes: int
+    reused_files: int
+    reused_bytes: int
+    reused_weight_bytes: int
+
+
+@dataclass(frozen=True)
+class _MirroredSnapshot:
+    files: dict[str, ModelManifestFile]
+    shard_headers: dict[str, tuple[int, tuple[str, ...]]]
+    stats: _MirrorTransferStats
 
 
 def load_model_manifest(model_uri: str) -> ModelManifest:
@@ -85,7 +117,7 @@ def _cached_manifest(
 ) -> ModelManifest | None:
     marker_uri = join_resource_path(cache_uri, MODEL_MANIFEST_FILENAME)
     filesystem, marker_path = fs_and_path(marker_uri)
-    if not filesystem.exists(marker_path):
+    if not call_with_filesystem_retry(filesystem, filesystem.exists, marker_path):
         return None
     # The manifest is the completion record. A malformed or mismatched marker
     # identifies a partial cache that the next lock holder can rebuild.
@@ -114,7 +146,8 @@ def download_hugging_face_snapshot(
                 local_dir=destination,
                 allow_patterns=list(allow_patterns) or None,
             ),
-            model_id=model_id,
+            resource_id=model_id,
+            resource_kind="model snapshot",
         )
     return Path(snapshot)
 
@@ -136,7 +169,7 @@ def resolve_hugging_face_revision(model_id: str, revision: str | None) -> str:
 def _open_hugging_face_snapshot(
     model_id: str,
     revision: str,
-) -> tuple[AbstractFileSystem, str, tuple[HuggingFaceSnapshotFile, ...]]:
+) -> HuggingFaceSnapshot:
     """Open and inventory one pinned Hub tree without downloading its files."""
     with hugging_face_hub_online():
         entries = call_with_hugging_face_retry(
@@ -155,7 +188,7 @@ def _open_hugging_face_snapshot(
     )
     if not files:
         raise ValueError(f"Hugging Face snapshot contains no files: {model_id}@{revision}")
-    return filesystem, f"{model_id}@{revision}", files
+    return HuggingFaceSnapshot(filesystem=filesystem, root=f"{model_id}@{revision}", files=files)
 
 
 def _destination_matches(
@@ -220,7 +253,7 @@ def _stream_snapshot_file(
     destination_path: str,
     *,
     safetensors: bool = False,
-) -> tuple[ModelManifestFile, tuple[str, ...], bool]:
+) -> _MirroredSnapshotFile:
     """Mirror one file without a disk copy and optionally collect tensor names."""
     if _destination_matches(
         destination_filesystem,
@@ -238,10 +271,10 @@ def _stream_snapshot_file(
             keys = call_with_filesystem_retry(destination_filesystem, read_header)
         else:
             keys = ()
-        return (
-            ModelManifestFile(path=snapshot_file.path, size=snapshot_file.size, sha256=snapshot_file.sha256),
-            keys,
-            True,
+        return _MirroredSnapshotFile(
+            entry=ModelManifestFile(path=snapshot_file.path, size=snapshot_file.size, sha256=snapshot_file.sha256),
+            tensor_keys=keys,
+            reused=True,
         )
 
     def transfer() -> tuple[ModelManifestFile, tuple[str, ...]]:
@@ -276,18 +309,144 @@ def _stream_snapshot_file(
         transfer,
         operation=f"stream Hugging Face file {snapshot_file.path}",
     )
-    return entry, keys, False
+    return _MirroredSnapshotFile(entry=entry, tensor_keys=keys, reused=False)
 
 
 def _remove_unexpected_files(filesystem: AbstractFileSystem, root: str, expected_paths: set[str]) -> None:
     found = call_with_filesystem_retry(filesystem, filesystem.find, root, detail=True)
-    prefix = root.rstrip("/") + "/"
     for path, info in found.items():
         if info["type"] != "file":
             continue
-        relative = path.removeprefix(prefix)
+        relative = relative_resource_path(root, path)
         if relative not in expected_paths:
             call_with_filesystem_retry(filesystem, filesystem.rm, path)
+
+
+def _mirror_snapshot_files(
+    source_filesystem: AbstractFileSystem,
+    source_root: str,
+    files_by_path: dict[str, HuggingFaceSnapshotFile],
+    destination_filesystem: AbstractFileSystem,
+    destination_root: str,
+) -> _MirroredSnapshot:
+    manifest_files: dict[str, ModelManifestFile] = {}
+    shard_headers: dict[str, tuple[int, tuple[str, ...]]] = {}
+    deferred_metadata = {*_MODEL_METADATA_FILES, HF_WEIGHT_INDEX_FILENAME}
+    streamed_files = 0
+    streamed_bytes = 0
+    streamed_weight_bytes = 0
+    reused_files = 0
+    reused_bytes = 0
+    reused_weight_bytes = 0
+
+    for path, snapshot_file in sorted(files_by_path.items()):
+        if path in deferred_metadata:
+            continue
+        source_path = posixpath.join(source_root, path)
+        destination_path = posixpath.join(destination_root, path)
+        mirrored = _stream_snapshot_file(
+            source_filesystem,
+            source_path,
+            snapshot_file,
+            destination_filesystem,
+            destination_path,
+            safetensors=path.endswith(".safetensors"),
+        )
+        manifest_files[path] = mirrored.entry
+        if mirrored.reused:
+            reused_files += 1
+            reused_bytes += mirrored.entry.size
+            if _is_weight(path):
+                reused_weight_bytes += mirrored.entry.size
+        else:
+            streamed_files += 1
+            streamed_bytes += mirrored.entry.size
+            if _is_weight(path):
+                streamed_weight_bytes += mirrored.entry.size
+        if path.endswith(".safetensors"):
+            shard_headers[path] = (mirrored.entry.size, mirrored.tensor_keys)
+
+    stats = _MirrorTransferStats(
+        streamed_files=streamed_files,
+        streamed_bytes=streamed_bytes,
+        streamed_weight_bytes=streamed_weight_bytes,
+        reused_files=reused_files,
+        reused_bytes=reused_bytes,
+        reused_weight_bytes=reused_weight_bytes,
+    )
+    return _MirroredSnapshot(files=manifest_files, shard_headers=shard_headers, stats=stats)
+
+
+def _publish_snapshot_metadata(
+    source_filesystem: AbstractFileSystem,
+    source_root: str,
+    files_by_path: dict[str, HuggingFaceSnapshotFile],
+    destination_filesystem: AbstractFileSystem,
+    destination_root: str,
+    *,
+    source: str,
+) -> dict[str, ModelManifestFile]:
+    manifest_files = {}
+
+    for path in _MODEL_METADATA_FILES:
+        snapshot_file = files_by_path.get(path)
+        if snapshot_file is None:
+            continue
+        payload = _read_source_bytes(
+            source_filesystem,
+            posixpath.join(source_root, path),
+            expected_size=snapshot_file.size,
+        )
+        if path in {_MODEL_CONFIG_NAME, TOKENIZER_JSON_NAME}:
+            json.loads(payload)
+        if path == TOKENIZER_CONFIG_NAME:
+            payload = normalize_fast_tokenizer_metadata_bytes(
+                payload,
+                has_tokenizer_json=TOKENIZER_JSON_NAME in files_by_path,
+                source=source,
+            )
+        destination_path = posixpath.join(destination_root, path)
+        digest = hashlib.sha256(payload).hexdigest()
+        if not _destination_matches(destination_filesystem, destination_path, size=len(payload), sha256=digest):
+            _write_bytes(destination_filesystem, destination_path, payload)
+        manifest_files[path] = ModelManifestFile(path=path, size=len(payload), sha256=digest)
+    return manifest_files
+
+
+def _publish_weight_index(
+    source_filesystem: AbstractFileSystem,
+    source_root: str,
+    files_by_path: dict[str, HuggingFaceSnapshotFile],
+    destination_filesystem: AbstractFileSystem,
+    destination_root: str,
+    shard_headers: dict[str, tuple[int, tuple[str, ...]]],
+    *,
+    source: str,
+) -> ModelManifestFile:
+    """Validate or synthesize the mirrored Transformers weight index."""
+
+    index_file = files_by_path.get(HF_WEIGHT_INDEX_FILENAME)
+    existing_index = None
+    if index_file is not None:
+        existing_index = _read_source_bytes(
+            source_filesystem,
+            posixpath.join(source_root, HF_WEIGHT_INDEX_FILENAME),
+            expected_size=index_file.size,
+        )
+    index_bytes = build_safetensors_weight_index(
+        shard_headers,
+        f"{source}/{HF_WEIGHT_INDEX_FILENAME}",
+        existing=existing_index,
+    )
+    index_path = posixpath.join(destination_root, HF_WEIGHT_INDEX_FILENAME)
+    index_digest = hashlib.sha256(index_bytes).hexdigest()
+    if not _destination_matches(destination_filesystem, index_path, size=len(index_bytes), sha256=index_digest):
+        _write_bytes(destination_filesystem, index_path, index_bytes)
+    return ModelManifestFile(
+        path=HF_WEIGHT_INDEX_FILENAME,
+        size=len(index_bytes),
+        sha256=index_digest,
+    )
 
 
 def publish_hugging_face_snapshot(
@@ -301,16 +460,13 @@ def publish_hugging_face_snapshot(
     tokenizer_mode: Literal["embedded", "policy"] = "embedded",
 ) -> ModelManifest:
     """Stream a pinned Hub snapshot into object storage and publish its manifest last."""
+    source = f"{model_id}@{revision}"
     files_by_path = {entry.path: entry for entry in files}
     if len(files_by_path) != len(files):
-        raise ValueError(f"Hugging Face snapshot contains duplicate paths: {model_id}@{revision}")
+        raise ValueError(f"Hugging Face snapshot contains duplicate paths: {source}")
     if MODEL_MANIFEST_FILENAME in files_by_path:
         raise ValueError(f"Hugging Face snapshot uses reserved path {MODEL_MANIFEST_FILENAME}")
-    names = set(files_by_path)
-    if tokenizer_mode == "embedded":
-        validate_portable_hf_model_files(names, f"{model_id}@{revision}")
-    else:
-        validate_hf_model_weights(names, f"{model_id}@{revision}")
+    validate_model_file_names(set(files_by_path), source, tokenizer_mode)
 
     destination_filesystem, destination_root = filesystem_and_path(destination_uri)
     call_with_filesystem_retry(destination_filesystem, destination_filesystem.makedirs, destination_root, exist_ok=True)
@@ -318,87 +474,32 @@ def publish_hugging_face_snapshot(
     if call_with_filesystem_retry(destination_filesystem, destination_filesystem.exists, marker_path):
         call_with_filesystem_retry(destination_filesystem, destination_filesystem.rm, marker_path)
 
-    manifest_files: dict[str, ModelManifestFile] = {}
-    shard_headers: dict[str, tuple[int, tuple[str, ...]]] = {}
-    deferred_metadata = {"config.json", "tokenizer.json", "tokenizer_config.json", HF_WEIGHT_INDEX_FILENAME}
-    streamed_files = 0
-    streamed_bytes = 0
-    streamed_weight_bytes = 0
-    reused_files = 0
-    reused_bytes = 0
-    reused_weight_bytes = 0
-
-    for path, snapshot_file in sorted(files_by_path.items()):
-        if path in deferred_metadata:
-            continue
-        source_path = posixpath.join(source_root, path)
-        destination_path = posixpath.join(destination_root, path)
-        entry, keys, reused = _stream_snapshot_file(
-            source_filesystem,
-            source_path,
-            snapshot_file,
-            destination_filesystem,
-            destination_path,
-            safetensors=path.endswith(".safetensors"),
-        )
-        manifest_files[path] = entry
-        if reused:
-            reused_files += 1
-            reused_bytes += entry.size
-            if _is_weight(path):
-                reused_weight_bytes += entry.size
-        else:
-            streamed_files += 1
-            streamed_bytes += entry.size
-            if _is_weight(path):
-                streamed_weight_bytes += entry.size
-        if path.endswith(".safetensors"):
-            shard_headers[path] = (entry.size, keys)
-
-    for path in ("config.json", "tokenizer.json", "tokenizer_config.json"):
-        snapshot_file = files_by_path.get(path)
-        if snapshot_file is None:
-            continue
-        payload = _read_source_bytes(
-            source_filesystem,
-            posixpath.join(source_root, path),
-            expected_size=snapshot_file.size,
-        )
-        if path in {"config.json", "tokenizer.json"}:
-            json.loads(payload)
-        if path == "tokenizer_config.json":
-            payload = normalize_fast_tokenizer_metadata_bytes(
-                payload,
-                has_tokenizer_json="tokenizer.json" in files_by_path,
-                source=f"{model_id}@{revision}",
-            )
-        destination_path = posixpath.join(destination_root, path)
-        digest = hashlib.sha256(payload).hexdigest()
-        if not _destination_matches(destination_filesystem, destination_path, size=len(payload), sha256=digest):
-            _write_bytes(destination_filesystem, destination_path, payload)
-        manifest_files[path] = ModelManifestFile(path=path, size=len(payload), sha256=digest)
-
-    index_file = files_by_path.get(HF_WEIGHT_INDEX_FILENAME)
-    existing_index = None
-    if index_file is not None:
-        existing_index = _read_source_bytes(
-            source_filesystem,
-            posixpath.join(source_root, HF_WEIGHT_INDEX_FILENAME),
-            expected_size=index_file.size,
-        )
-    index_bytes = build_safetensors_weight_index(
-        shard_headers,
-        f"{model_id}@{revision}/{HF_WEIGHT_INDEX_FILENAME}",
-        existing=existing_index,
+    mirrored = _mirror_snapshot_files(
+        source_filesystem,
+        source_root,
+        files_by_path,
+        destination_filesystem,
+        destination_root,
     )
-    index_path = posixpath.join(destination_root, HF_WEIGHT_INDEX_FILENAME)
-    index_digest = hashlib.sha256(index_bytes).hexdigest()
-    if not _destination_matches(destination_filesystem, index_path, size=len(index_bytes), sha256=index_digest):
-        _write_bytes(destination_filesystem, index_path, index_bytes)
-    manifest_files[HF_WEIGHT_INDEX_FILENAME] = ModelManifestFile(
-        path=HF_WEIGHT_INDEX_FILENAME,
-        size=len(index_bytes),
-        sha256=index_digest,
+    manifest_files = dict(mirrored.files)
+    manifest_files.update(
+        _publish_snapshot_metadata(
+            source_filesystem,
+            source_root,
+            files_by_path,
+            destination_filesystem,
+            destination_root,
+            source=source,
+        )
+    )
+    manifest_files[HF_WEIGHT_INDEX_FILENAME] = _publish_weight_index(
+        source_filesystem,
+        source_root,
+        files_by_path,
+        destination_filesystem,
+        destination_root,
+        mirrored.shard_headers,
+        source=source,
     )
 
     manifest = build_model_manifest(
@@ -418,14 +519,14 @@ def publish_hugging_face_snapshot(
         model_id,
         revision,
         destination_uri,
-        manifest.file_count,
-        manifest.total_bytes,
-        streamed_files,
-        streamed_bytes,
-        streamed_weight_bytes,
-        reused_files,
-        reused_bytes,
-        reused_weight_bytes,
+        len(manifest.files),
+        sum(entry.size for entry in manifest.files),
+        mirrored.stats.streamed_files,
+        mirrored.stats.streamed_bytes,
+        mirrored.stats.streamed_weight_bytes,
+        mirrored.stats.reused_files,
+        mirrored.stats.reused_bytes,
+        mirrored.stats.reused_weight_bytes,
         manifest.identity,
     )
     return manifest
@@ -461,11 +562,11 @@ def ensure_hugging_face_model_cache(
             return cache_uri, manifest
         with lease_refresh(lock):
             with hugging_face_hub_online():
-                source_filesystem, source_root, files = _open_hugging_face_snapshot(model_id, revision)
+                snapshot = _open_hugging_face_snapshot(model_id, revision)
                 manifest = publish_hugging_face_snapshot(
-                    source_filesystem,
-                    source_root,
-                    files,
+                    snapshot.filesystem,
+                    snapshot.root,
+                    snapshot.files,
                     cache_uri,
                     model_id=model_id,
                     revision=revision,
