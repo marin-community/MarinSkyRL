@@ -396,6 +396,14 @@ generator:
   backend: "vllm"
   vllm_attention_backend: null
   weight_sync_backend: "nccl"
+  # How weights reach the engines. "broadcast": trainer rank 0 sends every tensor to every engine.
+  # "expert_block": each MoE expert matrix is broadcast from a Megatron rank that holds it to the vLLM
+  # workers that serve it. Needs FullyAsyncRayPPOTrainer, a Grug MoE on the megatron strategy at TP=1
+  # and ETP=1, local vLLM engines at TP=1 with EP=DP>1, the NCCL weight-sync backend and vLLM's TRITON
+  # MoE backend.
+  weight_sync_transport: "broadcast"
+  expert_block_sync:
+    timeout_seconds: 600  # For creating the sync groups and for the broadcasts of each sync.
   fuse_weights: false
   r3_transport: "decentral"
   r3_dispatch_put_timeout_seconds: 600

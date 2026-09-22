@@ -237,6 +237,10 @@ class InferenceEngineClient(InferenceEngineInterface):
                 f"requests in flight per engine: {self._engine_inflight}"
             ) from None
 
+    async def expert_block_rpc(self, method: str, *args) -> list:
+        """Call one expert-block sync method on every engine. Returns the replies in engine order."""
+        return await self._run_on_all_engines("expert_block_rpc", method, *args)
+
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         # 0. Extract input
         prompts = input_batch.get("prompts")
