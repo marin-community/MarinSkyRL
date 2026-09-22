@@ -2112,7 +2112,7 @@ def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
         data_sources_json=_json_list(data_sources) if typed_sources else "",
         prestage_model=prestage_model,
         model_warm_source=task_env.get("OT_AGENT_MODEL_WARM_SOURCE", ""),
-        model_revision="",
+        model_revision=str(skyrl.get("trainer", {}).get("policy", {}).get("model", {}).get("revision") or ""),
         prestage_teacher_models=() if checkpoint_export else _local_teacher_models(skyrl),
         stream_model="",
         model_cache_ttl_days=None,

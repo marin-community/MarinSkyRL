@@ -13,6 +13,8 @@ from omegaconf import MISSING, DictConfig, OmegaConf
 from cloud.iris.ray_storage import RaySpillBackend, resolve_ray_spill_target
 from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
 from cloud.iris.rl_config_translation import (
+    RL_ENTRYPOINTS,
+    RLEntrypoint,
     compose_skyrl_config,
     parse_rl_config,
     registered_rl_entrypoint_module,
@@ -196,6 +198,7 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
                 "model_path": str(config.inputs.model.local_path),
                 "model_source_uri": str(config.inputs.model.uri),
                 "model_source_identity": str(config.inputs.model.identity),
+                "model_revision": str(config.inputs.model.identity),
                 "train_data": list(config.inputs.train_data),
                 "val_data": list(config.inputs.validation_data),
                 "checkpoint_root": str(config.artifacts.checkpoint_root),
@@ -255,7 +258,7 @@ def _validate_inputs(inputs: dict[str, Any]) -> None:
             data_source(value)
 
 
-def derive_iris_allocation(config: DictConfig | Mapping[str, Any]) -> IrisAllocationConfig:
+def validate_iris_allocation(config: DictConfig | Mapping[str, Any]) -> IrisAllocationConfig:
     """Validate explicit Iris resources against the canonical SkyRL role plan."""
     raw = _resolved_config(config)
     skyrl = raw["skyrl"]
@@ -316,7 +319,7 @@ def validate_launch_config(config: DictConfig | Mapping[str, Any]) -> LaunchTopo
         RaySpillBackend(ray["spill_backend"]),
         ray["spill_dir"],
     )
-    allocation = derive_iris_allocation(raw)
+    allocation = validate_iris_allocation(raw)
     skyrl = raw["skyrl"]
     run = raw["run"]
     runtime = raw["runtime"]
@@ -335,7 +338,7 @@ def validate_launch_config(config: DictConfig | Mapping[str, Any]) -> LaunchTopo
         int(generator["inference_engine_tensor_parallel_size"]),
         skyrl.get("model_num_attention_heads"),
     )
-    if entrypoint == "skyrl_train.entrypoints.fully_async":
+    if entrypoint == RL_ENTRYPOINTS[RLEntrypoint.FULLY_ASYNC]:
         trainer = skyrl.get("trainer", {})
         if trainer.get("train_batch_size") != trainer.get("policy_mini_batch_size"):
             raise ValueError("fully async SkyRL requires trainer.train_batch_size == trainer.policy_mini_batch_size")

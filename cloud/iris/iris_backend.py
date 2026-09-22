@@ -14,7 +14,6 @@ import datetime
 import hashlib
 import json
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -541,7 +540,6 @@ class BundledLaunchConfig:
 
 
 MARIN_LOGIN_RECORD_PATH = Path.home() / ".config" / "marin" / "credentials" / "marin.json"
-_JOB_NAME_MAX_LENGTH = 63
 
 
 def _resolve_parent_cluster_config(cluster_config: Optional[str]) -> Optional[str]:
@@ -580,29 +578,6 @@ def _load_cluster_config(cluster_config: str) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise SystemExit(f"--cluster-config {cluster_config!r} must contain a YAML mapping.")
     return loaded
-
-
-def _cluster_gpu_cpu_capacity(cluster_config: dict[str, Any], *, gpu_variant: str, gpus_per_node: int) -> float:
-    """Return CPU capacity for the matching GPU scale group in an Iris config."""
-    scale_groups = cluster_config.get("scale_groups")
-    if not isinstance(scale_groups, dict):
-        raise SystemExit("The selected Iris cluster config has no scale_groups mapping; pass --cpu explicitly.")
-    for scale_group in scale_groups.values():
-        resources = scale_group.get("resources") if isinstance(scale_group, dict) else None
-        if not isinstance(resources, dict):
-            continue
-        if (
-            resources.get("device_type") == "gpu"
-            and str(resources.get("device_variant", "")).lower() == gpu_variant.lower()
-            and resources.get("device_count") == gpus_per_node
-        ):
-            cpu = resources.get("cpu")
-            if isinstance(cpu, (int, float)) and cpu > 0:
-                return float(cpu)
-    raise SystemExit(
-        f"The selected Iris cluster config has no {gpus_per_node}x{gpu_variant} GPU scale group. "
-        "Choose a topology that the selected cluster advertises."
-    )
 
 
 def _daytona_rl_api_key_from_secret_manager() -> Optional[str]:
@@ -711,16 +686,8 @@ def _purge_stale_daytona_snapshots(api_key: str) -> None:
 
 
 def _effective_gdn_backend(args: SimpleNamespace) -> str:
-    """Return the GDN backend declared by the resolved launch config."""
-    raw_config = _load_rl_config_yaml(args.rl_config)
+    raw_config = _load_skyrl_config(args.rl_config)
     return str((raw_config.get("generator") or {}).get("gdn_backend", "torch")).lower()
-
-
-def _sanitize_job_name_component(value: str) -> str:
-    """Make one human-readable Kubernetes job-name component."""
-    value = value.strip().rstrip("/").split("/")[-1]
-    value = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return value or "run"
 
 
 def _cluster_dashboard_host(cluster_config_path: Optional[str]) -> Optional[str]:
@@ -927,7 +894,7 @@ def prepare_federated_parent_credentials(args: SimpleNamespace) -> FederatedPare
 
 def build_debug_launch_env(args: SimpleNamespace) -> dict[str, str]:
     """Resolve the effective debug preset after the job name and RL config exist."""
-    raw = _load_rl_config_yaml(args.rl_config)
+    raw = _load_skyrl_config(args.rl_config)
     trainer = raw.get("trainer") or {}
     mode = str(trainer.get("debug_mode", DebugMode.LIGHT.value))
     try:
@@ -955,7 +922,7 @@ def _load_yaml_mapping(config_path: str) -> dict[str, Any]:
     return raw
 
 
-def _load_rl_config_yaml(config_path: str) -> dict[str, Any]:
+def _load_skyrl_config(config_path: str) -> dict[str, Any]:
     """Return the SkyRL subtree from a validated launch document."""
     raw = _load_yaml_mapping(config_path)
     skyrl = raw.get("skyrl")
@@ -965,12 +932,7 @@ def _load_rl_config_yaml(config_path: str) -> dict[str, Any]:
 
 
 def load_config_extra_env(rl_config_path: str) -> dict[str, str]:
-    """Return normalized task environment variables declared by an RL config.
-
-    Top-level ``extra_env`` values take precedence over a ported
-    ``container.extra_env`` mapping. Unreadable or empty configurations return no
-    overrides.
-    """
+    """Return task environment variables from the launch document's runtime section."""
     try:
         launch = _load_yaml_mapping(rl_config_path)
     except Exception as exc:  # noqa: BLE001
