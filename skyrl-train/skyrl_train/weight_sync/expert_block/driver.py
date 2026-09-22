@@ -155,8 +155,8 @@ class ExpertBlockSync:
         engines = self.client.engines
         if any(engine.worker_placements is None for engine in engines):
             raise ValueError(
-                "Expert-block sync requires node-local engine replicas; the engine factory's log says why these "
-                "were not, and generator.inference_engine_node_local=require packs an engine smaller than a node"
+                "Expert-block sync requires checked worker placements, which the engine factory records for "
+                "local TP=1 vLLM engines with DP>1"
             )
         started = time.perf_counter()
         policy_rows, engine_rows = await asyncio.gather(

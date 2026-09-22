@@ -58,7 +58,6 @@ def test_the_default_transport_needs_nothing():
         ("generator.async_engine", False, "non-colocated async vLLM"),
         ("trainer.placement.colocate_all", True, "non-colocated async vLLM"),
         ("generator.weight_sync_backend", "gloo", "must be nccl"),
-        ("generator.inference_engine_node_local", "off", "inference_engine_node_local is off"),
         ("generator.inference_engine_tensor_parallel_size", 2, "TP=1"),
         ("generator.inference_engine_expert_parallel_size", 4, "EP equal to DP"),
         ("generator.inference_engine_data_parallel_size", 1, "DP=1"),
@@ -74,6 +73,15 @@ def test_each_missing_precondition_is_named(path, value, message):
         node = node[key]
     node[leaf] = value
     with pytest.raises(ValueError, match=message):
+        validate_expert_block_transport(cfg)
+
+
+def test_pipeline_parallel_engines_on_the_mp_backend_are_refused():
+    cfg = expert_block_config()
+    cfg.generator.inference_engine_pipeline_parallel_size = 2
+    validate_expert_block_transport(cfg)
+    cfg.generator.inference_engine_mp_backend = True
+    with pytest.raises(ValueError, match="Ray executor"):
         validate_expert_block_transport(cfg)
 
 

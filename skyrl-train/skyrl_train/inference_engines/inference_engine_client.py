@@ -36,7 +36,6 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from skyrl_train.config.trajectory_runner_capabilities import opencode_exact_continuation_enabled
 
-ABORT_GENERATION_GRACE_PERIOD_SECONDS = 5
 ABORT_FINISH_REASON = "abort"
 
 # Cap on the session -> engine memo so it cannot grow unbounded across a long run.
@@ -77,6 +76,12 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.http_endpoint_port = full_config.generator.http_endpoint_port
         self.enable_opencode_exact_continuation = opencode_exact_continuation_enabled(full_config)
         self.generation_paused_event = threading.Event()
+        # One wake-up event per event loop that has passed the pause barrier since the last
+        # release: the trainer's loop and, with the HTTP endpoint, the server thread's loop.
+        self._resume_events: dict[asyncio.AbstractEventLoop, asyncio.Event] = {}
+        self.weight_sync_pause_timeout = float(full_config.generator.weight_sync_pause_timeout_seconds)
+        if self.weight_sync_pause_timeout <= 0:
+            raise ValueError("generator.weight_sync_pause_timeout_seconds must be positive")
         self._dead_engines: set[int] = set()
 
         # ---- Load-aware session routing state ----
@@ -220,13 +225,23 @@ class InferenceEngineClient(InferenceEngineInterface):
         awaitables = [getattr(engine, method_name)(*args, **kwargs) for engine in live_engines]
         return await asyncio.gather(*awaitables)
 
+    async def _run_on_all_engines_before_deadline(self, method_name: str):
+        """Fan out a weight-sync pause or resume, failing loudly if an engine never answers."""
+        try:
+            async with asyncio.timeout(self.weight_sync_pause_timeout):
+                return await self._run_on_all_engines(method_name)
+        except TimeoutError:
+            raise TimeoutError(
+                f"{method_name} did not complete on every engine within "
+                f"generator.weight_sync_pause_timeout_seconds={self.weight_sync_pause_timeout}; "
+                f"requests in flight per engine: {self._engine_inflight}"
+            ) from None
+
     async def expert_block_rpc(self, method: str, *args) -> list:
         """Call one expert-block sync method on every engine. Returns the replies in engine order."""
         return await self._run_on_all_engines("expert_block_rpc", method, *args)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        if self.generation_paused_event.is_set():
-            raise RuntimeError("pause_generation is unsupported for InferenceEngineClient.generate().")
         # 0. Extract input
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
@@ -768,10 +783,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         # Boundary guard (reused from the non-streaming path): block a new stream from
         # entering the engine while a weight-sync pause is in effect. Placed before
         # routing / _inc_inflight so a blocked stream holds no engine slot and does not
-        # touch the engine until resume. Together with pause_generation()'s
-        # ABORT_GENERATION_GRACE_PERIOD_SECONDS window + the blocking scheduler pause RPC,
-        # this keeps the engine request-idle across the reload, so no
-        # forward pass runs against meta-device params.
+        # touch the engine until resume. Together with the blocking scheduler pause RPC
+        # in pause_generation(), this keeps the engine request-idle across the reload,
+        # so no forward pass runs against meta-device params.
         await self._wait_for_generation_to_resume()
 
         session_id = request_payload["json"].pop("session_id", None)
@@ -1029,21 +1043,39 @@ class InferenceEngineClient(InferenceEngineInterface):
     # Generation pause and resume
     # ----------------------------
     async def _wait_for_generation_to_resume(self) -> None:
-        """Waits for generation to be resumed, intended for in-flight weight updates and partial rollouts."""
-        while self.generation_paused_event.is_set():
-            await asyncio.sleep(0.5)
+        """Wait, on this loop, until a weight-sync pause is released."""
+        while True:
+            # Register before checking the flag; the release clears the flag and then takes
+            # the events. A waiter that sees the flag set is therefore always among the events
+            # the release wakes. Both sides are single dict operations, so no lock is needed.
+            event = self._resume_events.setdefault(asyncio.get_running_loop(), asyncio.Event())
+            if not self.generation_paused_event.is_set():
+                return
+            await event.wait()
+
+    def _release_generation_waiters(self) -> None:
+        """Clear the pause and wake every parked request on every loop."""
+        self.generation_paused_event.clear()
+        events, self._resume_events = self._resume_events, {}
+        for loop, event in events.items():
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:
+                # The HTTP server's loop has closed; nothing waits on it any more.
+                pass
 
     async def pause_generation(self) -> None:
-        """Pause engine schedulers for an in-flight weight update.
+        """Pause every engine scheduler for an in-flight weight update.
 
-        Chat and single-prompt completion requests wait for resume. ``generate()`` and batched
-        completions do not support the pause boundary.
+        Returns once every live engine has acknowledged the pause, with no request running and
+        any later arrival held until resume. Chat, single-prompt ``generate()`` and single-prompt
+        completion requests wait for the resume; batched ``generate()`` and batched completions
+        are rejected while paused.
         """
         if self.generation_paused_event.is_set():
             raise RuntimeError("Generation is already paused, cannot pause again.")
         self.generation_paused_event.set()
-        await asyncio.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
-        await self._run_on_all_engines("pause_generation")
+        await self._run_on_all_engines_before_deadline("pause_generation")
 
     async def resume_generation(self) -> None:
         """
@@ -1054,8 +1086,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         if not self.generation_paused_event.is_set():
             raise RuntimeError("Generation is not paused, cannot resume.")
-        await self._run_on_all_engines("resume_generation")
-        self.generation_paused_event.clear()
+        await self._run_on_all_engines_before_deadline("resume_generation")
+        self._release_generation_waiters()
 
     # ----------------------------
     # HTTP endpoint related methods
@@ -1098,6 +1130,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         state = self.__dict__.copy()
         state["_server_thread"] = None
         state["generation_paused_event"] = None
+        state["_resume_events"] = None
         # threading.Lock is not picklable; the pickled copy is only used for weight-sync
         # RPC args and never routes, so dropping the routing lock is safe.
         state["_routing_lock"] = None

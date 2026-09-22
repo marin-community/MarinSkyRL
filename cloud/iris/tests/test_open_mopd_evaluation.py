@@ -429,11 +429,11 @@ def test_stage_checkpoint_model_downloads_only_model_state_and_merges(
             del encoding
             return io.StringIO(files[path].decode())
 
-        def find(self, target: str) -> list[str]:
-            return [path for path in files if path.startswith(f"{target}/")]
-
-        def info(self, path: str) -> dict[str, int]:
-            return {"size": len(files[path])}
+        def find(self, target: str, *, detail: bool = False) -> list[str] | dict[str, dict[str, int | str]]:
+            paths = [path for path in files if path.startswith(f"{target}/")]
+            if detail:
+                return {path: {"size": len(files[path]), "type": "file"} for path in paths}
+            return paths
 
         def get_file(self, remote: str, local: str) -> None:
             self.downloaded.append(remote)

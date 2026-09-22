@@ -5,22 +5,38 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from enum import StrEnum
 import math
+import os
 import re
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
+from marinskyrl.hf_model import immutable_model_cache_key
 from marinskyrl.resource_locator import is_cloud_uri, is_hugging_face_repo_id
 
 
 _HF_SOURCE_SCHEME = "hf"
 _HF_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
+_DRAFT_MODEL_ROOT = "/tmp/marinskyrl/draft_models"
 STANDARD_TRAINING_ENTRYPOINT = "skyrl_train.entrypoints.main_base"
+
+
+def is_hugging_face_commit(value: str) -> bool:
+    """Return whether ``value`` is a full immutable Hugging Face commit SHA."""
+    return _HF_COMMIT_PATTERN.fullmatch(value) is not None
 
 
 class SpeculativeDecodingMethod(StrEnum):
     """Speculative methods supported by MarinSkyRL's managed lifecycle."""
 
     EAGLE3 = "eagle3"
+
+
+class SpeculatorModelSourceKind(StrEnum):
+    """Storage kinds supported by the draft-model lifecycle."""
+
+    HUGGING_FACE = "hugging_face"
+    LOCAL = "local"
+    ARTIFACT = "artifact"
 
 
 class SpeculativeDecodingConfigError(ValueError):
@@ -89,7 +105,7 @@ def runai_model_uri(source_uri: str) -> str:
 
 @dataclass(frozen=True)
 class SpeculatorModelConfig:
-    """One immutable Hugging Face or object-store draft model."""
+    """One immutable local, Hugging Face, or object-store draft model."""
 
     source_uri: str
     source_identity: str
@@ -111,24 +127,65 @@ class SpeculatorModelConfig:
 
         hf_repo = hugging_face_repo_from_source_uri(source_uri)
         if hf_repo is not None:
-            if _HF_COMMIT_PATTERN.fullmatch(source_identity) is None:
+            if not is_hugging_face_commit(source_identity):
                 raise SpeculativeDecodingConfigError(
                     f"{context}.source_identity must be a full 40-character lowercase commit SHA for {hf_repo}"
                 )
-        elif not is_cloud_uri(source_uri):
+        elif not is_cloud_uri(source_uri) and not os.path.isabs(source_uri):
             raise SpeculativeDecodingConfigError(
-                f"{context}.source_uri must use hf://, s3://, gs://, or gcs://, got {source_uri!r}"
+                f"{context}.source_uri must be an absolute local path or use hf://, s3://, gs://, or gcs://, "
+                f"got {source_uri!r}"
             )
-        else:
+        elif is_cloud_uri(source_uri):
             parsed = urlsplit(source_uri)
             if not parsed.netloc or not parsed.path.strip("/") or parsed.query or parsed.fragment:
                 raise SpeculativeDecodingConfigError(f"{context}.source_uri is not a complete object-store URI")
 
-        return cls(source_uri=source_uri, source_identity=source_identity)
+        return cls(
+            source_uri=source_uri,
+            source_identity=source_identity,
+        )
 
     @property
     def hugging_face_repo_id(self) -> str | None:
         return hugging_face_repo_from_source_uri(self.source_uri)
+
+    @property
+    def local_source_path(self) -> str | None:
+        """Return the source path when this model already exists locally."""
+        return self.source_uri if os.path.isabs(self.source_uri) else None
+
+    @property
+    def source_kind(self) -> SpeculatorModelSourceKind:
+        if self.local_source_path is not None:
+            return SpeculatorModelSourceKind.LOCAL
+        if self.hugging_face_repo_id is not None:
+            return SpeculatorModelSourceKind.HUGGING_FACE
+        return SpeculatorModelSourceKind.ARTIFACT
+
+    def node_local_path(self) -> str:
+        """Return the standard node-local location for this immutable source."""
+        if self.source_kind is SpeculatorModelSourceKind.LOCAL:
+            assert self.local_source_path is not None
+            return self.local_source_path
+        return os.path.join(
+            _DRAFT_MODEL_ROOT,
+            immutable_model_cache_key(self.source_uri, self.source_identity),
+        )
+
+    def vllm_source_config(self) -> dict[str, Any]:
+        """Return the vLLM fields needed to load this draft source."""
+        if self.source_kind is SpeculatorModelSourceKind.LOCAL:
+            assert self.local_source_path is not None
+            return {"model": self.local_source_path}
+        if self.source_kind is SpeculatorModelSourceKind.HUGGING_FACE:
+            assert self.hugging_face_repo_id is not None
+            model_id = self.hugging_face_repo_id
+            return {"model": model_id, "revision": self.source_identity}
+        return {
+            "model": runai_model_uri(self.source_uri),
+            "draft_load_config": {"load_format": "runai_streamer"},
+        }
 
 
 @dataclass(frozen=True)
@@ -255,17 +312,11 @@ class SpeculativeDecodingConfig:
 
     def vllm_speculative_config(self) -> dict[str, Any]:
         """Return the serving fields understood by vLLM."""
-        model = self.model.hugging_face_repo_id or runai_model_uri(self.model.source_uri)
-        result: dict[str, Any] = {
+        return {
             "method": self.method.value,
-            "model": model,
+            **self.model.vllm_source_config(),
             "num_speculative_tokens": self.num_speculative_tokens,
         }
-        if self.model.hugging_face_repo_id is not None:
-            result["revision"] = self.model.source_identity
-        else:
-            result["draft_load_config"] = {"load_format": "runai_streamer"}
-        return result
 
 
 def parse_speculative_decoding_config(

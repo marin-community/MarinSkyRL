@@ -119,6 +119,11 @@ from marinskyrl.resource_locator import (
     model_source_for_path,
 )
 from marinskyrl.runtime_options import GDNBackend, R3Transport
+from marinskyrl.speculative_decoding import (
+    SpeculativeDecodingConfig,
+    SpeculatorModelConfig,
+    SpeculatorModelSourceKind,
+)
 from cloud.iris.rl_config_translation import (
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
@@ -1407,7 +1412,6 @@ def create_parser() -> argparse.ArgumentParser:
         "HF prestage). Only used when the config runs HF_HUB_OFFLINE=1 with a "
         "repo-id model_path (same gate as --prestage-model).",
     )
-
     parser.add_argument(
         "--train_data",
         default=EMPTY_JSON_LIST,
@@ -1978,6 +1982,16 @@ def load_config_policy_model_revision(rl_config_path: str) -> str | None:
     return revision
 
 
+def load_config_draft_model(rl_config_path: str) -> SpeculatorModelConfig | None:
+    """Return the immutable draft model declared by an RL config."""
+    raw = _load_rl_config_yaml(rl_config_path)
+    generator = raw.get("generator") or {}
+    value = generator.get("speculative_decoding")
+    if value is None:
+        return None
+    return SpeculativeDecodingConfig.from_mapping(value).model
+
+
 def load_config_terminal_bench_data(rl_config_path: str) -> list[str]:
     """Return task datasets used by the mixed Gym/Harbor sidechannel.
 
@@ -2207,6 +2221,18 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     ]
     if args.model_revision:
         train_cmd.extend(["--model-revision", args.model_revision])
+    draft_model = load_config_draft_model(args.rl_config)
+    if draft_model is not None:
+        train_cmd.extend(
+            [
+                "--skyrl_override",
+                format_hydra_arg(
+                    "generator.speculative_decoding.model.source_uri",
+                    draft_model.node_local_path(),
+                    prefix="++",
+                ),
+            ]
+        )
     if args.entrypoint:
         train_cmd.extend(["--entrypoint", args.entrypoint])
     train_cmd.extend(model_source_cli_args(args.model_source_uri, args.model_source_identity))
@@ -2288,6 +2314,23 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         controller_cmd.extend(["--val-data", args.val_data])
     if args.data_sources_json:
         controller_cmd.extend(["--data-sources-json", args.data_sources_json])
+    if draft_model is not None:
+        controller_cmd.extend(
+            [
+                "--draft-model",
+                draft_model.source_uri,
+                draft_model.source_identity,
+            ]
+        )
+        if draft_model.source_kind is SpeculatorModelSourceKind.HUGGING_FACE:
+            controller_cmd.extend(
+                [
+                    "--draft-model-cache-ttl-days",
+                    str(args.storage_ttl_days),
+                    "--draft-model-cache-source-prefix",
+                    storage_paths.checkpoint_root,
+                ]
+            )
     terminal_bench_data = load_config_terminal_bench_data(args.rl_config)
     if terminal_bench_data:
         controller_cmd.extend(["--terminal-bench-data", json.dumps(terminal_bench_data)])
