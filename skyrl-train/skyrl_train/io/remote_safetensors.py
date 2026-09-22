@@ -31,6 +31,12 @@ _TORCH_DTYPES = {
 }
 
 
+def lazy_first_dim_patterns_for_bridge(bridge: object) -> tuple[str, ...]:
+    """Return remote slice patterns from an AutoBridge's registered model bridge."""
+    registered_bridge = getattr(bridge, "_model_bridge", bridge)
+    return tuple(getattr(registered_bridge, "REMOTE_FIRST_DIM_SLICE_PATTERNS", ()))
+
+
 def _safe_relative_path(value: str) -> str:
     path = PurePosixPath(value)
     if path.is_absolute() or ".." in path.parts:

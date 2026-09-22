@@ -2,7 +2,7 @@
 
 from megatron.bridge.models.hf_pretrained.state import StateDict, StateSource
 
-from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore
+from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore, lazy_first_dim_patterns_for_bridge
 
 
 class RemoteSafetensorsStateSource(StateSource):
@@ -33,7 +33,7 @@ def install_remote_hf_state(bridge, source_uri: str, metadata_dir: str) -> Remot
     source = RemoteSafetensorsStateSource(
         source_uri,
         metadata_dir,
-        lazy_first_dim_patterns=getattr(bridge, "REMOTE_FIRST_DIM_SLICE_PATTERNS", ()),
+        lazy_first_dim_patterns=lazy_first_dim_patterns_for_bridge(bridge),
     )
     bridge.hf_pretrained._state_dict_accessor = StateDict(source)
     return source
