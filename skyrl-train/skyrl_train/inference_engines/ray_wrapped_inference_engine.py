@@ -35,6 +35,7 @@ from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECO
 from skyrl_train.utils.utils import use_per_engine_strict_pack_pg
 from skyrl_train.inference_engines.placement import colocated_engine_bundle_layout
 
+MODEL_METADATA_PATH_KEY = "_marinskyrl_metadata_path"
 
 # ---------------------------------------------------------------------------
 # #232 FIX B — NCCL flight-recorder observability env -> vLLM engine workers.
@@ -400,6 +401,7 @@ def create_ray_wrapped_inference_engines(
         non-colocated engines (each engine owns its own GPUs); colocated/hybrid engines
         still require the ray backend for shared-GPU resource management.
     """
+    model_metadata_path = engine_init_kwargs.pop(MODEL_METADATA_PATH_KEY, pretrain)
     if backend == "vllm":
         import vllm
         from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
@@ -407,7 +409,7 @@ def create_ray_wrapped_inference_engines(
         # if a dev version is being used, skip the version check
         if "dev" not in vllm.__version__:
             assert version.parse(vllm.__version__) >= version.parse("0.8.3"), "SkyRL-Train only supports vLLM >= 0.8.3"
-        _validate_installed_vllm_for_model(pretrain)
+        _validate_installed_vllm_for_model(model_metadata_path)
     elif backend == "sglang":
         # We import SGLang later to avoid importing vllm. See `get_sglang_engine` for more.
         pass
@@ -424,7 +426,7 @@ def create_ray_wrapped_inference_engines(
     # Empty {} for every non-VLM-shell model -> byte-identical engine construction.
     # Do NOT clobber an explicit ++generator.engine_init_kwargs.language_model_only.
     vlm_engine_kwargs = (
-        _qwen3_5_vlm_engine_kwargs(pretrain, revision=engine_init_kwargs.get("revision"))
+        _qwen3_5_vlm_engine_kwargs(model_metadata_path, revision=engine_init_kwargs.get("revision"))
         if backend == "vllm" and "language_model_only" not in engine_init_kwargs
         else {}
     )

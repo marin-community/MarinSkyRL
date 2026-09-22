@@ -127,7 +127,6 @@ def _build_basic_spec(tmp_path, **kwargs):
         run_id="test-run",
         model_uri="s3://bucket/model",
         model_identity="model@rev123",
-        model_local_path="/tmp/model",
         tokenizer_uri="org/model",
         tokenizer_revision="rev123",
         train_data=[
@@ -579,7 +578,6 @@ class TestBuildJobSpec:
             run_id="r",
             model_uri="s3://m",
             model_identity="mi",
-            model_local_path="/tmp/m",
             tokenizer_uri="t",
             tokenizer_revision="tr",
             train_data=[
@@ -772,7 +770,6 @@ def test_build_raises_on_missing_geometry_key(tmp_path):
             run_id="r",
             model_uri="s3://m",
             model_identity="mi",
-            model_local_path="/tmp/m",
             tokenizer_uri="t",
             tokenizer_revision="tr",
             train_data=[
@@ -797,7 +794,6 @@ def test_config_yaml_preserved_verbatim_in_request(tmp_path):
         run_id="r",
         model_uri="s3://m",
         model_identity="mi",
-        model_local_path="/tmp/m",
         tokenizer_uri="t",
         tokenizer_revision="tr",
         train_data=[

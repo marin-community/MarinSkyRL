@@ -451,7 +451,6 @@ def build_job_spec(
     run_id: str,
     model_uri: str,
     model_identity: str,
-    model_local_path: str,
     tokenizer_uri: str,
     tokenizer_revision: str,
     train_data: list[dict[str, Any]],
@@ -517,7 +516,6 @@ def build_job_spec(
             model=ModelLocator(
                 uri=model_uri,
                 identity=model_identity,
-                local_path=model_local_path,
                 tokenizer_uri=tokenizer_uri,
                 tokenizer_revision=tokenizer_revision,
             ),

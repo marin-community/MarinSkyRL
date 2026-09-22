@@ -347,7 +347,6 @@ def resolve_stage_job(stage: CurriculumStage, previous: StageResult | None) -> t
             model=ModelLocator(
                 uri=previous_model.policy_export_uri,
                 identity=f"{previous_model.terminal_manifest_uri}#policy-step-{previous_model.global_step}",
-                local_path=request.model.local_path,
                 tokenizer_uri=previous_model.tokenizer_uri,
                 tokenizer_revision=previous_model.tokenizer_revision,
             ),

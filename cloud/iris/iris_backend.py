@@ -64,7 +64,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import yaml
 from iris.client.client import IrisClient
@@ -94,7 +94,7 @@ from cloud.iris.ray_storage import (
     resolve_ray_spill_target,
     validate_ray_spill_dir,
 )
-from cloud.iris.model_paths import model_source_cli_args, unsupported_model_path_message
+from cloud.iris.model_paths import model_source_cli_args
 from cloud.iris.storage_policy import (
     ALLOWED_RESUME_CHECKPOINT_COUNTS,
     ALLOWED_STORAGE_TTL_DAYS,
@@ -299,10 +299,30 @@ def _resolved_data_entry(source: DataSource) -> str | dict[str, Any]:
     return asdict(source)
 
 
+@dataclass(frozen=True)
+class _ModelCliReference:
+    model_path: str
+    source_uri: str | None = None
+    source_identity: str | None = None
+
+
+def _model_cli_reference(uri: str, identity: str) -> _ModelCliReference:
+    """Resolve a typed model URI into the standalone launcher's model flags."""
+    if is_cloud_uri(uri):
+        return _ModelCliReference(model_path=uri, source_uri=uri, source_identity=identity)
+    parsed = urlparse(uri)
+    if parsed.scheme == "file":
+        if parsed.netloc not in ("", "localhost"):
+            raise ValueError(f"Model file URI must be local: {uri!r}")
+        return _ModelCliReference(model_path=unquote(parsed.path))
+    return _ModelCliReference(model_path=uri)
+
+
 def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = LaunchMode.WAIT) -> list[str]:
     """Adapt the typed job request to the legacy Iris launcher CLI."""
     request = spec.request
     execution = spec.execution
+    model = _model_cli_reference(request.model.uri, request.model.identity)
     data_sources = [asdict(locator) for locator in (*request.train_data, *request.validation_data)]
     role_plan = request.topology.role_plan
     policy_claim = role_plan.claim(ModelRoleKind.POLICY)
@@ -347,11 +367,8 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
         "--rl_config",
         config_path,
         "--model_path",
-        request.model.local_path,
-        "--model-source-uri",
-        request.model.uri,
-        "--model-source-identity",
-        request.model.identity,
+        model.model_path,
+        *model_source_cli_args(model.source_uri, model.source_identity),
         "--train-data",
         json.dumps([_resolved_data_entry(source) for source in request.train_data]),
         "--val-data",
@@ -436,14 +453,15 @@ class IrisBackend:
         request = spec.request
         execution = spec.execution
         policy_claim = request.topology.role_plan.claim(ModelRoleKind.POLICY)
+        model = _model_cli_reference(request.model.uri, request.model.identity)
         submit_terminal_policy_export(
             TerminalPolicyExport(
                 checkpoint_root=request.output.checkpoint_root,
                 export_root=request.output.export_root,
                 config_path=config_path,
-                model_path=request.model.local_path,
-                model_source_uri=request.model.uri,
-                model_source_identity=request.model.identity,
+                model_path=model.model_path,
+                model_source_uri=model.source_uri,
+                model_source_identity=model.source_identity,
                 policy_num_nodes=policy_claim.num_nodes,
                 policy_num_gpus_per_node=policy_claim.gpus_per_node,
                 gpu_variant=request.topology.gpu_variant,
@@ -1397,7 +1415,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model_path",
         required=True,
-        help="Hugging Face repo ID (e.g., Qwen/Qwen3-8B) or a directory available inside every task.",
+        help="Pinned Hugging Face repo ID, versioned S3/GS model prefix, or a directory available in every task.",
     )
     parser.add_argument("--model-path", dest="model_path", help=argparse.SUPPRESS)
     parser.add_argument(
@@ -1409,7 +1427,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-source-uri",
         default=None,
-        help="Object-store HF export copied onto every allocated node before Ray starts.",
+        help="Versioned object-store HF export read directly by policy and rollout workers.",
     )
     parser.add_argument(
         "--model-source-identity",
@@ -2058,7 +2076,9 @@ def _job_scope_fr_dump_path(prefix: str, job_name: str) -> str:
 def normalize(args: argparse.Namespace) -> None:
     """Resolve the RL config and validate the requested worker topology."""
     if is_cloud_uri(args.model_path):
-        raise SystemExit(unsupported_model_path_message(args.model_path))
+        if args.model_source_uri is not None and args.model_source_uri != args.model_path:
+            raise SystemExit("--model_path and --model-source-uri must name the same object-store prefix")
+        args.model_source_uri = args.model_path
     try:
         model_source_for_path(args.model_path, args.model_source_uri, args.model_source_identity)
     except ModelLocatorError as error:
@@ -2091,6 +2111,7 @@ def normalize(args: argparse.Namespace) -> None:
         raise SystemExit(str(error)) from error
     if policy_model_revision and not is_hugging_face_repo_id(args.model_path):
         raise SystemExit("--model-revision requires a Hugging Face repo ID model_path")
+    args.model_revision = policy_model_revision
 
     if args.num_nodes < 1:
         raise SystemExit("--num-nodes must be >= 1.")
@@ -2164,21 +2185,33 @@ def _build_task_shell(
 
 
 def _model_bootstrap_args(args: argparse.Namespace) -> list[str]:
-    """Resolve per-node model materialization, prestaging, and tokenizer flags.
-
-    Offline or tokenizer-overridden Hub models are staged once per node before Ray;
-    task-local models are used directly after optional object-store materialization.
-    """
+    """Resolve direct model sources and bounded metadata-cache flags."""
     model_args = model_source_cli_args(args.model_source_uri, args.model_source_identity)
     is_hub_model = is_hugging_face_repo_id(args.model_path)
-    if args.model_source_uri or not is_hub_model:
+    direct_model_loading = args.runtime_profile in {RuntimeProfile.MEGATRON, RuntimeProfile.MEGATRON_EXPORT}
+    if args.model_source_uri and not direct_model_loading:
+        raise ValueError("Object-store model paths currently require trainer.strategy=megatron")
+    if not is_hub_model and not is_cloud_uri(args.model_path):
         model_args.extend(["--model-local-path", args.model_path])
 
     config_env = load_config_extra_env(args.rl_config)
     policy_chat_template = load_config_policy_chat_template(args.rl_config)
-    policy_model_revision = args.model_revision or load_config_policy_model_revision(args.rl_config)
+    policy_model_revision = args.model_revision
     offline = str(config_env.get("HF_HUB_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on")
-    if (offline or policy_chat_template or policy_model_revision) and is_hub_model:
+    if is_hub_model and direct_model_loading:
+        model_args.extend(
+            [
+                "--stream-model",
+                args.model_path,
+                "--model-revision",
+                policy_model_revision or "main",
+                "--model-cache-ttl-days",
+                str(args.storage_ttl_days),
+                "--model-cache-source-prefix",
+                args.storage_paths.checkpoint_root,
+            ]
+        )
+    elif is_hub_model and (offline or policy_chat_template or policy_model_revision):
         model_args.extend(["--prestage-model", args.model_path])
         warm_source = args.model_warm_source
         if warm_source is None:
@@ -2242,17 +2275,6 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     if args.model_revision:
         train_cmd.extend(["--model-revision", args.model_revision])
     draft_model = load_config_draft_model(args.rl_config)
-    if draft_model is not None:
-        train_cmd.extend(
-            [
-                "--skyrl_override",
-                format_hydra_arg(
-                    "generator.speculative_decoding.model.source_uri",
-                    draft_model.node_local_path(),
-                    prefix="++",
-                ),
-            ]
-        )
     if args.entrypoint:
         train_cmd.extend(["--entrypoint", args.entrypoint])
     train_cmd.extend(model_source_cli_args(args.model_source_uri, args.model_source_identity))
@@ -2324,14 +2346,18 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         controller_cmd.extend(["--rendezvous-timeout", str(args.rendezvous_timeout)])
     if args.driver_liveness_timeout is not None:
         controller_cmd.extend(["--driver-liveness-timeout", str(args.driver_liveness_timeout)])
-    # Per-node task-dataset staging. The training driver resolves these selectors only
-    # on rank 0, while Ray may schedule rollout and evaluation workers on any node.
-    # Forward both roles to the controller so every pod has identical task-local data.
-    # Object-store locators use the separate typed materialization path below.
-    if args.train_data and args.train_data != EMPTY_JSON_LIST and not args.data_sources_json:
-        controller_cmd.extend(["--train-data", args.train_data])
-    if args.val_data and args.val_data != EMPTY_JSON_LIST and not args.data_sources_json:
-        controller_cmd.extend(["--val-data", args.val_data])
+    # Task directories must exist on every node before Ray schedules agent rollouts.
+    # Standard parquet data is consumed by the rank-0 training driver instead; sending
+    # it through this path both duplicates staging and misclassifies HF dataset specs
+    # as packed task archives.
+    raw_config = _load_rl_config_yaml(args.rl_config)
+    data_config = raw_config.get("data") if isinstance(raw_config, dict) else None
+    data_kind = data_config.get("kind", "tasks") if isinstance(data_config, dict) else "tasks"
+    if data_kind == "tasks" and not args.data_sources_json:
+        if args.train_data and args.train_data != EMPTY_JSON_LIST:
+            controller_cmd.extend(["--train-data", args.train_data])
+        if args.val_data and args.val_data != EMPTY_JSON_LIST:
+            controller_cmd.extend(["--val-data", args.val_data])
     if args.data_sources_json:
         controller_cmd.extend(["--data-sources-json", args.data_sources_json])
     if draft_model is not None:

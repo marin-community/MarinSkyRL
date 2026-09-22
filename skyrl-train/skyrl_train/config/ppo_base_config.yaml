@@ -156,6 +156,8 @@ trainer:
     model:
       path: ${trainer.policy.model.path}
       revision: ${trainer.policy.model.revision}
+      source_uri: ${trainer.policy.model.source_uri}
+      source_identity: ${trainer.policy.model.source_identity}
     sequence_parallel_size: 1
     deepspeed_config: ${deepspeed_config.eval}
     fsdp_config:

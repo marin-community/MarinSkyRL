@@ -9,12 +9,12 @@ from pathlib import Path
 
 from loguru import logger
 from marinskyrl.hf_model import normalize_fast_tokenizer_metadata
+from marinskyrl.model_manifest import HF_WEIGHT_INDEX_FILENAME, MODEL_MANIFEST_FILENAME, write_local_model_manifest
 from marinskyrl.resource_locator import join_resource_path
 
 from skyrl_train.io import io
 
 HF_WEIGHT_FILENAME = "model.safetensors"
-HF_WEIGHT_INDEX_FILENAME = "model.safetensors.index.json"
 
 
 def verify_hf_model_export(export_path: str) -> None:
@@ -68,8 +68,11 @@ def _upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
     source_root = Path(local_path)
     files = sorted(path for path in source_root.rglob("*") if path.is_file())
     index_files = [path for path in files if path.relative_to(source_root).as_posix() == HF_WEIGHT_INDEX_FILENAME]
+    manifest_files = [path for path in files if path.relative_to(source_root).as_posix() == MODEL_MANIFEST_FILENAME]
     weight_files = [path for path in files if path.suffix == ".safetensors"]
-    other_files = [path for path in files if path not in weight_files and path not in index_files]
+    other_files = [
+        path for path in files if path not in weight_files and path not in index_files and path not in manifest_files
+    ]
 
     def publish_file(path: Path) -> None:
         relative_path = path.relative_to(source_root).as_posix()
@@ -86,34 +89,36 @@ def _upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
             f"Published HF weight shard {shard_index}/{len(weight_files)}: {relative_path} "
             f"({size} bytes in {time.monotonic() - started:.1f}s)"
         )
-    for path in [*other_files, *index_files]:
+    for path in [*other_files, *index_files, *manifest_files]:
         publish_file(path)
 
     logger.info(f"Published HF model directory to {cloud_path}")
 
 
-def _remove_weight_index_if_present(index_path: str) -> None:
-    if io.exists(index_path):
-        io.remove(index_path)
-        logger.info(f"Removed HF weight index: {index_path}")
+def _remove_completion_markers(output_path: str) -> None:
+    for filename in (HF_WEIGHT_INDEX_FILENAME, MODEL_MANIFEST_FILENAME):
+        path = join_resource_path(output_path, filename)
+        if io.exists(path):
+            io.remove(path)
+            logger.info(f"Removed HF export completion marker: {path}")
 
 
 @contextmanager
 def local_hf_model_dir(output_path: str):
     """Invalidate the prior index and yield a local directory for the completed export."""
-    index_path = join_resource_path(output_path, HF_WEIGHT_INDEX_FILENAME)
-    _remove_weight_index_if_present(index_path)
+    _remove_completion_markers(output_path)
 
     try:
         with io.local_output_dir(output_path, _upload_hf_model_directory) as work_dir:
             yield work_dir
             normalize_fast_tokenizer_metadata(Path(work_dir))
+            write_local_model_manifest(work_dir)
     except BaseException as export_error:
         try:
-            _remove_weight_index_if_present(index_path)
+            _remove_completion_markers(output_path)
         except Exception as cleanup_error:
             raise ExceptionGroup(
-                f"HF export failed and its incomplete index could not be removed: {index_path}",
+                f"HF export failed and its completion markers could not be removed: {output_path}",
                 [export_error, cleanup_error],
             ) from export_error
         raise

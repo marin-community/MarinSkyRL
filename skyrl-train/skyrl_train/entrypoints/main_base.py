@@ -28,7 +28,11 @@ from skyrl_train.config.trajectory_runner_capabilities import (
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
 )
-from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
+from marinskyrl.speculative_decoding import (
+    STANDARD_TRAINING_ENTRYPOINT,
+    parse_speculative_decoding_config,
+    runai_model_uri,
+)
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -116,7 +120,10 @@ def create_ray_wrapped_inference_engines_from_config(
         InferenceEngineRoleConfig,
         inference_engine_kwargs_from_config,
     )
-    from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
+    from skyrl_train.inference_engines.ray_wrapped_inference_engine import (
+        MODEL_METADATA_PATH_KEY,
+        create_ray_wrapped_inference_engines,
+    )
 
     raw_speculative_decoding = cfg.generator.get("speculative_decoding")
     speculative_decoding = parse_speculative_decoding_config(
@@ -135,6 +142,11 @@ def create_ray_wrapped_inference_engines_from_config(
         **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
         "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
     }
+    policy_source_uri = cfg.trainer.policy.model.get("source_uri")
+    rollout_model_path = runai_model_uri(policy_source_uri) if policy_source_uri else cfg.trainer.policy.model.path
+    if policy_source_uri is not None:
+        engine_init_kwargs["load_format"] = "runai_streamer"
+        engine_init_kwargs[MODEL_METADATA_PATH_KEY] = cfg.trainer.policy.model.path
     if speculative_decoding is not None:
         engine_init_kwargs["speculative_config"] = speculative_decoding.vllm_speculative_config()
         if speculative_decoding.training is not None:
@@ -151,7 +163,7 @@ def create_ray_wrapped_inference_engines_from_config(
     ]
 
     role = InferenceEngineRoleConfig(
-        pretrain=cfg.trainer.policy.model.path,
+        pretrain=rollout_model_path,
         backend=cfg.generator.backend,
         num_inference_engines=cfg.generator.num_inference_engines,
         tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
@@ -170,7 +182,7 @@ def create_ray_wrapped_inference_engines_from_config(
         max_logprobs=max([1, *requested_logprobs]),
     )
     model_revision = cfg.trainer.policy.model.get("revision")
-    if model_revision is not None:
+    if model_revision is not None and policy_source_uri is None:
         engine_init_kwargs["revision"] = model_revision
     engine_kwargs = inference_engine_kwargs_from_config(
         cfg,
