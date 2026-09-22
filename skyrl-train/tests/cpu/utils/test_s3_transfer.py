@@ -8,14 +8,11 @@ import os
 from pathlib import Path
 import threading
 import time
-from types import SimpleNamespace
 
-from aiohttp import ClientPayloadError
-from botocore.exceptions import ClientError, ReadTimeoutError
+from botocore.exceptions import ReadTimeoutError
 from fsspec.exceptions import FSTimeoutError
 import pytest
 import rigging.filesystem.s3_compat as rigging_s3_compat
-import rigging.timing
 import torch
 from torch.distributed import checkpoint
 from torch.distributed.checkpoint.api import CheckpointException
@@ -114,27 +111,30 @@ def _withholding_s3_endpoint() -> Generator[_WithholdingEndpoint, None, None]:
 
 def _configure_withholding_s3(endpoint: str):
     rigging_s3_compat._S3_TOTAL_TIMEOUT = _UPLOAD_REQUEST_TIMEOUT
-    request_bounds = rigging_s3_compat.s3_python_config_kwargs()
-    request_bounds["retries"] = {"total_max_attempts": 1, "mode": "standard"}
-    remote_io.s3_python_config_kwargs = request_bounds.copy
-    remote_io._S3_FILESYSTEM = None
     os.environ.update(
         {
             "AWS_ACCESS_KEY_ID": "test",
             "AWS_SECRET_ACCESS_KEY": "test",
             "AWS_DEFAULT_REGION": "us-east-1",
             "AWS_ENDPOINT_URL": endpoint,
-            "OT_AGENT_S3_ADDRESSING_STYLE": "path",
             "NO_PROXY": "127.0.0.1",
             "no_proxy": "127.0.0.1",
         }
     )
-    return remote_io.get_s3_filesystem()
+    return remote_io.create_s3_filesystem(
+        endpoint_url=endpoint,
+        client_kwargs={"region_name": "us-east-1"},
+        config_kwargs={
+            "retries": {"total_max_attempts": 1, "mode": "standard"},
+            "s3": {"addressing_style": "path"},
+        },
+    )
 
 
 def _upload_to_withholding_endpoint(endpoint: str, checkpoint_shard: str, result_sender: Connection) -> None:
     filesystem = _configure_withholding_s3(endpoint)
     filesystem.retries = 1
+    io._get_filesystem = lambda _path: filesystem
 
     started = time.monotonic()
     try:
@@ -204,56 +204,6 @@ def _run_upload_process(target: Callable[..., None], *args: str) -> _UploadResul
     return result
 
 
-def test_s3_client_uses_shared_request_bounds_and_bounded_retries(monkeypatch):
-    sentinel = SimpleNamespace(retries=None)
-    shared_request_bounds = {
-        "connect_timeout": object(),
-        "read_timeout": object(),
-        "max_pool_connections": object(),
-        "http_session_cls": object(),
-    }
-    calls = []
-    monkeypatch.setattr(remote_io, "_S3_FILESYSTEM", None)
-    monkeypatch.delenv("OT_AGENT_S3_ADDRESSING_STYLE", raising=False)
-    monkeypatch.setattr(remote_io, "s3_python_config_kwargs", lambda: shared_request_bounds.copy())
-    monkeypatch.setattr(
-        remote_io,
-        "guarded_filesystem",
-        lambda protocol, **kwargs: calls.append((protocol, kwargs)) or sentinel,
-    )
-
-    assert remote_io.get_s3_filesystem() is sentinel
-    assert calls == [
-        (
-            "s3",
-            {
-                "config_kwargs": {
-                    **shared_request_bounds,
-                    "retries": {"total_max_attempts": 2, "mode": "standard"},
-                    "s3": {"addressing_style": "virtual"},
-                }
-            },
-        )
-    ]
-    assert sentinel.retries == 1
-
-
-def test_s3_client_allows_addressing_style_override(monkeypatch):
-    calls = []
-    sentinel = SimpleNamespace(retries=None)
-    monkeypatch.setattr(remote_io, "_S3_FILESYSTEM", None)
-    monkeypatch.setenv("OT_AGENT_S3_ADDRESSING_STYLE", "path")
-    monkeypatch.setattr(
-        remote_io,
-        "guarded_filesystem",
-        lambda protocol, **kwargs: calls.append((protocol, kwargs)) or sentinel,
-    )
-
-    remote_io.get_s3_filesystem()
-
-    assert calls[0][1]["config_kwargs"]["s3"] == {"addressing_style": "path"}
-
-
 def test_s3_multipart_upload_fails_when_peer_withholds_continue(tmp_path):
     checkpoint_shard = tmp_path / "checkpoint.distcp"
     with checkpoint_shard.open("wb") as shard_file:
@@ -305,8 +255,7 @@ def test_abort_multipart_uploads_limits_cleanup_to_checkpoint_prefix(monkeypatch
             return {}
 
     filesystem = RecordingFilesystem()
-    monkeypatch.setattr(remote_io, "get_s3_filesystem", lambda: filesystem)
-    monkeypatch.setattr(remote_io, "refresh_s3_credentials_if_expiring", lambda _filesystem: None)
+    monkeypatch.setattr(remote_io, "create_s3_filesystem", lambda: filesystem)
 
     assert remote_io.abort_multipart_uploads("s3://bucket/checkpoints/global_step_4/policy") == 2
     assert filesystem.calls == [
@@ -336,85 +285,6 @@ def test_abort_multipart_uploads_limits_cleanup_to_checkpoint_prefix(monkeypatch
 def test_abort_multipart_uploads_rejects_noncanonical_checkpoint_path():
     with pytest.raises(ValueError):
         remote_io.abort_multipart_uploads("s3://bucket/checkpoints/global_step_4/policy//")
-
-
-@pytest.mark.parametrize(
-    ("transfer_error", "expected_refreshes"),
-    [
-        (FSTimeoutError("injected fsspec timeout"), 0),
-        (ReadTimeoutError(endpoint_url="https://bucket.invalid/shard.pt", error="injected SDK timeout"), 0),
-        (ClientPayloadError("incomplete S3 response body"), 0),
-        (OSError(5, "An error occurred (Forbidden) when calling ListObjectsV2: AccessDenied"), 2),
-        (
-            ClientError(
-                {"Error": {"Code": "AccessDenied"}, "ResponseMetadata": {"HTTPStatusCode": 403}},
-                "ListObjectsV2",
-            ),
-            2,
-        ),
-    ],
-)
-def test_s3_transfer_retries_retryable_failure_with_backoff(
-    monkeypatch,
-    transfer_error,
-    expected_refreshes,
-):
-    class RefreshableFilesystem:
-        def __init__(self):
-            self.refreshes = 0
-
-        def connect(self, *, refresh):
-            assert refresh is True
-            self.refreshes += 1
-
-    filesystem = RefreshableFilesystem()
-    attempts = 0
-    delays = []
-
-    def flaky_transfer():
-        nonlocal attempts
-        attempts += 1
-        if attempts < 3:
-            raise transfer_error
-        return "complete"
-
-    monkeypatch.setattr(rigging.timing.time, "sleep", delays.append)
-    monkeypatch.setattr(rigging.timing.random, "random", lambda: 0.5)
-
-    assert remote_io.call_with_s3_retry(filesystem, flaky_transfer) == "complete"
-    assert attempts == 3
-    assert filesystem.refreshes == expected_refreshes
-    assert delays == [1.0, 2.0]
-
-
-def test_s3_transfer_raises_after_access_denied_retry_budget(monkeypatch):
-    attempts = 0
-
-    def denied_transfer():
-        nonlocal attempts
-        attempts += 1
-        raise OSError(5, "Forbidden: AccessDenied")
-
-    monkeypatch.setattr(rigging.timing.time, "sleep", lambda _delay: None)
-
-    with pytest.raises(OSError, match="AccessDenied"):
-        remote_io.call_with_s3_retry(object(), denied_transfer)
-
-    assert attempts == 5
-
-
-def test_s3_transfer_does_not_retry_unrelated_oserror(monkeypatch):
-    attempts = 0
-
-    def denied_local_operation():
-        nonlocal attempts
-        attempts += 1
-        raise PermissionError("Forbidden local path")
-
-    with pytest.raises(PermissionError, match="Forbidden local path"):
-        remote_io.call_with_s3_retry(object(), denied_local_operation)
-
-    assert attempts == 1
 
 
 def test_local_read_files_downloads_only_requested_objects(monkeypatch):

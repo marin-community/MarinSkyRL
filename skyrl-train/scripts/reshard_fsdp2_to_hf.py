@@ -21,7 +21,7 @@ import torch._tensor as _tt
 import torch._utils as _tu
 from huggingface_hub import HfApi
 from marinskyrl.hf_model import normalize_fast_tokenizer_metadata
-from marinskyrl.remote_io import call_with_hugging_face_retry, call_with_s3_retry, create_s3_filesystem
+from marinskyrl.remote_io import call_with_hugging_face_retry, create_s3_filesystem
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 
@@ -124,19 +124,14 @@ def download_shards(s3_prefix, world_size, local_dir, endpoint_url):
         "chat_template.jinja",
     ]
     for fn in hf_files:
-        call_with_s3_retry(
-            fs,
-            fs.get_file,
-            f"{prefix}/huggingface/{fn}",
-            os.path.join(local_dir, "huggingface", fn),
-        )
+        fs.get_file(f"{prefix}/huggingface/{fn}", os.path.join(local_dir, "huggingface", fn))
         print(f"[reshard] downloaded huggingface/{fn}", flush=True)
     for r in range(world_size):
         fn = f"model_world_size_{world_size}_rank_{r}.pt"
         dst = os.path.join(local_dir, fn)
         if os.path.exists(dst) and os.path.getsize(dst) > 0:
             continue
-        call_with_s3_retry(fs, fs.get_file, f"{prefix}/{fn}", dst)
+        fs.get_file(f"{prefix}/{fn}", dst)
         print(f"[reshard] downloaded {fn} ({os.path.getsize(dst) / 1e9:.2f} GB)", flush=True)
 
 

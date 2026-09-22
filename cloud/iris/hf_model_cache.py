@@ -39,7 +39,6 @@ from marinskyrl.model_manifest import (
     validate_sha256_digest,
 )
 from marinskyrl.remote_io import (
-    call_with_filesystem_retry,
     call_with_hugging_face_retry,
     filesystem_and_path,
     load_hugging_face_with_retry,
@@ -117,7 +116,7 @@ def _cached_manifest(
 ) -> ModelManifest | None:
     marker_uri = join_resource_path(cache_uri, MODEL_MANIFEST_FILENAME)
     filesystem, marker_path = fs_and_path(marker_uri)
-    if not call_with_filesystem_retry(filesystem, filesystem.exists, marker_path):
+    if not filesystem.exists(marker_path):
         return None
     # The manifest is the completion record. A malformed or mismatched marker
     # identifies a partial cache that the next lock holder can rebuild.
@@ -198,9 +197,9 @@ def _destination_matches(
     size: int,
     sha256: str | None,
 ) -> bool:
-    if sha256 is None or not call_with_filesystem_retry(filesystem, filesystem.exists, path):
+    if sha256 is None or not filesystem.exists(path):
         return False
-    info = call_with_filesystem_retry(filesystem, filesystem.info, path)
+    info = filesystem.info(path)
     if int(info["size"]) != size:
         return False
 
@@ -211,7 +210,7 @@ def _destination_matches(
                 digest.update(chunk)
         return digest.hexdigest()
 
-    return call_with_filesystem_retry(filesystem, hash_existing) == sha256
+    return hash_existing() == sha256
 
 
 def _read_source_bytes(
@@ -268,7 +267,7 @@ def _stream_snapshot_file(
                     _header, existing_keys = read_safetensors_header(existing, destination_path)
                 return existing_keys
 
-            keys = call_with_filesystem_retry(destination_filesystem, read_header)
+            keys = read_header()
         else:
             keys = ()
         return _MirroredSnapshotFile(
@@ -313,13 +312,13 @@ def _stream_snapshot_file(
 
 
 def _remove_unexpected_files(filesystem: AbstractFileSystem, root: str, expected_paths: set[str]) -> None:
-    found = call_with_filesystem_retry(filesystem, filesystem.find, root, detail=True)
+    found = filesystem.find(root, detail=True)
     for path, info in found.items():
         if info["type"] != "file":
             continue
         relative = relative_resource_path(root, path)
         if relative not in expected_paths:
-            call_with_filesystem_retry(filesystem, filesystem.rm, path)
+            filesystem.rm(path)
 
 
 def _mirror_snapshot_files(
@@ -469,10 +468,10 @@ def publish_hugging_face_snapshot(
     validate_model_file_names(set(files_by_path), source, tokenizer_mode)
 
     destination_filesystem, destination_root = filesystem_and_path(destination_uri)
-    call_with_filesystem_retry(destination_filesystem, destination_filesystem.makedirs, destination_root, exist_ok=True)
+    destination_filesystem.makedirs(destination_root, exist_ok=True)
     marker_path = posixpath.join(destination_root, MODEL_MANIFEST_FILENAME)
-    if call_with_filesystem_retry(destination_filesystem, destination_filesystem.exists, marker_path):
-        call_with_filesystem_retry(destination_filesystem, destination_filesystem.rm, marker_path)
+    if destination_filesystem.exists(marker_path):
+        destination_filesystem.rm(marker_path)
 
     mirrored = _mirror_snapshot_files(
         source_filesystem,
@@ -606,12 +605,7 @@ def stage_model_metadata(model_uri: str, manifest: ModelManifest, local_path: st
         for entry in metadata_files:
             destination = staging / entry.path
             destination.parent.mkdir(parents=True, exist_ok=True)
-            call_with_filesystem_retry(
-                filesystem,
-                filesystem.get_file,
-                posixpath.join(root, entry.path),
-                str(destination),
-            )
+            filesystem.get_file(posixpath.join(root, entry.path), str(destination))
             if destination.stat().st_size != entry.size or sha256_file(destination) != entry.sha256:
                 raise ValueError(f"Model metadata checksum mismatch for {entry.path}: {model_uri}")
         (staging / MODEL_MANIFEST_FILENAME).write_text(

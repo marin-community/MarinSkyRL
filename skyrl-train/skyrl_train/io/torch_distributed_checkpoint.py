@@ -21,10 +21,10 @@ from torch.distributed.checkpoint.storage import WriteResult
 from torch.futures import Future
 
 from marinskyrl.remote_io import (
-    DEFAULT_S3_MULTIPART_CONCURRENCY,
-    DEFAULT_S3_MULTIPART_PART_BYTES,
-    MINIMUM_S3_MULTIPART_PART_BYTES,
+    CommittableStream,
     OutputStream,
+    S3_MULTIPART_CONCURRENCY,
+    S3_MULTIPART_PART_BYTES,
     S3MultipartWriteStream,
     create_output_stream,
     manage_output_stream,
@@ -34,7 +34,7 @@ from marinskyrl.remote_io import (
 DEFAULT_TENSOR_COPY_AHEAD_BYTES = 2**30
 
 
-class _DeferredWriteErrorStream:
+class _DeferredWriteErrorStream(CommittableStream):
     """Preserve Python write errors that torch.save would otherwise replace."""
 
     def __init__(self, stream: S3MultipartWriteStream) -> None:
@@ -71,38 +71,30 @@ class _DeferredWriteErrorStream:
         self._position += payload_bytes
         return payload_bytes
 
-    def close(self) -> None:
+    def commit(self) -> None:
         if self.closed:
-            return
+            raise ValueError("commit of closed checkpoint stream")
         if self._write_error is not None:
             error = self._write_error
             try:
-                self.discard()
+                self.close()
             except Exception as cleanup_error:
                 error.add_note(f"Failed to abort multipart upload for {self.path}: {cleanup_error}")
             raise error
-        self.stream.close()
+        self.stream.commit()
         self.closed = True
 
-    def discard(self) -> None:
+    def close(self) -> None:
         if self.closed:
             return
-        self.stream.discard()
+        self.stream.close()
         self.closed = True
 
 
 class _AbortableFsspecFileSystem(FsspecFileSystem):
-    def __init__(
-        self,
-        filesystem: AbstractFileSystem,
-        *,
-        multipart_part_bytes: int,
-        multipart_concurrency: int,
-    ) -> None:
+    def __init__(self, filesystem: AbstractFileSystem) -> None:
         super().__init__()
         self.fs = filesystem
-        self.multipart_part_bytes = multipart_part_bytes
-        self.multipart_concurrency = multipart_concurrency
 
     def init_path(self, path: str | os.PathLike, **_kwargs) -> str | os.PathLike:
         return path
@@ -118,12 +110,7 @@ class _AbortableFsspecFileSystem(FsspecFileSystem):
 
         object_path = os.fspath(path)
         if mode == "wb":
-            stream = create_output_stream(
-                self.fs,
-                object_path,
-                part_bytes=self.multipart_part_bytes,
-                concurrency=self.multipart_concurrency,
-            )
+            stream = create_output_stream(self.fs, object_path)
             if object_path.endswith(DEFAULT_SUFFIX) and isinstance(stream, S3MultipartWriteStream):
                 stream = _DeferredWriteErrorStream(stream)
             with manage_output_stream(stream, object_path) as managed:
@@ -143,15 +130,9 @@ class StreamingFsspecWriter(FileSystemWriter):
         *,
         filesystem: AbstractFileSystem,
         tensor_copy_ahead_bytes: int = DEFAULT_TENSOR_COPY_AHEAD_BYTES,
-        multipart_part_bytes: int = DEFAULT_S3_MULTIPART_PART_BYTES,
-        multipart_concurrency: int = DEFAULT_S3_MULTIPART_CONCURRENCY,
     ) -> None:
         if tensor_copy_ahead_bytes <= 0:
             raise ValueError("tensor_copy_ahead_bytes must be positive")
-        if multipart_part_bytes < MINIMUM_S3_MULTIPART_PART_BYTES:
-            raise ValueError(f"multipart_part_bytes must be at least {MINIMUM_S3_MULTIPART_PART_BYTES}")
-        if multipart_concurrency <= 0:
-            raise ValueError("multipart_concurrency must be positive")
         super().__init__(
             path,
             single_file_per_rank=True,
@@ -159,15 +140,9 @@ class StreamingFsspecWriter(FileSystemWriter):
             thread_count=1,
             per_thread_copy_ahead=tensor_copy_ahead_bytes,
         )
-        self.fs = _AbortableFsspecFileSystem(
-            filesystem,
-            multipart_part_bytes=multipart_part_bytes,
-            multipart_concurrency=multipart_concurrency,
-        )
+        self.fs = _AbortableFsspecFileSystem(filesystem)
         self.path = self.fs.init_path(path)
         self.tensor_copy_ahead_bytes = tensor_copy_ahead_bytes
-        self.multipart_part_bytes = multipart_part_bytes
-        self.multipart_concurrency = multipart_concurrency
 
     def prepare_local_plan(self, plan: SavePlan) -> SavePlan:
         plan = super().prepare_local_plan(plan)
@@ -177,9 +152,9 @@ class StreamingFsspecWriter(FileSystemWriter):
             self.rank,
             len(plan.items),
             self.tensor_copy_ahead_bytes,
-            self.multipart_part_bytes,
-            self.multipart_concurrency,
-            self.tensor_copy_ahead_bytes + self.multipart_part_bytes * (self.multipart_concurrency + 1),
+            S3_MULTIPART_PART_BYTES,
+            S3_MULTIPART_CONCURRENCY,
+            self.tensor_copy_ahead_bytes + S3_MULTIPART_PART_BYTES * (S3_MULTIPART_CONCURRENCY + 1),
         )
         return plan
 

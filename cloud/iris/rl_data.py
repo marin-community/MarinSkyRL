@@ -20,7 +20,7 @@ from typing import Any, List, Mapping, Optional
 
 from cloud.iris.hf_datasets import resolve_hf_dataset_selector
 from cloud.iris.tasks_parquet import from_parquet
-from marinskyrl.remote_io import call_with_filesystem_retry, filesystem_and_path
+from marinskyrl.remote_io import filesystem_and_path
 from marinskyrl.resource_locator import parse_hf_dataset_selector
 from marinskyrl.task_sources import TaskTroveParquetSource, data_source
 
@@ -40,12 +40,8 @@ def _stage_remote_file(uri: str, destination: Path, *, overwrite: bool) -> None:
     staging = destination.parent / f".{destination.name}.{os.getpid()}.tmp"
     try:
         filesystem, source_path = filesystem_and_path(uri)
-
-        def transfer() -> None:
-            with filesystem.open(source_path, "rb") as src, open(staging, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-
-        call_with_filesystem_retry(filesystem, transfer)
+        with filesystem.open(source_path, "rb") as src, open(staging, "wb") as dst:
+            shutil.copyfileobj(src, dst)
         os.replace(staging, destination)
     finally:
         staging.unlink(missing_ok=True)

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from fsspec.spec import AbstractFileSystem
-from marinskyrl.remote_io import call_with_filesystem_retry, filesystem_and_path, open_output_stream
+from marinskyrl.remote_io import filesystem_and_path, open_output_stream
 from marinskyrl.resource_locator import join_resource_path, relative_resource_path
 
 CHECKPOINT_MARKER_FILENAME = "latest_ckpt_global_step.txt"
@@ -49,11 +49,11 @@ def fs_and_path(uri: str) -> tuple[AbstractFileSystem, str]:
 def write_json(uri: str, value: dict[str, Any], *, overwrite: bool = True) -> None:
     """Write JSON to a local or object-store URI."""
     filesystem, path = fs_and_path(uri)
-    if not overwrite and call_with_filesystem_retry(filesystem, filesystem.exists, path):
+    if not overwrite and filesystem.exists(path):
         raise ValueError(f"JSON artifact already exists: {uri}")
     parent = posixpath.dirname(path)
     if parent:
-        call_with_filesystem_retry(filesystem, filesystem.makedirs, parent, exist_ok=True)
+        filesystem.makedirs(parent, exist_ok=True)
     payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
     with open_output_stream(filesystem, path) as destination:
         destination.write(payload)
@@ -62,33 +62,25 @@ def write_json(uri: str, value: dict[str, Any], *, overwrite: bool = True) -> No
 def read_json(uri: str) -> dict[str, Any] | None:
     """Read a JSON object, returning ``None`` when the URI does not exist."""
     filesystem, path = fs_and_path(uri)
-    if not call_with_filesystem_retry(filesystem, filesystem.exists, path):
+    if not filesystem.exists(path):
         return None
-
-    def read() -> dict[str, Any]:
-        with filesystem.open(path) as source:
-            return json.load(source)
-
-    return call_with_filesystem_retry(filesystem, read)
+    with filesystem.open(path) as source:
+        return json.load(source)
 
 
 def terminal_checkpoint_step(checkpoint_root: str) -> int:
     """Return the latest committed checkpoint step."""
     marker_uri = join_resource_path(checkpoint_root, CHECKPOINT_MARKER_FILENAME)
     filesystem, marker_path = fs_and_path(marker_uri)
-    if not call_with_filesystem_retry(filesystem, filesystem.exists, marker_path):
+    if not filesystem.exists(marker_path):
         raise ValueError(f"Successful Iris job did not commit a checkpoint marker: {marker_uri}")
-
-    def read() -> int:
-        with filesystem.open(marker_path, "r") as source:
-            return int(source.read().strip())
-
-    return call_with_filesystem_retry(filesystem, read)
+    with filesystem.open(marker_path, "r") as source:
+        return int(source.read().strip())
 
 
 def file_inventory(filesystem: AbstractFileSystem, root: str) -> tuple[tuple[str, FileEntry], ...]:
     """List files below a storage root using metadata returned by the listing."""
-    files = call_with_filesystem_retry(filesystem, filesystem.find, root, detail=True)
+    files = filesystem.find(root, detail=True)
     return tuple(
         sorted(
             (
@@ -103,7 +95,7 @@ def file_inventory(filesystem: AbstractFileSystem, root: str) -> tuple[tuple[str
 
 def _source_inventory(uri: str) -> tuple[AbstractFileSystem, tuple[tuple[str, FileEntry], ...]]:
     filesystem, source_path = fs_and_path(uri)
-    source_info = call_with_filesystem_retry(filesystem, filesystem.info, source_path)
+    source_info = filesystem.info(source_path)
     if source_info["type"] == "file":
         entry = FileEntry(path=posixpath.basename(source_path), size=int(source_info["size"]))
         return filesystem, ((source_path, entry),)
@@ -127,7 +119,7 @@ def copy_file_inventory(
         source_path, entry = item
         local_path = destination / entry.path
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        call_with_filesystem_retry(filesystem, filesystem.get_file, source_path, str(local_path))
+        filesystem.get_file(source_path, str(local_path))
         actual_size = local_path.stat().st_size
         if actual_size != entry.size:
             raise ValueError(f"Staging size mismatch for {entry.path}: expected {entry.size}, found {actual_size}")
