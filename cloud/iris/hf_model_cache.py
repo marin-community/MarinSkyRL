@@ -7,6 +7,7 @@ from pathlib import Path
 import posixpath
 import tempfile
 import time
+from typing import Literal
 
 from fsspec.spec import AbstractFileSystem
 from huggingface_hub import HfApi, snapshot_download
@@ -37,16 +38,22 @@ def load_model_manifest(model_uri: str) -> ModelManifest:
     return ModelManifest.from_mapping(read_json(marker_uri), marker_uri)
 
 
-def _cached_manifest(cache_uri: str, model_id: str, revision: str) -> ModelManifest | None:
+def _cached_manifest(
+    cache_uri: str,
+    model_id: str,
+    revision: str,
+    tokenizer_mode: Literal["embedded", "policy"],
+) -> ModelManifest | None:
     marker_uri = join_resource_path(cache_uri, MODEL_MANIFEST_FILENAME)
     filesystem, marker_path = fs_and_path(marker_uri)
     if not filesystem.exists(marker_path):
         return None
     manifest = load_model_manifest(cache_uri)
-    if manifest.model_id != model_id or manifest.revision != revision:
+    if manifest.model_id != model_id or manifest.revision != revision or manifest.tokenizer_mode != tokenizer_mode:
         raise ValueError(
             f"Hugging Face model-cache identity mismatch at {cache_uri}: "
-            f"{manifest.model_id}@{manifest.revision} != {model_id}@{revision}"
+            f"{manifest.model_id}@{manifest.revision} ({manifest.tokenizer_mode}) != "
+            f"{model_id}@{revision} ({tokenizer_mode})"
         )
     return manifest
 
@@ -98,31 +105,38 @@ def ensure_hugging_face_model_cache(
     *,
     ttl_days: int,
     source_prefix: str,
+    tokenizer_mode: Literal["embedded", "policy"] = "embedded",
 ) -> tuple[str, ModelManifest]:
     """Mirror one immutable Hub snapshot once and return its URI and manifest."""
     revision = resolve_hugging_face_revision(model_id, revision)
+    cache_identity = model_id if tokenizer_mode == "embedded" else f"{model_id}#tokenizer={tokenizer_mode}"
     cache_uri = marin_temp_bucket(
         ttl_days,
-        prefix=f"{_CACHE_PREFIX}/{immutable_model_cache_key(model_id, revision)}",
+        prefix=f"{_CACHE_PREFIX}/{immutable_model_cache_key(cache_identity, revision)}",
         source_prefix=source_prefix,
     ).rstrip("/")
     filesystem, cache_path = fs_and_path(cache_uri)
-    if manifest := _cached_manifest(cache_uri, model_id, revision):
+    if manifest := _cached_manifest(cache_uri, model_id, revision, tokenizer_mode):
         return cache_uri, manifest
 
     lock = create_lock(f"{cache_uri}.lock")
     while not lock.try_acquire():
-        if manifest := _cached_manifest(cache_uri, model_id, revision):
+        if manifest := _cached_manifest(cache_uri, model_id, revision, tokenizer_mode):
             return cache_uri, manifest
         time.sleep(_CACHE_POLL_INTERVAL)
 
     try:
-        if manifest := _cached_manifest(cache_uri, model_id, revision):
+        if manifest := _cached_manifest(cache_uri, model_id, revision, tokenizer_mode):
             return cache_uri, manifest
         with lease_refresh(lock):
             with tempfile.TemporaryDirectory(prefix="marinskyrl-hf-model-") as scratch:
                 snapshot = download_hugging_face_snapshot(model_id, revision=revision, destination=Path(scratch))
-                manifest = snapshot_model_manifest(snapshot, model_id, revision)
+                manifest = snapshot_model_manifest(
+                    snapshot,
+                    model_id,
+                    revision,
+                    tokenizer_mode=tokenizer_mode,
+                )
                 filesystem.makedirs(cache_path, exist_ok=True)
                 _upload_snapshot(filesystem, cache_path, snapshot)
             write_json(join_resource_path(cache_uri, MODEL_MANIFEST_FILENAME), manifest.model_dump(mode="json"))

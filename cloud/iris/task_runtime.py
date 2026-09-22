@@ -502,6 +502,7 @@ def prepare_draft_model(
             model.source_identity,
             ttl_days=cache_ttl_days,
             source_prefix=cache_source_prefix,
+            tokenizer_mode="policy",
         )
     else:
         source_uri = model.source_uri

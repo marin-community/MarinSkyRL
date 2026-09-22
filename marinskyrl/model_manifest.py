@@ -10,7 +10,11 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
-from marinskyrl.hf_model import normalize_fast_tokenizer_metadata, validate_portable_hf_model_files
+from marinskyrl.hf_model import (
+    normalize_fast_tokenizer_metadata,
+    validate_hf_model_weights,
+    validate_portable_hf_model_files,
+)
 
 MODEL_MANIFEST_FILENAME = ".marinskyrl-model-manifest.json"
 HF_WEIGHT_INDEX_FILENAME = "model.safetensors.index.json"
@@ -37,6 +41,7 @@ class ModelManifest(BaseModel):
 
     model_id: str | None
     revision: str | None
+    tokenizer_mode: Literal["embedded", "policy"] = "embedded"
     identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     files: tuple[ModelManifestFile, ...] = Field(min_length=1)
     format_version: Literal[1] = 1
@@ -54,10 +59,14 @@ class ModelManifest(BaseModel):
         paths = [entry.path for entry in self.files]
         if len(paths) != len(set(paths)):
             raise ValueError(f"Model manifest contains duplicate paths: {source}")
-        expected = _manifest_identity(self.model_id, self.revision, self.files)
+        expected = _manifest_identity(self.model_id, self.revision, self.files, self.tokenizer_mode)
         if self.identity != expected:
             raise ValueError(f"Model manifest identity mismatch at {source}: {self.identity} != {expected}")
-        validate_portable_hf_model_files(set(paths), source)
+        names = set(paths)
+        if self.tokenizer_mode == "embedded":
+            validate_portable_hf_model_files(names, source)
+        else:
+            validate_hf_model_weights(names, source)
         if HF_WEIGHT_INDEX_FILENAME not in paths:
             raise ValueError(f"Model manifest is missing {HF_WEIGHT_INDEX_FILENAME}: {source}")
         return self
@@ -75,6 +84,7 @@ def _manifest_identity(
     model_id: str | None,
     revision: str | None,
     files: tuple[ModelManifestFile, ...],
+    tokenizer_mode: Literal["embedded", "policy"] = "embedded",
 ) -> str:
     value = {
         "files": [entry.model_dump(mode="json") for entry in files],
@@ -82,6 +92,10 @@ def _manifest_identity(
         "model_id": model_id,
         "revision": revision,
     }
+    # Preserve identities written before draft manifests declared their shared
+    # policy-tokenizer contract. The non-default mode remains identity-bound.
+    if tokenizer_mode != "embedded":
+        value["tokenizer_mode"] = tokenizer_mode
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
@@ -123,14 +137,23 @@ def _ensure_weight_index(snapshot: Path) -> None:
         index_path.write_text(json.dumps(index, indent=2, sort_keys=True) + "\n")
 
 
-def snapshot_model_manifest(snapshot: Path, model_id: str | None, revision: str | None) -> ModelManifest:
+def snapshot_model_manifest(
+    snapshot: Path,
+    model_id: str | None,
+    revision: str | None,
+    *,
+    tokenizer_mode: Literal["embedded", "policy"] = "embedded",
+) -> ModelManifest:
     normalize_fast_tokenizer_metadata(snapshot)
     _ensure_weight_index(snapshot)
     paths = sorted(
         path for path in snapshot.rglob("*") if path.is_file() and path.relative_to(snapshot).parts[0] != ".cache"
     )
     names = {path.relative_to(snapshot).as_posix() for path in paths}
-    validate_portable_hf_model_files(names, str(snapshot))
+    if tokenizer_mode == "embedded":
+        validate_portable_hf_model_files(names, str(snapshot))
+    else:
+        validate_hf_model_weights(names, str(snapshot))
     files = tuple(
         ModelManifestFile(
             path=path.relative_to(snapshot).as_posix(),
@@ -142,7 +165,8 @@ def snapshot_model_manifest(snapshot: Path, model_id: str | None, revision: str 
     return ModelManifest(
         model_id=model_id,
         revision=revision,
-        identity=_manifest_identity(model_id, revision, files),
+        tokenizer_mode=tokenizer_mode,
+        identity=_manifest_identity(model_id, revision, files, tokenizer_mode),
         files=files,
     )
 

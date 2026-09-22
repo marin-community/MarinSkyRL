@@ -91,6 +91,35 @@ def test_corrupt_completed_cache_fails_instead_of_remirroring(tmp_path: Path, mo
         ensure_hugging_face_model_cache("laion/draft", revision, ttl_days=14, source_prefix="s3://region/run")
 
 
+def test_draft_manifest_can_share_the_policy_tokenizer(tmp_path: Path, monkeypatch) -> None:
+    cache = tmp_path / "draft-cache"
+
+    def download_snapshot(_model_id: str, *, revision: str, destination: Path) -> Path:
+        assert revision == "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
+        (destination / "config.json").write_text("{}")
+        save_file({"weight": np.arange(4, dtype=np.float32)}, destination / "model.safetensors")
+        return destination
+
+    monkeypatch.setattr(hf_model_cache, "marin_temp_bucket", lambda *_args, **_kwargs: str(cache))
+    monkeypatch.setattr(hf_model_cache, "download_hugging_face_snapshot", download_snapshot)
+
+    cache_uri, manifest = ensure_hugging_face_model_cache(
+        "laion/draft",
+        "4bdb47c08e5b5190bea3c7a93c3e14470230e469",
+        ttl_days=14,
+        source_prefix="s3://region/run",
+        tokenizer_mode="policy",
+    )
+
+    assert cache_uri == str(cache)
+    assert manifest.tokenizer_mode == "policy"
+    assert not any(entry.path.startswith("tokenizer") for entry in manifest.files)
+    assert (
+        ModelManifest.from_mapping(json.loads((cache / ".marinskyrl-model-manifest.json").read_text()), str(cache))
+        == manifest
+    )
+
+
 def test_model_manifest_rejects_metadata_paths_outside_the_model_root(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text("{}")
     (tmp_path / "tokenizer.json").write_text("{}")
@@ -101,3 +130,14 @@ def test_model_manifest_rejects_metadata_paths_outside_the_model_root(tmp_path: 
 
     with pytest.raises(ValueError, match="relative and contained"):
         ModelManifest.from_mapping(value, "memory://models/draft")
+
+
+def test_policy_manifest_without_tokenizer_mode_remains_compatible(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "tokenizer.json").write_text("{}")
+    save_file({"weight": np.arange(4, dtype=np.float32)}, tmp_path / "model.safetensors")
+    manifest = snapshot_model_manifest(tmp_path, model_id="snowball/policy", revision="pinned")
+    value = manifest.model_dump(mode="json")
+    value.pop("tokenizer_mode")
+
+    assert ModelManifest.from_mapping(value, "memory://models/policy") == manifest

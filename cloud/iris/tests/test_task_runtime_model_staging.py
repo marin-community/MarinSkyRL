@@ -8,8 +8,10 @@ from cloud.iris.task_runtime import (
     apply_policy_model_to_command,
     parse_args,
     policy_chat_template_model,
+    prepare_draft_model,
     prepare_policy_model,
 )
+from marinskyrl.speculative_decoding import SpeculatorModelConfig
 
 
 @pytest.mark.parametrize(
@@ -73,3 +75,23 @@ def test_s3_policy_stages_metadata_and_rewrites_driver_without_materializing_wei
     assert command[command.index("--model-source-uri") + 1] == "s3://models/policy"
     assert command[command.index("--model-source-identity") + 1] == identity
     assert "++generator.engine_init_kwargs.served_model_name=policy" in command
+
+
+def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(monkeypatch) -> None:
+    revision = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
+    identity = "sha256:" + "a" * 64
+
+    def ensure(model_id, requested_revision, **kwargs):
+        assert (model_id, requested_revision) == ("laion/draft", revision)
+        assert kwargs["tokenizer_mode"] == "policy"
+        return "s3://models/draft", SimpleNamespace(identity=identity)
+
+    monkeypatch.setattr(task_runtime, "ensure_hugging_face_model_cache", ensure)
+
+    prepared = prepare_draft_model(
+        SpeculatorModelConfig(source_uri="hf://laion/draft", source_identity=revision),
+        cache_ttl_days=14,
+        cache_source_prefix="s3://region/run",
+    )
+
+    assert prepared == SpeculatorModelConfig(source_uri="s3://models/draft", source_identity=identity)
