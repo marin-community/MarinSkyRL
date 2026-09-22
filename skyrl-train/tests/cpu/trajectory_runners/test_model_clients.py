@@ -195,6 +195,7 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
                 "message": {"role": "assistant", "content": "answer"},
                 "finish_reason": "stop",
                 "token_ids": [9],
+                "provider_specific_fields": {"routed_experts": [[[4, 7]]]},
                 "logprobs": {
                     "content": [
                         {
@@ -225,6 +226,7 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
     assert body["return_tokens_as_token_ids"] is True
     assert output["student_topk_indices"] == [[[2, 3]]]
     assert output["behavior_topk_logprobs"] == [[[-0.1, -0.2]]]
+    assert output["routed_experts"] == [[[[4, 7]]]]
 
 
 @pytest.mark.asyncio
