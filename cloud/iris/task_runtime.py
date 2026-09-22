@@ -100,6 +100,7 @@ except ImportError as error:
 RENDEZVOUS_FILENAME = "ray_head.json"
 DONE_FILENAME = "ray_head.done"
 HEAD_RESULT_SUCCEEDED = "succeeded"
+HUGGING_FACE_DEFAULT_REVISION = "main"
 
 
 @dataclass(frozen=True)
@@ -457,7 +458,7 @@ def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None
     if args.stream_model:
         source_uri, manifest = ensure_hugging_face_model_cache(
             args.stream_model,
-            args.model_revision or "main",
+            args.model_revision or HUGGING_FACE_DEFAULT_REVISION,
             ttl_days=args.model_cache_ttl_days,
             source_prefix=args.model_cache_source_prefix,
         )
@@ -502,7 +503,7 @@ def prepare_policy_tokenizer(args: argparse.Namespace) -> PreparedPolicyTokenize
         return PreparedPolicyTokenizer(tokenizer_path)
 
     revision = args.policy_tokenizer_revision
-    local_path = _metadata_path(tokenizer_path, revision or "main")
+    local_path = _metadata_path(tokenizer_path, revision or HUGGING_FACE_DEFAULT_REVISION)
     if is_cloud_uri(tokenizer_path):
         manifest = ensure_model_manifest(tokenizer_path)
         stage_model_metadata(tokenizer_path, manifest, local_path)
