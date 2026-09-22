@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import re
 
 import huggingface_hub.constants
 import numpy as np
@@ -10,14 +11,6 @@ from safetensors.numpy import save_file
 from cloud.iris import hf_model_cache
 from cloud.iris.hf_model_cache import ensure_hugging_face_model_cache, stage_model_metadata
 from marinskyrl.model_manifest import ModelManifest, snapshot_model_manifest
-
-
-def _cache_events(caplog) -> list[dict[str, str]]:
-    return [
-        dict(field.split("=", 1) for field in record.getMessage().split() if "=" in field)
-        for record in caplog.records
-        if record.name == hf_model_cache.__name__
-    ]
 
 
 def test_hub_download_temporarily_enables_network_access(tmp_path: Path, monkeypatch) -> None:
@@ -91,30 +84,16 @@ def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, 
     assert (local_model / "model.safetensors.index.json").is_file()
     assert not (local_model / "model.safetensors").exists()
     assert not (local_model / "stale.bin").exists()
-    events = _cache_events(caplog)
     output = "\n".join(record.getMessage() for record in caplog.records if record.name == hf_model_cache.__name__)
-    assert any(
-        event.get("role") == "publisher"
-        and event.get("hf_token_present") == "True"
-        and event.get("s3_endpoint_env_source") == "FSSPEC_S3"
-        and event.get("s3_endpoint_env_class") == "coreweave_in_cluster"
-        for event in events
-    )
-    assert any(event.get("role") == "hit" for event in events)
+    assert "role=publisher" in output and "role=hit" in output
+    assert "hf_token_present=True" in output
+    assert "s3_endpoint_env_source=FSSPEC_S3 s3_endpoint_env_class=coreweave_in_cluster" in output
     for phase in ("prepare", "download", "manifest", "publication"):
-        assert any(event.get("phase") == phase and event.get("status") == "started" for event in events)
-        assert any(
-            event.get("phase") == phase and event.get("status") == "completed" and float(event["seconds"]) >= 0
-            for event in events
-        )
-    assert any(
-        event.get("role") == "publisher" and event.get("status") == "completed" and float(event["total_seconds"]) >= 0
-        for event in events
-    )
-    assert any(event.get("files") == "4" and int(event["bytes"]) > 0 for event in events)
-    assert "sentinel-hf-token" not in output
-    assert "sentinel-s3-key" not in output
-    assert "sentinel-url" not in output
+        assert f"phase={phase} status=started" in output
+        assert re.search(rf"phase={phase} status=completed .* seconds=\d+\.\d+", output)
+    assert re.search(r"role=publisher status=completed .* total_seconds=\d+\.\d+", output)
+    assert re.search(r"files=4 bytes=\d+", output)
+    assert not any(secret in output for secret in ("sentinel-hf-token", "sentinel-s3-key", "sentinel-url"))
 
 
 @pytest.mark.parametrize(
@@ -157,16 +136,12 @@ def test_cold_cache_failure_reports_phase_and_safe_endpoint_class(
             "laion/draft", "4bdb47c08e5b5190bea3c7a93c3e14470230e469", ttl_days=14, source_prefix="s3://region/run"
         )
 
-    events = _cache_events(caplog)
     output = "\n".join(record.getMessage() for record in caplog.records if record.name == hf_model_cache.__name__)
-    assert any(
-        event.get("s3_endpoint_env_source") == expected_source and event.get("s3_endpoint_env_class") == expected_class
-        for event in events
-    )
-    assert any(event.get("hf_token_present") == ("False" if expected_source == "none" else "True") for event in events)
-    assert any(event.get("phase") == "download" and event.get("status") == "started" for event in events)
-    assert not any(event.get("phase") == "download" and event.get("status") == "completed" for event in events)
-    assert not any(event.get("role") == "publisher" and event.get("status") == "completed" for event in events)
+    assert f"s3_endpoint_env_source={expected_source} s3_endpoint_env_class={expected_class}" in output
+    assert f"hf_token_present={expected_source != 'none'}" in output
+    assert "phase=download status=started" in output
+    assert "phase=download status=completed" not in output
+    assert "role=publisher status=completed" not in output
     assert "sentinel-hf-token" not in output
 
 

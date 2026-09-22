@@ -45,31 +45,20 @@ logger.propagate = False
 
 
 def _s3_endpoint_environment() -> tuple[str, str]:
-    """Return the S3 hint's source and safe class, never its URL or credentials.
-
-    The class is one of ``coreweave_in_cluster``, ``other``, ``unset``, or
-    ``unknown``. A missing source is reported as ``none``. An ``AWS_ENDPOINT_URL``
-    value supplies the hint when ``FSSPEC_S3`` has no endpoint of its own.
-    """
+    """Classify the endpoint hinted by the environment without logging its value."""
+    source = "AWS_ENDPOINT_URL" if "AWS_ENDPOINT_URL" in os.environ else "none"
+    endpoint = os.environ.get("AWS_ENDPOINT_URL")
     if "FSSPEC_S3" in os.environ:
-        source = "FSSPEC_S3"
         try:
-            settings = json.loads(os.environ[source])
+            settings = json.loads(os.environ["FSSPEC_S3"])
         except (TypeError, ValueError):
-            return source, "unknown"
+            return "FSSPEC_S3", "unknown"
         if not isinstance(settings, dict):
-            return source, "unknown"
-        endpoint = settings.get("endpoint_url")
-        if (endpoint is None or endpoint == "") and "AWS_ENDPOINT_URL" in os.environ:
-            source = "AWS_ENDPOINT_URL"
-            endpoint = os.environ[source]
-    elif "AWS_ENDPOINT_URL" in os.environ:
-        source = "AWS_ENDPOINT_URL"
-        endpoint = os.environ[source]
-    else:
-        return "none", "unset"
+            return "FSSPEC_S3", "unknown"
+        if settings.get("endpoint_url") not in (None, ""):
+            source, endpoint = "FSSPEC_S3", settings["endpoint_url"]
 
-    if endpoint is None or endpoint == "":
+    if endpoint in (None, ""):
         return source, "unset"
     if not isinstance(endpoint, str):
         return source, "unknown"
@@ -105,13 +94,12 @@ def _start_phase(phase: str, model_id: str, revision: str) -> float:
 
 
 def _end_phase(phase: str, model_id: str, revision: str, started: float) -> None:
-    elapsed = time.monotonic() - started
     logger.info(
         "HF model cache phase=%s status=completed model=%s revision=%s seconds=%.3f",
         phase,
         model_id,
         revision,
-        elapsed,
+        time.monotonic() - started,
     )
 
 
