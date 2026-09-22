@@ -41,9 +41,9 @@ SCHEDULE_STEPS = 200
 POLICY_GPUS = 4
 CHECKPOINT_INTERVAL = load_config(FIDELITY_CONFIG).training.save_every
 # Rollouts may come from a policy at most this many optimizer updates behind the learner. The
-# released recipe samples with nucleus 0.99, and behavior-logprob corrections (TIS, behavior
-# clipping) require full-distribution sampling, so the clipped surrogate is the only guard against
-# that staleness and the bound stays at one update.
+# distillation objectives take the learner's pre-update logprobs as the behavior term and never
+# see the rollout engine's logprobs (reward_mode=replace also skips the TIS-capable policy loss),
+# so the clipped surrogate is the only guard against that staleness and the bound stays at one.
 FULLY_ASYNC_MAX_STALENESS_STEPS = 1
 
 
