@@ -16,7 +16,6 @@ from iris.client.client import JobFailedError
 
 from cloud.iris.artifacts import (
     fs_and_path,
-    relative_object_key,
     terminal_checkpoint_step,
     write_json,
 )
@@ -24,6 +23,7 @@ from cloud.iris.opd_curriculum import load_curriculum_manifest, run_curriculum
 from marinskyrl.checkpoint_paths import policy_export_path
 from marinskyrl.hf_model import validate_portable_hf_model_files
 from marinskyrl.packed_tasks import select_task_references
+from marinskyrl.resource_locator import relative_resource_path
 from marinskyrl.task_sources import DataSource, TaskTroveParquetSource, TaskTroveSelectionSnapshot
 from cloud.iris.runtime_bundle import runtime_bundle_inputs
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome
@@ -65,7 +65,7 @@ def _policy_export(request: SkyRLLaunchRequest) -> SkyRLModel:
     policy_uri = policy_export_path(request.output.export_root, global_step)
     filesystem, policy_path = fs_and_path(policy_uri)
     files = sorted(path for path in filesystem.find(policy_path) if not filesystem.isdir(path))
-    names = {relative_object_key(policy_path, path) for path in files}
+    names = {relative_resource_path(policy_path, path) for path in files}
     validate_portable_hf_model_files(names, policy_uri)
     return SkyRLModel(
         policy_export_uri=policy_uri,
