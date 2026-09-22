@@ -46,8 +46,9 @@ def test_twelve_rank_simulation_records_bounded_remote_reads_and_local_disk(tmp_
     remote.mkdir()
     shard_name = "model-00001-of-00001.safetensors"
     rank_count = 12
+    stacked_key = "model.layers.0.mlp.experts.down_proj.weight"
     save_file(
-        {f"rank.{rank}.weight": torch.arange(100_000, dtype=torch.float32) for rank in range(rank_count)},
+        {stacked_key: torch.arange(rank_count * 100_000, dtype=torch.float32).reshape(rank_count, 100_000)},
         remote / shard_name,
     )
     (remote / "config.json").write_text("{}")
@@ -57,9 +58,20 @@ def test_twelve_rank_simulation_records_bounded_remote_reads_and_local_disk(tmp_
     metadata_dirs = [tmp_path / f"rank-{rank}" for rank in range(rank_count)]
     for metadata in metadata_dirs:
         stage_model_metadata(str(remote), manifest, str(metadata))
-    stores = [RemoteSafetensorsTensorStore(str(remote), metadata) for metadata in metadata_dirs]
+    stores = [
+        RemoteSafetensorsTensorStore(
+            str(remote),
+            metadata,
+            lazy_first_dim_patterns=("model.layers.*.mlp.experts.*_proj.weight",),
+        )
+        for metadata in metadata_dirs
+    ]
     for rank, store in enumerate(stores):
-        store.load_tensors([f"rank.{rank}.weight"])
+        stacked = store.load_tensors([stacked_key])[stacked_key]
+        torch.testing.assert_close(
+            stacked[rank],
+            torch.arange(rank * 100_000, (rank + 1) * 100_000, dtype=torch.float32),
+        )
 
     artifact_bytes = (remote / shard_name).stat().st_size
     s3_bytes_read = sum(store.bytes_read for store in stores)

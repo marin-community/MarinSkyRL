@@ -128,6 +128,12 @@ def _gated_norm_mappings(megatron_prefix: str, hf_norm: str, hf_gate_prefix: str
 class GrugMoeBridge(MegatronModelBridge):
     """Convert Grug MoE HF checkpoints to and from the Megatron-Core model."""
 
+    REMOTE_FIRST_DIM_SLICE_PATTERNS = (
+        "model.layers.*.mlp.experts.gate_proj.weight",
+        "model.layers.*.mlp.experts.up_proj.weight",
+        "model.layers.*.mlp.experts.down_proj.weight",
+    )
+
     def provider_bridge(self, hf_pretrained) -> GrugModelProvider:
         provider = super().provider_bridge(hf_pretrained)
         config = hf_pretrained.config

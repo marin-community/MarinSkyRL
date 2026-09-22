@@ -8,8 +8,18 @@ from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore
 class RemoteSafetensorsStateSource(StateSource):
     """Expose an object-store tensor store through Megatron-Bridge's lazy API."""
 
-    def __init__(self, source_uri: str, metadata_dir: str) -> None:
-        self.store = RemoteSafetensorsTensorStore(source_uri, metadata_dir)
+    def __init__(
+        self,
+        source_uri: str,
+        metadata_dir: str,
+        *,
+        lazy_first_dim_patterns: tuple[str, ...] = (),
+    ) -> None:
+        self.store = RemoteSafetensorsTensorStore(
+            source_uri,
+            metadata_dir,
+            lazy_first_dim_patterns=lazy_first_dim_patterns,
+        )
 
     def get_all_keys(self) -> list[str]:
         return self.store.get_all_keys()
@@ -20,6 +30,10 @@ class RemoteSafetensorsStateSource(StateSource):
 
 def install_remote_hf_state(bridge, source_uri: str, metadata_dir: str) -> RemoteSafetensorsStateSource:
     """Replace Bridge's local safetensors accessor before its model hook is built."""
-    source = RemoteSafetensorsStateSource(source_uri, metadata_dir)
+    source = RemoteSafetensorsStateSource(
+        source_uri,
+        metadata_dir,
+        lazy_first_dim_patterns=getattr(bridge, "REMOTE_FIRST_DIM_SLICE_PATTERNS", ()),
+    )
     bridge.hf_pretrained._state_dict_accessor = StateDict(source)
     return source
