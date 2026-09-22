@@ -733,8 +733,9 @@ def test_write_json_supports_a_filename_without_a_parent(tmp_path: Path, monkeyp
         (RuntimeProfile.FSDP_EXPORT, ["cuda", "fsdp"]),
     ],
 )
+@pytest.mark.parametrize("attempt_id", [0, 1])
 def test_task_setup_executes_the_pinned_checkout_bootstrap(
-    tmp_path: Path, monkeypatch, profile: RuntimeProfile, expected_extras: list[str]
+    tmp_path: Path, monkeypatch, profile: RuntimeProfile, expected_extras: list[str], attempt_id: int
 ) -> None:
     source = tmp_path / "source"
     bootstrap = source / runtime_environment.MARINSKYRL_BOOTSTRAP_SCRIPT
@@ -771,8 +772,14 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(
     nvrtc_home = tmp_path / "cuda" / "nvrtc"
     nvrtc_home.mkdir(parents=True)
     uv_args = tmp_path / "uv-args"
+    uv_cache_dir = tmp_path / "uv-cache-dir"
     fake_uv = fake_bin / "uv"
-    fake_uv.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$FAKE_UV_ARGS"\n')
+    fake_uv.write_text(
+        '#!/bin/sh\nif [ "$1" = sync ]; then\n'
+        '  printf "%s\\n" "$@" > "$FAKE_UV_ARGS"\n'
+        '  printf "%s" "$UV_CACHE_DIR" > "$FAKE_UV_CACHE_DIR"\n'
+        "fi\n"
+    )
     fake_uv.chmod(0o755)
     fake_python = environment / "bin" / "python"
     fake_python.write_text(
@@ -792,7 +799,11 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "IRIS_VENV": str(environment),
+        "IRIS_TASK_ID": f"/test/job/0:{attempt_id}",
+        "IRIS_WORKDIR": str(tmp_path / "workdir"),
+        "UV_CACHE_DIR": str(tmp_path / "shared-uv-cache"),
         "FAKE_UV_ARGS": str(uv_args),
+        "FAKE_UV_CACHE_DIR": str(uv_cache_dir),
         "FAKE_CUDA_LIBRARY_PATH": str(cuda_library_path),
         "FAKE_NVRTC_HOME": str(nvrtc_home),
     }
@@ -817,4 +828,6 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(
     for extra in expected_extras:
         expected_uv_args.extend(["--extra", extra])
     assert uv_args.read_text().splitlines() == expected_uv_args
+    expected_uv_cache_dir = tmp_path / ("shared-uv-cache" if attempt_id == 0 else "workdir/.uv-cache")
+    assert uv_cache_dir.read_text() == str(expected_uv_cache_dir)
     assert runtime_file.read_text().startswith("export LD_LIBRARY_PATH=")

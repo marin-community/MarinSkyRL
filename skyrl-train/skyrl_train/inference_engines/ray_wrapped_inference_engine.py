@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import Collection
 from enum import StrEnum
 import os
+import time
 from typing import Any, Dict, List
 
 import ray
@@ -861,22 +862,25 @@ def wait_for_inference_engine_startup(
     startup_refs: list[ray.ObjectRef], actor_handles: list[ActorHandle], *, timeout_seconds: float
 ) -> None:
     """Wait for every engine readiness reference or terminate the actor gang."""
-
-    _, pending = ray.wait(startup_refs, num_returns=len(startup_refs), timeout=timeout_seconds, fetch_local=False)
-    if not pending:
-        try:
-            ray.get(startup_refs)
-        except Exception:
-            for actor in actor_handles:
-                ray.kill(actor)
-            raise
-        return
-
-    pending_set = set(pending)
-    pending_indices = [index for index, ref in enumerate(startup_refs) if ref in pending_set]
-    for actor in actor_handles:
-        ray.kill(actor)
-    raise TimeoutError(
-        f"inference engine startup timed out after {timeout_seconds:g} seconds; "
-        f"pending engine actors: {pending_indices}"
-    )
+    deadline = time.monotonic() + timeout_seconds
+    pending = list(startup_refs)
+    try:
+        while pending:
+            ready, pending = ray.wait(
+                pending,
+                num_returns=1,
+                timeout=max(0.0, deadline - time.monotonic()),
+                fetch_local=False,
+            )
+            if not ready:
+                pending_set = set(pending)
+                pending_indices = [index for index, ref in enumerate(startup_refs) if ref in pending_set]
+                raise TimeoutError(
+                    f"inference engine startup timed out after {timeout_seconds:g} seconds; "
+                    f"pending engine actors: {pending_indices}"
+                )
+            ray.get(ready)
+    except Exception:
+        for actor in actor_handles:
+            ray.kill(actor)
+        raise

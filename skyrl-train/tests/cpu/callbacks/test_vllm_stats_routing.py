@@ -1,7 +1,12 @@
 from types import SimpleNamespace as Record
 
 from skyrl_train.inference_engines.vllm import stats as vllm
-from skyrl_train.inference_observability import FinelogInferenceMetricsSink, trainer_metrics
+from skyrl_train.inference_observability import (
+    VLLM_GENERATION_TOKENS_TOTAL_METRIC,
+    VLLM_PROMPT_TOKENS_TOTAL_METRIC,
+    FinelogInferenceMetricsSink,
+    trainer_metrics,
+)
 
 
 def test_vllm_stats_reach_finelog():
@@ -73,5 +78,7 @@ def test_vllm_stats_reach_finelog():
     assert all("engine" not in record.attributes for record in http)
     projected = trainer_metrics(snapshot)
     assert projected["vllm/total_finished_requests"] == 1
+    assert projected[VLLM_PROMPT_TOKENS_TOTAL_METRIC] == 20
+    assert projected[VLLM_GENERATION_TOKENS_TOTAL_METRIC] == 12
     assert projected["vllm/spec_decode_acceptance_rate"] == 0.4
     assert projected["vllm/spec_decode_mean_acceptance_length"] == 2.2

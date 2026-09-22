@@ -329,7 +329,7 @@ def parse_speculative_decoding_config(
         raise SpeculativeDecodingConfigError(f"{context} requires generator.backend=vllm")
     if not run_engines_locally:
         raise SpeculativeDecodingConfigError(f"{context} requires generator.run_engines_locally=true")
-    if colocate_all:
+    if config.training is not None and colocate_all:
         raise SpeculativeDecodingConfigError(f"{context} requires trainer.placement.colocate_all=false")
     if config.training is not None and entrypoint != STANDARD_TRAINING_ENTRYPOINT:
         raise SpeculativeDecodingConfigError(f"{context}.training is not supported by entrypoint {entrypoint!r}")
