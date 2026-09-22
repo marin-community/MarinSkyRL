@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
@@ -43,6 +44,21 @@ def test_resolve_daytona_rl_api_key_rejects_generic_key(monkeypatch):
 
     with pytest.raises(SystemExit, match="no Daytona RL key available"):
         launcher._resolve_daytona_rl_api_key()
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "expected"),
+    [
+        ("skyrl_train.entrypoints.main_base", False),
+        ("skyrl_train.entrypoints.terminal_bench", True),
+        ("skyrl_train.entrypoints.terminal_bench_generate", True),
+    ],
+)
+def test_daytona_preflight_follows_the_resolved_entrypoint(tmp_path, entrypoint, expected):
+    config_path = tmp_path / "launch.yaml"
+    config_path.write_text(yaml.safe_dump({"runtime": {"entrypoint": entrypoint}, "skyrl": {"terminal_bench": {}}}))
+
+    assert launcher._rl_config_uses_daytona(str(config_path)) is expected
 
 
 @dataclass
