@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 from pathlib import Path
 import posixpath
@@ -22,6 +24,8 @@ from marinskyrl.hf_model import (
 from marinskyrl.model_manifest import (
     MODEL_MANIFEST_FILENAME,
     ModelManifest,
+    ModelManifestFile,
+    model_manifest,
     sha256_file,
     snapshot_model_manifest,
 )
@@ -30,12 +34,64 @@ from marinskyrl.speculative_decoding import is_hugging_face_commit
 
 _CACHE_PREFIX = "marinskyrl/hf-models"
 _CACHE_POLL_INTERVAL = 10.0
+_MANIFEST_HASH_WORKERS = 16
 _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth")
 
 
 def load_model_manifest(model_uri: str) -> ModelManifest:
     marker_uri = join_resource_path(model_uri, MODEL_MANIFEST_FILENAME)
     return ModelManifest.from_mapping(read_json(marker_uri), marker_uri)
+
+
+def _remote_manifest_entry(filesystem: AbstractFileSystem, root: str, path: str, size: int) -> ModelManifestFile:
+    digest = hashlib.sha256()
+    with filesystem.open(path, "rb") as source:
+        while chunk := source.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return ModelManifestFile(path=posixpath.relpath(path, root), size=size, sha256=digest.hexdigest())
+
+
+def _snapshot_remote_model_manifest(model_uri: str) -> ModelManifest:
+    filesystem, root = fs_and_path(model_uri)
+    marker_path = posixpath.join(root, MODEL_MANIFEST_FILENAME)
+    inventory = filesystem.find(root, detail=True)
+    files = tuple(
+        (path, int(info["size"])) for path, info in inventory.items() if info["type"] == "file" and path != marker_path
+    )
+    if not files:
+        raise ValueError(f"Model export contains no files: {model_uri}")
+    with ThreadPoolExecutor(max_workers=min(_MANIFEST_HASH_WORKERS, len(files))) as executor:
+        entries = tuple(executor.map(lambda item: _remote_manifest_entry(filesystem, root, *item), files))
+    return model_manifest(tuple(sorted(entries, key=lambda entry: entry.path)), model_id=None, revision=None)
+
+
+def ensure_model_manifest(model_uri: str) -> ModelManifest:
+    """Read a model manifest, creating one for a legacy object-store export."""
+    try:
+        return load_model_manifest(model_uri)
+    except ValueError:
+        pass
+
+    lock = create_lock(f"{model_uri}.manifest.lock")
+    while not lock.try_acquire():
+        try:
+            return load_model_manifest(model_uri)
+        except ValueError:
+            time.sleep(_CACHE_POLL_INTERVAL)
+
+    try:
+        try:
+            return load_model_manifest(model_uri)
+        except ValueError:
+            with lease_refresh(lock):
+                manifest = _snapshot_remote_model_manifest(model_uri)
+                write_json(
+                    join_resource_path(model_uri, MODEL_MANIFEST_FILENAME),
+                    manifest.model_dump(mode="json"),
+                )
+            return manifest
+    finally:
+        lock.release()
 
 
 def _cached_manifest(

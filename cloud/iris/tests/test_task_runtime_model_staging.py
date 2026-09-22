@@ -52,7 +52,7 @@ def test_s3_policy_stages_metadata_and_rewrites_driver_without_materializing_wei
     identity = "sha256:" + "a" * 64
     manifest = SimpleNamespace(identity=identity)
     staged = []
-    monkeypatch.setattr(task_runtime, "load_model_manifest", lambda _uri: manifest)
+    monkeypatch.setattr(task_runtime, "ensure_model_manifest", lambda _uri: manifest)
     monkeypatch.setattr(
         task_runtime, "stage_model_metadata", lambda uri, value, path: staged.append((uri, value, path))
     )

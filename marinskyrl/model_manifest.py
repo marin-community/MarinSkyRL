@@ -162,6 +162,22 @@ def snapshot_model_manifest(
         )
         for path in paths
     )
+    return model_manifest(
+        files,
+        model_id=model_id,
+        revision=revision,
+        tokenizer_mode=tokenizer_mode,
+    )
+
+
+def model_manifest(
+    files: tuple[ModelManifestFile, ...],
+    *,
+    model_id: str | None,
+    revision: str | None,
+    tokenizer_mode: Literal["embedded", "policy"] = "embedded",
+) -> ModelManifest:
+    """Build and validate a manifest from an existing file inventory."""
     return ModelManifest(
         model_id=model_id,
         revision=revision,

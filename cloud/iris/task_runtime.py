@@ -46,8 +46,8 @@ from typing import Protocol
 from cloud.iris.artifacts import ArtifactSource, file_inventory, fs_and_path, materialize
 from cloud.iris.hf_model_cache import (
     download_hugging_face_snapshot,
+    ensure_model_manifest,
     ensure_hugging_face_model_cache,
-    load_model_manifest,
     stage_model_metadata,
 )
 from marinskyrl.environment_contract import (
@@ -449,7 +449,7 @@ def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None
         )
         source_identity = manifest.identity
     elif source_uri:
-        manifest = load_model_manifest(source_uri)
+        manifest = ensure_model_manifest(source_uri)
         if source_identity and source_identity.startswith("sha256:") and source_identity != manifest.identity:
             raise ValueError(
                 f"Policy manifest identity mismatch: requested {source_identity}, found {manifest.identity} at {source_uri}"
@@ -507,7 +507,7 @@ def prepare_draft_model(
         )
     else:
         source_uri = model.source_uri
-        manifest = load_model_manifest(source_uri)
+        manifest = ensure_model_manifest(source_uri)
         if model.source_identity.startswith("sha256:") and model.source_identity != manifest.identity:
             raise ValueError(
                 f"Draft manifest identity mismatch: requested {model.source_identity}, "

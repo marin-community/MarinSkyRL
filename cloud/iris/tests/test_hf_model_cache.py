@@ -8,7 +8,7 @@ import pytest
 from safetensors.numpy import save_file
 
 from cloud.iris import hf_model_cache
-from cloud.iris.hf_model_cache import ensure_hugging_face_model_cache, stage_model_metadata
+from cloud.iris.hf_model_cache import ensure_hugging_face_model_cache, ensure_model_manifest, stage_model_metadata
 from marinskyrl.model_manifest import ModelManifest, snapshot_model_manifest
 
 
@@ -103,6 +103,25 @@ def test_corrupt_completed_cache_is_repaired_under_the_distributed_lock(tmp_path
     assert cache_uri == str(cache)
     assert manifest == hf_model_cache.load_model_manifest(str(cache))
     assert not (cache / "stale.safetensors").exists()
+
+
+def test_legacy_model_export_gets_a_manifest(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "tokenizer.json").write_text("{}")
+    save_file({"weight": np.arange(4, dtype=np.float32)}, tmp_path / "model.safetensors")
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": 16}, "weight_map": {"weight": "model.safetensors"}})
+    )
+
+    manifest = ensure_model_manifest(str(tmp_path))
+
+    assert manifest == hf_model_cache.load_model_manifest(str(tmp_path))
+    assert {entry.path for entry in manifest.files} == {
+        "config.json",
+        "model.safetensors",
+        "model.safetensors.index.json",
+        "tokenizer.json",
+    }
 
 
 def test_draft_manifest_can_share_the_policy_tokenizer(tmp_path: Path, monkeypatch) -> None:
