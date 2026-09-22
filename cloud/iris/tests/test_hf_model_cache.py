@@ -80,15 +80,29 @@ def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, 
     assert not (local_model / "stale.bin").exists()
 
 
-def test_corrupt_completed_cache_fails_instead_of_remirroring(tmp_path: Path, monkeypatch) -> None:
+def test_corrupt_completed_cache_is_repaired_under_the_distributed_lock(tmp_path: Path, monkeypatch) -> None:
     cache = tmp_path / "region-cache"
     cache.mkdir()
     (cache / ".marinskyrl-model-manifest.json").write_text("not json")
+    (cache / "stale.safetensors").write_bytes(b"stale")
     monkeypatch.setattr(hf_model_cache, "marin_temp_bucket", lambda *_args, **_kwargs: str(cache))
     revision = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
 
-    with pytest.raises(json.JSONDecodeError):
-        ensure_hugging_face_model_cache("laion/draft", revision, ttl_days=14, source_prefix="s3://region/run")
+    def download_snapshot(_model_id: str, *, revision: str, destination: Path) -> Path:
+        (destination / "config.json").write_text("{}")
+        (destination / "tokenizer.json").write_text("{}")
+        save_file({"weight": np.arange(4, dtype=np.float32)}, destination / "model.safetensors")
+        return destination
+
+    monkeypatch.setattr(hf_model_cache, "download_hugging_face_snapshot", download_snapshot)
+
+    cache_uri, manifest = ensure_hugging_face_model_cache(
+        "laion/draft", revision, ttl_days=14, source_prefix="s3://region/run"
+    )
+
+    assert cache_uri == str(cache)
+    assert manifest == hf_model_cache.load_model_manifest(str(cache))
+    assert not (cache / "stale.safetensors").exists()
 
 
 def test_draft_manifest_can_share_the_policy_tokenizer(tmp_path: Path, monkeypatch) -> None:

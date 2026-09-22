@@ -48,13 +48,14 @@ def _cached_manifest(
     filesystem, marker_path = fs_and_path(marker_uri)
     if not filesystem.exists(marker_path):
         return None
-    manifest = load_model_manifest(cache_uri)
+    # The manifest is the completion record. A malformed or mismatched marker
+    # identifies a partial cache that the next lock holder can rebuild.
+    try:
+        manifest = load_model_manifest(cache_uri)
+    except ValueError:
+        return None
     if manifest.model_id != model_id or manifest.revision != revision or manifest.tokenizer_mode != tokenizer_mode:
-        raise ValueError(
-            f"Hugging Face model-cache identity mismatch at {cache_uri}: "
-            f"{manifest.model_id}@{manifest.revision} ({manifest.tokenizer_mode}) != "
-            f"{model_id}@{revision} ({tokenizer_mode})"
-        )
+        return None
     return manifest
 
 
@@ -129,6 +130,8 @@ def ensure_hugging_face_model_cache(
         if manifest := _cached_manifest(cache_uri, model_id, revision, tokenizer_mode):
             return cache_uri, manifest
         with lease_refresh(lock):
+            if filesystem.exists(cache_path):
+                filesystem.rm(cache_path, recursive=True)
             with tempfile.TemporaryDirectory(prefix="marinskyrl-hf-model-") as scratch:
                 snapshot = download_hugging_face_snapshot(model_id, revision=revision, destination=Path(scratch))
                 manifest = snapshot_model_manifest(

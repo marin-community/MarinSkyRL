@@ -1,4 +1,4 @@
-"""Bounded local views of remote distributed checkpoints."""
+"""Bounded local metadata views of remote Megatron checkpoints."""
 
 from contextlib import contextmanager
 from pathlib import Path
@@ -10,7 +10,7 @@ from skyrl_train.io import io
 
 @contextmanager
 def remote_checkpoint_metadata(checkpoint_dir: str):
-    """Stage checkpoint control files while leaving DCP rank tensors remote."""
+    """Stage Megatron control files while leaving DCP rank tensors remote."""
     with tempfile.TemporaryDirectory(prefix="megatron-metadata-") as directory:
         root = Path(directory)
         for filename in io.find_files(checkpoint_dir):

@@ -2,10 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from skyrl_train.io import remote_checkpoint
+from skyrl_train.distributed.megatron import checkpoint_metadata
 
 
-def test_remote_checkpoint_metadata_never_downloads_rank_tensor_shards(tmp_path: Path, monkeypatch) -> None:
+def test_remote_checkpoint_metadata_never_downloads_rank_tensor_shards(monkeypatch) -> None:
     checkpoint = "s3://bucket/checkpoints/global_step_7/policy"
     objects = {
         "bucket/checkpoints/global_step_7/policy/.metadata": b"dcp metadata",
@@ -15,7 +15,7 @@ def test_remote_checkpoint_metadata_never_downloads_rank_tensor_shards(tmp_path:
     }
     reads = []
     monkeypatch.setattr(
-        remote_checkpoint.io, "find_files", lambda _path: {key: len(value) for key, value in objects.items()}
+        checkpoint_metadata.io, "find_files", lambda _path: {key: len(value) for key, value in objects.items()}
     )
 
     def read_bytes(path: str) -> bytes:
@@ -23,9 +23,9 @@ def test_remote_checkpoint_metadata_never_downloads_rank_tensor_shards(tmp_path:
         reads.append(key)
         return objects[key]
 
-    monkeypatch.setattr(remote_checkpoint.io, "read_bytes", read_bytes)
+    monkeypatch.setattr(checkpoint_metadata.io, "read_bytes", read_bytes)
 
-    with remote_checkpoint.remote_checkpoint_metadata(checkpoint) as local_dir:
+    with checkpoint_metadata.remote_checkpoint_metadata(checkpoint) as local_dir:
         root = Path(local_dir)
         assert (root / ".metadata").read_bytes() == b"dcp metadata"
         assert (root / "common.pt").read_bytes() == b"common state"
@@ -37,14 +37,14 @@ def test_remote_checkpoint_metadata_never_downloads_rank_tensor_shards(tmp_path:
     ]
 
 
-def test_remote_checkpoint_metadata_rejects_objects_outside_the_checkpoint_prefix(tmp_path: Path, monkeypatch) -> None:
+def test_remote_checkpoint_metadata_rejects_objects_outside_the_checkpoint_prefix(monkeypatch) -> None:
     checkpoint = "s3://bucket/checkpoints/global_step_7/policy"
     monkeypatch.setattr(
-        remote_checkpoint.io,
+        checkpoint_metadata.io,
         "find_files",
         lambda _path: {"bucket/checkpoints/global_step_7/other/common.pt": 12},
     )
 
     with pytest.raises(ValueError, match="is not below root"):
-        with remote_checkpoint.remote_checkpoint_metadata(checkpoint):
+        with checkpoint_metadata.remote_checkpoint_metadata(checkpoint):
             pass
