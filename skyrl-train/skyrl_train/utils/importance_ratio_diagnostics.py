@@ -292,7 +292,6 @@ class LogRatioMonitor:
         *,
         gather_fn: Callable[[torch.Tensor], list[torch.Tensor]] | None = None,
         sum_reduce_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
-        owns_tokens: bool = True,
     ) -> dict[str, float]:
         accumulator = self._accumulator
         failed = self._failed
@@ -300,7 +299,7 @@ class LogRatioMonitor:
             # Every rank participates even after local failure. Reducing fixed
             # sufficient statistics before finalization keeps ESS, token means,
             # tail quantiles and validity meaningful for uneven rank populations.
-            header, tail = pack_log_ratio_accumulator(accumulator, failed=failed, owns_tokens=owns_tokens)
+            header, tail = pack_log_ratio_accumulator(accumulator, failed=failed)
             headers, tails = gather_fn(header), gather_fn(tail)
             accumulator, failed = pool_log_ratio_accumulators(headers, tails)
 
@@ -309,8 +308,8 @@ class LogRatioMonitor:
                 return sum_reduce_fn(tensor)
             return torch.stack(gather_fn(tensor)).sum(0) if gather_fn is not None else tensor
 
-        quantiles = self._quantiles.quantiles(sum_reduce, owns_tokens=owns_tokens)
-        clip_counts = sum_reduce(self._clip_counts if owns_tokens else torch.zeros_like(self._clip_counts))
+        quantiles = self._quantiles.quantiles(sum_reduce)
+        clip_counts = sum_reduce(self._clip_counts)
         if failed:
             metrics = _failed_log_ratio_metrics(self.position_window)
         else:
@@ -355,10 +354,8 @@ def gather_ratio_tensor(tensor: torch.Tensor, *, group=None) -> list[torch.Tenso
     return values
 
 
-def pack_log_ratio_accumulator(accumulator, *, failed: bool = False, owns_tokens: bool = True):
-    """Encode bounded sufficient statistics, excluding replicated token owners."""
-    if not owns_tokens:
-        accumulator = _empty_log_ratio_accumulator(accumulator.abs_sum.device)
+def pack_log_ratio_accumulator(accumulator, *, failed: bool = False):
+    """Encode bounded sufficient statistics."""
     scalar_fields = [field.name for field in fields(accumulator) if field.name not in {"topk_abs", "top_per_mille"}]
     approximate_p99 = (
         accumulator.topk_abs.min() if accumulator.topk_abs.numel() else accumulator.abs_sum.new_tensor(math.inf)
@@ -605,9 +602,8 @@ def finalize_log_ratio_metrics(
 ) -> dict:
     """Reduce the accumulator to the public scalar metric dictionary.
 
-    One sync (final stack→CPU transfer). Returns the full keyset always
-    (zeros where input was empty), so downstream per-key `all_reduce(status)`
-    stays keyset-compatible across ranks.
+    Returns the full keyset always (zeros where input was empty), so downstream
+    per-key `all_reduce(status)` stays keyset-compatible across ranks.
     """
     device = acc.abs_sum.device
 

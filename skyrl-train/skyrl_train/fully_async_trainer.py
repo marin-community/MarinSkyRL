@@ -1288,7 +1288,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     earliest_model_step=staleness_step,
                     source_prompts=rand_prompts,
                     completed_at=time.perf_counter() if observation is not None else None,
-                    telemetry_attempt_id=observation.call_id if observation is not None else None,
+                    telemetry_call_id=observation.call_id if observation is not None else None,
                 )
                 with async_wait("enqueue", step=self.global_step, enabled=self._async_observations_enabled):
                     freshness = await self._enqueue_if_fresh(queues, completed_group)
@@ -1406,7 +1406,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             step=self.global_step,
             completed_at=group.completed_at,
             admitted_at=group.admitted_at,
-            attempt_id=group.telemetry_attempt_id,
+            call_id=group.telemetry_call_id,
         )
         group.telemetry_finished = True
 

@@ -7,7 +7,7 @@ import torch
 from skyrl_train.utils.distributed_quantiles import AbsoluteQuantileBuffer
 
 
-def pooled(buffers, ownership=None):
+def pooled(buffers):
     barrier = Barrier(len(buffers))
     inputs = [None] * len(buffers)
     calls = [0] * len(buffers)
@@ -21,7 +21,7 @@ def pooled(buffers, ownership=None):
             calls[rank] += 1
             return result
 
-        return buffers[rank].quantiles(reduce, owns_tokens=ownership[rank] if ownership else True)
+        return buffers[rank].quantiles(reduce)
 
     with ThreadPoolExecutor(max_workers=len(buffers)) as executor:
         outputs = list(executor.map(run, range(len(buffers))))
@@ -51,9 +51,9 @@ def test_unequal_shards_and_microbatches_match_exact_float32_oracle(seed):
     assert sum(item.retained_bytes for item in buffers) == sum(value.numel() for value in values) * 4
 
 
-def test_nonfinite_coverage_ties_extremes_and_replica_ownership():
+def test_nonfinite_coverage_ties_and_extremes():
     values = torch.tensor([0, -0.0, 1e-30, -1e-20, 1, 1, 1e30, float("nan"), float("inf")])
-    actual, calls = pooled([buffer(values), buffer(torch.ones(30)), buffer(values)], [True, True, False])
+    actual, calls = pooled([buffer(values), buffer(torch.ones(30))])
     oracle = torch.quantile(torch.cat([values[torch.isfinite(values)].abs(), torch.ones(30)]).double(), 0.95)
     assert actual["selected_tokens"] == 39
     assert actual["finite_tokens"] == 37

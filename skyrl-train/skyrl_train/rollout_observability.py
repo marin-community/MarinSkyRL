@@ -246,7 +246,7 @@ def async_wait(name: str, *, step: int, enabled: bool) -> Iterator[None]:
 
 
 async def run_environment(executor: Executor | None, func: Callable, *args, **kwargs):
-    """Separate executor queue, execution and driver-resume delay."""
+    """Run ``func`` on ``executor`` (inline when None) and return its result, recording queue, execution and driver-resume delays."""
     observation = _CURRENT.get()
     call = partial(func, *args, **kwargs)
     if observation is None:
@@ -280,7 +280,7 @@ def record_group_disposition(
     tokens: int,
     step: int,
     completed_at: float | None = None,
-    attempt_id: str | None = None,
+    call_id: str | None = None,
     admitted_at: float | None = None,
 ) -> None:
     attributes = {"role": TRAINER_ROLE, "step": str(step), "disposition": disposition}
@@ -289,5 +289,5 @@ def record_group_disposition(
     if completed_at is not None:
         finished = time.perf_counter() if admitted_at is None else admitted_at
         buffer_dwell.record(finished - completed_at, attributes=attributes)
-    if attempt_id is not None:
-        record_event("rollout_group_disposition", {"call_id": attempt_id, "tokens": tokens}, attributes=attributes)
+    if call_id is not None:
+        record_event("rollout_group_disposition", {"call_id": call_id, "tokens": tokens}, attributes=attributes)

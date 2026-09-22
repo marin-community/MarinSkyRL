@@ -107,7 +107,7 @@ def test_worker_masks_padding_before_subtraction_and_keeps_unclipped_absolute_de
 def test_rank_reduction_pools_unequal_token_counts_and_excludes_replicas():
     shards = [torch.arange(1, 101, dtype=torch.float64) / 10, torch.zeros(19_900, dtype=torch.float64)]
     monitors = []
-    for values in [*shards, shards[0]]:
+    for values in shards:
         monitor = LogRatioMonitor(torch.device("cpu"), exact_quantiles=True)
         values = values.unsqueeze(0)
         monitor.add(values, torch.zeros_like(values), torch.ones_like(values))
@@ -128,7 +128,7 @@ def test_rank_reduction_pools_unequal_token_counts_and_excludes_replicas():
                 barrier.wait(timeout=20)
                 return results
 
-            return monitors[rank].metrics(gather_fn=gather, owns_tokens=rank != 2)
+            return monitors[rank].metrics(gather_fn=gather)
 
         with ThreadPoolExecutor(max_workers=len(monitors)) as executor:
             results = list(executor.map(run, range(len(monitors))))

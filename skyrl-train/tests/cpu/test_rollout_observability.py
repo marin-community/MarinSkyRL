@@ -505,7 +505,7 @@ async def test_rollout_calls_progress_while_real_exporter_waits_for_http_ack(mon
 
         assert await asyncio.wait_for(produce_next(), timeout=1) == "next rollout completed"
         publish_step_timings({"step": 5.0, "policy_train": 2.0}, step=2)
-        rollout.record_group_disposition(disposition="consumed", tokens=20, step=2, attempt_id="group-1")
+        rollout.record_group_disposition(disposition="consumed", tokens=20, step=2, call_id="group-1")
         training_telemetry.record_training_metrics(
             {
                 **trainer_utils.consumed_stop_metrics(["length", "stop", "length", "stop"], 4),

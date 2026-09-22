@@ -45,17 +45,15 @@ class AbsoluteQuantileBuffer:
     def quantiles(
         self,
         sum_reduce: Callable[[torch.Tensor], torch.Tensor] = lambda value: value,
-        *,
-        owns_tokens: bool = True,
     ) -> dict[str, float]:
         """Pool counts then select p50/p95, matching linear torch.quantile.
 
-        ``sum_reduce`` must SUM over distinct-token ownership ranks and return
-        the same tensor on every participating rank. Replicas still participate
-        with zero counts. Empty and overflow ranks take identical collectives.
+        ``sum_reduce`` must SUM over ranks that hold distinct tokens and return
+        the same tensor on every participating rank. Empty and overflow ranks
+        take identical collectives.
         """
         header = torch.tensor(
-            [self.selected, self.finite, int(self.overflow), self.nonrepresentable] if owns_tokens else [0, 0, 0, 0],
+            [self.selected, self.finite, int(self.overflow), self.nonrepresentable],
             device=self.device,
             dtype=torch.int64,
         )
@@ -80,7 +78,7 @@ class AbsoluteQuantileBuffer:
             dtype=torch.int64,
         )
         prefix = torch.zeros(4, device=self.device, dtype=torch.int64)
-        chunks = self.chunks if owns_tokens else []
+        chunks = self.chunks
         for shift in (24, 16, 8, 0):
             histogram = torch.zeros((4, 256), device=self.device, dtype=torch.int64)
             for chunk in chunks:
