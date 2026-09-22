@@ -127,12 +127,14 @@ def test_null_speculator_keeps_the_default_disabled() -> None:
     )
 
 
-def test_frozen_object_store_speculator_is_supported(tmp_path: Path) -> None:
+@pytest.mark.parametrize("colocate_all", [False, True])
+def test_frozen_object_store_speculator_is_supported(tmp_path: Path, colocate_all: bool) -> None:
     config = _base_config()
     model = config["generator"]["speculative_decoding"]["model"]
     model["source_uri"] = "s3://models/snowball/eagle3"
     model["source_identity"] = "snowball-eagle3@step-1888"
     config["generator"]["speculative_decoding"]["training"] = None
+    config["trainer"]["placement"]["colocate_all"] = colocate_all
 
     parsed = parse_rl_config(str(_write_config(tmp_path, config)))
 
@@ -144,7 +146,7 @@ def test_frozen_object_store_speculator_is_supported(tmp_path: Path) -> None:
         backend="vllm",
         run_engines_locally=True,
         entrypoint="skyrl_train.entrypoints.main_base",
-        colocate_all=False,
+        colocate_all=colocate_all,
     )
     assert resolved is not None
     assert resolved.vllm_speculative_config() == {
@@ -153,18 +155,6 @@ def test_frozen_object_store_speculator_is_supported(tmp_path: Path) -> None:
         "num_speculative_tokens": 3,
         "draft_load_config": {"load_format": "runai_streamer"},
     }
-
-
-def test_frozen_speculator_can_use_all_gpus_for_generation(tmp_path: Path) -> None:
-    config = _base_config()
-    config["entrypoint"] = "terminal_bench_generate"
-    config["trainer"]["placement"]["colocate_all"] = True
-    config["generator"]["speculative_decoding"]["training"] = None
-
-    parsed = parse_rl_config(str(_write_config(tmp_path, config)))
-
-    assert parsed.entrypoint == "skyrl_train.entrypoints.terminal_bench_generate"
-    assert parsed.generator["speculative_decoding"]["training"] is None
 
 
 def test_gcs_alias_is_normalized_for_vllm_runai_loading(tmp_path: Path) -> None:

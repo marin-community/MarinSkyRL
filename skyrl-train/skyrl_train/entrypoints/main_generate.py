@@ -19,6 +19,7 @@ from skyrl_train.entrypoints.main_base import (
 )
 from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation, TrajectoryRunnerMode
 from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest, lora_disk_load_request
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
 from skyrl_train.inference_observability import (
     VLLM_GENERATION_TOKENS_TOTAL_METRIC,
@@ -26,6 +27,7 @@ from skyrl_train.inference_observability import (
     trainer_metrics,
 )
 from skyrl_train.evaluate import evaluate
+from skyrl_train.trajectory_runners.base import TrajectoryRunner
 from skyrl_train.utils.trainer_utils import build_dataloader
 
 
@@ -48,39 +50,49 @@ async def load_initial_policy_adapter(inference_engine_client: PolicyAdapterClie
     await inference_engine_client.update_named_weights(lora_disk_load_request(str(path)))
 
 
+async def _evaluate_and_report(
+    exp: BasePPOExp,
+    trajectory_runner: TrajectoryRunner,
+    inference_engine_client: InferenceEngineClient,
+) -> dict[str, float]:
+    started_at = time.monotonic()
+    results = await evaluate(
+        eval_dataloader=build_dataloader(exp.cfg, exp.eval_dataset, is_train=False),
+        trajectory_runner=trajectory_runner,
+        cfg=exp.cfg,
+        global_step=None,
+        tokenizer=exp.tokenizer,
+    )
+    elapsed = time.monotonic() - started_at
+    snapshot = await inference_engine_client.get_stats(read_mode=IntervalReadMode.PEEK)
+    inference_metrics = trainer_metrics(snapshot)
+    generation_tokens = inference_metrics.get(VLLM_GENERATION_TOKENS_TOTAL_METRIC, 0.0)
+    results.update(inference_metrics)
+    results["eval/all/wall_time_seconds"] = elapsed
+    results["eval/all/generation_tokens_per_second"] = generation_tokens / elapsed
+
+    if inference_metrics:
+        logger.info(format_console_summary(inference_metrics, step=0))
+    exp.get_tracker().log(results, step=0, commit=True)
+    return results
+
+
 async def run_evaluation_only(exp: BasePPOExp) -> dict[str, float]:
     """Run one measured evaluation and release all rollout resources."""
     assert exp.eval_dataset is not None, "The evaluation only entrypoint requires an eval dataset is provided"
 
     inference_engine_client = exp.create_inference_engine_client()
-    trajectory_runner = exp.get_trajectory_runner(exp.cfg, exp.tokenizer, inference_engine_client)
     try:
-        await inference_engine_client.wake_up()
-        await load_initial_policy_adapter(inference_engine_client, exp.cfg)
-        started_at = time.monotonic()
-        results = await evaluate(
-            eval_dataloader=build_dataloader(exp.cfg, exp.eval_dataset, is_train=False),
-            trajectory_runner=trajectory_runner,
-            cfg=exp.cfg,
-            global_step=None,
-            tokenizer=exp.tokenizer,
-        )
-        elapsed = time.monotonic() - started_at
-        snapshot = await inference_engine_client.get_stats(read_mode=IntervalReadMode.PEEK)
-        inference_metrics = trainer_metrics(snapshot)
-        generation_tokens = inference_metrics.get(VLLM_GENERATION_TOKENS_TOTAL_METRIC, 0.0)
-        results.update(inference_metrics)
-        results["eval/all/wall_time_seconds"] = elapsed
-        results["eval/all/generation_tokens_per_second"] = generation_tokens / elapsed
-
-        if inference_metrics:
-            logger.info(format_console_summary(inference_metrics, step=0))
-        tracker = exp.get_tracker()
-        tracker.log(results, step=0, commit=True)
-        return results
+        trajectory_runner = exp.get_trajectory_runner(exp.cfg, exp.tokenizer, inference_engine_client)
+        try:
+            await inference_engine_client.wake_up()
+            await trajectory_runner.startup()
+            await load_initial_policy_adapter(inference_engine_client, exp.cfg)
+            return await _evaluate_and_report(exp, trajectory_runner, inference_engine_client)
+        finally:
+            await trajectory_runner.shutdown()
     finally:
         inference_engine_client.shutdown_http_endpoint()
-        await trajectory_runner.shutdown()
         await inference_engine_client.teardown()
 
 

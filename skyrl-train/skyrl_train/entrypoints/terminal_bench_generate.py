@@ -17,7 +17,6 @@ from skyrl_train.entrypoints.terminal_bench import TerminalBenchExp
 
 class TerminalBenchGenerateExp(TerminalBenchExp):
     def get_train_dataset(self):
-        """Avoid loading training data for an evaluation-only run."""
         return None
 
     def run(self):

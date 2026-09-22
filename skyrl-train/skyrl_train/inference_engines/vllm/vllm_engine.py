@@ -1691,8 +1691,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         if data_parallel_master_ports is not None:
             # Explicit rendezvous ports identify a coordinated DP launch. Rank
             # 0 transfers the reservation immediately before vLLM binds; every
-            # rank then joins that generation exactly once. The driver retries
-            # the whole actor gang if any rank fails.
+            # rank then joins that generation exactly once. Any failure tears
+            # down the whole actor gang and propagates to the caller.
             self._release_rendezvous_port_reservation()
             engine = _create_async_engine(engine_args, stat_loggers, data_parallel_master_ports)
         else:
