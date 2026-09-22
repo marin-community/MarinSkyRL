@@ -134,8 +134,13 @@ from cloud.iris.rl_config_translation import (
 from marinskyrl.distillation import LocalInferenceTeacherSpec, compile_distillation_plan
 from cloud.iris.secrets_env import default_secrets_env, load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
-from cloud.iris.protocol import LaunchMode, ModelRoleKind, SkyRLJobSpec
-from cloud.iris.request_builder import derive_num_nodes, derive_role_plan, role_plan_is_configured
+from cloud.iris.protocol import ALL_ROLES_COLOCATION_GROUP, LaunchMode, ModelRoleKind, SkyRLJobSpec
+from cloud.iris.request_builder import (
+    apply_hydra_value_overrides,
+    derive_num_nodes,
+    derive_role_plan,
+    role_plan_is_configured,
+)
 from marinskyrl.task_sources import DataSource, DirectoryDataSource, TaskTroveParquetSource
 from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
@@ -304,12 +309,12 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
     rollout_claim = role_plan.claim(ModelRoleKind.ROLLOUT)
     reference_claim = next((claim for claim in role_plan.claims if claim.kind is ModelRoleKind.REFERENCE), None)
     critic_claim = next((claim for claim in role_plan.claims if claim.kind is ModelRoleKind.CRITIC), None)
-    colocate_policy_ref = reference_claim is not None and (
-        reference_claim.colocation_group == policy_claim.colocation_group
-    )
+    # These flags change runtime behavior as well as physical placement. Recover colocate_all from the policy claim
+    # rather than RolePlan.colocate_all: a remote rollout has no Iris bundle but must not silently make a sync config
+    # async. Leave colocate_policy_ref untouched when no reference is active because it has no physical consequence.
+    configured_colocate_all = policy_claim.colocation_group == ALL_ROLES_COLOCATION_GROUP
     role_overrides = [
-        f"++trainer.placement.colocate_all={str(role_plan.colocate_all).lower()}",
-        f"++trainer.placement.colocate_policy_ref={str(colocate_policy_ref).lower()}",
+        f"++trainer.placement.colocate_all={str(configured_colocate_all).lower()}",
         f"++trainer.placement.policy_num_nodes={policy_claim.num_nodes}",
         f"++trainer.placement.policy_num_gpus_per_node={policy_claim.gpus_per_node}",
         f"++generator.num_inference_engines={rollout_claim.replicas}",
@@ -323,8 +328,10 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
         f"++generator.n_samples_per_prompt={role_plan.n_samples_per_prompt}",
     ]
     if reference_claim is not None:
+        colocate_policy_ref = reference_claim.colocation_group == policy_claim.colocation_group
         role_overrides.extend(
             (
+                f"++trainer.placement.colocate_policy_ref={str(colocate_policy_ref).lower()}",
                 f"++trainer.placement.ref_num_nodes={reference_claim.num_nodes}",
                 f"++trainer.placement.ref_num_gpus_per_node={reference_claim.gpus_per_node}",
             )
@@ -914,7 +921,7 @@ def _purge_stale_daytona_snapshots(api_key: str) -> None:
 
 
 def _validate_rl_config_topology(args: argparse.Namespace) -> None:
-    """Reject a gang size that disagrees with the shared role-plan compiler."""
+    """Validate the requested gang against the effective SkyRL role plan."""
     try:
         with open(args.rl_config) as f:
             config = yaml.safe_load(f) or {}
@@ -922,21 +929,33 @@ def _validate_rl_config_topology(args: argparse.Namespace) -> None:
         return
     if not isinstance(config, dict):
         return
-    if not role_plan_is_configured(config):
+    # User overrides are applied after the YAML by Hydra and may activate a reference/critic, resize rollout engines,
+    # or change colocation. Validate the same effective values that the in-cluster trainer will receive.
+    overrides = tuple(args.skyrl_override or ())
+    effective_config = apply_hydra_value_overrides(config, overrides)
+    if not role_plan_is_configured(effective_config):
         return
-    plan = derive_role_plan(config)
+    plan = derive_role_plan(effective_config)
     checkpoint_export = _is_checkpoint_export(args)
     policy_claim = plan.claim(ModelRoleKind.POLICY)
     expected_nodes = policy_claim.num_nodes if checkpoint_export else derive_num_nodes(plan)
-    if args.num_nodes != expected_nodes:
+    node_count_mismatch = args.num_nodes != expected_nodes if checkpoint_export else args.num_nodes < expected_nodes
+    if node_count_mismatch:
         topology_description = (
             f"policy={expected_nodes}"
             if checkpoint_export
             else "+".join(f"{bundle.name}={bundle.num_nodes}" for bundle in plan.bundles)
         )
+        if checkpoint_export:
+            raise SystemExit(
+                f"--num-nodes={args.num_nodes} conflicts with {args.rl_config}'s checkpoint-export geometry "
+                f"({topology_description})."
+            )
+        # Extra nodes are harmless: SkyRL and Ray simply leave capacity unused. Reject only undersized gangs so the
+        # launcher does not impose a packing policy beyond the runtime's actual GPU and node-atomic constraints.
         raise SystemExit(
-            f"--num-nodes={args.num_nodes} conflicts with {args.rl_config}'s resolved role bundles "
-            f"({topology_description})."
+            f"--num-nodes={args.num_nodes} is too small for {args.rl_config}; the effective role plan requires at "
+            f"least {expected_nodes} nodes ({topology_description})."
         )
     declared_gpus = {bundle.gpus_per_node for bundle in plan.bundles}
     if declared_gpus and args.gpus_per_node not in declared_gpus:
