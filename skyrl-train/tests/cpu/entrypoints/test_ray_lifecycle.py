@@ -154,6 +154,7 @@ def test_generate_only_distillation_rejection_happens_before_ray_initialization(
 
 def test_generate_only_skips_training_validation(monkeypatch):
     cfg = get_default_config()
+    cfg.trainer.logger = "console"
     cfg.trainer.placement.colocate_all = True
     cfg.trainer.offload_optimizer_during_rollouts = True
     validation_complete = RuntimeError("generation validation complete")
