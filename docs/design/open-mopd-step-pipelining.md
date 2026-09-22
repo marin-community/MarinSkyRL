@@ -82,11 +82,15 @@ Facts from `skyrl_train/fully_async_trainer.py`, `entrypoints/fully_async.py`, a
 2. `generator.batched=false`, `generator.async_engine=true`, `colocate_all=false`.
 3. `num_parallel_generation_workers >= policy_mini_batch_size`. Start at `256 * (max_staleness_steps + 1)`, the
    example's convention.
-4. Staleness. `max_staleness_steps=1`. Behavior-logprob corrections (`use_tis`, `policy_loss_type=behavior_clip`)
-   are unavailable: `validate_cfg` requires full-distribution sampling for them and the recipe samples with nucleus
-   0.99, which is part of the method (the top-16 candidate set is taken after that truncation). The clipped
-   surrogate against the learner's pre-update logprobs is therefore the only guard, which is why the bound is one
-   update and raising it is a measured decision against the inline AIME gate, not a default.
+4. Staleness. `max_staleness_steps=1`. No behavior-policy correction reaches the distillation loss at all: under
+   `reward_mode=replace`, `compute_policy_objective` skips the TIS-capable policy loss, and the distillation
+   objectives take `old_action_log_probs` (the learner's pre-update forward) as the behavior term, never the
+   rollout engine's `rollout_logprobs` (`skyrl_train/distillation.py`, `sampled_reverse_kl_loss` and the student
+   top-k surrogate). Independently, `validate_cfg` requires full-distribution sampling for `use_tis` and the recipe
+   samples with nucleus 0.99. So the clipped surrogate against the learner's own pre-update logprobs is the only
+   guard against stale rollouts, which is why the bound is one update, why the first asynchronous run must be
+   compared against a synchronized baseline at matched prompt count, and why raising the bound needs a separate
+   validation of the behavior denominator, per-turn policy-version provenance, and ratio tails, not a config change.
 5. Trajectory runner. The existing `skyrl_train.entrypoints.fully_async` pairs the asynchronous trainer with the
    HTTP-backed SkyRL Gym runner. That runner's plain chat path re-tokenizes text and returns no logprobs and no
    student top-k candidates (`OpenAIHTTPModelClient.generate`, `token_provenance=RECONSTRUCTED`), and the entrypoint
