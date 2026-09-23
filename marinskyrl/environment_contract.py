@@ -169,14 +169,14 @@ ENV_VAR_SPECS = (
     ),
     EnvVarSpec(
         RUNAI_STREAMER_LOG_TO_STDERR_ENV,
-        "generator.engine_init_kwargs.load_format",
+        "generator.engine_init_kwargs",
         EnvVarSource.DERIVED,
         frozenset({EnvVarScope.INFERENCE_WORKER}),
         frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
     ),
     EnvVarSpec(
         RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV,
-        "generator.engine_init_kwargs.load_format",
+        "generator.engine_init_kwargs",
         EnvVarSource.DERIVED,
         frozenset({EnvVarScope.INFERENCE_WORKER}),
         frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
