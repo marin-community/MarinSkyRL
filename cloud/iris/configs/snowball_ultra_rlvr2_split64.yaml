@@ -1,11 +1,11 @@
 # Snowball Ultra-style RLVR phase 2 on 64 H100s: resume split64 at cumulative step 128.
-entrypoint: sync
+entrypoint: fully_async
 
 config_groups:
   terminal_bench_config: terminal_bench
 
 context_budget:
-  request_window_tokens: 65536
+  request_window_tokens: 32768
   max_new_tokens_per_turn: 6528
   max_turns: 999999
   generated_budget_fraction: 1.0
@@ -134,6 +134,7 @@ generator:
 
 environment:
   skyrl_gym:
+    max_env_workers: 8
     nemotron_ultra:
       sandbox:
         host: snowball-nemo-skills-sandbox.iris.svc.cluster.local

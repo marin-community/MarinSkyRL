@@ -44,9 +44,9 @@ _CONFIGS = {
     "snowball_megatron_online_eagle.yaml": (9856, 8192, 1),
     "snowball_megatron_smoke.yaml": (2048, 512, 1),
     "snowball_ultra_rlvr1_colocated64.yaml": (65536, 6528, 999999),
-    "snowball_ultra_rlvr1_split64.yaml": (65536, 6528, 999999),
+    "snowball_ultra_rlvr1_split64.yaml": (32768, 6528, 999999),
     "snowball_ultra_rlvr2_colocated64.yaml": (65536, 6528, 999999),
-    "snowball_ultra_rlvr2_split64.yaml": (65536, 6528, 999999),
+    "snowball_ultra_rlvr2_split64.yaml": (32768, 6528, 999999),
     "tasktrove_dq_sweep_30b.yaml": (131072, 16384, 90),
     "tasktrove_dq_sweep_30b_cp6.yaml": (131072, 16384, 90),
     "tasktrove_dq_sweep_30b_gb200.yaml": (131072, 16384, 90),
@@ -123,7 +123,18 @@ def test_snowball_ultra_grid_derives_prompt_budget_without_authored_override():
         parsed = parse_rl_config(str(configs_dir / name))
 
         assert "max_prompt_length" not in source["trainer"]
-        assert parsed.trainer["max_prompt_length"] == 59008
+        assert parsed.trainer["max_prompt_length"] == parsed.context_budget.request_window_tokens - 6528
+
+
+@pytest.mark.parametrize("phase", ("rlvr1", "rlvr2"))
+def test_snowball_ultra_split64_pins_validated_async_shape(phase):
+    config = _REPO_ROOT / "cloud/iris/configs" / f"snowball_ultra_{phase}_split64.yaml"
+    parsed = parse_rl_config(str(config))
+
+    assert parsed.entrypoint == "skyrl_train.entrypoints.fully_async"
+    assert parsed.context_budget.request_window_tokens == 32768
+    assert parsed.generator["max_num_seqs"] == 16
+    assert parsed.environment["skyrl_gym"]["max_env_workers"] == 8
 
 
 def test_snowball_ultra_grid_pins_phase_data_and_secret_free_judge_config():
