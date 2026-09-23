@@ -16,6 +16,7 @@ import ray
 import pytest
 import hydra
 import hashlib
+import pickle
 import torch
 import os
 import shutil
@@ -169,6 +170,54 @@ def megatron_next_step_logprobs(trainer: RayPPOTrainer) -> torch.Tensor:
     train_results = ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", train_batch))
     assert all(result.metadata["train_status"]["policy_update_steps"] == 1 for result in train_results)
     return megatron_policy_logprobs(trainer)
+
+
+@pytest.mark.megatron
+def test_megatron_full_checkpoint_restores_per_rank_rng_and_cuda_tracker(ray_init_fixture, tmp_path):
+    """A saved rank must recover both ordinary RNG and Megatron's separate CUDA tracker."""
+    from skyrl_train.workers.megatron.megatron_worker import MegatronPolicyWorkerBase
+
+    class RngPolicyWorker(MegatronPolicyWorkerBase):
+        def rng_fingerprint(self, advance: bool = False):
+            from megatron.core import tensor_parallel
+
+            tracker = tensor_parallel.get_cuda_rng_tracker()
+            names = sorted(tracker.get_states())
+            assert names, "Megatron CUDA RNG tracker was not initialized"
+            if advance:
+                with tracker.fork(names[0]):
+                    torch.rand(self._rank + 1, device="cuda")
+                torch.rand(self._rank + 1, device="cuda")
+            generic = self.strategy.get_rng_state()
+            return {
+                "rank": self._rank,
+                "generic": hashlib.sha256(pickle.dumps(generic)).hexdigest(),
+                "tracker": {
+                    name: hashlib.sha256(state.cpu().numpy().tobytes()).hexdigest()
+                    for name, state in tracker.get_states().items()
+                },
+            }
+
+    cfg = get_test_trainer_config("megatron", optimizer_checkpoint_sharding_type="dp_reshardable")
+    cfg.trainer.export_path = str(tmp_path)
+    cfg.trainer.ckpt_path = str(tmp_path)
+    trainer = create_minimal_trainer(cfg)
+    trainer.build_models(
+        ray.remote(num_gpus=1)(RngPolicyWorker), import_worker("megatron", "critic"), import_worker("megatron", "ref")
+    )
+
+    def fingerprints(advance: bool):
+        results = ray.get(trainer.policy_model.async_run_ray_method("pass_through", "rng_fingerprint", advance))
+        return {result["rank"]: result for result in results}
+
+    expected = fingerprints(advance=True)
+    trainer.global_step = 1
+    trainer.save_checkpoints()
+    changed = fingerprints(advance=True)
+    assert changed != expected, "The test must advance the tracked CUDA RNG after saving"
+    checkpoint_dir = os.path.join(resolve_checkpoint_payload(str(tmp_path / "global_step_1")), "policy")
+    ray.get(trainer.policy_model.async_run_ray_method("pass_through", "load_checkpoint", checkpoint_dir))
+    assert fingerprints(advance=False) == expected
 
 
 @pytest.mark.parametrize(

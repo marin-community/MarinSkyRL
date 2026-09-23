@@ -10,6 +10,7 @@ import contextlib
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from tests.cpu.util import stub_megatron_modules
@@ -82,3 +83,24 @@ def test_resume_returns_replicated_client_state_in_worker_expected_shape(monkeyp
     _, _, states = _load_with_fakes(monkeypatch, tmp_path)
 
     assert states == {"client_state": client_state}
+
+
+def test_rank_rng_selection_preserves_exact_rank_and_maps_resized_dp(monkeypatch):
+    rank_states = [
+        {"coordinates": (0, 0, 0, 0, 0, 0), "generic": "dp0"},
+        {"coordinates": (0, 0, 0, 0, 0, 1), "generic": "dp1"},
+    ]
+    monkeypatch.setattr(megatron_strategy.dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(megatron_strategy, "_rng_parallel_coordinates", lambda: (0, 0, 0, 0, 0, 1))
+    assert megatron_strategy._select_rank_rng_state(rank_states, 1)["generic"] == "dp1"
+
+    monkeypatch.setattr(megatron_strategy.dist, "get_world_size", lambda: 3)
+    monkeypatch.setattr(megatron_strategy, "_rng_parallel_coordinates", lambda: (0, 0, 0, 0, 0, 2))
+    assert megatron_strategy._select_rank_rng_state(rank_states, 2)["generic"] == "dp0"
+
+
+def test_rank_rng_selection_rejects_changed_model_parallel_slice(monkeypatch):
+    monkeypatch.setattr(megatron_strategy.dist, "get_world_size", lambda: 3)
+    monkeypatch.setattr(megatron_strategy, "_rng_parallel_coordinates", lambda: (0, 1, 0, 0, 0, 0))
+    with pytest.raises(ValueError, match="matching model-parallel geometry"):
+        megatron_strategy._select_rank_rng_state([{"coordinates": (0, 0, 0, 0, 0, 0), "generic": "saved"}], 0)
