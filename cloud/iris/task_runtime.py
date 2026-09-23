@@ -1929,11 +1929,7 @@ def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
     model_identity = str(model.identity)
     train_data = [] if checkpoint_export else _container(config.inputs.train_data)
     validation_data = [] if checkpoint_export else _container(config.inputs.validation_data)
-    data_kind = str(config.inputs.data_kind)
-    data_sources = train_data + validation_data if data_kind == "tasks" else []
-    typed_sources = bool(data_sources) and all(
-        isinstance(value, Mapping) and {"uri", "identity", "local_path"}.issubset(value) for value in data_sources
-    )
+    data_sources = train_data + validation_data
     generator = skyrl.get("generator", {})
     speculative = generator.get("speculative_decoding", {}) if isinstance(generator, DictConfig) else {}
     draft_mapping = speculative.get("model") if isinstance(speculative, DictConfig) and not checkpoint_export else None
@@ -1955,10 +1951,10 @@ def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
         driver_liveness_timeout=int(config.ray.driver_liveness_timeout),
         run_id=str(config.run.id),
         task_env=task_env,
-        train_data="" if typed_sources else _json_list(train_data),
-        val_data="" if typed_sources else _json_list(validation_data),
+        train_data="",
+        val_data="",
         terminal_bench_data=_json_list(skyrl.get("data", {}).get("terminal_bench_data", [])),
-        data_sources_json=_json_list(data_sources) if typed_sources else "",
+        data_sources_json=_json_list(data_sources) if data_sources else "",
         prestage_model=prestage_model,
         model_warm_source=task_env.get("OT_AGENT_MODEL_WARM_SOURCE", ""),
         model_revision=str(skyrl.get("trainer", {}).get("policy", {}).get("model", {}).get("revision") or ""),
