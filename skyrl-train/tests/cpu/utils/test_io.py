@@ -5,7 +5,9 @@ Unit tests for cloud storage I/O utilities.
 import json
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 import pytest
 from unittest.mock import patch, Mock
 import torch
@@ -475,6 +477,77 @@ class FakeHFCloudFilesystem:
             raise self.upload_error
         assert not recursive
         self.uploads.append(destination)
+
+
+@pytest.mark.parametrize("fail_weight_upload", [False, True])
+def test_parallel_hf_model_publication_waits_for_shards_before_markers(monkeypatch, fail_weight_upload):
+    class CoordinatedFilesystem(FakeHFCloudFilesystem):
+        def __init__(self):
+            super().__init__()
+            self.started = {
+                name: Event() for name in ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors")
+            }
+            self.release = {name: Event() for name in self.started}
+            self.failed = Event()
+
+        def put(self, source, destination, recursive):
+            name = Path(destination).name
+            if name in self.started:
+                self.started[name].set()
+                if not self.release[name].wait(timeout=5):
+                    raise TimeoutError("test did not release HF shard uploads")
+                if fail_weight_upload and name == "model-00001-of-00002.safetensors":
+                    self.failed.set()
+                    raise OSError("injected shard upload failure")
+            super().put(source, destination, recursive)
+
+    filesystem = CoordinatedFilesystem()
+    monkeypatch.setattr("skyrl_train.io.io._get_filesystem", lambda path: filesystem)
+
+    def publish() -> None:
+        with local_hf_model_dir("s3://bucket/export/policy", weight_upload_concurrency=2) as work_dir:
+            Path(work_dir, "config.json").write_text("{}")
+            Path(work_dir, "tokenizer.json").write_text("{}")
+            save_file({"layer.0.weight": torch.zeros(1)}, Path(work_dir, "model-00001-of-00002.safetensors"))
+            save_file({"layer.1.weight": torch.ones(1)}, Path(work_dir, "model-00002-of-00002.safetensors"))
+            Path(work_dir, "model.safetensors.index.json").write_text(
+                json.dumps(
+                    {
+                        "weight_map": {
+                            "layer.0.weight": "model-00001-of-00002.safetensors",
+                            "layer.1.weight": "model-00002-of-00002.safetensors",
+                        }
+                    }
+                )
+            )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(publish)
+        try:
+            assert all(started.wait(timeout=5) for started in filesystem.started.values())
+            assert not result.done()
+            assert not any(path.endswith("model.safetensors.index.json") for path in filesystem.uploads)
+            assert not any(path.endswith(".marinskyrl-model-manifest.json") for path in filesystem.uploads)
+            if fail_weight_upload:
+                filesystem.release["model-00001-of-00002.safetensors"].set()
+                assert filesystem.failed.wait(timeout=5)
+                assert not result.done()
+        finally:
+            for release in filesystem.release.values():
+                release.set()
+        if fail_weight_upload:
+            with pytest.raises(OSError, match="injected shard upload failure"):
+                result.result(timeout=5)
+            assert not any(path.endswith("model.safetensors.index.json") for path in filesystem.uploads)
+            assert not any(path.endswith(".marinskyrl-model-manifest.json") for path in filesystem.uploads)
+        else:
+            result.result(timeout=5)
+            marker_index = next(
+                index for index, path in enumerate(filesystem.uploads) if path.endswith("model.safetensors.index.json")
+            )
+            assert {Path(path).name for path in filesystem.uploads[:2]} == set(filesystem.started)
+            assert marker_index > 2
+            assert filesystem.uploads[-1].endswith(".marinskyrl-model-manifest.json")
 
 
 def test_cloud_hf_model_publication_writes_index_after_weight_shards(monkeypatch):

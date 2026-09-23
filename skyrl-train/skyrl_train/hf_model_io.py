@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 
 from loguru import logger
@@ -62,7 +64,7 @@ def verify_hf_model_export(export_path: str) -> None:
         )
 
 
-def _upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
+def _upload_hf_model_directory(local_path: str, cloud_path: str, *, weight_upload_concurrency: int) -> None:
     verify_hf_model_export(local_path)
 
     source_root = Path(local_path)
@@ -79,7 +81,8 @@ def _upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
         destination_uri = join_resource_path(cloud_path, relative_path)
         io.upload_file(str(path), destination_uri)
 
-    for shard_index, path in enumerate(weight_files, start=1):
+    def publish_weight_shard(shard: tuple[int, Path]) -> None:
+        shard_index, path = shard
         relative_path = path.relative_to(source_root).as_posix()
         size = path.stat().st_size
         logger.info(f"Publishing HF weight shard {shard_index}/{len(weight_files)}: {relative_path} ({size} bytes)")
@@ -89,6 +92,21 @@ def _upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
             f"Published HF weight shard {shard_index}/{len(weight_files)}: {relative_path} "
             f"({size} bytes in {time.monotonic() - started:.1f}s)"
         )
+
+    weight_upload_started = time.monotonic()
+    shards = enumerate(weight_files, start=1)
+    if weight_upload_concurrency == 1:
+        for shard in shards:
+            publish_weight_shard(shard)
+    else:
+        with ThreadPoolExecutor(max_workers=weight_upload_concurrency) as executor:
+            list(executor.map(publish_weight_shard, shards))
+    logger.info(
+        "Published {} HF weight shards ({} bytes) in {:.2f}s",
+        len(weight_files),
+        sum(path.stat().st_size for path in weight_files),
+        time.monotonic() - weight_upload_started,
+    )
     for path in [*other_files, *index_files, *manifest_files]:
         publish_file(path)
 
@@ -104,15 +122,26 @@ def _remove_completion_markers(output_path: str) -> None:
 
 
 @contextmanager
-def local_hf_model_dir(output_path: str):
+def local_hf_model_dir(output_path: str, *, weight_upload_concurrency: int = 1):
     """Invalidate the prior index and yield a local directory for the completed export."""
+    if weight_upload_concurrency < 1:
+        raise ValueError("weight_upload_concurrency must be positive")
     _remove_completion_markers(output_path)
 
     try:
-        with io.local_output_dir(output_path, _upload_hf_model_directory) as work_dir:
+        publisher = partial(_upload_hf_model_directory, weight_upload_concurrency=weight_upload_concurrency)
+        with io.local_output_dir(output_path, publisher) as work_dir:
             yield work_dir
+            normalize_started = time.monotonic()
             normalize_fast_tokenizer_metadata(Path(work_dir))
+            logger.info(
+                "Normalized HF export metadata for {} in {:.2f}s", output_path, time.monotonic() - normalize_started
+            )
+            manifest_started = time.monotonic()
             write_local_model_manifest(work_dir)
+            logger.info(
+                "Built HF export integrity manifest for {} in {:.2f}s", output_path, time.monotonic() - manifest_started
+            )
     except BaseException as export_error:
         try:
             _remove_completion_markers(output_path)

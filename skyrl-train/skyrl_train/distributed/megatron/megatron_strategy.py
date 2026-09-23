@@ -85,6 +85,7 @@ def _saved_optimizer_sharding_type(common_state: dict) -> str:
 
 
 _NODE_LOCAL_CHECKPOINT_CACHE = os.path.join(tempfile.gettempdir(), "marinskyrl-megatron-checkpoints")
+_HF_EXPORT_WEIGHT_UPLOAD_CONCURRENCY = 2
 
 
 def _rng_parallel_coordinates() -> tuple[int, int, int, int, int, int]:
@@ -475,7 +476,11 @@ class MegatronStrategy(DistributedStrategy):
 
         # Every rank exhausts Bridge's collective conversion; only cloud non-writers discard their local files.
         rank_writes_output = self.is_rank_0() or not io.is_cloud_path(output_dir)
-        model_dir = hf_model_io.local_hf_model_dir(output_dir) if rank_writes_output else tempfile.TemporaryDirectory()
+        model_dir = (
+            hf_model_io.local_hf_model_dir(output_dir, weight_upload_concurrency=_HF_EXPORT_WEIGHT_UPLOAD_CONCURRENCY)
+            if rank_writes_output
+            else tempfile.TemporaryDirectory()
+        )
         with (
             checkpoint_phase("megatron", "export", "write_and_publish_hf", rank=rank, step=step) as phase,
             model_dir as work_dir,
