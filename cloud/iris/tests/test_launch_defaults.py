@@ -13,11 +13,13 @@ import shlex
 import signal
 import subprocess
 import sys
+from collections.abc import Callable
 from contextlib import contextmanager
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from iris.cluster.types import JobName
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
@@ -1001,24 +1003,29 @@ def test_launch_applies_failure_retry_budget_to_tasks_and_job(tmp_path, monkeypa
     assert submitted["max_task_failures"] == 3
 
 
+class RecordingSupervisedJob:
+    def __init__(self, job_id: str, interrupt_wait: Callable[[], None]):
+        self.job_id = JobName.from_string(job_id)
+        self.interrupt_wait = interrupt_wait
+        self.cancelled = False
+        self.terminal_observed = False
+
+    def wait(self, **_kwargs):
+        if not self.cancelled:
+            self.interrupt_wait()
+            raise AssertionError("wait interruption did not propagate")
+        self.terminal_observed = True
+        return SimpleNamespace(state=iris_backend.JobState.KILLED)
+
+    def cancel(self):
+        self.cancelled = True
+
+
 def test_supervised_job_cancels_descendants_on_keyboard_interrupt():
-    class InterruptedJob:
-        job_id = "/power/interrupted"
+    def interrupt_wait():
+        raise KeyboardInterrupt
 
-        def __init__(self):
-            self.cancelled = False
-            self.terminal_observed = False
-
-        def wait(self, **_kwargs):
-            if not self.cancelled:
-                raise KeyboardInterrupt
-            self.terminal_observed = True
-            return SimpleNamespace(state=iris_backend.JobState.KILLED)
-
-        def cancel(self):
-            self.cancelled = True
-
-    job = InterruptedJob()
+    job = RecordingSupervisedJob("/power/interrupted", interrupt_wait)
 
     outcome = iris_backend.supervise_iris_job(job)
 
@@ -1029,25 +1036,8 @@ def test_supervised_job_cancels_descendants_on_keyboard_interrupt():
 
 
 def test_supervised_job_cancels_descendants_on_sigterm():
-    class TerminatedJob:
-        job_id = "/power/terminated"
-
-        def __init__(self):
-            self.cancelled = False
-            self.terminal_observed = False
-
-        def wait(self, **_kwargs):
-            if not self.cancelled:
-                signal.raise_signal(signal.SIGTERM)
-                raise AssertionError("SIGTERM handler did not interrupt the wait")
-            self.terminal_observed = True
-            return SimpleNamespace(state=iris_backend.JobState.KILLED)
-
-        def cancel(self):
-            self.cancelled = True
-
     previous_handler = signal.getsignal(signal.SIGTERM)
-    job = TerminatedJob()
+    job = RecordingSupervisedJob("/power/terminated", lambda: signal.raise_signal(signal.SIGTERM))
 
     outcome = iris_backend.supervise_iris_job(job)
 
@@ -1059,23 +1049,10 @@ def test_supervised_job_cancels_descendants_on_sigterm():
 
 
 def test_supervised_job_cancels_descendants_when_waiting_fails():
-    class FailedWaitJob:
-        job_id = "/power/wait-failed"
+    def fail_wait():
+        raise RuntimeError("log stream failed")
 
-        def __init__(self):
-            self.cancelled = False
-            self.terminal_observed = False
-
-        def wait(self, **_kwargs):
-            if not self.cancelled:
-                raise RuntimeError("log stream failed")
-            self.terminal_observed = True
-            return SimpleNamespace(state=iris_backend.JobState.KILLED)
-
-        def cancel(self):
-            self.cancelled = True
-
-    job = FailedWaitJob()
+    job = RecordingSupervisedJob("/power/wait-failed", fail_wait)
 
     with pytest.raises(RuntimeError, match="log stream failed"):
         iris_backend.supervise_iris_job(job)

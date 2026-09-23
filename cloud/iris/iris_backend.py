@@ -79,7 +79,7 @@ from iris.cluster.constraints import (
     preemptible_constraint,
 )
 from iris.cluster.platforms.k8s.coreweave_topology import gpu_gang_coscheduling_level
-from iris.cluster.types import CoschedulingConfig, ResourceSpec, gpu_device
+from iris.cluster.types import CoschedulingConfig, JobName, ResourceSpec, gpu_device
 from iris.resources.state import JobState
 
 from iris.rpc import job_pb2
@@ -268,7 +268,7 @@ class SupervisedIrisJob(Protocol):
     """Submitted Iris job operations needed by the launcher supervisor."""
 
     @property
-    def job_id(self) -> object: ...
+    def job_id(self) -> JobName: ...
 
     def wait(
         self,
@@ -322,7 +322,7 @@ def _cancel_iris_job_tree(job: SupervisedIrisJob, job_id: str, cause: BaseExcept
 
 
 def supervise_iris_job(job: SupervisedIrisJob) -> IrisLaunchOutcome:
-    """Wait for terminal success or cancel the complete Iris tree before exiting."""
+    """Wait for a terminal state, cancelling the job tree if supervision cannot continue."""
     job_id = str(job.job_id)
     try:
         with _supervised_termination_signals():
@@ -2871,10 +2871,8 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
             )
         print(
             f"[rl-iris] Now streaming logs for {full_job_id}. This process runs until the job ends.\n"
-            "[rl-iris] Ctrl-C or SIGINT TERMINATES the job. It does not detach from it.\n"
-            "[rl-iris] Use --no-wait to submit and return instead.\n"
-            "[rl-iris] To stop a backgrounded launcher and keep the job alive, use kill or kill -9. "
-            "Never use kill -2.",
+            "[rl-iris] SIGINT and SIGTERM cancel the complete job tree; signals do not detach.\n"
+            "[rl-iris] Use --no-wait to submit and return instead.",
             file=sys.stderr,
             flush=True,
         )
