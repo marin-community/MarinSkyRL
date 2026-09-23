@@ -133,6 +133,7 @@ trainer:
       scheduler: "constant_with_warmup"
       optimizer_kwargs: {}
     fsdp_config:
+      checkpoint_io_mode: staged_overlap  # staged | staged_overlap | direct_stream
       cpu_offload: false
       reshard_after_forward: true
       fsdp_size: -1
