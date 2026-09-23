@@ -1,0 +1,95 @@
+defaults:
+  - ppo_base_config
+  - _self_
+
+data:
+  shuffle: false
+
+trainer:
+  strategy: fsdp2
+  seed: 17
+  flash_attn: true
+  use_sample_packing: false
+  max_prompt_length: 15872
+  epochs: 1
+  max_steps: 1
+  update_epochs_per_batch: 1
+  train_batch_size: 8
+  policy_mini_batch_size: 8
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+  eval_batch_size: 4
+  resume_mode: none
+  dump_eval_results: true
+  logger: console
+  enable_db_registration: false
+  ckpt_path: ${oc.env:PIVOT_TMP_ROOT}/checkpoints
+  export_path: ${oc.env:PIVOT_RUN_ROOT}/exports
+  policy:
+    model:
+      path: Qwen/Qwen3-0.6B
+      revision: c1899de
+    optimizer_config:
+      lr: 2.0e-6
+      weight_decay: 0.0
+    fsdp_config:
+      cpu_offload: false
+      reshard_after_forward: true
+  placement:
+    colocate_all: true
+    policy_num_nodes: 1
+    policy_num_gpus_per_node: 1
+    critic_num_nodes: 1
+    critic_num_gpus_per_node: 1
+    ref_num_nodes: 1
+    ref_num_gpus_per_node: 1
+  algorithm:
+    advantage_estimator: grpo
+    use_kl_loss: false
+    use_kl_in_reward: false
+    loss_reduction: token_mean
+  callbacks:
+    - type: evaluation
+      eval_steps: 1
+      eval_before_train: true
+      eval_on_train_end: false
+    - type: checkpoint
+      save_steps: 1
+      save_on_train_end: false
+    - type: logging
+
+generator:
+  backend: vllm
+  model_dtype: bfloat16
+  num_inference_engines: 1
+  inference_engine_tensor_parallel_size: 1
+  n_samples_per_prompt: 2
+  eval_n_samples_per_prompt: 1
+  gpu_memory_utilization: 0.7
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: true
+  enable_http_endpoint: true
+  max_num_batched_tokens: 16384
+  engine_init_kwargs:
+    enable_auto_tool_choice: true
+    tool_call_parser: hermes
+  sampling_params:
+    max_generate_length: 512
+    temperature: 1.0
+    top_p: 1.0
+  eval_sampling_params:
+    max_generate_length: 512
+    temperature: 0.0
+    top_p: 1.0
+  trajectory_retention:
+    enabled: true
+    output_path: ${oc.env:PIVOT_TMP_ROOT}/trajectories
+    phases: [train]
+    sample_count_per_step: 16
+    sample_fraction: 1.0
+    required: true
+
+environment:
+  env_class: nemotron_ultra

@@ -123,6 +123,8 @@ NEMOTRON_ULTRA_SWE_AGENT = "swe_pivot_single_step_tool_use_with_argument_compari
 # The MOPD blend adds one generator whose verifier has not been ported; rows using it are
 # accepted by the source and rejected by the environment, so subsets must exclude it.
 NEMOTRON_ULTRA_MOPD_AGENTS = NEMOTRON_ULTRA_RLVR2_AGENTS | {"indirect_prompt_injection_simple_agent"}
+NEMOTRON_PIVOT_SWE_SOURCE_AGENT = "single_step_tool_use_with_argument_comparison_swe"
+NEMOTRON_PIVOT_SWE_DATA_SOURCE = "nemotron_swe_pivot"
 _NEMOTRON_PLACEHOLDER_KEY = "_hf_question_placeholder"
 _NEMOTRON_DAPO_PREFIX = (
     "Solve the following math problem step by step. The last line of your response "
@@ -213,6 +215,52 @@ def _nemotron_ultra_messages(raw_input: Any) -> list[dict[str, Any]]:
     if not messages:
         raise ValueError("NeMo Gym input did not contain any chat-visible messages.")
     return messages
+
+
+def prepare_pivot_swe_row(example: Mapping[str, Any], index: int) -> PreparedRow:
+    """Convert one released SWE pivot into a single-action local-verifier row."""
+    request = example.get("responses_create_params")
+    agent_ref = example.get("agent_ref")
+    expected_action = example.get("expected_action")
+    if not isinstance(request, Mapping):
+        raise TypeError("SWE pivot responses_create_params must be a mapping")
+    if not isinstance(agent_ref, Mapping) or agent_ref.get("name") != NEMOTRON_PIVOT_SWE_SOURCE_AGENT:
+        raise ValueError("SWE pivot has an unsupported agent_ref.name")
+    if not isinstance(expected_action, Mapping):
+        raise TypeError("SWE pivot expected_action must be a mapping")
+    trajectory_id = example.get("trajectory_id")
+    if not isinstance(trajectory_id, int):
+        raise TypeError("SWE pivot trajectory_id must be an integer")
+    return {
+        "data_source": NEMOTRON_PIVOT_SWE_DATA_SOURCE,
+        "prompt": _nemotron_ultra_messages(request.get("input")),
+        "env_class": "nemotron_ultra",
+        "reward_model": {"ground_truth": NEMOTRON_ULTRA_SWE_AGENT},
+        "extra_info": {
+            "split": "train",
+            "index": index,
+            "nemotron_ultra": {
+                "uuid": f"{trajectory_id}:{index}",
+                "blend": "swe_pivot",
+                "agent": NEMOTRON_ULTRA_SWE_AGENT,
+                "route": "skyrl_gym",
+                "request_json": json.dumps(
+                    {key: value for key, value in request.items() if key != "input"},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "record_json": json.dumps(
+                    {
+                        "expected_action": dict(expected_action),
+                        "trajectory_id": trajectory_id,
+                        "profile_pass_rate": example.get("pass_rate"),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            },
+        },
+    }
 
 
 def _prepare_nemotron_ultra(
