@@ -303,6 +303,14 @@ def test_trainer_full_checkpointing(
                 trainer1.policy_model.async_run_ray_method("pass_through", "checkpoint_parameter_fingerprints")
             )
             expected_next_step_logprobs = megatron_next_step_logprobs(trainer1)
+            # A same-process reload separates checkpoint-load effects from fresh-worker effects.
+            ray.get(
+                trainer1.policy_model.async_run_ray_method(
+                    "pass_through", "load_checkpoint", os.path.join(payload_dir, "policy")
+                )
+            )
+            reloaded_same_worker_logprobs = megatron_policy_logprobs(trainer1)
+            torch.testing.assert_close(reloaded_same_worker_logprobs, expected_pre_step_logprobs, rtol=1e-3, atol=1e-3)
 
         # Cleanup first trainer
         del trainer1
