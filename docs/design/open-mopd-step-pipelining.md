@@ -175,6 +175,10 @@ of whichever wins. Background checkpoint upload (#711) is the checkpoint half of
 shards synchronously, the cloud upload runs single-flight in the background, colocated inference residency is
 restored before the upload completes, the `latest_ckpt_global_step.txt` marker is committed last, and the fully
 asynchronous shutdown drains the pending upload. The inline AIME evaluation on the same cadence remains on the
-critical path until it moves to its own Iris job. The issue's timing data gives even steps about 1,700 s over odd
+critical path until it moves to its own Iris job. Measured on 2026-09-22: on the Snowball 67B smoke
+(`/karan/snowball-opd-math-smoke-4`, Megatron, 32 ranks, 939 GB checkpoint) `save_checkpoints` blocked 157 s for
+staging and `checkpoint_upload` drained in 9.7 s; on the Qwen3-0.6B FSDP2 validation
+(`/karan/qwen-opd-fsdp-checkpoint-e2e-3`) staging returned in 2.6 s and step 3 finished training and weight sync
+before the step-2 publication completed, and `/karan/qwen-opd-fsdp-checkpoint-resume-3` resumed from step 4. The issue's timing data gives even steps about 1,700 s over odd
 steps for checkpoint plus evaluation together and does not split the two; the first baseline run must report
 `timing/save_checkpoints` and `timing/eval` separately before either change is credited.
