@@ -107,6 +107,8 @@ trainer:
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
       revision: null
+      tokenizer_path: ${trainer.policy.model.path}
+      tokenizer_revision: ${trainer.policy.model.revision}
       source_uri: null
       source_identity: null
       lora:
@@ -156,6 +158,8 @@ trainer:
     model:
       path: ${trainer.policy.model.path}
       revision: ${trainer.policy.model.revision}
+      tokenizer_path: ${trainer.policy.model.tokenizer_path}
+      tokenizer_revision: ${trainer.policy.model.tokenizer_revision}
       source_uri: ${trainer.policy.model.source_uri}
       source_identity: ${trainer.policy.model.source_identity}
     sequence_parallel_size: 1

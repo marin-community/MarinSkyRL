@@ -169,10 +169,12 @@ def test_from_config_forwards_policy_revision_to_vllm(monkeypatch):
     cfg = get_default_config()
     revision = "68c46c4b3498877f3ef123c856ecfde50c39f404"
     cfg.trainer.policy.model.revision = revision
+    cfg.trainer.policy.model.tokenizer_revision = "tokenizer-commit"
 
     main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
 
     assert captured["engine_init_kwargs"]["revision"] == revision
+    assert captured["engine_init_kwargs"]["tokenizer_revision"] == "tokenizer-commit"
 
 
 def test_from_config_streams_object_store_policy_weights(monkeypatch):
@@ -188,6 +190,7 @@ def test_from_config_streams_object_store_policy_weights(monkeypatch):
     cfg.trainer.policy.model.source_uri = "s3://models/policy"
     cfg.trainer.policy.model.source_identity = "sha256:" + "a" * 64
     cfg.trainer.policy.model.revision = "68c46c4b3498877f3ef123c856ecfde50c39f404"
+    cfg.trainer.policy.model.tokenizer_path = "/tmp/tokenizer-metadata"
 
     main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
 
@@ -195,6 +198,7 @@ def test_from_config_streams_object_store_policy_weights(monkeypatch):
     assert captured["engine_init_kwargs"]["load_format"] == "runai_streamer"
     assert captured["engine_init_kwargs"]["model_loader_extra_config"] == {"distributed": True}
     assert captured["engine_init_kwargs"]["_marinskyrl_metadata_path"] == "/tmp/model-metadata"
+    assert captured["engine_init_kwargs"]["tokenizer"] == "/tmp/tokenizer-metadata"
     assert "revision" not in captured["engine_init_kwargs"]
 
 
@@ -262,10 +266,12 @@ def test_policy_tokenizer_uses_configured_revision(monkeypatch):
     experiment = main_base.BasePPOExp.__new__(main_base.BasePPOExp)
     experiment.cfg = get_default_config()
     revision = "68c46c4b3498877f3ef123c856ecfde50c39f404"
-    experiment.cfg.trainer.policy.model.revision = revision
+    experiment.cfg.trainer.policy.model.tokenizer_path = "penfever/grug-tokenizer"
+    experiment.cfg.trainer.policy.model.tokenizer_revision = revision
 
     experiment.get_tokenizer()
 
+    assert captured["model_path"] == "penfever/grug-tokenizer"
     assert captured["revision"] == revision
 
 

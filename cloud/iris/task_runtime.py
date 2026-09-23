@@ -34,6 +34,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import shutil
 import signal
 import socket
 import subprocess
@@ -46,7 +47,7 @@ from typing import Any, Protocol
 
 from omegaconf import DictConfig, OmegaConf
 
-from cloud.iris.artifacts import ArtifactSource, file_inventory, fs_and_path, materialize
+from cloud.iris.artifacts import ArtifactSource, atomic_directory_update, file_inventory, fs_and_path, materialize
 from cloud.iris.hf_model_cache import (
     download_hugging_face_snapshot,
     ensure_hugging_face_model_cache,
@@ -65,8 +66,9 @@ from marinskyrl.environment_contract import (
     ray_cluster_owner_environment,
 )
 from marinskyrl.hf_model import immutable_model_cache_key, validate_hf_model_weights
+from marinskyrl.model_manifest import MODEL_MANIFEST_FILENAME
 from cloud.iris.telemetry_env import telemetry_environment
-from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
+from marinskyrl.resource_locator import is_cloud_uri, is_hugging_face_repo_id, join_resource_path
 from marinskyrl.speculative_decoding import SpeculatorModelConfig, SpeculatorModelSourceKind
 from marinskyrl.distillation import TeacherModelSpec, TeacherSource, compile_distillation_plan_from_config
 from marinskyrl.process_diagnostics import (
@@ -283,6 +285,25 @@ class PreparedPolicyModel:
     local_path: str
 
 
+@dataclass(frozen=True)
+class PreparedPolicyTokenizer:
+    local_path: str
+
+
+TOKENIZER_METADATA_PATTERNS = (
+    "added_tokens.json",
+    "chat_template*.jinja",
+    "*.model",
+    "merges.txt",
+    "special_tokens_map.json",
+    "tokenization_*.py",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "vocab.txt",
+)
+
+
 def _requires_local_model_weights(runtime_profile: str) -> bool:
     profile = RuntimeProfile(runtime_profile)
     return profile not in {RuntimeProfile.MEGATRON, RuntimeProfile.MEGATRON_EXPORT}
@@ -328,6 +349,57 @@ def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None
         f"(identity={source_identity}; local_disk_high_water_bytes={metadata_bytes}; weight shards remain remote)"
     )
     return PreparedPolicyModel(source_uri, source_identity, local_path)
+
+
+def _tokenizer_metadata_files(path: Path) -> tuple[Path, ...]:
+    return tuple(
+        sorted({metadata_file for pattern in TOKENIZER_METADATA_PATTERNS for metadata_file in path.glob(pattern)})
+    )
+
+
+def _require_tokenizer_metadata(path: Path, source: str) -> tuple[Path, ...]:
+    metadata_files = _tokenizer_metadata_files(path)
+    if not metadata_files:
+        raise ValueError(f"Tokenizer source contains no tokenizer metadata: {source}")
+    return metadata_files
+
+
+def _copy_tokenizer_metadata(source: Path, destination: Path) -> None:
+    for metadata_file in _require_tokenizer_metadata(source, str(source)):
+        shutil.copy2(metadata_file, destination / metadata_file.name)
+
+
+def prepare_policy_tokenizer(args: argparse.Namespace) -> PreparedPolicyTokenizer | None:
+    """Stage the requested tokenizer independently from the policy weights."""
+    tokenizer_path = args.policy_tokenizer
+    if not tokenizer_path:
+        return None
+
+    revision = args.policy_tokenizer_revision
+    local_path = _metadata_path(tokenizer_path, revision or "main")
+    target = Path(local_path)
+    if is_cloud_uri(tokenizer_path):
+        manifest = load_model_manifest(tokenizer_path)
+        stage_model_metadata(tokenizer_path, manifest, local_path)
+        _require_tokenizer_metadata(target, tokenizer_path)
+        (target / MODEL_MANIFEST_FILENAME).unlink(missing_ok=True)
+    else:
+        with atomic_directory_update(target, staging_prefix=f".{target.name}.tokenizer-") as staging:
+            staging.mkdir()
+            if os.path.isdir(tokenizer_path):
+                _copy_tokenizer_metadata(Path(tokenizer_path), staging)
+            elif is_hugging_face_repo_id(tokenizer_path):
+                download_hugging_face_snapshot(
+                    tokenizer_path,
+                    revision=revision or None,
+                    destination=staging,
+                    allow_patterns=TOKENIZER_METADATA_PATTERNS,
+                )
+                _require_tokenizer_metadata(staging, tokenizer_path)
+            else:
+                raise ValueError(f"Unsupported policy tokenizer source: {tokenizer_path!r}")
+
+    return PreparedPolicyTokenizer(local_path)
 
 
 def prepare_draft_model(
@@ -1969,6 +2041,8 @@ def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
         model_local_path=str(model.local_path),
         model_source_identity=model_identity if is_cloud_uri(model_uri) else "",
         runtime_profile=str(config.runtime.profile),
+        policy_tokenizer=str(model.tokenizer_uri),
+        policy_tokenizer_revision=str(model.tokenizer_revision),
         policy_chat_template=str(model.chat_template or ""),
         draft_model=draft_model,
         draft_model_cache_ttl_days=None,
@@ -1991,6 +2065,7 @@ def _write_final_config(
     config: DictConfig,
     *,
     policy_model: PreparedPolicyModel | None,
+    policy_tokenizer: PreparedPolicyTokenizer | None,
     draft_model: SpeculatorModelConfig | None,
 ) -> Path:
     """Persist the post-staging root document consumed by the training subprocess."""
@@ -2017,6 +2092,15 @@ def _write_final_config(
             original_model_path.rstrip("/").rsplit("/", 1)[-1],
             force_add=True,
         )
+    if policy_tokenizer is not None:
+        for role in ("policy", "ref"):
+            OmegaConf.update(
+                skyrl,
+                f"trainer.{role}.model.tokenizer_path",
+                policy_tokenizer.local_path,
+                force_add=True,
+            )
+            OmegaConf.update(skyrl, f"trainer.{role}.model.tokenizer_revision", None, force_add=True)
     if draft_model is not None:
         OmegaConf.update(
             skyrl,
@@ -2090,6 +2174,7 @@ def main() -> None:
         stage_task_data(args.terminal_bench_data, role="terminal-bench sidechannel")
     policy_model = prepare_policy_model(args)
     policy_local_path = policy_model.local_path if policy_model is not None else None
+    policy_tokenizer = prepare_policy_tokenizer(args)
     if args.prestage_model:
         stage_model(
             args.prestage_model,
@@ -2107,11 +2192,20 @@ def main() -> None:
     # Force the policy chat template onto staged metadata or a local model on every
     # node before Ray; the training driver's tokenizer may load anywhere.
     if args.policy_chat_template:
-        model_path = policy_local_path or policy_chat_template_model(args.prestage_model, args.model_local_path)
+        model_path = (
+            policy_tokenizer.local_path
+            if policy_tokenizer is not None
+            else policy_local_path or policy_chat_template_model(args.prestage_model, args.model_local_path)
+        )
         apply_policy_chat_template(model_path, args.policy_chat_template)
     rank = _rank()
     if rank == 0:
-        final_config_path = _write_final_config(launch_config, policy_model=policy_model, draft_model=draft_model)
+        final_config_path = _write_final_config(
+            launch_config,
+            policy_model=policy_model,
+            policy_tokenizer=policy_tokenizer,
+            draft_model=draft_model,
+        )
         exit_code = run_head(args, final_config_path, derived_gloo_ifname)
     else:
         exit_code = run_worker(args)

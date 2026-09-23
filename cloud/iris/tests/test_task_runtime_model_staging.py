@@ -10,6 +10,7 @@ from cloud.iris.task_runtime import (
     policy_chat_template_model,
     prepare_draft_model,
     prepare_policy_model,
+    prepare_policy_tokenizer,
 )
 from marinskyrl.speculative_decoding import SpeculatorModelConfig
 
@@ -97,9 +98,28 @@ def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(monkeypatch) -> Non
     assert prepared == SpeculatorModelConfig(source_uri="s3://models/draft", source_identity=identity)
 
 
+def test_requested_local_policy_tokenizer_is_staged_independently(tmp_path, monkeypatch) -> None:
+    tokenizer_source = tmp_path / "tokenizer-source"
+    tokenizer_source.mkdir()
+    (tokenizer_source / "tokenizer.json").write_text('{"identity": "requested"}')
+    (tokenizer_source / "tokenizer_config.json").write_text('{"chat_template": "requested"}')
+    destination = tmp_path / "prepared-tokenizer"
+    monkeypatch.setattr(task_runtime, "_metadata_path", lambda _uri, _revision: str(destination))
+
+    prepared = prepare_policy_tokenizer(
+        Namespace(policy_tokenizer=str(tokenizer_source), policy_tokenizer_revision="tokenizer-commit")
+    )
+
+    assert prepared is not None
+    assert prepared.local_path == str(destination)
+    assert (destination / "tokenizer.json").read_text() == '{"identity": "requested"}'
+    assert (destination / "tokenizer_config.json").read_text() == '{"chat_template": "requested"}'
+
+
 def test_staged_models_are_written_as_structured_config(tmp_path, monkeypatch) -> None:
     identity = "sha256:" + "a" * 64
     policy = task_runtime.PreparedPolicyModel("s3://models/policy", identity, "/tmp/policy-metadata")
+    tokenizer = task_runtime.PreparedPolicyTokenizer("/tmp/tokenizer-metadata")
     draft = SpeculatorModelConfig(
         source_uri="s3://models/tmp/ttl=14d/draft",
         source_identity=identity,
@@ -124,10 +144,14 @@ def test_staged_models_are_written_as_structured_config(tmp_path, monkeypatch) -
     )
     monkeypatch.setattr(task_runtime.tempfile, "gettempdir", lambda: str(tmp_path))
 
-    path = _write_final_config(launch, policy_model=policy, draft_model=draft)
+    path = _write_final_config(launch, policy_model=policy, policy_tokenizer=tokenizer, draft_model=draft)
     resolved = OmegaConf.load(path)
 
     assert resolved.skyrl.trainer.policy.model.path == "/tmp/policy-metadata"
     assert resolved.skyrl.trainer.ref.model.path == "/tmp/policy-metadata"
     assert resolved.skyrl.trainer.policy.model.source_uri == "s3://models/policy"
+    assert resolved.skyrl.trainer.policy.model.tokenizer_path == "/tmp/tokenizer-metadata"
+    assert resolved.skyrl.trainer.policy.model.tokenizer_revision is None
+    assert resolved.skyrl.trainer.ref.model.tokenizer_path == "/tmp/tokenizer-metadata"
+    assert resolved.skyrl.trainer.ref.model.tokenizer_revision is None
     assert resolved.skyrl.generator.speculative_decoding.model.source_uri == draft.source_uri
