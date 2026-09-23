@@ -230,6 +230,41 @@ def test_generation_input_coverage_deduplicates_expanded_samples(monkeypatch):
     ]
 
 
+def test_transient_retry_shadow_classifies_without_changing_group(monkeypatch):
+    groups, tokens, staleness = _Recorder(), _Recorder(), _Recorder()
+    monkeypatch.setattr(trainer_telemetry, "transient_retry_shadow_groups", groups)
+    monkeypatch.setattr(trainer_telemetry, "transient_retry_shadow_tokens", tokens)
+    monkeypatch.setattr(trainer_telemetry, "transient_retry_shadow_staleness", staleness)
+    batch = {
+        "response_ids": [[1, 2], [3]],
+        "loss_masks": [[0, 0], [0]],
+        "exception_types": ["ServerDisconnectedError", "ServerDisconnectedError"],
+        "error_treatments": ["mask", "mask"],
+    }
+    prompts = [{"env_extras": {"extra_info": {"nemotron_ultra": {"route": "gym"}}}}]
+    original_batch, original_prompts = copy.deepcopy(batch), copy.deepcopy(prompts)
+
+    assert trainer_telemetry.record_transient_retry_shadow(batch, prompts, earliest_model_step=17, current_step=18)
+    assert groups.calls == [
+        (
+            1,
+            {
+                "route": "gym",
+                "classification": "complete_server_disconnect",
+                "would_retry_same_identity": "true",
+                "hypothetical_attempt": "1",
+            },
+        )
+    ]
+    assert tokens.calls[0][0] == 3
+    assert staleness.calls[0][0] == 1
+    assert batch == original_batch and prompts == original_prompts
+
+    batch["exception_types"][1] = "AgentTimeoutError"
+    assert not trainer_telemetry.record_transient_retry_shadow(batch, prompts, earliest_model_step=17, current_step=18)
+    assert groups.calls[-1][1]["classification"] == "partial_or_mixed_disconnect"
+
+
 @pytest.mark.asyncio
 async def test_executor_cancellation_preserves_work_cleanup(monkeypatch):
     work = _Recorder()

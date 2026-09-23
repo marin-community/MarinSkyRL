@@ -57,6 +57,7 @@ from skyrl_train.telemetry import (
     record_policy_step,
     record_rollout_buffer,
     record_rollout_staleness,
+    record_transient_retry_shadow,
 )
 from skyrl_train.rollout_observability import (
     async_phase_window,
@@ -1587,10 +1588,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     ) -> None:
         self._groups_rejected_since_step += len(rejected_groups)
         scan_reasons: collections.Counter[str] = collections.Counter()
-        for _, decision in rejected_groups:
+        for group, decision in rejected_groups:
             assert decision.primary_rejection is not None
             self._rejection_reasons_since_step[decision.primary_rejection.value] += 1
             scan_reasons[decision.primary_rejection.value] += 1
+            if decision.primary_rejection is AdmissionRejection.FULLY_MASKED:
+                record_transient_retry_shadow(
+                    group.trajectory_batch,
+                    group.source_prompts,
+                    earliest_model_step=group.earliest_model_step,
+                    current_step=self.global_step,
+                )
         self._groups_inspected_since_step += inspected_count
         retry_count = sum(decision.action is AdmissionAction.RETRY_PROMPT for _, decision in rejected_groups)
         discarded_count = len(rejected_groups) - retry_count

@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import functools
 import math
+import numbers
 import os
 import socket
 import threading
@@ -73,6 +74,9 @@ generation_groups = telemetry.counter("generation_groups", unit="{group}")
 generation_active_groups = telemetry.gauge("generation_active_groups", unit="{group}")
 generation_input_coverage = telemetry.counter("generation_input_coverage", unit="{group}")
 admission_groups = telemetry.counter("admission_groups", unit="{group}")
+transient_retry_shadow_groups = telemetry.counter("transient_retry_shadow_groups", unit="{group}")
+transient_retry_shadow_tokens = telemetry.histogram("transient_retry_shadow_response_tokens", unit="{token}")
+transient_retry_shadow_staleness = telemetry.histogram("transient_retry_shadow_staleness_steps", unit="{step}")
 executor_queue_delay = telemetry.histogram("executor_queue_delay_seconds", unit="s")
 executor_duration = telemetry.histogram("executor_duration_seconds", unit="s")
 executor_work = telemetry.gauge("executor_work", unit="{item}")
@@ -151,13 +155,17 @@ def record_consumed_work(work: ConsumedWork, *, step: int) -> None:
 def record_training_metrics(metrics: Mapping[str, object], *, step: int, kind: str) -> None:
     """Mirror finite numeric trainer scalars without changing their values."""
     for name, value in metrics.items():
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if isinstance(value, bool) or not isinstance(value, numbers.Real):
             continue
         attributes = {"metric": name, "step": str(step), "role": TRAINER_ROLE, "payload_kind": kind}
-        if math.isfinite(value):
-            training_metric.record(float(value), attributes=attributes)
-        else:
+        try:
+            numeric_value = float(value)
+        except (OverflowError, TypeError, ValueError):
+            numeric_value = float("nan")
+        if not math.isfinite(numeric_value):
             training_nonfinite_values.add(1, attributes=attributes)
+        else:
+            training_metric.record(numeric_value, attributes=attributes)
 
 
 class _BackgroundCollector(Protocol):
@@ -535,6 +543,65 @@ def record_admission(
     for reason, count in reasons.items():
         if count:
             admission_groups.add(count, attributes={"outcome": "rejected", "reason": str(reason)})
+
+
+def record_transient_retry_shadow(
+    trajectory_batch: Mapping[str, object],
+    source_prompts: Sequence[Mapping[str, object]],
+    *,
+    earliest_model_step: int,
+    current_step: int,
+) -> bool:
+    """Observe a possible same-identity retry without changing admission or queues.
+
+    Exception class alone cannot prove that a disconnect came from a weight pause.
+    The result is therefore a candidate count, never an active retry decision.
+    """
+    response_ids = trajectory_batch.get("response_ids")
+    exceptions = trajectory_batch.get("exception_types")
+    treatments = trajectory_batch.get("error_treatments")
+    masks = trajectory_batch.get("loss_masks")
+
+    def rows(value: object) -> bool:
+        return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+
+    aligned = (
+        rows(response_ids)
+        and rows(exceptions)
+        and rows(treatments)
+        and rows(masks)
+        and len(response_ids) > 0
+        and len(response_ids) == len(exceptions) == len(treatments) == len(masks)
+    )
+    fully_masked = aligned and all(rows(mask) and not any(mask) for mask in masks)
+    candidate = (
+        fully_masked
+        and all(error == "ServerDisconnectedError" for error in exceptions)
+        and all(treatment == "mask" for treatment in treatments)
+    )
+    if candidate:
+        reason = "complete_server_disconnect"
+    elif not aligned:
+        reason = "missing_or_unaligned_evidence"
+    elif any(error == "ServerDisconnectedError" for error in exceptions):
+        reason = "partial_or_mixed_disconnect"
+    else:
+        reason = "other_masked_failure"
+
+    extras = source_prompts[0].get("env_extras") if source_prompts else None
+    route = generation_route([extras]) if isinstance(extras, Mapping) else "unknown"
+    attributes = {
+        "route": route,
+        "classification": reason,
+        "would_retry_same_identity": str(candidate).lower(),
+        "hypothetical_attempt": "1",
+    }
+    transient_retry_shadow_groups.add(1, attributes=attributes)
+    if rows(response_ids):
+        token_count = sum(len(row) for row in response_ids if rows(row))
+        transient_retry_shadow_tokens.record(token_count, attributes=attributes)
+    transient_retry_shadow_staleness.record(max(0, current_step - earliest_model_step), attributes=attributes)
+    return bool(candidate)
 
 
 def _publish_executor_counts(work_kind: str) -> None:
