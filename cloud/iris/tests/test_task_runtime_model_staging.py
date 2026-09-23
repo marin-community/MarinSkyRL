@@ -2,12 +2,11 @@ from argparse import Namespace
 from types import SimpleNamespace
 
 import pytest
+from omegaconf import OmegaConf
 
 from cloud.iris import task_runtime
 from cloud.iris.task_runtime import (
-    apply_draft_model_to_command,
-    apply_policy_model_to_command,
-    parse_args,
+    _write_final_config,
     policy_chat_template_model,
     prepare_draft_model,
     prepare_policy_model,
@@ -33,22 +32,7 @@ def test_policy_chat_template_requires_a_materialized_model() -> None:
         policy_chat_template_model("", "")
 
 
-def test_model_staging_cli_parses_launcher_payloads() -> None:
-    args, train_argv = parse_args(
-        [
-            "--prestage-teacher-models-json",
-            '[{"path":"Qwen/teacher","revision":"abc123"}]',
-            "--",
-            "python",
-            "train.py",
-        ]
-    )
-
-    assert [(model.path, model.revision) for model in args.prestage_teacher_models] == [("Qwen/teacher", "abc123")]
-    assert train_argv == ["python", "train.py"]
-
-
-def test_s3_policy_stages_metadata_and_rewrites_driver_without_materializing_weights(monkeypatch) -> None:
+def test_s3_policy_stages_metadata_without_materializing_weights(monkeypatch) -> None:
     identity = "sha256:" + "a" * 64
     manifest = SimpleNamespace(identity=identity)
     staged = []
@@ -60,22 +44,37 @@ def test_s3_policy_stages_metadata_and_rewrites_driver_without_materializing_wei
         model_source_uri="s3://models/policy",
         model_source_identity=identity,
         prestage_model="",
-        stream_model="",
         model_revision="",
-        model_cache_ttl_days=None,
-        model_cache_source_prefix="",
+        runtime_profile="megatron",
+        model_local_path="/tmp/materialized-model",
     )
-    command = ["python", "-m", "cloud.iris.training_driver", "--model_path", "s3://models/policy"]
+    policy_model = prepare_policy_model(args)
+
+    assert policy_model is not None
+    assert staged == [("s3://models/policy", manifest, policy_model.local_path)]
+
+
+def test_fsdp_policy_materializes_weights_at_the_declared_local_path(monkeypatch) -> None:
+    staged = []
+    monkeypatch.setattr(
+        task_runtime,
+        "stage_artifact_model",
+        lambda uri, identity, path: staged.append((uri, identity, path)) or 1024,
+    )
+    args = Namespace(
+        model_source_uri="s3://models/policy",
+        model_source_identity="artifact@v1:abc123",
+        prestage_model="",
+        model_revision="",
+        runtime_profile="fsdp",
+        model_local_path="/tmp/materialized-model",
+    )
 
     policy_model = prepare_policy_model(args)
 
     assert policy_model is not None
-    apply_policy_model_to_command(command, policy_model)
-    assert staged == [("s3://models/policy", manifest, policy_model.metadata_path)]
-    assert command[command.index("--model_path") + 1] == policy_model.metadata_path
-    assert command[command.index("--model-source-uri") + 1] == "s3://models/policy"
-    assert command[command.index("--model-source-identity") + 1] == identity
-    assert "++generator.engine_init_kwargs.served_model_name=policy" in command
+    assert policy_model.local_path == "/tmp/materialized-model"
+    assert staged == [("s3://models/policy", "artifact@v1:abc123", "/tmp/materialized-model")]
 
 
 def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(monkeypatch) -> None:
@@ -98,15 +97,37 @@ def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(monkeypatch) -> Non
     assert prepared == SpeculatorModelConfig(source_uri="s3://models/draft", source_identity=identity)
 
 
-def test_draft_s3_uri_is_quoted_for_hydra() -> None:
-    command = ["python", "train.py"]
-
-    apply_draft_model_to_command(
-        command,
-        SpeculatorModelConfig(
-            source_uri="s3://models/tmp/ttl=14d/draft",
-            source_identity="sha256:" + "a" * 64,
-        ),
+def test_staged_models_are_written_as_structured_config(tmp_path, monkeypatch) -> None:
+    identity = "sha256:" + "a" * 64
+    policy = task_runtime.PreparedPolicyModel("s3://models/policy", identity, "/tmp/policy-metadata")
+    draft = SpeculatorModelConfig(
+        source_uri="s3://models/tmp/ttl=14d/draft",
+        source_identity=identity,
     )
+    launch = OmegaConf.create(
+        {
+            "run": {"id": "run", "attempt_id": "attempt"},
+            "inputs": {"model": {"uri": "s3://models/policy"}},
+            "skyrl": {
+                "trainer": {
+                    "policy": {"model": {"path": "policy"}},
+                    "ref": {"model": {"path": "policy"}},
+                },
+                "generator": {
+                    "engine_init_kwargs": {"served_model_name": "policy"},
+                    "speculative_decoding": {"model": {"source_uri": "old", "source_identity": "old"}},
+                },
+                "data": {"train_data": [], "val_data": [], "terminal_bench_data": []},
+                "terminal_bench_config": {"agent_api_base": None, "literal_log_path": None},
+            },
+        }
+    )
+    monkeypatch.setattr(task_runtime.tempfile, "gettempdir", lambda: str(tmp_path))
 
-    assert "++generator.speculative_decoding.model.source_uri='s3://models/tmp/ttl=14d/draft'" in command
+    path = _write_final_config(launch, policy_model=policy, draft_model=draft)
+    resolved = OmegaConf.load(path)
+
+    assert resolved.skyrl.trainer.policy.model.path == "/tmp/policy-metadata"
+    assert resolved.skyrl.trainer.ref.model.path == "/tmp/policy-metadata"
+    assert resolved.skyrl.trainer.policy.model.source_uri == "s3://models/policy"
+    assert resolved.skyrl.generator.speculative_decoding.model.source_uri == draft.source_uri

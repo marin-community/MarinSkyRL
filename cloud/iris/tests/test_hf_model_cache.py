@@ -17,6 +17,8 @@ from cloud.iris.hf_model_cache import (
     HuggingFaceSnapshotFile,
     ensure_hugging_face_model_cache,
     publish_hugging_face_snapshot,
+    stage_artifact_model,
+    stage_artifact_model_metadata,
     stage_model_metadata,
 )
 from marinskyrl.model_manifest import ModelManifest, snapshot_model_manifest
@@ -286,6 +288,38 @@ def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, 
     assert (local_model / "model.safetensors.index.json").is_file()
     assert not (local_model / "model.safetensors").exists()
     assert not (local_model / "stale.bin").exists()
+
+
+def test_artifact_metadata_staging_leaves_weight_shards_remote(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("{}")
+    (source / "tokenizer.json").write_text("{}")
+    save_file({"weight": np.arange(4, dtype=np.float32)}, source / "model.safetensors")
+    destination = tmp_path / "node" / "model"
+
+    metadata_bytes = stage_artifact_model_metadata(source.as_uri(), "artifact@v1:abc123", str(destination))
+
+    assert metadata_bytes == sum(path.stat().st_size for path in (source / "config.json", source / "tokenizer.json"))
+    assert (destination / "config.json").read_text() == "{}"
+    assert (destination / "tokenizer.json").read_text() == "{}"
+    assert not (destination / "model.safetensors").exists()
+
+
+def test_artifact_model_staging_materializes_weight_shards(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("{}")
+    (source / "tokenizer.json").write_text("{}")
+    save_file({"weight": np.arange(4, dtype=np.float32)}, source / "model.safetensors")
+    destination = tmp_path / "node" / "model"
+
+    materialized_bytes = stage_artifact_model(source.as_uri(), "artifact@v1:abc123", str(destination))
+
+    assert materialized_bytes == sum(path.stat().st_size for path in source.iterdir())
+    assert (destination / "config.json").read_text() == "{}"
+    assert (destination / "tokenizer.json").read_text() == "{}"
+    assert (destination / "model.safetensors").is_file()
 
 
 def test_corrupt_completed_cache_is_repaired_under_the_distributed_lock(tmp_path: Path, monkeypatch) -> None:

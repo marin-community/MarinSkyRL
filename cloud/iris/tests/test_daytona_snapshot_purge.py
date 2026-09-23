@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+from omegaconf import OmegaConf
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
@@ -43,6 +44,20 @@ def test_resolve_daytona_rl_api_key_rejects_generic_key(monkeypatch):
 
     with pytest.raises(SystemExit, match="no Daytona RL key available"):
         launcher._resolve_daytona_rl_api_key()
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "expected"),
+    [
+        ("skyrl_train.entrypoints.main_base", False),
+        ("skyrl_train.entrypoints.terminal_bench", True),
+        ("skyrl_train.entrypoints.terminal_bench_generate", True),
+    ],
+)
+def test_daytona_preflight_follows_the_resolved_entrypoint(entrypoint, expected):
+    config = OmegaConf.create({"runtime": {"entrypoint": entrypoint}})
+
+    assert launcher._rl_config_uses_daytona(config) is expected
 
 
 @dataclass

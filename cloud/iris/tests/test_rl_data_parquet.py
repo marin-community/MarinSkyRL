@@ -12,7 +12,7 @@ import fsspec
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from cloud.iris.rl_data import resolve_rl_train_data
+from cloud.iris.rl_data import resolve_rl_train_data, resolve_rl_train_data_with_sources
 from infra.rl_data.nemotron_ultra_swe import _tar_bytes
 
 
@@ -21,6 +21,21 @@ def test_parquet_local_and_hf_pass_through(tmp_path):
     p.write_bytes(b"local")
     out = resolve_rl_train_data([str(p), "allenai/RLVR-MATH"], kind="parquet", verbose=False)
     assert out == [str(p), "allenai/RLVR-MATH"]  # unchanged: no staging for local path / HF id
+
+
+def test_structured_directory_source_resolves_to_materialized_parquet():
+    source = {
+        "kind": "directory",
+        "uri": "s3://artifacts/gsm8k",
+        "identity": "gsm8k@v1:abc123",
+        "local_path": "/tmp/marinskyrl/data/gsm8k",
+        "relative_path": "train.parquet",
+    }
+
+    resolved = resolve_rl_train_data_with_sources([source], kind="parquet", verbose=False)
+
+    assert resolved.paths == ("/tmp/marinskyrl/data/gsm8k/train.parquet",)
+    assert resolved.sources == (source,)
 
 
 def test_parquet_remote_uri_staged_to_local(tmp_path):
