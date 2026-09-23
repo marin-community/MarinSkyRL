@@ -170,7 +170,7 @@ def main():
             seed=42,
             vllm_v1_disable_multiproc=True,
             enable_prefix_caching=False,
-            enforce_eager=True,
+            enforce_eager=False,
             engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
             shared_pg=None,  # DISAGGREGATED
             gpu_memory_utilization=cfg.generator.gpu_memory_utilization,

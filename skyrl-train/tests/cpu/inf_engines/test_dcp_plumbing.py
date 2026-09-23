@@ -372,7 +372,7 @@ def _run_create(
         seed=0,
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=False,
-        enforce_eager=True,
+        enforce_eager=False,
         pipeline_parallel_size=1,
         data_parallel_size=1,
         decode_context_parallel_size=dcp,
