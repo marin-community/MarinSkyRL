@@ -133,6 +133,12 @@ For fully async specifically, the following are the main knobs to tune:
   worker, so no worker ever waits. A finished group's staleness grows the same whether it waits in the buffer or in
   its worker. Set it to ``trainer.policy_mini_batch_size`` to keep exactly one update's cohort ready and bound the
   head-node backlog to that cohort.
+- ``generator.weight_sync_transport``: How each weight sync reaches the engines. ``auto`` (the default) picks
+  ``expert_block``, which sends each MoE expert matrix from a Megatron rank that holds it to the vLLM workers that
+  serve it, when the run qualifies: this trainer, a Grug MoE on the megatron strategy at TP=1 and ETP=1, local vLLM
+  engines at TP=1 with EP=DP>1, ``weight_sync_backend: nccl``, ``engine_init_kwargs.moe_backend: triton`` and a policy
+  ``config.json`` that can be read. Otherwise it picks ``broadcast`` and the startup log names the
+  unmet requirements. An explicit ``expert_block`` fails at startup when a requirement is unmet.
 - ``trainer.algorithm.group_admission.stall_timeout``: An optional maximum number of seconds without newly admitted groups while
   assembling a training batch. The same progress watchdog applies to synchronous and fully asynchronous entrypoints. The null
   default allows 30 minutes before any step timing exists, then adapts to ``max(5 * recent median step time, 10 minutes)``. Set a

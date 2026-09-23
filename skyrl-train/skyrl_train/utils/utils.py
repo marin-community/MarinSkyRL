@@ -40,8 +40,14 @@ from marinskyrl.distillation import (
     compile_distillation_plan_from_config,
     validate_distillation_runtime_support,
 )
-from marinskyrl.inference_placement import validate_expert_block_transport
-from marinskyrl.runtime_options import GDNBackend, R3Transport
+from marinskyrl.inference_placement import (
+    expert_block_engine_problems,
+    expert_block_model_problems,
+    expert_block_transport_problems,
+    validate_expert_block_transport,
+)
+from marinskyrl.resource_locator import is_cloud_uri
+from marinskyrl.runtime_options import GDNBackend, R3Transport, WeightSyncTransport
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from .algorithm_registry import (
@@ -904,6 +910,46 @@ def resolve_ratio_diagnostics_pooled(cfg: DictConfig) -> None:
     if ratio_diagnostics is not None and ratio_diagnostics.get("pooled") is None:
         # Megatron's data-parallel ranks can pool; FSDP has no such path.
         ratio_diagnostics["pooled"] = cfg.trainer.strategy == "megatron"
+
+
+def policy_model_config(model: DictConfig) -> dict | None:
+    """The policy's parsed ``config.json``, or ``None`` when it sits in object storage or cannot be read."""
+    if is_cloud_uri(model.path):
+        return None
+    from transformers import PretrainedConfig  # noqa: PLC0415
+
+    try:
+        config, _ = PretrainedConfig.get_config_dict(model.path, revision=model.get("revision"))
+    except Exception:
+        return None
+    return config
+
+
+def resolve_weight_sync_transport(cfg: DictConfig, *, uses_fully_async_trainer: bool) -> None:
+    """Write the transport that ``auto`` stands for, and log the choice.
+
+    ``auto`` becomes ``expert_block`` when the trainer and engine config, the entrypoint's trainer,
+    the engine arguments and the policy's model config meet every requirement of the transport.
+    Explicit values stay as written.
+    """
+    generator = cfg.generator
+    if generator.weight_sync_transport != WeightSyncTransport.AUTO:
+        logger.info(f"generator.weight_sync_transport={generator.weight_sync_transport}")
+        return
+    problems = expert_block_transport_problems(cfg)
+    if not uses_fully_async_trainer:
+        problems.append("the entrypoint must run FullyAsyncRayPPOTrainer")
+    problems.extend(expert_block_engine_problems(OmegaConf.to_container(generator.engine_init_kwargs, resolve=True)))
+    model = cfg.trainer.policy.model
+    problems.extend(expert_block_model_problems(policy_model_config(model), model.path))
+    if problems:
+        generator.weight_sync_transport = WeightSyncTransport.BROADCAST.value
+        logger.info(
+            "generator.weight_sync_transport=auto resolved to broadcast; expert_block requires: " + "; ".join(problems)
+        )
+    else:
+        generator.weight_sync_transport = WeightSyncTransport.EXPERT_BLOCK.value
+        logger.info("generator.weight_sync_transport=auto resolved to expert_block")
 
 
 def validate_batch_invariant_config(cfg: DictConfig) -> None:

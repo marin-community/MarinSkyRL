@@ -537,6 +537,9 @@ class BasePPOExp:
         Returns:
             RayPPOTrainer: The trainer.
         """
+        from skyrl_train.utils.utils import resolve_weight_sync_transport  # noqa: PLC0415
+
+        resolve_weight_sync_transport(self.cfg, uses_fully_async_trainer=self.uses_fully_async_trainer())
         validate_expert_block_trainer(self.cfg, uses_fully_async_trainer=self.uses_fully_async_trainer())
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)

@@ -817,6 +817,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     "generation_workers": self.num_parallel_generation_workers,
                     "mini_batch_size": self.mini_batch_size,
                     "max_staleness_steps": self.max_staleness_steps,
+                    "weight_sync_transport": str(self.cfg.generator.weight_sync_transport),
                 },
                 attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
             )
