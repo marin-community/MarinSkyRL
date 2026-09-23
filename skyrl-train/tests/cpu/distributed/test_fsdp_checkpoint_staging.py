@@ -66,6 +66,51 @@ def test_s3_checkpoint_streams_complete_rank_files_without_local_staging(monkeyp
         assert extra["world_size"] == 2
 
 
+def test_staged_s3_checkpoint_can_tune_multipart_parts_without_changing_payload(monkeypatch, tmp_path):
+    strategy = object.__new__(FSDPStrategy)
+    strategy.world_size = 2
+    strategy.fsdp_strategy = "fsdp2"
+    strategy.fsdp_config = {"checkpoint_upload_part_size_mb": 128}
+    strategy.is_lora = False
+    monkeypatch.setattr(strategy, "get_rank", lambda: 1)
+    monkeypatch.setattr(strategy, "is_rank_0", lambda: False)
+    monkeypatch.setattr(strategy, "get_rng_state", lambda: {})
+    monkeypatch.setattr(strategy, "log", lambda *args: None)
+    monkeypatch.setattr(fsdp_module.dist, "barrier", lambda: None)
+    monkeypatch.setattr(fsdp_module, "get_fsdp_state_ctx", lambda *args, **kwargs: nullcontext())
+    uploaded = []
+
+    @contextmanager
+    def stage_checkpoint(_cloud_path, publisher):
+        yield str(tmp_path)
+        publisher(str(tmp_path), _cloud_path)
+
+    def tuned_upload(local_path, cloud_path, *, part_size_bytes):
+        uploaded.append((local_path, cloud_path, part_size_bytes, sorted(path.name for path in tmp_path.iterdir())))
+
+    monkeypatch.setattr(fsdp_module.io, "local_output_dir", stage_checkpoint)
+    monkeypatch.setattr(fsdp_module.io, "upload_directory_with_s3_part_size", tuned_upload)
+    monkeypatch.setattr(fsdp_module.io, "upload_directory", lambda *args: pytest.fail("default uploader called"))
+
+    model = torch.nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters())
+    checkpoint_dir = "s3://bucket/checkpoints/global_step_1/policy"
+    strategy.save_checkpoint(model, checkpoint_dir, node_local_rank=1, optimizer=optimizer)
+
+    assert uploaded == [
+        (
+            str(tmp_path),
+            checkpoint_dir,
+            128 * 1024**2,
+            [
+                "extra_state_world_size_2_rank_1.pt",
+                "model_world_size_2_rank_1.pt",
+                "optim_world_size_2_rank_1.pt",
+            ],
+        )
+    ]
+
+
 def test_cloud_checkpoint_load_stages_only_its_rank_shards(monkeypatch, tmp_path):
     strategy = object.__new__(FSDPStrategy)
     strategy.world_size = 8

@@ -18,6 +18,7 @@ from skyrl_train.io.io import (
     exists,
     open_file,
     upload_directory,
+    upload_directory_with_s3_part_size,
     download_directory,
     local_work_dir,
     local_read_dir,
@@ -165,8 +166,8 @@ class TestCheckpointUtilities:
             for step in steps:
                 checkpoint_dir = os.path.join(temp_dir, f"global_step_{step}")
                 os.makedirs(checkpoint_dir)
-                # Add a dummy file to make it more realistic
-                with open(os.path.join(checkpoint_dir, "model.pt"), "w") as f:
+                # A flat legacy checkpoint is complete only with trainer state.
+                with open(os.path.join(checkpoint_dir, "trainer_state.pt"), "w") as f:
                     f.write("dummy")
 
             # Keep only 3 most recent
@@ -225,7 +226,7 @@ class TestCloudFileOperationsMocked:
     def test_cleanup_old_checkpoints_cloud(self, mock_get_filesystem):
         """Test cleanup_old_checkpoints with cloud storage."""
         mock_fs = Mock()
-        mock_fs.exists.return_value = True
+        mock_fs.exists.side_effect = lambda path: not str(path).endswith("checkpoint_commit.json")
         mock_fs.ls.return_value = [
             "s3://bucket/checkpoints/global_step_1000",
             "s3://bucket/checkpoints/global_step_1500",
@@ -598,6 +599,33 @@ class TestUploadDownload:
         """Test that download_directory validates source is a cloud path."""
         with pytest.raises(ValueError, match="Source must be a cloud path"):
             download_directory("/local/src", "/local/dst")
+
+    def test_tuned_s3_upload_preserves_tree_and_stops_on_failure(self, tmp_path, monkeypatch):
+        source = tmp_path / "checkpoint"
+        (source / "policy").mkdir(parents=True)
+        (source / "policy" / "model.pt").write_bytes(b"model")
+        (source / "policy" / "optim.pt").write_bytes(b"optimizer")
+        uploaded = []
+
+        class Filesystem:
+            @staticmethod
+            def _strip_protocol(path):
+                return path.removeprefix("s3://")
+
+            @staticmethod
+            def put_file(local, remote, *, chunksize):
+                uploaded.append((Path(local).name, remote, chunksize))
+                if remote.endswith("optim.pt"):
+                    raise OSError("injected upload failure")
+
+        monkeypatch.setattr("skyrl_train.io.io._get_filesystem", lambda _: Filesystem())
+        with pytest.raises(OSError, match="injected upload failure"):
+            upload_directory_with_s3_part_size(str(source), "s3://bucket/step", part_size_bytes=128 * 1024**2)
+
+        assert uploaded == [
+            ("model.pt", "bucket/step/policy/model.pt", 128 * 1024**2),
+            ("optim.pt", "bucket/step/policy/optim.pt", 128 * 1024**2),
+        ]
 
 
 if __name__ == "__main__":

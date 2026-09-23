@@ -192,6 +192,47 @@ def upload_directory(local_path: str, cloud_path: str) -> None:
     logger.info(f"Uploaded {local_path} to {cloud_path}")
 
 
+def upload_directory_with_s3_part_size(local_path: str, cloud_path: str, *, part_size_bytes: int) -> None:
+    """Upload a staged checkpoint using a specified S3 multipart part size.
+
+    The normal recursive upload remains the default. This variant keeps its
+    per-file completion and failure semantics while allowing a measured part
+    size for large FSDP rank objects.
+    """
+    if not cloud_path.startswith("s3://"):
+        raise ValueError(f"Expected an S3 destination, got: {cloud_path}")
+    if part_size_bytes < 5 * 1024 * 1024:
+        raise ValueError("S3 multipart part size must be at least 5 MiB")
+    if not os.path.isdir(local_path):
+        raise FileNotFoundError(local_path)
+    filesystem = _get_filesystem(cloud_path)
+    uploaded = 0
+    for root, _, filenames in os.walk(local_path):
+        for filename in sorted(filenames):
+            local_file = os.path.join(root, filename)
+            relative = os.path.relpath(local_file, local_path).replace(os.sep, "/")
+            remote_file = filesystem._strip_protocol(f"{cloud_path.rstrip('/')}/{relative}")
+            try:
+                # s3fs aborts a failed multipart upload. Its internal request
+                # retries keep the current upload ID, so do not retry the
+                # whole file from the outer layer.
+                call_with_s3_retry(
+                    filesystem,
+                    filesystem.put_file,
+                    local_file,
+                    remote_file,
+                    chunksize=part_size_bytes,
+                    max_attempts=1,
+                )
+                uploaded += 1
+            except Exception as error:
+                error.add_note(f"S3 upload failed from {local_file} to {remote_file}")
+                raise
+    if not uploaded:
+        raise ValueError(f"No files to upload from {local_path}")
+    logger.info(f"Uploaded {local_path} to {cloud_path} with {part_size_bytes}-byte S3 parts")
+
+
 def download_directory(cloud_path: str, local_path: str) -> None:
     """Download a cloud directory to local storage."""
     if not is_cloud_path(cloud_path):

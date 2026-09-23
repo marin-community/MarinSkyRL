@@ -788,7 +788,13 @@ class FSDPStrategy(DistributedStrategy):
         def publish_staged_checkpoint(local_path: str, cloud_path: str) -> None:
             with checkpoint_phase(self.fsdp_strategy, "save", "upload", rank=rank, step=step) as phase:
                 phase.scratch_bytes = local_directory_bytes(local_path)
-                io.upload_directory(local_path, cloud_path)
+                part_size_mb = int(getattr(self, "fsdp_config", {}).get("checkpoint_upload_part_size_mb", 0))
+                if cloud_path.startswith("s3://") and part_size_mb > 0:
+                    io.upload_directory_with_s3_part_size(
+                        local_path, cloud_path, part_size_bytes=part_size_mb * 1024 * 1024
+                    )
+                else:
+                    io.upload_directory(local_path, cloud_path)
                 phase.bytes_written = phase.scratch_bytes
 
         checkpoint_io_mode = getattr(self, "fsdp_config", {}).get("checkpoint_io_mode", "staged")
