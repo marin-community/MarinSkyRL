@@ -14,10 +14,19 @@ from huggingface_hub import HfApi, snapshot_download
 from rigging.filesystem.cluster_config import marin_temp_bucket
 from rigging.filesystem.distributed_lock import create_lock, lease_refresh
 
-from cloud.iris.artifacts import atomic_directory_update, fs_and_path, read_json, write_json
+from cloud.iris.artifacts import (
+    ArtifactSource,
+    atomic_directory_update,
+    file_inventory,
+    fs_and_path,
+    materialize_inventory,
+    read_json,
+    write_json,
+)
 from marinskyrl.hf_model import (
     hugging_face_hub_online,
     immutable_model_cache_key,
+    validate_portable_hf_model_files,
 )
 from marinskyrl.model_manifest import (
     MODEL_MANIFEST_FILENAME,
@@ -183,3 +192,19 @@ def stage_model_metadata(model_uri: str, manifest: ModelManifest, local_path: st
         (staging / MODEL_MANIFEST_FILENAME).write_text(
             json.dumps(manifest.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
         )
+
+
+def stage_artifact_model_metadata(model_uri: str, source_identity: str, local_path: str) -> int:
+    """Stage metadata for a Marin-owned immutable model artifact without copying its weights."""
+    filesystem, root = fs_and_path(model_uri)
+    inventory = file_inventory(filesystem, root)
+    validate_portable_hf_model_files({entry.path for _, entry in inventory}, model_uri)
+    metadata_inventory = tuple(item for item in inventory if not _is_weight(item[1].path))
+    if not metadata_inventory:
+        raise ValueError(f"Model artifact contains no metadata: {model_uri}")
+    artifact = materialize_inventory(
+        ArtifactSource(uri=model_uri, identity=source_identity, local_path=local_path),
+        filesystem,
+        metadata_inventory,
+    )
+    return sum(entry.size for entry in artifact.files)

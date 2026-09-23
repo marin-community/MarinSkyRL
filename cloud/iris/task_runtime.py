@@ -51,6 +51,7 @@ from cloud.iris.hf_model_cache import (
     download_hugging_face_snapshot,
     ensure_hugging_face_model_cache,
     load_model_manifest,
+    stage_artifact_model_metadata,
     stage_model_metadata,
 )
 from marinskyrl.environment_contract import (
@@ -444,8 +445,18 @@ def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None
         )
         source_identity = manifest.identity
     elif source_uri:
+        if not source_identity:
+            raise ValueError(f"Policy source identity is required for {source_uri}")
+        local_path = _metadata_path(source_uri, source_identity)
+        if not source_identity.startswith("sha256:"):
+            metadata_bytes = stage_artifact_model_metadata(source_uri, source_identity, local_path)
+            _log(
+                f"Policy metadata ready on rank {_rank()}/{_num_tasks()}: {source_uri} -> {local_path} "
+                f"(identity={source_identity}; local_disk_high_water_bytes={metadata_bytes}; weight shards remain remote)"
+            )
+            return PreparedPolicyModel(source_uri, source_identity, local_path)
         manifest = load_model_manifest(source_uri)
-        if source_identity and source_identity.startswith("sha256:") and source_identity != manifest.identity:
+        if source_identity != manifest.identity:
             raise ValueError(
                 f"Policy manifest identity mismatch: requested {source_identity}, found {manifest.identity} at {source_uri}"
             )
