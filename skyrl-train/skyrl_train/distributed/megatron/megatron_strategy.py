@@ -1,6 +1,7 @@
 import os
 import random
 import tempfile
+import uuid
 from datetime import timedelta
 from typing import List, Union, Optional
 from jaxtyping import Float
@@ -31,6 +32,7 @@ from skyrl_train.distributed.megatron.megatron_utils import (
 from skyrl_train.distributed.megatron.direct_checkpoint import (
     DirectS3TorchDistLoadShardedStrategy,
     DirectS3TorchDistSaveShardedStrategy,
+    invalidate_checkpoint_plan_cache,
 )
 from skyrl_train.distributed.megatron.checkpoint_metadata import remote_checkpoint_metadata
 from skyrl_train.io.s3fs import abort_multipart_uploads
@@ -151,12 +153,15 @@ class MegatronStrategy(DistributedStrategy):
         megatron_config,
         optimizer_config=None,
         seed: int = 42,
+        checkpoint_plan_cache: bool = False,
     ) -> None:
         super().__init__()
         self.megatron_config = megatron_config
         self.optimizer_config = optimizer_config
         self.seed = seed
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
+        self._checkpoint_plan_cache_key = uuid.uuid4().hex if checkpoint_plan_cache else None
+        self._checkpoint_plan_cache_committed = False
         if optimizer_config is not None:
             _optimizer_checkpoint_metadata(megatron_config.optimizer_checkpoint_sharding_type)
 
@@ -249,6 +254,10 @@ class MegatronStrategy(DistributedStrategy):
     ):
         rank = dist.get_rank() if dist.is_initialized() else 0
         step = extract_step_from_path(os.path.dirname(ckpt_dir.rstrip("/")))
+        if self._checkpoint_plan_cache_key is not None:
+            if not self._checkpoint_plan_cache_committed:
+                invalidate_checkpoint_plan_cache(self._checkpoint_plan_cache_key)
+            self._checkpoint_plan_cache_committed = False
         # Extract base model.
         model: List[nn.Module] = model.actor_module
         materialize_megatron_params(model)
@@ -307,7 +316,9 @@ class MegatronStrategy(DistributedStrategy):
                             ckpt_dir,
                         )
             dist.barrier()
-            save_strategy = DirectS3TorchDistSaveShardedStrategy(ckpt_dir)
+            save_strategy = DirectS3TorchDistSaveShardedStrategy(
+                ckpt_dir, plan_cache_key=self._checkpoint_plan_cache_key
+            )
         else:
             save_strategy = get_default_save_sharded_strategy("torch_dist")
         save_strategy = _ObservedFullyParallelSaveStrategyWrapper(
@@ -341,6 +352,7 @@ class MegatronStrategy(DistributedStrategy):
             dist.barrier()
         ckpt_base.async_calls.close()
         ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
+        self._checkpoint_plan_cache_committed = True
         self.log(f"Checkpoint successfully saved to {ckpt_dir}")
 
     def load_checkpoint(

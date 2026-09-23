@@ -28,7 +28,7 @@ from skyrl_train.timing_observability import CheckpointPhaseSample, checkpoint_p
 
 
 DEFAULT_TENSOR_COPY_AHEAD_BYTES = 2**30
-DEFAULT_S3_MULTIPART_PART_BYTES = 128 * 2**20
+DEFAULT_S3_MULTIPART_PART_BYTES = 64 * 2**20
 DEFAULT_S3_MULTIPART_CONCURRENCY = 4
 _MINIMUM_S3_MULTIPART_PART_BYTES = 5 * 2**20
 _S3_MULTIPART_PART_MAX_ATTEMPTS = 2
@@ -350,8 +350,10 @@ class StreamingFsspecWriter(FileSystemWriter):
         self.checkpoint_step = extract_step_from_path(os.path.dirname(path.rstrip("/")))
 
     def prepare_local_plan(self, plan: SavePlan) -> SavePlan:
-        with checkpoint_phase("megatron", "save", "dcp_local_plan", rank=self.rank, step=self.checkpoint_step):
+        with checkpoint_phase("megatron", "save", "dcp_local_plan", rank=self.rank, step=self.checkpoint_step) as phase:
             plan = super().prepare_local_plan(plan)
+            phase.counters["plan_usable"] = int(plan.usable)
+            phase.counters["plan_items"] = len(plan.items)
         logger.info(
             "DCP direct-write plan rank={} items={} files=1 copy_ahead_bytes={} multipart_part_bytes={} "
             "multipart_concurrency={} max_staged_bytes={}",

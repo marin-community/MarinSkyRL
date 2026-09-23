@@ -375,6 +375,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             megatron_config=self.cfg.trainer.policy.megatron_config,
             optimizer_config=self.cfg.trainer.policy.optimizer_config,
             seed=self.cfg.trainer.seed,
+            checkpoint_plan_cache=self.cfg.trainer.policy.megatron_config.checkpoint_plan_cache,
         )
         self.strategy.setup_distributed()
 

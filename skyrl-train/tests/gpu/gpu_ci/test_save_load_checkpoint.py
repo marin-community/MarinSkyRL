@@ -13,8 +13,11 @@ import torch
 import os
 import shutil
 import json
+import pickle
+import fsspec
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
+from torch.distributed import checkpoint
 
 from skyrl_train.utils.utils import print_mem
 from tests.gpu.utils import init_worker_with_type, make_dummy_experience, get_model_logits_from_actor, validate_cfg
@@ -23,6 +26,47 @@ from skyrl_train.entrypoints.main_base import config_dir
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 CKPT_PATH = "$HOME/ckpts/test/"
 NUM_GPUS = 4
+
+
+@pytest.mark.megatron
+def test_megatron_plan_cache_reuses_stable_schema_and_refreshes_changed_dtype(tmp_path):
+    from skyrl_train.distributed.megatron.direct_checkpoint import (
+        _SchemaGuardedMCoreSavePlanner,
+        invalidate_checkpoint_plan_cache,
+    )
+    from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
+
+    cache_key = f"test-{tmp_path.name}"
+
+    class ObservedPlanner(_SchemaGuardedMCoreSavePlanner):
+        def create_local_plan(self):
+            plan = super().create_local_plan()
+            self.local_plan_usable = plan.usable
+            return plan
+
+    try:
+        for step, dtype in ((1, torch.float32), (2, torch.float32), (3, torch.float16)):
+            state = {"tensor": torch.arange(6, dtype=dtype).reshape(2, 3) + step}
+            path = tmp_path / f"step-{step}"
+            planner = ObservedPlanner(
+                cache_key=cache_key,
+                dedup_replicated_tensors=False,
+                flatten_state_dict=False,
+                flatten_sharded_tensors=False,
+            )
+            writer = StreamingFsspecWriter(str(path), filesystem=fsspec.filesystem("file"))
+            checkpoint.save(state, storage_writer=writer, planner=planner)
+
+            assert planner.local_plan_usable == (step != 2)
+            with (path / ".metadata").open("rb") as source:
+                metadata = pickle.load(source)
+            assert metadata.state_dict_metadata["tensor"].properties.dtype == dtype
+
+            restored = {"tensor": torch.zeros_like(state["tensor"])}
+            checkpoint.load(restored, checkpoint_id=str(path))
+            torch.testing.assert_close(restored["tensor"], state["tensor"], atol=0, rtol=0)
+    finally:
+        invalidate_checkpoint_plan_cache(cache_key)
 
 
 def run_one_training_step(

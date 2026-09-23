@@ -16,8 +16,9 @@ from megatron.core.dist_checkpointing.strategies.torch import (
 )
 from torch.distributed import checkpoint
 from torch import distributed as dist
-from torch.distributed.checkpoint import FileSystemReader
+from torch.distributed.checkpoint import FileSystemReader, SavePlan, SavePlanner
 from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as FsspecFileSystem
+from torch.distributed.checkpoint.metadata import Metadata
 
 from skyrl_train.io.s3fs import get_s3_fs, s3_refresh_if_expiring
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
@@ -27,12 +28,52 @@ from skyrl_train.timing_observability import checkpoint_phase
 
 # MCore 0.18 does not expose a storage-writer hook. Keep the adapter narrow: it
 # preserves MCore's state translation and planner and replaces only the writer.
+class _SchemaGuardedMCoreSavePlanner(MCoreSavePlanner):
+    """Reuse DCP plans only when all rank-local write properties are identical."""
+
+    def __init__(self, *, cache_key: str, **kwargs) -> None:
+        super().__init__(enable_plan_caching=True, **kwargs)
+        self._cached_plans_key = cache_key
+
+    def create_local_plan(self) -> SavePlan:
+        plan = super().create_local_plan()
+        cached = SavePlanner._cached_save_plan.get(self._cached_plans_key)
+        # PyTorch's comparator omits dtype and other TensorProperties. Dataclass
+        # equality also checks those properties and MCore's planner data.
+        if cached is not None and plan == cached:
+            return SavePlan([], usable=False)
+        self._pending_local_plan = plan
+        return plan
+
+    def create_global_plan(self, all_plans: list[SavePlan]) -> tuple[list[SavePlan], Metadata]:
+        changed = any(plan.usable for plan in all_plans)
+        delta_plans, metadata = super().create_global_plan(all_plans)
+        if changed:
+            # The upstream delta comparator also omits TensorProperties. Scatter
+            # every fresh plan if any rank's full schema changed.
+            return self.global_plan, metadata
+        return delta_plans, metadata
+
+
+def invalidate_checkpoint_plan_cache(cache_key: str) -> None:
+    """Drop every DCP plan/metadata cache entry for one Megatron strategy."""
+    for cache in (
+        SavePlanner._cached_save_plan,
+        SavePlanner._cached_all_plans,
+        SavePlanner._cached_global_plan,
+        SavePlanner._cached_metadata,
+        SavePlanner._cached_final_save_plan,
+    ):
+        cache.pop(cache_key, None)
+
+
 class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
     """Save MCore torch-dist shards directly to S3 through PyTorch DCP."""
 
-    def __init__(self, checkpoint_dir: str) -> None:
+    def __init__(self, checkpoint_dir: str, *, plan_cache_key: str | None = None) -> None:
         super().__init__()
         self.checkpoint_dir = checkpoint_dir
+        self.plan_cache_key = plan_cache_key
 
     def save(self, sharded_state_dict: ShardedStateDict, _checkpoint_dir: Path) -> None:
         rank = dist.get_rank()
@@ -45,15 +86,22 @@ class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
         filesystem = get_s3_fs()
         s3_refresh_if_expiring(filesystem)
         writer = StreamingFsspecWriter(self.checkpoint_dir, filesystem=filesystem)
-        checkpoint.save(
-            pytorch_state_dict,
-            storage_writer=writer,
-            planner=MCoreSavePlanner(
-                dedup_replicated_tensors=not self.keep_only_main_replica,
-                flatten_state_dict=False,
-                flatten_sharded_tensors=False,
-            ),
+        planner_kwargs = {
+            "dedup_replicated_tensors": not self.keep_only_main_replica,
+            "flatten_state_dict": False,
+            "flatten_sharded_tensors": False,
+        }
+        planner = (
+            _SchemaGuardedMCoreSavePlanner(cache_key=self.plan_cache_key, **planner_kwargs)
+            if self.plan_cache_key is not None
+            else MCoreSavePlanner(**planner_kwargs)
         )
+        try:
+            checkpoint.save(pytorch_state_dict, storage_writer=writer, planner=planner)
+        except BaseException:
+            if self.plan_cache_key is not None:
+                invalidate_checkpoint_plan_cache(self.plan_cache_key)
+            raise
 
 
 class DirectS3TorchDistLoadShardedStrategy(TorchDistLoadShardedStrategy):

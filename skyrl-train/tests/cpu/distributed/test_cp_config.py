@@ -139,6 +139,9 @@ MOE_FSDP_FIELDS = {
 EXPERT_LOADER_FIELDS = {
     "expert_loader_chunk_rows": 8,
 }
+CHECKPOINT_FSDP_FIELDS = {
+    "checkpoint_io_mode": "staged",
+}
 ADDITIVE_TRAINING_OPTIMIZER_FIELDS = {
     "fsdp_parameter_storage_dtype": None,
 }
@@ -184,7 +187,7 @@ def test_all_defaults_is_structurally_identical_to_baseline():
     container = OmegaConf.to_container(get_default_config(), resolve=False, throw_on_missing=False)
     for role in TRAINER_MODEL_ROLES:
         fsdp = container["trainer"][role]["fsdp_config"]
-        for k in (*CP_FIELDS, *MOE_FSDP_FIELDS, *EXPERT_LOADER_FIELDS):
+        for k in (*CP_FIELDS, *MOE_FSDP_FIELDS, *EXPERT_LOADER_FIELDS, *CHECKPOINT_FSDP_FIELDS):
             fsdp.pop(k, None)
     for role in ("policy", "critic"):
         optimizer = container["trainer"][role]["optimizer_config"]
@@ -224,24 +227,30 @@ def test_all_defaults_is_structurally_identical_to_baseline():
     container["trainer"]["algorithm"].pop("group_admission", None)
     container["trainer"]["policy"]["megatron_config"].pop("check_train_eval_parity", None)
     container["trainer"]["policy"]["megatron_config"].pop("optimizer_checkpoint_sharding_type", None)
+    container["trainer"]["policy"]["megatron_config"].pop("checkpoint_plan_cache", None)
     golden = OmegaConf.to_container(OmegaConf.load(GOLDEN), resolve=False, throw_on_missing=False)
     assert container == golden, "default config drifted from the no-CP baseline"
 
 
 def test_diff_is_exactly_the_additive_fsdp_keys_x_three_roles():
-    """The fsdp_config delta contains only the CP, grouped-mm, and expert-loader fields."""
+    """The fsdp_config delta contains only declared additive fields."""
     current = OmegaConf.to_container(get_default_config(), resolve=False, throw_on_missing=False)
     golden = OmegaConf.to_container(OmegaConf.load(GOLDEN), resolve=False, throw_on_missing=False)
-    expected_added = set(CP_FIELDS) | set(MOE_FSDP_FIELDS) | set(EXPERT_LOADER_FIELDS)
     for role in TRAINER_MODEL_ROLES:
         cur_fsdp = current["trainer"][role]["fsdp_config"]
         gold_fsdp = golden["trainer"][role]["fsdp_config"]
         added = set(cur_fsdp) - set(gold_fsdp)
+        expected_added = set(CP_FIELDS) | set(MOE_FSDP_FIELDS) | set(EXPERT_LOADER_FIELDS)
+        if role == "policy":
+            expected_added |= set(CHECKPOINT_FSDP_FIELDS)
         assert added == expected_added, (
             f"trainer.{role}.fsdp_config added keys {sorted(added)}, expected {sorted(expected_added)}"
         )
         # The CP and grouped-mm keys carry their disabled defaults.
-        for k, v in {**CP_FIELDS, **MOE_FSDP_FIELDS}.items():
+        disabled_defaults = {**CP_FIELDS, **MOE_FSDP_FIELDS}
+        if role == "policy":
+            disabled_defaults.update(CHECKPOINT_FSDP_FIELDS)
+        for k, v in disabled_defaults.items():
             assert cur_fsdp[k] == v
     # Only explicitly additive top-level trainer keys may differ from the golden.
     added_trainer = set(current["trainer"]) - set(golden["trainer"])
