@@ -184,9 +184,10 @@ def test_megatron_full_checkpoint_restores_per_rank_rng_and_cuda_tracker(ray_ini
             names = sorted(tracker.get_states())
             assert names, "Megatron CUDA RNG tracker was not initialized"
             if advance:
-                with tracker.fork(names[0]):
-                    torch.rand(1024 * (self._rank + 1), device="cuda")
-                torch.rand(1024 * (self._rank + 1), device="cuda")
+                for _ in range(self._rank + 1):
+                    with tracker.fork(names[0]):
+                        torch.rand(1024, device="cuda")
+                    torch.rand(1024, device="cuda")
             generic = self.strategy.get_rng_state()
             return {
                 "rank": self._rank,
