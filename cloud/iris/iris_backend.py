@@ -58,16 +58,19 @@ import os
 import re
 import secrets
 import shlex
+import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Protocol
 from urllib.parse import unquote, urlparse
 
 import yaml
 from iris.client.client import IrisClient
+from iris.client.workload import JobStatus
 from iris.cluster.constraints import (
     CLUSTER_CONSTRAINT_KEY,
     Constraint,
@@ -259,6 +262,83 @@ class IrisLaunchOutcome:
     job_id: str
     job_state: str
     exit_code: int
+
+
+class SupervisedIrisJob(Protocol):
+    """Submitted Iris job operations needed by the launcher supervisor."""
+
+    @property
+    def job_id(self) -> object: ...
+
+    def wait(
+        self,
+        timeout: float = 300.0,
+        poll_interval: float = 30.0,
+        *,
+        raise_on_failure: bool = True,
+        stream_logs: bool = False,
+        since_ms: int = 0,
+        min_level: str = "",
+        substring: str = "",
+    ) -> JobStatus: ...
+
+    def cancel(self) -> None: ...
+
+
+class _LauncherTermination(BaseException):
+    """A process termination signal converted into supervised job cancellation."""
+
+    def __init__(self, signum: int):
+        self.signum = signum
+        super().__init__(f"launcher received signal {signum}")
+
+
+@contextlib.contextmanager
+def _supervised_termination_signals() -> Iterator[None]:
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def request_termination(signum, _frame) -> None:
+        raise _LauncherTermination(signum)
+
+    signal.signal(signal.SIGTERM, request_termination)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _cancel_iris_job_tree(job: SupervisedIrisJob, job_id: str, cause: BaseException) -> JobStatus:
+    print(f"[rl-iris] Cancelling job tree {job_id}...", file=sys.stderr, flush=True)
+    try:
+        job.cancel()
+        status = job.wait(timeout=float("inf"), raise_on_failure=False)
+    except BaseException as cleanup_error:
+        cause.add_note(f"Failed to confirm cancellation of Iris job tree {job_id}: {cleanup_error}")
+        raise cause from cleanup_error
+    print(
+        f"[rl-iris] Cancelled job tree {job_id} with terminal state {status.state.value}.", file=sys.stderr, flush=True
+    )
+    return status
+
+
+def supervise_iris_job(job: SupervisedIrisJob) -> IrisLaunchOutcome:
+    """Wait for terminal success or cancel the complete Iris tree before exiting."""
+    job_id = str(job.job_id)
+    try:
+        with _supervised_termination_signals():
+            status = job.wait(stream_logs=True, timeout=float("inf"), raise_on_failure=False)
+    except (KeyboardInterrupt, _LauncherTermination) as interruption:
+        status = _cancel_iris_job_tree(job, job_id, interruption)
+        exit_code = 130 if isinstance(interruption, KeyboardInterrupt) else 128 + interruption.signum
+        return IrisLaunchOutcome(job_id=job_id, job_state=status.state.value, exit_code=exit_code)
+    except BaseException as error:
+        _cancel_iris_job_tree(job, job_id, error)
+        raise
+    return IrisLaunchOutcome(
+        job_id=job_id,
+        job_state=status.state.value,
+        exit_code=0 if status.state is JobState.SUCCEEDED else 1,
+    )
 
 
 def _gpu_resources(gpu_variant: str, gpu_count: int, *, cpu: float, memory: str, disk: str) -> ResourceSpec:
@@ -2798,21 +2878,9 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
             file=sys.stderr,
             flush=True,
         )
-        try:
-            status = job.wait(stream_logs=True, timeout=float("inf"), raise_on_failure=False)
-            exit_code = 0 if status.state is JobState.SUCCEEDED else 1
-            job_state = status.state.value
-        except KeyboardInterrupt:
-            print(f"[rl-iris] Terminating job {full_job_id}...", file=sys.stderr, flush=True)
-            job.terminate()
-            exit_code = 130
-            job_state = "cancelled"
-        print(f"[rl-iris] Job exit: {exit_code}", flush=True)
-        return IrisLaunchOutcome(
-            job_id=full_job_id,
-            job_state=job_state,
-            exit_code=exit_code,
-        )
+        outcome = supervise_iris_job(job)
+        print(f"[rl-iris] Job exit: {outcome.exit_code}", flush=True)
+        return outcome
 
 
 def _ambient_in_cluster_client(workspace: Path) -> IrisClient | None:
