@@ -46,7 +46,6 @@ def test_streaming_fsspec_writer_round_trips_one_aggregated_object_per_rank():
 
 class _FailingWriteStream:
     def __init__(self) -> None:
-        self.discarded = False
         self.closed = False
 
     def write(self, _payload) -> int:
@@ -59,7 +58,6 @@ class _FailingWriteStream:
         pass
 
     def close(self) -> None:
-        self.discarded = True
         self.closed = True
 
 
@@ -87,7 +85,7 @@ class _FailingFilesystem(AbstractFileSystem):
         pass
 
 
-def test_streaming_fsspec_writer_aborts_failed_object():
+def test_streaming_fsspec_writer_closes_failed_object():
     filesystem = _FailingFilesystem()
     writer = StreamingFsspecWriter("memory://failed-checkpoint/step", filesystem=filesystem)
 
@@ -97,7 +95,7 @@ def test_streaming_fsspec_writer_aborts_failed_object():
             checkpoint.save({"tensor": torch.arange(8)}, storage_writer=writer)
 
     assert filesystem.streams
-    assert all(stream.discarded for stream in filesystem.streams)
+    assert all(stream.closed for stream in filesystem.streams)
     assert not any(path.endswith(".metadata") for path in filesystem.opened_paths)
 
 

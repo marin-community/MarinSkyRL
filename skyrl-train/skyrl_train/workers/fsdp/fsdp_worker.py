@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from huggingface_hub import snapshot_download
 from loguru import logger
-from marinskyrl.remote_io import load_hugging_face_with_retry
+from marinskyrl.hugging_face_retry import load_hugging_face_with_retry
 from safetensors import safe_open
 from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
 import ray

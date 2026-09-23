@@ -46,6 +46,10 @@ def _model_snapshot(filesystem, root: str, *, tokenizer_class: str | None = None
     return files, weights
 
 
+def _snapshot(filesystem, root: str, files: tuple[HuggingFaceSnapshotFile, ...]) -> HuggingFaceSnapshot:
+    return HuggingFaceSnapshot(filesystem=filesystem, root=root, files=files)
+
+
 class _BoundedReader(io.BufferedIOBase):
     def __init__(self, source, read_sizes: list[int]) -> None:
         self.source = source
@@ -93,9 +97,7 @@ def test_hugging_face_snapshot_streams_weights_and_normalizes_metadata(monkeypat
     monkeypatch.setattr(source, "open", bounded_open)
 
     manifest = publish_hugging_face_snapshot(
-        source,
-        source_root,
-        files,
+        _snapshot(source, source_root, files),
         destination,
         model_id="org/model",
         revision="a" * 40,
@@ -118,9 +120,7 @@ def test_interrupted_snapshot_reuses_verified_weight_object(monkeypatch) -> None
     destination = "memory://resume-destination/model"
     files, _weights = _model_snapshot(source, source_root)
     publish_hugging_face_snapshot(
-        source,
-        source_root,
-        files,
+        _snapshot(source, source_root, files),
         destination,
         model_id="org/model",
         revision="b" * 40,
@@ -138,9 +138,7 @@ def test_interrupted_snapshot_reuses_verified_weight_object(monkeypatch) -> None
     monkeypatch.setattr(source, "open", recording_open)
 
     publish_hugging_face_snapshot(
-        source,
-        source_root,
-        files,
+        _snapshot(source, source_root, files),
         destination,
         model_id="org/model",
         revision="b" * 40,
@@ -160,9 +158,7 @@ def test_interrupted_snapshot_replaces_corrupt_weight_object() -> None:
         corrupt.write(b"corrupt")
 
     publish_hugging_face_snapshot(
-        source,
-        source_root,
-        files,
+        _snapshot(source, source_root, files),
         destination,
         model_id="org/model",
         revision="c" * 40,
@@ -193,9 +189,7 @@ def test_hugging_face_snapshot_retries_an_interrupted_weight_stream(monkeypatch)
     monkeypatch.setattr(rigging.timing.time, "sleep", lambda _delay: None)
 
     publish_hugging_face_snapshot(
-        source,
-        source_root,
-        files,
+        _snapshot(source, source_root, files),
         destination,
         model_id="org/model",
         revision="e" * 40,
@@ -218,9 +212,7 @@ def test_snapshot_rejects_weight_index_that_disagrees_with_shards() -> None:
 
     with pytest.raises(ValueError, match="does not match its shards"):
         publish_hugging_face_snapshot(
-            source,
-            source_root,
-            files,
+            _snapshot(source, source_root, files),
             destination,
             model_id="org/model",
             revision="d" * 40,

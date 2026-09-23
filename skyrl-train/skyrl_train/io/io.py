@@ -130,14 +130,11 @@ def _upload(local_path: str, cloud_path: str, *, recursive: bool) -> None:
     filesystem = _get_filesystem(cloud_path)
     is_s3_path = cloud_path.startswith("s3://")
     destination = filesystem._strip_protocol(cloud_path) if is_s3_path else cloud_path
-    if is_s3_path:
-        try:
-            filesystem.put(local_path, destination, recursive=recursive)
-        except Exception as error:
-            error.add_note(f"S3 upload failed from {local_path} to {cloud_path}")
-            raise
-    else:
+    try:
         filesystem.put(local_path, destination, recursive=recursive)
+    except Exception as error:
+        error.add_note(f"Cloud upload failed from {local_path} to {cloud_path}")
+        raise
 
 
 def upload_file(local_path: str, cloud_path: str) -> None:

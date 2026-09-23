@@ -42,7 +42,7 @@ from skyrl_train.utils.flash_attention import (
 )
 from packaging.version import Version
 from marinskyrl.runtime_options import GDNBackend
-from marinskyrl.remote_io import (
+from marinskyrl.hugging_face_retry import (
     DEFAULT_HF_BACKOFF_BASE_SECONDS,
     DEFAULT_HF_BACKOFF_CAP_SECONDS,
     DEFAULT_HF_MAX_RETRIES,

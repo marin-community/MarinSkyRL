@@ -3,7 +3,7 @@ from huggingface_hub.errors import RepositoryNotFoundError
 import pytest
 import rigging.timing
 
-from marinskyrl.remote_io import call_with_hugging_face_retry
+from marinskyrl.hugging_face_retry import call_with_hugging_face_retry
 
 
 def test_hugging_face_retry_recovers_from_transport_failure(monkeypatch) -> None:

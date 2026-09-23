@@ -1,8 +1,8 @@
-from collections.abc import Generator
+from collections.abc import Buffer, Generator
 from contextlib import contextmanager
 import io
 import os
-from typing import Any, cast
+from typing import cast
 
 from fsspec import AbstractFileSystem
 from loguru import logger
@@ -56,7 +56,7 @@ class _DeferredWriteErrorStream(CommittableStream):
         if self._write_error is None:
             self.stream.flush()
 
-    def write(self, payload: Any) -> int:
+    def write(self, payload: Buffer) -> int:
         if self.closed:
             raise ValueError("write to closed checkpoint stream")
         payload_bytes = len(memoryview(payload).cast("B"))
@@ -66,7 +66,7 @@ class _DeferredWriteErrorStream(CommittableStream):
             except BaseException as error:
                 # torch.save replaces exceptions from a Python write callback with
                 # an `unexpected pos` assertion while finalizing its zip stream.
-                # Accept the remaining callbacks and raise the storage error at close.
+                # Accept the remaining callbacks and raise the storage error at commit.
                 self._write_error = error
         self._position += payload_bytes
         return payload_bytes

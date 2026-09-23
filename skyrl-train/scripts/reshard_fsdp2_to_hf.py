@@ -21,7 +21,8 @@ import torch._tensor as _tt
 import torch._utils as _tu
 from huggingface_hub import HfApi
 from marinskyrl.hf_model import normalize_fast_tokenizer_metadata
-from marinskyrl.remote_io import call_with_hugging_face_retry, create_s3_filesystem
+from marinskyrl.hugging_face_retry import call_with_hugging_face_retry
+from marinskyrl.remote_io import create_s3_filesystem
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 

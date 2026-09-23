@@ -1,6 +1,5 @@
 import asyncio
-from collections.abc import Collection
-import contextlib
+from collections.abc import Callable, Collection
 from enum import StrEnum
 import os
 import time
@@ -11,6 +10,7 @@ from loguru import logger
 from packaging import version
 from ray.actor import ActorHandle
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group, remove_placement_group
+from rigging.timing import ExponentialBackoff, retry_with_backoff
 from transformers import AutoConfig, PretrainedConfig
 
 from marinskyrl.inference_placement import InferenceReplicaPlacement
@@ -222,8 +222,9 @@ def _build_inference_engine_runtime_env(
     """Forward managed inference settings into each vLLM engine actor.
 
     This covers NCCL diagnostics and batch invariance. Selected-ID scoring also
-    forces the V1 model runner. Returns ``None`` only when neither managed
-    variables nor a V1 runner requirement are set.
+    forces the V1 model runner. RunAI-backed engines also receive conservative
+    S3 stall tolerance and stderr diagnostics. Returns ``None`` when no managed
+    or derived settings apply.
     """
     passthrough = set(_NCCL_FR_ENV_PASSTHROUGH) | set(managed_environment_names(EnvVarScope.INFERENCE_WORKER))
     env_vars = {key: os.environ[key] for key in passthrough if key in os.environ}
@@ -394,11 +395,13 @@ def _release_node_local_gang(actors: list, placement_groups: list) -> None:
 
 
 def create_ray_wrapped_inference_engines_with_retry(
+    create_engines: Callable[[float], List[InferenceEngineInterface]],
     *,
+    model_path: str,
+    engine_init_timeout_seconds: float,
     max_retries: int,
     backoff_base_seconds: float,
     backoff_cap_seconds: float,
-    **engine_kwargs: Any,
 ) -> List[InferenceEngineInterface]:
     """Retry a failed remote vLLM actor gang within one startup deadline.
 
@@ -407,30 +410,26 @@ def create_ray_wrapped_inference_engines_with_retry(
     without the underlying status code. A data-parallel pool must restart as a
     gang: retrying one rank would leave it on a different coordinator generation.
     """
-    from rigging.timing import ExponentialBackoff, retry_with_backoff
-
-    timeout_seconds = float(engine_kwargs["engine_init_timeout_seconds"])
     started = time.monotonic()
 
     def create() -> List[InferenceEngineInterface]:
-        remaining = timeout_seconds - (time.monotonic() - started)
+        remaining = engine_init_timeout_seconds - (time.monotonic() - started)
         if remaining <= 0:
-            raise TimeoutError(f"inference engine startup timed out after {timeout_seconds:g} seconds")
-        attempt_kwargs = {**engine_kwargs, "engine_init_timeout_seconds": remaining}
-        return create_ray_wrapped_inference_engines(**attempt_kwargs)
+            raise TimeoutError(f"inference engine startup timed out after {engine_init_timeout_seconds:g} seconds")
+        return create_engines(remaining)
 
     return retry_with_backoff(
         create,
         retryable=lambda error: isinstance(error, ray.exceptions.RayActorError),
         max_attempts=max_retries + 1,
-        max_elapsed=timeout_seconds,
+        max_elapsed=engine_init_timeout_seconds,
         backoff=ExponentialBackoff(
             initial=backoff_base_seconds,
             maximum=backoff_cap_seconds,
             factor=2.0,
             jitter=0.2,
         ),
-        operation=f"initialize remote vLLM engine gang for {engine_kwargs['pretrain']}",
+        operation=f"initialize remote vLLM engine gang for {model_path}",
     )
 
 
@@ -1007,11 +1006,15 @@ def create_ray_wrapped_inference_engines(
         return engines
     except BaseException:
         for actor in inference_engine_actors:
-            with contextlib.suppress(Exception):
+            try:
                 ray.kill(actor)
+            except Exception as cleanup_error:
+                logger.warning("Failed to stop vLLM actor after startup failure: {}", cleanup_error)
         for pg in owned_placement_groups:
-            with contextlib.suppress(Exception):
+            try:
                 remove_placement_group(pg)
+            except Exception as cleanup_error:
+                logger.warning("Failed to remove vLLM placement group after startup failure: {}", cleanup_error)
         raise
 
 

@@ -13,7 +13,7 @@ from typing import Optional
 import huggingface_hub
 from huggingface_hub import snapshot_download
 
-from marinskyrl.remote_io import call_with_hugging_face_retry, load_hugging_face_with_retry
+from marinskyrl.hugging_face_retry import call_with_hugging_face_retry, load_hugging_face_with_retry
 from marinskyrl.resource_locator import HFDatasetSelector, parse_hf_dataset_selector
 
 

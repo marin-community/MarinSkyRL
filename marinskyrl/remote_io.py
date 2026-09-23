@@ -3,139 +3,32 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Buffer, Callable, Generator
+from collections.abc import Buffer, Generator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 import logging
-import os
-from typing import Any, cast, Protocol, TYPE_CHECKING, TypeVar, runtime_checkable
+from typing import Any, cast, Protocol, runtime_checkable
 
-if TYPE_CHECKING:
-    from fsspec.spec import AbstractFileSystem
+from fsspec.spec import AbstractFileSystem
+from rigging.filesystem.factory import filesystem as create_filesystem
+from rigging.filesystem.factory import url_to_fs
+from rigging.filesystem.storage_path import StoragePath
 
 
-T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
 S3_MULTIPART_PART_BYTES = 64 * 2**20
 S3_MULTIPART_CONCURRENCY = 4
-DEFAULT_HF_MAX_RETRIES = 5
-DEFAULT_HF_BACKOFF_BASE_SECONDS = 2.0
-DEFAULT_HF_BACKOFF_CAP_SECONDS = 32.0
-
-_HF_TRANSIENT_MESSAGE_FRAGMENTS = (
-    "incompleteread",
-    "incomplete read",
-    "eof",
-    "connection reset",
-    "connection aborted",
-    "connection broken",
-    "remote end closed",
-    "broken pipe",
-    "server disconnected",
-    "disconnected without sending",
-    "peer closed connection",
-)
 
 
 def create_s3_filesystem(**storage_options: Any) -> AbstractFileSystem:
     """Create an S3 filesystem with Rigging's request bounds and retries."""
-    from rigging.filesystem.factory import filesystem
-
-    return filesystem("s3", **storage_options)
+    return create_filesystem("s3", **storage_options)
 
 
 def filesystem_and_path(uri: str) -> tuple[AbstractFileSystem, str]:
     """Resolve a URI through Rigging's guarded fsspec factory."""
-    from rigging.filesystem.factory import url_to_fs
-
     return url_to_fs(uri)
-
-
-def is_transient_hugging_face_error(error: BaseException) -> bool:
-    """Return whether a Hugging Face failure is safe to retry."""
-    import httpcore
-    import httpx
-    from huggingface_hub.errors import (
-        EntryNotFoundError,
-        GatedRepoError,
-        HfHubHTTPError,
-        LocalEntryNotFoundError,
-        RepositoryNotFoundError,
-        RevisionNotFoundError,
-    )
-    import requests
-    import urllib3
-
-    fatal_errors = (RepositoryNotFoundError, RevisionNotFoundError, GatedRepoError)
-    transient_errors = (
-        OSError,
-        httpx.TransportError,
-        httpcore.ProtocolError,
-        requests.exceptions.RequestException,
-        urllib3.exceptions.HTTPError,
-        HfHubHTTPError,
-        EntryNotFoundError,
-        LocalEntryNotFoundError,
-    )
-    seen: set[int] = set()
-    current: BaseException | None = error
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, fatal_errors):
-            return False
-        if isinstance(current, transient_errors):
-            return True
-        message = str(current).lower()
-        if any(fragment in message for fragment in _HF_TRANSIENT_MESSAGE_FRAGMENTS):
-            return True
-        if "safetensors" in message and any(
-            fragment in message
-            for fragment in ("no ", "not find", "cannot find", "couldn't find", "could not find", "does not")
-        ):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
-
-
-def call_with_hugging_face_retry(
-    call: Callable[[], T],
-    *,
-    operation: str,
-    max_retries: int = DEFAULT_HF_MAX_RETRIES,
-    backoff_base: float = DEFAULT_HF_BACKOFF_BASE_SECONDS,
-    backoff_cap: float = DEFAULT_HF_BACKOFF_CAP_SECONDS,
-) -> T:
-    """Call a Hub operation with the shared transient-failure policy."""
-    from rigging.timing import ExponentialBackoff, retry_with_backoff
-
-    return retry_with_backoff(
-        call,
-        retryable=is_transient_hugging_face_error,
-        max_attempts=max_retries + 1,
-        backoff=ExponentialBackoff(initial=backoff_base, maximum=backoff_cap, factor=2.0, jitter=0.0),
-        operation=operation,
-    )
-
-
-def load_hugging_face_with_retry(
-    call: Callable[[], T],
-    *,
-    resource_id: str,
-    resource_kind: str,
-    max_retries: int = DEFAULT_HF_MAX_RETRIES,
-    backoff_base: float = DEFAULT_HF_BACKOFF_BASE_SECONDS,
-    backoff_cap: float = DEFAULT_HF_BACKOFF_CAP_SECONDS,
-) -> T:
-    """Load one Hub resource through the shared Hugging Face retry policy."""
-    rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "?"))
-    return call_with_hugging_face_retry(
-        call,
-        operation=f"load Hugging Face {resource_kind} {resource_id} on rank {rank}",
-        max_retries=max_retries,
-        backoff_base=backoff_base,
-        backoff_cap=backoff_cap,
-    )
 
 
 @runtime_checkable
@@ -356,8 +249,6 @@ def open_output_stream(
 
 def abort_multipart_uploads(path: str) -> int:
     """Abort incomplete uploads below a canonical S3 checkpoint prefix."""
-    from rigging.filesystem.storage_path import StoragePath
-
     checkpoint_path = StoragePath(path)
     if checkpoint_path.scheme != "s3" or str(checkpoint_path) != path or not checkpoint_path.key:
         raise ValueError(f"Expected a canonical S3 checkpoint path, got: {path}")

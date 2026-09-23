@@ -75,7 +75,7 @@ from pathlib import Path
 from huggingface_hub import snapshot_download
 import torch
 
-from marinskyrl.remote_io import load_hugging_face_with_retry
+from marinskyrl.hugging_face_retry import load_hugging_face_with_retry
 
 # --------------------------------------------------------------------------- #
 # Reuse the trainer's verified grouped->HF converter WITHOUT importing the      #

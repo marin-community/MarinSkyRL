@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from huggingface_hub import HfApi
 
 from marinskyrl.hf_model import hugging_face_hub_online
-from marinskyrl.remote_io import call_with_hugging_face_retry
+from marinskyrl.hugging_face_retry import call_with_hugging_face_retry
 from skyrl_train.hf_export_schema import DEFAULT_HF_HUB_REVISION, DEFAULT_HF_UPLOAD_MODE, HFUploadMode
 from skyrl_train.io import io
 
