@@ -24,6 +24,8 @@ from skyrl_train.distributed.optimizer_learning_rates import validate_optimizer_
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl_train.io import io
+from skyrl_train.checkpoint_listing import extract_step_from_path
+from skyrl_train.timing_observability import checkpoint_phase, local_directory_bytes
 from skyrl_train.utils.constants import validate_worker_collective_timeout_seconds
 from skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
@@ -778,8 +780,15 @@ class FSDPStrategy(DistributedStrategy):
         # Define paths for saving individual rank files
         rank = self.get_rank()
         world_size = self.world_size
+        step = extract_step_from_path(os.path.dirname(ckpt_dir.rstrip("/")))
 
-        with io.local_work_dir(ckpt_dir) as work_dir:
+        def publish_staged_checkpoint(local_path: str, cloud_path: str) -> None:
+            with checkpoint_phase(self.fsdp_strategy, "save", "upload", rank=rank, step=step) as phase:
+                phase.scratch_bytes = local_directory_bytes(local_path)
+                io.upload_directory(local_path, cloud_path)
+                phase.bytes_written = phase.scratch_bytes
+
+        with io.local_output_dir(ckpt_dir, publish_staged_checkpoint) as work_dir:
             model_path = os.path.join(work_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
             optim_path = os.path.join(work_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
             extra_path = os.path.join(work_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
@@ -789,18 +798,26 @@ class FSDPStrategy(DistributedStrategy):
                 warnings.simplefilter("ignore")
                 with get_fsdp_state_ctx(save_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
                     # Get and save model state dict
-                    model_state_dict = save_model.state_dict()
+                    with checkpoint_phase(self.fsdp_strategy, "save", "model_state_dict", rank=rank, step=step):
+                        model_state_dict = save_model.state_dict()
                     self.log(f"[rank-{rank}]: Saving model to {model_path}")
-                    with io.open_file(model_path, "wb") as f:
-                        torch.save(model_state_dict, f)
+                    with checkpoint_phase(self.fsdp_strategy, "save", "model_serialize", rank=rank, step=step) as phase:
+                        with io.open_file(model_path, "wb") as f:
+                            torch.save(model_state_dict, f)
+                        phase.bytes_written = os.path.getsize(model_path)
 
                     # Get and save optimizer state dict if optimizer is provided
                     optimizer_state_dict = {}
-                    if optimizer is not None:
-                        optimizer_state_dict = optimizer.state_dict()
+                    with checkpoint_phase(self.fsdp_strategy, "save", "optimizer_state_dict", rank=rank, step=step):
+                        if optimizer is not None:
+                            optimizer_state_dict = optimizer.state_dict()
                     self.log(f"[rank-{rank}]: Saving optim to {optim_path}")
-                    with io.open_file(optim_path, "wb") as f:
-                        torch.save(optimizer_state_dict, f)
+                    with checkpoint_phase(
+                        self.fsdp_strategy, "save", "optimizer_serialize", rank=rank, step=step
+                    ) as phase:
+                        with io.open_file(optim_path, "wb") as f:
+                            torch.save(optimizer_state_dict, f)
+                        phase.bytes_written = os.path.getsize(optim_path)
 
                     # Get scheduler state dict if scheduler is provided
                     lr_scheduler_state_dict = {}
@@ -820,8 +837,10 @@ class FSDPStrategy(DistributedStrategy):
 
                     # Save extra state
                     self.log(f"[rank-{rank}]: Saving extra_state to {extra_path}")
-                    with io.open_file(extra_path, "wb") as f:
-                        torch.save(extra_state_dict, f)
+                    with checkpoint_phase(self.fsdp_strategy, "save", "extra_serialize", rank=rank, step=step) as phase:
+                        with io.open_file(extra_path, "wb") as f:
+                            torch.save(extra_state_dict, f)
+                        phase.bytes_written = os.path.getsize(extra_path)
 
                     # Garbage collect temporary buffers from materializing the state dicts
                     gc.collect()
@@ -873,6 +892,8 @@ class FSDPStrategy(DistributedStrategy):
         # Define paths for loading individual rank files
         rank = self.get_rank()
         world_size = self.world_size
+        step = extract_step_from_path(os.path.dirname(ckpt_dir.rstrip("/")))
+        operation = "resume" if load_training_state else "export"
 
         model_path = os.path.join(ckpt_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
         optim_path = os.path.join(ckpt_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
@@ -895,19 +916,20 @@ class FSDPStrategy(DistributedStrategy):
             checkpoint_paths.append(optim_path)
         if load_training_state:
             checkpoint_paths.append(extra_path)
-        with io.local_read_files(checkpoint_paths) as local_paths:
-            staged_paths = dict(zip(checkpoint_paths, local_paths, strict=True))
-            with io.open_file(staged_paths[model_path], "rb") as f:
-                model_state_dict = torch.load(f, map_location="cpu", weights_only=False)
-            extra_state_dict = {}
-            if load_training_state:
-                with io.open_file(staged_paths[extra_path], "rb") as f:
-                    extra_state_dict = torch.load(f, map_location="cpu", weights_only=False)
+        with checkpoint_phase(self.fsdp_strategy, operation, "stage_and_deserialize", rank=rank, step=step):
+            with io.local_read_files(checkpoint_paths) as local_paths:
+                staged_paths = dict(zip(checkpoint_paths, local_paths, strict=True))
+                with io.open_file(staged_paths[model_path], "rb") as f:
+                    model_state_dict = torch.load(f, map_location="cpu", weights_only=False)
+                extra_state_dict = {}
+                if load_training_state:
+                    with io.open_file(staged_paths[extra_path], "rb") as f:
+                        extra_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
-            optimizer_state_dict = {}
-            if optim_exists:
-                with io.open_file(staged_paths[optim_path], "rb") as f:
-                    optimizer_state_dict = torch.load(f, map_location="cpu", weights_only=False)
+                optimizer_state_dict = {}
+                if optim_exists:
+                    with io.open_file(staged_paths[optim_path], "rb") as f:
+                        optimizer_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
         # Extract scheduler state from extra state
         lr_scheduler_state_dict = extra_state_dict.get("lr_scheduler", {})
@@ -917,22 +939,23 @@ class FSDPStrategy(DistributedStrategy):
         optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)
 
         # Load using appropriate FSDP context
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            with get_fsdp_state_ctx(load_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
-                # Load model state dict
-                load_model.load_state_dict(model_state_dict, strict=load_module_strict)
-                self.log(f"[rank-{rank}]: Successfully loaded model state dict")
+        with checkpoint_phase(self.fsdp_strategy, operation, "apply_state", rank=rank, step=step):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with get_fsdp_state_ctx(load_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
+                    # Load model state dict
+                    load_model.load_state_dict(model_state_dict, strict=load_module_strict)
+                    self.log(f"[rank-{rank}]: Successfully loaded model state dict")
 
-                # Load optimizer state dict if optimizer object is provided and loading is requested
-                if optimizer is not None and optimizer_state_dict:
-                    optimizer.load_state_dict(optimizer_state_dict)
-                    self.log(f"[rank-{rank}]: Successfully loaded optimizer state")
+                    # Load optimizer state dict if optimizer object is provided and loading is requested
+                    if optimizer is not None and optimizer_state_dict:
+                        optimizer.load_state_dict(optimizer_state_dict)
+                        self.log(f"[rank-{rank}]: Successfully loaded optimizer state")
 
-                # Load scheduler state dict if scheduler object is provided and loading is requested
-                if scheduler is not None and load_training_state:
-                    scheduler.load_state_dict(lr_scheduler_state_dict)
-                    self.log(f"[rank-{rank}]: Successfully loaded scheduler state")
+                    # Load scheduler state dict if scheduler object is provided and loading is requested
+                    if scheduler is not None and load_training_state:
+                        scheduler.load_state_dict(lr_scheduler_state_dict)
+                        self.log(f"[rank-{rank}]: Successfully loaded scheduler state")
 
         # Load RNG state for reproducibility
         if load_training_state and "rng" in extra_state_dict:
@@ -977,18 +1000,21 @@ class FSDPStrategy(DistributedStrategy):
         self.log(f"[rank-{self.get_rank()}]: Detected FSDP version: {fsdp_ver}")
         self.log(f"[rank-{self.get_rank()}]: Gathering full state dict for HF export")
 
-        if fsdp_ver == 2:
-            # Use FSDP2 API - collects on rank 0 only
-            output_state_dict = fsdp2_get_full_state_dict(fsdp_model, cpu_offload=True, rank0_only=True)
-        elif fsdp_ver == 1:
-            from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
+        rank = self.get_rank()
+        step = extract_step_from_path(os.path.dirname(output_dir.rstrip("/")))
+        with checkpoint_phase(self.fsdp_strategy, "export", "gather_full_state", rank=rank, step=step):
+            if fsdp_ver == 2:
+                # Use FSDP2 API - collects on rank 0 only
+                output_state_dict = fsdp2_get_full_state_dict(fsdp_model, cpu_offload=True, rank0_only=True)
+            elif fsdp_ver == 1:
+                from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 
-            options = StateDictOptions(full_state_dict=True, cpu_offload=True, broadcast_from_rank0=False)
-            output_state_dict = get_model_state_dict(fsdp_model, options=options)
-            if not self.is_rank_0():
-                output_state_dict.clear()
-        else:
-            raise ValueError(f"Unsupported FSDP version: {fsdp_ver}")
+                options = StateDictOptions(full_state_dict=True, cpu_offload=True, broadcast_from_rank0=False)
+                output_state_dict = get_model_state_dict(fsdp_model, options=options)
+                if not self.is_rank_0():
+                    output_state_dict.clear()
+            else:
+                raise ValueError(f"Unsupported FSDP version: {fsdp_ver}")
 
         if self.is_rank_0():
             self.log(f"Gathered {len(output_state_dict)} tensors for HF export")
@@ -1003,20 +1029,26 @@ class FSDPStrategy(DistributedStrategy):
             # transform the weight-sync-to-vLLM path in ``FSDPWeightExtractor`` applies)
             # BEFORE ``save_pretrained``. GATED on grouped expert keys actually being
             # present, so a dense / non-grouped / non-MoE save stays BYTE-IDENTICAL.
-            output_state_dict = self._maybe_remap_grouped_moe_state_dict(output_state_dict)
+            with checkpoint_phase(self.fsdp_strategy, "export", "moe_remap", rank=rank, step=step):
+                output_state_dict = self._maybe_remap_grouped_moe_state_dict(output_state_dict)
 
-            with hf_model_io.local_hf_model_dir(output_dir) as work_dir:
-                self.log(f"[rank-0]: Serializing {len(output_state_dict)} tensors to HF safetensors")
-                model_to_save.save_pretrained(work_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs)
-                self.log("[rank-0]: Finished serializing HF safetensors")
+            with checkpoint_phase(self.fsdp_strategy, "export", "write_and_publish_hf", rank=rank, step=step) as phase:
+                with hf_model_io.local_hf_model_dir(output_dir) as work_dir:
+                    self.log(f"[rank-0]: Serializing {len(output_state_dict)} tensors to HF safetensors")
+                    with checkpoint_phase(self.fsdp_strategy, "export", "serialize_hf", rank=rank, step=step):
+                        model_to_save.save_pretrained(
+                            work_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs
+                        )
+                    self.log("[rank-0]: Finished serializing HF safetensors")
 
-                # Fix and save the config
-                config_to_save = self._fix_fsdp_config(model_to_save.config)
-                config_to_save.save_pretrained(work_dir)
+                    # Fix and save the config
+                    config_to_save = self._fix_fsdp_config(model_to_save.config)
+                    config_to_save.save_pretrained(work_dir)
 
-                # Save tokenizer if provided
-                if tokenizer is not None:
-                    tokenizer.save_pretrained(work_dir)
+                    # Save tokenizer if provided
+                    if tokenizer is not None:
+                        tokenizer.save_pretrained(work_dir)
+                    phase.scratch_bytes = local_directory_bytes(work_dir)
 
             self.log(f"[rank-0]: Successfully saved model to {output_dir}")
 

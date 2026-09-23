@@ -91,6 +91,10 @@ environment (`MODEL`, `MAX_STEPS`, `DATA_DIR`). Inside an Iris GPU task:
 MAX_STEPS=2 bash ci/marin_nightly/run_h100.sh
 ```
 
+For a checkpoint smoke, set `CKPT_INTERVAL` and `CKPT_PATH` (an isolated output prefix).
+Set `RUN_GATE=0` if the step count differs from the nightly spec; the training command
+and its exit status are unchanged, while the nightly metric gate is skipped.
+
 The GB200 lane additionally imports `vllm._C_stable_libtorch` and the cuMem allocator, verifies the
 Grug model registry entry, then runs a real rollout, eager FSDP2 policy update,
 mixed-dtype weight broadcast, and second rollout. The eager policy path keeps this

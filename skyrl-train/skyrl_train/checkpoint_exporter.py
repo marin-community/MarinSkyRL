@@ -22,6 +22,7 @@ from skyrl_train.hf_export_schema import (
 )
 from skyrl_train.hf_publisher import HuggingFacePublisher
 from skyrl_train.tokenizer import create_tokenizer
+from skyrl_train.timing_observability import checkpoint_phase
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.io import io
 from skyrl_train.utils.utils import (
@@ -117,11 +118,14 @@ class CheckpointExporter:
         workers: PolicyExportWorkers,
         tokenizer: PreTrainedTokenizerBase,
         publisher: ExportPublisher | None = None,
+        *,
+        backend: str,
     ):
         self._plan = plan
         self._workers = workers
         self._tokenizer = tokenizer
         self._publisher = publisher
+        self._backend = backend
 
     def _validate_checkpoint(self) -> None:
         trainer_state_path = os.path.join(self._plan.checkpoint_path, TRAINER_STATE_FILENAME)
@@ -138,17 +142,27 @@ class CheckpointExporter:
             raise FileNotFoundError(f"policy checkpoint not found: {self._plan.policy_checkpoint_path}")
 
     def run(self) -> CheckpointExportResult:
+        def phase(name: str):
+            return checkpoint_phase(self._backend, "export", name, rank=-1, step=self._plan.step)
+
         try:
-            self._validate_checkpoint()
-            self._workers.initialize(self._plan.model_path)
-            self._workers.load_model_checkpoint(self._plan.policy_checkpoint_path)
-            self._workers.save_hf_model(self._plan.policy_export_path, self._tokenizer)
-            hf_model_io.verify_hf_model_export(self._plan.policy_export_path)
+            with phase("validate_checkpoint"):
+                self._validate_checkpoint()
+            with phase("initialize_workers"):
+                self._workers.initialize(self._plan.model_path)
+            with phase("load_model"):
+                self._workers.load_model_checkpoint(self._plan.policy_checkpoint_path)
+            with phase("write_hf"):
+                self._workers.save_hf_model(self._plan.policy_export_path, self._tokenizer)
+            with phase("verify_hf"):
+                hf_model_io.verify_hf_model_export(self._plan.policy_export_path)
             if self._publisher is not None:
-                self._publisher.publish(self._plan.policy_export_path, self._plan.step)
+                with phase("publish_hf"):
+                    self._publisher.publish(self._plan.policy_export_path, self._plan.step)
             return CheckpointExportResult(step=self._plan.step, export_path=self._plan.policy_export_path)
         finally:
-            self._workers.close()
+            with phase("close_workers"):
+                self._workers.close()
 
 
 def checkpoint_export_plan(cfg: DictConfig) -> CheckpointExportPlan:
@@ -238,4 +252,5 @@ def checkpoint_exporter(cfg: DictConfig) -> CheckpointExporter:
         policy_export_workers(cfg),
         export_tokenizer(cfg),
         hub_publisher(cfg),
+        backend=str(cfg.trainer.strategy),
     )

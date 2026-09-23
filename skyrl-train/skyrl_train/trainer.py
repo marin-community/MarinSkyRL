@@ -115,7 +115,7 @@ from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
-from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
+from skyrl_train.timing_observability import checkpoint_phase, publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
     read_hf_export_request,
@@ -219,6 +219,7 @@ class RayPPOTrainer:
         self._shutdown_complete = False
         self.global_step = 0
         self._last_saved_step: int | None = None
+        self._last_optimizer_step_finished_at: tuple[int, float] | None = None
         raw_speculative_decoding = cfg.generator.get("speculative_decoding")
         if raw_speculative_decoding is not None:
             raw_speculative_decoding = OmegaConf.to_container(raw_speculative_decoding, resolve=True)
@@ -639,7 +640,8 @@ class RayPPOTrainer:
         self._control = await self.callback_handler.call_event_async("on_step_end", state, self._control, trainer=self)
 
         if self._control.should_save:
-            await self._save_intermediate_checkpoint(state)
+            with Timer("checkpoint_foreground_pause", self.all_timings):
+                await self._save_intermediate_checkpoint(state)
             self._control.should_save = False
 
         if self._control.should_save_hf_model:
@@ -1175,6 +1177,7 @@ class RayPPOTrainer:
                         critical_phase("train_step", self.global_step),
                     ):
                         status = self.train_critic_and_policy(training_input)
+                    self._last_optimizer_step_finished_at = (self.global_step, time.monotonic())
                     train_duration = self.all_timings["train_critic_and_policy"]
                     self._log_optimizer_step_completed(
                         epoch=epoch,
@@ -2586,14 +2589,16 @@ class RayPPOTrainer:
         io.makedirs(global_step_folder, exist_ok=True)
 
         # Save policy checkpoint
-        ray.get(
-            self.policy_model.async_run_ray_method(
-                "pass_through",
-                "save_checkpoint",
-                ckpt_dir=policy_save_dir,
-                tokenizer=self.tokenizer,
+        backend = str(self.cfg.trainer.strategy)
+        with checkpoint_phase(backend, "save", "policy_workers", rank=-1, step=self.global_step):
+            ray.get(
+                self.policy_model.async_run_ray_method(
+                    "pass_through",
+                    "save_checkpoint",
+                    ckpt_dir=policy_save_dir,
+                    tokenizer=self.tokenizer,
+                )
             )
-        )
 
         # Save critic checkpoint (if it exists)
         if self.critic_model is not None:
@@ -2601,14 +2606,15 @@ class RayPPOTrainer:
                 self.policy_model.offload_to_cpu()
                 self.critic_model.backload_to_gpu()
 
-            ray.get(
-                self.critic_model.async_run_ray_method(
-                    "pass_through",
-                    "save_checkpoint",
-                    ckpt_dir=critic_save_dir,
-                    tokenizer=self.tokenizer,
+            with checkpoint_phase(backend, "save", "critic_workers", rank=-1, step=self.global_step):
+                ray.get(
+                    self.critic_model.async_run_ray_method(
+                        "pass_through",
+                        "save_checkpoint",
+                        ckpt_dir=critic_save_dir,
+                        tokenizer=self.tokenizer,
+                    )
                 )
-            )
 
             if self.colocate_all:
                 self.critic_model.offload_to_cpu()
@@ -2616,13 +2622,15 @@ class RayPPOTrainer:
 
         # Save dataloader state
         dataloader_save_path = os.path.join(global_step_folder, "data.pt")
-        try:
-            dataloader_state_dict = self.train_dataloader.state_dict()
-            with io.open_file(dataloader_save_path, "wb") as f:
-                torch.save(dataloader_state_dict, f)
-            logger.info(f"Saved dataloader state to {dataloader_save_path}")
-        except Exception as e:
-            logger.warning(f"Failed to save dataloader state: {e}")
+        with checkpoint_phase(backend, "save", "dataloader_state", rank=-1, step=self.global_step) as phase:
+            try:
+                dataloader_state_dict = self.train_dataloader.state_dict()
+                with io.open_file(dataloader_save_path, "wb") as f:
+                    torch.save(dataloader_state_dict, f)
+                logger.info(f"Saved dataloader state to {dataloader_save_path}")
+            except Exception as e:
+                phase.failed = True
+                logger.warning(f"Failed to save dataloader state: {e}")
 
         # Save additional trainer state
         trainer_state = {
@@ -2633,21 +2641,28 @@ class RayPPOTrainer:
             "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
         }
         trainer_state_path = os.path.join(global_step_folder, TRAINER_STATE_FILENAME)
-        with io.open_file(trainer_state_path, "wb") as f:
-            torch.save(trainer_state, f)
+        with checkpoint_phase(backend, "save", "trainer_state", rank=-1, step=self.global_step):
+            with io.open_file(trainer_state_path, "wb") as f:
+                torch.save(trainer_state, f)
         logger.info(f"Saved trainer state to {trainer_state_path}")
 
         # Atomic tracking - write this last after all saves succeed
         latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
-        with io.open_file(latest_checkpoint_file, "w") as f:
-            f.write(str(self.global_step))
+        with checkpoint_phase(backend, "save", "latest_pointer", rank=-1, step=self.global_step):
+            with io.open_file(latest_checkpoint_file, "w") as f:
+                f.write(str(self.global_step))
+        last_optimizer_step = self._last_optimizer_step_finished_at
+        if last_optimizer_step is not None and last_optimizer_step[0] == self.global_step:
+            # Main's latest pointer precedes callback state, so this is not full durability latency.
+            self.all_timings["checkpoint_pointer_lag"] = time.monotonic() - last_optimizer_step[1]
 
         logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
         self._last_saved_step = self.global_step
 
         # Clean up old checkpoints after successful save
         with Timer("cleanup_old_checkpoints", self.all_timings):
-            self._cleanup_old_checkpoints()
+            with checkpoint_phase(backend, "save", "retention", rank=-1, step=self.global_step):
+                self._cleanup_old_checkpoints()
 
     def _cleanup_old_checkpoints(self):
         max_ckpts = self.cfg.trainer.max_ckpts_to_keep

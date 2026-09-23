@@ -100,7 +100,7 @@ def test_checkpoint_exporter_converts_only_the_policy_model(tmp_path):
     workers = FakePolicyExportWorkers()
     tokenizer = object()
 
-    result = CheckpointExporter(plan, workers, tokenizer).run()
+    result = CheckpointExporter(plan, workers, tokenizer, backend="fsdp2").run()
 
     assert result.step == 12
     assert result.export_path == str(tmp_path / "exports" / "global_step_12" / "policy")
@@ -117,7 +117,7 @@ def test_checkpoint_exporter_rejects_a_mismatched_checkpoint_marker(tmp_path):
     workers = FakePolicyExportWorkers()
 
     with pytest.raises(ValueError, match="checkpoint step mismatch"):
-        CheckpointExporter(plan, workers, object()).run()
+        CheckpointExporter(plan, workers, object(), backend="fsdp2").run()
 
     assert workers.closed
 
@@ -134,7 +134,7 @@ def test_checkpoint_exporter_rejects_incomplete_conversion_result(tmp_path, work
     publisher = FakePublisher()
 
     with pytest.raises(RuntimeError, match=error):
-        CheckpointExporter(_plan(tmp_path), workers, object(), publisher).run()
+        CheckpointExporter(_plan(tmp_path), workers, object(), publisher, backend="fsdp2").run()
 
     assert workers.closed
     assert publisher.calls == []

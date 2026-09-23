@@ -23,6 +23,8 @@ from torch.distributed.checkpoint.storage import WriteResult
 from torch.futures import Future
 
 from skyrl_train.io.s3fs import call_with_s3_retry
+from skyrl_train.checkpoint_listing import extract_step_from_path
+from skyrl_train.timing_observability import checkpoint_phase
 
 
 DEFAULT_TENSOR_COPY_AHEAD_BYTES = 2**30
@@ -308,9 +310,11 @@ class StreamingFsspecWriter(FileSystemWriter):
         self.tensor_copy_ahead_bytes = tensor_copy_ahead_bytes
         self.multipart_part_bytes = multipart_part_bytes
         self.multipart_concurrency = multipart_concurrency
+        self.checkpoint_step = extract_step_from_path(os.path.dirname(path.rstrip("/")))
 
     def prepare_local_plan(self, plan: SavePlan) -> SavePlan:
-        plan = super().prepare_local_plan(plan)
+        with checkpoint_phase("megatron", "save", "dcp_local_plan", rank=self.rank, step=self.checkpoint_step):
+            plan = super().prepare_local_plan(plan)
         logger.info(
             "DCP direct-write plan rank={} items={} files=1 copy_ahead_bytes={} multipart_part_bytes={} "
             "multipart_concurrency={} max_staged_bytes={}",
@@ -325,6 +329,12 @@ class StreamingFsspecWriter(FileSystemWriter):
 
     def write_data(self, plan: SavePlan, planner: SavePlanner) -> Future[list[WriteResult]]:
         """Write a rank shard without retaining serialized tensors until close."""
+        with checkpoint_phase("megatron", "save", "stream_shard", rank=self.rank, step=self.checkpoint_step) as phase:
+            result = self._write_data(plan, planner)
+            phase.bytes_written = sum(item.size_in_bytes for item in result.wait())
+            return result
+
+    def _write_data(self, plan: SavePlan, planner: SavePlanner) -> Future[list[WriteResult]]:
         storage_plan = plan.storage_data
         if storage_plan is None:
             raise AssertionError("DCP storage plan is missing its rank prefix")

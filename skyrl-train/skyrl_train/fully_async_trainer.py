@@ -12,6 +12,7 @@ High-level notes:
 """
 
 import asyncio
+import time
 import collections
 import os
 import sys
@@ -913,6 +914,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # 3. Run training and record consumed UIDs in the tracker.
                     with Timer("run_training", self.all_timings):
                         status = await self._run_training(training_input)
+                    self._last_optimizer_step_finished_at = (self.global_step, time.monotonic())
                     train_duration = self.all_timings["train_critic_and_policy"]
                     self._log_optimizer_step_completed(
                         epoch=epoch,

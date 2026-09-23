@@ -47,6 +47,11 @@ N_SAMPLES="${N_SAMPLES:-8}"
 MAX_GEN_LEN="${MAX_GEN_LEN:-512}"
 MAX_PROMPT_LEN="${MAX_PROMPT_LEN:-512}"
 LR="${LR:-2.0e-6}"
+CKPT_INTERVAL="${CKPT_INTERVAL:--1}"
+CHECKPOINT_ARGS=(trainer.ckpt_interval="$CKPT_INTERVAL")
+if [[ -n "${CKPT_PATH:-}" ]]; then
+  CHECKPOINT_ARGS+=(trainer.ckpt_path="$CKPT_PATH")
+fi
 
 # train_batch_size * MAX_STEPS prompts get consumed; keep some margin. Evaluation is off, but
 # data.val_data still has to resolve, so a handful of rows is enough.
@@ -144,7 +149,7 @@ export SKYRL_HOME="$REPOSITORY_ROOT"
   trainer.max_prompt_length="$MAX_PROMPT_LEN" \
   trainer.eval_before_train=false \
   trainer.eval_interval=-1 \
-  trainer.ckpt_interval=-1 \
+  "${CHECKPOINT_ARGS[@]}" \
   trainer.hf_save_interval=-1 \
   trainer.resume_mode=null \
   trainer.dump_eval_results=false \
@@ -166,8 +171,10 @@ export SKYRL_HOME="$REPOSITORY_ROOT"
 ELAPSED=$(( $(date +%s) - START ))
 
 echo "::: gating (run took ${ELAPSED}s)"
-"$PYTHON" -m ci.marin_nightly.gate \
-  --log "$LOG" --spec "$SPEC" --wall-clock-seconds "$ELAPSED"
+if [[ "${RUN_GATE:-1}" == "1" ]]; then
+  "$PYTHON" -m ci.marin_nightly.gate \
+    --log "$LOG" --spec "$SPEC" --wall-clock-seconds "$ELAPSED"
+fi
 
 echo "::: checking Grug PyTorch parity against the committed Levanter fixture"
 "$PYTHON" -m tests.grug_training_parity

@@ -15,6 +15,8 @@ from torch import distributed as dist
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl_train.io import io
+from skyrl_train.checkpoint_listing import extract_step_from_path
+from skyrl_train.timing_observability import checkpoint_phase, local_directory_bytes
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
 import megatron.core.parallel_state as mpu
 from skyrl_train.distributed.megatron.megatron_utils import (
@@ -189,6 +191,8 @@ class MegatronStrategy(DistributedStrategy):
         tag=None,
         tokenizer: Optional[PreTrainedTokenizer] = None,
     ):
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        step = extract_step_from_path(os.path.dirname(ckpt_dir.rstrip("/")))
         # Extract base model.
         model: List[nn.Module] = model.actor_module
         materialize_megatron_params(model)
@@ -206,13 +210,15 @@ class MegatronStrategy(DistributedStrategy):
 
         # Collect the sharded state dicts for model and optimizer, and full state dict for the scheduler.
         sharded_state_dict = {}
-        model_sharded_state_dict = model.sharded_state_dict()
+        with checkpoint_phase("megatron", "save", "model_state_dict", rank=rank, step=step):
+            model_sharded_state_dict = model.sharded_state_dict()
         sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer:
-            sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
-                model_sharded_state_dict,
-                metadata=_optimizer_checkpoint_metadata(self.megatron_config.optimizer_checkpoint_sharding_type),
-            )
+            with checkpoint_phase("megatron", "save", "optimizer_state_dict", rank=rank, step=step):
+                sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
+                    model_sharded_state_dict,
+                    metadata=_optimizer_checkpoint_metadata(self.megatron_config.optimizer_checkpoint_sharding_type),
+                )
         if scheduler:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
@@ -223,15 +229,16 @@ class MegatronStrategy(DistributedStrategy):
         # multipart object; the local work directory contains only small control files.
         if ckpt_dir.startswith("s3://"):
             if self.is_rank_0():
-                try:
-                    abort_multipart_uploads(ckpt_dir)
-                except ValueError:
-                    raise
-                except Exception:
-                    logger.opt(exception=True).warning(
-                        "Could not remove stale multipart uploads below {}; relying on bucket lifecycle cleanup",
-                        ckpt_dir,
-                    )
+                with checkpoint_phase("megatron", "save", "abort_stale_uploads", rank=rank, step=step):
+                    try:
+                        abort_multipart_uploads(ckpt_dir)
+                    except ValueError:
+                        raise
+                    except Exception:
+                        logger.opt(exception=True).warning(
+                            "Could not remove stale multipart uploads below {}; relying on bucket lifecycle cleanup",
+                            ckpt_dir,
+                        )
             dist.barrier()
             save_strategy = DirectS3TorchDistSaveShardedStrategy(ckpt_dir)
         else:
@@ -242,29 +249,29 @@ class MegatronStrategy(DistributedStrategy):
 
         with io.local_work_dir(ckpt_dir) as work_dir:
             # TODO(tgriggs): Support configurable async saves.
-            async_save_request = dist_checkpointing.save(
-                sharded_state_dict=sharded_state_dict,
-                checkpoint_dir=work_dir,
-                sharded_strategy=save_strategy,
-                async_sharded_save=False,
-                validate_access_integrity=True,
-            )
+            with checkpoint_phase("megatron", "save", "distributed_checkpoint", rank=rank, step=step):
+                async_save_request = dist_checkpointing.save(
+                    sharded_state_dict=sharded_state_dict,
+                    checkpoint_dir=work_dir,
+                    sharded_strategy=save_strategy,
+                    async_sharded_save=False,
+                    validate_access_integrity=True,
+                )
             assert async_save_request is None, "Async save is not yet supported for Megatron"
 
             # Only global rank 0 saves the Huggingface config and tokenizer.
             if self.is_rank_0():
-                hf_dir = os.path.join(work_dir, "huggingface")
-                self.save_hf_configs(self.hf_config, hf_dir, tokenizer)
+                with checkpoint_phase("megatron", "save", "rank0_metadata", rank=rank, step=step):
+                    hf_dir = os.path.join(work_dir, "huggingface")
+                    self.save_hf_configs(self.hf_config, hf_dir, tokenizer)
 
-                # Persist replicated client state (e.g. ZClip / StaleClip warmup
-                # counters + EMA stats) so they survive chain-restarts, matching
-                # the FSDP2 strategy. client_state is global (not sharded), so a
-                # single rank-0 file suffices; every rank reads it back on load.
-                extra_state_path = os.path.join(work_dir, "extra_state.pt")
-                with io.open_file(extra_state_path, "wb") as f:
-                    torch.save({"client_state": client_state, "tag": tag}, f)
+                    # Client state is replicated, so a single rank-0 file suffices.
+                    extra_state_path = os.path.join(work_dir, "extra_state.pt")
+                    with io.open_file(extra_state_path, "wb") as f:
+                        torch.save({"client_state": client_state, "tag": tag}, f)
 
-        dist.barrier()
+        with checkpoint_phase("megatron", "save", "final_barrier", rank=rank, step=step):
+            dist.barrier()
         ckpt_base.async_calls.close()
         ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
         self.log(f"Checkpoint successfully saved to {ckpt_dir}")
@@ -280,6 +287,9 @@ class MegatronStrategy(DistributedStrategy):
     ):
         if not ckpt_dir or not io.exists(ckpt_dir):
             raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        step = extract_step_from_path(os.path.dirname(ckpt_dir.rstrip("/")))
+        operation = "resume" if load_training_state else "export"
 
         # Extract base model.
         model: List[nn.Module] = model.actor_module
@@ -301,7 +311,7 @@ class MegatronStrategy(DistributedStrategy):
             if ckpt_dir.startswith("s3://")
             else io.node_cached_read_dir(ckpt_dir, _NODE_LOCAL_CHECKPOINT_CACHE)
         )
-        with read_context as read_dir:
+        with checkpoint_phase("megatron", operation, "read_and_load", rank=rank, step=step), read_context as read_dir:
             if optimizer and load_training_state:
                 common_state = dist_checkpointing.load_common_state_dict(read_dir)
                 saved_type = _saved_optimizer_sharding_type(common_state)
@@ -325,9 +335,10 @@ class MegatronStrategy(DistributedStrategy):
             load_strategy = FullyParallelLoadStrategyWrapper(
                 load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
             )
-            state_dict = dist_checkpointing.load(
-                sharded_state_dict=sharded_state_dict, checkpoint_dir=read_dir, sharded_strategy=load_strategy
-            )
+            with checkpoint_phase("megatron", operation, "distributed_checkpoint", rank=rank, step=step):
+                state_dict = dist_checkpointing.load(
+                    sharded_state_dict=sharded_state_dict, checkpoint_dir=read_dir, sharded_strategy=load_strategy
+                )
 
         # Load the model, optimizer, and scheduler state dicts.
         assert "model" in state_dict, (
@@ -368,6 +379,8 @@ class MegatronStrategy(DistributedStrategy):
         return ckpt_dir, states
 
     def save_hf_model(self, bridge, model: MegatronModelWrapper, output_dir: str, tokenizer=None, **kwargs) -> None:
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        step = extract_step_from_path(os.path.dirname(output_dir.rstrip("/")))
         materialize_megatron_params(model.actor_module)
         # Create checkpoint directory if it doesn't exist.
         if self.is_rank_0():
@@ -377,13 +390,18 @@ class MegatronStrategy(DistributedStrategy):
         # Every rank exhausts Bridge's collective conversion; only cloud non-writers discard their local files.
         rank_writes_output = self.is_rank_0() or not io.is_cloud_path(output_dir)
         model_dir = hf_model_io.local_hf_model_dir(output_dir) if rank_writes_output else tempfile.TemporaryDirectory()
-        with model_dir as work_dir:
-            bridge.save_hf_weights(model.actor_module, work_dir)
+        with (
+            checkpoint_phase("megatron", "export", "write_and_publish_hf", rank=rank, step=step) as phase,
+            model_dir as work_dir,
+        ):
+            with checkpoint_phase("megatron", "export", "bridge_convert", rank=rank, step=step):
+                bridge.save_hf_weights(model.actor_module, work_dir)
             self.log(f"Successfully saved HF safetensors model to {output_dir}")
 
             # Only rank 0 saves the Huggingface config and tokenizer.
             if self.is_rank_0():
                 self.save_hf_configs(self.hf_config, work_dir, tokenizer)
                 self.log(f"Successfully saved HF config and tokenizer to {output_dir}")
+            phase.scratch_bytes = local_directory_bytes(work_dir)
 
         # The Ray caller waits for every rank result; no collective needs to span artifact publication.

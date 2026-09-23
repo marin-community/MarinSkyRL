@@ -100,6 +100,7 @@ def test_hf_export_serialization_has_no_trailing_barrier(monkeypatch, tmp_path):
             Path(output_dir, "model.safetensors").write_bytes(struct.pack("<Q", len(header)) + header + b"\0" * 4)
 
     strategy = object.__new__(FSDPStrategy)
+    strategy.fsdp_strategy = "fsdp2"
     monkeypatch.setattr(strategy, "is_rank_0", lambda: True)
     monkeypatch.setattr(strategy, "get_rank", lambda: 0)
     monkeypatch.setattr(strategy, "log", lambda *args: None)
