@@ -13,19 +13,19 @@ from typing import Any
 from marinskyrl.runtime_options import WeightSyncTransport
 
 
-def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
-    """Reject ``expert_block`` unless the config meets its requirements.
+# The receiver writes expert weights in place, so the engine's w13 layout must match the trainer's
+# [gate;up] order; vLLM's triton backend keeps it. Both are checked again when the engines load.
+EXPERT_BLOCK_MODEL_TYPE = "grug_moe"
+EXPERT_BLOCK_MOE_BACKEND = "triton"
+
+
+def expert_block_transport_problems(config: Mapping[str, Any]) -> list[str]:
+    """The requirements of ``expert_block`` that the trainer and engine config leaves unmet.
 
     It needs the megatron strategy at TP=1 and ETP=1, local TP=1 vLLM engines with EP=DP>1, and
     the NCCL weight-sync backend.
     """
     generator = config["generator"]
-    transport = generator["weight_sync_transport"]
-    choices = [item.value for item in WeightSyncTransport]
-    if transport not in choices:
-        raise ValueError(f"generator.weight_sync_transport must be one of {choices}, not {transport!r}")
-    if transport != WeightSyncTransport.EXPERT_BLOCK:
-        return
     trainer = config["trainer"]
     problems = []
     if trainer["strategy"] != "megatron":
@@ -64,6 +64,50 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
         problems.append("the engines must use EP equal to DP")
     if int(generator["expert_block_sync"]["timeout_seconds"]) <= 0:
         problems.append("generator.expert_block_sync.timeout_seconds must be positive")
+    return problems
+
+
+def expert_block_engine_problems(engine_init_kwargs: Mapping[str, Any]) -> list[str]:
+    """The requirements of ``expert_block`` that the vLLM engine arguments leave unmet."""
+    kernel_config = engine_init_kwargs.get("kernel_config") or {}
+    moe_backend = engine_init_kwargs.get("moe_backend", kernel_config.get("moe_backend"))
+    problems = []
+    if str(moe_backend).lower() != EXPERT_BLOCK_MOE_BACKEND:
+        problems.append(f"generator.engine_init_kwargs.moe_backend must be {EXPERT_BLOCK_MOE_BACKEND}")
+    if engine_init_kwargs.get("quantization") is not None:
+        problems.append("the engines must serve unquantised weights")
+    if engine_init_kwargs.get("enable_eplb"):
+        problems.append("the engines must keep a static expert placement (no EPLB)")
+    return problems
+
+
+def expert_block_model_problems(model_config: Mapping[str, Any] | None, model_path: str) -> list[str]:
+    """The requirements of ``expert_block`` that the policy's HF config leaves unmet.
+
+    ``model_config`` is the parsed ``config.json``; ``None`` means it could not be read.
+    """
+    if model_config is None:
+        return [f"the policy model config at {model_path!r} must be readable"]
+    problems = []
+    if model_config.get("model_type") != EXPERT_BLOCK_MODEL_TYPE:
+        problems.append(f"the policy must be a {EXPERT_BLOCK_MODEL_TYPE} model")
+    if model_config.get("quantization_config") is not None:
+        problems.append("the policy weights must be unquantised")
+    return problems
+
+
+def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
+    """Reject an explicit ``expert_block`` unless the trainer and engine config meets its requirements.
+
+    ``auto`` is resolved by the entrypoint, which also knows the trainer, engine arguments and model.
+    """
+    transport = config["generator"]["weight_sync_transport"]
+    choices = [item.value for item in WeightSyncTransport]
+    if transport not in choices:
+        raise ValueError(f"generator.weight_sync_transport must be one of {choices}, not {transport!r}")
+    if transport != WeightSyncTransport.EXPERT_BLOCK:
+        return
+    problems = expert_block_transport_problems(config)
     if problems:
         raise ValueError("generator.weight_sync_transport=expert_block requires: " + "; ".join(problems))
 

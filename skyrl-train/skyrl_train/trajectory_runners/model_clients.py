@@ -19,6 +19,11 @@ from skyrl_train.inference_engines.chat_template import (
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.response_topk import select_chat_response_topk
+from skyrl_train.policy_version import (
+    POLICY_VERSION_SEGMENTS_KEY,
+    PolicyVersionSegment,
+    validate_policy_version_segments,
+)
 from skyrl_train.trajectory_runners.types import TokenProvenance
 
 
@@ -38,19 +43,6 @@ class ModelClient(Protocol):
     async def generate(self, request: InferenceEngineInput) -> ModelClientOutput: ...
 
 
-@dataclass(frozen=True)
-class _ChatResult:
-    prompt_ids: list[int]
-    response_ids: list[int]
-    response_logprobs: list[float] | None
-    student_topk_indices: list[list[int]] | None
-    behavior_topk_logprobs: list[list[float]] | None
-    text: str
-    stop_reason: str
-    assistant_message: dict[str, Any]
-    routed_experts: list[list[list[int]]] | None = None
-
-
 def _choice_routed_experts(choice: dict[str, Any], response_ids: list[int]) -> list[list[list[int]]] | None:
     provider_fields = choice.get("provider_specific_fields") or {}
     routes = choice.get("routed_experts", provider_fields.get("routed_experts"))
@@ -65,6 +57,88 @@ def _choice_routed_experts(choice: dict[str, Any], response_ids: list[int]) -> l
     ):
         raise ValueError("chat response routed_experts must have [token, layer, expert] integer shape")
     return routes
+
+
+@dataclass(frozen=True)
+class _ChatChoice:
+    """One chat completion choice with the served prompt, the engine's own tokens, logprobs and version spans."""
+
+    message: dict[str, Any]
+    finish_reason: str
+    prompt_ids: list[int]
+    response_ids: list[int]
+    response_logprobs: list[float] | None
+    logprob_items: list[dict[str, Any]] | None
+    policy_version_segments: list[PolicyVersionSegment] | None
+    routed_experts: list[list[list[int]]] | None
+
+
+def _is_token_id_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(token, int) for token in value)
+
+
+def _parse_chat_choice(choice: dict[str, Any], *, prompt_ids: Any, logprobs_requested: bool) -> _ChatChoice:
+    """Read one OpenAI chat completion choice, rejecting one without exact tokens or requested logprobs.
+
+    ``prompt_ids`` is the prompt the engine served for this choice: vLLM's response-level
+    ``prompt_token_ids`` under ``return_token_ids``, or the tokenize call that rendered it.
+    """
+    response_ids = choice.get("token_ids")
+    if not _is_token_id_list(response_ids):
+        raise RuntimeError("OpenAI chat completion did not return exact response token IDs")
+    if not _is_token_id_list(prompt_ids):
+        raise RuntimeError("OpenAI chat completion did not return the served prompt token IDs")
+    logprob_items = (choice.get("logprobs") or {}).get("content")
+    if logprobs_requested and logprob_items is None:
+        raise RuntimeError("OpenAI chat completion did not return the requested logprobs")
+    response_logprobs = [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None
+    if response_logprobs is not None and len(response_logprobs) != len(response_ids):
+        raise RuntimeError("OpenAI chat completion logprobs do not align with exact response token IDs")
+    segments = choice.get(POLICY_VERSION_SEGMENTS_KEY)
+    if segments is not None:
+        validate_policy_version_segments(segments, response_length=len(response_ids), require_known=False)
+    return _ChatChoice(
+        message=choice["message"],
+        finish_reason=choice["finish_reason"],
+        prompt_ids=prompt_ids,
+        response_ids=response_ids,
+        response_logprobs=response_logprobs,
+        logprob_items=logprob_items,
+        policy_version_segments=segments,
+        routed_experts=_choice_routed_experts(choice, response_ids),
+    )
+
+
+def _assemble_plain_results(results: list[_ChatChoice]) -> ModelClientOutput:
+    logprobs = [result.response_logprobs for result in results]
+    segments = [result.policy_version_segments for result in results]
+    output = ModelClientOutput(
+        responses=[result.message["content"] for result in results],
+        prompt_ids=[result.prompt_ids for result in results],
+        response_ids=[result.response_ids for result in results],
+        stop_reasons=[result.finish_reason for result in results],
+        response_logprobs=logprobs if all(value is not None for value in logprobs) else None,
+        prompt_logprobs=None,
+        token_provenance=TokenProvenance.ENGINE,
+    )
+    if all(rows is not None for rows in segments):
+        output["response_policy_version_segments"] = segments
+    if any(result.routed_experts is not None for result in results):
+        output["routed_experts"] = [result.routed_experts for result in results]
+    return output
+
+
+@dataclass(frozen=True)
+class _ChatResult:
+    prompt_ids: list[int]
+    response_ids: list[int]
+    response_logprobs: list[float] | None
+    student_topk_indices: list[list[int]] | None
+    behavior_topk_logprobs: list[list[float]] | None
+    text: str
+    stop_reason: str
+    assistant_message: dict[str, Any]
+    routed_experts: list[list[list[int]]] | None = None
 
 
 def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
@@ -340,15 +414,7 @@ class OpenAIHTTPModelClient:
                 )
             )
 
-        texts = [response[0] for response in responses]
-        return ModelClientOutput(
-            responses=texts,
-            response_ids=[self._tokenizer.encode(text, add_special_tokens=False) for text in texts],
-            stop_reasons=[response[1] for response in responses],
-            response_logprobs=None,
-            prompt_logprobs=None,
-            token_provenance=TokenProvenance.RECONSTRUCTED,
-        )
+        return _assemble_plain_results(responses)
 
     async def _generate_structured_chat(
         self,
@@ -404,29 +470,25 @@ class OpenAIHTTPModelClient:
             body = await response.json()
             if response.status >= 400:
                 raise RuntimeError(f"OpenAI chat completion returned HTTP {response.status}: {body}")
-        choice = body["choices"][0]
-        response_ids = choice.get("token_ids")
-        if not isinstance(response_ids, list) or not all(isinstance(token, int) for token in response_ids):
-            raise RuntimeError("OpenAI chat completion did not return exact response token IDs")
-        logprob_items = (choice.get("logprobs") or {}).get("content")
-        response_logprobs = [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None
-        if response_logprobs is not None and len(response_logprobs) != len(response_ids):
-            raise RuntimeError("OpenAI chat completion logprobs do not align with exact response token IDs")
+        choice = _parse_chat_choice(
+            body["choices"][0], prompt_ids=prompt_ids, logprobs_requested=sampling_params.get("logprobs") is not None
+        )
         selected = None
-        if requested_top_k is not None and logprob_items is not None:
+        if requested_top_k is not None and choice.logprob_items is not None:
             selected = [
-                select_chat_response_topk(item.get("top_logprobs") or [], requested_top_k) for item in logprob_items
+                select_chat_response_topk(item.get("top_logprobs") or [], requested_top_k)
+                for item in choice.logprob_items
             ]
         return _ChatResult(
-            prompt_ids=prompt_ids,
-            response_ids=response_ids,
-            response_logprobs=response_logprobs,
+            prompt_ids=choice.prompt_ids,
+            response_ids=choice.response_ids,
+            response_logprobs=choice.response_logprobs,
             student_topk_indices=None if selected is None else [ids for ids, _ in selected],
             behavior_topk_logprobs=None if selected is None else [scores for _, scores in selected],
-            text=self._tokenizer.decode(response_ids, skip_special_tokens=True),
-            stop_reason=choice["finish_reason"],
-            assistant_message=choice["message"],
-            routed_experts=_choice_routed_experts(choice, response_ids),
+            text=self._tokenizer.decode(choice.response_ids, skip_special_tokens=True),
+            stop_reason=choice.finish_reason,
+            assistant_message=choice.message,
+            routed_experts=choice.routed_experts,
         )
 
     async def _generate_one(
@@ -436,16 +498,25 @@ class OpenAIHTTPModelClient:
         messages: list[dict[str, str]],
         session_id,
         sampling_params: dict,
-    ) -> tuple[str, str]:
-        request_sampling_params = dict(sampling_params)
-        if "max_generate_length" in request_sampling_params:
-            request_sampling_params["max_completion_tokens"] = request_sampling_params.pop("max_generate_length")
+    ) -> _ChatChoice:
+        request_sampling_params = {
+            key: value for key, value in sampling_params.items() if key not in _CHAT_SAMPLING_EXCLUSIONS
+        }
+        if "max_generate_length" in sampling_params:
+            request_sampling_params["max_completion_tokens"] = sampling_params["max_generate_length"]
+        if sampling_params.get("stop") is not None:
+            request_sampling_params["stop"] = sampling_params["stop"]
         payload = {
             "model": self._model_name,
             "messages": [{"role": message["role"], "content": message["content"]} for message in messages],
             "session_id": session_id,
             **request_sampling_params,
+            # The engine's own prompt and response tokens, so the trainer trains on what was served
+            # and sampled.
+            "return_token_ids": True,
         }
+        if sampling_params.get("logprobs") is not None:
+            payload["logprobs"] = True
         async with session.post(
             f"{self._base_url}/v1/chat/completions",
             json=payload,
@@ -454,5 +525,8 @@ class OpenAIHTTPModelClient:
             body = await response.json()
             if response.status >= 400:
                 raise RuntimeError(f"OpenAI chat completion returned HTTP {response.status}: {body}")
-        choice = body["choices"][0]
-        return choice["message"]["content"], choice["finish_reason"]
+        return _parse_chat_choice(
+            body["choices"][0],
+            prompt_ids=body.get("prompt_token_ids"),
+            logprobs_requested=sampling_params.get("logprobs") is not None,
+        )

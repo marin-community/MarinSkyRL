@@ -33,6 +33,7 @@ from typing import Any, Dict, Iterator, List
 from cloud.iris.artifacts import fs_and_path
 from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.rl_config_translation import (
+    TRAINING_LOOP_ENTRYPOINT_MODULES,
     apply_context_budget_overrides,
     build_checkpoint_export_hydra_args,
     build_skyrl_hydra_args,
@@ -275,6 +276,15 @@ class LocalRLRunner:
         )
         parsed, skyrl_overrides = apply_context_budget_overrides(parsed, self.config.skyrl_overrides)
         entrypoint = self.config.entrypoint or parsed.entrypoint
+        if (
+            entrypoint != parsed.entrypoint
+            and entrypoint in TRAINING_LOOP_ENTRYPOINT_MODULES
+            and parsed.entrypoint in TRAINING_LOOP_ENTRYPOINT_MODULES
+        ):
+            raise ValueError(
+                f"--entrypoint {entrypoint} contradicts the RL config's entrypoint "
+                f"({parsed.entrypoint}); the config names the training loop, so change it there"
+            )
         self.config.tensor_parallel_size = parsed.tensor_parallel_size
         self._resolve_data_inputs(parsed.data_kind, exp_args)
         self._resolve_terminal_bench_sidechannel(parsed)
@@ -580,7 +590,11 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--rl_config", required=True, help="Path to a SkyRL config YAML.")
     parser.add_argument("--rl-config", dest="rl_config", help=argparse.SUPPRESS)
-    parser.add_argument("--entrypoint", default=None, help="Override the RL config entrypoint.")
+    parser.add_argument(
+        "--entrypoint",
+        default=None,
+        help="Entrypoint module to run instead of the config's; it may not replace one training entrypoint with another.",
+    )
 
     parser.add_argument("--model_path", required=True, help="Model path or HuggingFace ID.")
     parser.add_argument("--model-path", dest="model_path", help=argparse.SUPPRESS)

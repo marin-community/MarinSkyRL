@@ -10,6 +10,7 @@ class R3Transport(StrEnum):
 
 
 class WeightSyncTransport(StrEnum):
+    AUTO = "auto"
     BROADCAST = "broadcast"
     EXPERT_BLOCK = "expert_block"
 

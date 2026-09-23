@@ -340,6 +340,22 @@ trainer:
     max_staleness_steps: 4
 
     num_parallel_generation_workers: 768
+    # Finished groups the completed buffer holds before a producer waits with its group in
+    # hand. Null means num_parallel_generation_workers, so no producer ever waits; a smaller
+    # value bounds the head-node backlog without changing a group's staleness.
+    max_buffered_groups: null
+    # Count a group's staleness from the oldest policy version that sampled it, plus one.
+    # Off counts from the trainer's step at submission. Chat attempts are stamped with the
+    # version installed when sent, never newer than the version that sampled them.
+    first_token_admission: false
+    # What the engines do with requests still generating at each weight sync. abort cancels
+    # them and the client resubmits each prompt with the tokens it already generated, so the
+    # answer continues under the new weights after one prefill; keep freezes them in the
+    # scheduler and resumes them with the cache the old weights built.
+    pause_mode: abort
+    # Drop the engines' KV/prefix cache at the pause, so nothing computed by the old weights
+    # is reused. Set false to keep the cache across the resume.
+    clear_kv_cache_on_weight_sync: true
 
     # Bound teacher-scoring work independently for each logical teacher. Queue
     # backpressure is applied when a rollout group is admitted, before learner
@@ -426,9 +442,10 @@ generator:
   # How weights reach the engines. "broadcast": trainer rank 0 sends every tensor to every engine.
   # "expert_block": each MoE expert matrix is broadcast from a Megatron rank that holds it to the vLLM
   # workers that serve it. Needs FullyAsyncRayPPOTrainer, a Grug MoE on the megatron strategy at TP=1
-  # and ETP=1, local vLLM engines at TP=1 with EP=DP>1, the NCCL weight-sync backend and vLLM's TRITON
-  # MoE backend.
-  weight_sync_transport: "broadcast"
+  # and ETP=1, local vLLM engines at TP=1 with EP=DP>1, the NCCL weight-sync backend and
+  # engine_init_kwargs.moe_backend triton. "auto": the entrypoint picks expert_block when the run meets
+  # all of that and the policy's config.json is readable locally, and broadcast otherwise, logging why.
+  weight_sync_transport: "auto"
   expert_block_sync:
     timeout_seconds: 600  # For creating the sync groups and for the broadcasts of each sync.
     verify: false  # If set, replay synchronization and verify it against the trainer values.

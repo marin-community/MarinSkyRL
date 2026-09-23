@@ -10,6 +10,7 @@ from omegaconf import DictConfig
 
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.distillation_adapters import build_teacher_scoring_work
+from skyrl_train.policy_version import policy_version_bounds
 
 from skyrl_train.trajectory_runners.skyrl_gym import ExactChatTransportError, SkyRLGymTrajectoryRunner
 from skyrl_train.trajectory_runners.base import ConversationType, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
@@ -91,6 +92,9 @@ def mock_llm():
             # say response gets tokenized to 3 tokens
             "response_logprobs": [[0.1] * len(MOCK_LLM_OUTPUT_IDS)] * num_prompts,
             "response_ids": [MOCK_LLM_OUTPUT_IDS.copy()] * num_prompts,
+            "response_policy_version_segments": [
+                [{"start": 0, "token_count": len(MOCK_LLM_OUTPUT_IDS), "policy_version": 0}] for _ in range(num_prompts)
+            ],
         }
 
     mock.generate = AsyncMock(side_effect=mock_generate)
@@ -866,6 +870,7 @@ async def test_non_batched_terminal_assembly_masks_unsampled_tokens(
         "stop_reasons": [stop_reason],
         "response_ids": [response_ids],
         "response_logprobs": [response_logprobs],
+        "response_policy_version_segments": [[{"start": 0, "token_count": len(response_ids), "policy_version": 0}]],
     }
 
     trajectory_runner = SkyRLGymTrajectoryRunner(
@@ -893,6 +898,61 @@ async def test_non_batched_terminal_assembly_masks_unsampled_tokens(
         if trainable
     ]
     assert sampled_trainable_logprobs == response_logprobs
+    assert list(output.behavior_policy_version_segments or ()) == [
+        {"start": 0, "token_count": len(response_ids), "policy_version": 0}
+    ]
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_generate_non_batched_multiturn_keeps_the_first_sampled_token_version(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    generator_cfg.batched = False
+    generator_cfg.use_conversation_multi_turn = True
+    generator_cfg.max_turns = 3
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    mock_env.step.side_effect = [
+        BaseTextEnvStepOutput(observations=[{"role": "user", "content": "again"}], reward=0.0, done=False, metadata={}),
+        BaseTextEnvStepOutput(observations=[{"role": "user", "content": "again"}], reward=0.0, done=False, metadata={}),
+        BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={}),
+    ]
+    mock_llm.generate.side_effect = [
+        {"responses": [""], "stop_reasons": ["stop"], "response_ids": [[]], "response_policy_version_segments": [[]]},
+        {
+            "responses": ["first"],
+            "stop_reasons": ["stop"],
+            "response_ids": [[10, 4]],
+            "response_policy_version_segments": [[{"start": 0, "token_count": 2, "policy_version": 2}]],
+        },
+        {
+            "responses": ["second"],
+            "stop_reasons": ["stop"],
+            "response_ids": [[20, 4]],
+            "response_policy_version_segments": [[{"start": 0, "token_count": 2, "policy_version": 3}]],
+        },
+    ]
+
+    trajectory_runner = SkyRLGymTrajectoryRunner(
+        trajectory_runner_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    trajectory_runner.base_conversation_token_ids = []
+    output = await trajectory_runner.run(
+        {
+            "prompts": [[{"role": "user", "content": "question"}]],
+            "env_extras": [{}],
+            "env_classes": [mock_env_cfg.env_class],
+        }
+    )
+
+    rows = output["behavior_policy_version_segments"]
+    assert [segment["policy_version"] for segment in rows[0]] == [2, 3]
+    assert policy_version_bounds(rows) == (2, 3)
+    assert output["first_token_policy_version"] == 2
 
 
 @pytest.mark.asyncio
@@ -921,6 +981,7 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
             "routed_experts": [[[[1, 2]], [[3, 4]]]],
             "student_topk_indices": [[[11, 12], [13, 14]]],
             "behavior_topk_logprobs": [[[-0.1, -2.0], [-0.2, -1.9]]],
+            "response_policy_version_segments": [[{"start": 0, "token_count": 2, "policy_version": 0}]],
         },
         {
             "responses": ["second"],
@@ -930,6 +991,7 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
             "routed_experts": [[[[5, 6]], [[7, 8]]]],
             "student_topk_indices": [[[21, 22], [23, 24]]],
             "behavior_topk_logprobs": [[[-0.3, -1.8], [-0.4, -1.7]]],
+            "response_policy_version_segments": [[{"start": 0, "token_count": 2, "policy_version": 1}]],
         },
     ]
 
@@ -975,6 +1037,12 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
     assert work.request.student_selected_mask.tolist() == [[True, True, False, False, False, False, True, True]]
     assert work.request.student_topk_indices[0, 2:6].tolist() == [[-1, -1]] * 4
     assert np.isnan(work.request.behavior_topk_logprobs[0, 2:6].numpy()).all()
+    assert output["behavior_policy_version_segments"] == [
+        [
+            {"start": 0, "token_count": 2, "policy_version": 0},
+            {"start": 6, "token_count": 2, "policy_version": 1},
+        ]
+    ]
 
 
 @pytest.mark.asyncio
@@ -1000,12 +1068,14 @@ async def test_generate_non_batched_single_message_multiturn_aligns_rollout_logp
             "stop_reasons": ["stop"],
             "response_ids": [[10, 4]],
             "response_logprobs": [[-0.1, -0.2]],
+            "response_policy_version_segments": [[{"start": 0, "token_count": 2, "policy_version": 0}]],
         },
         {
             "responses": ["second"],
             "stop_reasons": ["stop"],
             "response_ids": [[20, 4]],
             "response_logprobs": [[-0.3, -0.4]],
+            "response_policy_version_segments": [[{"start": 0, "token_count": 2, "policy_version": 1}]],
         },
     ]
 
@@ -1026,6 +1096,12 @@ async def test_generate_non_batched_single_message_multiturn_aligns_rollout_logp
     assert output["response_ids"] == [[10, *MOCK_TOKENIZER_ENCODED_IDS, 20, 4]]
     assert output["loss_masks"] == [[1, 0, 0, 0, 0, 1, 1]]
     assert output["rollout_logprobs"] == [[-0.1, 0.0, 0.0, 0.0, 0.0, -0.3, -0.4]]
+    assert output["behavior_policy_version_segments"] == [
+        [
+            {"start": 0, "token_count": 1, "policy_version": 0},
+            {"start": 5, "token_count": 2, "policy_version": 1},
+        ]
+    ]
 
 
 @pytest.mark.asyncio
@@ -1059,6 +1135,7 @@ async def test_non_batched_postprocessed_action_discards_stale_logprobs(
 
     assert output["response_ids"] == [MOCK_TOKENIZER_ENCODED_IDS]
     assert output["rollout_logprobs"] is None
+    assert output.get("behavior_policy_version_segments") is None
 
 
 @pytest.mark.asyncio
@@ -1094,6 +1171,10 @@ async def test_non_batched_postprocessed_action_preserves_aligned_logprobs(
 
     assert output["response_ids"] == [MOCK_LLM_OUTPUT_IDS]
     assert output["rollout_logprobs"] == [[0.1] * len(MOCK_LLM_OUTPUT_IDS)]
+    assert output["first_token_policy_version"] == 0
+    assert output["behavior_policy_version_segments"] == [
+        [{"start": 0, "token_count": len(MOCK_LLM_OUTPUT_IDS), "policy_version": 0}]
+    ]
 
 
 @pytest.mark.asyncio
@@ -1871,7 +1952,8 @@ async def test_apply_overlong_filtering_batched(
         return_value={
             "responses": ["truncated response"],
             "stop_reasons": ["length"],
-            "response_ids": [[10, 11, 12, 13]],
+            "response_ids": [[10, 11, 12, 13, 14, 15]],
+            "response_policy_version_segments": [[{"start": 0, "token_count": 6, "policy_version": 2}]],
         }
     )
 
@@ -1909,15 +1991,12 @@ async def test_apply_overlong_filtering_batched(
 
     trajectory_batch = await trajectory_runner.run(input_batch)
 
-    # Verify that the loss mask is zeroed out for the response not ending with eos token
-    assert len(trajectory_batch["loss_masks"]) == 1
-    assert len(trajectory_batch["loss_masks"][0]) == 4  # Should match response length
-    assert trajectory_batch["loss_masks"][0] == [
-        0,
-        0,
-        0,
-        0,
-    ], "Loss mask should be all zeros for response not ending with eos token"
+    # The response is cut to the 5-token budget, masked out for not ending with eos, and its span cut with it.
+    assert trajectory_batch["response_ids"] == [[10, 11, 12, 13, 14]]
+    assert trajectory_batch["loss_masks"] == [[0, 0, 0, 0, 0]]
+    assert trajectory_batch["behavior_policy_version_segments"] == [
+        [{"start": 0, "token_count": 5, "policy_version": 2}]
+    ]
 
 
 @pytest.mark.asyncio
@@ -2005,6 +2084,75 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
     assert out.reward.optimization_reward == sum(expected_rewards)
     assert out.reward.token_rewards == tuple(expected_rewards)
     assert (out.evidence.stop_reason or "unknown") == "stop"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_single_message_multi_turn_drops_the_span_of_a_trimmed_eos(
+    mock_make, mock_tokenizer, mock_llm, mock_env_cfg
+):
+    mock_tokenizer.eos_token_id = 4
+    mock_tokenizer.apply_chat_template.side_effect = lambda messages, **kwargs: (
+        [101, 102] if kwargs.get("tokenize", True) else "".join(m.get("content", "") for m in messages)
+    )
+    mock_tokenizer.encode.side_effect = lambda text, **kwargs: [77] if text else []
+    versions = iter([2, 3])
+
+    async def llm_generate_side_effect(input_batch):
+        version = next(versions)
+        return {
+            "responses": ["aaa"],
+            "stop_reasons": ["stop"],
+            "response_logprobs": None,
+            "response_ids": [[10, 11, 12, mock_tokenizer.eos_token_id]],
+            "response_policy_version_segments": [[{"start": 0, "token_count": 4, "policy_version": version}]],
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
+
+    class TwoStepEnv(BaseTextEnv):
+        def __init__(self):
+            super().__init__()
+            self.turns = 0
+
+        def init(self, prompt):
+            return prompt, {}
+
+        def step(self, action):
+            self.turns += 1
+            if self.turns == 1:
+                return BaseTextEnvStepOutput(
+                    observations=[{"role": "user", "content": "obs1"}], reward=0.0, done=False, metadata={}
+                )
+            return BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+
+    mock_make.return_value = TwoStepEnv()
+    cfg = MagicMock()
+    cfg.sampling_params.max_generate_length = 50
+    cfg.sampling_params.logprobs = None
+    cfg.apply_overlong_filtering = False
+    cfg.max_input_length = 512
+    cfg.batched = False
+    cfg.max_turns = 10
+    cfg.use_conversation_multi_turn = False
+    cfg.chat_template = {"source": "name", "name_or_path": None}
+    trajectory_runner = SkyRLGymTrajectoryRunner(
+        trajectory_runner_cfg=cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+
+    out = await trajectory_runner.agent_loop(
+        [{"role": "user", "content": "Q?"}], mock_env_cfg.env_class, {}, max_tokens=50, max_input_length=512
+    )
+
+    # step 1 without its trimmed eos (3) + observation (1) + step 2 with its final eos (4)
+    assert list(out.evidence.response_token_ids) == [10, 11, 12, 77, 10, 11, 12, 4]
+    assert out.behavior_policy_version_segments == (
+        {"start": 0, "token_count": 3, "policy_version": 2},
+        {"start": 4, "token_count": 4, "policy_version": 3},
+    )
 
 
 @pytest.mark.asyncio

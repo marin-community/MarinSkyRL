@@ -17,6 +17,7 @@ import base64
 import binascii
 import copy
 import json
+import logging
 import math
 import os
 from dataclasses import dataclass, field, replace
@@ -35,6 +36,8 @@ from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 from marinskyrl.remote_io import filesystem_and_path, open_output_stream
 
+logger = logging.getLogger(__name__)
+
 # Directory containing the bundled example RL config YAML files.
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
 RL_CONFIG_TASK_DIR = "/tmp/marin-rl-configs"
@@ -47,30 +50,47 @@ class RLEntrypoint(StrEnum):
     FULLY_ASYNC = "fully_async"
     GENERATE = "generate"
     MINI_SWE = "mini_swe"
-    STANDARD = "standard"
+    SYNC = "sync"
     TERMINAL_BENCH = "terminal_bench"
     TERMINAL_BENCH_GENERATE = "terminal_bench_generate"
+
+
+# The synchronous loop's former name, accepted with a warning.
+DEPRECATED_ENTRYPOINT_NAMES = {"standard": RLEntrypoint.SYNC}
 
 
 RL_ENTRYPOINT_MODULES = {
     RLEntrypoint.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async",
     RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
     RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
-    RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
+    RLEntrypoint.SYNC: STANDARD_TRAINING_ENTRYPOINT,
     RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
     RLEntrypoint.TERMINAL_BENCH_GENERATE: "skyrl_train.entrypoints.terminal_bench_generate",
 }
 
+# Modules that run a training loop; the launcher's --entrypoint may not swap one of these for another.
+TRAINING_LOOP_ENTRYPOINT_MODULES = frozenset(
+    RL_ENTRYPOINT_MODULES[entrypoint]
+    for entrypoint in (RLEntrypoint.SYNC, RLEntrypoint.FULLY_ASYNC, RLEntrypoint.TERMINAL_BENCH, RLEntrypoint.MINI_SWE)
+)
+
 
 def parse_rl_entrypoint(value: str | None, *, config_path: Path) -> RLEntrypoint:
-    """Parse one supported RL execution mode name; an absent name is the standard entrypoint."""
-    name = RLEntrypoint.STANDARD if value is None else value
+    """Name the execution mode a config selects; absent means the synchronous loop."""
+    if value is None:
+        return RLEntrypoint.SYNC
+    if value in DEPRECATED_ENTRYPOINT_NAMES:
+        replacement = DEPRECATED_ENTRYPOINT_NAMES[value]
+        logger.warning(
+            "%s: entrypoint %r is the old name for %r; update the config", config_path, value, replacement.value
+        )
+        return replacement
     try:
-        return RLEntrypoint(name)
+        return RLEntrypoint(value)
     except ValueError as error:
         choices = ", ".join(item.value for item in RLEntrypoint)
         raise ValueError(
-            f"{config_path}: entrypoint must be a registered name ({choices}); got {name!r}. "
+            f"{config_path}: entrypoint must be a registered name ({choices}); got {value!r}. "
             "Python module paths are not accepted in RL configs."
         ) from error
 
@@ -610,6 +630,20 @@ def materialize_rl_config(
     return str(destination)
 
 
+def inert_fully_async_settings(raw: Dict[str, Any], entrypoint: RLEntrypoint) -> tuple[str, ...]:
+    """Return the trainer.fully_async keys a config sets although its trainer never reads them.
+
+    Reads the YAML before launcher overrides, so it reports on the config as written.
+    """
+    if training_loop_for_entrypoint(entrypoint, raw) is TrainingLoop.ASYNC:
+        return ()
+    trainer = raw.get("trainer")
+    fully_async = trainer.get("fully_async") if isinstance(trainer, dict) else None
+    if not isinstance(fully_async, dict):
+        return ()
+    return tuple(f"trainer.fully_async.{key}" for key in fully_async)
+
+
 def parse_rl_config(
     config_path: str,
     model_override: Optional[str] = None,
@@ -628,7 +662,16 @@ def parse_rl_config(
     distillation_plan = compile_distillation_plan(raw)
     context_budget = resolve_context_budget(raw, path)
 
-    entrypoint = resolve_rl_entrypoint(raw.get("entrypoint"), config_path=path)
+    entrypoint_kind = parse_rl_entrypoint(raw.get("entrypoint"), config_path=path)
+    entrypoint = RL_ENTRYPOINT_MODULES[entrypoint_kind]
+    inert_settings = inert_fully_async_settings(raw, entrypoint_kind)
+    if inert_settings:
+        logger.warning(
+            "%s: entrypoint %s never runs the fully async trainer and never reads %s",
+            path,
+            entrypoint_kind.value,
+            ", ".join(inert_settings),
+        )
     config_groups = raw.get("config_groups", {})
     trainer, generator, terminal_bench, materialized_raw = _materialize_context_budget(raw, context_budget)
     data = dict(raw.get("data", {}))

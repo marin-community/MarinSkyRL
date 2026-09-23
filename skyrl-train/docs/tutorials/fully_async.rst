@@ -99,6 +99,11 @@ Following ``examples/fully_async/async_run_gsm8k.sh``, select the packaged entry
     uv run --isolated --extra vllm -m skyrl_train.entrypoints.fully_async \
     ...
 
+The RL config's ``entrypoint`` key names the training loop: ``sync`` (the synchronous loop; ``standard`` is its old
+name and still accepted) or ``fully_async``. A launcher ``--entrypoint`` naming a different training loop fails, and
+``trainer.fully_async`` settings in a config that does not run the fully async trainer are reported as inert when the
+config is parsed.
+
 For fully async specifically, the following are the main knobs to tune:
 
 - ``trainer.policy_mini_batch_size``: The mini-batch size for policy training. The trainer triggers a training step whenever the generation workers have generated this many groups of trajectories.
@@ -109,6 +114,31 @@ For fully async specifically, the following are the main knobs to tune:
   each worker works on a group of trajectories. It should be ``>= trainer.policy_mini_batch_size`` to avoid wasted throughput, 
   and ``<= trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)`` since it would be wasted due to capacity control.
   The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
+- ``trainer.fully_async.pause_mode``: What the engines do with requests still generating when the weights are
+  reloaded. ``abort`` (the default) cancels them; the client then resubmits each prompt with the tokens it already
+  generated, so the answer continues under the new weights after one prefill. ``keep`` freezes them in the scheduler
+  and resumes them with the cache the old weights built, saving the prefill. Either way one answer can mix policy
+  versions, which the recorded engine logprobs make visible to the ratio diagnostics.
+- ``trainer.fully_async.clear_kv_cache_on_weight_sync``: Drop the engines' KV/prefix cache at the pause so nothing
+  computed by the old weights is reused (default ``true``); ``false`` keeps it across the resume.
+- ``trainer.fully_async.first_token_admission``: Where a group's staleness is counted from. ``false`` (the default)
+  counts from the trainer's step at submission, which can be earlier than the version that sampled the group when a
+  request waited in the engine's queue across a weight sync. ``true`` counts from the oldest policy version that
+  sampled any of the group's tokens, plus one. The engines stamp every sampled span with the version they had
+  installed, so a span sampled after a weight sync carries the newer one. On the OpenAI chat route the
+  client stamps each attempt with the version installed when it was sent, never newer than the version that sampled
+  it; other engines carry no version, and a run sampling through them fails at its first admission with this on.
+- ``trainer.fully_async.max_buffered_groups``: How many finished groups the completed buffer holds before a
+  generation worker waits with its finished group in hand. ``null`` (the default) means one slot per generation
+  worker, so no worker ever waits. A finished group's staleness grows the same whether it waits in the buffer or in
+  its worker. Set it to ``trainer.policy_mini_batch_size`` to keep exactly one update's cohort ready and bound the
+  head-node backlog to that cohort.
+- ``generator.weight_sync_transport``: How each weight sync reaches the engines. ``auto`` (the default) picks
+  ``expert_block``, which sends each MoE expert matrix from a Megatron rank that holds it to the vLLM workers that
+  serve it, when the run qualifies: this trainer, a Grug MoE on the megatron strategy at TP=1 and ETP=1, local vLLM
+  engines at TP=1 with EP=DP>1, ``weight_sync_backend: nccl``, ``engine_init_kwargs.moe_backend: triton`` and a policy
+  ``config.json`` that can be read. Otherwise it picks ``broadcast`` and the startup log names the
+  unmet requirements. An explicit ``expert_block`` fails at startup when a requirement is unmet.
 - ``trainer.algorithm.group_admission.stall_timeout``: An optional maximum number of seconds without newly admitted groups while
   assembling a training batch. The same progress watchdog applies to synchronous and fully asynchronous entrypoints. The null
   default allows 30 minutes before any step timing exists, then adapts to ``max(5 * recent median step time, 10 minutes)``. Set a
