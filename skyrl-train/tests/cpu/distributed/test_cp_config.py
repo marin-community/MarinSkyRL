@@ -122,6 +122,8 @@ ADDITIVE_MODEL_FIELDS = {
     "source_uri": None,
     "source_identity": None,
     "revision": None,
+    "tokenizer_path": None,
+    "tokenizer_revision": None,
 }
 ADDITIVE_POLICY_LORA_FIELDS = {
     "adapter_path": None,

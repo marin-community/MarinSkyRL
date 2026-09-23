@@ -101,13 +101,19 @@ class MegatronWorker:
         flash_attn=False,
         model_revision: str | None = None,
         model_source_uri: str | None = None,
+        tokenizer_path: str | None = None,
+        tokenizer_revision: str | None = None,
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
         """
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
         validate_grug_training_strategy(getattr(hf_config, "model_type", None), "megatron")
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_path or model_path,
+            trust_remote_code=True,
+            revision=tokenizer_revision if tokenizer_path else model_revision,
+        )
 
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
@@ -401,6 +407,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             flash_attn=self.cfg.trainer.flash_attn,
             model_revision=self.cfg.trainer.policy.model.get("revision"),
             model_source_uri=self.cfg.trainer.policy.model.get("source_uri"),
+            tokenizer_path=self.cfg.trainer.policy.model.get("tokenizer_path"),
+            tokenizer_revision=self.cfg.trainer.policy.model.get("tokenizer_revision"),
         )
 
         self.actor_module = self.make_megatron_module(
@@ -832,6 +840,8 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             flash_attn=self.cfg.trainer.flash_attn,
             model_revision=self.cfg.trainer.ref.model.get("revision"),
             model_source_uri=self.cfg.trainer.ref.model.get("source_uri"),
+            tokenizer_path=self.cfg.trainer.ref.model.get("tokenizer_path"),
+            tokenizer_revision=self.cfg.trainer.ref.model.get("tokenizer_revision"),
         )
 
         self.actor_module = self.make_megatron_module(

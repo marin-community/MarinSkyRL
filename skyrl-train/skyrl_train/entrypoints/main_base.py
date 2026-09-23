@@ -145,6 +145,7 @@ def create_ray_wrapped_inference_engines_from_config(
         **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
         "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
     }
+    engine_init_kwargs["tokenizer"] = cfg.trainer.policy.model.tokenizer_path
     policy_source_uri = cfg.trainer.policy.model.get("source_uri")
     rollout_model_path = runai_model_uri(policy_source_uri) if policy_source_uri else cfg.trainer.policy.model.path
     if policy_source_uri is not None:
@@ -325,10 +326,10 @@ class BasePPOExp:
         from skyrl_train.tokenizer import create_tokenizer  # noqa: PLC0415
 
         return create_tokenizer(
-            model_path=self.cfg.trainer.policy.model.path,
+            model_path=self.cfg.trainer.policy.model.tokenizer_path,
             disable_fast_tokenizer=self.cfg.trainer.disable_fast_tokenizer,
             padding_side=padding_side,
-            revision=self.cfg.trainer.policy.model.get("revision"),
+            revision=self.cfg.trainer.policy.model.get("tokenizer_revision"),
         )
 
     def get_train_dataset(self):
