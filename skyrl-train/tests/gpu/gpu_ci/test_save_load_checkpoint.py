@@ -15,9 +15,12 @@ import shutil
 import json
 import pickle
 import fsspec
+from datetime import timedelta
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 from torch.distributed import checkpoint
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 from skyrl_train.utils.utils import print_mem
 from tests.gpu.utils import init_worker_with_type, make_dummy_experience, get_model_logits_from_actor, validate_cfg
@@ -67,6 +70,59 @@ def test_megatron_plan_cache_reuses_stable_schema_and_refreshes_changed_dtype(tm
             torch.testing.assert_close(restored["tensor"], state["tensor"], atol=0, rtol=0)
     finally:
         invalidate_checkpoint_plan_cache(cache_key)
+
+
+def _run_megatron_plan_cache_rank(rank: int, checkpoint_root: str, rendezvous_file: str) -> None:
+    from skyrl_train.distributed.megatron.direct_checkpoint import (
+        _SchemaGuardedMCoreSavePlanner,
+        invalidate_checkpoint_plan_cache,
+    )
+    from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
+
+    class ObservedPlanner(_SchemaGuardedMCoreSavePlanner):
+        def create_local_plan(self):
+            plan = super().create_local_plan()
+            self.local_plan_usable = plan.usable
+            return plan
+
+    dist.init_process_group(
+        "gloo", init_method=f"file://{rendezvous_file}", rank=rank, world_size=2, timeout=timedelta(seconds=60)
+    )
+    cache_key = f"two-rank-{checkpoint_root}"
+    try:
+        for step in (1, 2, 3, 4):
+            dtype = torch.float16 if rank == 1 and step == 3 else torch.float32
+            state = {f"rank_{rank}": torch.arange(6, dtype=dtype).reshape(2, 3) + step + rank}
+            path = os.path.join(checkpoint_root, f"step-{step}")
+            planner = ObservedPlanner(
+                cache_key=cache_key,
+                dedup_replicated_tensors=False,
+                flatten_state_dict=False,
+                flatten_sharded_tensors=False,
+            )
+            writer = StreamingFsspecWriter(path, filesystem=fsspec.filesystem("file"))
+            checkpoint.save(state, storage_writer=writer, planner=planner)
+
+            assert planner.local_plan_usable == (step == 1 or (rank == 1 and step >= 3))
+            if rank == 0:
+                with open(os.path.join(path, ".metadata"), "rb") as source:
+                    metadata = pickle.load(source)
+                assert metadata.state_dict_metadata["rank_0"].properties.dtype == torch.float32
+                assert metadata.state_dict_metadata["rank_1"].properties.dtype == (
+                    torch.float16 if step == 3 else torch.float32
+                )
+
+            restored = {f"rank_{rank}": torch.zeros_like(state[f"rank_{rank}"])}
+            checkpoint.load(restored, checkpoint_id=path)
+            torch.testing.assert_close(restored[f"rank_{rank}"], state[f"rank_{rank}"], atol=0, rtol=0)
+    finally:
+        invalidate_checkpoint_plan_cache(cache_key)
+        dist.destroy_process_group()
+
+
+@pytest.mark.megatron
+def test_megatron_plan_cache_refreshes_one_changed_rank_without_stale_metadata(tmp_path):
+    mp.spawn(_run_megatron_plan_cache_rank, args=(str(tmp_path), str(tmp_path / "rendezvous")), nprocs=2)
 
 
 def run_one_training_step(
