@@ -16,6 +16,7 @@ import json
 import pickle
 import fsspec
 from datetime import timedelta
+from pathlib import Path
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 from torch.distributed import checkpoint
@@ -123,6 +124,44 @@ def _run_megatron_plan_cache_rank(rank: int, checkpoint_root: str, rendezvous_fi
 @pytest.mark.megatron
 def test_megatron_plan_cache_refreshes_one_changed_rank_without_stale_metadata(tmp_path):
     mp.spawn(_run_megatron_plan_cache_rank, args=(str(tmp_path), str(tmp_path / "rendezvous")), nprocs=2)
+
+
+@pytest.mark.megatron
+def test_megatron_direct_save_failure_invalidates_every_plan_cache(monkeypatch):
+    from torch.distributed.checkpoint.planner import SavePlanner
+    from skyrl_train.distributed.megatron import direct_checkpoint
+
+    cache_key = "failed-direct-save"
+    caches = (
+        SavePlanner._cached_save_plan,
+        SavePlanner._cached_all_plans,
+        SavePlanner._cached_global_plan,
+        SavePlanner._cached_metadata,
+        SavePlanner._cached_final_save_plan,
+    )
+    for cache in caches:
+        cache[cache_key] = object()
+
+    monkeypatch.setattr(direct_checkpoint.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(
+        direct_checkpoint, "_replace_state_dict_keys_with_sharded_keys", lambda state, _: (state, {}, {})
+    )
+    monkeypatch.setattr(direct_checkpoint, "mcore_to_pyt_state_dict", lambda state, _: state)
+    monkeypatch.setattr(direct_checkpoint, "get_s3_fs", lambda: object())
+    monkeypatch.setattr(direct_checkpoint, "s3_refresh_if_expiring", lambda _: None)
+    monkeypatch.setattr(direct_checkpoint, "StreamingFsspecWriter", lambda *args, **kwargs: object())
+
+    def fail_after_planning(state, *, storage_writer, planner):
+        assert isinstance(planner, direct_checkpoint._SchemaGuardedMCoreSavePlanner)
+        raise RuntimeError("injected checkpoint write failure")
+
+    monkeypatch.setattr(direct_checkpoint.checkpoint, "save", fail_after_planning)
+    strategy = direct_checkpoint.DirectS3TorchDistSaveShardedStrategy(
+        "s3://unit-test/global_step_2/policy", plan_cache_key=cache_key
+    )
+    with pytest.raises(RuntimeError, match="injected checkpoint write failure"):
+        strategy.save({"tensor": torch.ones(1)}, Path("."))
+    assert all(cache_key not in cache for cache in caches)
 
 
 def run_one_training_step(
