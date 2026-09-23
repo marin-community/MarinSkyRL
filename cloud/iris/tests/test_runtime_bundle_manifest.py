@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
@@ -27,3 +28,24 @@ def test_every_marinskyrl_module_is_in_the_runtime_bundle() -> None:
         f"modules under marinskyrl/ not shipped to Iris tasks: {sorted(missing)}. "
         f"Add them to {BUNDLE_FILE_MANIFEST} or add an explicit exclusion in this test."
     )
+
+
+def test_bundled_iris_modules_include_local_imports() -> None:
+    """A task must be able to import its bundled Iris entrypoints in isolation."""
+    manifest = set(read_manifest_paths(_REPOSITORY_ROOT))
+    missing: set[tuple[str, str]] = set()
+    for path in manifest:
+        if not path.startswith("cloud/iris/") or not path.endswith(".py"):
+            continue
+        tree = ast.parse((_REPOSITORY_ROOT / path).read_text())
+        for node in ast.walk(tree):
+            modules: list[str] = []
+            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("cloud.iris"):
+                modules = [node.module, *(f"{node.module}.{name.name}" for name in node.names)]
+            elif isinstance(node, ast.Import):
+                modules = [name.name for name in node.names if name.name.startswith("cloud.iris")]
+            for module in modules:
+                imported = f"{module.replace('.', '/')}.py"
+                if (_REPOSITORY_ROOT / imported).is_file() and imported not in manifest:
+                    missing.add((path, imported))
+    assert not missing, f"bundled cloud.iris modules import unbundled local modules: {sorted(missing)}"
