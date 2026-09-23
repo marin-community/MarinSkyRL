@@ -64,6 +64,24 @@ def test_delphi_config_composes_environment_and_caps_into_hydra_config():
     assert "model_num_attention_heads" not in cfg
 
 
+def test_launch_without_hub_destination_does_not_publish():
+    parsed = parse_rl_config(_CONFIG)
+
+    cfg = compose_skyrl_config(
+        parsed,
+        {
+            "job_name": "artifact-only-run",
+            "export_hf_artifact": True,
+            "hf_hub_repo_id": None,
+            "num_nodes": 4,
+        },
+        _HPCStub(),
+    ).config
+
+    assert cfg.trainer.export_hf_artifact is True
+    assert cfg.trainer.get("hf_hub_repo_id") is None
+
+
 def test_iris_derives_durable_training_trajectory_path():
     parsed = parse_rl_config(_CONFIG)
     cfg = compose_skyrl_config(

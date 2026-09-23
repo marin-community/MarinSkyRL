@@ -156,10 +156,12 @@ def test_hf_export_interval_must_be_checkpoint_aligned():
 
 
 @pytest.mark.parametrize(
-    ("repo_id", "expected_export"),
-    [(None, False), ("org/exported-model", True)],
+    ("repo_id", "export_hf_artifact", "expected_export"),
+    [(None, False, False), (None, True, True), ("org/exported-model", False, True)],
 )
-def test_hf_export_interval_requires_an_explicit_repository(repo_id, expected_export):
+def test_hf_export_interval_requires_an_artifact_or_repository_destination(
+    repo_id, export_hf_artifact, expected_export
+):
     cfg = OmegaConf.create(
         {
             "trainer": {
@@ -167,6 +169,7 @@ def test_hf_export_interval_requires_an_explicit_repository(repo_id, expected_ex
                 "eval_interval": -1,
                 "hf_save_interval": 5,
                 "hf_hub_repo_id": repo_id,
+                "export_hf_artifact": export_hf_artifact,
                 "enable_db_registration": False,
             },
             "generator": {},
@@ -178,6 +181,28 @@ def test_hf_export_interval_requires_an_explicit_repository(repo_id, expected_ex
     control = handler.call_event("on_step_end", state, TrainerControl())
 
     assert control.should_save_hf_model is expected_export
+
+
+def test_pending_export_request_refreshes_publication_settings(tmp_path):
+    checkpoint = _queue_export(tmp_path)
+    existing = read_hf_export_request(str(checkpoint))
+    assert existing is not None
+    write_hf_export_request(existing.with_status(HFExportStatus.PENDING, last_exit_code=1, increment_attempts=True))
+
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = _trainer_config(tmp_path)
+    trainer.cfg.trainer.hf_hub_repo_id = None
+    trainer.cfg.trainer.export_hf_artifact = True
+    trainer.all_timings = {}
+    trainer.global_step = 10
+    trainer.handle_hf_export()
+
+    refreshed = read_hf_export_request(str(checkpoint))
+    assert refreshed is not None
+    assert refreshed.status is HFExportStatus.PENDING
+    assert refreshed.hf_hub_repo_id is None
+    assert refreshed.attempts == 1
+    assert refreshed.last_exit_code == 1
 
 
 def test_disabled_hf_export_does_not_require_checkpoint_alignment():

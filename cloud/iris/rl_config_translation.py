@@ -805,7 +805,9 @@ def _skyrl_config_sections(
     if model_path:
         generator.setdefault("engine_init_kwargs", {})["served_model_name"] = model_path.rsplit("/", 1)[-1]
 
-    hf_hub_repo_id = exp_args.get("hf_hub_repo_id") or (f"laion/{job_name}" if job_name else None)
+    hf_hub_repo_id = exp_args.get("hf_hub_repo_id")
+    if exp_args.get("export_hf_artifact") is not None:
+        trainer["export_hf_artifact"] = bool(exp_args["export_hf_artifact"])
     if hf_hub_repo_id:
         trainer["hf_hub_repo_id"] = hf_hub_repo_id
     if exp_args.get("hf_hub_private", False):
