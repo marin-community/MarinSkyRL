@@ -78,6 +78,7 @@ VLLM_USE_V2_MODEL_RUNNER_ENV = "VLLM_USE_V2_MODEL_RUNNER"
 VLLM_USE_DEEP_GEMM_ENV = "VLLM_USE_DEEP_GEMM"
 VLLM_BATCH_INVARIANT_ENV = "VLLM_BATCH_INVARIANT"
 VLLM_ALLOW_INSECURE_SERIALIZATION_ENV = "VLLM_ALLOW_INSECURE_SERIALIZATION"
+RUNAI_STREAMER_PARTITION_POLICY_ENV = "RUNAI_STREAMER_PARTITION_POLICY"
 WANDB_ENTITY_ENV = "WANDB_ENTITY"
 HF_HUB_OFFLINE_ENV = "HF_HUB_OFFLINE"
 TRANSFORMERS_OFFLINE_ENV = "TRANSFORMERS_OFFLINE"
@@ -160,6 +161,12 @@ ENV_VAR_SPECS = (
     EnvVarSpec(
         VLLM_ALLOW_INSECURE_SERIALIZATION_ENV,
         "generator.fuse_weights",
+        EnvVarSource.CONFIG,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
+    ),
+    EnvVarSpec(
+        RUNAI_STREAMER_PARTITION_POLICY_ENV,
+        "generator.runai_streamer_partition_policy",
         EnvVarSource.CONFIG,
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
     ),
@@ -456,6 +463,12 @@ class EnvVarManager:
             values[VLLM_BATCH_INVARIANT_ENV] = "1"
         if _config_value(config, "generator.fuse_weights", False):
             values[VLLM_ALLOW_INSECURE_SERIALIZATION_ENV] = "1"
+        partition_policy = str(_config_value(config, "generator.runai_streamer_partition_policy", "files"))
+        if partition_policy not in {"chunks", "files"}:
+            raise ValueError(
+                f"generator.runai_streamer_partition_policy must be 'chunks' or 'files'; got {partition_policy!r}"
+            )
+        values[RUNAI_STREAMER_PARTITION_POLICY_ENV] = partition_policy
         if _config_value(config, "trainer.placement.enable_numa_affinity", False):
             values[NUMA_AFFINITY_ENV] = "1"
         phase_diagnostics = _config_value(config, "trainer.collective_phase_diagnostics")
