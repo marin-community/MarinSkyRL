@@ -61,3 +61,20 @@ def test_cleanup_runs_driver_side_after_fanout_failure(tmp_path):
 
     remaining = sorted(p.name for p in tmp_path.iterdir())
     assert remaining == ["global_step_3"], "driver-side cleanup should keep only the newest checkpoint"
+
+
+def test_cloud_cleanup_runs_once_on_driver_without_node_leases():
+    checkpoint_root = "s3://bucket/checkpoints"
+    trainer = _make_bare_trainer(max_ckpts_to_keep=2, ckpt_path=checkpoint_root, node_ids=[])
+
+    with (
+        patch("skyrl_train.trainer.protected_hf_export_steps", return_value={3}),
+        patch("skyrl_train.trainer.get_node_ids") as mock_node_ids,
+        patch("skyrl_train.trainer.run_on_each_node") as mock_dispatch,
+        patch("skyrl_train.trainer.cleanup_old_checkpoints") as mock_cleanup,
+    ):
+        trainer._cleanup_old_checkpoints()
+
+    mock_node_ids.assert_not_called()
+    mock_dispatch.assert_not_called()
+    mock_cleanup.assert_called_once_with(checkpoint_root, 2, {3})

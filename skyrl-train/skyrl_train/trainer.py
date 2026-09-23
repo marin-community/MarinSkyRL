@@ -2692,23 +2692,22 @@ class RayPPOTrainer:
 
         protected_steps = protected_hf_export_steps(self.cfg.trainer.ckpt_path)
 
-        if not self._node_ids:
-            self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)
-        try:
-            run_on_each_node(
-                self._node_ids,
-                cleanup_old_checkpoints,
-                self.cfg.trainer.ckpt_path,
-                max_ckpts,
-                protected_steps,
-            )
-        except ray.exceptions.RayError as e:
-            # Best-effort: cleanup runs only after a successful checkpoint save,
-            # so any per-node dispatch failure -- worker lease failure, worker or
-            # node death, or a failure raised inside the remote task -- is logged
-            # rather than propagated. The checkpoint is already on disk; cleanup
-            # must not kill the run.
-            logger.warning(f"Per-node checkpoint cleanup failed, continuing: {e}")
+        # Cloud prefixes are shared by every node. Running the same listing and
+        # deletes on each node just multiplies object-store traffic and Ray leases.
+        if not io.is_cloud_path(self.cfg.trainer.ckpt_path):
+            if not self._node_ids:
+                self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)
+            try:
+                run_on_each_node(
+                    self._node_ids,
+                    cleanup_old_checkpoints,
+                    self.cfg.trainer.ckpt_path,
+                    max_ckpts,
+                    protected_steps,
+                )
+            except ray.exceptions.RayError as e:
+                # A node-local cleanup failure must not kill an already saved run.
+                logger.warning(f"Per-node checkpoint cleanup failed, continuing: {e}")
 
         # Driver-side cleanup. For a shared ckpt_path (GPFS, S3) this alone
         # suffices; the per-node fan-out above only matters for node-local dirs.
