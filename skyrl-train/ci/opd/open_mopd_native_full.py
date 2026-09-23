@@ -4,6 +4,13 @@ The prompt schedule is staged locally after a digest check. Full optimizer
 checkpoints are written directly to durable object storage every two steps;
 unlike the ordinary Iris resume policy, this run must retain every step for
 independent target evaluation.
+
+``--schedule sync`` (default) runs the synchronous trainer: 200 rollout batches of
+1,024 prompts, four 256-prompt optimizer updates each. ``--schedule fully_async``
+runs ``FullyAsyncRayPPOTrainer`` through ``skyrl_train.entrypoints.fully_async_in_process``
+with the same 256-prompt updates and the same checkpoint, export, and evaluation
+cadence per prompt, so async optimizer step 8 corresponds to sync step 2. The design
+is ``docs/design/open-mopd-step-pipelining.md`` (marin-community/MarinSkyRL#707).
 """
 
 from __future__ import annotations
@@ -14,6 +21,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from enum import StrEnum
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -21,6 +29,7 @@ from skyrl_train.io import io
 
 from cloud.iris.artifacts import fs_and_path
 from cloud.iris.open_mopd_fidelity import load_config
+from cloud.iris.rl_config_translation import RL_ENTRYPOINT_MODULES, RLEntrypoint
 from marinskyrl.checkpoint_paths import LATEST_CHECKPOINT_FILE
 from marinskyrl.resource_locator import join_resource_path
 
@@ -31,10 +40,33 @@ SCHEDULE_ROWS = 204_800
 SCHEDULE_STEPS = 200
 POLICY_GPUS = 4
 CHECKPOINT_INTERVAL = load_config(FIDELITY_CONFIG).training.save_every
+# Rollouts may come from a policy at most this many optimizer updates behind the learner. This
+# bounds policy age only. The distillation objectives take the learner's pre-update logprobs as
+# the behavior term and never see the rollout engine's logprobs (reward_mode=replace also skips
+# the TIS-capable policy loss); the surrogate's dual clip acts on the learner-vs-learner ratio, so
+# drift between a stale rollout and the learner is neither corrected nor clipped.
+FULLY_ASYNC_MAX_STALENESS_STEPS = 1
+
+
+class Schedule(StrEnum):
+    SYNC = "sync"
+    FULLY_ASYNC = "fully_async"
+
+
+ENTRYPOINT_MODULES = {
+    Schedule.SYNC: RL_ENTRYPOINT_MODULES[RLEntrypoint.STANDARD],
+    Schedule.FULLY_ASYNC: RL_ENTRYPOINT_MODULES[RLEntrypoint.FULLY_ASYNC_IN_PROCESS],
+}
 
 
 def hydra_arguments(
-    data_path: Path, validation_path: Path, checkpoint_uri: str, export_uri: str, *, resume: bool = False
+    data_path: Path,
+    validation_path: Path,
+    checkpoint_uri: str,
+    export_uri: str,
+    *,
+    resume: bool = False,
+    schedule: Schedule = Schedule.SYNC,
 ) -> tuple[str, ...]:
     config = load_config(FIDELITY_CONFIG)
     training = config.training
@@ -137,7 +169,38 @@ def hydra_arguments(
             )
         )
     args.append("++teacher_routing.opd.revision=open-mopd-native-200step-v1")
+    if schedule is Schedule.FULLY_ASYNC:
+        return _replace_overrides(args, _fully_async_overrides(training))
     return tuple(args)
+
+
+def _fully_async_overrides(training) -> tuple[str, ...]:
+    """Overrides that keep the per-prompt cadence of the synchronous run under the async trainer.
+
+    The fully asynchronous trainer requires ``train_batch_size == policy_mini_batch_size``
+    and counts one optimizer update per ``global_step``, so the 200 synchronous steps of
+    four updates each become 800 steps of one update and every interval scales by four.
+    """
+    updates_per_rollout_batch = training.train_batch_size // training.mini_batch_size
+    interval = CHECKPOINT_INTERVAL * updates_per_rollout_batch
+    return (
+        f"trainer.train_batch_size={training.mini_batch_size}",
+        f"trainer.max_steps={SCHEDULE_STEPS * updates_per_rollout_batch}",
+        f"trainer.ckpt_interval={interval}",
+        f"trainer.hf_save_interval={interval}",
+        f"trainer.eval_interval={interval}",
+        "generator.batched=false",
+        f"trainer.fully_async.max_staleness_steps={FULLY_ASYNC_MAX_STALENESS_STEPS}",
+        f"trainer.fully_async.num_parallel_generation_workers="
+        f"{training.mini_batch_size * (FULLY_ASYNC_MAX_STALENESS_STEPS + 1)}",
+    )
+
+
+def _replace_overrides(base: list[str], replacements: tuple[str, ...]) -> tuple[str, ...]:
+    """Append ``replacements``, dropping any base override for the same key so no key repeats."""
+    replaced_keys = {override.split("=", 1)[0].lstrip("+") for override in replacements}
+    kept = [override for override in base if override.split("=", 1)[0].lstrip("+") not in replaced_keys]
+    return (*kept, *replacements)
 
 
 def stage_schedule(source_uri: str, destination: Path) -> None:
@@ -174,12 +237,14 @@ def run(
     source_commit: str,
     *,
     resume: bool = False,
+    schedule: Schedule = Schedule.SYNC,
 ) -> int:
     if any(not uri.startswith("s3://") or "/users/" not in uri for uri in (checkpoint_uri, export_uri, manifest_uri)):
         raise ValueError("Native artifacts require durable user-owned s3:// paths")
     filesystem, manifest_path = fs_and_path(manifest_uri)
     identity = {
         "source_commit": source_commit,
+        "schedule": str(schedule),
         "dataset_uri": dataset_uri,
         "dataset_sha256": SCHEDULE_SHA256,
         "validation_uri": validation_uri,
@@ -204,15 +269,15 @@ def run(
         if not marker_fs.exists(marker_path):
             raise FileNotFoundError(f"Open-MOPD resume has no durable checkpoint marker: {checkpoint_uri}")
     with tempfile.TemporaryDirectory(prefix="open-mopd-native-") as directory:
-        schedule = Path(directory) / "weighted_200step_schedule.parquet"
+        schedule_path = Path(directory) / "weighted_200step_schedule.parquet"
         validation = Path(directory) / "aime24.parquet"
-        stage_schedule(dataset_uri, schedule)
+        stage_schedule(dataset_uri, schedule_path)
         stage_validation(validation_uri, validation, validation_sha256)
         command = [
             sys.executable,
             "-m",
-            "skyrl_train.entrypoints.main_base",
-            *hydra_arguments(schedule, validation, checkpoint_uri, export_uri, resume=resume),
+            ENTRYPOINT_MODULES[schedule],
+            *hydra_arguments(schedule_path, validation, checkpoint_uri, export_uri, resume=resume, schedule=schedule),
         ]
         manifest = {
             "schema_version": 1,
@@ -238,19 +303,22 @@ def main() -> int:
     parser.add_argument("--manifest-uri", required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--schedule", type=Schedule, choices=tuple(Schedule), default=Schedule.SYNC)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.dry_run:
         print(
             json.dumps(
                 {
+                    "entrypoint": ENTRYPOINT_MODULES[args.schedule],
                     "hydra_arguments": hydra_arguments(
                         Path("/data/schedule.parquet"),
                         Path("/data/aime24.parquet"),
                         args.checkpoint_uri,
                         args.export_uri,
                         resume=args.resume,
-                    )
+                        schedule=args.schedule,
+                    ),
                 },
                 indent=2,
             )
@@ -265,6 +333,7 @@ def main() -> int:
         args.manifest_uri,
         args.source_commit,
         resume=args.resume,
+        schedule=args.schedule,
     )
 
 
