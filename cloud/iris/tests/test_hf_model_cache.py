@@ -10,6 +10,7 @@ from safetensors.numpy import save_file
 from cloud.iris import hf_model_cache
 from cloud.iris.hf_model_cache import (
     ensure_hugging_face_model_cache,
+    stage_artifact_model,
     stage_artifact_model_metadata,
     stage_model_metadata,
 )
@@ -98,6 +99,22 @@ def test_artifact_metadata_staging_leaves_weight_shards_remote(tmp_path: Path) -
     assert (destination / "config.json").read_text() == "{}"
     assert (destination / "tokenizer.json").read_text() == "{}"
     assert not (destination / "model.safetensors").exists()
+
+
+def test_artifact_model_staging_materializes_weight_shards(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("{}")
+    (source / "tokenizer.json").write_text("{}")
+    save_file({"weight": np.arange(4, dtype=np.float32)}, source / "model.safetensors")
+    destination = tmp_path / "node" / "model"
+
+    materialized_bytes = stage_artifact_model(source.as_uri(), "artifact@v1:abc123", str(destination))
+
+    assert materialized_bytes == sum(path.stat().st_size for path in source.iterdir())
+    assert (destination / "config.json").read_text() == "{}"
+    assert (destination / "tokenizer.json").read_text() == "{}"
+    assert (destination / "model.safetensors").is_file()
 
 
 def test_corrupt_completed_cache_is_repaired_under_the_distributed_lock(tmp_path: Path, monkeypatch) -> None:

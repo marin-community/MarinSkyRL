@@ -208,3 +208,16 @@ def stage_artifact_model_metadata(model_uri: str, source_identity: str, local_pa
         metadata_inventory,
     )
     return sum(entry.size for entry in artifact.files)
+
+
+def stage_artifact_model(model_uri: str, source_identity: str, local_path: str) -> int:
+    """Materialize a complete Marin-owned immutable model artifact on one node."""
+    filesystem, root = fs_and_path(model_uri)
+    inventory = file_inventory(filesystem, root)
+    validate_portable_hf_model_files({entry.path for _, entry in inventory}, model_uri)
+    artifact = materialize_inventory(
+        ArtifactSource(uri=model_uri, identity=source_identity, local_path=local_path),
+        filesystem,
+        inventory,
+    )
+    return sum(entry.size for entry in artifact.files)
