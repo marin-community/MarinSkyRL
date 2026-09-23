@@ -357,22 +357,16 @@ def _tokenizer_metadata_files(path: Path) -> tuple[Path, ...]:
     )
 
 
-def _copy_tokenizer_metadata(source: Path, destination: Path) -> None:
-    metadata_files = _tokenizer_metadata_files(source)
+def _require_tokenizer_metadata(path: Path, source: str) -> tuple[Path, ...]:
+    metadata_files = _tokenizer_metadata_files(path)
     if not metadata_files:
         raise ValueError(f"Tokenizer source contains no tokenizer metadata: {source}")
-    for metadata_file in metadata_files:
+    return metadata_files
+
+
+def _copy_tokenizer_metadata(source: Path, destination: Path) -> None:
+    for metadata_file in _require_tokenizer_metadata(source, str(source)):
         shutil.copy2(metadata_file, destination / metadata_file.name)
-
-
-def _policy_tokenizer_source_kind(tokenizer_path: str) -> SpeculatorModelSourceKind:
-    if os.path.isdir(tokenizer_path):
-        return SpeculatorModelSourceKind.LOCAL
-    if is_cloud_uri(tokenizer_path):
-        return SpeculatorModelSourceKind.ARTIFACT
-    if is_hugging_face_repo_id(tokenizer_path):
-        return SpeculatorModelSourceKind.HUGGING_FACE
-    raise ValueError(f"Unsupported policy tokenizer source: {tokenizer_path!r}")
 
 
 def prepare_policy_tokenizer(args: argparse.Namespace) -> PreparedPolicyTokenizer | None:
@@ -384,27 +378,26 @@ def prepare_policy_tokenizer(args: argparse.Namespace) -> PreparedPolicyTokenize
     revision = args.policy_tokenizer_revision
     local_path = _metadata_path(tokenizer_path, revision or "main")
     target = Path(local_path)
-    source_kind = _policy_tokenizer_source_kind(tokenizer_path)
-    if source_kind is SpeculatorModelSourceKind.ARTIFACT:
+    if is_cloud_uri(tokenizer_path):
         manifest = load_model_manifest(tokenizer_path)
         stage_model_metadata(tokenizer_path, manifest, local_path)
-        if not _tokenizer_metadata_files(target):
-            raise ValueError(f"Tokenizer source contains no tokenizer metadata: {tokenizer_path}")
+        _require_tokenizer_metadata(target, tokenizer_path)
         (target / MODEL_MANIFEST_FILENAME).unlink(missing_ok=True)
     else:
         with atomic_directory_update(target, staging_prefix=f".{target.name}.tokenizer-") as staging:
             staging.mkdir()
-            if source_kind is SpeculatorModelSourceKind.LOCAL:
+            if os.path.isdir(tokenizer_path):
                 _copy_tokenizer_metadata(Path(tokenizer_path), staging)
-            else:
+            elif is_hugging_face_repo_id(tokenizer_path):
                 download_hugging_face_snapshot(
                     tokenizer_path,
                     revision=revision or None,
                     destination=staging,
                     allow_patterns=TOKENIZER_METADATA_PATTERNS,
                 )
-                if not _tokenizer_metadata_files(staging):
-                    raise ValueError(f"Tokenizer source contains no tokenizer metadata: {tokenizer_path}")
+                _require_tokenizer_metadata(staging, tokenizer_path)
+            else:
+                raise ValueError(f"Unsupported policy tokenizer source: {tokenizer_path!r}")
 
     return PreparedPolicyTokenizer(local_path)
 

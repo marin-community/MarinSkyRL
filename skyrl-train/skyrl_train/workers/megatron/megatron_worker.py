@@ -97,12 +97,12 @@ class MegatronWorker:
         megatron_config,
         model_config_kwargs,
         transformer_config_kwargs,
+        tokenizer_path: str,
+        tokenizer_revision: str | None,
         bf16=True,
         flash_attn=False,
         model_revision: str | None = None,
         model_source_uri: str | None = None,
-        tokenizer_path: str | None = None,
-        tokenizer_revision: str | None = None,
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
@@ -110,9 +110,9 @@ class MegatronWorker:
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
         validate_grug_training_strategy(getattr(hf_config, "model_type", None), "megatron")
         tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_path or model_path,
+            tokenizer_path,
             trust_remote_code=True,
-            revision=tokenizer_revision if tokenizer_path else model_revision,
+            revision=tokenizer_revision,
         )
 
         override_config_kwargs = {

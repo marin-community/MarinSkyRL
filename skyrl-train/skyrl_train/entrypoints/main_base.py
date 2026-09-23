@@ -146,6 +146,9 @@ def create_ray_wrapped_inference_engines_from_config(
         "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
     }
     engine_init_kwargs["tokenizer"] = cfg.trainer.policy.model.tokenizer_path
+    tokenizer_revision = cfg.trainer.policy.model.get("tokenizer_revision")
+    if tokenizer_revision is not None:
+        engine_init_kwargs["tokenizer_revision"] = tokenizer_revision
     policy_source_uri = cfg.trainer.policy.model.get("source_uri")
     rollout_model_path = runai_model_uri(policy_source_uri) if policy_source_uri else cfg.trainer.policy.model.path
     if policy_source_uri is not None:
