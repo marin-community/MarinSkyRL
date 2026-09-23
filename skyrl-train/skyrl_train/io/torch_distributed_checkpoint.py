@@ -87,6 +87,9 @@ class _ConcurrentS3WriteStream:
         self.upload_part_seconds_total = 0.0
         self.upload_part_seconds_max = 0.0
         self.upload_queue_wait_seconds = 0.0
+        self.write_seconds_total = 0.0
+        self.buffer_copy_seconds_total = 0.0
+        self.close_drain_seconds = 0.0
         self.complete_upload_seconds = 0.0
         self.uploaded_part_count = 0
 
@@ -103,13 +106,16 @@ class _ConcurrentS3WriteStream:
     def write(self, payload) -> int:
         if self.closed:
             raise ValueError("write to closed checkpoint stream")
+        write_started = time.perf_counter()
         view = memoryview(payload).cast("B")
         payload_bytes = len(view)
         if self._write_error is None:
             try:
                 while view:
                     chunk_bytes = min(self.part_bytes - len(self._buffer), len(view))
+                    copy_started = time.perf_counter()
                     self._buffer.extend(view[:chunk_bytes])
+                    self.buffer_copy_seconds_total += time.perf_counter() - copy_started
                     view = view[chunk_bytes:]
                     if len(self._buffer) == self.part_bytes:
                         self._submit_part(bytes(self._buffer))
@@ -122,6 +128,7 @@ class _ConcurrentS3WriteStream:
                 self._write_error = error
                 self._buffer.clear()
         self._position += payload_bytes
+        self.write_seconds_total += time.perf_counter() - write_started
         return payload_bytes
 
     def close(self) -> None:
@@ -156,8 +163,10 @@ class _ConcurrentS3WriteStream:
         if self._buffer:
             self._submit_part(bytes(self._buffer))
             self._buffer.clear()
+        drain_started = time.perf_counter()
         while self._pending:
             self._finish_next_part()
+        self.close_drain_seconds = time.perf_counter() - drain_started
         self._executor.shutdown(wait=True)
         started = time.perf_counter()
         call_with_s3_retry(
@@ -467,6 +476,9 @@ class StreamingFsspecWriter(FileSystemWriter):
                     "upload_part_seconds_total": stream.upload_part_seconds_total,
                     "upload_part_seconds_max": stream.upload_part_seconds_max,
                     "upload_queue_wait_seconds": stream.upload_queue_wait_seconds,
+                    "stream_write_seconds_total": stream.write_seconds_total,
+                    "stream_buffer_copy_seconds_total": stream.buffer_copy_seconds_total,
+                    "multipart_close_drain_seconds": stream.close_drain_seconds,
                     "complete_upload_seconds": stream.complete_upload_seconds,
                     "uploaded_part_count": stream.uploaded_part_count,
                 }
