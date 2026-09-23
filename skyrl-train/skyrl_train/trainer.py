@@ -264,6 +264,9 @@ class RayPPOTrainer:
         self._shutdown_complete = False
         self.global_step = 0
         self._last_saved_step: int | None = None
+        # Process-local: a completed resume must not infer success from an output path
+        # that may have been written only partially by a previous attempt.
+        self._last_successfully_evaluated: tuple[str, int] | None = None
         raw_speculative_decoding = cfg.generator.get("speculative_decoding")
         if raw_speculative_decoding is not None:
             raw_speculative_decoding = OmegaConf.to_container(raw_speculative_decoding, resolve=True)
@@ -619,14 +622,19 @@ class RayPPOTrainer:
         )
 
         try:
+            evaluation_identity = (str(self.cfg.trainer.ckpt_path), self.global_step)
             if self._control.should_evaluate and self.eval_dataset is not None:
-                with Timer("eval", self.all_timings):
-                    eval_metrics = await self.eval()
-                    self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
-                    self.tracker.log(eval_metrics, step=self.global_step, commit=True)
-                await self.callback_handler.call_event_async(
-                    "on_evaluate", final_state, self._control, metrics=eval_metrics, trainer=self
-                )
+                if getattr(self, "_last_successfully_evaluated", None) != evaluation_identity:
+                    with Timer("eval", self.all_timings):
+                        eval_metrics = await self.eval()
+                        self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
+                        self.tracker.log(eval_metrics, step=self.global_step, commit=True)
+                    await self.callback_handler.call_event_async(
+                        "on_evaluate", final_state, self._control, metrics=eval_metrics, trainer=self
+                    )
+                    self._last_successfully_evaluated = evaluation_identity
+                else:
+                    logger.info("Skipping repeated final evaluation for completed step {}", self.global_step)
                 self._control.should_evaluate = False
         finally:
             if self.colocate_all:
@@ -698,6 +706,7 @@ class RayPPOTrainer:
             await self.callback_handler.call_event_async(
                 "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
             )
+            self._last_successfully_evaluated = (str(self.cfg.trainer.ckpt_path), self.global_step)
             self._control.should_evaluate = False
 
     async def _sync_weights_and_restore_rollout_residency(self) -> None:

@@ -103,6 +103,21 @@ class _RecordingCallbackHandler:
         return control
 
 
+class _StepAndFinalEvaluationHandler:
+    def __init__(self, *, interval_evaluation: bool = True, final_evaluation: bool = True):
+        self.events = []
+        self.interval_evaluation = interval_evaluation
+        self.final_evaluation = final_evaluation
+
+    async def call_event_async(self, event, state, control, **kwargs):
+        self.events.append(event)
+        if event == "on_step_end":
+            control.should_evaluate = self.interval_evaluation
+        elif event == "on_train_end":
+            control.should_evaluate = self.final_evaluation
+        return control
+
+
 # ---------------------------------------------------------------------------
 # Guard-predicate tests (the core termination/resume-at-max condition)
 # ---------------------------------------------------------------------------
@@ -199,6 +214,60 @@ def test_train_end_still_saves_when_the_final_evaluation_fails(cls):
 
     trainer.save_checkpoints.assert_called_once()
     assert trainer.callback_handler.events == ["on_train_end", "on_save"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cls", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
+async def test_interval_aligned_final_step_evaluates_only_once(cls):
+    trainer = _make_bare_trainer(cls, global_step=16, total_training_steps=16)
+    trainer.callback_handler = _StepAndFinalEvaluationHandler()
+
+    await trainer._run_step_end_callbacks(trainer._create_trainer_state(epoch=0))
+    await trainer._finalize_training(completed_step=16, epoch=0)
+
+    trainer.eval.assert_awaited_once()
+    assert trainer.callback_handler.events == ["on_step_end", "on_evaluate", "on_train_end"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cls", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
+async def test_non_aligned_final_step_still_evaluates(cls):
+    trainer = _make_bare_trainer(cls, global_step=17, total_training_steps=17)
+    trainer.callback_handler = _StepAndFinalEvaluationHandler(interval_evaluation=False)
+
+    await trainer._run_step_end_callbacks(trainer._create_trainer_state(epoch=0))
+    await trainer._finalize_training(completed_step=17, epoch=0)
+
+    trainer.eval.assert_awaited_once()
+    assert trainer.callback_handler.events == ["on_step_end", "on_train_end", "on_evaluate"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cls", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
+async def test_failed_interval_evaluation_does_not_suppress_final_retry(cls):
+    trainer = _make_bare_trainer(cls, global_step=16, total_training_steps=16)
+    trainer.callback_handler = _StepAndFinalEvaluationHandler()
+    trainer.eval.side_effect = [RuntimeError("interval failed"), {"eval/accuracy": 0.75}]
+
+    with pytest.raises(RuntimeError, match="interval failed"):
+        await trainer._run_step_end_callbacks(trainer._create_trainer_state(epoch=0))
+    await trainer._finalize_training(completed_step=16, epoch=0)
+
+    assert trainer.eval.await_count == 2
+    assert trainer.callback_handler.events == ["on_step_end", "on_train_end", "on_evaluate"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cls", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
+async def test_final_evaluation_is_not_suppressed_for_a_distinct_checkpoint(cls):
+    trainer = _make_bare_trainer(cls, global_step=16, total_training_steps=16)
+    trainer.callback_handler = _StepAndFinalEvaluationHandler()
+
+    await trainer._run_step_end_callbacks(trainer._create_trainer_state(epoch=0))
+    trainer.cfg.trainer.ckpt_path = "other-run/checkpoints"
+    await trainer._finalize_training(completed_step=16, epoch=0)
+
+    assert trainer.eval.await_count == 2
 
 
 # ---------------------------------------------------------------------------
