@@ -130,7 +130,9 @@ from skyrl_train.rollout_observability import observe_rollout_call
 from skyrl_train.utils.importance_ratio_diagnostics import (
     ratio_diagnostics_settings,
     mismatch_ratio_metrics,
+    rollout_train_prob_diff_metrics,
 )
+from skyrl_train.utils.old_logprob_forward import log_old_logprob_forward_choice, skip_old_logprob_forward
 from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
@@ -306,6 +308,7 @@ class RayPPOTrainer:
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         configure_ray_worker_logging()
+        log_old_logprob_forward_choice(cfg)
 
         # Initialize callback system
         # If callbacks are provided, use them; otherwise create defaults from config
@@ -2245,9 +2248,13 @@ class RayPPOTrainer:
 
         Adds:
             - `["base_action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
-            - `["action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
+            - `["action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"], or None when the run
+              takes the old log-probs from the training forward (`old_logprobs_from_training_forward`)
             - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
         """
+        # The policy forward only feeds consumers that the eligible run lacks: its PPO ratio is
+        # exactly one, and the Megatron loss reports the mismatch diagnostics from its own forward.
+        skip_policy_forward = skip_old_logprob_forward(self.cfg)
         # MoE router-replay (R3): the pre-update old-logprob / ref forward MUST
         # replay the SAME captured routing as the training forward, otherwise the
         # old-logprob pass uses NATIVE top-k routing while the training pass
@@ -2303,11 +2310,12 @@ class RayPPOTrainer:
             base_log_probs = None
 
         # calculate action log probs
-        if self.colocate_all:
+        if self.colocate_all and not skip_policy_forward:
             self.policy_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
-        action_log_probs_refs = self.policy_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
-        if self.colocate_all:
+        if not skip_policy_forward:
+            action_log_probs_refs = self.policy_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
+        if self.colocate_all and not skip_policy_forward:
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
             action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
@@ -2331,8 +2339,11 @@ class RayPPOTrainer:
                 all_rank_values = ray.get(value_refs)
                 values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
 
-            all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
-            action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
+            if not skip_policy_forward:
+                all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
+                action_log_probs = collect_results(
+                    self.policy_model.actor_infos, all_rank_action_log_probs, key="output"
+                )
 
         if not self.colocate_all:
             empty_cache_refs = self.policy_model.async_run_ray_method("pass_through", "empty_cache")
@@ -2345,12 +2356,15 @@ class RayPPOTrainer:
         sequences_all: torch.Tensor = training_input["sequences"]
         # NOTE (sumanthrh): The slicing is needed to make sure that the batch dimension doesn't change for the tensordict.
         base_log_probs = base_log_probs[: len(sequences_all)] if base_log_probs is not None else None
-        action_log_probs = action_log_probs[: len(sequences_all)]
+        action_log_probs = action_log_probs[: len(sequences_all)] if action_log_probs is not None else None
         values = values[: len(sequences_all)] if values is not None else None
 
         training_input["base_action_log_probs"] = base_log_probs
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
+
+        if action_log_probs is None:
+            return training_input
 
         if self._training_metrics_enabled and training_input.get("rollout_logprobs") is not None:
             self.all_metrics.update(
@@ -2374,18 +2388,10 @@ class RayPPOTrainer:
             # here is what crashed the 80B R3+TIS train loop at global_step 1
             # ('NoneType' object is not subscriptable). Skip the inference/train prob-diff
             # diagnostic for that batch; the batch still trains as standard (non-TIS) loss.
-            logprobs_diff = (
-                training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
-                - action_log_probs[training_input["loss_mask"] > 0]
-            )
-            prob_diff = logprobs_diff.exp().abs()
-            prob_diff_mean = prob_diff.mean().item()
-            prob_diff_std = prob_diff.std().item()
             self.all_metrics.update(
-                {
-                    "policy/rollout_train_prob_diff_mean": prob_diff_mean,
-                    "policy/rollout_train_prob_diff_std": prob_diff_std,
-                }
+                rollout_train_prob_diff_metrics(
+                    action_log_probs, training_input["rollout_logprobs"], training_input["loss_mask"]
+                )
             )
         # Always log KL divergence as a diagnostic, even when not used as penalty
         if base_log_probs is not None:

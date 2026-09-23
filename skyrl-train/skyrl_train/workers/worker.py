@@ -1313,6 +1313,10 @@ class PolicyWorkerBase(Worker):
 
         sequences = experience.sequences
         old_action_log_probs = experience.action_log_probs
+        if old_action_log_probs is None:
+            raise ValueError(
+                "the batch carries no old log-probs; old_logprobs_from_training_forward applies to the megatron strategy"
+            )
         base_action_log_probs = (
             experience.base_action_log_probs if experience.base_action_log_probs is not None else None
         )

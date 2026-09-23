@@ -242,6 +242,13 @@ trainer:
       # Exact pooled |log ratio| p50/p95 and clip pressure for the stale family.
       # Retains up to 4M float32 values per rank and syncs once per micro-batch.
       exact_quantiles: false
+    # Skip the policy's pre-update old-log-prob forward when its PPO ratio is identically one:
+    # regular loss, one epoch and one optimizer step per batch (train_batch_size equal to
+    # policy_mini_batch_size), no critic, reference model, TIS, distillation, parity probe or
+    # batch dump, and the megatron strategy with pooled ratio diagnostics. The training forward
+    # then supplies the old log-probs and the policy/mismatch diagnostics. Any other run keeps
+    # the forward, and the startup log says why.
+    old_logprobs_from_training_forward: true
     grad_cosine:
       # Holds an fp32 copy of every gradient shard and adds an all-reduce per update.
       enabled: false

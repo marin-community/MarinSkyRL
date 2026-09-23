@@ -30,6 +30,11 @@ LOG_RATIO_DOUBLING = math.log(2)
 LOG_RATIO_COLLAPSE = math.log(1e-5)
 
 TIS_DIAG_KEYS = ("tis/imp_ratio_mean", "tis/imp_ratio_capped_fraction", "tis/log_ratio_abs_mean")
+MISMATCH_METRIC_PREFIX = "policy/mismatch/"
+PROB_DIFF_METRIC_PREFIX = "policy/"
+# The trainer prepends "policy/" to every policy worker status key, so a worker emits the
+# mismatch family under this prefix and the prob-diff pair under none.
+WORKER_MISMATCH_METRIC_PREFIX = "mismatch/"
 LOG_RATIO_BASE_METRIC_KEYS = (
     "log_ratio_abs_mean",
     "log_ratio_abs_max",
@@ -135,11 +140,14 @@ def mismatch_ratio_metrics(
     position_window: int = DEFAULT_POSITION_WINDOW,
     eps_clip_low: float = 0.2,
     eps_clip_high: float = 0.2,
+    key_prefix: str = MISMATCH_METRIC_PREFIX,
 ) -> dict[str, float]:
     """Condition consume-time trainer/vLLM ratios on staleness and token position.
 
     Only staleness0 isolates engine mismatch. Other buckets and the pooled values
     measure its product with policy drift. Position buckets overlap on short responses.
+    ``key_prefix`` names the metric family; a policy worker drops the ``policy/`` part
+    the trainer prepends to its status.
     """
     if type(position_window) is not int or position_window <= 0:
         raise ValueError("position_window must be a positive integer")
@@ -167,7 +175,7 @@ def mismatch_ratio_metrics(
     result = {}
     for name, rows in buckets.items():
         selected = mask & rows.unsqueeze(1)
-        prefix = f"policy/mismatch/{name}/"
+        prefix = f"{key_prefix}{name}/"
         if delta is None:
             metrics = {"selected_tokens": float(selected.sum()), "finite_tokens": 0.0, "missing_behavior": 1.0}
         else:
@@ -190,6 +198,87 @@ def mismatch_ratio_metrics(
                 if key in stats:
                     result[f"{prefix}pos_{position}/{key}"] = stats[key]
     return result
+
+
+def rollout_train_prob_diff_metrics(
+    learner_logprobs: torch.Tensor,
+    rollout_logprobs: torch.Tensor,
+    loss_mask: torch.Tensor,
+    *,
+    key_prefix: str = PROB_DIFF_METRIC_PREFIX,
+) -> dict[str, float]:
+    """Mean and spread of the token probability ratio between the rollout engine and the trainer."""
+    learner_logprobs = learner_logprobs.detach().cpu()
+    rollout_logprobs = rollout_logprobs.detach().cpu()
+    loss_mask = loss_mask.detach().cpu()
+    logprobs_diff = rollout_logprobs[loss_mask > 0] - learner_logprobs[loss_mask > 0]
+    prob_diff = logprobs_diff.exp().abs()
+    return {
+        f"{key_prefix}rollout_train_prob_diff_mean": prob_diff.mean().item(),
+        f"{key_prefix}rollout_train_prob_diff_std": prob_diff.std().item(),
+    }
+
+
+class TrainingForwardMismatchMonitor:
+    """Collect a training forward's log-probs across micro-batches for the consume-time mismatch metrics.
+
+    Replaces the driver's computation when the old-log-prob forward is skipped. Rows are gathered
+    over the data-parallel group before one host reduction, so the pooled statistics are the
+    driver's statistics of the same log-probs rather than an average of per-rank estimates.
+    """
+
+    def __init__(self) -> None:
+        self._learner_logprobs: list[torch.Tensor] = []
+        self._rollout_logprobs: list[torch.Tensor] = []
+        self._loss_masks: list[torch.Tensor] = []
+        self._staleness: list[torch.Tensor | None] = []
+
+    def add(
+        self,
+        learner_logprobs: torch.Tensor,
+        rollout_logprobs: torch.Tensor,
+        loss_mask: torch.Tensor,
+        rollout_staleness: torch.Tensor | None,
+    ) -> None:
+        self._learner_logprobs.append(learner_logprobs.detach())
+        self._rollout_logprobs.append(rollout_logprobs.detach())
+        self._loss_masks.append(loss_mask.detach())
+        self._staleness.append(rollout_staleness)
+
+    def metrics(
+        self,
+        *,
+        gather_fn: Callable[[torch.Tensor], torch.Tensor],
+        eps_clip_low: float,
+        eps_clip_high: float,
+        position_window: int,
+        mismatch: bool,
+        prob_diff: bool,
+    ) -> dict[str, float]:
+        """The selected families: the staleness-conditioned mismatch ratios and the prob-diff pair."""
+        learner_logprobs = gather_fn(torch.cat(self._learner_logprobs))
+        rollout_logprobs = gather_fn(torch.cat(self._rollout_logprobs))
+        loss_mask = gather_fn(torch.cat(self._loss_masks))
+        result = {}
+        if mismatch:
+            staleness = None
+            if all(rows is not None for rows in self._staleness):
+                staleness = gather_fn(torch.cat(self._staleness).to(learner_logprobs.device))
+            result.update(
+                mismatch_ratio_metrics(
+                    learner_logprobs,
+                    rollout_logprobs,
+                    loss_mask,
+                    staleness,
+                    position_window=position_window,
+                    eps_clip_low=eps_clip_low,
+                    eps_clip_high=eps_clip_high,
+                    key_prefix=WORKER_MISMATCH_METRIC_PREFIX,
+                )
+            )
+        if prob_diff:
+            result.update(rollout_train_prob_diff_metrics(learner_logprobs, rollout_logprobs, loss_mask, key_prefix=""))
+        return result
 
 
 def _ratio_extra_keys(window: int = DEFAULT_POSITION_WINDOW) -> tuple[str, ...]:
@@ -352,6 +441,18 @@ def gather_ratio_tensor(tensor: torch.Tensor, *, group=None) -> list[torch.Tenso
     values = [torch.empty_like(tensor) for _ in range(torch.distributed.get_world_size(group))]
     torch.distributed.all_gather(values, tensor, group=group)
     return values
+
+
+def gather_ratio_rows(tensor: torch.Tensor, *, group=None) -> torch.Tensor:
+    """Concatenate every rank's rows of a ``[rows, ...]`` tensor in rank order over the ownership group."""
+    if not torch.distributed.is_initialized():
+        return tensor
+    counts = gather_ratio_tensor(tensor.new_tensor([tensor.shape[0]], dtype=torch.int64), group=group)
+    rows = max(int(count.item()) for count in counts)
+    padded = tensor.new_zeros((rows, *tensor.shape[1:]))
+    padded[: tensor.shape[0]] = tensor
+    pieces = gather_ratio_tensor(padded, group=group)
+    return torch.cat([piece[: int(count.item())] for piece, count in zip(pieces, counts, strict=True)])
 
 
 def pack_log_ratio_accumulator(accumulator, *, failed: bool = False):

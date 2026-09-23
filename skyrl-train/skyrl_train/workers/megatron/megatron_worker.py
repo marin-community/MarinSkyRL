@@ -41,6 +41,7 @@ from skyrl_train.utils.utils import (
     str_to_torch_dtype,
     get_physical_gpu_id,
 )
+from skyrl_train.utils.old_logprob_forward import old_logprob_forward_skip_problems
 from marinskyrl.hugging_face_retry import load_hugging_face_with_retry
 from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
 import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
@@ -563,6 +564,19 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.cfg.trainer.micro_train_batch_size_per_gpu,
         )
 
+        old_logprobs_from_training_forward = train_data["action_log_probs"] is None
+        if old_logprobs_from_training_forward:
+            # The loss detaches its own log-probs as the old ones, which is the on-policy
+            # objective only while this batch takes exactly one optimizer step.
+            problems = old_logprob_forward_skip_problems(self.cfg)
+            if problems:
+                raise ValueError("the batch carries no old log-probs but the run needs them: " + "; ".join(problems))
+            if len(dataloader) != micro_batches_per_mini_batch:
+                raise ValueError(
+                    f"the batch carries no old log-probs but spans {len(dataloader)} micro-batches while a "
+                    f"mini-batch takes {micro_batches_per_mini_batch}; it must take exactly one optimizer step"
+                )
+
         status_list = []
         all_metrics = defaultdict(list)
         policy_update_steps = 0
@@ -601,6 +615,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         distillation=experience.distillation,
                         global_loss_denom=(experience.metadata or {}).get(GLOBAL_LOSS_DENOM_METADATA_KEY),
                         rollout_routed_experts=experience.rollout_routed_experts,
+                        rollout_staleness=experience.rollout_staleness,
                     )
                 )
 
@@ -686,7 +701,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         status_mean = policy_training_metrics(all_metrics, policy_update_steps)
         # The range over this call's updates.
         status_mean.update(gradient_direction_summary(self._grad_updates))
-        if status_mean.get("ppo_ratio_exact_unit_fraction") == 1.0 and not self._warned_exact_unit_policy_ratio:
+        # A run that takes the old log-probs from the training forward chose the unit ratio.
+        if (
+            status_mean.get("ppo_ratio_exact_unit_fraction") == 1.0
+            and not old_logprobs_from_training_forward
+            and not self._warned_exact_unit_policy_ratio
+        ):
             logger.warning(
                 "Megatron's recomputed old log probabilities exactly match the training forward for every policy "
                 "token. PPO clip bounds cannot activate until the mini-batch contains a forward after an optimizer "

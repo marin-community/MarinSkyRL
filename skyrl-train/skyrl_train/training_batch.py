@@ -446,6 +446,7 @@ class TrainingBatchIterator(Iterator[Experience]):
             ),
             rollout_routed_experts=batch.get("rollout_routed_experts"),
             response_span_tags=batch.get("response_span_tags"),
+            rollout_staleness=batch.get("rollout_staleness"),
             info={},
             metadata=batch.metadata,
         )

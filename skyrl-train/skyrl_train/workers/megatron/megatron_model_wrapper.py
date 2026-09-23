@@ -27,6 +27,8 @@ from skyrl_train.megatron_timing import (
 from skyrl_train.utils.importance_ratio_diagnostics import (
     ratio_diagnostics_settings,
     LogRatioMonitor,
+    TrainingForwardMismatchMonitor,
+    gather_ratio_rows,
     gather_ratio_tensor,
     sum_ratio_tensor,
 )
@@ -73,7 +75,8 @@ class MegatronPolicyMicroBatch:
     attention_mask: torch.Tensor
     position_ids: torch.Tensor
     num_actions: int
-    old_action_log_probs: torch.Tensor
+    # None when the driver skipped the old-log-prob forward; the loss then detaches its own.
+    old_action_log_probs: Optional[torch.Tensor]
     base_action_log_probs: Optional[torch.Tensor]
     advantages: torch.Tensor
     loss_mask: torch.Tensor
@@ -82,6 +85,7 @@ class MegatronPolicyMicroBatch:
     global_loss_denom: Optional[float]
     distillation: Optional[DistillationInput] = None
     rollout_routed_experts: Optional[torch.Tensor] = None
+    rollout_staleness: Optional[torch.Tensor] = None
 
 
 class MegatronModelWrapper:
@@ -443,10 +447,14 @@ class MegatronModelWrapper:
         forward_backward_func = get_forward_backward_func()
         ratio_settings = ratio_diagnostics_settings(self.cfg.trainer.algorithm)
         log_ratio_monitor = None
+        # The driver reports these two families from the old-log-prob forward under the same gates.
+        report_mismatch = bool(self.cfg.trainer.get("training_metrics", False))
+        report_prob_diff = self.cfg.generator.sampling_params.get("logprobs") is not None
+        mismatch_monitor = None
         completed_microbatches = 0
 
         def loss_func(logits, data, packed_seq_params):
-            nonlocal completed_microbatches, log_ratio_monitor
+            nonlocal completed_microbatches, log_ratio_monitor, mismatch_monitor
             sequences = data.sequences
             num_actions = data.num_actions
             old_action_log_probs = data.old_action_log_probs
@@ -463,6 +471,19 @@ class MegatronModelWrapper:
             token_logprobs = self._token_logprobs(logits, sequences, data.attention_mask.to(bool), packed_seq_params)
 
             action_log_probs = token_logprobs[:, -num_actions:]
+
+            if old_action_log_probs is None:
+                # The driver skipped the old-log-prob forward (old_logprobs_from_training_forward):
+                # this mini-batch takes the batch's only optimizer step, so these are the weights
+                # that forward would have read. The ratio is exactly one, clipping is inert and
+                # the objective is the on-policy policy gradient; the log-ratio monitor reports
+                # zeros by construction, and the consume-time mismatch diagnostics the driver
+                # computed from that forward come from this one instead.
+                old_action_log_probs = action_log_probs.detach()
+                if rollout_action_logprobs is not None and (report_mismatch or report_prob_diff):
+                    if mismatch_monitor is None:
+                        mismatch_monitor = TrainingForwardMismatchMonitor()
+                    mismatch_monitor.add(action_log_probs, rollout_action_logprobs, loss_mask, data.rollout_staleness)
 
             sparse_student_logprobs = self._distillation_student_logprobs(logits, data)
 
@@ -520,6 +541,17 @@ class MegatronModelWrapper:
                             sum_reduce_fn=partial(sum_ratio_tensor, group=group),
                         )
                     )
+                    if mismatch_monitor is not None:
+                        metrics.update(
+                            mismatch_monitor.metrics(
+                                gather_fn=partial(gather_ratio_rows, group=group),
+                                eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
+                                eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
+                                position_window=ratio_settings.position_window,
+                                mismatch=report_mismatch,
+                                prob_diff=report_prob_diff,
+                            )
+                        )
                 else:
                     metrics.update(log_ratio_monitor.metrics())
             return objective.optimization_loss, metrics

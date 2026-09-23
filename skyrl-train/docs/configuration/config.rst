@@ -433,8 +433,11 @@ Algorithm Configuration
         min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
       
       # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
-      use_tis: false 
+      use_tis: false
       tis_imp_ratio_cap: -1.0
+
+      # Skip the old-log-prob forward when one optimizer step per batch makes its ratio exactly one
+      old_logprobs_from_training_forward: true
 
       # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
       sapo:
@@ -486,6 +489,7 @@ Algorithm Configuration
   - ``algorithm.dynamic_sampling.min_replace_ratio``: Minimum proportion of good samples with which to replace bad samples for ``replace`` strategy.
 - ``algorithm.use_tis``: Whether to use Truncated Importance Sampling (TIS) as proposed in `this blog <https://fengyao.notion.site/off-policy-rl>`_. 
 - ``algorithm.tis_imp_ratio_cap``: Cap parameter for the importance ratio in TIS.
+- ``algorithm.old_logprobs_from_training_forward``: Skip the policy's pre-update old-log-prob forward when its PPO ratio is identically one, and take the old log-probs from the training forward instead (default ``true``). The skip applies only when ``policy_loss_type`` is ``regular``, ``update_epochs_per_batch`` is 1, ``train_batch_size`` equals ``policy_mini_batch_size`` (one optimizer step per batch), no critic, reference model (``use_kl_loss`` and ``use_kl_in_reward`` off), TIS, distillation, ``check_train_eval_parity`` probe or ``dump_data_batch`` consumes them, and the strategy is ``megatron`` with ``ratio_diagnostics.pooled`` on. The ``policy/mismatch/*`` and ``policy/rollout_train_prob_diff_*`` diagnostics then come from the training forward's log-probs, and the ``policy/log_ratio_*`` family reports a unit ratio. Any other run keeps the forward and the startup log names why.
 - ``algorithm.clip_cov``: Clip-Cov parameters (only used when ``policy_loss_type`` is ``clip_cov``):
 
   - ``clip_ratio``: Fraction of tokens to clip based on covariance values.
