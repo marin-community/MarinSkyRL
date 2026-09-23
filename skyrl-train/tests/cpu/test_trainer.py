@@ -700,6 +700,19 @@ def test_dataloader_save_failure_preserves_previous_latest_checkpoint(tmp_path, 
     assert not (checkpoint_root / "global_step_1" / trainer_module.TRAINER_STATE_FILENAME).exists()
 
 
+@pytest.mark.parametrize("worker_class", [PolicyWorkerBase, CriticWorkerBase])
+def test_checkpoint_worker_returns_global_rank_receipt_after_save(tmp_path, worker_class):
+    worker = worker_class.__new__(worker_class)
+    worker._rank = 3
+    worker._local_rank = 1
+    worker.model = object()
+    worker.optimizer = object()
+    worker.scheduler = object()
+    worker.strategy = SimpleNamespace(save_checkpoint=lambda **_kwargs: None)
+
+    assert worker.save_checkpoint(tmp_path) == 3
+
+
 def test_on_save_callback_failure_does_not_publish_partial_checkpoint(tmp_path):
     latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
     latest.write_text("1")
