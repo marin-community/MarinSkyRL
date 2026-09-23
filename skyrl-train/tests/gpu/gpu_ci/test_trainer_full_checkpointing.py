@@ -185,8 +185,8 @@ def test_megatron_full_checkpoint_restores_per_rank_rng_and_cuda_tracker(ray_ini
             assert names, "Megatron CUDA RNG tracker was not initialized"
             if advance:
                 with tracker.fork(names[0]):
-                    torch.rand(self._rank + 1, device="cuda")
-                torch.rand(self._rank + 1, device="cuda")
+                    torch.rand(1024 * (self._rank + 1), device="cuda")
+                torch.rand(1024 * (self._rank + 1), device="cuda")
             generic = self.strategy.get_rng_state()
             return {
                 "rank": self._rank,
@@ -223,6 +223,9 @@ def test_megatron_full_checkpoint_restores_per_rank_rng_and_cuda_tracker(ray_ini
         return {result["rank"]: result for result in results}
 
     expected = fingerprints(trainer, advance=True)
+    assert len({state["generic"]["cuda"] for state in expected.values()}) == len(expected)
+    first_tracker_name = next(iter(next(iter(expected.values()))["tracker"]))
+    assert len({state["tracker"][first_tracker_name] for state in expected.values()}) == len(expected)
     trainer.global_step = 1
     trainer.save_checkpoints()
     changed = fingerprints(trainer, advance=True)

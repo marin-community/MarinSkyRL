@@ -116,8 +116,8 @@ def _select_rank_rng_state(rank_states: list[dict], rank: int) -> dict:
         )
     selected = matching[coordinates[5] % len(matching)]
     logger.warning(
-        "Megatron DP geometry changed from {} to {} ranks; mapping RNG replica {} to saved replica {}. "
-        "Exact replay is not guaranteed for changed-DP resume.",
+        "Megatron RNG rank layout differs from the checkpoint (saved world {}, current world {}); "
+        "mapping RNG replica {} to saved replica {}. Exact replay is not guaranteed for changed-layout resume.",
         len(rank_states),
         dist.get_world_size(),
         coordinates[5],
