@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from iris.client.client import JobFailedError
+from iris.resources.state import JobState
 
 from cloud.iris.artifacts import (
     fs_and_path,
@@ -175,6 +176,8 @@ def execute_job(
             return _record_failed_attempt(spec, outcome, f"Iris job reached {outcome.job_state}")
         if mode is LaunchMode.DETACH:
             return _launch_response(spec, AttemptState.SUBMITTED, outcome=outcome)
+        if outcome.job_state != JobState.SUCCEEDED.value:
+            return _record_failed_attempt(spec, outcome, f"Iris job reached {outcome.job_state}")
         if request.export_hf:
             try:
                 active_backend.export_terminal_policy(spec, config_file.name)

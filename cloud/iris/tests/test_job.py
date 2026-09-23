@@ -519,6 +519,27 @@ def test_execute_job_failure_records_attempt_without_terminal_model(tmp_path: Pa
     assert json.loads(attempt.read_text())["response"]["iris_job_state"] == "failed"
 
 
+def test_execute_job_does_not_commit_nonterminal_zero_exit_outcome(tmp_path: Path) -> None:
+    envelope = _spec(tmp_path)
+    envelope = replace(envelope, request=replace(envelope.request, export_hf=False))
+    resolved = Path(envelope.request.output.resolved_config_uri.removeprefix("file://"))
+    resolved.parent.mkdir(parents=True)
+    resolved.write_text('{"entrypoint":"skyrl_train.entrypoints.main_base","hydra_args":[]}')
+    backend = FakeLaunchBackend(
+        IrisLaunchOutcome(
+            job_id="/power/still-running",
+            job_state="submitted",
+            exit_code=0,
+        )
+    )
+
+    response = execute_job(envelope, backend=backend)
+
+    assert response.state == AttemptState.FAILED
+    assert response.failure == "Iris job reached submitted"
+    assert not Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://")).exists()
+
+
 def test_execute_job_serializes_iris_job_failure(tmp_path: Path) -> None:
     envelope = _spec(tmp_path)
     status = job_status_from_proto(

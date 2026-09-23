@@ -13,8 +13,8 @@ import shlex
 import subprocess
 import sys
 from contextlib import contextmanager
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
