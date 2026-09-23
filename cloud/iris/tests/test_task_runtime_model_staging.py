@@ -48,11 +48,39 @@ def test_s3_policy_stages_metadata_without_materializing_weights(monkeypatch) ->
         model_revision="",
         model_cache_ttl_days=None,
         model_cache_source_prefix="",
+        runtime_profile="megatron",
+        model_local_path="/tmp/materialized-model",
     )
     policy_model = prepare_policy_model(args)
 
     assert policy_model is not None
-    assert staged == [("s3://models/policy", manifest, policy_model.metadata_path)]
+    assert staged == [("s3://models/policy", manifest, policy_model.local_path)]
+
+
+def test_fsdp_policy_materializes_weights_at_the_declared_local_path(monkeypatch) -> None:
+    staged = []
+    monkeypatch.setattr(
+        task_runtime,
+        "stage_artifact_model",
+        lambda uri, identity, path: staged.append((uri, identity, path)) or 1024,
+    )
+    args = Namespace(
+        model_source_uri="s3://models/policy",
+        model_source_identity="artifact@v1:abc123",
+        prestage_model="",
+        stream_model="",
+        model_revision="",
+        model_cache_ttl_days=None,
+        model_cache_source_prefix="",
+        runtime_profile="fsdp",
+        model_local_path="/tmp/materialized-model",
+    )
+
+    policy_model = prepare_policy_model(args)
+
+    assert policy_model is not None
+    assert policy_model.local_path == "/tmp/materialized-model"
+    assert staged == [("s3://models/policy", "artifact@v1:abc123", "/tmp/materialized-model")]
 
 
 def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(monkeypatch) -> None:

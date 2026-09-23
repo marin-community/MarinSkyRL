@@ -51,6 +51,7 @@ from cloud.iris.hf_model_cache import (
     download_hugging_face_snapshot,
     ensure_hugging_face_model_cache,
     load_model_manifest,
+    stage_artifact_model,
     stage_artifact_model_metadata,
     stage_model_metadata,
 )
@@ -84,6 +85,7 @@ from cloud.iris.launch_config import RunMode, load_launch_config
 from cloud.iris.rl_config_translation import materialize_launch_config
 from cloud.iris.rl_config_translation import TaskLocalSkyRLValues, apply_task_local_values
 from cloud.iris.runtime_bundle import validate_bundled_runtime
+from cloud.iris.runtime_environment import RuntimeProfile
 
 try:
     from skyrl_train.ray_metrics import ray_metrics_telemetry
@@ -278,13 +280,19 @@ def _metadata_path(source_uri: str, identity: str) -> str:
 class PreparedPolicyModel:
     source_uri: str
     source_identity: str
-    metadata_path: str
+    local_path: str
+
+
+def _requires_local_model_weights(runtime_profile: str) -> bool:
+    profile = RuntimeProfile(runtime_profile)
+    return profile not in {RuntimeProfile.MEGATRON, RuntimeProfile.MEGATRON_EXPORT}
 
 
 def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None:
-    """Resolve one immutable policy source and stage metadata, never weights."""
+    """Resolve one immutable policy source and stage what its runtime needs."""
     source_uri = args.model_source_uri
     source_identity = args.model_source_identity
+    manifest = None
     if args.stream_model:
         source_uri, manifest = ensure_hugging_face_model_cache(
             args.stream_model,
@@ -296,27 +304,33 @@ def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None
     elif source_uri:
         if not source_identity:
             raise ValueError(f"Policy source identity is required for {source_uri}")
-        local_path = _metadata_path(source_uri, source_identity)
-        if not source_identity.startswith("sha256:"):
-            metadata_bytes = stage_artifact_model_metadata(source_uri, source_identity, local_path)
-            _log(
-                f"Policy metadata ready on rank {_rank()}/{_num_tasks()}: {source_uri} -> {local_path} "
-                f"(identity={source_identity}; local_disk_high_water_bytes={metadata_bytes}; weight shards remain remote)"
-            )
-            return PreparedPolicyModel(source_uri, source_identity, local_path)
-        manifest = load_model_manifest(source_uri)
-        if source_identity != manifest.identity:
-            raise ValueError(
-                f"Policy manifest identity mismatch: requested {source_identity}, found {manifest.identity} at {source_uri}"
-            )
-        source_identity = manifest.identity
+        if source_identity.startswith("sha256:"):
+            manifest = load_model_manifest(source_uri)
+            if source_identity != manifest.identity:
+                raise ValueError(
+                    f"Policy manifest identity mismatch: requested {source_identity}, "
+                    f"found {manifest.identity} at {source_uri}"
+                )
+            source_identity = manifest.identity
     else:
         return None
 
     assert source_uri and source_identity
+    if _requires_local_model_weights(args.runtime_profile):
+        local_path = args.model_local_path
+        materialized_bytes = stage_artifact_model(source_uri, source_identity, local_path)
+        _log(
+            f"Policy model ready on rank {_rank()}/{_num_tasks()}: {source_uri} -> {local_path} "
+            f"(identity={source_identity}; local_disk_high_water_bytes={materialized_bytes})"
+        )
+        return PreparedPolicyModel(source_uri, source_identity, local_path)
+
     local_path = _metadata_path(source_uri, source_identity)
-    stage_model_metadata(source_uri, manifest, local_path)
-    metadata_bytes = sum(path.stat().st_size for path in Path(local_path).rglob("*") if path.is_file())
+    if manifest is None:
+        metadata_bytes = stage_artifact_model_metadata(source_uri, source_identity, local_path)
+    else:
+        stage_model_metadata(source_uri, manifest, local_path)
+        metadata_bytes = sum(path.stat().st_size for path in Path(local_path).rglob("*") if path.is_file())
     _log(
         f"Policy metadata ready on rank {_rank()}/{_num_tasks()}: {source_uri} -> {local_path} "
         f"(identity={source_identity}; local_disk_high_water_bytes={metadata_bytes}; weight shards remain remote)"
@@ -1976,6 +1990,7 @@ def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
         model_source_uri=model_uri if is_cloud_uri(model_uri) else "",
         model_local_path=str(model.local_path),
         model_source_identity=model_identity if is_cloud_uri(model_uri) else "",
+        runtime_profile=str(config.runtime.profile),
         policy_chat_template=str(model.chat_template or ""),
         draft_model=draft_model,
         draft_model_cache_ttl_days=None,
@@ -2011,7 +2026,7 @@ def _write_final_config(
         terminal_bench_data=(),
         agent_api_base=None,
         literal_log_path=None,
-        policy_model_path=policy_model.metadata_path if policy_model else None,
+        policy_model_path=policy_model.local_path if policy_model else None,
         draft_model_uri=draft_model.source_uri if draft_model else None,
     )
     skyrl = apply_task_local_values(root.skyrl, values)
@@ -2100,7 +2115,7 @@ def main() -> None:
     if args.terminal_bench_data:
         stage_task_data(args.terminal_bench_data, role="terminal-bench sidechannel")
     policy_model = prepare_policy_model(args)
-    policy_metadata_path = policy_model.metadata_path if policy_model is not None else None
+    policy_local_path = policy_model.local_path if policy_model is not None else None
     if args.prestage_model:
         stage_model(
             args.prestage_model,
@@ -2118,7 +2133,7 @@ def main() -> None:
     # Force the policy chat template onto staged metadata or a local model on every
     # node before Ray; the training driver's tokenizer may load anywhere.
     if args.policy_chat_template:
-        model_path = policy_metadata_path or policy_chat_template_model(args.prestage_model, args.model_local_path)
+        model_path = policy_local_path or policy_chat_template_model(args.prestage_model, args.model_local_path)
         apply_policy_chat_template(model_path, args.policy_chat_template)
     rank = _rank()
     if rank == 0:
