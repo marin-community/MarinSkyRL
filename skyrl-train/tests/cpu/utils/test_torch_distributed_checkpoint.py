@@ -186,6 +186,63 @@ def test_concurrent_s3_stream_bounds_and_parallelizes_parts():
     assert not filesystem.aborted
 
 
+def test_concurrent_s3_stream_uploads_past_slow_earlier_part():
+    class OutOfOrderFilesystem:
+        protocol = "s3"
+
+        def __init__(self):
+            self.first_started = threading.Event()
+            self.third_started = threading.Event()
+            self.completed_parts = None
+            self.aborted = False
+
+        def split_path(self, _path):
+            return "bucket", "checkpoint/__0_0.distcp", None
+
+        def call_s3(self, method, **kwargs):
+            if method == "create_multipart_upload":
+                return {"UploadId": "upload-1"}
+            if method == "upload_part":
+                part_number = int(kwargs["PartNumber"])
+                if part_number == 1:
+                    self.first_started.set()
+                    if not self.third_started.wait(timeout=5):
+                        raise AssertionError("part 3 never started while part 1 was pending")
+                if part_number == 2 and not self.first_started.wait(timeout=5):
+                    raise AssertionError("part 1 never started")
+                if part_number == 3:
+                    self.third_started.set()
+                return {"ETag": f"etag-{part_number}"}
+            if method == "complete_multipart_upload":
+                self.completed_parts = kwargs["MultipartUpload"]["Parts"]
+                return {}
+            if method == "abort_multipart_upload":
+                self.aborted = True
+                self.third_started.set()
+                return {}
+            raise AssertionError(f"unexpected S3 method: {method}")
+
+    filesystem = OutOfOrderFilesystem()
+    part_bytes = _MINIMUM_S3_MULTIPART_PART_BYTES
+    stream = _ConcurrentS3WriteStream(
+        filesystem,
+        "s3://bucket/checkpoint/__0_0.distcp",
+        part_bytes=part_bytes,
+        concurrency=2,
+    )
+
+    stream.write(b"a" * part_bytes + b"b" * part_bytes + b"c" * part_bytes)
+    stream.close()
+
+    assert filesystem.third_started.is_set()
+    assert filesystem.completed_parts == [
+        {"PartNumber": 1, "ETag": "etag-1"},
+        {"PartNumber": 2, "ETag": "etag-2"},
+        {"PartNumber": 3, "ETag": "etag-3"},
+    ]
+    assert not filesystem.aborted
+
+
 def test_concurrent_s3_stream_aborts_failed_part():
     filesystem = _RecordingMultipartFilesystem(fail_part=1)
     stream = _ConcurrentS3WriteStream(

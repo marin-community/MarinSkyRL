@@ -1,6 +1,5 @@
 from collections.abc import Generator
-from collections import deque
-from concurrent.futures import Future as ConcurrentFuture, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future as ConcurrentFuture, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 import io
 import os
@@ -81,7 +80,7 @@ class _ConcurrentS3WriteStream:
         self._upload_id: str | None = None
         self._next_part_number = 1
         self._completed_parts: list[dict[str, int | str]] = []
-        self._pending: deque[tuple[int, ConcurrentFuture[tuple[dict[str, int | str], float]]]] = deque()
+        self._pending: set[ConcurrentFuture[tuple[dict[str, int | str], float]]] = set()
         self._executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="checkpoint-s3")
         self._write_error: BaseException | None = None
         self.create_upload_seconds = 0.0
@@ -158,7 +157,7 @@ class _ConcurrentS3WriteStream:
             self._submit_part(bytes(self._buffer))
             self._buffer.clear()
         while self._pending:
-            self._finish_oldest_part()
+            self._finish_next_part()
         self._executor.shutdown(wait=True)
         started = time.perf_counter()
         call_with_s3_retry(
@@ -178,7 +177,7 @@ class _ConcurrentS3WriteStream:
         if self.closed or self._discarded:
             return
         self._discarded = True
-        for _part_number, future in self._pending:
+        for future in self._pending:
             future.cancel()
         if self._upload_id is not None:
             call_with_s3_retry(
@@ -211,9 +210,9 @@ class _ConcurrentS3WriteStream:
         part_number = self._next_part_number
         self._next_part_number += 1
         future = self._executor.submit(self._upload_part, part_number, payload)
-        self._pending.append((part_number, future))
+        self._pending.add(future)
         if len(self._pending) >= self.concurrency:
-            self._finish_oldest_part()
+            self._finish_next_part()
 
     def _upload_part(self, part_number: int, payload: bytes) -> tuple[dict[str, int | str], float]:
         started = time.perf_counter()
@@ -234,9 +233,11 @@ class _ConcurrentS3WriteStream:
             raise
         return {"PartNumber": part_number, "ETag": str(response["ETag"])}, time.perf_counter() - started
 
-    def _finish_oldest_part(self) -> None:
-        _part_number, future = self._pending.popleft()
+    def _finish_next_part(self) -> None:
         started = time.perf_counter()
+        completed, _ = wait(self._pending, return_when=FIRST_COMPLETED)
+        future = completed.pop()
+        self._pending.remove(future)
         part, upload_seconds = future.result()
         self.upload_queue_wait_seconds += time.perf_counter() - started
         self.upload_part_seconds_total += upload_seconds
