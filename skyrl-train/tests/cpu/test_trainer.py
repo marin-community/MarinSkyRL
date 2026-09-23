@@ -600,7 +600,7 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
         if save_error is not None:
             raise save_error
 
-    trainer.save_checkpoints = save_checkpoints
+    trainer._save_checkpoint_payloads = save_checkpoints
 
     if save_error is None:
         asyncio.run(trainer._save_checkpoints_with_residency())
@@ -615,22 +615,33 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
     assert trainer.inference_engine_client.wake_tags == [["weights"], ["kv_cache"]]
 
 
-def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed():
+def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(tmp_path):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {"trainer": {"strategy": "fsdp2", "ckpt_path": str(tmp_path), "max_ckpts_to_keep": -1}}
+    )
+    trainer.global_step = 6
     trainer.all_metrics = {}
     trainer.all_timings = {}
     trainer._checkpoint_save_failures = 0.0
+    trainer._last_optimizer_step_finished_at = None
+    trainer._last_saved_step = None
     attempts = 0
     saved_steps = []
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
 
     async def save_with_residency():
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise OSError("AccessDenied")
+        step_dir = tmp_path / "global_step_6"
+        step_dir.mkdir()
+        torch.save({"global_step": 6}, step_dir / trainer_module.TRAINER_STATE_FILENAME)
 
     async def call_event_async(event, state, control, **_kwargs):
         assert event == "on_save"
+        assert not latest.exists()
         saved_steps.append(state.global_step)
         return control
 
@@ -643,6 +654,7 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
     assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
     asyncio.run(trainer._save_intermediate_checkpoint(state))
     assert saved_steps == [6]
+    assert latest.read_text() == "6"
 
 
 def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
@@ -686,6 +698,54 @@ def test_dataloader_save_failure_preserves_previous_latest_checkpoint(tmp_path, 
 
     assert latest.read_text() == "0"
     assert not (checkpoint_root / "global_step_1" / trainer_module.TRAINER_STATE_FILENAME).exists()
+
+
+def test_on_save_callback_failure_does_not_publish_partial_checkpoint(tmp_path):
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("1")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "fsdp2", "ckpt_path": str(tmp_path)}})
+    trainer.global_step = 2
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer._checkpoint_save_failures = 0.0
+    trainer._control = SimpleNamespace()
+    step_dir = tmp_path / "global_step_2"
+
+    async def save_payloads():
+        step_dir.mkdir()
+        torch.save({"global_step": 2}, step_dir / trainer_module.TRAINER_STATE_FILENAME)
+
+    async def fail_callback(event, state, control, **_kwargs):
+        assert event == "on_save"
+        (step_dir / "data_consumption_state.pt").write_bytes(b"partial")
+        raise OSError("callback write failed")
+
+    trainer._save_checkpoints_with_residency = save_payloads
+    trainer.callback_handler = SimpleNamespace(call_event_async=fail_callback)
+
+    asyncio.run(trainer._save_intermediate_checkpoint(SimpleNamespace(global_step=2)))
+
+    assert latest.read_text() == "1"
+    assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
+
+
+def test_retention_failure_does_not_undo_published_checkpoint(tmp_path):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "fsdp2", "ckpt_path": str(tmp_path)}})
+    trainer.global_step = 2
+    trainer.all_timings = {}
+    trainer._last_optimizer_step_finished_at = None
+    trainer._last_saved_step = None
+
+    def fail_cleanup():
+        raise OSError("retention unavailable")
+
+    trainer._cleanup_old_checkpoints = fail_cleanup
+    trainer._publish_checkpoint()
+
+    assert (tmp_path / trainer_module.LATEST_CHECKPOINT_FILE).read_text() == "2"
+    assert trainer._last_saved_step == 2
 
 
 def test_sync_trainer_attaches_global_loss_denominator_before_dispatch(monkeypatch):

@@ -592,22 +592,24 @@ class RayPPOTrainer:
             # The interval save may have just written this same step; do not write it twice.
             if self._control.should_save and self._last_saved_step != self.global_step:
                 with Timer("save_checkpoints", self.all_timings):
-                    await asyncio.to_thread(self.save_checkpoints)
+                    await asyncio.to_thread(self._save_checkpoint_payloads)
+                    await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
+                    await asyncio.to_thread(self._publish_checkpoint)
                     logger.info("Saved final checkpoint.")
-                await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
             if self._control.should_save_hf_model:
                 await asyncio.to_thread(self.handle_hf_export)
 
     async def _save_checkpoints_with_residency(self) -> None:
         """Save a checkpoint, swapping colocated training and inference residency when needed."""
         if not self.colocate_all:
-            await asyncio.to_thread(self.save_checkpoints)
+            await asyncio.to_thread(self._save_checkpoint_payloads)
             return
 
         await self.inference_engine_client.sleep()
         try:
-            self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
-            await asyncio.to_thread(self.save_checkpoints)
+            with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "policy_backload", rank=-1, step=self.global_step):
+                self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
+            await asyncio.to_thread(self._save_checkpoint_payloads)
         finally:
             await self._sync_policy_for_rollouts(reason="checkpoint_restore")
 
@@ -632,6 +634,11 @@ class RayPPOTrainer:
                 ),
             ):
                 await self._save_checkpoints_with_residency()
+                with checkpoint_phase(
+                    str(self.cfg.trainer.strategy), "save", "on_save_callbacks", rank=-1, step=self.global_step
+                ):
+                    await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
+                await asyncio.to_thread(self._publish_checkpoint)
         except OSError:
             self._record_checkpoint_save_failure(state)
             return
@@ -640,8 +647,6 @@ class RayPPOTrainer:
                 raise
             self._record_checkpoint_save_failure(state)
             return
-
-        await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
 
     async def _run_step_end_callbacks(self, state: TrainerState) -> None:
         """Run callback-requested work that belongs to the current training step."""
@@ -2599,7 +2604,7 @@ class RayPPOTrainer:
         actor_info: ActorInfo = model.actor_infos[rank]
         return actor_info.rank
 
-    def save_checkpoints(self):
+    def _save_checkpoint_payloads(self):
         """
         Save the model, optimizer, and training states to disk.
 
@@ -2662,17 +2667,36 @@ class RayPPOTrainer:
             torch.save(trainer_state, f)
         logger.info(f"Saved trainer state to {trainer_state_path}")
 
-        # Atomic tracking - write this last after all saves succeed
+        logger.info(f"Prepared checkpoint for global_step_{self.global_step} at: {global_step_folder}")
+
+    def _publish_checkpoint(self) -> None:
+        """Advance latest only after payloads and on-save callback state are durable."""
+        global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
         latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
-        with io.open_file(latest_checkpoint_file, "w") as f:
-            f.write(str(self.global_step))
+        with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "latest_pointer", rank=-1, step=self.global_step):
+            io.write_bytes_atomic(latest_checkpoint_file, str(self.global_step).encode())
+        last_optimizer_step = getattr(self, "_last_optimizer_step_finished_at", None)
+        if last_optimizer_step is not None and last_optimizer_step[0] == self.global_step:
+            self.all_timings["checkpoint_pointer_lag"] = time.monotonic() - last_optimizer_step[1]
 
         logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
         self._last_saved_step = self.global_step
 
-        # Clean up old checkpoints after successful save
-        with Timer("cleanup_old_checkpoints", self.all_timings):
-            self._cleanup_old_checkpoints()
+        # Retention is best-effort after publication. A cleanup I/O failure must
+        # not make a committed checkpoint look like a failed save.
+        try:
+            with Timer("cleanup_old_checkpoints", self.all_timings):
+                with checkpoint_phase(
+                    str(self.cfg.trainer.strategy), "save", "retention", rank=-1, step=self.global_step
+                ):
+                    self._cleanup_old_checkpoints()
+        except OSError as error:
+            logger.warning(f"Checkpoint retention failed after publication; continuing: {error}")
+
+    def save_checkpoints(self):
+        """Save and publish a checkpoint when no on-save callbacks are involved."""
+        self._save_checkpoint_payloads()
+        self._publish_checkpoint()
 
     def _cleanup_old_checkpoints(self):
         max_ckpts = self.cfg.trainer.max_ckpts_to_keep

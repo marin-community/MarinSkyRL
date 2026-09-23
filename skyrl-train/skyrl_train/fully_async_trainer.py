@@ -1696,15 +1696,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         return self.convert_to_training_input(trajectory_batch, uids)
 
-    def save_checkpoints(self):
-        """
-        Save checkpoints. Data consumption state is persisted by DataTrackingCallback.on_save,
-        which fires after the base checkpoint save completes.
-        """
-        # The base method saves model, dataloader state, trainer_state, and latest_ckpt_global_step.txt.
-        # DataTrackingCallback.on_save (registered in __init__) writes data_consumption_state.pt.
-        super().save_checkpoints()
-
     def load_checkpoints(self) -> Tuple[int, str]:
         """
         Load the base checkpoint.
