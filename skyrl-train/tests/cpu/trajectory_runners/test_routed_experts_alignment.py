@@ -9,6 +9,8 @@ Run:
 """
 
 import pytest
+import base64
+import io
 import numpy as np
 import torch
 from transformers import AutoTokenizer
@@ -22,6 +24,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
     SENTINEL_EXPERT_ID,
 )
+from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 
 from unittest.mock import MagicMock
@@ -135,7 +138,7 @@ def test_tokenizer_mismatch_lcs():
 # extract helper: reads rollout_details[0]["extra"]["routed_experts"], None-safe
 # ---------------------------------------------------------------------------
 def test_extract_routed_experts_from_rollout_details():
-    rd = [{"extra": {"routed_experts": [[_real_row(0)], [_real_row(1)]]}}]
+    rd = [{"completion_token_ids": [[1], [2]], "extra": {"routed_experts": [[_real_row(0)], [_real_row(1)]]}}]
     got = extract_routed_experts_from_rollout_details(rd)
     assert len(got) == 2
     np.testing.assert_array_equal(got[0], np.asarray([_real_row(0)], dtype=np.int16))
@@ -147,6 +150,38 @@ def test_extract_routed_experts_from_rollout_details():
     assert extract_routed_experts_from_rollout_details([{"logprobs": [[0.0]]}]) is None
     assert extract_routed_experts_from_rollout_details([{"extra": {}}]) is None
     assert extract_routed_experts_from_rollout_details([{"extra": {"routed_experts": []}}]) is None
+
+
+def test_extract_encoded_routed_experts_uses_exact_turn_token_ids():
+    rows = np.asarray([[[1, 2]], [[3, 4]], [[5, 6]], [[7, 8]]], dtype=np.uint16)
+    buffer = io.BytesIO()
+    np.save(buffer, rows, allow_pickle=False)
+    detail = {
+        "prompt_token_ids": [[10, 11, 12]],
+        "completion_token_ids": [[20, 21]],
+        "extra": {"routed_experts": [base64.b64encode(buffer.getvalue()).decode("ascii")]},
+    }
+
+    got = extract_routed_experts_from_rollout_details([detail])
+
+    np.testing.assert_array_equal(got[0], np.asarray([[[7, 8]], [[0, 0]]], dtype=np.int16))
+
+
+@pytest.mark.parametrize(
+    "payload, error",
+    [
+        ("not base64!", "base64-encoded NumPy array"),
+        (None, "expected 4"),
+    ],
+)
+def test_encoded_routed_experts_rejects_malformed_wire_payload(payload, error):
+    if payload is None:
+        buffer = io.BytesIO()
+        np.save(buffer, np.asarray([[[1]], [[2]]], dtype=np.uint16), allow_pickle=False)
+        payload = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    with pytest.raises(ValueError, match=error):
+        normalize_routed_experts(payload, [10, 11, 12], [20, 21])
 
 
 # ---------------------------------------------------------------------------

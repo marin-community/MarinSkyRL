@@ -20,6 +20,7 @@ from skyrl_train.inference_engines.chat_template import (
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.response_topk import select_chat_response_topk
 from skyrl_train.trajectory_runners.types import TokenProvenance
+from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 
 
 _CHAT_SAMPLING_EXCLUSIONS = frozenset({"max_generate_length", "logprobs", "stop"})
@@ -51,20 +52,14 @@ class _ChatResult:
     routed_experts: list[list[list[int]]] | None = None
 
 
-def _choice_routed_experts(choice: dict[str, Any], response_ids: list[int]) -> list[list[list[int]]] | None:
+def _choice_routed_experts(
+    choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]
+) -> list[list[list[int]]] | None:
     provider_fields = choice.get("provider_specific_fields") or {}
     routes = choice.get("routed_experts", provider_fields.get("routed_experts"))
     if routes is None:
         return None
-    if not isinstance(routes, list) or len(routes) != len(response_ids):
-        raise ValueError("chat response routed_experts must align with exact response token IDs")
-    if not all(
-        isinstance(token, list)
-        and all(isinstance(layer, list) and all(isinstance(expert, int) for expert in layer) for layer in token)
-        for token in routes
-    ):
-        raise ValueError("chat response routed_experts must have [token, layer, expert] integer shape")
-    return routes
+    return normalize_routed_experts(routes, prompt_ids, response_ids)
 
 
 def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
@@ -255,7 +250,7 @@ class DirectModelClient:
                 text,
                 choice["finish_reason"],
                 message,
-                _choice_routed_experts(choice, response_ids),
+                _choice_routed_experts(choice, prompt_ids, response_ids),
             )
 
         results = await asyncio.gather(
@@ -426,7 +421,7 @@ class OpenAIHTTPModelClient:
             text=self._tokenizer.decode(response_ids, skip_special_tokens=True),
             stop_reason=choice["finish_reason"],
             assistant_message=choice["message"],
-            routed_experts=_choice_routed_experts(choice, response_ids),
+            routed_experts=_choice_routed_experts(choice, prompt_ids, response_ids),
         )
 
     async def _generate_one(
