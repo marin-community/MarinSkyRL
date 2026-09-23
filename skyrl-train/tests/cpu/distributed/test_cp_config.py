@@ -60,6 +60,7 @@ DEBUG_MODE_TRAINER_FIELDS = {
 RUNTIME_CONFIG_TRAINER_FIELDS = {
     "collective_phase_diagnostics": None,
     "distillation_token_budget": None,
+    "eval_num_prompts": None,
     "offload_optimizer_during_rollouts": False,
     "reset_distillation_token_count_on_resume": False,
     "reset_global_step_on_resume": False,

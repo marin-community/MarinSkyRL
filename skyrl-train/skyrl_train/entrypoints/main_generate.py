@@ -11,6 +11,7 @@ import ray
 from loguru import logger
 from omegaconf import DictConfig
 
+from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation
 from skyrl_train.entrypoints.main_base import (
     BasePPOExp,
     config_dir,
@@ -48,8 +49,7 @@ class EvalOnlyEntrypoint(BasePPOExp):
     async def run(self) -> dict[str, Any]:
         assert self.eval_dataset is not None, "The evaluation only entrypoint requires an eval dataset is provided"
 
-        inference_engine_client = self.create_inference_engine_client()
-        await inference_engine_client.wake_up()
+        inference_engine_client = self.create_inference_engine_client(operation=EntrypointOperation.GENERATE)
         await load_initial_policy_adapter(inference_engine_client, self.cfg)
         trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
 

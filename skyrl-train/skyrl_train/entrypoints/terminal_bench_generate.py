@@ -19,8 +19,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import prepare_traject
 
 class TerminalBenchGenerateExp(TerminalBenchExp):
     async def _generate(self) -> None:
-        inference_engine_client = self.create_inference_engine_client()
-        await inference_engine_client.wake_up()
+        inference_engine_client = self.create_inference_engine_client(operation=EntrypointOperation.GENERATE)
         trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
 
         input_batch, _ = prepare_trajectory_request(
