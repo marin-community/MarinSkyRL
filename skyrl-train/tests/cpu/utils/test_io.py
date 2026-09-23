@@ -11,6 +11,7 @@ from unittest.mock import patch, Mock
 import torch
 from safetensors.torch import save_file
 
+from marinskyrl import model_manifest
 from skyrl_train.hf_model_io import local_hf_model_dir
 from skyrl_train.io.io import (
     is_cloud_path,
@@ -558,6 +559,32 @@ def test_interrupted_cloud_hf_model_publication_removes_stale_index(monkeypatch)
             Path(work_dir, "model.safetensors.index.json").write_text('{"weight_map": {"x": "model.safetensors"}}')
 
     assert index_key not in filesystem.objects
+
+
+def test_parallel_manifest_hash_failure_does_not_publish_cloud_export(monkeypatch):
+    index_key = "bucket/export/policy/model.safetensors.index.json"
+    manifest_key = "bucket/export/policy/.marinskyrl-model-manifest.json"
+    filesystem = FakeHFCloudFilesystem(objects={index_key: b"stale index", manifest_key: b"stale manifest"})
+    monkeypatch.setattr("skyrl_train.io.io._get_filesystem", lambda path: filesystem)
+
+    original_sha256_file = model_manifest.sha256_file
+
+    def fail_weight_hash(path):
+        if path.name == "model.safetensors":
+            raise OSError("weight hash read failed")
+        return original_sha256_file(path)
+
+    monkeypatch.setattr(model_manifest, "sha256_file", fail_weight_hash)
+
+    with pytest.raises(OSError, match="weight hash read failed"):
+        with local_hf_model_dir("s3://bucket/export/policy", manifest_hash_concurrency=4) as work_dir:
+            Path(work_dir, "config.json").write_text("{}")
+            Path(work_dir, "tokenizer.json").write_text("{}")
+            save_file({"weight": torch.ones(1)}, Path(work_dir, "model.safetensors"))
+
+    assert filesystem.uploads == []
+    assert index_key not in filesystem.objects
+    assert manifest_key not in filesystem.objects
 
 
 class TestUploadDownload:
