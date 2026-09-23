@@ -87,7 +87,10 @@ def test_staged_models_are_written_as_structured_config(tmp_path, monkeypatch) -
             "run": {"id": "run", "attempt_id": "attempt"},
             "inputs": {"model": {"uri": "s3://models/policy"}},
             "skyrl": {
-                "trainer": {"policy": {"model": {"path": "policy"}}},
+                "trainer": {
+                    "policy": {"model": {"path": "policy"}},
+                    "ref": {"model": {"path": "policy"}},
+                },
                 "generator": {
                     "engine_init_kwargs": {"served_model_name": "policy"},
                     "speculative_decoding": {"model": {"source_uri": "old", "source_identity": "old"}},
@@ -103,5 +106,6 @@ def test_staged_models_are_written_as_structured_config(tmp_path, monkeypatch) -
     resolved = OmegaConf.load(path)
 
     assert resolved.skyrl.trainer.policy.model.path == "/tmp/policy-metadata"
+    assert resolved.skyrl.trainer.ref.model.path == "/tmp/policy-metadata"
     assert resolved.skyrl.trainer.policy.model.source_uri == "s3://models/policy"
     assert resolved.skyrl.generator.speculative_decoding.model.source_uri == draft.source_uri
