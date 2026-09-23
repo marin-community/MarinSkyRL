@@ -11,6 +11,7 @@ import megatron.core.parallel_state as mpu
 from megatron.core.distributed import finalize_model_grads
 
 from skyrl_train.distributed.megatron.model_utils import (
+    allgather_cp_sharded_tensor,
     from_parallel_logits_to_logprobs,
     from_parallel_logits_to_logprobs_packed_sequences,
     vocab_parallel_entropy,
@@ -166,7 +167,7 @@ class MegatronModelWrapper:
             vocab_end_index=(tp_rank + 1) * logits.shape[-1],
             tp_group=tp_group,
             inference_only=not self.actor_module[0].training,
-            cp_group=None,
+            cp_group=mpu.get_context_parallel_group(),
             chunk_size=self._logprob_chunk_size,
         )
         return scatter_token_values(compact_logprobs, attention_mask, drop_last=True)
@@ -178,6 +179,8 @@ class MegatronModelWrapper:
             if packed_seq_params is None:
                 raise ValueError("Packed sequence parameters are required when sample packing is enabled.")
             return unpack_packed_token_values(token_entropies, packed_seq_params, attention_mask)
+        if mpu.get_context_parallel_world_size() > 1:
+            token_entropies = allgather_cp_sharded_tensor(token_entropies, mpu.get_context_parallel_group(), seq_dim=1)
         return scatter_token_values(token_entropies, attention_mask, drop_last=False)
 
     def _build_router_replay_targets(
