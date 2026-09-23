@@ -207,23 +207,37 @@ def test_megatron_full_checkpoint_restores_per_rank_rng_and_cuda_tracker(ray_ini
     cfg = get_test_trainer_config("megatron", optimizer_checkpoint_sharding_type="dp_reshardable")
     cfg.trainer.export_path = str(tmp_path)
     cfg.trainer.ckpt_path = str(tmp_path)
+    PolicyWorker = ray.remote(num_gpus=1)(RngPolicyWorker)
+    CriticWorker = import_worker("megatron", "critic")
+    RefWorker = import_worker("megatron", "ref")
     trainer = create_minimal_trainer(cfg)
-    trainer.build_models(
-        ray.remote(num_gpus=1)(RngPolicyWorker), import_worker("megatron", "critic"), import_worker("megatron", "ref")
-    )
+    trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
 
-    def fingerprints(advance: bool):
-        results = ray.get(trainer.policy_model.async_run_ray_method("pass_through", "rng_fingerprint", advance))
+    def fingerprints(current_trainer: RayPPOTrainer, advance: bool):
+        results = ray.get(current_trainer.policy_model.async_run_ray_method("pass_through", "rng_fingerprint", advance))
         return {result["rank"]: result for result in results}
 
-    expected = fingerprints(advance=True)
+    expected = fingerprints(trainer, advance=True)
     trainer.global_step = 1
     trainer.save_checkpoints()
-    changed = fingerprints(advance=True)
+    changed = fingerprints(trainer, advance=True)
     assert changed != expected, "The test must advance the tracked CUDA RNG after saving"
-    checkpoint_dir = os.path.join(resolve_checkpoint_payload(str(tmp_path / "global_step_1")), "policy")
+    checkpoint_step_dir = str(tmp_path / "global_step_1")
+    checkpoint_dir = os.path.join(resolve_checkpoint_payload(checkpoint_step_dir), "policy")
     ray.get(trainer.policy_model.async_run_ray_method("pass_through", "load_checkpoint", checkpoint_dir))
-    assert fingerprints(advance=False) == expected
+    assert fingerprints(trainer, advance=False) == expected
+
+    # Reload into new worker processes as a separate regression gate. The output-level
+    # fresh-worker numerical baseline is investigated by the full-checkpoint test.
+    del trainer
+    ray.shutdown()
+    ray_init_for_tests()
+    cfg.trainer.resume_mode = "from_path"
+    cfg.trainer.resume_path = checkpoint_step_dir
+    resumed = create_minimal_trainer(cfg)
+    resumed.build_models(PolicyWorker, CriticWorker, RefWorker)
+    assert resumed.load_checkpoints()[0] == 1
+    assert fingerprints(resumed, advance=False) == expected
 
 
 @pytest.mark.parametrize(
