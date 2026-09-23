@@ -6,7 +6,6 @@ import hydra
 from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
-import asyncio
 from skyrl_train.trajectory_runners.model_clients import OpenAIHTTPModelClient
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
 from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
@@ -72,11 +71,6 @@ class AsyncPPOExp(BasePPOExp):
         if runner.custom_chat_template is None:
             raise ValueError("the fully asynchronous HTTP entrypoint requires a custom chat template")
         return runner
-
-    def run(self):
-        trainer = self._setup_trainer()
-        # Start the async training loop
-        asyncio.run(trainer.train())
 
 
 @ray.remote(num_cpus=1, max_retries=0)

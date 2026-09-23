@@ -22,11 +22,13 @@ import os
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Protocol
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence
 
 import yaml
 
 from cloud.iris.paths import resolve_paths_in_dict
+from cloud.iris.request_builder import apply_hydra_value_overrides
+from marinskyrl.environment_contract import TrainingLoop
 from marinskyrl.distillation import DistillationPlan, compile_distillation_plan, validate_distillation_runtime_support
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
@@ -60,11 +62,11 @@ RL_ENTRYPOINT_MODULES = {
 }
 
 
-def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
-    """Resolve one supported RL execution mode to its packaged module."""
+def parse_rl_entrypoint(value: str | None, *, config_path: Path) -> RLEntrypoint:
+    """Parse one supported RL execution mode name; an absent name is the standard entrypoint."""
     name = RLEntrypoint.STANDARD if value is None else value
     try:
-        entrypoint = RLEntrypoint(name)
+        return RLEntrypoint(name)
     except ValueError as error:
         choices = ", ".join(item.value for item in RLEntrypoint)
         raise ValueError(
@@ -72,7 +74,33 @@ def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
             "Python module paths are not accepted in RL configs."
         ) from error
 
-    return RL_ENTRYPOINT_MODULES[entrypoint]
+
+def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
+    """Resolve one supported RL execution mode to its packaged module."""
+    return RL_ENTRYPOINT_MODULES[parse_rl_entrypoint(value, config_path=config_path)]
+
+
+RL_ENTRYPOINT_NAMES_BY_MODULE = {module: name for name, module in RL_ENTRYPOINT_MODULES.items()}
+
+
+def _colocate_all(raw: Mapping[str, Any], overrides: Sequence[str]) -> bool:
+    """Whether the trainer runs with colocate_all once the launch overrides apply."""
+    effective = apply_hydra_value_overrides(dict(raw), list(overrides))
+    placement = (effective.get("trainer") or {}).get("placement") or {}
+    return placement.get("colocate_all", True) is not False
+
+
+def training_loop_for_entrypoint(
+    entrypoint: RLEntrypoint, raw: Mapping[str, Any], overrides: Sequence[str] = ()
+) -> TrainingLoop | None:
+    """The loop ``entrypoint`` trains with for this RL config, or None for an entrypoint that trains nothing."""
+    if entrypoint in (RLEntrypoint.GENERATE, RLEntrypoint.TERMINAL_BENCH_GENERATE):
+        return None
+    if entrypoint is RLEntrypoint.FULLY_ASYNC:
+        return TrainingLoop.ASYNC
+    if entrypoint is RLEntrypoint.TERMINAL_BENCH and not _colocate_all(raw, overrides):
+        return TrainingLoop.ASYNC
+    return TrainingLoop.SYNC
 
 
 class HPCGeometry(Protocol):

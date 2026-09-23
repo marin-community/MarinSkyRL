@@ -9,7 +9,10 @@ store snapshots. A rollout is one completed trajectory; a sample is one generate
 response segment, so step-wise training counts only terminal segments as
 rollouts. Export is inert without a telemetry endpoint, run id, and execution uid.
 `cloud/iris/telemetry_env.py` resolves them inside the Iris task, and the task
-runtime exports them before Ray starts so its actors inherit them.
+runtime exports them before Ray starts so its actors inherit them. Rigging also
+discards records from a process that never configured it, so the trainer and
+driver configure it in the entrypoint and every worker actor configures it in its
+constructor.
 `SKYRL_EXECUTION_UID` can override the execution identity; otherwise each process
 uses its node-local `IRIS_ATTEMPT_UID`. The service is fixed to `marinskyrl`;
 `SKYRL_SERVING_JOB_ID` optionally joins a centralized serving job.
