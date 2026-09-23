@@ -394,6 +394,8 @@ generator:
   # whole-node rollout pool. Wrappers must not assume that changing replicas leaves the requested gang unchanged.
   num_inference_engines: 1
   backend: "vllm"
+  # Keep legacy scalar export until the Finelog reader/server and Rigging release are deployed.
+  vllm_histogram_format: scalar
   vllm_attention_backend: null
   weight_sync_backend: "nccl"
   # How weights reach the engines. "broadcast": trainer rank 0 sends every tensor to every engine.

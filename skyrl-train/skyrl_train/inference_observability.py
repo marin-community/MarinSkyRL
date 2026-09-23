@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from enum import StrEnum
 from typing import Protocol
 
 from loguru import logger
@@ -20,6 +21,16 @@ from skyrl_train.telemetry import TelemetryConfig
 
 VLLM_MAX_RECORDS_PER_ENGINE = 512
 PUBLICATION_LOSS_METRIC = "metric_publication_dropped_records"
+VLLM_MAX_HISTOGRAM_RECORDS_PER_ENGINE = 512
+HISTOGRAM_PUBLICATION_ATTRIBUTE = "histogram_publication_id"
+
+
+class VllmHistogramFormat(StrEnum):
+    """Explicit rollout modes for native vLLM histograms."""
+
+    SCALAR = "scalar"
+    DUAL = "dual"
+    STRUCTURED = "structured"
 
 
 class InferenceMetricsSink(Protocol):
@@ -28,12 +39,14 @@ class InferenceMetricsSink(Protocol):
     def publish(self, snapshot: InferenceStatsSnapshot, step: int) -> None: ...
 
 
-def configured_inference_sinks() -> tuple[InferenceMetricsSink, ...]:
+def configured_inference_sinks(
+    histogram_format: VllmHistogramFormat = VllmHistogramFormat.SCALAR,
+) -> tuple[InferenceMetricsSink, ...]:
     """Return the Finelog sink when telemetry is configured and Rigging is installed."""
     if not TelemetryConfig.from_environment().endpoint:
         return ()
     try:
-        return (FinelogInferenceMetricsSink(),)
+        return (FinelogInferenceMetricsSink(histogram_format=histogram_format),)
     except ImportError as error:
         if error.name != "rigging":
             raise
@@ -130,13 +143,22 @@ def format_console_summary(metrics: Mapping[str, float], step: int) -> str:
 class FinelogInferenceMetricsSink:
     """Convert the neutral snapshot to Rigging records at the publishing edge."""
 
-    def __init__(self) -> None:
+    def __init__(self, histogram_format: VllmHistogramFormat = VllmHistogramFormat.SCALAR) -> None:
         from rigging.telemetry.metrics import MetricSnapshotPublisher  # noqa: PLC0415
 
+        self._histogram_format = VllmHistogramFormat(histogram_format)
         self._publisher = MetricSnapshotPublisher(
             max_records=VLLM_MAX_RECORDS_PER_ENGINE,
             attributes={"metric_source": "vllm"},
         )
+        self._histogram_publisher = None
+        if self._histogram_format is not VllmHistogramFormat.SCALAR:
+            from rigging.telemetry.metrics import HistogramSnapshotPublisher  # noqa: PLC0415
+
+            self._histogram_publisher = HistogramSnapshotPublisher(
+                max_records=VLLM_MAX_HISTOGRAM_RECORDS_PER_ENGINE,
+                attributes={"metric_source": "vllm"},
+            )
         self._bridge_publisher = MetricSnapshotPublisher(
             max_records=512, attributes={"metric_source": "inference_http_bridge"}
         )
@@ -145,9 +167,20 @@ class FinelogInferenceMetricsSink:
         from rigging import telemetry  # noqa: PLC0415
         from rigging.telemetry.metrics import MetricSnapshot  # noqa: PLC0415
 
+        if self._histogram_format is not VllmHistogramFormat.SCALAR:
+            from rigging.telemetry.metrics import HistogramSnapshot  # noqa: PLC0415
+
         sample_limit_dropped = 0
         telemetry_lost = 0
         for engine in snapshot.engines:
+            structured_histograms = []
+            telemetry_lost += engine.histogram_dropped_count
+            if engine.histogram_dropped_count:
+                logger.warning(
+                    "Rejected {} unsupported native vLLM histogram families for engine {}",
+                    engine.histogram_dropped_count,
+                    engine.engine_id,
+                )
             records = []
             cumulative_base = {**engine.attributes, "engine": engine.engine_id}
             current_base = {**cumulative_base, "step": str(step)}
@@ -221,9 +254,38 @@ class FinelogInferenceMetricsSink:
                     )
                 )
             for histogram in engine.histograms:
-                records.extend(
-                    _histogram_records(histogram, cumulative_base, MetricSnapshot, telemetry.CUMULATIVE_SNAPSHOT)
-                )
+                structured = None
+                if self._histogram_format is not VllmHistogramFormat.SCALAR:
+                    try:
+                        structured = _structured_histogram_snapshot(
+                            histogram, engine, cumulative_base, HistogramSnapshot
+                        )
+                    except ValueError as error:
+                        telemetry_lost += 1
+                        logger.warning(
+                            "Rejected native vLLM histogram {} for engine {}: {}",
+                            histogram.name,
+                            engine.engine_id,
+                            error,
+                        )
+                        continue
+                if self._histogram_format is not VllmHistogramFormat.STRUCTURED:
+                    publication_attributes = (
+                        {HISTOGRAM_PUBLICATION_ATTRIBUTE: _histogram_publication_id(engine)}
+                        if self._histogram_format is VllmHistogramFormat.DUAL
+                        else {}
+                    )
+                    records.extend(
+                        _histogram_records(
+                            histogram,
+                            cumulative_base,
+                            MetricSnapshot,
+                            telemetry.CUMULATIVE_SNAPSHOT,
+                            publication_attributes,
+                        )
+                    )
+                if structured is not None:
+                    structured_histograms.append(structured)
             if len(records) > VLLM_MAX_RECORDS_PER_ENGINE:
                 sample_limit_dropped += len(records)
                 logger.warning(
@@ -250,6 +312,13 @@ class FinelogInferenceMetricsSink:
                         result.sample_limit_dropped_records,
                         result.telemetry_lost_records,
                     )
+            if structured_histograms:
+                if self._histogram_publisher is None:
+                    raise RuntimeError("Structured histograms require a Rigging histogram publisher")
+                result = self._histogram_publisher.publish(structured_histograms)
+                if result.configured:
+                    sample_limit_dropped += result.sample_limit_dropped_records
+                    telemetry_lost += result.telemetry_lost_records
         _record_publication_health(telemetry, "vllm", sample_limit_dropped, telemetry_lost)
         if snapshot.http_bridge is not None:
             records = []
@@ -337,8 +406,9 @@ def _histogram_records(
     base: Mapping[str, str],
     metric_snapshot_type: _MetricRecordFactory,
     cumulative: str,
+    additional_attributes: Mapping[str, str] | None = None,
 ) -> list[_MetricRecord]:
-    attributes = {**histogram.attributes, **base}
+    attributes = {**histogram.attributes, **base, **(additional_attributes or {})}
     records = [
         metric_snapshot_type(
             name=f"{histogram.name}_bucket",
@@ -362,6 +432,52 @@ def _histogram_records(
             )
         )
     return records
+
+
+def _histogram_publication_id(engine: VLLMEngineStatsSnapshot) -> str:
+    if engine.histogram_sequence is None:
+        raise ValueError("vLLM histogram publication has no collection sequence")
+    return f"{engine.engine_id}:{engine.histogram_sequence}"
+
+
+def _structured_histogram_snapshot(
+    histogram: VLLMHistogramSnapshot,
+    engine: VLLMEngineStatsSnapshot,
+    base: Mapping[str, str],
+    snapshot_type,
+):
+    if engine.histogram_timestamp_ms is None or engine.histogram_sequence is None:
+        raise ValueError("native histogram has no collection timestamp or sequence")
+    bounds = []
+    counts = []
+    previous = 0
+    seen_overflow = False
+    for index, (bound, cumulative) in enumerate(histogram.buckets):
+        if math.isinf(bound):
+            if bound < 0 or cumulative != histogram.count or seen_overflow or index != len(histogram.buckets) - 1:
+                raise ValueError("histogram requires one terminal +Inf bucket matching total count")
+            seen_overflow = True
+            continue
+        if not math.isfinite(bound) or (bounds and bound <= bounds[-1]) or cumulative < previous:
+            raise ValueError("histogram buckets are unordered or decreasing")
+        bounds.append(bound)
+        counts.append(cumulative - previous)
+        previous = cumulative
+    if not seen_overflow or histogram.count < previous:
+        raise ValueError("histogram is missing a valid overflow bucket")
+    counts.append(histogram.count - previous)
+    return snapshot_type(
+        name=histogram.name,
+        explicit_bounds=tuple(bounds),
+        bucket_counts=tuple(counts),
+        count=histogram.count,
+        total=histogram.total,
+        unit=histogram.unit,
+        attributes={**histogram.attributes, **base},
+        timestamp_ms=engine.histogram_timestamp_ms,
+        producer_epoch=engine.engine_id,
+        sequence=engine.histogram_sequence,
+    )
 
 
 def _record_publication_health(

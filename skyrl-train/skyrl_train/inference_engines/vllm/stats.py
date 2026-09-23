@@ -38,8 +38,8 @@ class IntervalReadMode(StrEnum):
 @dataclass(frozen=True)
 class VLLMHistogramSnapshot:
     name: str
-    buckets: tuple[tuple[float, float], ...]
-    count: float
+    buckets: tuple[tuple[float, int], ...]
+    count: int
     total: float
     unit: str
     attributes: Mapping[str, str] = field(default_factory=dict)
@@ -112,6 +112,9 @@ class VLLMEngineStatsSnapshot:
     interval: VLLMIntervalStats
     attributes: Mapping[str, str] = field(default_factory=dict)
     histograms: tuple[VLLMHistogramSnapshot, ...] = ()
+    histogram_timestamp_ms: int | None = None
+    histogram_sequence: int | None = None
+    histogram_dropped_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -199,6 +202,7 @@ class VLLMNativeStatsSnapshot:
     current: VLLMCurrentStats
     cumulative: VLLMCumulativeStats
     histograms: tuple[VLLMHistogramSnapshot, ...]
+    histogram_dropped_count: int = 0
 
 
 @dataclass
@@ -232,11 +236,27 @@ class HistogramAccumulator:
         )
 
 
+def _native_histogram_count(value: int | float) -> int:
+    """Keep native counts exact; a large float may already have lost integer bits."""
+    if isinstance(value, bool):
+        raise ValueError("vLLM histogram count must be an integer")
+    if isinstance(value, int):
+        count = value
+    elif isinstance(value, float) and math.isfinite(value) and value.is_integer() and value < 1 << 53:
+        count = int(value)
+    else:
+        raise ValueError("vLLM histogram count is not an exact supported integer")
+    if not 0 <= count <= (1 << 63) - 1:
+        raise ValueError("vLLM histogram count exceeds the signed-64 range")
+    return count
+
+
 def snapshot_vllm_prometheus_metrics(metrics: Sequence[Any], engine_index: str) -> VLLMNativeStatsSnapshot:
     """Translate one engine's built-in vLLM Prometheus snapshot to the wire type."""
     values: dict[str, float] = {}
     finished = {reason: 0 for reason in VLLM_FINISH_REASONS}
     histograms: list[VLLMHistogramSnapshot] = []
+    histogram_dropped_count = 0
 
     for metric in metrics:
         raw_name = str(getattr(metric, "name", ""))
@@ -252,24 +272,28 @@ def snapshot_vllm_prometheus_metrics(metrics: Sequence[Any], engine_index: str) 
             attributes = {"engine_index": engine_index}
             if model_name := labels.get("model_name"):
                 attributes["model_name"] = str(model_name)
-            histograms.append(
-                VLLMHistogramSnapshot(
+            try:
+                histogram = VLLMHistogramSnapshot(
                     name=name,
                     buckets=tuple(
                         sorted(
                             (
-                                (math.inf if bound == "+Inf" else float(bound), float(count))
+                                (math.inf if bound == "+Inf" else float(bound), _native_histogram_count(count))
                                 for bound, count in metric.buckets.items()
                             ),
                             key=lambda item: item[0],
                         )
                     ),
-                    count=float(metric.count),
+                    count=_native_histogram_count(metric.count),
                     total=float(metric.sum),
                     unit=VLLM_HISTOGRAM_UNITS[name],
                     attributes=attributes,
                 )
-            )
+            except (ValueError, TypeError, OverflowError):
+                # One unsupported source family must not erase the rest of the engine scrape.
+                histogram_dropped_count += 1
+            else:
+                histograms.append(histogram)
         elif hasattr(metric, "value"):
             key = f"{name}:{labels.get('reason')}" if name == "num_requests_waiting_by_reason" else name
             values[key] = float(metric.value)
@@ -293,4 +317,5 @@ def snapshot_vllm_prometheus_metrics(metrics: Sequence[Any], engine_index: str) 
             finished_by_reason=finished,
         ),
         histograms=tuple(histograms),
+        histogram_dropped_count=histogram_dropped_count,
     )
