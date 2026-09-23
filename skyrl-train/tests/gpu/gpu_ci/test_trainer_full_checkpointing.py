@@ -317,6 +317,8 @@ def test_trainer_full_checkpointing(
             )
             reloaded_same_worker_logprobs = megatron_policy_logprobs(trainer1)
             torch.testing.assert_close(reloaded_same_worker_logprobs, expected_pre_step_logprobs, rtol=1e-3, atol=1e-3)
+            replayed_same_worker_logprobs = megatron_next_step_logprobs(trainer1)
+            torch.testing.assert_close(replayed_same_worker_logprobs, expected_next_step_logprobs, rtol=1e-3, atol=1e-3)
 
         # Cleanup first trainer
         del trainer1
