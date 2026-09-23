@@ -15,6 +15,7 @@ from skyrl_train.trajectory_runners.types import (
     TrajectoryRequestBatch,
 )
 from skyrl_train.trajectory_runners.trajectory_processing import (
+    _sentinel_routed_experts_row,
     apply_overlong_filtering,
     get_rollout_metrics,
     minimum_captured_global_step,
@@ -92,6 +93,7 @@ class WholeTrajectoryProjection:
             actual_global_step=minimum_captured_global_step(outputs),
         )
         attach_student_topk(batch, outputs, responses, loss_masks)
+        attach_routed_experts(batch, outputs, responses, loss_masks)
         attach_terminal_classifications(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
         return batch
@@ -197,6 +199,29 @@ def attach_student_topk(
         scores.append([list(row) for row in evidence.behavior_topk_logprobs])
     batch["student_topk_indices"] = indices
     batch["behavior_topk_logprobs"] = scores
+
+
+def attach_routed_experts(
+    batch: TrajectoryBatch,
+    outputs: Sequence[AgentLoopOutput],
+    responses: Sequence[Sequence[int]],
+    loss_masks: Sequence[Sequence[int]],
+) -> None:
+    """Project exact response routes and sentinel-fill only fully masked rows."""
+    captured = [output.evidence.routed_experts for output in outputs]
+    if not any(rows is not None for rows in captured):
+        return
+    first_row = next((row for rows in captured if rows is not None for row in rows), None)
+    sentinel = _sentinel_routed_experts_row(first_row) if first_row is not None else [[0]]
+    routes = []
+    for rows, response, mask in zip(captured, responses, loss_masks, strict=True):
+        if rows is None:
+            if any(mask):
+                raise ValueError("routed-expert evidence is missing for a trainable trajectory")
+            routes.append([sentinel for _ in response])
+        else:
+            routes.append([[list(layer) for layer in token] for token in rows])
+    batch["rollout_routed_experts"] = routes
 
 
 def projected_rewards(
