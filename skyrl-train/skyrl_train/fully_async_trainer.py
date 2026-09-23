@@ -48,7 +48,11 @@ from enum import Enum, auto
 from skyrl_train.telemetry import (
     TRAINER_ROLE,
     critical_phase,
+    generation_group,
+    generation_route,
+    record_admission,
     record_event,
+    record_generation_input_coverage,
     record_generated_work,
     record_policy_step,
     record_rollout_buffer,
@@ -1312,19 +1316,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 global_step_at_start = self.global_step
 
                 # Disable each runner's progress bar so concurrent workers do not flood the console.
-                with observe_rollout_call(
-                    step=global_step_at_start,
-                    mode="async",
-                    enabled=self._async_observations_enabled,
-                ) as observation:
-                    cur_trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(
-                        trajectory_request, disable_tqdm=True
-                    )
-                    if observation is not None:
-                        observation.response_tokens = sum(
-                            len(tokens) for tokens in cur_trajectory_batch["response_ids"]
+                route = generation_route(trajectory_request.get("env_extras"))
+                with generation_group(route):
+                    with observe_rollout_call(
+                        step=global_step_at_start,
+                        mode="async",
+                        enabled=self._async_observations_enabled,
+                    ) as observation:
+                        cur_trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(
+                            trajectory_request, disable_tqdm=True
                         )
+                        if observation is not None:
+                            observation.response_tokens = sum(
+                                len(tokens) for tokens in cur_trajectory_batch["response_ids"]
+                            )
                 staleness_step = self._admission_step(cur_trajectory_batch, global_step_at_start)
+                record_generation_input_coverage(trajectory_request.get("env_extras"))
 
                 record_generated_work(
                     cur_trajectory_batch["response_ids"],
@@ -1501,10 +1508,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         inspected_count: int,
     ) -> None:
         self._groups_rejected_since_step += len(rejected_groups)
+        scan_reasons: collections.Counter[str] = collections.Counter()
         for _, decision in rejected_groups:
             assert decision.primary_rejection is not None
             self._rejection_reasons_since_step[decision.primary_rejection.value] += 1
+            scan_reasons[decision.primary_rejection.value] += 1
         self._groups_inspected_since_step += inspected_count
+        retry_count = sum(decision.action is AdmissionAction.RETRY_PROMPT for _, decision in rejected_groups)
+        discarded_count = len(rejected_groups) - retry_count
+        record_admission(
+            inspected=inspected_count,
+            admitted=0,
+            retried=retry_count,
+            discarded=discarded_count,
+            reasons=scan_reasons,
+        )
 
     def _partition_completed_groups(
         self, completed_groups: List[GeneratedOutputGroup], occupied_uids: set[str]
@@ -1581,6 +1599,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             {f"async/rejected_count/{reason.value}": reason_counts[reason.value] for reason in AdmissionRejection}
         )
         self.all_metrics.update(metrics)
+        record_admission(
+            inspected=0,
+            admitted=self.mini_batch_size,
+            retried=0,
+            discarded=dynamic_discarded_count,
+            reasons={},
+        )
         if rejected:
             logger.warning(
                 f"Rejected {rejected} completed groups before step {self.global_step}; "

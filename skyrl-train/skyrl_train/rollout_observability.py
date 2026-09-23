@@ -18,7 +18,14 @@ from functools import partial
 from typing import Literal
 from uuid import uuid4
 
-from skyrl_train.telemetry import TRAINER_ROLE, phase_attributes, phase_duration, record_event, telemetry
+from skyrl_train.telemetry import (
+    TRAINER_ROLE,
+    phase_attributes,
+    phase_duration,
+    record_event,
+    run_in_executor_observed,
+    telemetry,
+)
 
 
 RolloutPhase = Literal["collect", "assemble", "finalize", "tokenize", "retain"]
@@ -250,7 +257,7 @@ async def run_environment(executor: Executor | None, func: Callable, *args, **kw
     observation = _CURRENT.get()
     call = partial(func, *args, **kwargs)
     if observation is None:
-        return call() if executor is None else await asyncio.get_running_loop().run_in_executor(executor, call)
+        return call() if executor is None else await run_in_executor_observed(executor, "environment", call)
     clock = observation.clock
     submitted = clock()
     stamps: list[float] = []
@@ -264,7 +271,7 @@ async def run_environment(executor: Executor | None, func: Callable, *args, **kw
 
     try:
         with rollout_wait("env_await"):
-            return invoke() if executor is None else await asyncio.get_running_loop().run_in_executor(executor, invoke)
+            return invoke() if executor is None else await run_in_executor_observed(executor, "environment", invoke)
     finally:
         # Cancellation can leave the executor running. Do not invent an execution
         # duration or mutate a published accumulator when that thread later exits.

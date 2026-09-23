@@ -936,6 +936,22 @@ def test_failure_metrics_survive_concatenation():
     assert merged["rollout_metrics"]["generate/errors/ContextLengthExceededError"] == 1
 
 
+def test_nemotron_route_coverage_survives_fully_async_concatenation():
+    groups = [_generated_group(1, 0), _generated_group(1, 0)]
+    groups[0]["rollout_metrics"]["nemotron_ultra/coverage/rlvr1/math"] = 1
+    groups[1]["rollout_metrics"].update(
+        {
+            "nemotron_ultra/coverage/rlvr1/math": 2,
+            "nemotron_ultra/coverage/rlvr1/terminus": 1,
+        }
+    )
+
+    merged = concatenate_trajectory_batches(groups, tis_lcs_alert_threshold=0.005)
+
+    assert merged["rollout_metrics"]["nemotron_ultra/coverage/rlvr1/math"] == 3
+    assert merged["rollout_metrics"]["nemotron_ultra/coverage/rlvr1/terminus"] == 1
+
+
 def test_unaligned_logprob_alert_survives_concatenation():
     groups = [_generated_group(1, 0), _generated_group(1, 0)]
     clean = AlignmentStats()
