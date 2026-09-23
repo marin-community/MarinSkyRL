@@ -1,10 +1,79 @@
+import base64
 import contextlib
+import io
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
 from aiohttp import web
 
-from skyrl_train.trajectory_runners.model_clients import DirectModelClient, OpenAIHTTPModelClient
+from skyrl_train.trajectory_runners.model_clients import (
+    DirectModelClient,
+    OpenAIHTTPModelClient,
+    _choice_routed_experts,
+)
+
+
+def _encoded_routes(rows):
+    with io.BytesIO() as buffer:
+        np.save(buffer, np.asarray(rows, dtype=np.uint8), allow_pickle=False)
+        return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def test_vllm_base64_routes_strip_prompt_and_pad_uncaptured_last_response_token():
+    # vLLM includes prompt forwards and omits the last sampled token's forward.
+    routes = _encoded_routes([[[1, 2]], [[3, 4]], [[5, 6]], [[7, 8]]])
+
+    assert _choice_routed_experts({"routed_experts": routes}, [11, 12], [21, 22, 23]) == [
+        [[5, 6]],
+        [[7, 8]],
+        [[0, 0]],
+    ]
+
+
+def test_vllm_base64_routes_reject_wrong_token_count_without_shifting_router_evidence():
+    routes = _encoded_routes([[[1, 2]], [[3, 4]], [[5, 6]]])
+
+    with pytest.raises(ValueError, match="served prompt and response token IDs"):
+        _choice_routed_experts({"routed_experts": routes}, [11, 12], [21, 22, 23])
+
+
+def test_vllm_base64_routes_reject_invalid_encoding_and_shape():
+    with pytest.raises(ValueError, match="valid base64 .npy"):
+        _choice_routed_experts({"routed_experts": "not-base64"}, [11], [21])
+    with pytest.raises(ValueError, match="served prompt and response token IDs"):
+        _choice_routed_experts({"routed_experts": _encoded_routes([[1, 2]])}, [11], [21])
+
+
+@pytest.mark.asyncio
+async def test_direct_chat_client_decodes_vllm_router_capture_without_masking_valid_response():
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "answer"
+    engine.tokenize.return_value = {"tokens": [11, 12]}
+    engine.chat_completion.return_value = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "answer"},
+                "finish_reason": "stop",
+                "token_ids": [21, 22],
+                "routed_experts": _encoded_routes([[[1, 2]], [[3, 4]], [[5, 6]]]),
+            }
+        ]
+    }
+
+    output = await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "question"}]],
+            "session_ids": ["trajectory-1"],
+            "sampling_params": {},
+            "chat_completion_params": [{}],
+        }
+    )
+
+    assert output["response_ids"] == [[21, 22]]
+    assert output["routed_experts"] == [[[[5, 6]], [[0, 0]]]]
 
 
 @pytest.mark.asyncio
