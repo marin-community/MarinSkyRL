@@ -47,7 +47,46 @@ if TYPE_CHECKING:
 mp.set_start_method("spawn", force=True)
 
 config_dir = str(Path(__file__).parent.parent / "config")
-__all__ = ["BasePPOExp", "config_dir"]
+__all__ = ["BasePPOExp", "build_nemotron_ultra_trajectory_runner", "config_dir"]
+
+
+def build_nemotron_ultra_trajectory_runner(
+    cfg: DictConfig,
+    tokenizer,
+    gym_runner: "TrajectoryRunner",
+) -> "TrajectoryRunner":
+    """Wrap Gym with Harbor routing when the config carries SWE task data."""
+    terminal_bench_data = list(cfg.get("data", {}).get("terminal_bench_data", []))
+    if not terminal_bench_data:
+        return gym_runner
+    if cfg.trainer.step_wise_training:
+        raise ValueError("Nemotron Ultra terminal-bench routing is incompatible with step-wise training")
+
+    from skyrl_train.trajectory_runners.harbor.execution import (  # noqa: PLC0415
+        ExecutionEnvironment,
+        HarborRunnerSpec,
+        ProcessPoolResources,
+        TrajectoryWorkload,
+        build_harbor_trajectory_runner,
+    )
+    from skyrl_train.trajectory_runners.nemotron_ultra import NemotronUltraTrajectoryRouter  # noqa: PLC0415
+    from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
+
+    if not cfg.get("terminal_bench_config"):
+        raise ValueError("data.terminal_bench_data requires terminal_bench_config")
+    harbor_runner = build_harbor_trajectory_runner(
+        spec=HarborRunnerSpec.from_config(cfg),
+        workload=TrajectoryWorkload(environment=ExecutionEnvironment.PRODUCTION),
+        tokenizer=tokenizer,
+        resources=ProcessPoolResources.from_config(cfg),
+    )
+    return NemotronUltraTrajectoryRouter(
+        gym_runner=gym_runner,
+        harbor_runner=harbor_runner,
+        terminal_bench_data=terminal_bench_data,
+        require_rollout_logprobs=rollout_logprobs_enabled(cfg.trainer.algorithm),
+        tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
+    )
 
 
 def resolve_entrypoint_node_id(node_ip: str) -> str:
@@ -452,38 +491,7 @@ class BasePPOExp:
             tokenizer=tokenizer,
             pipeline=pipeline,
         )
-        terminal_bench_data = list(cfg.data.get("terminal_bench_data", []))
-        if not terminal_bench_data:
-            return gym_runner
-
-        if cfg.trainer.step_wise_training:
-            raise ValueError("Nemotron Ultra terminal-bench routing is incompatible with step-wise training")
-
-        from skyrl_train.trajectory_runners.harbor.execution import (  # noqa: PLC0415
-            ExecutionEnvironment,
-            HarborRunnerSpec,
-            ProcessPoolResources,
-            TrajectoryWorkload,
-            build_harbor_trajectory_runner,
-        )
-        from skyrl_train.trajectory_runners.nemotron_ultra import NemotronUltraTrajectoryRouter  # noqa: PLC0415
-        from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
-
-        if not cfg.get("terminal_bench_config"):
-            raise ValueError("data.terminal_bench_data requires terminal_bench_config")
-        harbor_runner = build_harbor_trajectory_runner(
-            spec=HarborRunnerSpec.from_config(cfg),
-            workload=TrajectoryWorkload(environment=ExecutionEnvironment.PRODUCTION),
-            tokenizer=tokenizer,
-            resources=ProcessPoolResources.from_config(cfg),
-        )
-        return NemotronUltraTrajectoryRouter(
-            gym_runner=gym_runner,
-            harbor_runner=harbor_runner,
-            terminal_bench_data=terminal_bench_data,
-            require_rollout_logprobs=rollout_logprobs_enabled(cfg.trainer.algorithm),
-            tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
-        )
+        return build_nemotron_ultra_trajectory_runner(cfg, tokenizer, gym_runner)
 
     def get_trainer(
         self,
