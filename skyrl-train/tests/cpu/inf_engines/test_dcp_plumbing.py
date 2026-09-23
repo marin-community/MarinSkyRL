@@ -183,6 +183,7 @@ def test_from_config_streams_object_store_policy_weights(monkeypatch):
 
     assert captured["pretrain"] == "s3://models/policy"
     assert captured["engine_init_kwargs"]["load_format"] == "runai_streamer"
+    assert captured["engine_init_kwargs"]["model_loader_extra_config"] == {"distributed": True}
     assert captured["engine_init_kwargs"]["_marinskyrl_metadata_path"] == "/tmp/model-metadata"
     assert "revision" not in captured["engine_init_kwargs"]
 

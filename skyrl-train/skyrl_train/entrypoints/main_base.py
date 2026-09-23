@@ -147,6 +147,8 @@ def create_ray_wrapped_inference_engines_from_config(
     rollout_model_path = runai_model_uri(policy_source_uri) if policy_source_uri else cfg.trainer.policy.model.path
     if policy_source_uri is not None:
         engine_init_kwargs["load_format"] = "runai_streamer"
+        model_loader_extra_config = engine_init_kwargs.setdefault("model_loader_extra_config", {})
+        model_loader_extra_config.setdefault("distributed", True)
         engine_init_kwargs[MODEL_METADATA_PATH_KEY] = cfg.trainer.policy.model.path
     if speculative_decoding is not None:
         engine_init_kwargs["speculative_config"] = speculative_decoding.vllm_speculative_config()
