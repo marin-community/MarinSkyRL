@@ -2,6 +2,7 @@ import os
 import copy
 import random
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import timedelta
 from typing import List, Union, Optional
@@ -793,6 +794,12 @@ class FSDPStrategy(DistributedStrategy):
             optim_path = os.path.join(work_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
             extra_path = os.path.join(work_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
 
+            def serialize_state_dict(state_dict, path: str, phase_name: str) -> None:
+                with checkpoint_phase(self.fsdp_strategy, "save", phase_name, rank=rank, step=step) as phase:
+                    with io.open_file(path, "wb") as f:
+                        torch.save(state_dict, f)
+                    phase.bytes_written = os.path.getsize(path)
+
             # Save using appropriate FSDP context
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -800,24 +807,22 @@ class FSDPStrategy(DistributedStrategy):
                     # Get and save model state dict
                     with checkpoint_phase(self.fsdp_strategy, "save", "model_state_dict", rank=rank, step=step):
                         model_state_dict = save_model.state_dict()
-                    self.log(f"[rank-{rank}]: Saving model to {model_path}")
-                    with checkpoint_phase(self.fsdp_strategy, "save", "model_serialize", rank=rank, step=step) as phase:
-                        with io.open_file(model_path, "wb") as f:
-                            torch.save(model_state_dict, f)
-                        phase.bytes_written = os.path.getsize(model_path)
-
                     # Get and save optimizer state dict if optimizer is provided
                     optimizer_state_dict = {}
                     with checkpoint_phase(self.fsdp_strategy, "save", "optimizer_state_dict", rank=rank, step=step):
                         if optimizer is not None:
                             optimizer_state_dict = optimizer.state_dict()
+                    self.log(f"[rank-{rank}]: Saving model to {model_path}")
                     self.log(f"[rank-{rank}]: Saving optim to {optim_path}")
-                    with checkpoint_phase(
-                        self.fsdp_strategy, "save", "optimizer_serialize", rank=rank, step=step
-                    ) as phase:
-                        with io.open_file(optim_path, "wb") as f:
-                            torch.save(optimizer_state_dict, f)
-                        phase.bytes_written = os.path.getsize(optim_path)
+                    with ThreadPoolExecutor(max_workers=2) as executor:
+                        model_future = executor.submit(
+                            serialize_state_dict, model_state_dict, model_path, "model_serialize"
+                        )
+                        optim_future = executor.submit(
+                            serialize_state_dict, optimizer_state_dict, optim_path, "optimizer_serialize"
+                        )
+                        model_future.result()
+                        optim_future.result()
 
                     # Get scheduler state dict if scheduler is provided
                     lr_scheduler_state_dict = {}

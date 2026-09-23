@@ -3,10 +3,67 @@ import json
 from pathlib import Path
 import struct
 
+import pytest
 import torch
 
 from skyrl_train.distributed import fsdp_strategy as fsdp_module
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
+
+
+@pytest.mark.parametrize("fail_optimizer_save", [False, True])
+def test_cloud_save_publishes_only_complete_rank_files(monkeypatch, tmp_path, fail_optimizer_save):
+    strategy = object.__new__(FSDPStrategy)
+    strategy.world_size = 2
+    strategy.fsdp_strategy = "fsdp2"
+    strategy.is_lora = False
+    monkeypatch.setattr(strategy, "get_rank", lambda: 1)
+    monkeypatch.setattr(strategy, "is_rank_0", lambda: False)
+    monkeypatch.setattr(strategy, "get_rng_state", lambda: {})
+    monkeypatch.setattr(strategy, "log", lambda *args: None)
+    monkeypatch.setattr(fsdp_module.dist, "barrier", lambda: None)
+    monkeypatch.setattr(fsdp_module, "get_fsdp_state_ctx", lambda *args, **kwargs: nullcontext())
+
+    published = []
+
+    @contextmanager
+    def staged_output_dir(cloud_path, publisher):
+        staged = tmp_path / "staged"
+        staged.mkdir()
+        yield str(staged)
+        model_state = torch.load(staged / "model_world_size_2_rank_1.pt", weights_only=False)
+        optimizer_state = torch.load(staged / "optim_world_size_2_rank_1.pt", weights_only=False)
+        extra_state = torch.load(staged / "extra_state_world_size_2_rank_1.pt", weights_only=False)
+        assert "weight" in model_state
+        assert "param_groups" in optimizer_state
+        assert extra_state["client_state"] == {"completed_steps": 1}
+        publisher(str(staged), cloud_path)
+
+    monkeypatch.setattr(fsdp_module.io, "local_output_dir", staged_output_dir)
+    monkeypatch.setattr(fsdp_module.io, "upload_directory", lambda local, remote: published.append(remote))
+    if fail_optimizer_save:
+        save = torch.save
+
+        def fail_optimizer(obj, file):
+            if isinstance(obj, dict) and "param_groups" in obj:
+                raise OSError("optimizer serialization failed")
+            return save(obj, file)
+
+        monkeypatch.setattr(fsdp_module.torch, "save", fail_optimizer)
+
+    model = torch.nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters())
+    checkpoint_dir = "s3://bucket/checkpoints/global_step_1/policy"
+    if fail_optimizer_save:
+        with pytest.raises(OSError, match="optimizer serialization failed"):
+            strategy.save_checkpoint(
+                model, checkpoint_dir, node_local_rank=1, optimizer=optimizer, client_state={"completed_steps": 1}
+            )
+        assert published == []
+    else:
+        strategy.save_checkpoint(
+            model, checkpoint_dir, node_local_rank=1, optimizer=optimizer, client_state={"completed_steps": 1}
+        )
+        assert published == [checkpoint_dir]
 
 
 def test_cloud_checkpoint_load_stages_only_its_rank_shards(monkeypatch, tmp_path):
