@@ -233,7 +233,13 @@ def test_trainer_full_checkpointing(
 
         # Build models
         trainer1.build_models(PolicyWorker, CriticWorker, RefWorker)
+        initial_logprobs = None
+        initial_parameter_fingerprints = None
         if strategy == "megatron":
+            initial_logprobs = megatron_policy_logprobs(trainer1)
+            initial_parameter_fingerprints = ray.get(
+                trainer1.policy_model.async_run_ray_method("pass_through", "checkpoint_parameter_fingerprints")
+            )
             # A real optimizer step initializes Adam moments, which the checkpoint must preserve.
             # Keep this Megatron-only fixture out of non-Megatron test collection.
             from tests.gpu.test_megatron_worker import get_test_training_batch
@@ -330,6 +336,22 @@ def test_trainer_full_checkpointing(
 
         # Build models again
         trainer2.build_models(PolicyWorker, CriticWorker, RefWorker)
+        if strategy == "megatron":
+            assert initial_logprobs is not None and initial_parameter_fingerprints is not None
+            fresh_logprobs = megatron_policy_logprobs(trainer2)
+            fresh_parameter_fingerprints = ray.get(
+                trainer2.policy_model.async_run_ray_method("pass_through", "checkpoint_parameter_fingerprints")
+            )
+            initial_by_rank = {result["rank"]: result["hashes"] for result in initial_parameter_fingerprints}
+            fresh_by_rank = {result["rank"]: result["hashes"] for result in fresh_parameter_fingerprints}
+            fresh_diff = (fresh_logprobs.float() - initial_logprobs.float()).abs()
+            fresh_mismatches = ~torch.isclose(fresh_logprobs, initial_logprobs, rtol=1e-3, atol=1e-3)
+            print(
+                "Fresh-worker HF-load control: "
+                f"model_tensors_exact={initial_by_rank == fresh_by_rank} "
+                f"output_mismatches={fresh_mismatches.sum().item()}/{fresh_mismatches.numel()} "
+                f"max_abs={fresh_diff.max().item():.6f} mean_abs={fresh_diff.mean().item():.6f}"
+            )
 
         # Load checkpoints
         loaded_global_step, loaded_checkpoint_dir = trainer2.load_checkpoints()
