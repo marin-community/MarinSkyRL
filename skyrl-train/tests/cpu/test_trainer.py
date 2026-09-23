@@ -7,6 +7,7 @@ import asyncio
 import collections
 import gc
 import weakref
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -21,6 +22,7 @@ from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.group_admission import GroupAdmissionStalledError, GroupAdvantageInvariant
 import skyrl_train.trainer as trainer_module
 from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.checkpoint_generation import COMMIT_FILENAME, resolve_checkpoint_payload
 from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.utils.policy_losses import ppo_policy_loss
 from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch, TrainingOutputBatch
@@ -638,8 +640,11 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
         if attempts == 1:
             raise OSError("AccessDenied")
         step_dir = tmp_path / "global_step_6"
-        step_dir.mkdir()
-        torch.save({"global_step": 6}, step_dir / trainer_module.TRAINER_STATE_FILENAME)
+        attempt_dir = Path(trainer_module.new_attempt_path(str(step_dir)))
+        attempt_dir.mkdir(parents=True)
+        trainer._active_checkpoint_payload_path = str(attempt_dir)
+        trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
+        torch.save({"global_step": 6}, attempt_dir / trainer_module.TRAINER_STATE_FILENAME)
 
     async def call_event_async(event, state, control, **_kwargs):
         assert event == "on_save"
@@ -685,7 +690,7 @@ def test_dataloader_save_failure_preserves_previous_latest_checkpoint(tmp_path, 
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = OmegaConf.create({"trainer": {"strategy": "fsdp2", "ckpt_path": str(checkpoint_root)}})
     trainer.global_step = 1
-    trainer.policy_model = SimpleNamespace(async_run_ray_method=lambda *args, **kwargs: [])
+    trainer.policy_model = SimpleNamespace(async_run_ray_method=lambda *args, **kwargs: [0])
     trainer.critic_model = None
     trainer.tokenizer = None
 
@@ -702,9 +707,56 @@ def test_dataloader_save_failure_preserves_previous_latest_checkpoint(tmp_path, 
     assert not (checkpoint_root / "global_step_1" / trainer_module.TRAINER_STATE_FILENAME).exists()
 
 
+@pytest.mark.parametrize("omit_optimizer", [False, True])
+def test_fully_versioned_fsdp_save_commits_only_complete_rank_files(tmp_path, monkeypatch, omit_optimizer):
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    latest = checkpoint_root / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("0")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {"trainer": {"strategy": "fsdp2", "ckpt_path": str(checkpoint_root), "max_ckpts_to_keep": -1}}
+    )
+    trainer.global_step = 1
+    trainer.critic_model = None
+    trainer.tokenizer = None
+    trainer.train_dataloader = SimpleNamespace(state_dict=lambda: {"cursor": 1})
+    trainer._pending_sync_prompts = []
+    trainer.distillation_scored_tokens_total = 0
+    trainer._domain_balancer = None
+    trainer._last_optimizer_step_finished_at = None
+    trainer.all_timings = {}
+
+    def save_rank(_dispatch, _method, *, ckpt_dir, tokenizer):
+        del tokenizer
+        policy_dir = Path(ckpt_dir)
+        policy_dir.mkdir(parents=True)
+        for name in ("model", "extra_state") if omit_optimizer else ("model", "optim", "extra_state"):
+            (policy_dir / f"{name}_world_size_1_rank_0.pt").write_bytes(b"state")
+        (policy_dir / "fsdp_config.json").write_text("{}")
+        return [0]
+
+    trainer.policy_model = SimpleNamespace(async_run_ray_method=save_rank)
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+
+    if omit_optimizer:
+        with pytest.raises(RuntimeError, match="optim_world_size_1_rank_0.pt"):
+            trainer.save_checkpoints()
+        assert latest.read_text() == "0"
+        assert not (checkpoint_root / "global_step_1" / COMMIT_FILENAME).exists()
+    else:
+        trainer.save_checkpoints()
+        assert latest.read_text() == "1"
+        payload = resolve_checkpoint_payload(str(checkpoint_root / "global_step_1"), verify_files=True)
+        assert Path(payload, "policy", "model_world_size_1_rank_0.pt").read_bytes() == b"state"
+
+
 def test_on_save_callback_failure_does_not_publish_partial_checkpoint(tmp_path):
     latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
     latest.write_text("1")
+    previous = tmp_path / "global_step_1"
+    previous.mkdir()
+    (previous / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"previous")
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = OmegaConf.create({"trainer": {"strategy": "fsdp2", "ckpt_path": str(tmp_path)}})
     trainer.global_step = 2
@@ -715,12 +767,15 @@ def test_on_save_callback_failure_does_not_publish_partial_checkpoint(tmp_path):
     step_dir = tmp_path / "global_step_2"
 
     async def save_payloads():
-        step_dir.mkdir()
-        torch.save({"global_step": 2}, step_dir / trainer_module.TRAINER_STATE_FILENAME)
+        attempt_dir = Path(trainer_module.new_attempt_path(str(step_dir)))
+        attempt_dir.mkdir(parents=True)
+        trainer._active_checkpoint_payload_path = str(attempt_dir)
+        trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
+        torch.save({"global_step": 2}, attempt_dir / trainer_module.TRAINER_STATE_FILENAME)
 
     async def fail_callback(event, state, control, **_kwargs):
         assert event == "on_save"
-        (step_dir / "data_consumption_state.pt").write_bytes(b"partial")
+        (Path(trainer._active_checkpoint_payload_path) / "data_consumption_state.pt").write_bytes(b"partial")
         raise OSError("callback write failed")
 
     trainer._save_checkpoints_with_residency = save_payloads
@@ -730,6 +785,8 @@ def test_on_save_callback_failure_does_not_publish_partial_checkpoint(tmp_path):
 
     assert latest.read_text() == "1"
     assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
+    assert resolve_checkpoint_payload(str(previous)) == str(previous)
+    assert not (step_dir / COMMIT_FILENAME).exists()
 
 
 def test_retention_failure_does_not_undo_published_checkpoint(tmp_path):
@@ -744,6 +801,12 @@ def test_retention_failure_does_not_undo_published_checkpoint(tmp_path):
         raise OSError("retention unavailable")
 
     trainer._cleanup_old_checkpoints = fail_cleanup
+    step_dir = tmp_path / "global_step_2"
+    attempt_dir = Path(trainer_module.new_attempt_path(str(step_dir)))
+    attempt_dir.mkdir(parents=True)
+    (attempt_dir / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"trainer")
+    trainer._active_checkpoint_payload_path = str(attempt_dir)
+    trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
     trainer._publish_checkpoint()
 
     assert (tmp_path / trainer_module.LATEST_CHECKPOINT_FILE).read_text() == "2"

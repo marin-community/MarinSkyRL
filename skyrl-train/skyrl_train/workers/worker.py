@@ -1442,6 +1442,7 @@ class PolicyWorkerBase(Worker):
             tokenizer=tokenizer,
             client_state=client_state,
         )
+        return self.get_rank()
 
     def load_checkpoint(
         self,
@@ -1669,6 +1670,7 @@ class CriticWorkerBase(Worker):
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
         )
+        return self.get_rank()
 
     def load_checkpoint(
         self,

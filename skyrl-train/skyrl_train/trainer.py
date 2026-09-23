@@ -93,6 +93,7 @@ from marinskyrl.checkpoint_paths import (
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculativeDecodingConfig, runai_model_uri
 from skyrl_train.checkpoint_listing import extract_step_from_path
+from skyrl_train.checkpoint_generation import commit_attempt, new_attempt_path, resolve_checkpoint_payload
 from skyrl_train.utils.trainer_utils import (
     cleanup_old_checkpoints,
     run_on_each_node,
@@ -219,6 +220,8 @@ class RayPPOTrainer:
         self._shutdown_complete = False
         self.global_step = 0
         self._last_saved_step: int | None = None
+        self._active_checkpoint_payload_path: str | None = None
+        self._checkpoint_required_files: set[str] | None = None
         self._last_optimizer_step_finished_at: tuple[int, float] | None = None
         raw_speculative_decoding = cfg.generator.get("speculative_decoding")
         if raw_speculative_decoding is not None:
@@ -591,11 +594,17 @@ class RayPPOTrainer:
 
             # The interval save may have just written this same step; do not write it twice.
             if self._control.should_save and self._last_saved_step != self.global_step:
-                with Timer("save_checkpoints", self.all_timings):
-                    await asyncio.to_thread(self._save_checkpoint_payloads)
-                    await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
-                    await asyncio.to_thread(self._publish_checkpoint)
-                    logger.info("Saved final checkpoint.")
+                try:
+                    with Timer("save_checkpoints", self.all_timings):
+                        await asyncio.to_thread(self._save_checkpoint_payloads)
+                        await self.callback_handler.call_event_async(
+                            "on_save", final_state, self._control, trainer=self
+                        )
+                        await asyncio.to_thread(self._publish_checkpoint)
+                        logger.info("Saved final checkpoint.")
+                finally:
+                    self._active_checkpoint_payload_path = None
+                    self._checkpoint_required_files = None
             if self._control.should_save_hf_model:
                 await asyncio.to_thread(self.handle_hf_export)
 
@@ -641,6 +650,9 @@ class RayPPOTrainer:
                 raise
             self._record_checkpoint_save_failure(state)
             return
+        finally:
+            self._active_checkpoint_payload_path = None
+            self._checkpoint_required_files = None
 
     async def _run_step_end_callbacks(self, state: TrainerState) -> None:
         """Run callback-requested work that belongs to the current training step."""
@@ -2590,7 +2602,12 @@ class RayPPOTrainer:
         If colocate_all is True, assumes that the policy model is currently on GPU.
         """
         # Create global step folder structure
-        global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
+        step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
+        global_step_folder = new_attempt_path(step_folder)
+        self._active_checkpoint_payload_path = global_step_folder
+        required_files = {"data.pt", TRAINER_STATE_FILENAME, f"{POLICY_CHECKPOINT_SUBDIRECTORY}/worker_receipts.json"}
+        required_files.update(getattr(self, "_required_checkpoint_callback_files", set()))
+        self._checkpoint_required_files = required_files
         policy_save_dir = os.path.join(global_step_folder, POLICY_CHECKPOINT_SUBDIRECTORY)
         critic_save_dir = os.path.join(global_step_folder, "critic")
 
@@ -2598,15 +2615,32 @@ class RayPPOTrainer:
 
         # Save policy checkpoint
         backend = str(self.cfg.trainer.strategy)
+
+        def require_component_files(component: str, ranks: list[int]) -> None:
+            if backend in ("fsdp", "fsdp2"):
+                world_size = len(ranks)
+                for rank in ranks:
+                    for name in ("model", "optim", "extra_state"):
+                        required_files.add(f"{component}/{name}_world_size_{world_size}_rank_{rank}.pt")
+                required_files.add(f"{component}/fsdp_config.json")
+            elif backend == "megatron":
+                required_files.update({f"{component}/.metadata", f"{component}/extra_state.pt"})
+
         with checkpoint_phase(backend, "save", "policy_workers", rank=-1, step=self.global_step):
-            ray.get(
-                self.policy_model.async_run_ray_method(
-                    "pass_through",
-                    "save_checkpoint",
-                    ckpt_dir=policy_save_dir,
-                    tokenizer=self.tokenizer,
-                )
+            policy_refs = self.policy_model.async_run_ray_method(
+                "pass_through",
+                "save_checkpoint",
+                ckpt_dir=policy_save_dir,
+                tokenizer=self.tokenizer,
             )
+            policy_ranks = ray.get(policy_refs)
+        if sorted(policy_ranks) != list(range(len(policy_refs))) or not policy_refs:
+            raise RuntimeError(f"Policy checkpoint worker receipts incomplete: {policy_ranks}")
+        require_component_files(POLICY_CHECKPOINT_SUBDIRECTORY, policy_ranks)
+        io.write_bytes_atomic(
+            os.path.join(policy_save_dir, "worker_receipts.json"),
+            json.dumps({"component": "policy", "ranks": policy_ranks}, sort_keys=True).encode(),
+        )
 
         # Save critic checkpoint (if it exists)
         if self.critic_model is not None:
@@ -2615,14 +2649,21 @@ class RayPPOTrainer:
                 self.critic_model.backload_to_gpu()
 
             with checkpoint_phase(backend, "save", "critic_workers", rank=-1, step=self.global_step):
-                ray.get(
-                    self.critic_model.async_run_ray_method(
-                        "pass_through",
-                        "save_checkpoint",
-                        ckpt_dir=critic_save_dir,
-                        tokenizer=self.tokenizer,
-                    )
+                critic_refs = self.critic_model.async_run_ray_method(
+                    "pass_through",
+                    "save_checkpoint",
+                    ckpt_dir=critic_save_dir,
+                    tokenizer=self.tokenizer,
                 )
+                critic_ranks = ray.get(critic_refs)
+            if sorted(critic_ranks) != list(range(len(critic_refs))) or not critic_refs:
+                raise RuntimeError(f"Critic checkpoint worker receipts incomplete: {critic_ranks}")
+            require_component_files("critic", critic_ranks)
+            io.write_bytes_atomic(
+                os.path.join(critic_save_dir, "worker_receipts.json"),
+                json.dumps({"component": "critic", "ranks": critic_ranks}, sort_keys=True).encode(),
+            )
+            required_files.add("critic/worker_receipts.json")
 
             if self.colocate_all:
                 self.critic_model.offload_to_cpu()
@@ -2655,6 +2696,14 @@ class RayPPOTrainer:
     def _publish_checkpoint(self) -> None:
         """Advance latest only after payloads and on-save callback state are durable."""
         global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
+        attempt_path = getattr(self, "_active_checkpoint_payload_path", None)
+        required_files = getattr(self, "_checkpoint_required_files", None)
+        if attempt_path is None or required_files is None:
+            raise RuntimeError("No prepared checkpoint attempt to publish")
+        with checkpoint_phase(
+            str(self.cfg.trainer.strategy), "save", "generation_commit", rank=-1, step=self.global_step
+        ):
+            commit_attempt(global_step_folder, attempt_path, required_files=required_files)
         latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
         with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "latest_pointer", rank=-1, step=self.global_step):
             io.write_bytes_atomic(latest_checkpoint_file, str(self.global_step).encode())
@@ -2678,8 +2727,12 @@ class RayPPOTrainer:
 
     def save_checkpoints(self):
         """Save and publish a checkpoint when no on-save callbacks are involved."""
-        self._save_checkpoint_payloads()
-        self._publish_checkpoint()
+        try:
+            self._save_checkpoint_payloads()
+            self._publish_checkpoint()
+        finally:
+            self._active_checkpoint_payload_path = None
+            self._checkpoint_required_files = None
 
     def _cleanup_old_checkpoints(self):
         max_ckpts = self.cfg.trainer.max_ckpts_to_keep
@@ -2689,6 +2742,12 @@ class RayPPOTrainer:
         # cluster for no benefit.
         if max_ckpts < 0:
             return
+        if max_ckpts == 0:
+            # Once latest points at a step, retention must not delete that
+            # step's only recoverable generation. Keep one even if the
+            # requested retention count is zero.
+            logger.warning("max_ckpts_to_keep=0 cannot retain a recoverable latest checkpoint; keeping one")
+            max_ckpts = 1
 
         protected_steps = protected_hf_export_steps(self.cfg.trainer.ckpt_path)
 
@@ -2766,6 +2825,7 @@ class RayPPOTrainer:
         if not io.exists(str(checkpoint_path)):
             raise FileNotFoundError(f"Checkpoint path not found: {checkpoint_path}")
 
+        checkpoint_path = resolve_checkpoint_payload(str(checkpoint_path), verify_files=True)
         logger.info(f"Loading checkpoint from: {checkpoint_path}")
 
         # Extract global step from checkpoint path
@@ -2813,8 +2873,15 @@ class RayPPOTrainer:
                 self._pending_sync_prompts = trainer_state.get("pending_sync_prompts", [])
                 logger.info("Successfully loaded dataloader state")
             except Exception as e:
+                if os.path.basename(os.path.dirname(checkpoint_path)) == "_attempts":
+                    raise RuntimeError(f"Failed to restore required dataloader state: {dataloader_state_path}") from e
                 logger.warning(f"Failed to load dataloader state: {e}. Dataloader will start from beginning.")
         else:
+            if (
+                os.path.basename(os.path.dirname(checkpoint_path)) == "_attempts"
+                and self.cfg.trainer.restore_dataloader_state
+            ):
+                raise FileNotFoundError(f"Required dataloader state missing: {dataloader_state_path}")
             logger.warning(
                 f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
             )
@@ -2865,7 +2932,8 @@ class RayPPOTrainer:
 
     def _handle_hf_export(self) -> None:
         checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{self.global_step}")
-        trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
+        payload_path = resolve_checkpoint_payload(checkpoint_path)
+        trainer_state_path = os.path.join(payload_path, TRAINER_STATE_FILENAME)
         if not io.exists(trainer_state_path):
             raise RuntimeError(
                 f"Cannot request HF export for global_step_{self.global_step}: "

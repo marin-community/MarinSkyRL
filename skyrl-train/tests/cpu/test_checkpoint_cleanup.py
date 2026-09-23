@@ -53,7 +53,9 @@ def test_cleanup_runs_driver_side_after_fanout_failure(tmp_path):
     old checkpoints so a shared ``ckpt_path`` does not accumulate.
     """
     for step in (1, 2, 3):
-        (tmp_path / f"global_step_{step}").mkdir()
+        checkpoint_dir = tmp_path / f"global_step_{step}"
+        checkpoint_dir.mkdir()
+        (checkpoint_dir / "trainer_state.pt").write_bytes(b"legacy checkpoint")
     trainer = _make_bare_trainer(max_ckpts_to_keep=1, ckpt_path=str(tmp_path), node_ids=["a", "b"])
 
     with patch("skyrl_train.trainer.run_on_each_node", side_effect=ray.exceptions.WorkerCrashedError):
@@ -78,3 +80,16 @@ def test_cloud_cleanup_runs_once_on_driver_without_node_leases():
     mock_node_ids.assert_not_called()
     mock_dispatch.assert_not_called()
     mock_cleanup.assert_called_once_with(checkpoint_root, 2, {3})
+
+
+def test_driver_retention_zero_still_keeps_advertised_latest():
+    checkpoint_root = "s3://bucket/checkpoints"
+    trainer = _make_bare_trainer(max_ckpts_to_keep=0, ckpt_path=checkpoint_root, node_ids=[])
+
+    with (
+        patch("skyrl_train.trainer.protected_hf_export_steps", return_value=set()),
+        patch("skyrl_train.trainer.cleanup_old_checkpoints") as mock_cleanup,
+    ):
+        trainer._cleanup_old_checkpoints()
+
+    mock_cleanup.assert_called_once_with(checkpoint_root, 1, set())

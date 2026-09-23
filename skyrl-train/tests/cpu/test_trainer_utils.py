@@ -57,11 +57,13 @@ def test_run_on_node_local_rank_0():
 
 def setup_mock_ckpts(tmpdir, checkpoint_steps):
     """
-    Sets up dummy checkpoint directories.
+    Sets up completed legacy checkpoint directories.
     """
-    # Create dummy checkpoint directories
     for step in checkpoint_steps:
-        os.makedirs(os.path.join(tmpdir, f"global_step_{step}"))
+        checkpoint_dir = os.path.join(tmpdir, f"global_step_{step}")
+        os.makedirs(checkpoint_dir)
+        with open(os.path.join(checkpoint_dir, "trainer_state.pt"), "wb") as marker:
+            marker.write(b"legacy checkpoint")
     return
 
 
