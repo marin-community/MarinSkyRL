@@ -377,11 +377,18 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         return await self.inference_engine_actor.get_stats.remote(read_mode=read_mode)
 
 
-def populate_engine_max_model_lens(engines: List["RayWrappedInferenceEngine"], *, timeout_seconds: float) -> None:
+def populate_engine_max_model_lens(
+    engines: List["RayWrappedInferenceEngine"], *, timeout_seconds: float, kill_on_failure: bool = True
+) -> None:
     """Record each serving actor's resolved context limit on its local wrapper."""
     actor_handles = [engine.inference_engine_actor for engine in engines]
     limit_refs = [actor.get_model_max_len.remote() for actor in actor_handles]
-    wait_for_inference_engine_startup(limit_refs, actor_handles, timeout_seconds=timeout_seconds)
+    wait_for_inference_engine_startup(
+        limit_refs,
+        actor_handles,
+        timeout_seconds=timeout_seconds,
+        kill_on_failure=kill_on_failure,
+    )
     for engine, max_model_len in zip(engines, ray.get(limit_refs), strict=True):
         engine.max_model_len = max_model_len
 
@@ -950,6 +957,7 @@ def create_ray_wrapped_inference_engines(
                 numa_refs,
                 [engine.inference_engine_actor for engine in engines],
                 timeout_seconds=engine_init_timeout_seconds,
+                kill_on_failure=False,
             )
 
         # Readiness gate (DISAGGREGATED-mode init-deadlock fix): block until every engine
@@ -985,30 +993,22 @@ def create_ray_wrapped_inference_engines(
             startup_refs = sleep_refs
 
         if startup_refs:
-            try:
-                startup_results = wait_for_inference_engine_startup(
-                    startup_refs,
-                    [engine.inference_engine_actor for engine in engines],
-                    timeout_seconds=engine_init_timeout_seconds,
-                )
-            except Exception:
-                if verify_workers:
-                    _release_node_local_gang([], per_engine_pgs)
-                raise
+            startup_results = wait_for_inference_engine_startup(
+                startup_refs,
+                [engine.inference_engine_actor for engine in engines],
+                timeout_seconds=engine_init_timeout_seconds,
+                kill_on_failure=False,
+            )
             if verify_workers:
-                try:
-                    placements = verified_inference_replica_placements(
-                        startup_results,
-                        stage_nodes=stage_nodes,
-                        node_hosts=node_hosts,
-                        relative_rank_offsets=weight_sync_relative_rank_offsets,
-                        data_parallel_size=data_parallel_size,
-                        expert_parallel_size=expert_parallel_size,
-                        pipeline_parallel_size=pipeline_parallel_size,
-                    )
-                except Exception:
-                    _release_node_local_gang(inference_engine_actors, per_engine_pgs)
-                    raise
+                placements = verified_inference_replica_placements(
+                    startup_results,
+                    stage_nodes=stage_nodes,
+                    node_hosts=node_hosts,
+                    relative_rank_offsets=weight_sync_relative_rank_offsets,
+                    data_parallel_size=data_parallel_size,
+                    expert_parallel_size=expert_parallel_size,
+                    pipeline_parallel_size=pipeline_parallel_size,
+                )
                 for index, engine in enumerate(engines):
                     engine.worker_placements = placements[
                         index * pipeline_parallel_size : (index + 1) * pipeline_parallel_size
@@ -1016,7 +1016,11 @@ def create_ray_wrapped_inference_engines(
                     for placement in engine.worker_placements:
                         logger.info("Verified inference replica placement: {}", placement)
 
-        populate_engine_max_model_lens(engines, timeout_seconds=engine_init_timeout_seconds)
+        populate_engine_max_model_lens(
+            engines,
+            timeout_seconds=engine_init_timeout_seconds,
+            kill_on_failure=False,
+        )
         return engines
     except BaseException:
         _cleanup_failed_engine_startup(inference_engine_actors, owned_placement_groups)
@@ -1024,23 +1028,29 @@ def create_ray_wrapped_inference_engines(
 
 
 def wait_for_inference_engine_startup(
-    startup_refs: list[ray.ObjectRef], actor_handles: list[ActorHandle], *, timeout_seconds: float
+    startup_refs: list[ray.ObjectRef],
+    actor_handles: list[ActorHandle],
+    *,
+    timeout_seconds: float,
+    kill_on_failure: bool = True,
 ) -> list[Any]:
-    """Wait for every engine's startup reply. Kill all the actors if one fails or times out."""
+    """Wait for every startup reply, killing the actors on failure unless the caller owns teardown."""
 
     _, pending = ray.wait(startup_refs, num_returns=len(startup_refs), timeout=timeout_seconds, fetch_local=False)
     if not pending:
         try:
             return ray.get(startup_refs)
         except Exception:
-            for actor in actor_handles:
-                ray.kill(actor)
+            if kill_on_failure:
+                for actor in actor_handles:
+                    ray.kill(actor)
             raise
 
     pending_set = set(pending)
     pending_indices = [index for index, ref in enumerate(startup_refs) if ref in pending_set]
-    for actor in actor_handles:
-        ray.kill(actor)
+    if kill_on_failure:
+        for actor in actor_handles:
+            ray.kill(actor)
     raise TimeoutError(
         f"inference engine startup timed out after {timeout_seconds:g} seconds; "
         f"pending engine actors: {pending_indices}"
