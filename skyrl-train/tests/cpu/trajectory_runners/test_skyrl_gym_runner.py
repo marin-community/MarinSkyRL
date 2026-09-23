@@ -751,6 +751,61 @@ async def test_generate_non_batched_preserves_rollout_logprobs(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("use_conversation_multi_turn", "stop_reason", "expected_ids", "expected_mask"),
+    [
+        (True, "length", [10, 11], [1, 1]),
+        (False, "stop", [10, 11, 4], [1, 1, 0]),
+    ],
+)
+@patch("skyrl_gym.make")
+async def test_non_batched_rollout_projects_response_routes(
+    mock_make,
+    mock_tokenizer,
+    mock_llm,
+    mock_env,
+    generator_cfg,
+    mock_env_cfg,
+    use_conversation_multi_turn,
+    stop_reason,
+    expected_ids,
+    expected_mask,
+):
+    generator_cfg.batched = False
+    generator_cfg.use_conversation_multi_turn = use_conversation_multi_turn
+    generator_cfg.sampling_params.logprobs = 0
+    mock_tokenizer.eos_token_id = 4
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Question"}], {})
+    mock_env.step.side_effect = None
+    mock_env.step.return_value = BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+    routes = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]
+    mock_llm.generate.side_effect = None
+    mock_llm.generate.return_value = {
+        "responses": ["answer"],
+        "response_ids": [[10, 11]],
+        "response_logprobs": [[-0.1, -0.2]],
+        "routed_experts": [routes],
+        "stop_reasons": [stop_reason],
+    }
+    runner = SkyRLGymTrajectoryRunner(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+
+    batch = await runner.run(
+        {
+            "prompts": [[{"role": "user", "content": "Question"}]],
+            "env_extras": [{}],
+            "env_classes": [mock_env_cfg.env_class],
+        }
+    )
+
+    expected_routes = routes if use_conversation_multi_turn else routes + [[[0, 0], [0, 0]]]
+    assert batch["response_ids"] == [expected_ids]
+    assert batch["loss_masks"] == [expected_mask]
+    assert batch["rollout_routed_experts"] == [expected_routes]
+    assert len(batch["rollout_routed_experts"][0]) == len(batch["rollout_logprobs"][0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("stop_reason", "response_ids", "response_logprobs", "expected_ids", "expected_mask", "expected_rewards"),
     [
         ("stop", [10, 11], [-0.1, -0.2], [10, 11, 4], [1, 1, 0], [0.0, 1.0, 0.0]),
@@ -1125,6 +1180,40 @@ async def test_generate_batched_uses_evaluation_token_budget(
 
     assert batch["response_ids"] == [response_ids]
     assert batch["loss_masks"] == [[1] * len(response_ids)]
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_batched_rollout_carries_routes_aligned_with_truncated_response(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    response_ids = [10, 11, 12, 13]
+    routes = [[[index, index + 1], [index + 2, index + 3]] for index in range(len(response_ids))]
+    mock_llm.generate = AsyncMock(
+        return_value={
+            "responses": ["mocked output"],
+            "response_ids": [response_ids],
+            "response_logprobs": [[-0.1, -0.2, -0.3, -0.4]],
+            "routed_experts": [routes],
+            "stop_reasons": ["length"],
+        }
+    )
+    runner = SkyRLGymTrajectoryRunner(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+
+    batch = await runner.run(
+        {
+            "prompts": [[{"role": "user", "content": "Question"}]],
+            "env_extras": [{}],
+            "env_classes": [mock_env_cfg.env_class],
+            "sampling_params": {"max_tokens": 3},
+        }
+    )
+
+    assert batch["response_ids"] == [response_ids[:3]]
+    assert batch["rollout_logprobs"] == [[-0.1, -0.2, -0.3]]
+    assert batch["rollout_routed_experts"] == [routes[:3]]
 
 
 @pytest.mark.asyncio

@@ -35,6 +35,7 @@ from skyrl_train.trajectory_runners.skyrl_gym_contracts import (
     verification_from_env_step,
 )
 from skyrl_train.trajectory_runners.trajectory_processing import (
+    _sentinel_routed_experts_row,
     get_custom_chat_template,
     get_generation_prompt_ids,
     apply_overlong_filtering,
@@ -402,6 +403,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         )
         collect_logprobs = current_sampling_params.get("logprobs", None) is not None
         rollout_logprobs: Optional[List[float]] = [] if collect_logprobs else None
+        rollout_routed_experts: Optional[List[List[List[int]]]] = None
+        route_sentinel: Optional[List[List[int]]] = None
         requested_logprobs = current_sampling_params.get("logprobs")
         collect_topk = isinstance(requested_logprobs, int) and requested_logprobs > 0
         selected_capture_possible = collect_topk and not retokenize_chat_history
@@ -456,6 +459,19 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 captured_global_step = global_step_fn()
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
+            routed_experts_batch = engine_output.get("routed_experts")
+            response_routes = None
+            if routed_experts_batch is not None:
+                if len(routed_experts_batch) != 1:
+                    raise ValueError("Inference engine routed-expert rows must align with responses")
+                response_routes = routed_experts_batch[0]
+                if len(response_routes) != len(output_ids):
+                    raise ValueError("Inference engine routed-expert tokens must align with response tokens")
+                if retokenize_chat_history or chat_completion_params is not None:
+                    raise ValueError("Router replay requires exact token-in-token-out generation")
+                if rollout_routed_experts is not None:
+                    raise ValueError("Router replay through multiple environment turns is not supported")
+                route_sentinel = _sentinel_routed_experts_row(response_routes[0]) if response_routes else [[0]]
             topk_ids_batch = engine_output.get("student_topk_indices")
             topk_scores_batch = engine_output.get("behavior_topk_logprobs")
             if (topk_ids_batch is None) != (topk_scores_batch is None):
@@ -528,6 +544,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     output_ids.append(self.tokenizer.eos_token_id)
                     if response_logprobs is not None:
                         response_logprobs.append(0.0)
+                    if response_routes is not None:
+                        response_routes.append(route_sentinel)
                     added_eos = True
 
             # 2. Environment step
@@ -548,6 +566,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             step_reward: float = env_step_output["reward"]
             verification_results.append(verification_from_env_step(env_step_output))
             done = env_step_output["done"]
+            if response_routes is not None and not done:
+                raise ValueError("Router replay through multiple environment turns is not supported")
 
             reset_conversation = env_step_output.get("reset_conversation")
             if reset_conversation is not None:
@@ -587,7 +607,12 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     rollout_logprobs = None
                 if postprocessed_output_ids != output_ids:
                     selected_capture_possible = False
+                    if response_routes is not None:
+                        raise ValueError("Router replay cannot use postprocessed token IDs")
                 output_ids = postprocessed_output_ids
+
+            if response_routes is not None:
+                rollout_routed_experts = list(response_routes)
 
             # 3. Update states: input ids, loss_mask, chat_history, etc.
             # Three ways of managing input
@@ -668,6 +693,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             response_ids = input_ids[initial_prompt_length : response_end_idx + 1]
             if rollout_logprobs is not None:
                 rollout_logprobs = rollout_logprobs[: len(response_ids)]
+            if rollout_routed_experts is not None:
+                rollout_routed_experts = rollout_routed_experts[: len(response_ids)]
             per_step_rewards = [
                 (reward, None if idx is None else idx - initial_prompt_length) for reward, idx in per_step_rewards
             ]
@@ -682,9 +709,14 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 loss_mask.append(0)
                 if rollout_logprobs is not None:
                     rollout_logprobs.append(0.0)
+                if rollout_routed_experts is not None:
+                    rollout_routed_experts.append(route_sentinel)
 
         assert rollout_logprobs is None or len(rollout_logprobs) == len(response_ids), (
             "rollout_logprobs and response_ids should have the same length"
+        )
+        assert rollout_routed_experts is None or len(rollout_routed_experts) == len(response_ids), (
+            "rollout_routed_experts and response_ids should have the same length"
         )
 
         selected = (
@@ -715,6 +747,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             prompt_token_ids=tuple(prompt_ids),
             response_token_ids=tuple(response_ids),
             behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
+            routed_experts=(
+                None
+                if rollout_routed_experts is None
+                else tuple(tuple(tuple(layer) for layer in token) for token in rollout_routed_experts)
+            ),
             student_topk_indices=None if selected is None else selected.indices,
             behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
         )
@@ -781,6 +818,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         responses = engine_output["response_ids"]
         stop_reasons = engine_output["stop_reasons"]
         logprobs = engine_output.get("response_logprobs", None)
+        routed_experts = engine_output.get("routed_experts")
+        if routed_experts is not None and len(routed_experts) != len(responses):
+            raise ValueError("Inference engine routed-expert rows must align with responses")
         selected_indices = engine_output.get("student_topk_indices")
         selected_logprobs = engine_output.get("behavior_topk_logprobs")
         if (selected_indices is None) != (selected_logprobs is None):
@@ -798,10 +838,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         loss_masks = []
         env_metrics = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
+        truncated_routed_experts = [] if routed_experts is not None else None
         truncated_selected_indices: list[list[list[int]]] = []
         truncated_selected_logprobs: list[list[list[float]]] = []
 
         for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
+            if routed_experts is not None and len(routed_experts[i]) != len(response):
+                raise ValueError("Inference engine routed-expert tokens must align with response tokens")
             publish_rollout_evidence(
                 env,
                 messages=init_prompts[i],
@@ -819,6 +862,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 response = response[:max_tokens]
             loss_masks.append([1] * len(response))
             truncated_responses.append(response)
+            if truncated_routed_experts is not None:
+                truncated_routed_experts.append(routed_experts[i][: len(response)])
             if selected_indices is not None:
                 if len(selected_indices[i]) < len(response) or len(selected_logprobs[i]) < len(response):
                     raise ValueError("Inference engine student top-K tokens must align with response tokens")
@@ -889,6 +934,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         if selected_indices is not None:
             trajectory_batch["student_topk_indices"] = truncated_selected_indices
             trajectory_batch["behavior_topk_logprobs"] = truncated_selected_logprobs
+        if truncated_routed_experts is not None:
+            trajectory_batch["rollout_routed_experts"] = truncated_routed_experts
         attach_unshaped_rewards(trajectory_batch, unshaped_rewards)
 
         return trajectory_batch
