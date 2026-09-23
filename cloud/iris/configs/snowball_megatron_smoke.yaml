@@ -83,3 +83,5 @@ extra_env:
   UV_CACHE_DIR: /uv/cache/checkpoint-benchmark-20260923
   # Limit each RunAI engine's S3 concurrency during the full-model startup burst.
   RUNAI_STREAMER_CONCURRENCY: "2"
+  # Preserve rank-local checkpoint phases while deduplicating startup logs.
+  RAY_DEDUP_LOGS_ALLOW_REGEX: checkpoint_observation

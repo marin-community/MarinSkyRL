@@ -50,6 +50,7 @@ def test_checkpoint_phases_publish_rank_local_structured_results(monkeypatch):
         with checkpoint_phase("fsdp2", "save", "model_serialize", rank=3, step=12) as sample:
             sample.bytes_written = 4096
             sample.scratch_bytes = 4096
+            sample.counters["upload_queue_wait_seconds"] = 0.25
         with pytest.raises(OSError, match="upload failed"):
             with checkpoint_phase("fsdp2", "save", "upload", rank=3, step=12):
                 raise OSError("upload failed")
@@ -73,6 +74,7 @@ def test_checkpoint_phases_publish_rank_local_structured_results(monkeypatch):
     assert [item["rank"] for item in observations] == ["3", "3", "-1"]
     assert all(item["duration_seconds"] >= 0 and item["process_rss_bytes"] > 0 for item in observations)
     assert observations[0]["scratch_bytes"] == 4096
+    assert observations[0]["counters"] == {"upload_queue_wait_seconds": 0.25}
     assert all(item["cgroup_memory_current_bytes"] == 45 for item in observations)
     assert all(item["cgroup_memory_peak_bytes"] == 123 for item in observations)
 

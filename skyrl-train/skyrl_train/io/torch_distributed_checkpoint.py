@@ -4,6 +4,7 @@ from concurrent.futures import Future as ConcurrentFuture, ThreadPoolExecutor
 from contextlib import contextmanager
 import io
 import os
+import time
 from typing import cast, Protocol, runtime_checkable
 
 from fsspec import AbstractFileSystem
@@ -24,7 +25,7 @@ from torch.futures import Future
 
 from skyrl_train.io.s3fs import call_with_s3_retry, get_s3_fs, s3_refresh_if_expiring
 from skyrl_train.checkpoint_listing import extract_step_from_path
-from skyrl_train.timing_observability import checkpoint_phase
+from skyrl_train.timing_observability import CheckpointPhaseSample, checkpoint_phase
 
 
 DEFAULT_TENSOR_COPY_AHEAD_BYTES = 2**30
@@ -80,9 +81,15 @@ class _ConcurrentS3WriteStream:
         self._upload_id: str | None = None
         self._next_part_number = 1
         self._completed_parts: list[dict[str, int | str]] = []
-        self._pending: deque[tuple[int, ConcurrentFuture[dict[str, int | str]]]] = deque()
+        self._pending: deque[tuple[int, ConcurrentFuture[tuple[dict[str, int | str], float]]]] = deque()
         self._executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="checkpoint-s3")
         self._write_error: BaseException | None = None
+        self.create_upload_seconds = 0.0
+        self.upload_part_seconds_total = 0.0
+        self.upload_part_seconds_max = 0.0
+        self.upload_queue_wait_seconds = 0.0
+        self.complete_upload_seconds = 0.0
+        self.uploaded_part_count = 0
 
     def writable(self) -> bool:
         return True
@@ -153,6 +160,7 @@ class _ConcurrentS3WriteStream:
         while self._pending:
             self._finish_oldest_part()
         self._executor.shutdown(wait=True)
+        started = time.perf_counter()
         call_with_s3_retry(
             self.filesystem,
             self.filesystem.call_s3,
@@ -163,6 +171,7 @@ class _ConcurrentS3WriteStream:
             UploadId=self._upload_id,
             MultipartUpload={"Parts": sorted(self._completed_parts, key=lambda part: int(part["PartNumber"]))},
         )
+        self.complete_upload_seconds = time.perf_counter() - started
         self.closed = True
 
     def discard(self) -> None:
@@ -187,6 +196,7 @@ class _ConcurrentS3WriteStream:
 
     def _submit_part(self, payload: bytes) -> None:
         if self._upload_id is None:
+            started = time.perf_counter()
             response = call_with_s3_retry(
                 self.filesystem,
                 self.filesystem.call_s3,
@@ -195,6 +205,7 @@ class _ConcurrentS3WriteStream:
                 Bucket=self.bucket,
                 Key=self.key,
             )
+            self.create_upload_seconds = time.perf_counter() - started
             self._upload_id = str(response["UploadId"])
 
         part_number = self._next_part_number
@@ -204,7 +215,8 @@ class _ConcurrentS3WriteStream:
         if len(self._pending) >= self.concurrency:
             self._finish_oldest_part()
 
-    def _upload_part(self, part_number: int, payload: bytes) -> dict[str, int | str]:
+    def _upload_part(self, part_number: int, payload: bytes) -> tuple[dict[str, int | str], float]:
+        started = time.perf_counter()
         try:
             response = call_with_s3_retry(
                 self.filesystem,
@@ -220,11 +232,17 @@ class _ConcurrentS3WriteStream:
         except BaseException as error:
             error.add_note(f"Multipart upload failed for {self.path}: upload_id={self._upload_id} part={part_number}")
             raise
-        return {"PartNumber": part_number, "ETag": str(response["ETag"])}
+        return {"PartNumber": part_number, "ETag": str(response["ETag"])}, time.perf_counter() - started
 
     def _finish_oldest_part(self) -> None:
         _part_number, future = self._pending.popleft()
-        self._completed_parts.append(future.result())
+        started = time.perf_counter()
+        part, upload_seconds = future.result()
+        self.upload_queue_wait_seconds += time.perf_counter() - started
+        self.upload_part_seconds_total += upload_seconds
+        self.upload_part_seconds_max = max(self.upload_part_seconds_max, upload_seconds)
+        self.uploaded_part_count += 1
+        self._completed_parts.append(part)
 
 
 class _AbortableFsspecFileSystem(FsspecFileSystem):
@@ -354,11 +372,13 @@ class StreamingFsspecWriter(FileSystemWriter):
     def write_data(self, plan: SavePlan, planner: SavePlanner) -> Future[list[WriteResult]]:
         """Write a rank shard without retaining serialized tensors until close."""
         with checkpoint_phase("megatron", "save", "stream_shard", rank=self.rank, step=self.checkpoint_step) as phase:
-            result = self._write_data(plan, planner)
+            result = self._write_data(plan, planner, phase)
             phase.bytes_written = sum(item.size_in_bytes for item in result.wait())
             return result
 
-    def _write_data(self, plan: SavePlan, planner: SavePlanner) -> Future[list[WriteResult]]:
+    def _write_data(
+        self, plan: SavePlan, planner: SavePlanner, phase: CheckpointPhaseSample
+    ) -> Future[list[WriteResult]]:
         storage_plan = plan.storage_data
         if storage_plan is None:
             raise AssertionError("DCP storage plan is missing its rank prefix")
@@ -375,12 +395,19 @@ class StreamingFsspecWriter(FileSystemWriter):
             loader = _SerialCpuLoader(planner.resolve_data)
         for item in tensor_items:
             loader.add(_item_size(item), item)
+        started = time.perf_counter()
         loader.start_loading()
+        phase.counters["loader_start_seconds"] = time.perf_counter() - started
+        phase.counters["tensor_item_count"] = len(tensor_items)
 
         results: list[WriteResult] = []
+        byte_item_seconds = 0.0
+        tensor_item_seconds = 0.0
+        loader_next_seconds = 0.0
         with self.fs.create_stream(path, "wb") as stream:
             for item in plan.items:
                 if item.type == WriteItemType.BYTE_IO:
+                    started = time.perf_counter()
                     results.append(
                         _write_item(
                             self.transforms,
@@ -391,14 +418,24 @@ class StreamingFsspecWriter(FileSystemWriter):
                             self.serialization_format,
                         )
                     )
+                    byte_item_seconds += time.perf_counter() - started
 
             # PyTorch's stock one-file writer fills a safetensors dictionary even
             # for torch.save, retaining every GPU-to-CPU copy until the rank closes.
             # Emit each result immediately so only the loader's bounded window lives.
-            for tensor, item_object in loader.values():
+            values = iter(loader.values())
+            while True:
+                started = time.perf_counter()
+                try:
+                    tensor, item_object = next(values)
+                except StopIteration:
+                    loader_next_seconds += time.perf_counter() - started
+                    break
+                loader_next_seconds += time.perf_counter() - started
                 item = cast(WriteItem, item_object)
                 if not tensor.is_cpu:
                     raise AssertionError("DCP tensor must be on CPU before serialization")
+                started = time.perf_counter()
                 results.append(
                     _write_item(
                         self.transforms,
@@ -409,6 +446,26 @@ class StreamingFsspecWriter(FileSystemWriter):
                         self.serialization_format,
                     )
                 )
+                tensor_item_seconds += time.perf_counter() - started
+
+        phase.counters.update(
+            {
+                "byte_item_seconds": byte_item_seconds,
+                "tensor_item_seconds": tensor_item_seconds,
+                "loader_next_seconds": loader_next_seconds,
+            }
+        )
+        if isinstance(stream, _ConcurrentS3WriteStream):
+            phase.counters.update(
+                {
+                    "create_upload_seconds": stream.create_upload_seconds,
+                    "upload_part_seconds_total": stream.upload_part_seconds_total,
+                    "upload_part_seconds_max": stream.upload_part_seconds_max,
+                    "upload_queue_wait_seconds": stream.upload_queue_wait_seconds,
+                    "complete_upload_seconds": stream.complete_upload_seconds,
+                    "uploaded_part_count": stream.uploaded_part_count,
+                }
+            )
 
         future: Future[list[WriteResult]] = Future()
         future.set_result(results)
