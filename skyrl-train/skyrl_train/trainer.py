@@ -2624,7 +2624,16 @@ class RayPPOTrainer:
                         required_files.add(f"{component}/{name}_world_size_{world_size}_rank_{rank}.pt")
                 required_files.add(f"{component}/fsdp_config.json")
             elif backend == "megatron":
-                required_files.update({f"{component}/.metadata", f"{component}/extra_state.pt"})
+                required_files.update(
+                    {
+                        f"{component}/.metadata",
+                        f"{component}/common.pt",
+                        f"{component}/metadata.json",
+                        f"{component}/extra_state.pt",
+                        f"{component}/huggingface/config.json",
+                    }
+                )
+                required_files.update(f"{component}/__{rank}_0.distcp" for rank in ranks)
 
         with checkpoint_phase(backend, "save", "policy_workers", rank=-1, step=self.global_step):
             policy_refs = self.policy_model.async_run_ray_method(

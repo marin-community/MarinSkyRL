@@ -764,6 +764,60 @@ def test_fully_versioned_fsdp_save_commits_only_complete_rank_files(tmp_path, mo
         assert Path(payload, "policy", "model_world_size_1_rank_0.pt").read_bytes() == b"state"
 
 
+@pytest.mark.parametrize("missing_file", [None, "__1_0.distcp", "common.pt", "metadata.json"])
+def test_fully_versioned_megatron_save_requires_rank_and_common_state(tmp_path, monkeypatch, missing_file):
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    latest = checkpoint_root / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("0")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {"trainer": {"strategy": "megatron", "ckpt_path": str(checkpoint_root), "max_ckpts_to_keep": -1}}
+    )
+    trainer.global_step = 1
+    trainer.critic_model = None
+    trainer.tokenizer = None
+    trainer.train_dataloader = SimpleNamespace(state_dict=lambda: {"cursor": 1})
+    trainer._pending_sync_prompts = []
+    trainer.distillation_scored_tokens_total = 0
+    trainer._domain_balancer = None
+    trainer._last_optimizer_step_finished_at = None
+    trainer.all_timings = {}
+
+    def save_ranks(_dispatch, _method, *, ckpt_dir, tokenizer):
+        del tokenizer
+        policy_dir = Path(ckpt_dir)
+        policy_dir.mkdir(parents=True)
+        for name in (
+            ".metadata",
+            "__0_0.distcp",
+            "__1_0.distcp",
+            "common.pt",
+            "metadata.json",
+            "extra_state.pt",
+            "huggingface/config.json",
+        ):
+            if name != missing_file:
+                target = policy_dir / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"state")
+        return [0, 1]
+
+    trainer.policy_model = SimpleNamespace(async_run_ray_method=save_ranks)
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+
+    if missing_file is not None:
+        with pytest.raises(RuntimeError, match=missing_file):
+            trainer.save_checkpoints()
+        assert latest.read_text() == "0"
+        assert not (checkpoint_root / "global_step_1" / COMMIT_FILENAME).exists()
+    else:
+        trainer.save_checkpoints()
+        assert latest.read_text() == "1"
+        payload = resolve_checkpoint_payload(str(checkpoint_root / "global_step_1"), verify_files=True)
+        assert Path(payload, "policy", "__1_0.distcp").read_bytes() == b"state"
+
+
 def test_on_save_callback_failure_does_not_publish_partial_checkpoint(tmp_path):
     latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
     latest.write_text("1")
