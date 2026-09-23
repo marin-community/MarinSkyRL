@@ -34,6 +34,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import shutil
 import signal
 import socket
 import subprocess
@@ -43,7 +44,7 @@ import threading
 import time
 import uuid
 from typing import Protocol
-from cloud.iris.artifacts import ArtifactSource, file_inventory, fs_and_path, materialize
+from cloud.iris.artifacts import ArtifactSource, atomic_directory_update, file_inventory, fs_and_path, materialize
 from cloud.iris.hf_model_cache import (
     download_hugging_face_snapshot,
     ensure_model_manifest,
@@ -60,6 +61,7 @@ from marinskyrl.environment_contract import (
     ray_cluster_owner_environment,
 )
 from marinskyrl.hf_model import immutable_model_cache_key, validate_hf_model_weights
+from marinskyrl.model_manifest import MODEL_MANIFEST_FILENAME
 from cloud.iris.telemetry_env import telemetry_environment
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculatorModelConfig, SpeculatorModelSourceKind
@@ -443,11 +445,15 @@ class PreparedPolicyTokenizer:
 
 
 TOKENIZER_METADATA_PATTERNS = (
-    "*.json",
-    "*.jinja",
+    "added_tokens.json",
+    "chat_template*.jinja",
     "*.model",
-    "*.py",
-    "*.txt",
+    "merges.txt",
+    "special_tokens_map.json",
+    "tokenization_*.py",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
 )
 
 
@@ -494,27 +500,58 @@ def apply_policy_model_to_command(train_argv: list[str], model: PreparedPolicyMo
     _set_command_option(train_argv, "--model-source-identity", model.source_identity)
 
 
-def prepare_policy_tokenizer(args: argparse.Namespace) -> PreparedPolicyTokenizer | None:
-    """Stage only the explicitly requested tokenizer metadata before Ray starts."""
+def _remove_tokenizer_metadata(path: Path) -> None:
+    for pattern in TOKENIZER_METADATA_PATTERNS:
+        for metadata_file in path.glob(pattern):
+            metadata_file.unlink()
+
+
+def _copy_tokenizer_metadata(source: Path, destination: Path) -> None:
+    copied = False
+    for pattern in TOKENIZER_METADATA_PATTERNS:
+        for metadata_file in source.glob(pattern):
+            shutil.copy2(metadata_file, destination / metadata_file.name)
+            copied = True
+    if not copied:
+        raise ValueError(f"Tokenizer source contains no tokenizer metadata: {source}")
+
+
+def prepare_policy_tokenizer(
+    args: argparse.Namespace, policy_model: PreparedPolicyModel | None
+) -> PreparedPolicyTokenizer | None:
+    """Compose the requested tokenizer with staged policy model metadata."""
     tokenizer_path = args.policy_tokenizer
     if not tokenizer_path:
         return None
-    if os.path.isdir(tokenizer_path):
-        return PreparedPolicyTokenizer(tokenizer_path)
+    if policy_model is None:
+        raise ValueError("A separate --policy-tokenizer requires staged policy model metadata")
 
     revision = args.policy_tokenizer_revision
-    local_path = _metadata_path(tokenizer_path, revision or HUGGING_FACE_DEFAULT_REVISION)
-    if is_cloud_uri(tokenizer_path):
-        manifest = ensure_model_manifest(tokenizer_path)
-        stage_model_metadata(tokenizer_path, manifest, local_path)
-        return PreparedPolicyTokenizer(local_path)
+    identity = f"{policy_model.source_identity}#tokenizer={tokenizer_path}@{revision or HUGGING_FACE_DEFAULT_REVISION}"
+    local_path = _metadata_path(policy_model.source_uri, identity)
+    target = Path(local_path)
+    with atomic_directory_update(target, staging_prefix=f".{target.name}.tokenizer-") as staging:
+        shutil.copytree(policy_model.metadata_path, staging, dirs_exist_ok=True)
+        _remove_tokenizer_metadata(staging)
+        manifest_path = staging / MODEL_MANIFEST_FILENAME
+        if manifest_path.exists():
+            manifest_path.unlink()
 
-    download_hugging_face_snapshot(
-        tokenizer_path,
-        revision=revision,
-        destination=Path(local_path),
-        allow_patterns=TOKENIZER_METADATA_PATTERNS,
-    )
+        if os.path.isdir(tokenizer_path):
+            _copy_tokenizer_metadata(Path(tokenizer_path), staging)
+        elif is_cloud_uri(tokenizer_path):
+            tokenizer_metadata_path = _metadata_path(tokenizer_path, revision or HUGGING_FACE_DEFAULT_REVISION)
+            manifest = ensure_model_manifest(tokenizer_path)
+            stage_model_metadata(tokenizer_path, manifest, tokenizer_metadata_path)
+            _copy_tokenizer_metadata(Path(tokenizer_metadata_path), staging)
+        else:
+            download_hugging_face_snapshot(
+                tokenizer_path,
+                revision=revision,
+                destination=staging,
+                allow_patterns=TOKENIZER_METADATA_PATTERNS,
+            )
+
     return PreparedPolicyTokenizer(local_path)
 
 
@@ -2393,7 +2430,7 @@ def main() -> None:
     policy_model = prepare_policy_model(args)
     if policy_model is not None:
         apply_policy_model_to_command(train_argv, policy_model)
-    policy_tokenizer = prepare_policy_tokenizer(args)
+    policy_tokenizer = prepare_policy_tokenizer(args, policy_model)
     if policy_tokenizer is not None:
         apply_policy_tokenizer_to_command(train_argv, policy_tokenizer)
     policy_metadata_path = policy_model.metadata_path if policy_model is not None else None

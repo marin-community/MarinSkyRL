@@ -1,10 +1,13 @@
 from argparse import Namespace
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from cloud.iris import task_runtime
 from cloud.iris.task_runtime import (
+    PreparedPolicyModel,
     apply_draft_model_to_command,
     apply_policy_model_to_command,
     apply_policy_tokenizer_to_command,
@@ -106,7 +109,8 @@ def test_requested_policy_tokenizer_is_staged_and_applied(monkeypatch, tmp_path)
 
     def download(model_id, *, revision, destination, allow_patterns):
         staged.append((model_id, revision, destination, allow_patterns))
-        destination.mkdir(parents=True)
+        (destination / "tokenizer.json").write_text('{"version":"pinned"}')
+        (destination / "tokenizer_config.json").write_text('{"chat_template":"pinned"}')
         return destination
 
     monkeypatch.setattr(task_runtime, "download_hugging_face_snapshot", download)
@@ -115,14 +119,22 @@ def test_requested_policy_tokenizer_is_staged_and_applied(monkeypatch, tmp_path)
         policy_tokenizer="penfever/grug-tokenizer",
         policy_tokenizer_revision=revision,
     )
+    policy_metadata = tmp_path / "policy"
+    policy_metadata.mkdir()
+    (policy_metadata / "config.json").write_text('{"model_type":"grug_moe"}')
+    (policy_metadata / "tokenizer_config.json").write_text('{"chat_template":"embedded"}')
+    policy_model = PreparedPolicyModel("s3://models/policy", "sha256:" + "a" * 64, str(policy_metadata))
     command = ["python", "-m", "cloud.iris.training_driver"]
 
-    tokenizer = prepare_policy_tokenizer(args)
+    tokenizer = prepare_policy_tokenizer(args, policy_model)
 
     assert tokenizer is not None
     apply_policy_tokenizer_to_command(command, tokenizer)
     overrides = [command[index + 1] for index, value in enumerate(command) if value == "--skyrl_override"]
     assert staged[0][0:2] == ("penfever/grug-tokenizer", revision)
+    metadata_path = Path(tokenizer.metadata_path)
+    assert json.loads((metadata_path / "config.json").read_text()) == {"model_type": "grug_moe"}
+    assert json.loads((metadata_path / "tokenizer_config.json").read_text()) == {"chat_template": "pinned"}
     assert f"++trainer.policy.model.tokenizer_path={tokenizer.metadata_path}" in overrides
     assert "++trainer.policy.model.tokenizer_revision=null" in overrides
 
