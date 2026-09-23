@@ -472,9 +472,6 @@ def validate_megatron_cfg(cfg: DictConfig):
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
-        # context, expert, and expert tensor parallel are not yet supported for megatron
-        if config.megatron_config.context_parallel_size > 1:
-            assert cfg.trainer.use_sample_packing, "context parallel is only supported with sample packing"
         # check that sequence parallel is not configured outside of megatron
         assert config.sequence_parallel_size == 1, (
             f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence parallel is not supported for megatron"

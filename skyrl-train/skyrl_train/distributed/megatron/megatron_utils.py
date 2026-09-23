@@ -30,6 +30,7 @@ from megatron.core.optimizer import ChainedOptimizer
 from megatron.core import parallel_state as mpu
 from megatron.core.utils import get_attr_wrapped_model
 from megatron.core.packed_seq_params import PackedSeqParams
+from skyrl_train.utils.context_parallel import shard_dense_sequence_for_context_parallel
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
@@ -523,15 +524,16 @@ def remove_left_padding(
     assert attention_mask.ndim == 2
     assert position_ids.ndim == 2
     cp_size = mpu.get_context_parallel_world_size()
-    assert cp_size == 1, "Context parallel size without seq_pack is not supported"
+    cp_rank = mpu.get_context_parallel_rank()
     batch_size = input_ids.shape[0]
     shape = list(input_ids.shape)  # batch_size, seq_len,...
     seq_lens = attention_mask.sum(dim=1)
     seq_len = seq_lens.max().item()
-    if mpu.get_tensor_model_parallel_world_size() > 1:
-        sp_world_size = mpu.get_tensor_model_parallel_world_size()
-        pad_size = (sp_world_size - seq_len % sp_world_size) % sp_world_size
-        seq_len = seq_len + pad_size
+    # Megatron's causal CP layout assigns each rank one chunk from each end.
+    # Align before sharding so every rank receives the same sequence length.
+    align_size = mpu.get_tensor_model_parallel_world_size() * (2 * cp_size if cp_size > 1 else 1)
+    pad_size = (align_size - seq_len % align_size) % align_size
+    seq_len = seq_len + pad_size
     shape[1] = seq_len
     if pre_process:
         new_input_ids = torch.zeros(dtype=input_ids.dtype, device=input_ids.device, size=shape)
@@ -544,10 +546,16 @@ def remove_left_padding(
             new_input_ids[i, : seq_lens[i]] = input_ids[i, attention_mask[i]]
         new_attention_mask[i, : seq_lens[i]] = attention_mask[i, attention_mask[i]]
         new_position_ids[i, : seq_lens[i]] = position_ids[i, attention_mask[i]]
+    if cp_size > 1:
+        new_attention_mask = shard_dense_sequence_for_context_parallel(
+            new_attention_mask, cp_size=cp_size, cp_rank=cp_rank
+        )
+        new_position_ids = shard_dense_sequence_for_context_parallel(new_position_ids, cp_size=cp_size, cp_rank=cp_rank)
+        if pre_process:
+            new_input_ids = shard_dense_sequence_for_context_parallel(new_input_ids, cp_size=cp_size, cp_rank=cp_rank)
     if pre_process:
         return new_input_ids, new_attention_mask, new_position_ids
-    else:
-        return input_ids, new_attention_mask, new_position_ids
+    return input_ids, new_attention_mask, new_position_ids
 
 
 def get_model_config(model):
