@@ -15,6 +15,7 @@ uv run --isolated --group dev --extra vllm --extra megatron pytest tests/gpu/gpu
 import ray
 import pytest
 import hydra
+import hashlib
 import torch
 import os
 import shutil
@@ -208,6 +209,27 @@ def test_trainer_full_checkpointing(
         PolicyWorker = import_worker(strategy, "policy")
         CriticWorker = import_worker(strategy, "critic")
         RefWorker = import_worker(strategy, "ref")
+        if strategy == "megatron":
+            from skyrl_train.workers.megatron.megatron_worker import MegatronPolicyWorkerBase
+
+            class FingerprintPolicyWorker(MegatronPolicyWorkerBase):
+                def checkpoint_parameter_fingerprints(self):
+                    module = self.actor_module[0]
+                    tensors = {
+                        **dict(module.named_parameters()),
+                        **{f"buffer:{name}": tensor for name, tensor in module.named_buffers()},
+                    }
+                    return {
+                        "rank": self._rank,
+                        "hashes": {
+                            name: hashlib.sha256(
+                                tensor.detach().contiguous().view(torch.uint8).cpu().numpy().tobytes()
+                            ).hexdigest()
+                            for name, tensor in tensors.items()
+                        },
+                    }
+
+            PolicyWorker = ray.remote(num_gpus=1)(FingerprintPolicyWorker)
 
         # Build models
         trainer1.build_models(PolicyWorker, CriticWorker, RefWorker)
@@ -270,12 +292,16 @@ def test_trainer_full_checkpointing(
         # A second save alone does not exercise restored optimizer moments.
         expected_pre_step_logprobs = None
         expected_next_step_logprobs = None
+        expected_parameter_fingerprints = None
         if strategy == "megatron":
             assert pre_save_logprobs is not None
             expected_pre_step_logprobs = megatron_policy_logprobs(trainer1)
             torch.testing.assert_close(expected_pre_step_logprobs, pre_save_logprobs, rtol=1e-3, atol=1e-3)
             repeated_pre_step_logprobs = megatron_policy_logprobs(trainer1)
             torch.testing.assert_close(repeated_pre_step_logprobs, expected_pre_step_logprobs, rtol=1e-3, atol=1e-3)
+            expected_parameter_fingerprints = ray.get(
+                trainer1.policy_model.async_run_ray_method("pass_through", "checkpoint_parameter_fingerprints")
+            )
             expected_next_step_logprobs = megatron_next_step_logprobs(trainer1)
 
         # Cleanup first trainer
@@ -308,6 +334,20 @@ def test_trainer_full_checkpointing(
         print("Phase 3: Resumed optimizer step and second checkpoint save")
 
         if strategy == "megatron":
+            assert expected_parameter_fingerprints is not None
+            actual_parameter_fingerprints = ray.get(
+                trainer2.policy_model.async_run_ray_method("pass_through", "checkpoint_parameter_fingerprints")
+            )
+            expected_by_rank = {result["rank"]: result["hashes"] for result in expected_parameter_fingerprints}
+            actual_by_rank = {result["rank"]: result["hashes"] for result in actual_parameter_fingerprints}
+            assert expected_by_rank.keys() == actual_by_rank.keys()
+            mismatches = {
+                rank: [
+                    name for name, digest in expected_by_rank[rank].items() if actual_by_rank[rank].get(name) != digest
+                ]
+                for rank in expected_by_rank
+            }
+            assert not any(mismatches.values()), f"Model tensors differ after resume: {mismatches}"
             assert expected_pre_step_logprobs is not None
             actual_pre_step_logprobs = megatron_policy_logprobs(trainer2)
             torch.testing.assert_close(actual_pre_step_logprobs, expected_pre_step_logprobs, rtol=1e-3, atol=1e-3)
