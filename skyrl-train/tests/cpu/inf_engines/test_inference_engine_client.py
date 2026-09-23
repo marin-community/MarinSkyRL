@@ -1239,6 +1239,62 @@ async def test_generate_retry_direct_return():
 
 
 @pytest.mark.asyncio
+async def test_generate_single_prompt_waits_for_publication_resume():
+    class RecordingEngine:
+        def __init__(self):
+            self.entered = asyncio.Event()
+
+        async def generate(self, input_batch):
+            self.entered.set()
+            return InferenceEngineOutput(
+                responses=["done"],
+                response_ids=[[7]],
+                stop_reasons=["stop"],
+                response_logprobs=[[-0.1]],
+            )
+
+    engine = RecordingEngine()
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    client.generation_paused_event.set()
+    request = InferenceEngineInput(prompt_token_ids=[[1, 2, 3]], sampling_params={"max_tokens": 1})
+    task = asyncio.create_task(client.generate(request))
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.05)
+        assert not engine.entered.is_set()
+
+        client.generation_paused_event.clear()
+        result = await asyncio.wait_for(task, timeout=2)
+        assert engine.entered.is_set()
+        assert result["response_ids"] == [[7]]
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_generate_batched_rejects_publication_pause_before_engine_dispatch():
+    class RecordingEngine:
+        def __init__(self):
+            self.entered = asyncio.Event()
+
+        async def generate(self, input_batch):
+            self.entered.set()
+            raise AssertionError("The paused batch must not reach the engine")
+
+    engine = RecordingEngine()
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    client.generation_paused_event.set()
+    request = InferenceEngineInput(prompt_token_ids=[[1], [2]], sampling_params={"max_tokens": 1})
+
+    with pytest.raises(RuntimeError, match="unsupported for batched"):
+        await client.generate(request)
+
+    assert not engine.entered.is_set()
+
+
+@pytest.mark.asyncio
 async def test_generate_retry_no_gen_finish():
     """
     First response aborts with 0 tokens; next finishes.
