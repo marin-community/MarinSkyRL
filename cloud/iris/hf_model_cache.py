@@ -24,7 +24,6 @@ from cloud.iris.artifacts import (
     fs_and_path,
     materialize_inventory,
     read_json,
-    write_json,
 )
 from marinskyrl.hf_model import (
     TOKENIZER_CONFIG_NAME,
