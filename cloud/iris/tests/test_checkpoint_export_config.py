@@ -78,6 +78,9 @@ def test_checkpoint_export_config_carries_request_fields_as_data() -> None:
     assert config.skyrl.trainer.placement.policy_num_gpus_per_node == 4
     assert config.skyrl.checkpoint_export.checkpoint_path == request.checkpoint_path
     assert config.skyrl.checkpoint_export.export_root == request.export_path
+    serialized = OmegaConf.to_yaml(config, resolve=True)
+    assert "mode: checkpoint_export" in serialized
+    assert "submission: wait" in serialized
 
 
 def test_checkpoint_export_config_preserves_federated_routing() -> None:

@@ -111,9 +111,9 @@ def checkpoint_export_launch_config(
     OmegaConf.set_struct(config, False)
 
     strategy = str(config.skyrl.trainer.strategy)
-    config.run.mode = RunMode.CHECKPOINT_EXPORT
+    config.run.mode = RunMode.CHECKPOINT_EXPORT.value
     config.run.export_hf = False
-    config.run.submission = SubmissionMode.DETACH if spec.no_wait else SubmissionMode.WAIT
+    config.run.submission = SubmissionMode.DETACH.value if spec.no_wait else SubmissionMode.WAIT.value
     config.run.attempt_id = f"{config.run.attempt_id}-export-{request.step}"
     config.runtime.entrypoint = CHECKPOINT_EXPORT_ENTRYPOINT
     config.runtime.profile = runtime_profile_for_strategy(strategy, mode=RuntimeMode.CHECKPOINT_EXPORT).value
