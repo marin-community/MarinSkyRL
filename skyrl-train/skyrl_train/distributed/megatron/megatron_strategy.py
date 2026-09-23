@@ -373,7 +373,7 @@ class MegatronStrategy(DistributedStrategy):
         if load_training_state and io.exists(extra_state_path):
             with io.open_file(extra_state_path, "rb") as f:
                 extra_state = torch.load(f, weights_only=False)
-            states = extra_state.get("client_state", {}) or {}
+            states = {"client_state": extra_state.get("client_state", {}) or {}}
             self.log("Loaded client state (ZClip / StaleClip) from checkpoint.")
 
         return ckpt_dir, states
