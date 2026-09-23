@@ -2629,15 +2629,11 @@ class RayPPOTrainer:
 
         # Save dataloader state
         dataloader_save_path = os.path.join(global_step_folder, "data.pt")
-        with checkpoint_phase(backend, "save", "dataloader_state", rank=-1, step=self.global_step) as phase:
-            try:
-                dataloader_state_dict = self.train_dataloader.state_dict()
-                with io.open_file(dataloader_save_path, "wb") as f:
-                    torch.save(dataloader_state_dict, f)
-                logger.info(f"Saved dataloader state to {dataloader_save_path}")
-            except Exception as e:
-                phase.failed = True
-                logger.warning(f"Failed to save dataloader state: {e}")
+        with checkpoint_phase(backend, "save", "dataloader_state", rank=-1, step=self.global_step):
+            dataloader_state_dict = self.train_dataloader.state_dict()
+            with io.open_file(dataloader_save_path, "wb") as f:
+                torch.save(dataloader_state_dict, f)
+            logger.info(f"Saved dataloader state to {dataloader_save_path}")
 
         # Save additional trainer state
         trainer_state = {
