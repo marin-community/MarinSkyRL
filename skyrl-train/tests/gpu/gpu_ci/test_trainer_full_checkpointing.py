@@ -223,6 +223,8 @@ def test_trainer_full_checkpointing(
         # Set initial global step as if 2 steps were completed
         trainer1.global_step = 2
 
+        pre_save_logprobs = megatron_policy_logprobs(trainer1) if strategy == "megatron" else None
+
         # Save checkpoint
         trainer1.save_checkpoints()
 
@@ -269,7 +271,11 @@ def test_trainer_full_checkpointing(
         expected_pre_step_logprobs = None
         expected_next_step_logprobs = None
         if strategy == "megatron":
+            assert pre_save_logprobs is not None
             expected_pre_step_logprobs = megatron_policy_logprobs(trainer1)
+            torch.testing.assert_close(expected_pre_step_logprobs, pre_save_logprobs, rtol=1e-3, atol=1e-3)
+            repeated_pre_step_logprobs = megatron_policy_logprobs(trainer1)
+            torch.testing.assert_close(repeated_pre_step_logprobs, expected_pre_step_logprobs, rtol=1e-3, atol=1e-3)
             expected_next_step_logprobs = megatron_next_step_logprobs(trainer1)
 
         # Cleanup first trainer
