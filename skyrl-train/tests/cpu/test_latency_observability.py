@@ -114,6 +114,7 @@ def test_retention_metrics_publish_low_cardinality_snapshot(monkeypatch):
     )
 
     trainer_telemetry.record_generation_retention_snapshot(
+        surface="fully_async_queue",
         groups={"producer": 2, "completed_buffer": 3},
         rows={"producer": 16, "completed_buffer": 24},
         estimated_bytes={"producer": 200, "completed_buffer": 300},
@@ -127,13 +128,72 @@ def test_retention_metrics_publish_low_cardinality_snapshot(monkeypatch):
         boundary="admission_complete",
     )
 
-    assert (3, {"owner": "completed_buffer"}) in recorders["generation_retained_groups"].calls
-    assert (250, {"owner": "completed_buffer", "field": "rollout_routed_experts"}) in recorders[
-        "generation_retained_estimated_bytes"
+    assert (3, {"owner": "completed_buffer", "surface": "fully_async_queue"}) in recorders[
+        "generation_retained_groups"
     ].calls
-    assert (1, {"state": "blocked_on_buffer"}) in recorders["generation_producers"].calls
-    assert (100, {"kind": "rss"}) in recorders["process_memory_bytes"].calls
-    assert recorders["generation_memory_boundaries"].calls == [(1, {"boundary": "admission_complete"})]
+    assert (
+        250,
+        {"owner": "completed_buffer", "field": "rollout_routed_experts", "surface": "fully_async_queue"},
+    ) in recorders["generation_retained_estimated_bytes"].calls
+    assert (1, {"state": "blocked_on_buffer", "surface": "fully_async_queue"}) in recorders[
+        "generation_producers"
+    ].calls
+    assert (100, {"kind": "rss", "surface": "fully_async_queue"}) in recorders["process_memory_bytes"].calls
+    assert recorders["generation_memory_boundaries"].calls == [
+        (1, {"boundary": "admission_complete", "surface": "fully_async_queue"})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_retention_observer_preserves_overlapping_call_ownership():
+    boundaries = []
+    observer = GenerationRetentionObserver(
+        surface="gym_fanout",
+        publish_interval_seconds=3600,
+        publish=lambda snapshot, boundary: boundaries.append((snapshot, boundary)),
+    )
+    first, second = object(), object()
+    first_group, second_group = _WeakGroup(), _WeakGroup()
+    batch = _representative_trajectory_batch()
+
+    observer.start()
+    observer.start()
+    observer.register_group(
+        first_group, trajectory_batch=batch, source_prompts=[], owner="projected_batch", token=first
+    )
+    observer.register_group(
+        second_group, trajectory_batch=batch, source_prompts=[], owner="projected_batch", token=second
+    )
+    observer.release_token(first)
+    await observer.stop()
+
+    assert observer.snapshot().groups == {"projected_batch": 1}
+    assert [boundary for _, boundary in boundaries if boundary == "observer_stopped"] == []
+    assert observer.snapshot().surface == "gym_fanout"
+
+    observer.release_token(second)
+    await observer.stop()
+    assert observer.snapshot().groups == {}
+    assert [boundary for _, boundary in boundaries if boundary == "observer_stopped"] == ["observer_stopped"]
+
+
+@pytest.mark.asyncio
+async def test_retention_observer_restart_does_not_clear_new_heartbeat():
+    boundaries = []
+
+    def publish(snapshot, boundary):
+        boundaries.append(boundary)
+        if boundary == "observer_stopped" and boundaries.count("observer_stopped") == 1:
+            observer.start()
+
+    observer = GenerationRetentionObserver(publish_interval_seconds=3600, publish=publish)
+    observer.start()
+    await observer.stop()
+
+    assert boundaries == ["observer_started", "observer_stopped", "observer_started"]
+
+    await observer.stop()
+    assert boundaries == ["observer_started", "observer_stopped", "observer_started", "observer_stopped"]
 
 
 def test_tracker_forwards_only_finite_numeric_metrics_with_step(monkeypatch):

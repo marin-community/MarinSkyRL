@@ -353,7 +353,7 @@ async def test_cancelled_environment_thread_does_not_mutate_published_call(recor
     assert records.select("wait_seconds", wait="env_exec", stat="sum") == []
 
 
-def test_training_metrics_preserve_selected_values_and_count_nonfinite_values(records):
+def test_training_metrics_preserve_finite_values_and_count_nonfinite_values(records):
     training_telemetry.record_training_metrics(
         {
             "policy/entropy": 1.25,
@@ -368,6 +368,7 @@ def test_training_metrics_preserve_selected_values_and_count_nonfinite_values(re
             "policy/grad_norm": float("inf"),
             "policy/details": [1, 2],
             "unselected/value": 99.0,
+            "boolean_flag": True,
         },
         step=8,
         kind="train",
@@ -384,6 +385,7 @@ def test_training_metrics_preserve_selected_values_and_count_nonfinite_values(re
         "val/accuracy": 0.75,
         "eval/all/avg_score": 0.625,
         "eval/all/pass_at_N": 0.875,
+        "unselected/value": 99.0,
     }
     assert {
         row["attributes"]["metric"]: row["value"]
@@ -545,6 +547,7 @@ async def test_rollout_calls_progress_while_real_exporter_waits_for_http_ack(mon
         "consumed/length_stop_fraction": 0.5,
         "tis/batch_skipped_no_logprobs": 1.0,
         "tis/skipped_fraction": 0.25,
+        "unselected/value": 99.0,
     }
     assert all(
         row["attributes"]["step"] == "2"

@@ -90,7 +90,14 @@ generation_retention_events = telemetry.gauge("generation_retention_events", uni
 process_memory_bytes = telemetry.gauge("process_memory_bytes", unit="By")
 generation_memory_boundaries = telemetry.counter("generation_memory_boundaries", unit="{boundary}")
 
-_RETENTION_OWNERS = ("producer", "completed_buffer", "admission", "admitted")
+_RETENTION_OWNERS = (
+    "producer",
+    "completed_buffer",
+    "admission",
+    "admitted",
+    "fanout_completed",
+    "projected_batch",
+)
 _PRODUCER_STATES = ("waiting_input", "generating", "projecting", "holding_completed", "blocked_on_buffer")
 _RETENTION_FIELDS = (
     "prompt_token_ids",
@@ -414,6 +421,7 @@ def _process_memory_snapshot() -> dict[str, int]:
 
 def record_generation_retention_snapshot(
     *,
+    surface: str,
     groups: Mapping[str, int],
     rows: Mapping[str, int],
     estimated_bytes: Mapping[str, int],
@@ -426,7 +434,7 @@ def record_generation_retention_snapshot(
     """Publish a low-cardinality snapshot of driver-owned rollout memory."""
 
     for owner in _RETENTION_OWNERS:
-        attributes = {"owner": owner}
+        attributes = {"owner": owner, "surface": surface}
         generation_retained_groups.set(groups.get(owner, 0), attributes=attributes)
         generation_retained_rows.set(rows.get(owner, 0), attributes=attributes)
         generation_retained_estimated_bytes.set(estimated_bytes.get(owner, 0), attributes=attributes)
@@ -438,17 +446,17 @@ def record_generation_retention_snapshot(
         for field in _RETENTION_FIELDS:
             generation_retained_estimated_bytes.set(
                 selected_field_bytes.get(field, 0),
-                attributes={"owner": owner, "field": field},
+                attributes={"owner": owner, "field": field, "surface": surface},
             )
 
     for state in _PRODUCER_STATES:
-        generation_producers.set(producers.get(state, 0), attributes={"state": state})
-    generation_retention_events.set(settled_groups, attributes={"kind": "settled_group"})
-    generation_retention_events.set(settled_rows, attributes={"kind": "settled_row"})
+        generation_producers.set(producers.get(state, 0), attributes={"state": state, "surface": surface})
+    generation_retention_events.set(settled_groups, attributes={"kind": "settled_group", "surface": surface})
+    generation_retention_events.set(settled_rows, attributes={"kind": "settled_row", "surface": surface})
     for kind, value in _process_memory_snapshot().items():
-        process_memory_bytes.set(value, attributes={"kind": kind})
+        process_memory_bytes.set(value, attributes={"kind": kind, "surface": surface})
     if boundary is not None:
-        generation_memory_boundaries.add(1, attributes={"boundary": boundary})
+        generation_memory_boundaries.add(1, attributes={"boundary": boundary, "surface": surface})
     record_telemetry_health()
 
 

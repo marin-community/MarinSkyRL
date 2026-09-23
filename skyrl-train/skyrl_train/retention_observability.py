@@ -65,6 +65,7 @@ class PayloadEstimate:
 class RetentionSnapshot:
     """Primitive-only ownership snapshot safe to retain or export."""
 
+    surface: str
     groups: dict[str, int]
     rows: dict[str, int]
     estimated_bytes: dict[str, int]
@@ -78,6 +79,7 @@ class RetentionSnapshot:
 class _RetainedEstimate:
     owner: str
     estimate: PayloadEstimate
+    token_id: int | None = None
 
 
 @dataclass
@@ -197,10 +199,58 @@ def estimate_group_payload(
     )
 
 
+def estimate_agent_loop_payload(output: object, *, max_nodes_per_field: int = 64) -> PayloadEstimate:
+    """Estimate one pre-projection ``AgentLoopOutput`` without retaining it.
+
+    The synchronous Snowball path fans out thousands of these objects through
+    ``tqdm.gather``.  Keeping the estimate primitive-only lets us measure that
+    actual retention seam without adding another reference to the payload.
+    """
+
+    if max_nodes_per_field <= 0:
+        raise ValueError("max_nodes_per_field must be positive")
+
+    evidence = getattr(output, "evidence", None)
+    fields = {
+        "prompt_token_ids": getattr(evidence, "prompt_token_ids", None),
+        "response_ids": getattr(evidence, "response_token_ids", None),
+        "rollout_logprobs": getattr(evidence, "behavior_logprobs", None),
+        "student_topk_indices": getattr(evidence, "student_topk_indices", None),
+        "behavior_topk_logprobs": getattr(evidence, "behavior_topk_logprobs", None),
+        "rollout_routed_experts": getattr(evidence, "routed_experts", None),
+        "source_prompts": getattr(evidence, "messages", None),
+        "loss_masks": getattr(output, "loss_mask", None),
+        "other": (
+            getattr(evidence, "response", None),
+            getattr(output, "verification", None),
+            getattr(output, "reward", None),
+            getattr(output, "disposition", None),
+            getattr(output, "env_metrics", None),
+        ),
+    }
+    field_sizes: Counter[str] = Counter()
+    sampled_nodes = 0
+    truncated = False
+    for name, value in fields.items():
+        budget = _Budget(max_nodes_per_field)
+        size, field_truncated = _estimate_value(value, budget)
+        field_sizes[name] += size
+        sampled_nodes += budget.sampled
+        truncated = truncated or field_truncated
+    return PayloadEstimate(
+        rows=1,
+        total_bytes=sum(field_sizes.values()),
+        field_bytes=tuple(sorted(field_sizes.items())),
+        sampled_nodes=sampled_nodes,
+        truncated=truncated,
+    )
+
+
 def _default_publish(snapshot: RetentionSnapshot, boundary: str | None) -> None:
     from skyrl_train.telemetry import record_generation_retention_snapshot
 
     record_generation_retention_snapshot(
+        surface=snapshot.surface,
         groups=snapshot.groups,
         rows=snapshot.rows,
         estimated_bytes=snapshot.estimated_bytes,
@@ -222,6 +272,7 @@ class GenerationRetentionObserver:
         max_nodes_per_field: int = 256,
         publish: Callable[[RetentionSnapshot, str | None], None] = _default_publish,
         monotonic: Callable[[], float] = time.monotonic,
+        surface: str = "fully_async_queue",
     ) -> None:
         if publish_interval_seconds <= 0:
             raise ValueError("publish_interval_seconds must be positive")
@@ -229,6 +280,7 @@ class GenerationRetentionObserver:
         self._max_nodes_per_field = max_nodes_per_field
         self._publish_callback = publish
         self._monotonic = monotonic
+        self._surface = surface
         self._lock = threading.Lock()
         self._retained: dict[int, _RetainedEstimate] = {}
         self._producer_states: dict[int, str] = {}
@@ -237,19 +289,27 @@ class GenerationRetentionObserver:
         self._last_published = float("-inf")
         self._stop_event: asyncio.Event | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._active_leases = 0
 
     def start(self) -> None:
-        """Start a bounded-cadence heartbeat on the current event loop."""
+        """Acquire a heartbeat lease for one overlapping collection."""
 
-        if self._heartbeat_task is not None:
+        self._active_leases += 1
+        if self._active_leases > 1:
             return
-        self._stop_event = asyncio.Event()
-        self._heartbeat_task = asyncio.create_task(self._heartbeat())
+        stop_event = asyncio.Event()
+        self._stop_event = stop_event
+        self._heartbeat_task = asyncio.create_task(self._heartbeat(stop_event))
         self.publish(force=True, boundary="observer_started")
 
     async def stop(self) -> None:
-        """Publish the terminal snapshot and stop the heartbeat."""
+        """Release a heartbeat lease and stop after the last collection."""
 
+        if self._active_leases == 0:
+            return
+        self._active_leases -= 1
+        if self._active_leases > 0:
+            return
         task = self._heartbeat_task
         stop_event = self._stop_event
         if task is None or stop_event is None:
@@ -257,14 +317,14 @@ class GenerationRetentionObserver:
         stop_event.set()
         await task
         self.publish(force=True, boundary="observer_stopped")
-        self._heartbeat_task = None
-        self._stop_event = None
+        if self._heartbeat_task is task:
+            self._heartbeat_task = None
+            self._stop_event = None
 
-    async def _heartbeat(self) -> None:
-        assert self._stop_event is not None
-        while not self._stop_event.is_set():
+    async def _heartbeat(self, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=self._publish_interval_seconds)
+                await asyncio.wait_for(stop_event.wait(), timeout=self._publish_interval_seconds)
             except asyncio.TimeoutError:
                 self.publish(force=True)
 
@@ -293,6 +353,7 @@ class GenerationRetentionObserver:
         trajectory_batch: Mapping[str, object],
         source_prompts: Sequence[Mapping[str, object]],
         owner: str,
+        token: object | None = None,
     ) -> PayloadEstimate:
         estimate = estimate_group_payload(
             trajectory_batch,
@@ -303,11 +364,29 @@ class GenerationRetentionObserver:
             group_id = id(group)
             if group_id in self._retained:
                 raise ValueError("group is already registered")
-            self._retained[group_id] = _RetainedEstimate(owner=owner, estimate=estimate)
+            self._retained[group_id] = _RetainedEstimate(
+                owner=owner, estimate=estimate, token_id=None if token is None else id(token)
+            )
             self._settled_groups += 1
             self._settled_rows += estimate.rows
         self.publish()
         return estimate
+
+    def register_estimate(
+        self, payload: object, *, estimate: PayloadEstimate, owner: str, token: object | None = None
+    ) -> None:
+        """Track a primitive estimate while deliberately not retaining ``payload``."""
+
+        with self._lock:
+            payload_id = id(payload)
+            if payload_id in self._retained:
+                raise ValueError("payload is already registered")
+            self._retained[payload_id] = _RetainedEstimate(
+                owner=owner, estimate=estimate, token_id=None if token is None else id(token)
+            )
+            self._settled_groups += 1
+            self._settled_rows += estimate.rows
+        self.publish()
 
     def transfer_group(self, group: object, *, owner: str) -> None:
         with self._lock:
@@ -315,12 +394,23 @@ class GenerationRetentionObserver:
             retained = self._retained.get(group_id)
             if retained is None:
                 raise KeyError("group was not registered")
-            self._retained[group_id] = _RetainedEstimate(owner=owner, estimate=retained.estimate)
+            self._retained[group_id] = _RetainedEstimate(
+                owner=owner, estimate=retained.estimate, token_id=retained.token_id
+            )
         self.publish()
 
     def release_group(self, group: object) -> None:
         with self._lock:
             self._retained.pop(id(group), None)
+        self.publish()
+
+    def release_token(self, token: object) -> None:
+        """Release only one call's estimates, preserving overlapping calls."""
+        token_id = id(token)
+        with self._lock:
+            self._retained = {
+                payload_id: retained for payload_id, retained in self._retained.items() if retained.token_id != token_id
+            }
         self.publish()
 
     def snapshot(self) -> RetentionSnapshot:
@@ -339,6 +429,7 @@ class GenerationRetentionObserver:
                     field_estimated_bytes[(owner, field_name)] += field_bytes
             producers = Counter(self._producer_states.values())
             return RetentionSnapshot(
+                surface=self._surface,
                 groups=dict(groups),
                 rows=dict(rows),
                 estimated_bytes=dict(estimated_bytes),

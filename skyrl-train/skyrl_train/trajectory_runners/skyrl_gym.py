@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+from contextvars import ContextVar
 from dataclasses import dataclass
 from uuid import uuid4
 import skyrl_gym
@@ -60,6 +61,9 @@ from skyrl_train.trajectory_runners.projections import (
     WholeTrajectoryProjection,
 )
 from skyrl_train.telemetry import JudgeTelemetryObserver, run_in_executor_observed
+from skyrl_train.retention_observability import GenerationRetentionObserver
+
+_RETENTION_TOKEN: ContextVar[object | None] = ContextVar("gym_retention_token", default=None)
 
 
 class WholeTrajectoryCollector:
@@ -78,6 +82,8 @@ class WholeTrajectoryCollector:
             self._runner.agent_loop,
             disable_tqdm=disable_tqdm,
             on_error=lambda index, error: self._runner.failed_agent_loop_output(request, index, error),
+            retention_observer=self._runner.retention_observer,
+            retention_token=_RETENTION_TOKEN.get(),
         )
 
 
@@ -171,6 +177,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         self.skyrl_gym_cfg = skyrl_gym_cfg
         self.model_client = model_client or DirectModelClient(inference_engine_client)
         self.tokenizer = tokenizer
+        self.retention_observer = GenerationRetentionObserver(surface="gym_fanout")
         if pipeline is None:
             pipeline = (
                 TrajectoryPipeline(BatchedTrajectoryCollector, IdentityTrajectoryProjection())
@@ -1086,12 +1093,30 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """Run the configured environment loop and project its interaction records."""
-        with rollout_phase("collect"):
-            outputs = await self.collector.collect(input_batch, disable_tqdm=disable_tqdm)
-        if isinstance(outputs, list) and outputs and isinstance(outputs[0], AgentLoopOutput):
-            await self._apply_genrm_cohort_rewards(outputs, input_batch)
-        with rollout_phase("assemble"):
-            return self.projection.project(outputs, input_batch)
+        retention_token = object()
+        context_token = _RETENTION_TOKEN.set(retention_token)
+        self.retention_observer.start()
+        try:
+            with rollout_phase("collect"):
+                outputs = await self.collector.collect(input_batch, disable_tqdm=disable_tqdm)
+            if isinstance(outputs, list) and outputs and isinstance(outputs[0], AgentLoopOutput):
+                await self._apply_genrm_cohort_rewards(outputs, input_batch)
+            with rollout_phase("assemble"):
+                result = self.projection.project(outputs, input_batch)
+            self.retention_observer.register_group(
+                result,
+                trajectory_batch=result,
+                source_prompts=input_batch["prompts"],
+                owner="projected_batch",
+                token=retention_token,
+            )
+            self.retention_observer.publish(force=True, boundary="fanout_projection_complete")
+            return result
+        finally:
+            _RETENTION_TOKEN.reset(context_token)
+            self.retention_observer.release_token(retention_token)
+            self.retention_observer.publish(force=True, boundary="fanout_released")
+            await self.retention_observer.stop()
 
     async def _apply_genrm_cohort_rewards(
         self,
