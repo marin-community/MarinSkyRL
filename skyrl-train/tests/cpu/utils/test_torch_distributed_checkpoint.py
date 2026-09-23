@@ -1,3 +1,4 @@
+import io
 import threading
 import warnings
 
@@ -13,6 +14,7 @@ from skyrl_train.io.torch_distributed_checkpoint import (
     _ConcurrentS3WriteStream,
     _MINIMUM_S3_MULTIPART_PART_BYTES,
     StreamingFsspecWriter,
+    open_s3_checkpoint_write_stream,
 )
 
 
@@ -241,3 +243,76 @@ def test_streaming_fsspec_writer_preserves_upload_part_failure():
             )
 
     assert filesystem.aborted
+
+
+def test_s3_checkpoint_stream_round_trips_torch_save_and_aborts_failed_write(monkeypatch):
+    class Filesystem:
+        protocol = "s3"
+
+        def __init__(self):
+            self.objects = {}
+
+        def split_path(self, path):
+            bucket, key = path.removeprefix("s3://").split("/", 1)
+            return bucket, key, None
+
+        def call_s3(self, method, **kwargs):
+            if method != "put_object":
+                raise AssertionError(f"Unexpected S3 operation: {method}")
+            self.objects[kwargs["Key"]] = kwargs["Body"]
+
+    filesystem = Filesystem()
+    monkeypatch.setattr("skyrl_train.io.torch_distributed_checkpoint.get_s3_fs", lambda: filesystem)
+    monkeypatch.setattr("skyrl_train.io.torch_distributed_checkpoint.s3_refresh_if_expiring", lambda _fs: None)
+    state = {"weight": torch.arange(8)}
+    path = "s3://bucket/checkpoint/model_world_size_1_rank_0.pt"
+
+    with open_s3_checkpoint_write_stream(path) as stream:
+        torch.save(state, stream)
+    restored = torch.load(io.BytesIO(filesystem.objects["checkpoint/model_world_size_1_rank_0.pt"]))
+    assert torch.equal(restored["weight"], state["weight"])
+
+    failed_path = "s3://bucket/checkpoint/optim_world_size_1_rank_0.pt"
+    with pytest.raises(OSError, match="injected serialization failure"):
+        with open_s3_checkpoint_write_stream(failed_path) as stream:
+            stream.write(b"partial")
+            raise OSError("injected serialization failure")
+    assert "checkpoint/optim_world_size_1_rank_0.pt" not in filesystem.objects
+
+
+def test_s3_checkpoint_stream_round_trips_multipart_torch_save(monkeypatch):
+    filesystem = _RecordingMultipartFilesystem()
+    monkeypatch.setattr("skyrl_train.io.torch_distributed_checkpoint.get_s3_fs", lambda: filesystem)
+    monkeypatch.setattr("skyrl_train.io.torch_distributed_checkpoint.s3_refresh_if_expiring", lambda _fs: None)
+    monkeypatch.setattr(
+        "skyrl_train.io.torch_distributed_checkpoint.DEFAULT_S3_MULTIPART_PART_BYTES",
+        _MINIMUM_S3_MULTIPART_PART_BYTES,
+    )
+    state = {"weight": torch.arange(12 * 2**20, dtype=torch.uint8)}
+
+    with open_s3_checkpoint_write_stream("s3://bucket/checkpoint/model_world_size_1_rank_0.pt") as stream:
+        torch.save(state, stream)
+
+    uploaded = b"".join(filesystem.uploaded_parts[number] for number in sorted(filesystem.uploaded_parts))
+    restored = torch.load(io.BytesIO(uploaded))
+    assert torch.equal(restored["weight"], state["weight"])
+    assert filesystem.completed_parts is not None
+    assert not filesystem.aborted
+
+
+def test_s3_checkpoint_stream_aborts_multipart_after_serialization_failure(monkeypatch):
+    filesystem = _RecordingMultipartFilesystem()
+    monkeypatch.setattr("skyrl_train.io.torch_distributed_checkpoint.get_s3_fs", lambda: filesystem)
+    monkeypatch.setattr("skyrl_train.io.torch_distributed_checkpoint.s3_refresh_if_expiring", lambda _fs: None)
+    monkeypatch.setattr(
+        "skyrl_train.io.torch_distributed_checkpoint.DEFAULT_S3_MULTIPART_PART_BYTES",
+        _MINIMUM_S3_MULTIPART_PART_BYTES,
+    )
+
+    with pytest.raises(OSError, match="injected serialization failure"):
+        with open_s3_checkpoint_write_stream("s3://bucket/checkpoint/optim_world_size_1_rank_0.pt") as stream:
+            stream.write(b"a" * _MINIMUM_S3_MULTIPART_PART_BYTES)
+            raise OSError("injected serialization failure")
+
+    assert filesystem.aborted
+    assert filesystem.completed_parts is None

@@ -22,7 +22,7 @@ from torch.distributed.checkpoint.planner import WriteItem, WriteItemType
 from torch.distributed.checkpoint.storage import WriteResult
 from torch.futures import Future
 
-from skyrl_train.io.s3fs import call_with_s3_retry
+from skyrl_train.io.s3fs import call_with_s3_retry, get_s3_fs, s3_refresh_if_expiring
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.timing_observability import checkpoint_phase
 
@@ -251,7 +251,7 @@ class _AbortableFsspecFileSystem(FsspecFileSystem):
         object_path = os.fspath(path)
         protocol = self.fs.protocol
         protocols = (protocol,) if isinstance(protocol, str) else protocol
-        if mode == "wb" and object_path.endswith(DEFAULT_SUFFIX) and "s3" in protocols:
+        if mode == "wb" and object_path.endswith((DEFAULT_SUFFIX, ".pt")) and "s3" in protocols:
             if not isinstance(self.fs, _MultipartS3FileSystem):
                 raise TypeError("S3 checkpoint filesystem does not provide multipart operations")
             stream = _ConcurrentS3WriteStream(
@@ -274,6 +274,22 @@ class _AbortableFsspecFileSystem(FsspecFileSystem):
                     error.add_note(f"Failed to abort multipart upload for {path}: {cleanup_error}")
             error.add_note(f"Object write failed for {path}")
             raise
+
+
+@contextmanager
+def open_s3_checkpoint_write_stream(path: str):
+    """Write one checkpoint object with bounded multipart staging and abort on failure."""
+    if not path.startswith("s3://"):
+        raise ValueError(f"Expected an S3 checkpoint object path, got {path!r}")
+    filesystem = get_s3_fs()
+    s3_refresh_if_expiring(filesystem)
+    adapter = _AbortableFsspecFileSystem(
+        filesystem,
+        multipart_part_bytes=DEFAULT_S3_MULTIPART_PART_BYTES,
+        multipart_concurrency=DEFAULT_S3_MULTIPART_CONCURRENCY,
+    )
+    with adapter.create_stream(path, "wb") as stream:
+        yield stream
 
 
 class StreamingFsspecWriter(FileSystemWriter):

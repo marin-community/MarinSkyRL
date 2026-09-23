@@ -2,8 +2,10 @@ import os
 import copy
 import random
 from collections import defaultdict
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import timedelta
+from tempfile import TemporaryDirectory
 from typing import List, Union, Optional
 from jaxtyping import Float
 import gc
@@ -24,6 +26,7 @@ from skyrl_train.distributed.optimizer_learning_rates import validate_optimizer_
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl_train.io import io
+from skyrl_train.io.torch_distributed_checkpoint import open_s3_checkpoint_write_stream
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.timing_observability import checkpoint_phase, local_directory_bytes
 from skyrl_train.utils.constants import validate_worker_collective_timeout_seconds
@@ -788,10 +791,17 @@ class FSDPStrategy(DistributedStrategy):
                 io.upload_directory(local_path, cloud_path)
                 phase.bytes_written = phase.scratch_bytes
 
-        with io.local_output_dir(ckpt_dir, publish_staged_checkpoint) as work_dir:
+        direct_s3 = ckpt_dir.startswith("s3://")
+        # Multipart objects become visible only after close. The driver waits for
+        # every rank before advancing its latest-step pointer.
+        output_dir = nullcontext(ckpt_dir) if direct_s3 else io.local_output_dir(ckpt_dir, publish_staged_checkpoint)
+        with output_dir as work_dir:
             model_path = os.path.join(work_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
             optim_path = os.path.join(work_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
             extra_path = os.path.join(work_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
+
+            def open_rank_file(path: str):
+                return open_s3_checkpoint_write_stream(path) if direct_s3 else io.open_file(path, "wb")
 
             # Save using appropriate FSDP context
             with warnings.catch_warnings():
@@ -801,10 +811,11 @@ class FSDPStrategy(DistributedStrategy):
                     with checkpoint_phase(self.fsdp_strategy, "save", "model_state_dict", rank=rank, step=step):
                         model_state_dict = save_model.state_dict()
                     self.log(f"[rank-{rank}]: Saving model to {model_path}")
-                    with checkpoint_phase(self.fsdp_strategy, "save", "model_serialize", rank=rank, step=step) as phase:
-                        with io.open_file(model_path, "wb") as f:
+                    model_phase = "model_stream_upload" if direct_s3 else "model_serialize"
+                    with checkpoint_phase(self.fsdp_strategy, "save", model_phase, rank=rank, step=step) as phase:
+                        with open_rank_file(model_path) as f:
                             torch.save(model_state_dict, f)
-                        phase.bytes_written = os.path.getsize(model_path)
+                            phase.bytes_written = f.tell()
 
                     # Get and save optimizer state dict if optimizer is provided
                     optimizer_state_dict = {}
@@ -812,12 +823,11 @@ class FSDPStrategy(DistributedStrategy):
                         if optimizer is not None:
                             optimizer_state_dict = optimizer.state_dict()
                     self.log(f"[rank-{rank}]: Saving optim to {optim_path}")
-                    with checkpoint_phase(
-                        self.fsdp_strategy, "save", "optimizer_serialize", rank=rank, step=step
-                    ) as phase:
-                        with io.open_file(optim_path, "wb") as f:
+                    optimizer_phase = "optimizer_stream_upload" if direct_s3 else "optimizer_serialize"
+                    with checkpoint_phase(self.fsdp_strategy, "save", optimizer_phase, rank=rank, step=step) as phase:
+                        with open_rank_file(optim_path) as f:
                             torch.save(optimizer_state_dict, f)
-                        phase.bytes_written = os.path.getsize(optim_path)
+                            phase.bytes_written = f.tell()
 
                     # Get scheduler state dict if scheduler is provided
                     lr_scheduler_state_dict = {}
@@ -837,23 +847,33 @@ class FSDPStrategy(DistributedStrategy):
 
                     # Save extra state
                     self.log(f"[rank-{rank}]: Saving extra_state to {extra_path}")
-                    with checkpoint_phase(self.fsdp_strategy, "save", "extra_serialize", rank=rank, step=step) as phase:
-                        with io.open_file(extra_path, "wb") as f:
+                    extra_phase = "extra_stream_upload" if direct_s3 else "extra_serialize"
+                    with checkpoint_phase(self.fsdp_strategy, "save", extra_phase, rank=rank, step=step) as phase:
+                        with open_rank_file(extra_path) as f:
                             torch.save(extra_state_dict, f)
-                        phase.bytes_written = os.path.getsize(extra_path)
+                            phase.bytes_written = f.tell()
 
                     # Garbage collect temporary buffers from materializing the state dicts
                     gc.collect()
 
             if self.is_rank_0():
                 config_save_model = self._unwrap_model(model)
-                hf_dir = os.path.join(work_dir, "huggingface")
-                self.save_hf_configs(config_save_model.config, hf_dir, tokenizer)
+                metadata_dir = TemporaryDirectory() if direct_s3 else nullcontext(work_dir)
+                with metadata_dir as metadata_path:
+                    hf_dir = os.path.join(metadata_path, "huggingface")
+                    self.save_hf_configs(config_save_model.config, hf_dir, tokenizer)
 
-                # Also save runtime FSDP config
-                fsdp_config_path = os.path.join(work_dir, "fsdp_config.json")
-                with io.open_file(fsdp_config_path, "w") as f:
-                    json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
+                    # Also save runtime FSDP config
+                    fsdp_config_path = os.path.join(metadata_path, "fsdp_config.json")
+                    with io.open_file(fsdp_config_path, "w") as f:
+                        json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
+                    if direct_s3:
+                        with checkpoint_phase(
+                            self.fsdp_strategy, "save", "metadata_upload", rank=rank, step=step
+                        ) as phase:
+                            phase.scratch_bytes = local_directory_bytes(metadata_path)
+                            io.upload_directory(metadata_path, ckpt_dir)
+                            phase.bytes_written = phase.scratch_bytes
 
         # Save LoRA adapters if using LoRA
         if self.is_lora and hasattr(save_model, "peft_config"):
