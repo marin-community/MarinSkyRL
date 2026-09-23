@@ -1,11 +1,13 @@
 """Behavior tests for config-native checkpoint export derivation."""
 
+import sys
 from dataclasses import replace
 
 from omegaconf import OmegaConf
 
 from cloud.iris.export_hf_checkpoint import (
     ExportJobSpec,
+    _run_export,
     checkpoint_export_launch_config,
 )
 from skyrl_train.hf_export_schema import HFExportRequest
@@ -105,3 +107,14 @@ def test_checkpoint_export_config_preserves_saved_policy_geometry_on_whole_nodes
 
     assert config.iris.allocation.gpus_per_node == 8
     assert config.skyrl.trainer.placement.policy_num_gpus_per_node == 4
+
+
+def test_nested_export_keeps_parent_response_stream_clean(capfd) -> None:
+    request = _request()
+    spec = replace(_spec(request), no_wait=True)
+
+    _run_export(spec, [sys.executable, "-c", "print('nested export response')"])
+
+    captured = capfd.readouterr()
+    assert "nested export response" not in captured.out
+    assert "nested export response" in captured.err

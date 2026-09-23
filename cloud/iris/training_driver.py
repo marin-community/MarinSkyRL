@@ -153,17 +153,20 @@ class LocalRLRunner:
     def _write_resolved_config(self, config: DictConfig) -> None:
         if not self.config.resolved_config_uri:
             return
-        filesystem, path = fs_and_path(self.config.resolved_config_uri)
-        with filesystem.open(path, "w") as destination:
-            json.dump(
+        record = OmegaConf.to_container(
+            OmegaConf.create(
                 {
-                    "config": OmegaConf.to_container(config, resolve=True),
+                    "config": config,
                     "train_data_sources": self._train_data_sources,
                     "val_data_sources": self._val_data_sources,
-                },
-                destination,
-                sort_keys=True,
-            )
+                }
+            ),
+            resolve=True,
+        )
+        assert isinstance(record, dict)
+        filesystem, path = fs_and_path(self.config.resolved_config_uri)
+        with filesystem.open(path, "w") as destination:
+            json.dump(record, destination, sort_keys=True)
 
     def _resolve_data_inputs(self, data_kind: str) -> None:
         for role, attribute in (("train", "train_data"), ("validation", "val_data")):

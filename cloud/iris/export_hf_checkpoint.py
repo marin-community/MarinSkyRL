@@ -367,7 +367,10 @@ def _run_export(spec: ExportJobSpec, command: list[str]) -> None:
         f"[export-hf] policy geometry {spec.request.num_nodes}x{spec.request.gpus_per_node} GPU ranks, "
         f"allocation {spec.request.num_nodes}x{spec.allocated_gpus_per_node} GPUs"
     )
-    exit_code = subprocess.call(command, cwd=str(_REPO_ROOT))
+    # The parent launcher's stdout is a single JSON response. A nested export
+    # launcher has the same response format, so keep its output with the live
+    # diagnostics instead of corrupting the parent's machine-readable stream.
+    exit_code = subprocess.call(command, cwd=str(_REPO_ROOT), stdout=sys.stderr)
     if exit_code != 0:
         raise subprocess.CalledProcessError(exit_code, command)
     if not spec.no_wait:

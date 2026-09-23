@@ -14,6 +14,7 @@ Run:
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -124,7 +125,7 @@ def test_direct_ingress_never_clobbers_a_real_openai_api_key(monkeypatch):
         assert os.environ["OPENAI_API_KEY"] == "sk-real-host-key"
 
 
-def test_checkpoint_export_entrypoint_bypasses_rollout_environment(monkeypatch):
+def test_checkpoint_export_entrypoint_bypasses_rollout_environment(monkeypatch, tmp_path):
     launch_config = OmegaConf.create(
         {
             "run": {"mode": "checkpoint_export"},
@@ -135,6 +136,8 @@ def test_checkpoint_export_entrypoint_bypasses_rollout_environment(monkeypatch):
     cfg = LocalRLConfig(
         job_name="checkpoint-export",
         model_path="Qwen/Qwen3-8B",
+        train_data=[OmegaConf.create({"source": "unused-during-export"})],
+        resolved_config_uri=(tmp_path / "resolved.json").as_uri(),
         gpus=4,
         launch_config=launch_config,
     )
@@ -146,12 +149,12 @@ def test_checkpoint_export_entrypoint_bypasses_rollout_environment(monkeypatch):
         "_setup_environment",
         lambda _args: pytest.fail("checkpoint export must not configure the rollout runtime"),
     )
-    monkeypatch.setattr(
-        runner,
-        "_write_resolved_config",
-        lambda config: invocation.update(written=config),
-    )
     monkeypatch.setattr(runner, "_run_skyrl", lambda config: invocation.update(run=config) or 0)
 
     assert runner.run() == 0
-    assert invocation == {"written": launch_config, "run": launch_config}
+    assert invocation == {"run": launch_config}
+    assert json.loads((tmp_path / "resolved.json").read_text()) == {
+        "config": OmegaConf.to_container(launch_config, resolve=True),
+        "train_data_sources": [{"source": "unused-during-export"}],
+        "val_data_sources": [],
+    }
