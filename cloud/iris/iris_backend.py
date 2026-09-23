@@ -976,6 +976,15 @@ def _validate_rl_config_topology(args: argparse.Namespace) -> None:
             f"--num-nodes={args.num_nodes} is too small for {args.rl_config}; the effective role plan requires at "
             f"least {expected_nodes} nodes ({topology_description})."
         )
+    if checkpoint_export:
+        # A checkpoint export creates only policy workers. The physical GPU node
+        # may have spare GPUs when the conversion mesh is smaller than training's.
+        if args.gpus_per_node < policy_claim.gpus_per_node:
+            raise SystemExit(
+                f"--gpus-per-node={args.gpus_per_node} is too small for the checkpoint-export "
+                f"policy geometry ({policy_claim.gpus_per_node} GPUs per node)."
+            )
+        return
     declared_gpus = {bundle.gpus_per_node for bundle in plan.bundles}
     if declared_gpus and args.gpus_per_node not in declared_gpus:
         raise SystemExit(

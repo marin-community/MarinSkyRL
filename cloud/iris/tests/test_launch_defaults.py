@@ -1329,3 +1329,60 @@ generator:
 
     with pytest.raises(SystemExit, match=r"policy=2"):
         resolve_launch_defaults(args)
+
+
+def test_checkpoint_export_can_use_one_policy_gpu_on_an_eight_gpu_node(tmp_path):
+    rl_config = tmp_path / "colocated-export.yaml"
+    rl_config.write_text(
+        """\
+trainer:
+  strategy: megatron
+  placement:
+    colocate_all: true
+    policy_num_nodes: 1
+    policy_num_gpus_per_node: 8
+  train_batch_size: 8
+  policy_mini_batch_size: 8
+  micro_train_batch_size_per_gpu: 1
+  algorithm:
+    use_kl_loss: false
+    use_kl_in_reward: false
+  critic:
+    model:
+      path: null
+generator:
+  run_engines_locally: true
+  num_inference_engines: 8
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_pipeline_parallel_size: 1
+  inference_engine_data_parallel_size: 1
+  inference_engine_expert_parallel_size: 1
+  n_samples_per_prompt: 1
+  backend: vllm
+"""
+    )
+    args = create_parser().parse_args(
+        [
+            "--rl_config",
+            str(rl_config),
+            "--model_path",
+            "model",
+            "--cluster-config",
+            str(_cluster_config(tmp_path)),
+            "--num-nodes",
+            "1",
+            "--gpus-per-node",
+            "8",
+            "--entrypoint",
+            "skyrl_train.entrypoints.checkpoint_export",
+            "--skyrl_override",
+            "++trainer.placement.policy_num_gpus_per_node=1",
+            "--skyrl_override",
+            "++generator.num_inference_engines=1",
+        ]
+    )
+
+    # Export uses one policy actor while the Iris task still reserves the H100x8 node.
+    resolve_launch_defaults(args)
+
+    assert args.runtime_profile is RuntimeProfile.MEGATRON_EXPORT
