@@ -63,6 +63,7 @@ uv run --isolated --env-file .env --extra skyrl-train -m skyrl_agent.integration
   trainer.ckpt_interval=1 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=31232 \
+  generator.enforce_eager=true \
   trainer.algorithm.policy_loss_type="dual_clip" \
   trainer.policy.optimizer_config.lr=5e-6 \
   trainer.policy.sequence_parallel_size=2 \
