@@ -6,20 +6,6 @@ from collections.abc import Callable
 import os
 from typing import TypeVar
 
-import httpcore
-import httpx
-from huggingface_hub.errors import (
-    EntryNotFoundError,
-    GatedRepoError,
-    HfHubHTTPError,
-    LocalEntryNotFoundError,
-    RepositoryNotFoundError,
-    RevisionNotFoundError,
-)
-import requests
-from rigging.timing import ExponentialBackoff, retry_with_backoff
-import urllib3
-
 
 T = TypeVar("T")
 
@@ -44,6 +30,21 @@ _HF_TRANSIENT_MESSAGE_FRAGMENTS = (
 
 def is_transient_hugging_face_error(error: BaseException) -> bool:
     """Return whether a Hugging Face failure is safe to retry."""
+    # The Iris runtime bundle imports this module in dependency-light dataset
+    # commands, so transport dependencies stay lazy until a Hub call fails.
+    import httpcore  # noqa: PLC0415
+    import httpx  # noqa: PLC0415
+    from huggingface_hub.errors import (  # noqa: PLC0415
+        EntryNotFoundError,
+        GatedRepoError,
+        HfHubHTTPError,
+        LocalEntryNotFoundError,
+        RepositoryNotFoundError,
+        RevisionNotFoundError,
+    )
+    import requests  # noqa: PLC0415
+    import urllib3  # noqa: PLC0415
+
     fatal_errors = (RepositoryNotFoundError, RevisionNotFoundError, GatedRepoError)
     transient_errors = (
         OSError,
@@ -84,6 +85,10 @@ def call_with_hugging_face_retry(
     backoff_cap: float = DEFAULT_HF_BACKOFF_CAP_SECONDS,
 ) -> T:
     """Call a Hub operation with the shared transient-failure policy."""
+    # Rigging is absent from dependency-light runtime-bundle commands that
+    # import the retry interface without invoking it.
+    from rigging.timing import ExponentialBackoff, retry_with_backoff  # noqa: PLC0415
+
     return retry_with_backoff(
         call,
         retryable=is_transient_hugging_face_error,
