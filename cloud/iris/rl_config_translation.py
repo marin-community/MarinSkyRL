@@ -695,15 +695,15 @@ class TaskLocalSkyRLValues:
     draft_model_uri: str | None = None
 
 
-TASK_LOCAL_SKYRL_FIELDS = MappingProxyType(
+TASK_LOCAL_SKYRL_PATHS = MappingProxyType(
     {
-        "train_data": "data.train_data",
-        "validation_data": "data.val_data",
-        "terminal_bench_data": "data.terminal_bench_data",
-        "agent_api_base": "terminal_bench_config.agent_api_base",
-        "literal_log_path": "terminal_bench_config.literal_log_path",
-        "policy_model_path": "trainer.policy.model.path",
-        "draft_model_uri": "generator.speculative_decoding.model.source_uri",
+        "train_data": ("data.train_data",),
+        "validation_data": ("data.val_data",),
+        "terminal_bench_data": ("data.terminal_bench_data",),
+        "agent_api_base": ("terminal_bench_config.agent_api_base",),
+        "literal_log_path": ("terminal_bench_config.literal_log_path",),
+        "policy_model_path": ("trainer.policy.model.path", "trainer.ref.model.path"),
+        "draft_model_uri": ("generator.speculative_decoding.model.source_uri",),
     }
 )
 
@@ -913,10 +913,11 @@ def compose_checkpoint_export_config(
 def apply_task_local_values(config: DictConfig, values: TaskLocalSkyRLValues) -> DictConfig:
     """Apply the complete allowlisted task-local patch to a SkyRL config."""
     updated = copy.deepcopy(config)
-    for field_name, path in TASK_LOCAL_SKYRL_FIELDS.items():
+    for field_name, paths in TASK_LOCAL_SKYRL_PATHS.items():
         value = getattr(values, field_name)
         if value is None or isinstance(value, tuple) and not value:
             continue
-        OmegaConf.update(updated, path, list(value) if isinstance(value, tuple) else value, force_add=False)
+        for path in paths:
+            OmegaConf.update(updated, path, list(value) if isinstance(value, tuple) else value, force_add=False)
     OmegaConf.resolve(updated)
     return updated
