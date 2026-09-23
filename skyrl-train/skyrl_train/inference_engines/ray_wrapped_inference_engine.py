@@ -1,7 +1,9 @@
 import asyncio
 from collections.abc import Collection
+import contextlib
 from enum import StrEnum
 import os
+import time
 from typing import Any, Dict, List
 
 import ray
@@ -26,7 +28,15 @@ from skyrl_train.inference_engines.utils import (
     reserve_rendezvous_ports,
 )
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
-from skyrl_train.env_vars import EnvVarScope, VLLM_USE_V2_MODEL_RUNNER_ENV, managed_environment_names
+from skyrl_train.env_vars import (
+    DEFAULT_RUNAI_STREAMER_LOG_TO_STDERR,
+    DEFAULT_RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS,
+    EnvVarScope,
+    RUNAI_STREAMER_LOG_TO_STDERR_ENV,
+    RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV,
+    VLLM_USE_V2_MODEL_RUNNER_ENV,
+    managed_environment_names,
+)
 from skyrl_train.utils import (
     get_all_env_variables,
     get_ray_pg_ready_with_timeout,
@@ -204,7 +214,11 @@ def _qwen3_5_vlm_engine_kwargs(pretrain: str, *, revision: str | None = None) ->
     return {}
 
 
-def _build_inference_engine_runtime_env(*, require_v1_model_runner: bool = False) -> Dict[str, Any] | None:
+def _build_inference_engine_runtime_env(
+    *,
+    require_v1_model_runner: bool = False,
+    runai_streamer_enabled: bool = False,
+) -> Dict[str, Any] | None:
     """Forward managed inference settings into each vLLM engine actor.
 
     This covers NCCL diagnostics and batch invariance. Selected-ID scoring also
@@ -217,6 +231,16 @@ def _build_inference_engine_runtime_env(*, require_v1_model_runner: bool = False
         # Selected-ID prompt scoring is implemented in vLLM's V1 GPU runner.
         # Set this before actor import so the EngineCore and TP workers agree.
         env_vars[VLLM_USE_V2_MODEL_RUNNER_ENV] = "0"
+    if runai_streamer_enabled:
+        # RunAI 0.16.x defaults the S3 low-throughput interval to one second;
+        # the bundled AWS CRT raises that to only three seconds. A ten-second
+        # interval tolerates brief object-store stalls while leaving the whole-
+        # gang startup retry as the bounded recovery for a failed chunk.
+        env_vars.setdefault(
+            RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV,
+            DEFAULT_RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS,
+        )
+        env_vars.setdefault(RUNAI_STREAMER_LOG_TO_STDERR_ENV, DEFAULT_RUNAI_STREAMER_LOG_TO_STDERR)
     if not env_vars:
         return None
     logger.info(f"Forwarding managed environment to vLLM engine actors via runtime_env: {sorted(env_vars)}")
@@ -369,6 +393,47 @@ def _release_node_local_gang(actors: list, placement_groups: list) -> None:
         remove_placement_group(pg)
 
 
+def create_ray_wrapped_inference_engines_with_retry(
+    *,
+    max_retries: int,
+    backoff_base_seconds: float,
+    backoff_cap_seconds: float,
+    **engine_kwargs: Any,
+) -> List[InferenceEngineInterface]:
+    """Retry a failed remote vLLM actor gang within one startup deadline.
+
+    RunAI's S3 streamer reports a transient object-store read failure only after
+    the EngineCore processes have exited, so the parent sees an ``ActorDiedError``
+    without the underlying status code. A data-parallel pool must restart as a
+    gang: retrying one rank would leave it on a different coordinator generation.
+    """
+    from rigging.timing import ExponentialBackoff, retry_with_backoff
+
+    timeout_seconds = float(engine_kwargs["engine_init_timeout_seconds"])
+    started = time.monotonic()
+
+    def create() -> List[InferenceEngineInterface]:
+        remaining = timeout_seconds - (time.monotonic() - started)
+        if remaining <= 0:
+            raise TimeoutError(f"inference engine startup timed out after {timeout_seconds:g} seconds")
+        attempt_kwargs = {**engine_kwargs, "engine_init_timeout_seconds": remaining}
+        return create_ray_wrapped_inference_engines(**attempt_kwargs)
+
+    return retry_with_backoff(
+        create,
+        retryable=lambda error: isinstance(error, ray.exceptions.RayActorError),
+        max_attempts=max_retries + 1,
+        max_elapsed=timeout_seconds,
+        backoff=ExponentialBackoff(
+            initial=backoff_base_seconds,
+            maximum=backoff_cap_seconds,
+            factor=2.0,
+            jitter=0.2,
+        ),
+        operation=f"initialize remote vLLM engine gang for {engine_kwargs['pretrain']}",
+    )
+
+
 def create_ray_wrapped_inference_engines(
     num_inference_engines: int,
     tensor_parallel_size: int,
@@ -419,6 +484,7 @@ def create_ray_wrapped_inference_engines(
         non-colocated engines (each engine owns its own GPUs); colocated/hybrid engines
         still require the ray backend for shared-GPU resource management.
     """
+    engine_init_kwargs = dict(engine_init_kwargs)
     model_metadata_path = engine_init_kwargs.pop(MODEL_METADATA_PATH_KEY, pretrain)
     if backend == "vllm":
         import vllm
@@ -451,7 +517,10 @@ def create_ray_wrapped_inference_engines(
     # #232 FIX B: NCCL flight-recorder env to forward into the engine actor (and,
     # via placement_group_capture_child_tasks, its ray-backend TP worker actors).
     # None for every run that does not set the TORCH_NCCL_* FR vars -> no change.
-    inference_engine_runtime_env = _build_inference_engine_runtime_env(require_v1_model_runner=require_v1_model_runner)
+    inference_engine_runtime_env = _build_inference_engine_runtime_env(
+        require_v1_model_runner=require_v1_model_runner,
+        runai_streamer_enabled=engine_init_kwargs.get("load_format") == "runai_streamer",
+    )
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
     use_hybrid_engine = shared_pg is not None
     tp_pp_size = tensor_parallel_size * pipeline_parallel_size
@@ -540,6 +609,7 @@ def create_ray_wrapped_inference_engines(
     # single-GPU engine instead shares one flat PACK group so rollout allocation
     # does not fragment nodes needed by the policy workers.
     per_engine_pgs: list = []
+    owned_placement_groups: list = []
     use_per_engine_strict_pack = use_per_engine_strict_pack_pg(
         use_hybrid_engine=use_hybrid_engine,
         use_mp_backend=use_mp_backend,
@@ -563,6 +633,7 @@ def create_ray_wrapped_inference_engines(
                 {"GPU": tp_pp_size, "CPU": tp_pp_size} for _ in range(num_inference_engines * data_parallel_size)
             ]
             shared_pg = placement_group(bundles, strategy="PACK")
+            owned_placement_groups.append(shared_pg)
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
         elif use_per_engine_strict_pack:
             # ray/uni backend, multi-GPU engines (TP*PP*DP > 1): one STRICT_PACK PG per
@@ -575,6 +646,7 @@ def create_ray_wrapped_inference_engines(
                     strategy="STRICT_PACK",
                 )
                 per_engine_pgs.append(pg)
+                owned_placement_groups.append(pg)
             for pg in per_engine_pgs:
                 get_ray_pg_ready_with_timeout(pg, timeout=placement_group_timeout_seconds)
             # Keep `shared_pg` defined for downstream indexing; per-engine path
@@ -587,6 +659,7 @@ def create_ray_wrapped_inference_engines(
             # downstream policy/ref PACK PG.
             bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
             shared_pg = placement_group(bundles, strategy="PACK")
+            owned_placement_groups.append(shared_pg)
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
 
     if use_hybrid_engine:
@@ -845,89 +918,101 @@ def create_ray_wrapped_inference_engines(
             inference_engine_actors.append(engine)
             weight_sync_relative_rank_offsets.append(i * per_engine_gpu_count)
 
-    engines = [
-        RayWrappedInferenceEngine(
-            actor_handle,
-            weight_sync_relative_rank_offset=rank_offset,
-        )
-        for actor_handle, rank_offset in zip(inference_engine_actors, weight_sync_relative_rank_offsets, strict=True)
-    ]
+    try:
+        engines = [
+            RayWrappedInferenceEngine(
+                actor_handle,
+                weight_sync_relative_rank_offset=rank_offset,
+            )
+            for actor_handle, rank_offset in zip(
+                inference_engine_actors,
+                weight_sync_relative_rank_offsets,
+                strict=True,
+            )
+        ]
 
-    if backend == "vllm" and (tensor_parallel_size > 1 or pipeline_parallel_size > 1):
-        numa_refs = [engine.inference_engine_actor.initialize_worker_numa_affinity.remote() for engine in engines]
-        wait_for_inference_engine_startup(
-            numa_refs,
-            [engine.inference_engine_actor for engine in engines],
-            timeout_seconds=engine_init_timeout_seconds,
-        )
-
-    # Readiness gate (DISAGGREGATED-mode init-deadlock fix): block until every engine
-    # actor has finished loading its model (weights + CUDA-graph capture) BEFORE the
-    # trainer opens the weight-sync NCCL group in init_weight_sync_state. In COLOCATED
-    # mode the bounded sleep barrier below already forces this wait; in
-    # DISAGGREGATED mode (inference_engine_enable_sleep=False) nothing otherwise waits,
-    # so a slow-loading engine (e.g. Qwen3.6-35B-A3B MoE) is still inside __init__ when
-    # the policy ranks post the default-group barrier (worker.py) -> the barrier ALLREDUCE
-    # hits the 20-min SKYRL_WORKER_NCCL_TIMEOUT_IN_S watchdog and SIGABRTs the job
-    # (init_weight_sync_state failed at Ray boundary). 30B loads fast enough to win the
-    # race; 35B loses it deterministically. report_engine_hosts fans a collective_rpc
-    # across every engine TP/EP worker, so the ray.get returns only once all workers are
-    # up (model fully loaded) -> closes the race for any model size / load time. It is a
-    # read-only probe (returns hostnames), no side effects. vLLM-only (collective_rpc);
-    # the colocated sleep barrier still covers the sglang/colocated paths unchanged.
-    startup_refs = []
-    if verify_workers:
-        # The placement report is also the readiness barrier.
-        startup_refs = [engine.inference_engine_actor.report_engine_placement.remote() for engine in engines]
-    elif not inference_engine_enable_sleep and backend == "vllm":
-        startup_refs = [engine.inference_engine_actor.report_engine_hosts.remote() for engine in engines]
-
-    if inference_engine_enable_sleep:
-        if backend == "vllm":
-            # NOTE(shu): set to 1 for LoRA
-            sleep_level = 1 if enable_lora else sleep_level
-            sleep_refs = [engine.inference_engine_actor.sleep.remote(level=sleep_level) for engine in engines]
-        elif backend == "sglang":
-            # NOTE(Charlie): we always need to sync weights after waking up: https://github.com/sgl-project/sglang/issues/7939
-            assert sleep_level == 2, "SGLang always discards weights, so sleep_level is not applicable."
-            sleep_refs = [engine.inference_engine_actor.sleep.remote() for engine in engines]
-        startup_refs = sleep_refs
-
-    if startup_refs:
-        try:
-            startup_results = wait_for_inference_engine_startup(
-                startup_refs,
+        if backend == "vllm" and (tensor_parallel_size > 1 or pipeline_parallel_size > 1):
+            numa_refs = [engine.inference_engine_actor.initialize_worker_numa_affinity.remote() for engine in engines]
+            wait_for_inference_engine_startup(
+                numa_refs,
                 [engine.inference_engine_actor for engine in engines],
                 timeout_seconds=engine_init_timeout_seconds,
             )
-        except Exception:
-            if verify_workers:
-                _release_node_local_gang([], per_engine_pgs)
-            raise
+
+        # Readiness gate (DISAGGREGATED-mode init-deadlock fix): block until every engine
+        # actor has finished loading its model (weights + CUDA-graph capture) BEFORE the
+        # trainer opens the weight-sync NCCL group in init_weight_sync_state. In COLOCATED
+        # mode the bounded sleep barrier below already forces this wait; in
+        # DISAGGREGATED mode (inference_engine_enable_sleep=False) nothing otherwise waits,
+        # so a slow-loading engine (e.g. Qwen3.6-35B-A3B MoE) is still inside __init__ when
+        # the policy ranks post the default-group barrier (worker.py) -> the barrier ALLREDUCE
+        # hits the 20-min SKYRL_WORKER_NCCL_TIMEOUT_IN_S watchdog and SIGABRTs the job
+        # (init_weight_sync_state failed at Ray boundary). 30B loads fast enough to win the
+        # race; 35B loses it deterministically. report_engine_hosts fans a collective_rpc
+        # across every engine TP/EP worker, so the ray.get returns only once all workers are
+        # up (model fully loaded) -> closes the race for any model size / load time. It is a
+        # read-only probe (returns hostnames), no side effects. vLLM-only (collective_rpc);
+        # the colocated sleep barrier still covers the sglang/colocated paths unchanged.
+        startup_refs = []
         if verify_workers:
+            # The placement report is also the readiness barrier.
+            startup_refs = [engine.inference_engine_actor.report_engine_placement.remote() for engine in engines]
+        elif not inference_engine_enable_sleep and backend == "vllm":
+            startup_refs = [engine.inference_engine_actor.report_engine_hosts.remote() for engine in engines]
+
+        if inference_engine_enable_sleep:
+            if backend == "vllm":
+                # NOTE(shu): set to 1 for LoRA
+                sleep_level = 1 if enable_lora else sleep_level
+                sleep_refs = [engine.inference_engine_actor.sleep.remote(level=sleep_level) for engine in engines]
+            elif backend == "sglang":
+                # NOTE(Charlie): we always need to sync weights after waking up: https://github.com/sgl-project/sglang/issues/7939
+                assert sleep_level == 2, "SGLang always discards weights, so sleep_level is not applicable."
+                sleep_refs = [engine.inference_engine_actor.sleep.remote() for engine in engines]
+            startup_refs = sleep_refs
+
+        if startup_refs:
             try:
-                placements = verified_inference_replica_placements(
-                    startup_results,
-                    stage_nodes=stage_nodes,
-                    node_hosts=node_hosts,
-                    relative_rank_offsets=weight_sync_relative_rank_offsets,
-                    data_parallel_size=data_parallel_size,
-                    expert_parallel_size=expert_parallel_size,
-                    pipeline_parallel_size=pipeline_parallel_size,
+                startup_results = wait_for_inference_engine_startup(
+                    startup_refs,
+                    [engine.inference_engine_actor for engine in engines],
+                    timeout_seconds=engine_init_timeout_seconds,
                 )
             except Exception:
-                _release_node_local_gang(inference_engine_actors, per_engine_pgs)
+                if verify_workers:
+                    _release_node_local_gang([], per_engine_pgs)
                 raise
-            for index, engine in enumerate(engines):
-                engine.worker_placements = placements[
-                    index * pipeline_parallel_size : (index + 1) * pipeline_parallel_size
-                ]
-                for placement in engine.worker_placements:
-                    logger.info("Verified inference replica placement: {}", placement)
+            if verify_workers:
+                try:
+                    placements = verified_inference_replica_placements(
+                        startup_results,
+                        stage_nodes=stage_nodes,
+                        node_hosts=node_hosts,
+                        relative_rank_offsets=weight_sync_relative_rank_offsets,
+                        data_parallel_size=data_parallel_size,
+                        expert_parallel_size=expert_parallel_size,
+                        pipeline_parallel_size=pipeline_parallel_size,
+                    )
+                except Exception:
+                    _release_node_local_gang(inference_engine_actors, per_engine_pgs)
+                    raise
+                for index, engine in enumerate(engines):
+                    engine.worker_placements = placements[
+                        index * pipeline_parallel_size : (index + 1) * pipeline_parallel_size
+                    ]
+                    for placement in engine.worker_placements:
+                        logger.info("Verified inference replica placement: {}", placement)
 
-    populate_engine_max_model_lens(engines, timeout_seconds=engine_init_timeout_seconds)
-
-    return engines
+        populate_engine_max_model_lens(engines, timeout_seconds=engine_init_timeout_seconds)
+        return engines
+    except BaseException:
+        for actor in inference_engine_actors:
+            with contextlib.suppress(Exception):
+                ray.kill(actor)
+        for pg in owned_placement_groups:
+            with contextlib.suppress(Exception):
+                remove_placement_group(pg)
+        raise
 
 
 def wait_for_inference_engine_startup(
