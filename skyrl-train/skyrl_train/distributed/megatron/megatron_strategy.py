@@ -1,6 +1,7 @@
 import os
 import random
 import tempfile
+from contextlib import nullcontext
 from datetime import timedelta
 from typing import List, Union, Optional
 from jaxtyping import Float
@@ -370,19 +371,25 @@ class MegatronStrategy(DistributedStrategy):
     def save_hf_model(self, bridge, model: MegatronModelWrapper, output_dir: str, tokenizer=None, **kwargs) -> None:
         materialize_megatron_params(model.actor_module)
         # Create checkpoint directory if it doesn't exist.
-        if self.is_rank_0():
+        rank_zero = self.is_rank_0()
+        if rank_zero:
             io.makedirs(output_dir, exist_ok=True)
         dist.barrier()
 
-        # Every rank exhausts Bridge's collective conversion; only cloud non-writers discard their local files.
-        rank_writes_output = self.is_rank_0() or not io.is_cloud_path(output_dir)
-        model_dir = hf_model_io.local_hf_model_dir(output_dir) if rank_writes_output else tempfile.TemporaryDirectory()
+        # Every rank exhausts Bridge's collective conversion. Rank zero owns artifact finalization and cloud
+        # publication; local nonzero ranks write directly to the shared directory without publishing a manifest.
+        if rank_zero:
+            model_dir = hf_model_io.local_hf_model_dir(output_dir)
+        elif io.is_cloud_path(output_dir):
+            model_dir = tempfile.TemporaryDirectory()
+        else:
+            model_dir = nullcontext(output_dir)
         with model_dir as work_dir:
             bridge.save_hf_weights(model.actor_module, work_dir)
             self.log(f"Successfully saved HF safetensors model to {output_dir}")
 
             # Only rank 0 saves the Huggingface config and tokenizer.
-            if self.is_rank_0():
+            if rank_zero:
                 self.save_hf_configs(self.hf_config, work_dir, tokenizer)
                 self.log(f"Successfully saved HF config and tokenizer to {output_dir}")
 
