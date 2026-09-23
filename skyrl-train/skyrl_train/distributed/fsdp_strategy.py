@@ -2,7 +2,6 @@ import os
 import copy
 import random
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import timedelta
@@ -792,20 +791,14 @@ class FSDPStrategy(DistributedStrategy):
                 io.upload_directory(local_path, cloud_path)
                 phase.bytes_written = phase.scratch_bytes
 
-        checkpoint_io_mode = getattr(self, "fsdp_config", {}).get("checkpoint_io_mode", "staged_overlap")
-        if checkpoint_io_mode not in {"staged", "staged_overlap", "direct_stream"}:
+        checkpoint_io_mode = getattr(self, "fsdp_config", {}).get("checkpoint_io_mode", "staged")
+        if checkpoint_io_mode not in {"staged", "direct_stream"}:
             raise ValueError(f"Unsupported FSDP checkpoint_io_mode: {checkpoint_io_mode!r}")
         direct_s3 = ckpt_dir.startswith("s3://") and checkpoint_io_mode == "direct_stream"
-        overlap_model_upload = ckpt_dir.startswith("s3://") and checkpoint_io_mode == "staged_overlap"
         # Multipart objects become visible only after close. The driver waits for
         # every rank before advancing its latest-step pointer.
         output_dir = nullcontext(ckpt_dir) if direct_s3 else io.local_output_dir(ckpt_dir, publish_staged_checkpoint)
-        uploader = (
-            ThreadPoolExecutor(max_workers=1, thread_name_prefix="fsdp-checkpoint-upload")
-            if overlap_model_upload
-            else nullcontext()
-        )
-        with uploader as executor, output_dir as work_dir:
+        with output_dir as work_dir:
             model_path = os.path.join(work_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
             optim_path = os.path.join(work_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
             extra_path = os.path.join(work_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
@@ -826,19 +819,6 @@ class FSDPStrategy(DistributedStrategy):
                         with open_rank_file(model_path) as f:
                             torch.save(model_state_dict, f)
                             phase.bytes_written = f.tell()
-                    model_upload = None
-                    if overlap_model_upload:
-
-                        def upload_model() -> None:
-                            with checkpoint_phase(
-                                self.fsdp_strategy, "save", "model_upload_overlap", rank=rank, step=step
-                            ) as phase:
-                                phase.scratch_bytes = os.path.getsize(model_path)
-                                io.upload_file(model_path, os.path.join(ckpt_dir, os.path.basename(model_path)))
-                                phase.bytes_written = phase.scratch_bytes
-
-                        model_upload = executor.submit(upload_model)
-
                     # Get and save optimizer state dict if optimizer is provided
                     optimizer_state_dict = {}
                     with checkpoint_phase(self.fsdp_strategy, "save", "optimizer_state_dict", rank=rank, step=step):
@@ -896,10 +876,6 @@ class FSDPStrategy(DistributedStrategy):
                             phase.scratch_bytes = local_directory_bytes(metadata_path)
                             io.upload_directory(metadata_path, ckpt_dir)
                             phase.bytes_written = phase.scratch_bytes
-
-            if model_upload is not None:
-                model_upload.result()
-                os.remove(model_path)
 
         # Save LoRA adapters if using LoRA
         if self.is_lora and hasattr(save_model, "peft_config"):

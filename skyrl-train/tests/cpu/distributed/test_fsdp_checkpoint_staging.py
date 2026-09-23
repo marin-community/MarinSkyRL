@@ -3,7 +3,6 @@ from io import BytesIO
 import json
 from pathlib import Path
 import struct
-import threading
 
 import pytest
 import torch
@@ -65,67 +64,6 @@ def test_s3_checkpoint_streams_complete_rank_files_without_local_staging(monkeyp
         assert "param_groups" in torch.load(BytesIO(objects[f"{checkpoint_dir}/optim_world_size_2_rank_1.pt"]))
         extra = torch.load(BytesIO(objects[f"{checkpoint_dir}/extra_state_world_size_2_rank_1.pt"]))
         assert extra["world_size"] == 2
-
-
-@pytest.mark.parametrize("fail_model_upload", [False, True])
-def test_staged_s3_checkpoint_overlaps_model_upload_with_optimizer_serialization(monkeypatch, fail_model_upload):
-    strategy = object.__new__(FSDPStrategy)
-    strategy.world_size = 2
-    strategy.fsdp_strategy = "fsdp2"
-    strategy.fsdp_config = {"checkpoint_io_mode": "staged_overlap"}
-    strategy.is_lora = False
-    monkeypatch.setattr(strategy, "get_rank", lambda: 1)
-    monkeypatch.setattr(strategy, "is_rank_0", lambda: False)
-    monkeypatch.setattr(strategy, "get_rng_state", lambda: {})
-    monkeypatch.setattr(strategy, "log", lambda *args: None)
-    monkeypatch.setattr(fsdp_module.dist, "barrier", lambda: None)
-    monkeypatch.setattr(fsdp_module, "get_fsdp_state_ctx", lambda *args, **kwargs: nullcontext())
-
-    model_upload_started = threading.Event()
-    optimizer_serialization_started = threading.Event()
-    uploaded = {}
-    directory_files = []
-
-    def upload_file(local_path, cloud_path):
-        model_upload_started.set()
-        assert optimizer_serialization_started.wait(timeout=5)
-        if fail_model_upload:
-            raise OSError("injected model upload failure")
-        uploaded[cloud_path] = Path(local_path).read_bytes()
-
-    def upload_directory(local_path, cloud_path):
-        directory_files.extend(path.name for path in Path(local_path).iterdir())
-        for path in Path(local_path).iterdir():
-            uploaded[f"{cloud_path}/{path.name}"] = path.read_bytes()
-
-    save = torch.save
-
-    def record_optimizer_serialization(obj, file):
-        if isinstance(obj, dict) and "param_groups" in obj:
-            assert model_upload_started.wait(timeout=5)
-            optimizer_serialization_started.set()
-        return save(obj, file)
-
-    monkeypatch.setattr(fsdp_module.io, "upload_file", upload_file)
-    monkeypatch.setattr(fsdp_module.io, "upload_directory", upload_directory)
-    monkeypatch.setattr(fsdp_module.torch, "save", record_optimizer_serialization)
-
-    model = torch.nn.Linear(2, 2)
-    optimizer = torch.optim.AdamW(model.parameters())
-    checkpoint_dir = "s3://bucket/checkpoints/global_step_1/policy"
-    if fail_model_upload:
-        with pytest.raises(OSError, match="injected model upload failure"):
-            strategy.save_checkpoint(model, checkpoint_dir, node_local_rank=1, optimizer=optimizer)
-        assert not uploaded
-        assert not directory_files
-    else:
-        strategy.save_checkpoint(model, checkpoint_dir, node_local_rank=1, optimizer=optimizer)
-        assert model_upload_started.is_set()
-        assert optimizer_serialization_started.is_set()
-        assert "model_world_size_2_rank_1.pt" not in directory_files
-        assert len(uploaded) == 3
-        assert "weight" in torch.load(BytesIO(uploaded[f"{checkpoint_dir}/model_world_size_2_rank_1.pt"]))
-        assert "param_groups" in torch.load(BytesIO(uploaded[f"{checkpoint_dir}/optim_world_size_2_rank_1.pt"]))
 
 
 def test_cloud_checkpoint_load_stages_only_its_rank_shards(monkeypatch, tmp_path):
