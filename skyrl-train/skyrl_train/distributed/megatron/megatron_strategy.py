@@ -475,7 +475,11 @@ class MegatronStrategy(DistributedStrategy):
 
         # Every rank exhausts Bridge's collective conversion; only cloud non-writers discard their local files.
         rank_writes_output = self.is_rank_0() or not io.is_cloud_path(output_dir)
-        model_dir = hf_model_io.local_hf_model_dir(output_dir) if rank_writes_output else tempfile.TemporaryDirectory()
+        model_dir = (
+            hf_model_io.local_hf_model_dir(output_dir, manifest_hash_concurrency=4)
+            if rank_writes_output
+            else tempfile.TemporaryDirectory()
+        )
         with (
             checkpoint_phase("megatron", "export", "write_and_publish_hf", rank=rank, step=step) as phase,
             model_dir as work_dir,

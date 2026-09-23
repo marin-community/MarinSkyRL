@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -155,3 +156,18 @@ def test_policy_manifest_without_tokenizer_mode_remains_compatible(tmp_path: Pat
     value.pop("tokenizer_mode")
 
     assert ModelManifest.from_mapping(value, "memory://models/policy") == manifest
+
+
+def test_parallel_manifest_hashes_match_serial_export_identity(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "tokenizer.json").write_text("{}")
+    for index in range(4):
+        save_file({f"weight_{index}": np.arange(64, dtype=np.float32) + index}, tmp_path / f"model-{index}.safetensors")
+
+    serial = snapshot_model_manifest(tmp_path, model_id="snowball/policy", revision="pinned")
+    parallel = snapshot_model_manifest(tmp_path, model_id="snowball/policy", revision="pinned", hash_concurrency=4)
+
+    assert parallel == serial
+    assert all(
+        entry.sha256 == hashlib.sha256((tmp_path / entry.path).read_bytes()).hexdigest() for entry in parallel.files
+    )

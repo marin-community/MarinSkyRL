@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 import struct
 from typing import Literal, Self
@@ -143,6 +144,7 @@ def snapshot_model_manifest(
     revision: str | None,
     *,
     tokenizer_mode: Literal["embedded", "policy"] = "embedded",
+    hash_concurrency: int = 1,
 ) -> ModelManifest:
     normalize_fast_tokenizer_metadata(snapshot)
     _ensure_weight_index(snapshot)
@@ -154,13 +156,20 @@ def snapshot_model_manifest(
         validate_portable_hf_model_files(names, str(snapshot))
     else:
         validate_hf_model_weights(names, str(snapshot))
+    if hash_concurrency < 1:
+        raise ValueError("hash_concurrency must be positive")
+    if hash_concurrency == 1:
+        hashes = map(sha256_file, paths)
+    else:
+        with ThreadPoolExecutor(max_workers=hash_concurrency) as executor:
+            hashes = tuple(executor.map(sha256_file, paths))
     files = tuple(
         ModelManifestFile(
             path=path.relative_to(snapshot).as_posix(),
             size=path.stat().st_size,
-            sha256=sha256_file(path),
+            sha256=digest,
         )
-        for path in paths
+        for path, digest in zip(paths, hashes, strict=True)
     )
     return ModelManifest(
         model_id=model_id,
@@ -176,12 +185,13 @@ def write_local_model_manifest(
     *,
     model_id: str | None = None,
     revision: str | None = None,
+    hash_concurrency: int = 1,
 ) -> ModelManifest:
     """Validate a completed local HF export and write its immutable manifest."""
     root = Path(model_dir)
     marker = root / MODEL_MANIFEST_FILENAME
     if marker.exists():
         marker.unlink()
-    manifest = snapshot_model_manifest(root, model_id, revision)
+    manifest = snapshot_model_manifest(root, model_id, revision, hash_concurrency=hash_concurrency)
     marker.write_text(json.dumps(manifest.model_dump(mode="json"), indent=2, sort_keys=True) + "\n")
     return manifest
