@@ -239,8 +239,6 @@ class InferenceEngineClient(InferenceEngineInterface):
         return await asyncio.gather(*awaitables)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        if self.generation_paused_event.is_set():
-            raise RuntimeError("pause_generation is unsupported for InferenceEngineClient.generate().")
         # 0. Extract input
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
@@ -1115,8 +1113,8 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def pause_generation(self) -> None:
         """Pause engine schedulers for an in-flight weight update.
 
-        Chat and single-prompt completion requests wait for resume. ``generate()`` and batched
-        completions do not support the pause boundary.
+        Chat, single-prompt completion, and single-prompt ``generate()`` requests wait for
+        resume. Batched completions and ``generate()`` requests do not support the pause boundary.
         """
         if self.generation_paused_event.is_set():
             raise RuntimeError("Generation is already paused, cannot pause again.")
