@@ -133,9 +133,9 @@ def _upload(local_path: str, cloud_path: str, *, recursive: bool) -> None:
         raise ValueError(f"Destination must be a cloud path, got: {cloud_path}")
     fs = _get_filesystem(cloud_path)
     is_s3_path = cloud_path.startswith("s3://")
-    destination = filesystem._strip_protocol(cloud_path) if is_s3_path else cloud_path
+    destination = fs._strip_protocol(cloud_path) if is_s3_path else cloud_path
     try:
-        filesystem.put(local_path, destination, recursive=recursive)
+        fs.put(local_path, destination, recursive=recursive)
     except Exception as error:
         error.add_note(f"Cloud upload failed from {local_path} to {cloud_path}")
         raise
@@ -157,7 +157,7 @@ def download_directory(cloud_path: str, local_path: str) -> None:
     if not is_cloud_path(cloud_path):
         raise ValueError(f"Source must be a cloud path, got: {cloud_path}")
 
-    filesystem = _get_filesystem(cloud_path)
+    fs = _get_filesystem(cloud_path)
     # The trailing separator makes fsspec copy the directory CONTENTS instead of
     # nesting the directory under the destination. It must be appended AFTER
     # _strip_protocol, which rstrips separators and would silently undo it.
