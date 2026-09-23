@@ -6,7 +6,7 @@ import os
 import socket
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -82,6 +82,27 @@ judge_requests = telemetry.counter("judge_requests", unit="{request}")
 judge_parse_events = telemetry.counter("judge_parse_events", unit="{event}")
 judge_cohort_duration = telemetry.histogram("judge_cohort_duration_seconds", unit="s")
 telemetry_smoke = telemetry.gauge("telemetry_smoke", unit="1")
+generation_retained_groups = telemetry.gauge("generation_retained_groups", unit="{group}")
+generation_retained_rows = telemetry.gauge("generation_retained_rows", unit="{row}")
+generation_retained_estimated_bytes = telemetry.gauge("generation_retained_estimated_bytes", unit="By")
+generation_producers = telemetry.gauge("generation_producers", unit="{producer}")
+generation_retention_events = telemetry.gauge("generation_retention_events", unit="{event}")
+process_memory_bytes = telemetry.gauge("process_memory_bytes", unit="By")
+generation_memory_boundaries = telemetry.counter("generation_memory_boundaries", unit="{boundary}")
+
+_RETENTION_OWNERS = ("producer", "completed_buffer", "admission", "admitted")
+_PRODUCER_STATES = ("waiting_input", "generating", "projecting", "holding_completed", "blocked_on_buffer")
+_RETENTION_FIELDS = (
+    "prompt_token_ids",
+    "response_ids",
+    "loss_masks",
+    "rollout_logprobs",
+    "student_topk_indices",
+    "behavior_topk_logprobs",
+    "rollout_routed_experts",
+    "source_prompts",
+    "other",
+)
 
 _generation_active: defaultdict[str, int] = defaultdict(int)
 _executor_counts: defaultdict[str, dict[str, int]] = defaultdict(lambda: {"queued": 0, "active": 0})
@@ -361,6 +382,74 @@ def record_rollout_buffer(depth: int, queue_capacity: int) -> None:
     attributes = {"queue": "rollout_buffer", "role": TRAINER_ROLE}
     rollout_queue_depth.set(depth, attributes=attributes)
     rollout_capacity.set(queue_capacity, attributes=attributes)
+
+
+def _process_memory_snapshot() -> dict[str, int]:
+    """Return process and host memory in bytes, including USS/PSS where supported."""
+    try:
+        import psutil
+
+        process = psutil.Process()
+        memory = process.memory_info()
+        host = psutil.virtual_memory()
+        values = {
+            "rss": int(memory.rss),
+            "vms": int(memory.vms),
+            "system_used": int(host.used),
+            "system_available": int(host.available),
+        }
+        try:
+            full_memory = process.memory_full_info()
+        except (psutil.AccessDenied, psutil.NoSuchProcess, AttributeError):
+            full_memory = None
+        if full_memory is not None:
+            for name in ("uss", "pss"):
+                value = getattr(full_memory, name, None)
+                if value is not None:
+                    values[name] = int(value)
+        return values
+    except (ImportError, OSError):
+        return {}
+
+
+def record_generation_retention_snapshot(
+    *,
+    groups: Mapping[str, int],
+    rows: Mapping[str, int],
+    estimated_bytes: Mapping[str, int],
+    field_estimated_bytes: Mapping[tuple[str, str], int],
+    producers: Mapping[str, int],
+    settled_groups: int,
+    settled_rows: int,
+    boundary: str | None,
+) -> None:
+    """Publish a low-cardinality snapshot of driver-owned rollout memory."""
+
+    for owner in _RETENTION_OWNERS:
+        attributes = {"owner": owner}
+        generation_retained_groups.set(groups.get(owner, 0), attributes=attributes)
+        generation_retained_rows.set(rows.get(owner, 0), attributes=attributes)
+        generation_retained_estimated_bytes.set(estimated_bytes.get(owner, 0), attributes=attributes)
+
+        selected_field_bytes: Counter[str] = Counter()
+        for (field_owner, field), value in field_estimated_bytes.items():
+            if field_owner == owner:
+                selected_field_bytes[field if field in _RETENTION_FIELDS else "other"] += value
+        for field in _RETENTION_FIELDS:
+            generation_retained_estimated_bytes.set(
+                selected_field_bytes.get(field, 0),
+                attributes={"owner": owner, "field": field},
+            )
+
+    for state in _PRODUCER_STATES:
+        generation_producers.set(producers.get(state, 0), attributes={"state": state})
+    generation_retention_events.set(settled_groups, attributes={"kind": "settled_group"})
+    generation_retention_events.set(settled_rows, attributes={"kind": "settled_row"})
+    for kind, value in _process_memory_snapshot().items():
+        process_memory_bytes.set(value, attributes={"kind": kind})
+    if boundary is not None:
+        generation_memory_boundaries.add(1, attributes={"boundary": boundary})
+    record_telemetry_health()
 
 
 def generation_route(env_extras: Sequence[Mapping[str, object]] | None) -> str:

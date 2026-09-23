@@ -66,6 +66,7 @@ from skyrl_train.rollout_observability import (
     record_group_disposition,
 )
 from skyrl_train.timing_observability import publish_step_timings
+from skyrl_train.retention_observability import GenerationRetentionObserver
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
 from skyrl_train.io import io
 from skyrl_train.dynamic_sampling import (
@@ -119,6 +120,7 @@ class _GenerationQueues:
     active_producers: int = 0
     admitted_groups: List[GeneratedOutputGroup] = field(default_factory=list)
     admitted_groups_consumed: bool = False
+    retention_observer: GenerationRetentionObserver | None = None
 
     async def mark_producer_finished(self) -> None:
         """Wake admission when a generation worker permanently exits."""
@@ -142,6 +144,9 @@ class _GenerationQueues:
 
     def clear_admitted(self) -> None:
         """Release the prior step's admitted groups before assembling the next step."""
+        if self.retention_observer is not None:
+            for group in self.admitted_groups:
+                self.retention_observer.release_group(group)
         self.admitted_groups.clear()
         self.admitted_groups_consumed = False
 
@@ -589,6 +594,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._groups_inspected_since_step = 0
         self._async_distillation_runtime: AsyncDistillationRuntime | None = None
         self._async_distillation_tickets: dict[str, AsyncRoutedTeacherScoreTicket] = {}
+        self._retention_observer = GenerationRetentionObserver()
 
     def configure_async_distillation(self, runtime: AsyncDistillationRuntime) -> None:
         """Install admitted-group teacher scoring before the training loop starts."""
@@ -635,6 +641,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     def _restore_buffer_from_checkpoint(self, queues: _GenerationQueues, checkpoint_path: str) -> None:
         """Restore completed, admitted, and retryable rollout work from a checkpoint."""
+        retention_observer = queues.retention_observer
         buffer_state = BufferCheckpointCallback.load_buffer_state(checkpoint_path)
         if len(buffer_state.completed_groups) > queues.completed.maxsize:
             raise ValueError(
@@ -649,9 +656,24 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.async_train_dataloader.reserve_pending_uids(buffer_state.pending_uids())
         for item in buffer_state.completed_groups:
             queues.completed.put_nowait(item)
+            if retention_observer is not None:
+                retention_observer.register_group(
+                    item,
+                    trajectory_batch=item.trajectory_batch,
+                    source_prompts=item.source_prompts,
+                    owner="completed_buffer",
+                )
         for prompts in buffer_state.retry_prompts:
             queues.retries.put_nowait(prompts)
         queues.record_admitted(buffer_state.admitted_groups)
+        if retention_observer is not None:
+            for item in buffer_state.admitted_groups:
+                retention_observer.register_group(
+                    item,
+                    trajectory_batch=item.trajectory_batch,
+                    source_prompts=item.source_prompts,
+                    owner="admitted",
+                )
         restored_group_count = len(buffer_state.completed_groups) + len(buffer_state.admitted_groups)
         self._staleness_manager._stat.accepted += restored_group_count
         self._staleness_manager._stat.submitted += restored_group_count
@@ -715,6 +737,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             if self._async_observations_enabled
             else None
         )
+        retention_observer = getattr(self, "_retention_observer", None)
+        if retention_observer is not None:
+            retention_observer.start()
 
         try:
             async_distillation_runtime = getattr(self, "_async_distillation_runtime", None)
@@ -731,8 +756,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # Cancel any orphaned generation tasks that survived an early exit
             # (the per-epoch epilogue only runs on normal loop completion).
             self._cancel_trajectory_tasks()
-
-            await self.shutdown()
+            try:
+                if retention_observer is not None:
+                    await retention_observer.stop()
+            finally:
+                await self.shutdown()
 
     async def _train_loop(self):
         """
@@ -861,6 +889,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 retries=asyncio.Queue(),
                 condition=asyncio.Condition(),
                 active_producers=self.num_parallel_generation_workers,
+                retention_observer=self._retention_observer,
             )
 
             self._buffer_checkpoint_callback.bind_queues(generation_queues)
@@ -896,6 +925,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         self.global_step,
                         self.mini_batch_size,
                     )
+                    self._retention_observer.publish(force=True, boundary="rollout_wait_started")
                     with (
                         Timer("wait_for_generation_buffer", self.all_timings) as rollout_wait_timer,
                         critical_phase("rollout_or_inference_wait", self.global_step),
@@ -906,6 +936,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         cur_generation_group_mini_batch = await self._get_admitted_generation_group_mini_batch(
                             generation_queues,
                         )
+                    self._retention_observer.publish(force=True, boundary="admission_complete")
 
                     scored_distillation = None
                     if self._async_distillation_runtime is not None:
@@ -977,11 +1008,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         )
 
                     # 3. Run training and record consumed UIDs in the tracker.
+                    self._retention_observer.publish(force=True, boundary="training_started")
                     with (
                         Timer("run_training", self.all_timings),
                         async_phase_window("training", step=self.global_step, enabled=self._async_observations_enabled),
                     ):
                         status = await self._run_training(training_input)
+                    self._retention_observer.publish(force=True, boundary="training_completed")
                     train_duration = self.all_timings["train_critic_and_policy"]
                     self._log_optimizer_step_completed(
                         epoch=epoch,
@@ -1142,7 +1175,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             )
             # Drain any generation outputs that arrived after the training loop
             # stopped consuming (race between producer enqueue and consumer exit).
-            n_drained = len(_drain_queue(generation_queues.completed))
+            drained_groups = _drain_queue(generation_queues.completed)
+            n_drained = len(drained_groups)
+            if generation_queues.retention_observer is not None:
+                for group in drained_groups:
+                    generation_queues.retention_observer.release_group(group)
             assert generation_queues.retries.empty(), (
                 f"Epoch ended with {generation_queues.retries.qsize()} stale-group retries still pending"
             )
@@ -1292,9 +1329,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     async def _run_generate_for_a_group_loop(self, queues: _GenerationQueues):
         """Generate dataset rows or retries and route only fresh groups to the completed queue."""
+        producer = asyncio.current_task()
+        assert producer is not None
+        retention_observer = queues.retention_observer
+        if retention_observer is not None:
+            retention_observer.producer_started(producer)
+        completed_group: GeneratedOutputGroup | None = None
         try:
             while True:
                 slot_acquired = False
+                if retention_observer is not None:
+                    retention_observer.producer_state(producer, "waiting_input")
                 with async_wait("prompt", step=self.global_step, enabled=self._async_observations_enabled):
                     rand_prompts = await self._next_generation_prompts(queues)
                 with async_wait("slot", step=self.global_step, enabled=self._async_observations_enabled):
@@ -1317,6 +1362,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 # Disable each runner's progress bar so concurrent workers do not flood the console.
                 route = generation_route(trajectory_request.get("env_extras"))
+                if retention_observer is not None:
+                    retention_observer.producer_state(producer, "generating")
                 with generation_group(route):
                     with observe_rollout_call(
                         step=global_step_at_start,
@@ -1331,6 +1378,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 len(tokens) for tokens in cur_trajectory_batch["response_ids"]
                             )
                 staleness_step = self._admission_step(cur_trajectory_batch, global_step_at_start)
+                if retention_observer is not None:
+                    retention_observer.producer_state(producer, "projecting")
                 record_generation_input_coverage(trajectory_request.get("env_extras"))
 
                 record_generated_work(
@@ -1346,17 +1395,29 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     completed_at=time.perf_counter() if observation is not None else None,
                     telemetry_call_id=observation.call_id if observation is not None else None,
                 )
+                if retention_observer is not None:
+                    retention_observer.register_group(
+                        completed_group,
+                        trajectory_batch=cur_trajectory_batch,
+                        source_prompts=rand_prompts,
+                        owner="producer",
+                    )
+                    retention_observer.producer_state(producer, "holding_completed")
                 with async_wait("enqueue", step=self.global_step, enabled=self._async_observations_enabled):
-                    freshness = await self._enqueue_if_fresh(queues, completed_group)
+                    freshness = await self._enqueue_if_fresh(queues, completed_group, producer=producer)
                 if freshness is _GroupFreshness.STALE:
                     self._record_group_terminal(completed_group, "stale_enqueue")
+                    if retention_observer is not None:
+                        retention_observer.release_group(completed_group)
                     await self._staleness_manager.cancel_submission_slot()
                     slot_acquired = False
                     self._record_admission_scan(
                         [(completed_group, AdmissionDecision((AdmissionRejection.STALE,)))],
                         inspected_count=1,
                     )
+                    completed_group = None
                     continue
+                completed_group = None
                 record_rollout_buffer(queues.completed.qsize(), queues.completed.maxsize)
                 await self._staleness_manager.on_rollout_accepted()
                 slot_acquired = False  # Slot properly released; safe for next iteration
@@ -1381,6 +1442,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await self._staleness_manager.cancel_submission_slot()
             sys.exit(1)
         finally:
+            if retention_observer is not None:
+                if completed_group is not None:
+                    retention_observer.release_group(completed_group)
+                retention_observer.producer_finished(producer)
             await queues.mark_producer_finished()
 
     async def _next_generation_prompts(
@@ -1408,15 +1473,28 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         except asyncio.TimeoutError:
             raise GenerationStalledError("Dataset exhausted and no retries arrived within the stall deadline")
 
-    async def _enqueue_if_fresh(self, queues: _GenerationQueues, group: GeneratedOutputGroup) -> _GroupFreshness:
+    async def _enqueue_if_fresh(
+        self,
+        queues: _GenerationQueues,
+        group: GeneratedOutputGroup,
+        *,
+        producer: object | None = None,
+    ) -> _GroupFreshness:
         """Enqueue a fresh group or route a stale group to retry."""
+        retention_observer = queues.retention_observer
         async with queues.condition:
             while queues.completed.full():
+                if producer is not None and retention_observer is not None:
+                    retention_observer.producer_state(producer, "blocked_on_buffer")
                 await queues.condition.wait()
+            if producer is not None and retention_observer is not None:
+                retention_observer.producer_state(producer, "holding_completed")
             freshness = self._classify_and_route_group(queues, group)
             if freshness is _GroupFreshness.STALE:
                 return freshness
             queues.completed.put_nowait(group)
+            if retention_observer is not None:
+                retention_observer.transfer_group(group, owner="completed_buffer")
             queues.condition.notify_all()
             return freshness
 
@@ -1689,6 +1767,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """
         if queues.admitted_groups_consumed:
             raise RuntimeError("cannot assemble a new batch before clearing the previously consumed batch")
+        retention_observer = queues.retention_observer
         accepted_groups = queues.admitted_groups
         loop = asyncio.get_event_loop()
         last_admitted_progress = loop.time()
@@ -1732,6 +1811,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         )
 
                 completed_groups = _drain_queue(queues.completed)
+                if retention_observer is not None:
+                    for group in completed_groups:
+                        retention_observer.transfer_group(group, owner="admission")
                 partition = self._partition_completed_groups(
                     completed_groups,
                     occupied_uids={group.uid for group in accepted_groups}
@@ -1749,12 +1831,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         )
                     assert decision.primary_rejection is not None
                     rejection_counts_since_admission[decision.primary_rejection.value] += 1
+                if retention_observer is not None:
+                    for group, _ in partition.rejected_groups + partition.discarded_groups:
+                        retention_observer.release_group(group)
 
                 selection = self._select_dynamic_sampling_candidates(
                     partition.accepted_groups,
                     available_slots=self.mini_batch_size - len(accepted_groups),
                 )
                 queues.record_admitted(selection.admitted_groups)
+                if retention_observer is not None:
+                    for group in selection.admitted_groups:
+                        retention_observer.transfer_group(group, owner="admitted")
+                retained_candidate_ids = {id(group) for group in selection.admitted_groups + selection.surplus_groups}
+                for group in partition.accepted_groups:
+                    if retention_observer is not None and id(group) not in retained_candidate_ids:
+                        retention_observer.release_group(group)
                 dynamic_candidate_metrics.merge(selection.candidate_metrics)
                 dynamic_discarded_this_scan = sum(selection.discarded_reasons.values())
                 dynamic_discarded_count += dynamic_discarded_this_scan
@@ -1762,6 +1854,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 for group in selection.surplus_groups:
                     queues.completed.put_nowait(group)
+                    if retention_observer is not None:
+                        retention_observer.transfer_group(group, owner="completed_buffer")
 
                 if selection.admitted_groups:
                     watchdog.observe(now=loop.time(), progressed=True)
