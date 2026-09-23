@@ -148,6 +148,17 @@ def saved_optimizer_format(checkpoint_dir: str) -> str:
     return _saved_optimizer_sharding_type(common_state)
 
 
+def megatron_policy_logprobs(trainer: RayPPOTrainer) -> torch.Tensor:
+    """Probe the policy on a fixed batch without changing its training state."""
+    from tests.gpu.test_megatron_worker import get_test_training_batch
+
+    probe_batch = get_test_training_batch(batch_size=4)
+    probe_results = ray.get(trainer.policy_model.async_run_ray_method("mesh", "forward", data=probe_batch))
+    logprobs = concatenate_outputs_after_mesh_dispatch(trainer.policy_model.actor_infos, probe_results)["output"]
+    assert torch.isfinite(logprobs).all()
+    return logprobs.detach().cpu()
+
+
 def megatron_next_step_logprobs(trainer: RayPPOTrainer) -> torch.Tensor:
     """Run the same post-save optimizer step and probe the resulting policy."""
     from tests.gpu.test_megatron_worker import get_test_training_batch
@@ -156,12 +167,7 @@ def megatron_next_step_logprobs(trainer: RayPPOTrainer) -> torch.Tensor:
     train_batch.metadata["global_step"] = 3
     train_results = ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", train_batch))
     assert all(result.metadata["train_status"]["policy_update_steps"] == 1 for result in train_results)
-
-    probe_batch = get_test_training_batch(batch_size=4)
-    probe_results = ray.get(trainer.policy_model.async_run_ray_method("mesh", "forward", data=probe_batch))
-    logprobs = concatenate_outputs_after_mesh_dispatch(trainer.policy_model.actor_infos, probe_results)["output"]
-    assert torch.isfinite(logprobs).all()
-    return logprobs.detach().cpu()
+    return megatron_policy_logprobs(trainer)
 
 
 @pytest.mark.parametrize(
@@ -260,8 +266,10 @@ def test_trainer_full_checkpointing(
         assert loaded_trainer_state["global_step"] == saved_global_step, "global_step not preserved in checkpoint"
 
         # A second save alone does not exercise restored optimizer moments.
+        expected_pre_step_logprobs = None
         expected_next_step_logprobs = None
         if strategy == "megatron":
+            expected_pre_step_logprobs = megatron_policy_logprobs(trainer1)
             expected_next_step_logprobs = megatron_next_step_logprobs(trainer1)
 
         # Cleanup first trainer
@@ -294,6 +302,9 @@ def test_trainer_full_checkpointing(
         print("Phase 3: Resumed optimizer step and second checkpoint save")
 
         if strategy == "megatron":
+            assert expected_pre_step_logprobs is not None
+            actual_pre_step_logprobs = megatron_policy_logprobs(trainer2)
+            torch.testing.assert_close(actual_pre_step_logprobs, expected_pre_step_logprobs, rtol=1e-3, atol=1e-3)
             assert expected_next_step_logprobs is not None
             actual_next_step_logprobs = megatron_next_step_logprobs(trainer2)
             torch.testing.assert_close(actual_next_step_logprobs, expected_next_step_logprobs, rtol=1e-3, atol=1e-3)
