@@ -26,6 +26,7 @@ from transformers import AutoTokenizer
 
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.checkpoint_generation import resolve_checkpoint_payload
 from tests.gpu.utils import import_worker, ray_init_for_tests
 from skyrl_train.entrypoints.main_base import config_dir
 
@@ -140,7 +141,9 @@ def saved_optimizer_format(checkpoint_dir: str) -> str:
     from megatron.core import dist_checkpointing
     from skyrl_train.distributed.megatron.megatron_strategy import _saved_optimizer_sharding_type
 
-    common_state = dist_checkpointing.load_common_state_dict(os.path.join(checkpoint_dir, "policy"))
+    common_state = dist_checkpointing.load_common_state_dict(
+        os.path.join(resolve_checkpoint_payload(checkpoint_dir), "policy")
+    )
     return _saved_optimizer_sharding_type(common_state)
 
 
@@ -202,16 +205,17 @@ def test_trainer_full_checkpointing(
         # Capture state before teardown
         saved_global_step = trainer1.global_step
         checkpoint_dir = os.path.join(cfg.trainer.export_path, f"global_step_{trainer1.global_step}")
+        payload_dir = resolve_checkpoint_payload(checkpoint_dir, verify_files=True)
 
         # Verify checkpoint structure was created
         expected_files = [
-            os.path.join(checkpoint_dir, "policy"),
-            os.path.join(checkpoint_dir, "trainer_state.pt"),
-            os.path.join(checkpoint_dir, "data.pt"),
+            os.path.join(payload_dir, "policy"),
+            os.path.join(payload_dir, "trainer_state.pt"),
+            os.path.join(payload_dir, "data.pt"),
         ]
         # Only expect critic dir for non-megatron strategies
         if strategy != "megatron":
-            expected_files.append(os.path.join(checkpoint_dir, "critic"))
+            expected_files.append(os.path.join(payload_dir, "critic"))
         for expected_file in expected_files:
             assert os.path.exists(expected_file), f"Expected checkpoint file/dir not found: {expected_file}"
         if strategy == "megatron":
@@ -227,7 +231,7 @@ def test_trainer_full_checkpointing(
         # Verify trainer state content
         print("Verifying checkpoint content...")
         loaded_trainer_state = torch.load(
-            os.path.join(checkpoint_dir, "trainer_state.pt"), map_location="cpu", weights_only=False
+            os.path.join(payload_dir, "trainer_state.pt"), map_location="cpu", weights_only=False
         )
 
         # Check key configuration values are preserved
@@ -261,7 +265,7 @@ def test_trainer_full_checkpointing(
         assert loaded_global_step == saved_global_step, (
             f"Expected global_step={saved_global_step}, got {loaded_global_step}"
         )
-        assert loaded_checkpoint_dir == checkpoint_dir, "Checkpoint path mismatch"
+        assert loaded_checkpoint_dir == payload_dir, "Checkpoint payload path mismatch"
 
         # ============= PHASE 3: Continue Training =============
         print("Phase 3: Second checkpoint save")
@@ -271,7 +275,9 @@ def test_trainer_full_checkpointing(
         trainer2.save_checkpoints()
 
         next_checkpoint_dir = os.path.join(cfg.trainer.export_path, f"global_step_{trainer2.global_step}")
-        assert os.path.exists(next_checkpoint_dir), "Could not save checkpoint after resume"
+        assert os.path.exists(resolve_checkpoint_payload(next_checkpoint_dir, verify_files=True)), (
+            "Could not save checkpoint after resume"
+        )
         if strategy == "megatron":
             assert saved_optimizer_format(next_checkpoint_dir) == resumed_sharding_type
 

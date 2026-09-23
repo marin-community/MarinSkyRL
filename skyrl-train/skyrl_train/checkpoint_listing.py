@@ -1,6 +1,7 @@
 """Torch-free helpers for enumerating checkpoint directories; safe to import from launcher environments."""
 
 import os
+import re
 
 from loguru import logger
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
@@ -9,9 +10,12 @@ from skyrl_train.io import io
 
 
 def extract_step_from_path(path: str) -> int:
-    basename = os.path.basename(path)
-    if basename.startswith(GLOBAL_STEP_PREFIX):
-        return int(basename.split(GLOBAL_STEP_PREFIX)[1])
+    # Generation payloads live below global_step_N/_attempts/<id>. Walk
+    # ancestors so backend telemetry and I/O keep the correct step label.
+    for part in reversed(path.rstrip("/").split("/")):
+        match = re.fullmatch(rf"{re.escape(GLOBAL_STEP_PREFIX)}(\d+)", part)
+        if match:
+            return int(match.group(1))
     return -1
 
 
@@ -43,3 +47,18 @@ def list_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
     except Exception as e:
         logger.warning(f"Failed to list checkpoint directories from {checkpoint_base_path}: {e}")
         return []
+
+
+def list_committed_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
+    """Exclude incomplete generation prefixes from resume consistency and retention."""
+    from skyrl_train.checkpoint_generation import resolve_checkpoint_payload
+
+    committed = []
+    for directory in list_checkpoint_dirs(checkpoint_base_path):
+        try:
+            resolve_checkpoint_payload(os.path.join(checkpoint_base_path, directory))
+        except (FileNotFoundError, OSError, ValueError, KeyError, TypeError) as error:
+            logger.warning(f"Ignoring uncommitted checkpoint directory {directory}: {error}")
+        else:
+            committed.append(directory)
+    return committed
