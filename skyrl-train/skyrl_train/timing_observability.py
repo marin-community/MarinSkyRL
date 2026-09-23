@@ -9,7 +9,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterator, Protocol
 
 import psutil
@@ -63,6 +63,7 @@ class CheckpointPhaseSample:
     bytes_written: int | None = None
     scratch_bytes: int | None = None
     failed: bool = False
+    counters: dict[str, float | int] = field(default_factory=dict)
 
 
 def local_directory_bytes(path: str) -> int | None:
@@ -130,6 +131,7 @@ def checkpoint_phase(
                 "ended_unix_seconds": time.time(),
                 "bytes_written": sample.bytes_written,
                 "scratch_bytes": sample.scratch_bytes,
+                "counters": sample.counters,
                 "process_rss_bytes": psutil.Process(os.getpid()).memory_info().rss,
                 "process_peak_rss_since_start_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                 * (1 if sys.platform == "darwin" else 1024),

@@ -85,6 +85,21 @@ def _saved_optimizer_sharding_type(common_state: dict) -> str:
 _NODE_LOCAL_CHECKPOINT_CACHE = os.path.join(tempfile.gettempdir(), "marinskyrl-megatron-checkpoints")
 
 
+class _ObservedFullyParallelSaveStrategyWrapper(FullyParallelSaveStrategyWrapper):
+    """Expose MCore's metadata distribution as its own save-phase observation."""
+
+    def __init__(self, strategy, group, *, rank: int, step: int):
+        super().__init__(strategy, group)
+        self.observation_rank = rank
+        self.observation_step = step
+
+    def apply_saving_parallelization(self, sharded_state_dict):
+        with checkpoint_phase(
+            "megatron", "save", "save_distribution", rank=self.observation_rank, step=self.observation_step
+        ):
+            return super().apply_saving_parallelization(sharded_state_dict)
+
+
 class MegatronStrategy(DistributedStrategy):
     """
     The strategy for training with Megatron.
@@ -243,8 +258,8 @@ class MegatronStrategy(DistributedStrategy):
             save_strategy = DirectS3TorchDistSaveShardedStrategy(ckpt_dir)
         else:
             save_strategy = get_default_save_sharded_strategy("torch_dist")
-        save_strategy = FullyParallelSaveStrategyWrapper(
-            save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
+        save_strategy = _ObservedFullyParallelSaveStrategyWrapper(
+            save_strategy, mpu.get_data_parallel_group(with_context_parallel=True), rank=rank, step=step
         )
 
         with io.local_work_dir(ckpt_dir) as work_dir:

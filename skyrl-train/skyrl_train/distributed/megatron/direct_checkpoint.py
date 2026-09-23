@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from megatron.core.dist_checkpointing.dict_utils import nested_values
@@ -14,11 +15,14 @@ from megatron.core.dist_checkpointing.strategies.torch import (
     mcore_to_pyt_state_dict,
 )
 from torch.distributed import checkpoint
+from torch import distributed as dist
 from torch.distributed.checkpoint import FileSystemReader
 from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as FsspecFileSystem
 
 from skyrl_train.io.s3fs import get_s3_fs, s3_refresh_if_expiring
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
+from skyrl_train.checkpoint_listing import extract_step_from_path
+from skyrl_train.timing_observability import checkpoint_phase
 
 
 # MCore 0.18 does not expose a storage-writer hook. Keep the adapter narrow: it
@@ -31,10 +35,13 @@ class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
         self.checkpoint_dir = checkpoint_dir
 
     def save(self, sharded_state_dict: ShardedStateDict, _checkpoint_dir: Path) -> None:
-        sharded_state_dict, _, _ = _replace_state_dict_keys_with_sharded_keys(
-            sharded_state_dict, self.keep_only_main_replica
-        )
-        pytorch_state_dict = mcore_to_pyt_state_dict(sharded_state_dict, False)
+        rank = dist.get_rank()
+        step = extract_step_from_path(os.path.dirname(self.checkpoint_dir.rstrip("/")))
+        with checkpoint_phase("megatron", "save", "dcp_translate", rank=rank, step=step):
+            sharded_state_dict, _, _ = _replace_state_dict_keys_with_sharded_keys(
+                sharded_state_dict, self.keep_only_main_replica
+            )
+            pytorch_state_dict = mcore_to_pyt_state_dict(sharded_state_dict, False)
         filesystem = get_s3_fs()
         s3_refresh_if_expiring(filesystem)
         writer = StreamingFsspecWriter(self.checkpoint_dir, filesystem=filesystem)
