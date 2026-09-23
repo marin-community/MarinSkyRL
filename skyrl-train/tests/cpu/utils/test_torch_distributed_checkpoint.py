@@ -1,4 +1,5 @@
 import io
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import warnings
 
@@ -257,6 +258,66 @@ def test_concurrent_s3_stream_aborts_failed_part():
         stream.close()
 
     assert filesystem.aborted
+    assert stream.closed
+
+
+def test_concurrent_s3_stream_waits_for_inflight_part_before_abort():
+    class FailingFilesystem:
+        protocol = "s3"
+
+        def __init__(self):
+            self.second_started = threading.Event()
+            self.release_second = threading.Event()
+            self.abort_called = threading.Event()
+            self.second_finished = threading.Event()
+
+        def split_path(self, _path):
+            return "bucket", "checkpoint/__0_0.distcp", None
+
+        def call_s3(self, method, **kwargs):
+            if method == "create_multipart_upload":
+                return {"UploadId": "upload-1"}
+            if method == "upload_part":
+                if kwargs["PartNumber"] == 1:
+                    assert self.second_started.wait(timeout=5)
+                    raise OSError("injected UploadPart failure")
+                self.second_started.set()
+                assert self.release_second.wait(timeout=5)
+                self.second_finished.set()
+                return {"ETag": "etag-2"}
+            if method == "abort_multipart_upload":
+                self.abort_called.set()
+                return {}
+            raise AssertionError(f"unexpected S3 method: {method}")
+
+    discard_started = threading.Event()
+
+    class ObservedStream(_ConcurrentS3WriteStream):
+        def discard(self):
+            discard_started.set()
+            return super().discard()
+
+    filesystem = FailingFilesystem()
+    stream = ObservedStream(
+        filesystem,
+        "s3://bucket/checkpoint/__0_0.distcp",
+        part_bytes=_MINIMUM_S3_MULTIPART_PART_BYTES,
+        concurrency=2,
+    )
+    stream.write(b"a" * _MINIMUM_S3_MULTIPART_PART_BYTES + b"b" * _MINIMUM_S3_MULTIPART_PART_BYTES)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        close = executor.submit(stream.close)
+        try:
+            assert discard_started.wait(timeout=5)
+            assert not filesystem.abort_called.wait(timeout=0.1)
+        finally:
+            filesystem.release_second.set()
+        with pytest.raises(OSError, match="injected UploadPart failure"):
+            close.result(timeout=5)
+
+    assert filesystem.second_finished.is_set()
+    assert filesystem.abort_called.is_set()
     assert stream.closed
 
 

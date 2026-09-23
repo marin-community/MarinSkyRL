@@ -179,6 +179,9 @@ class _ConcurrentS3WriteStream:
         self._discarded = True
         for future in self._pending:
             future.cancel()
+        # An in-flight UploadPart can succeed after AbortMultipartUpload. Wait for
+        # all running calls before aborting so no uploaded parts are left behind.
+        self._executor.shutdown(wait=True, cancel_futures=True)
         if self._upload_id is not None:
             call_with_s3_retry(
                 self.filesystem,
@@ -189,7 +192,6 @@ class _ConcurrentS3WriteStream:
                 Key=self.key,
                 UploadId=self._upload_id,
             )
-        self._executor.shutdown(wait=True, cancel_futures=True)
         self._buffer.clear()
         self.closed = True
 
