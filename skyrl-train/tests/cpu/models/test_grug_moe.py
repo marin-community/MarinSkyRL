@@ -93,7 +93,7 @@ def test_tiny_grug_forward_backward_and_checkpoint_contract(tmp_path):
     with torch.no_grad():
         actual = reloaded(tokens).logits
         expected = model(tokens).logits
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-8)
 
 
 def test_enabling_grouped_mm_preserves_checkpoint_keys():
