@@ -663,6 +663,31 @@ def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
     assert trainer.all_metrics == {}
 
 
+def test_dataloader_save_failure_preserves_previous_latest_checkpoint(tmp_path, monkeypatch):
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    latest = checkpoint_root / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("0")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "fsdp2", "ckpt_path": str(checkpoint_root)}})
+    trainer.global_step = 1
+    trainer.policy_model = SimpleNamespace(async_run_ray_method=lambda *args, **kwargs: [])
+    trainer.critic_model = None
+    trainer.tokenizer = None
+
+    def fail_dataloader_state():
+        raise OSError("dataloader state unavailable")
+
+    trainer.train_dataloader = SimpleNamespace(state_dict=fail_dataloader_state)
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+
+    with pytest.raises(OSError, match="dataloader state unavailable"):
+        trainer.save_checkpoints()
+
+    assert latest.read_text() == "0"
+    assert not (checkpoint_root / "global_step_1" / trainer_module.TRAINER_STATE_FILENAME).exists()
+
+
 def test_sync_trainer_attaches_global_loss_denominator_before_dispatch(monkeypatch):
     trainer = object.__new__(RayPPOTrainer)
     trainer.cfg = OmegaConf.create(
