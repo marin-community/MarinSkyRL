@@ -1,9 +1,13 @@
+import itertools
 from typing import List, Tuple, Optional, Sequence
 import numpy as np
 import torch
 from loguru import logger
 from transformers import AutoTokenizer
 from jaxtyping import Float, Integer
+
+# Element dtypes the collated response channels and token ids take.
+_ROW_ELEMENT_DTYPES = {torch.int64: np.int64, torch.float32: np.float32}
 
 
 def _routed_experts_dtype_for_num_experts(num_experts: Optional[int]) -> Optional[torch.dtype]:
@@ -118,8 +122,11 @@ def _verify_inputs(
     # malformed rollout trajectory). Surface exactly which sample + field +
     # offending element is corrupt instead, so the bad trajectory is
     # actionable rather than a bare ValueError at the tensor build. Valid
-    # int-only inputs (the normal path, incl. a3) pass through unchanged.
+    # int-only inputs (the normal path, incl. a3) pass through unchanged. The
+    # per-element walk runs only for a row whose element types are not all ints.
     def _first_bad_token(seq):
+        if all(issubclass(element_type, int) for element_type in set(map(type, seq))):
+            return None
         for tok in seq:
             if not isinstance(tok, (int, bool)):
                 return tok
@@ -139,6 +146,32 @@ def _verify_inputs(
                 )
 
 
+def _collate_rows(
+    rows: Sequence[Sequence[float]],
+    width: int,
+    *,
+    dtype: torch.dtype,
+    fill: float = 0,
+    left_pad: bool = False,
+) -> torch.Tensor:
+    """Scatter variable-length rows into one ``[len(rows), width]`` canvas of ``fill``.
+
+    One C-level walk over the chained rows and one index assignment replace the per-row
+    Python list padding and copies. Each element converts to ``dtype`` directly, as a
+    per-row assignment into a ``dtype`` canvas converts it.
+    """
+    lengths = np.fromiter((len(row) for row in rows), dtype=np.int64, count=len(rows))
+    canvas = torch.full((len(rows), width), fill, dtype=dtype)
+    values = np.fromiter(itertools.chain.from_iterable(rows), dtype=_ROW_ELEMENT_DTYPES[dtype], count=lengths.sum())
+    row_index = np.repeat(np.arange(len(rows)), lengths)
+    starts = np.cumsum(lengths) - lengths
+    column_index = np.arange(values.size) - np.repeat(starts, lengths)
+    if left_pad:
+        column_index += np.repeat(width - lengths, lengths)
+    canvas[torch.from_numpy(row_index), torch.from_numpy(column_index)] = torch.from_numpy(values)
+    return canvas
+
+
 def collate_response_token_channel(
     rows: Optional[Sequence[Sequence[float]]],
     response_template: torch.Tensor,
@@ -153,11 +186,7 @@ def collate_response_token_channel(
         raise ValueError("response token channel must have one row per response")
     if any(len(row) != expected for row, expected in zip(rows, expected_lengths)):
         raise ValueError("response token channel must align one-to-one with response tokens")
-    result = torch.zeros_like(response_template, dtype=dtype)
-    for index, row in enumerate(rows):
-        values = torch.as_tensor(row, dtype=dtype)
-        result[index, : len(values)] = values
-    return result
+    return _collate_rows(rows, response_template.shape[1], dtype=dtype)
 
 
 def convert_prompts_responses_to_batch_tensors(
@@ -211,64 +240,35 @@ def convert_prompts_responses_to_batch_tensors(
     """
     _verify_inputs(prompts, responses, rewards, loss_masks)
 
-    max_input_len, max_output_len = 0, 0
-    prompt_token_lens, response_token_lens = [], []
-    inputs_token_ids, outputs_token_ids = [], []
-    for prompt, response in zip(prompts, responses):
-        inputs_token_ids.append(prompt)
-        outputs_token_ids.append(response)
-
-        prompt_token_len = len(prompt)
-        response_token_len = len(response)
-        prompt_token_lens.append(prompt_token_len)
-        response_token_lens.append(response_token_len)
-
-        max_input_len = max(max_input_len, prompt_token_len)
-        max_output_len = max(max_output_len, response_token_len)
+    prompt_token_lens = [len(prompt) for prompt in prompts]
+    response_token_lens = [len(response) for response in responses]
+    max_input_len = max(prompt_token_lens)
+    max_output_len = max(response_token_lens)
 
     pad_token_id = tokenizer.pad_token_id
-    sequences = []
-    attention_masks = []
-    action_masks = []
-    for i, prompt in enumerate(prompts):
-        # left padding input
-        input_len = prompt_token_lens[i]
-        input_ids = [pad_token_id] * (max_input_len - input_len) + list(inputs_token_ids[i])
-        input_attention_mask = [0] * (max_input_len - input_len) + [1] * input_len
+    # Prompts are left padded and responses right padded, so the attended span of a row runs from
+    # its prompt start to its response end.
+    sequences = torch.cat(
+        [
+            _collate_rows(prompts, max_input_len, dtype=torch.int64, fill=pad_token_id, left_pad=True),
+            _collate_rows(responses, max_output_len, dtype=torch.int64, fill=pad_token_id),
+        ],
+        dim=1,
+    )
+    prompt_lens = torch.tensor(prompt_token_lens, dtype=torch.int64).unsqueeze(1)
+    response_lens = torch.tensor(response_token_lens, dtype=torch.int64).unsqueeze(1)
+    positions = torch.arange(max_input_len + max_output_len).unsqueeze(0)
+    attention_mask = ((positions >= max_input_len - prompt_lens) & (positions < max_input_len + response_lens)).to(
+        torch.int64
+    )
+    action_mask = (torch.arange(max_output_len).unsqueeze(0) < response_lens).to(torch.int64)
 
-        # right padding output
-        output_len = response_token_lens[i]
-        output_ids = list(outputs_token_ids[i]) + [pad_token_id] * (max_output_len - output_len)
-        output_attention_mask = [1] * output_len + [0] * (max_output_len - output_len)
-
-        # concat input and output
-        sequences.append(input_ids + output_ids)
-        attention_masks.append(input_attention_mask + output_attention_mask)
-        action_masks.append(output_attention_mask)
-
-    sequences = torch.tensor(sequences)
-    attention_mask = torch.tensor(attention_masks, dtype=torch.int64)
-    action_mask = torch.tensor(action_masks, dtype=torch.int64)
-
-    # initialize ret loss masks to be the same as action mask
-    ret_loss_masks = torch.zeros_like(action_mask, dtype=torch.float)
-    for i, loss_mask in enumerate(loss_masks):
-        ret_loss_masks[i, : len(loss_mask)] = torch.tensor(loss_mask)
-
-    # do the same for custom rewards
-    ret_rewards = torch.zeros_like(action_mask, dtype=torch.float)
-    for i, custom_reward in enumerate(rewards):
-        if isinstance(custom_reward, list):
-            custom_reward = torch.tensor(custom_reward)
-        ret_rewards[i, : len(custom_reward)] = custom_reward
+    ret_loss_masks = _collate_rows(loss_masks, max_output_len, dtype=torch.float)
+    ret_rewards = _collate_rows(rewards, max_output_len, dtype=torch.float)
 
     logprobs_tensor = None
     if logprobs:
-        max_output_len = action_mask.size(1)
-        padded_logprobs = [
-            sample_logprobs + [0.0] * (max_output_len - len(sample_logprobs)) for sample_logprobs in logprobs
-        ]
-        logprobs_tensor = torch.tensor(padded_logprobs, dtype=torch.float)
+        logprobs_tensor = _collate_rows(logprobs, max_output_len, dtype=torch.float)
 
     # MoE router-replay capture rail (Stage 1): right-pad routed_experts on the
     # response axis exactly like rollout_logprobs, but each per-token element is a
