@@ -104,7 +104,7 @@ def _remove_completion_markers(output_path: str) -> None:
 
 
 @contextmanager
-def local_hf_model_dir(output_path: str):
+def local_hf_model_dir(output_path: str, *, manifest_hash_concurrency: int = 1):
     """Invalidate the prior index and yield a local directory for the completed export."""
     _remove_completion_markers(output_path)
 
@@ -112,7 +112,11 @@ def local_hf_model_dir(output_path: str):
         with io.local_output_dir(output_path, _upload_hf_model_directory) as work_dir:
             yield work_dir
             normalize_fast_tokenizer_metadata(Path(work_dir))
-            write_local_model_manifest(work_dir)
+            manifest_started = time.monotonic()
+            write_local_model_manifest(work_dir, hash_concurrency=manifest_hash_concurrency)
+            logger.info(
+                "Built HF export integrity manifest for {} in {:.2f}s", output_path, time.monotonic() - manifest_started
+            )
     except BaseException as export_error:
         try:
             _remove_completion_markers(output_path)
