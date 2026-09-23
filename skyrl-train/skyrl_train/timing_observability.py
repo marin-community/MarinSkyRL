@@ -78,6 +78,15 @@ def local_directory_bytes(path: str) -> int | None:
         return None
 
 
+def _cgroup_memory_bytes(filename: str) -> int | None:
+    """Read pod/container memory on cgroup v2; unavailable locally is normal."""
+    try:
+        with open(os.path.join("/sys/fs/cgroup", filename)) as source:
+            return int(source.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
 @contextmanager
 def checkpoint_phase(
     backend: str,
@@ -124,6 +133,8 @@ def checkpoint_phase(
                 "process_rss_bytes": psutil.Process(os.getpid()).memory_info().rss,
                 "process_peak_rss_since_start_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                 * (1 if sys.platform == "darwin" else 1024),
+                "cgroup_memory_current_bytes": _cgroup_memory_bytes("memory.current"),
+                "cgroup_memory_peak_bytes": _cgroup_memory_bytes("memory.peak"),
                 "cuda_allocated_bytes": torch.cuda.memory_allocated() if torch.cuda.is_initialized() else None,
                 "cuda_reserved_bytes": torch.cuda.memory_reserved() if torch.cuda.is_initialized() else None,
                 "cuda_peak_allocated_since_start_bytes": (
