@@ -16,7 +16,6 @@ import ray
 import pytest
 import hydra
 import hashlib
-import pickle
 import torch
 import os
 import shutil
@@ -191,7 +190,14 @@ def test_megatron_full_checkpoint_restores_per_rank_rng_and_cuda_tracker(ray_ini
             generic = self.strategy.get_rng_state()
             return {
                 "rank": self._rank,
-                "generic": hashlib.sha256(pickle.dumps(generic)).hexdigest(),
+                "generic": {
+                    "cpu": hashlib.sha256(generic["cpu"].numpy().tobytes()).hexdigest(),
+                    "cuda": hashlib.sha256(generic["cuda"].cpu().numpy().tobytes()).hexdigest(),
+                    "numpy": hashlib.sha256(
+                        generic["numpy"][1].tobytes() + repr((generic["numpy"][0], generic["numpy"][2:])).encode()
+                    ).hexdigest(),
+                    "python": hashlib.sha256(repr(generic["random"]).encode()).hexdigest(),
+                },
                 "tracker": {
                     name: hashlib.sha256(state.cpu().numpy().tobytes()).hexdigest()
                     for name, state in tracker.get_states().items()

@@ -126,6 +126,21 @@ def _select_rank_rng_state(rank_states: list[dict], rank: int) -> dict:
     return selected
 
 
+class _ObservedFullyParallelSaveStrategyWrapper(FullyParallelSaveStrategyWrapper):
+    """Expose MCore's metadata distribution as its own save-phase observation."""
+
+    def __init__(self, strategy, group, *, rank: int, step: int):
+        super().__init__(strategy, group)
+        self.observation_rank = rank
+        self.observation_step = step
+
+    def apply_saving_parallelization(self, sharded_state_dict):
+        with checkpoint_phase(
+            "megatron", "save", "save_distribution", rank=self.observation_rank, step=self.observation_step
+        ):
+            return super().apply_saving_parallelization(sharded_state_dict)
+
+
 class MegatronStrategy(DistributedStrategy):
     """
     The strategy for training with Megatron.
@@ -264,17 +279,18 @@ class MegatronStrategy(DistributedStrategy):
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
         # Save RNG state.
-        generic_rng_state = self.get_rng_state()
-        sharded_state_dict["rng"] = generic_rng_state  # Retain the old common-state reader contract.
-        from megatron.core import tensor_parallel
+        with checkpoint_phase("megatron", "save", "rank_rng_snapshot", rank=rank, step=step):
+            generic_rng_state = self.get_rng_state()
+            sharded_state_dict["rng"] = generic_rng_state  # Retain the old common-state reader contract.
+            from megatron.core import tensor_parallel
 
-        local_rng_state = {
-            "coordinates": _rng_parallel_coordinates(),
-            "generic": generic_rng_state,
-            "cuda_tracker": tensor_parallel.get_cuda_rng_tracker().get_states(),
-        }
-        rank_rng_states = [None] * dist.get_world_size()
-        dist.all_gather_object(rank_rng_states, local_rng_state)
+            local_rng_state = {
+                "coordinates": _rng_parallel_coordinates(),
+                "generic": generic_rng_state,
+                "cuda_tracker": tensor_parallel.get_cuda_rng_tracker().get_states(),
+            }
+            rank_rng_states = [None] * dist.get_world_size()
+            dist.all_gather_object(rank_rng_states, local_rng_state)
 
         # Save the checkpoint across ranks in parallel. Each S3 rank shard is one
         # multipart object; the local work directory contains only small control files.
@@ -294,8 +310,8 @@ class MegatronStrategy(DistributedStrategy):
             save_strategy = DirectS3TorchDistSaveShardedStrategy(ckpt_dir)
         else:
             save_strategy = get_default_save_sharded_strategy("torch_dist")
-        save_strategy = FullyParallelSaveStrategyWrapper(
-            save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
+        save_strategy = _ObservedFullyParallelSaveStrategyWrapper(
+            save_strategy, mpu.get_data_parallel_group(with_context_parallel=True), rank=rank, step=step
         )
 
         with io.local_work_dir(ckpt_dir) as work_dir:

@@ -343,6 +343,14 @@ class StreamingFsspecWriter(FileSystemWriter):
         )
         return plan
 
+    def prepare_global_plan(self, plans: list[SavePlan]) -> list[SavePlan]:
+        with checkpoint_phase("megatron", "save", "dcp_global_plan", rank=self.rank, step=self.checkpoint_step):
+            return super().prepare_global_plan(plans)
+
+    def finish(self, metadata, results: list[list[WriteResult]]) -> None:
+        with checkpoint_phase("megatron", "save", "dcp_finish", rank=self.rank, step=self.checkpoint_step):
+            return super().finish(metadata, results)
+
     def write_data(self, plan: SavePlan, planner: SavePlanner) -> Future[list[WriteResult]]:
         """Write a rank shard without retaining serialized tensors until close."""
         with checkpoint_phase("megatron", "save", "stream_shard", rank=self.rank, step=self.checkpoint_step) as phase:
