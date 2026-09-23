@@ -211,6 +211,7 @@ def test_trainer_full_checkpointing(
             from tests.gpu.test_megatron_worker import get_test_training_batch
 
             batch = get_test_training_batch(batch_size=4)
+            batch.metadata["global_step"] = 1
             ray.get(trainer1.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
 
         # Set initial global step as if 2 steps were completed
