@@ -9,9 +9,11 @@ import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Callable
+
+from skyrl_train.telemetry import record_generation_retention_snapshot
 
 
 _KNOWN_FIELDS = frozenset(
@@ -160,36 +162,19 @@ def _estimate_value(value: object, budget: _Budget) -> tuple[int, bool]:
     return base_size, False
 
 
-def estimate_group_payload(
-    trajectory_batch: Mapping[str, object],
-    source_prompts: Sequence[Mapping[str, object]],
-    *,
-    max_nodes_per_field: int = 256,
-) -> PayloadEstimate:
-    """Return a bounded logical-size estimate without changing either input."""
-
+def _estimate_fields(fields: Iterable[tuple[str, object]], *, rows: int, max_nodes_per_field: int) -> PayloadEstimate:
     if max_nodes_per_field <= 0:
         raise ValueError("max_nodes_per_field must be positive")
-
     field_sizes: Counter[str] = Counter()
     sampled_nodes = 0
     truncated = False
-    for raw_name, value in trajectory_batch.items():
+    for raw_name, value in fields:
         name = raw_name if raw_name in _KNOWN_FIELDS else "other"
         budget = _Budget(max_nodes_per_field)
         size, field_truncated = _estimate_value(value, budget)
         field_sizes[name] += size
         sampled_nodes += budget.sampled
         truncated = truncated or field_truncated
-
-    source_budget = _Budget(max_nodes_per_field)
-    source_size, source_truncated = _estimate_value(source_prompts, source_budget)
-    field_sizes["source_prompts"] += source_size
-    sampled_nodes += source_budget.sampled
-    truncated = truncated or source_truncated
-
-    response_ids = trajectory_batch.get("response_ids")
-    rows = len(response_ids) if isinstance(response_ids, Sequence) else 0
     return PayloadEstimate(
         rows=rows,
         total_bytes=sum(field_sizes.values()),
@@ -199,16 +184,24 @@ def estimate_group_payload(
     )
 
 
+def estimate_group_payload(
+    trajectory_batch: Mapping[str, object],
+    source_prompts: Sequence[Mapping[str, object]],
+    *,
+    max_nodes_per_field: int = 256,
+) -> PayloadEstimate:
+    """Return a bounded logical-size estimate without changing either input."""
+    response_ids = trajectory_batch.get("response_ids")
+    rows = len(response_ids) if isinstance(response_ids, Sequence) else 0
+    return _estimate_fields(
+        itertools.chain(trajectory_batch.items(), (("source_prompts", source_prompts),)),
+        rows=rows,
+        max_nodes_per_field=max_nodes_per_field,
+    )
+
+
 def estimate_agent_loop_payload(output: object, *, max_nodes_per_field: int = 64) -> PayloadEstimate:
-    """Estimate one pre-projection ``AgentLoopOutput`` without retaining it.
-
-    The synchronous Snowball path fans out thousands of these objects through
-    ``tqdm.gather``.  Keeping the estimate primitive-only lets us measure that
-    actual retention seam without adding another reference to the payload.
-    """
-
-    if max_nodes_per_field <= 0:
-        raise ValueError("max_nodes_per_field must be positive")
+    """Return a primitive-only size estimate of one agent-loop output."""
 
     evidence = getattr(output, "evidence", None)
     fields = {
@@ -228,27 +221,10 @@ def estimate_agent_loop_payload(output: object, *, max_nodes_per_field: int = 64
             getattr(output, "env_metrics", None),
         ),
     }
-    field_sizes: Counter[str] = Counter()
-    sampled_nodes = 0
-    truncated = False
-    for name, value in fields.items():
-        budget = _Budget(max_nodes_per_field)
-        size, field_truncated = _estimate_value(value, budget)
-        field_sizes[name] += size
-        sampled_nodes += budget.sampled
-        truncated = truncated or field_truncated
-    return PayloadEstimate(
-        rows=1,
-        total_bytes=sum(field_sizes.values()),
-        field_bytes=tuple(sorted(field_sizes.items())),
-        sampled_nodes=sampled_nodes,
-        truncated=truncated,
-    )
+    return _estimate_fields(fields.items(), rows=1, max_nodes_per_field=max_nodes_per_field)
 
 
 def _default_publish(snapshot: RetentionSnapshot, boundary: str | None) -> None:
-    from skyrl_train.telemetry import record_generation_retention_snapshot
-
     record_generation_retention_snapshot(
         surface=snapshot.surface,
         groups=snapshot.groups,
@@ -360,16 +336,7 @@ class GenerationRetentionObserver:
             source_prompts,
             max_nodes_per_field=self._max_nodes_per_field,
         )
-        with self._lock:
-            group_id = id(group)
-            if group_id in self._retained:
-                raise ValueError("group is already registered")
-            self._retained[group_id] = _RetainedEstimate(
-                owner=owner, estimate=estimate, token_id=None if token is None else id(token)
-            )
-            self._settled_groups += 1
-            self._settled_rows += estimate.rows
-        self.publish()
+        self.register_estimate(group, estimate=estimate, owner=owner, token=token)
         return estimate
 
     def register_estimate(

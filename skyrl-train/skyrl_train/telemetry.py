@@ -118,6 +118,8 @@ _RETENTION_FIELDS = (
 _generation_active: defaultdict[str, int] = defaultdict(int)
 _executor_counts: defaultdict[str, dict[str, int]] = defaultdict(lambda: {"queued": 0, "active": 0})
 _executor_lock = threading.Lock()
+_memory_snapshot_failure_logged = False
+_SHADOW_DISCONNECT_ERROR = "ServerDisconnectedError"
 
 
 def record_event(
@@ -401,6 +403,7 @@ def record_rollout_buffer(depth: int, queue_capacity: int) -> None:
 
 def _process_memory_snapshot() -> dict[str, int]:
     """Return process and host memory in bytes, including USS/PSS where supported."""
+    global _memory_snapshot_failure_logged
     try:
         import psutil
 
@@ -423,7 +426,10 @@ def _process_memory_snapshot() -> dict[str, int]:
                 if value is not None:
                     values[name] = int(value)
         return values
-    except (ImportError, OSError):
+    except (ImportError, OSError) as error:
+        if not _memory_snapshot_failure_logged:
+            logger.warning("Process memory telemetry is unavailable: {}", error)
+            _memory_snapshot_failure_logged = True
         return {}
 
 
@@ -468,13 +474,18 @@ def record_generation_retention_snapshot(
     record_telemetry_health()
 
 
+def _ultra_metadata(extras: Mapping[str, object]) -> Mapping[str, object] | None:
+    extra_info = extras.get("extra_info")
+    ultra = extra_info.get("nemotron_ultra") if isinstance(extra_info, Mapping) else None
+    return ultra if isinstance(ultra, Mapping) else None
+
+
 def generation_route(env_extras: Sequence[Mapping[str, object]] | None) -> str:
     """Classify a generation group without placing row identities in metric labels."""
     routes: set[str] = set()
     for extras in env_extras or ():
-        extra_info = extras.get("extra_info")
-        ultra = extra_info.get("nemotron_ultra") if isinstance(extra_info, Mapping) else None
-        route = ultra.get("route") if isinstance(ultra, Mapping) else None
+        ultra = _ultra_metadata(extras)
+        route = ultra.get("route") if ultra is not None else None
         routes.add("harbor" if route == "terminal_bench" else "gym")
     if not routes:
         return "unknown"
@@ -485,9 +496,8 @@ def record_generation_input_coverage(env_extras: Sequence[Mapping[str, object]] 
     """Count logical input coverage before admission can discard a completed group."""
     coverage: set[tuple[str, str, str]] = set()
     for extras in env_extras or ():
-        extra_info = extras.get("extra_info")
-        ultra = extra_info.get("nemotron_ultra") if isinstance(extra_info, Mapping) else None
-        if not isinstance(ultra, Mapping):
+        ultra = _ultra_metadata(extras)
+        if ultra is None:
             continue
         blend = ultra.get("blend")
         agent = ultra.get("agent")
@@ -576,14 +586,14 @@ def record_transient_retry_shadow(
     fully_masked = aligned and all(rows(mask) and not any(mask) for mask in masks)
     candidate = (
         fully_masked
-        and all(error == "ServerDisconnectedError" for error in exceptions)
+        and all(error == _SHADOW_DISCONNECT_ERROR for error in exceptions)
         and all(treatment == "mask" for treatment in treatments)
     )
     if candidate:
         reason = "complete_server_disconnect"
     elif not aligned:
         reason = "missing_or_unaligned_evidence"
-    elif any(error == "ServerDisconnectedError" for error in exceptions):
+    elif any(error == _SHADOW_DISCONNECT_ERROR for error in exceptions):
         reason = "partial_or_mixed_disconnect"
     else:
         reason = "other_masked_failure"

@@ -8,7 +8,7 @@ import os
 import time
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, Protocol
 
 import requests
 
@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 _MAX_REQUEST_ATTEMPTS = 5
 _INITIAL_RETRY_DELAY_SECONDS = 1.0
 _TRANSIENT_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+class JudgeRequestObserver(Protocol):
+    def request(self, *, duration_seconds: float, status: str, attempt: int, will_retry: bool) -> None: ...
 
 
 class GenRMResponseTransport(StrEnum):
@@ -40,7 +44,7 @@ def _post_json_with_retry(
     headers: dict[str, str],
     json_body: dict[str, Any],
     timeout: float,
-    observer: Any = None,
+    observer: JudgeRequestObserver | None = None,
 ) -> requests.Response:
     def observe(*, duration_seconds: float, status: str, attempt: int, will_retry: bool) -> None:
         if observer is None:
@@ -122,7 +126,7 @@ class OpenAIJudge:
     timeout_seconds: float = 600.0
     response_transport: GenRMResponseTransport = GenRMResponseTransport.RESPONSES_METADATA
     reasoning_effort: str | None = None
-    observer: Any = None
+    observer: JudgeRequestObserver | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "response_transport", GenRMResponseTransport(self.response_transport))
