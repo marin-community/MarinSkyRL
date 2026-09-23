@@ -519,12 +519,16 @@ class MegatronModelWrapper:
             log_ratio_monitor.add(action_log_probs, old_action_log_probs, loss_mask)
             completed_microbatches += 1
 
-            metrics = {
-                "final_loss": objective.unscaled_loss.detach().item(),
-                "policy_loss": objective.policy_loss.detach().item(),
-                "policy_entropy": objective.entropy.detach().item(),
-                "policy_kl": objective.kl_loss.detach().item(),
-            }
+            # One host transfer for the four losses instead of one sync each.
+            losses = torch.stack(
+                [
+                    objective.unscaled_loss.detach(),
+                    objective.policy_loss.detach(),
+                    objective.entropy.detach(),
+                    objective.kl_loss.detach(),
+                ]
+            ).tolist()
+            metrics = dict(zip(("final_loss", "policy_loss", "policy_entropy", "policy_kl"), losses, strict=True))
             metrics.update(objective.metrics)
             if completed_microbatches == len(micro_batches):
                 if ratio_settings.pooled:

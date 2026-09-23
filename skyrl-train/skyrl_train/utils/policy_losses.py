@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
 from enum import StrEnum
-from typing import Optional, Protocol
+from typing import Optional, Protocol, Sequence
 
 import loguru
 import torch
@@ -115,8 +115,10 @@ def sft_policy_loss(
     return loss, {}
 
 
-def _masked_fraction(condition: torch.Tensor, loss_mask: Optional[torch.Tensor]) -> float:
-    return masked_mean(condition.float(), loss_mask).mean().detach().item()
+def _masked_fractions(conditions: Sequence[torch.Tensor], loss_mask: Optional[torch.Tensor]) -> list[float]:
+    """Mask-weighted token fractions of every condition, moved to the host in one transfer."""
+    fractions = [masked_mean(condition.float(), loss_mask).mean().detach() for condition in conditions]
+    return torch.stack(fractions).tolist()
 
 
 def clipping_metrics(
@@ -138,18 +140,13 @@ def clipping_metrics(
     """
     low_pressure = ratio < 1 - eps_clip_low
     high_pressure = ratio > 1 + eps_clip_high
-    low_selected = selected & low_pressure
-    high_selected = selected & high_pressure
-    if pooled_clip_ratio is None:
-        pooled_clip_ratio = _masked_fraction(selected, loss_mask)
-    return PolicyClipMetrics(
-        ppo_clip_ratio=pooled_clip_ratio,
-        ppo_clip_ratio_low=_masked_fraction(low_selected, loss_mask),
-        ppo_clip_ratio_high=_masked_fraction(high_selected, loss_mask),
-        ppo_clip_pressure_low=_masked_fraction(low_pressure, loss_mask),
-        ppo_clip_pressure_high=_masked_fraction(high_pressure, loss_mask),
-        ppo_ratio_exact_unit_fraction=_masked_fraction(ratio == 1, loss_mask),
-    ).as_dict()
+    fractions = _masked_fractions(
+        [selected, selected & low_pressure, selected & high_pressure, low_pressure, high_pressure, ratio == 1],
+        loss_mask,
+    )
+    if pooled_clip_ratio is not None:
+        fractions[0] = pooled_clip_ratio
+    return PolicyClipMetrics(*fractions).as_dict()
 
 
 def complete_clip_metrics(metrics: dict[str, float]) -> dict[str, float]:

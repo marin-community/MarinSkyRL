@@ -210,7 +210,6 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
         chunk_size = ctx.chunk_size
         tp_group = ctx.tp_group
 
-        partition_vocab_size = int(vocab_parallel_logits.shape[-1])
         seq_size = int(vocab_parallel_logits.shape[1])
         num_chunks = (seq_size + chunk_size - 1) // chunk_size
 
@@ -238,17 +237,22 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
             )
             softmax_output = softmax_output.exp()
 
-            # 1 if it's the chosen log prob, 0 otherwise
-            is_chosen = (~(target_mask[:, chunk_start:chunk_end])).unsqueeze(-1) * torch.nn.functional.one_hot(
-                masked_target[:, chunk_start:chunk_end],
-                num_classes=partition_vocab_size,
+            # (1 if it's the chosen log prob, 0 otherwise) - softmax, as one fp32 chunk:
+            # 0 - softmax everywhere, plus 1 at each unmasked position's chosen token.
+            # The sum rounds exactly as the former one-hot subtraction did, without the
+            # two [B, chunk, V] int64 temporaries a one-hot builds.
+            grad_chunk = torch.rsub(softmax_output, 0.0)
+            grad_chunk.scatter_add_(
+                -1,
+                masked_target[:, chunk_start:chunk_end].unsqueeze(-1),
+                (~target_mask[:, chunk_start:chunk_end]).to(grad_chunk.dtype).unsqueeze(-1),
             )
 
             grad_input_chunk = grad_input[:, chunk_start:chunk_end, :]
-            grad_input_chunk.copy_(is_chosen.float().sub_(softmax_output))
+            grad_input_chunk.copy_(grad_chunk)
             grad_input_chunk.mul_(grad_output[:, chunk_start:chunk_end].unsqueeze(dim=-1))
 
-            del softmax_output, is_chosen, logits
+            del softmax_output, grad_chunk, logits
 
         # TODO: Investigate PrimeRL's streamed token-and-vocab LM-head backward
         # (`prime_rl/trainer/models/layers/lm_head.py:_SequenceChunkedLogProbEntropyFn`)

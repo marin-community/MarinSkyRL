@@ -81,9 +81,16 @@ class DistributedStrategy(ABC):
         """Perform all_reduce across all processes"""
         assert op in ("mean", "max", "sum")
         if isinstance(data, dict):
+            # Every scalar value of the dict rides one collective; tensors and nested
+            # dicts keep their own, so a status of hundreds of metrics costs one all-reduce.
+            scalar_keys = [k for k, v in data.items() if not isinstance(v, (torch.Tensor, dict))]
+            scalars = {}
+            if scalar_keys:
+                packed = self.all_reduce(torch.Tensor([data[k] for k in scalar_keys]), op)
+                scalars = dict(zip(scalar_keys, packed.tolist(), strict=True))
             ret = {}
             for k, v in data.items():
-                ret[k] = self.all_reduce(v, op)
+                ret[k] = scalars[k] if k in scalars else self.all_reduce(v, op)
             return ret
         else:
             is_tensor = True
