@@ -39,10 +39,14 @@ def _get_filesystem(path: str):
     return fs
 
 
+def _normalized_path(filesystem, path: str) -> str:
+    return filesystem._strip_protocol(path) if is_cloud_path(path) else path
+
+
 def open_file(path: str, mode: str = "rb"):
     """Open a file using fsspec, works with both local and cloud paths."""
     fs = _get_filesystem(path)
-    norm = fs._strip_protocol(path) if is_cloud_path(path) else path
+    norm = _normalized_path(fs, path)
     return fs.open(norm, mode)
 
 
@@ -76,7 +80,7 @@ def read_bytes(path: str) -> bytes:
 def find_files(path: str) -> dict[str, int]:
     """Return recursive file paths and sizes below a local or cloud prefix."""
     filesystem = _get_filesystem(path)
-    normalized = filesystem._strip_protocol(path) if is_cloud_path(path) else path
+    normalized = _normalized_path(filesystem, path)
     details = filesystem.find(normalized, detail=True, withdirs=False)
     return {str(file_path): int(detail["size"]) for file_path, detail in details.items()}
 
@@ -84,7 +88,7 @@ def find_files(path: str) -> dict[str, int]:
 def file_size(path: str) -> int:
     """Return the size of one exact local or cloud object."""
     filesystem = _get_filesystem(path)
-    normalized = filesystem._strip_protocol(path) if is_cloud_path(path) else path
+    normalized = _normalized_path(filesystem, path)
     detail = filesystem.info(normalized)
     if detail.get("type") == "directory":
         raise IsADirectoryError(path)
@@ -127,7 +131,7 @@ def remove(path: str) -> None:
 def _upload(local_path: str, cloud_path: str, *, recursive: bool) -> None:
     if not is_cloud_path(cloud_path):
         raise ValueError(f"Destination must be a cloud path, got: {cloud_path}")
-    filesystem = _get_filesystem(cloud_path)
+    fs = _get_filesystem(cloud_path)
     is_s3_path = cloud_path.startswith("s3://")
     destination = filesystem._strip_protocol(cloud_path) if is_s3_path else cloud_path
     try:
@@ -153,7 +157,7 @@ def download_directory(cloud_path: str, local_path: str) -> None:
     if not is_cloud_path(cloud_path):
         raise ValueError(f"Source must be a cloud path, got: {cloud_path}")
 
-    fs = _get_filesystem(cloud_path)
+    filesystem = _get_filesystem(cloud_path)
     # The trailing separator makes fsspec copy the directory CONTENTS instead of
     # nesting the directory under the destination. It must be appended AFTER
     # _strip_protocol, which rstrips separators and would silently undo it.

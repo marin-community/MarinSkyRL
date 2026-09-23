@@ -48,6 +48,13 @@ class OutputStream(Protocol):
     def close(self) -> None: ...
 
 
+def _close_after_error(stream: OutputStream, error: BaseException, path: str, action: str) -> None:
+    try:
+        stream.close()
+    except Exception as cleanup_error:
+        error.add_note(f"Failed to {action} for {path}: {cleanup_error}")
+
+
 class CommittableStream:
     """Output stream that publishes buffered data only on explicit commit."""
 
@@ -104,10 +111,7 @@ class S3MultipartWriteStream(CommittableStream):
                     self._submit_part(bytes(self._buffer))
                     self._buffer.clear()
         except BaseException as error:
-            try:
-                self.close()
-            except Exception as cleanup_error:
-                error.add_note(f"Failed to abort multipart upload for {self.path}: {cleanup_error}")
+            _close_after_error(self, error, self.path, "abort multipart upload")
             raise
         self._position += payload_bytes
         return payload_bytes
@@ -143,10 +147,7 @@ class S3MultipartWriteStream(CommittableStream):
             )
             self.closed = True
         except BaseException as error:
-            try:
-                self.close()
-            except Exception as cleanup_error:
-                error.add_note(f"Failed to abort multipart upload for {self.path}: {cleanup_error}")
+            _close_after_error(self, error, self.path, "abort multipart upload")
             raise
 
     def close(self) -> None:
@@ -228,10 +229,7 @@ def manage_output_stream(stream: OutputStream, path: str) -> Generator[OutputStr
         else:
             stream.close()
     except BaseException as error:
-        try:
-            stream.close()
-        except Exception as cleanup_error:
-            error.add_note(f"Failed to close remote write for {path}: {cleanup_error}")
+        _close_after_error(stream, error, path, "close remote write")
         error.add_note(f"Object write failed for {path}")
         raise
 
@@ -248,7 +246,7 @@ def open_output_stream(
 
 
 def abort_multipart_uploads(path: str) -> int:
-    """Abort incomplete uploads below a canonical S3 checkpoint prefix."""
+    """Abort incomplete uploads below a canonical S3 prefix and return their count."""
     checkpoint_path = StoragePath(path)
     if checkpoint_path.scheme != "s3" or str(checkpoint_path) != path or not checkpoint_path.key:
         raise ValueError(f"Expected a canonical S3 checkpoint path, got: {path}")

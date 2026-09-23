@@ -433,6 +433,20 @@ def create_ray_wrapped_inference_engines_with_retry(
     )
 
 
+def _cleanup_failed_engine_startup(inference_engine_actors: list[ActorHandle], owned_placement_groups: list) -> None:
+    """Best-effort teardown before retrying a failed engine gang."""
+    for actor in inference_engine_actors:
+        try:
+            ray.kill(actor)
+        except Exception as cleanup_error:
+            logger.warning("Failed to stop vLLM actor after startup failure: {}", cleanup_error)
+    for placement_group_handle in owned_placement_groups:
+        try:
+            remove_placement_group(placement_group_handle)
+        except Exception as cleanup_error:
+            logger.warning("Failed to remove vLLM placement group after startup failure: {}", cleanup_error)
+
+
 def create_ray_wrapped_inference_engines(
     num_inference_engines: int,
     tensor_parallel_size: int,
@@ -1005,16 +1019,7 @@ def create_ray_wrapped_inference_engines(
         populate_engine_max_model_lens(engines, timeout_seconds=engine_init_timeout_seconds)
         return engines
     except BaseException:
-        for actor in inference_engine_actors:
-            try:
-                ray.kill(actor)
-            except Exception as cleanup_error:
-                logger.warning("Failed to stop vLLM actor after startup failure: {}", cleanup_error)
-        for pg in owned_placement_groups:
-            try:
-                remove_placement_group(pg)
-            except Exception as cleanup_error:
-                logger.warning("Failed to remove vLLM placement group after startup failure: {}", cleanup_error)
+        _cleanup_failed_engine_startup(inference_engine_actors, owned_placement_groups)
         raise
 
 

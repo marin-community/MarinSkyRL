@@ -42,7 +42,7 @@ from marinskyrl.hugging_face_retry import (
     call_with_hugging_face_retry,
     load_hugging_face_with_retry,
 )
-from marinskyrl.remote_io import filesystem_and_path, open_output_stream
+from marinskyrl.remote_io import open_output_stream
 from marinskyrl.resource_locator import join_resource_path, relative_resource_path
 from marinskyrl.speculative_decoding import is_hugging_face_commit
 
@@ -53,6 +53,10 @@ _STREAM_CHUNK_BYTES = 8 * 2**20
 _MAX_METADATA_BYTES = 256 * 2**20
 _MODEL_CONFIG_NAME = "config.json"
 _MODEL_METADATA_FILES = (_MODEL_CONFIG_NAME, TOKENIZER_JSON_NAME, TOKENIZER_CONFIG_NAME)
+
+
+def _is_safetensors(path: str) -> bool:
+    return path.endswith(".safetensors")
 
 
 @dataclass(frozen=True)
@@ -264,7 +268,7 @@ def _stream_snapshot_file(
 ) -> _MirroredSnapshotFile:
     """Mirror one file without a disk copy and optionally collect tensor names."""
     source_path = posixpath.join(source.root, snapshot_file.path)
-    is_safetensors = snapshot_file.path.endswith(".safetensors")
+    is_safetensors = _is_safetensors(snapshot_file.path)
     if _destination_matches(
         destination_filesystem,
         destination_path,
@@ -364,7 +368,7 @@ def _mirror_snapshot_files(
             streamed_bytes += mirrored.entry.size
             if _is_weight(path):
                 streamed_weight_bytes += mirrored.entry.size
-        if path.endswith(".safetensors"):
+        if _is_safetensors(path):
             shard_headers[path] = (mirrored.entry.size, mirrored.tensor_keys)
 
     stats = _MirrorTransferStats(
@@ -453,7 +457,7 @@ def publish_hugging_face_snapshot(
         raise ValueError(f"Hugging Face snapshot uses reserved path {MODEL_MANIFEST_FILENAME}")
     validate_model_file_names(set(files_by_path), model_source, tokenizer_mode)
 
-    destination_filesystem, destination_root = filesystem_and_path(destination_uri)
+    destination_filesystem, destination_root = fs_and_path(destination_uri)
     destination_filesystem.makedirs(destination_root, exist_ok=True)
     marker_path = posixpath.join(destination_root, MODEL_MANIFEST_FILENAME)
     if destination_filesystem.exists(marker_path):

@@ -422,9 +422,9 @@ def apply_policy_chat_template(model_path: str, template_repo_rel: str) -> None:
     template_path = resolve_repo_path(template_repo_rel)
     delphi = template_path.read_text()
 
-    # Import transformers/hf lazily (matches wait_for_nodes' local `import ray` and
-    # stage_model): the controller bootstraps Ray on every node and must not pull these
-    # heavy ML deps into the fast bootstrap path for configs that set no chat-template.
+    # Import transformers lazily (matches wait_for_nodes' local `import ray`): the
+    # controller bootstraps Ray on every node and must not pull this heavy dependency
+    # into the fast bootstrap path for configs that set no chat-template.
     from transformers import AutoTokenizer
 
     snap = model_path if os.path.isdir(model_path) else download_hugging_face_snapshot(model_path, revision=None)
