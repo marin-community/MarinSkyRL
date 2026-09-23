@@ -8,11 +8,14 @@ cloud/iris/ingress_utils.py
 cloud/iris/literal_proxy_utils.py
 cloud/iris/model_paths.py
 cloud/iris/paths.py
+cloud/iris/protocol.py
 cloud/iris/ray_storage.py
+cloud/iris/request_builder.py
 cloud/iris/rl_config_translation.py
 cloud/iris/rl_data.py
 cloud/iris/runtime_bundle.py
 cloud/iris/runtime_environment.py
+cloud/iris/storage_policy.py
 cloud/iris/tasks_parquet.py
 cloud/iris/task_runtime.py
 cloud/iris/telemetry_env.py
