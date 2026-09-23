@@ -604,12 +604,16 @@ class RayPPOTrainer:
             await asyncio.to_thread(self.save_checkpoints)
             return
 
-        await self.inference_engine_client.sleep()
+        backend = str(self.cfg.trainer.strategy)
+        with checkpoint_phase(backend, "save", "inference_sleep", rank=-1, step=self.global_step):
+            await self.inference_engine_client.sleep()
         try:
-            self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
+            with checkpoint_phase(backend, "save", "policy_backload", rank=-1, step=self.global_step):
+                self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
             await asyncio.to_thread(self.save_checkpoints)
         finally:
-            await self._sync_policy_for_rollouts(reason="checkpoint_restore")
+            with checkpoint_phase(backend, "save", "rollout_restore_sync", rank=-1, step=self.global_step):
+                await self._sync_policy_for_rollouts(reason="checkpoint_restore")
 
     def _record_checkpoint_save_failure(self, state: TrainerState) -> None:
         self._checkpoint_save_failures += 1.0
@@ -632,7 +636,10 @@ class RayPPOTrainer:
             self._record_checkpoint_save_failure(state)
             return
 
-        await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
+        with checkpoint_phase(
+            str(self.cfg.trainer.strategy), "save", "on_save_callbacks", rank=-1, step=self.global_step
+        ):
+            await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
 
     async def _run_step_end_callbacks(self, state: TrainerState) -> None:
         """Run callback-requested work that belongs to the current training step."""
