@@ -1,10 +1,13 @@
 """Model transports used by trajectory runners."""
 
 import asyncio
+import base64
+import io
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import aiohttp
+import numpy as np
 from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInput, InferenceEngineOutput
@@ -34,11 +37,34 @@ class ModelClient(Protocol):
     async def generate(self, request: InferenceEngineInput) -> ModelClientOutput: ...
 
 
-def _choice_routed_experts(choice: dict[str, Any], response_ids: list[int]) -> list[list[list[int]]] | None:
+def _choice_routed_experts(
+    choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]
+) -> list[list[list[int]]] | None:
     provider_fields = choice.get("provider_specific_fields") or {}
     routes = choice.get("routed_experts", provider_fields.get("routed_experts"))
     if routes is None:
         return None
+    if isinstance(routes, str):
+        # vLLM's HTTP response uses base64 .npy, including the served prompt and
+        # every generated token except the final one (which was never forwarded).
+        # Keep only generated-token routes and mark that uncaptured final forward
+        # with the router-replay sentinel, rather than assigning it another token's route.
+        try:
+            array = np.load(io.BytesIO(base64.b64decode(routes, validate=True)), allow_pickle=False)
+        except (ValueError, OSError) as error:
+            raise ValueError("chat response routed_experts is not valid base64 .npy") from error
+        if (
+            array.ndim != 3
+            or array.dtype.kind not in "iu"
+            or array.shape[1] == 0
+            or array.shape[2] == 0
+            or array.shape[0] != len(prompt_ids) + len(response_ids) - 1
+        ):
+            raise ValueError("chat response routed_experts must align with served prompt and response token IDs")
+        generated = array[len(prompt_ids) :]
+        if response_ids:
+            generated = np.concatenate((generated, np.zeros_like(array[:1])))
+        routes = generated.tolist()
     if not isinstance(routes, list) or len(routes) != len(response_ids):
         raise ValueError("chat response routed_experts must align with exact response token IDs")
     if not all(
@@ -96,7 +122,7 @@ def _parse_chat_choice(choice: dict[str, Any], *, prompt_ids: Any, logprobs_requ
         response_logprobs=response_logprobs,
         logprob_items=logprob_items,
         policy_version_segments=segments,
-        routed_experts=_choice_routed_experts(choice, response_ids),
+        routed_experts=_choice_routed_experts(choice, prompt_ids, response_ids),
     )
 
 
@@ -283,7 +309,7 @@ class DirectModelClient:
                 text,
                 choice["finish_reason"],
                 message,
-                _choice_routed_experts(choice, response_ids),
+                _choice_routed_experts(choice, prompt_ids, response_ids),
             )
 
         results = await asyncio.gather(
