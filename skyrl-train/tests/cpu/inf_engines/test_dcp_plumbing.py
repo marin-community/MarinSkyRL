@@ -61,6 +61,7 @@ def test_from_config_forwards_vllm_engine_options(monkeypatch):
     cfg = get_default_config()
     main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
     assert captured["decode_context_parallel_size"] == 1
+    assert captured["inference_engine_enable_sleep"] is True
     assert captured["vllm_attention_backend"] is None
     assert "speculative_config" not in captured["engine_init_kwargs"]
     assert "weight_transfer_config" not in captured["engine_init_kwargs"]
@@ -74,6 +75,15 @@ def test_from_config_forwards_vllm_engine_options(monkeypatch):
     main_base.create_ray_wrapped_inference_engines_from_config(cfg2, colocate_pg=None, tokenizer=None)
     assert captured["decode_context_parallel_size"] == 2
     assert captured["vllm_attention_backend"] == "FLASH_ATTN"
+
+    captured.clear()
+    main_base.create_ray_wrapped_inference_engines_from_config(
+        cfg2,
+        colocate_pg=None,
+        tokenizer=None,
+        operation=main_base.EntrypointOperation.GENERATE,
+    )
+    assert captured["inference_engine_enable_sleep"] is False
 
 
 def test_standard_entrypoint_identity_survives_python_module_execution(monkeypatch):

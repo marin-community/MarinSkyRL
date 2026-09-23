@@ -115,6 +115,7 @@ def create_ray_wrapped_inference_engines_from_config(
     tokenizer: PreTrainedTokenizerBase,
     *,
     entrypoint: str = STANDARD_TRAINING_ENTRYPOINT,
+    operation: EntrypointOperation = EntrypointOperation.TRAIN,
 ):
     from skyrl_train.inference_engines.configuration import (
         InferenceEngineRoleConfig,
@@ -187,7 +188,7 @@ def create_ray_wrapped_inference_engines_from_config(
         # standard and terminal_bench entrypoints via this shared config-assembly seam (G5).
         decode_context_parallel_size=cfg.generator.get("inference_engine_decode_context_parallel_size", 1),
         shared_pg=colocate_pg,
-        inference_engine_enable_sleep=cfg.trainer.placement.colocate_all,
+        inference_engine_enable_sleep=(cfg.trainer.placement.colocate_all and operation is EntrypointOperation.TRAIN),
         max_logprobs=max([1, *requested_logprobs]),
     )
     model_revision = cfg.trainer.policy.model.get("revision")
@@ -261,7 +262,9 @@ class BasePPOExp:
         # eligible (disaggregated, no-ref) run.
         self.policy_pg = self.get_policy_pg()
 
-    def create_inference_engine_client(self) -> InferenceEngineClient:
+    def create_inference_engine_client(
+        self, *, operation: EntrypointOperation = EntrypointOperation.TRAIN
+    ) -> InferenceEngineClient:
         """Create the configured local or remote inference-engine client."""
         from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient  # noqa: PLC0415
 
@@ -274,6 +277,7 @@ class BasePPOExp:
                 self.colocate_pg,
                 self.tokenizer,
                 entrypoint=entrypoint,
+                operation=operation,
             )
         else:
             inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)

@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
+from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation
 from skyrl_train.entrypoints.main_generate import run_evaluation_only
 from skyrl_train.entrypoints.terminal_bench_generate import TerminalBenchGenerateExp
 from skyrl_train.inference_engines.vllm.stats import InferenceStatsSnapshot
@@ -14,9 +15,6 @@ from tests.cpu.util import example_dummy_config
 class _InferenceClient:
     def __init__(self) -> None:
         self.stopped = False
-
-    async def wake_up(self) -> None:
-        pass
 
     async def get_stats(self, *, read_mode) -> InferenceStatsSnapshot:
         del read_mode
@@ -112,7 +110,12 @@ async def test_terminal_bench_generate_starts_runner_before_rollout(tmp_path: Pa
     experiment.cfg = cfg
     experiment.eval_dataset = TerminalBenchTaskDataset(data_files=[str(tmp_path / "tasks")])
     experiment.tokenizer = type("Tokenizer", (), {"decode": lambda _self, _tokens: "done"})()
-    experiment.create_inference_engine_client = lambda: inference_client
+
+    def create_inference_engine_client(*, operation: EntrypointOperation):
+        assert operation is EntrypointOperation.GENERATE
+        return inference_client
+
+    experiment.create_inference_engine_client = create_inference_engine_client
     experiment.get_trajectory_runner = lambda *_args: runner
     experiment.get_tracker = lambda: tracker
 

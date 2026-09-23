@@ -81,11 +81,10 @@ async def run_evaluation_only(exp: BasePPOExp) -> dict[str, float]:
     """Run one measured evaluation and release all rollout resources."""
     assert exp.eval_dataset is not None, "The evaluation only entrypoint requires an eval dataset is provided"
 
-    inference_engine_client = exp.create_inference_engine_client()
+    inference_engine_client = exp.create_inference_engine_client(operation=EntrypointOperation.GENERATE)
     try:
         trajectory_runner = exp.get_trajectory_runner(exp.cfg, exp.tokenizer, inference_engine_client)
         try:
-            await inference_engine_client.wake_up()
             await trajectory_runner.startup()
             await load_initial_policy_adapter(inference_engine_client, exp.cfg)
             return await _evaluate_and_report(exp, trajectory_runner, inference_engine_client)
