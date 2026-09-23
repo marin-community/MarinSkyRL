@@ -25,7 +25,10 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     SENTINEL_EXPERT_ID,
 )
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
-from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
+from skyrl_train.dataset.preprocess import (
+    _collate_routed_experts_from_arrays,
+    convert_prompts_responses_to_batch_tensors,
+)
 
 from unittest.mock import MagicMock
 
@@ -371,6 +374,19 @@ def test_collator_container_parity_byte_identical(char_tokenizer, num_experts):
         if a is None and b is None:
             continue
         assert torch.equal(a, b)
+
+
+def test_collator_mixed_rectangular_and_ragged_routes():
+    rectangular = np.asarray([_real_row(0), _real_row(1)], dtype=np.int16)
+    ragged = [_real_row(2), [[0]]]
+
+    routes = _collate_routed_experts_from_arrays([rectangular, ragged], max_output_len=3, num_experts=512)
+
+    assert routes.shape == (2, 3, L, K)
+    assert routes.dtype == torch.int16
+    assert routes[0, :2].tolist() == rectangular.tolist()
+    assert routes[1, 0].tolist() == ragged[0]
+    assert torch.all(routes[1, 1:] == 0)
 
 
 def test_training_input_batch_container_parity(char_tokenizer):
