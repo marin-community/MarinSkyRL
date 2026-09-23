@@ -100,6 +100,7 @@ class MegatronWorker:
         flash_attn=False,
         model_revision: str | None = None,
         model_source_uri: str | None = None,
+        load_hf_weights: bool = True,
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
@@ -128,7 +129,7 @@ class MegatronWorker:
         self.remote_hf_state = None
         if model_source_uri:
             self.remote_hf_state = install_remote_hf_state(bridge, model_source_uri, model_path)
-        provider = bridge.to_megatron_provider()
+        provider = bridge.to_megatron_provider(load_weights=load_hf_weights)
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
         provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
         provider.pipeline_dtype = torch.bfloat16 if bf16 else torch.float32
@@ -401,6 +402,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             flash_attn=self.cfg.trainer.flash_attn,
             model_revision=self.cfg.trainer.policy.model.get("revision"),
             model_source_uri=self.cfg.trainer.policy.model.get("source_uri"),
+            load_hf_weights=for_training,
         )
 
         self.actor_module = self.make_megatron_module(
@@ -412,7 +414,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self._download_hf_snapshot_if_needed(model_path, self.cfg.trainer.policy.model)
         torch.distributed.barrier()
 
-        if self.remote_hf_state is not None:
+        if self.remote_hf_state is not None and for_training:
             logger.info(
                 "Loaded Megatron policy weights directly from {} (rank range bytes read: {})",
                 self.cfg.trainer.policy.model.source_uri,
