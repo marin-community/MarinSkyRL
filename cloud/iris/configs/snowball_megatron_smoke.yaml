@@ -79,5 +79,5 @@ data:
 extra_env:
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
   # One east H100 node has repeatedly served a corrupt cached numpy wheel.
-  # Keep this bootstrap-only workaround identical for benchmark control and candidate.
-  UV_NO_CACHE: "1"
+  # Isolate the bootstrap cache while retaining uv's required symlink mode.
+  UV_CACHE_DIR: /tmp/uv-checkpoint-benchmark-cache
