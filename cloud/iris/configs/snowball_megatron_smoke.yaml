@@ -80,4 +80,6 @@ extra_env:
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
   # One east H100 node has repeatedly served a corrupt cached numpy wheel.
   # Isolate the bootstrap cache while retaining uv's required symlink mode.
-  UV_CACHE_DIR: /tmp/uv-checkpoint-benchmark-cache
+  UV_CACHE_DIR: /uv/cache/checkpoint-benchmark-20260923
+  # Limit each RunAI engine's S3 concurrency during the full-model startup burst.
+  RUNAI_STREAMER_CONCURRENCY: "2"

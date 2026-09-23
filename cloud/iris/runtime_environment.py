@@ -43,13 +43,14 @@ def runtime_profile_for_strategy(
     return RuntimeProfile.FSDP_EXPORT if checkpoint_export else RuntimeProfile.FSDP
 
 
-def task_setup_script(commit: str, profile: RuntimeProfile) -> str:
+def task_setup_script(commit: str, profile: RuntimeProfile, *, cache_dir: str | None = None) -> str:
     """Build the Iris setup script for a frozen SkyRL checkout and dependency profile."""
     checkout = MARINSKYRL_TASK_ROOT
     activation_file = MARINSKYRL_ACTIVATION_FILE
     bootstrap_script = f"{checkout}/{MARINSKYRL_BOOTSTRAP_SCRIPT}"
+    cache_export = f"export UV_CACHE_DIR={shlex.quote(cache_dir)}\n" if cache_dir else ""
     return f"""set -euo pipefail
-checkout={shlex.quote(checkout)}
+{cache_export}checkout={shlex.quote(checkout)}
 git init -q "$checkout"
 git -C "$checkout" remote add origin {shlex.quote(MARINSKYRL_REPOSITORY)}
 git -C "$checkout" fetch --depth=1 origin {shlex.quote(commit)}

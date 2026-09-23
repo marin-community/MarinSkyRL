@@ -44,6 +44,13 @@ from iris.cluster.types import JobName  # noqa: E402
 from iris.rpc import job_pb2  # noqa: E402
 
 
+def test_setup_script_overrides_uv_cache_before_runtime_bootstrap():
+    script = task_setup_script("a" * 40, RuntimeProfile.MEGATRON, cache_dir="/uv/cache/checkpoint test")
+    export = "export UV_CACHE_DIR='/uv/cache/checkpoint test'"
+    assert export in script
+    assert script.index(export) < script.index("bash /app/marinskyrl/cloud/iris/bootstrap_runtime.sh")
+
+
 @dataclass(frozen=True)
 class FakeLaunchBackend(JobBackend):
     outcome: IrisLaunchOutcome
