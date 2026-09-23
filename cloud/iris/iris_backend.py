@@ -2766,7 +2766,13 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
             environment=EnvironmentSpec(
                 env_vars=env_vars,
                 extras=["gpu"],
-                setup_scripts=[task_setup_script(args.runtime_commit, args.runtime_profile)],
+                setup_scripts=[
+                    task_setup_script(
+                        args.runtime_commit,
+                        args.runtime_profile,
+                        cache_dir=config_extra_env.get("UV_CACHE_DIR"),
+                    )
+                ],
             ),
             constraints=constraints or None,
             coscheduling=coscheduling,
