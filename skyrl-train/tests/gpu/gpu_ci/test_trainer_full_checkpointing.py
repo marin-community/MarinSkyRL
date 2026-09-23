@@ -212,6 +212,11 @@ def test_megatron_full_checkpoint_restores_per_rank_rng_and_cuda_tracker(ray_ini
     RefWorker = import_worker("megatron", "ref")
     trainer = create_minimal_trainer(cfg)
     trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
+    from tests.gpu.test_megatron_worker import get_test_training_batch
+
+    batch = get_test_training_batch(batch_size=4)
+    batch.metadata["global_step"] = 1
+    ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
 
     def fingerprints(current_trainer: RayPPOTrainer, advance: bool):
         results = ray.get(current_trainer.policy_model.async_run_ray_method("pass_through", "rng_fingerprint", advance))
