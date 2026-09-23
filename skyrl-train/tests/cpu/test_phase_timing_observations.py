@@ -42,7 +42,8 @@ def test_unknown_spans_are_not_published():
     assert step == 7
 
 
-def test_checkpoint_phases_publish_rank_local_structured_results():
+def test_checkpoint_phases_publish_rank_local_structured_results(monkeypatch):
+    monkeypatch.setattr(timing_observability, "_cgroup_memory_bytes", lambda name: 123 if name == "memory.peak" else 45)
     output = io.StringIO()
     sink = logger.add(output, format="{message}")
     try:
@@ -72,6 +73,8 @@ def test_checkpoint_phases_publish_rank_local_structured_results():
     assert [item["rank"] for item in observations] == ["3", "3", "-1"]
     assert all(item["duration_seconds"] >= 0 and item["process_rss_bytes"] > 0 for item in observations)
     assert observations[0]["scratch_bytes"] == 4096
+    assert all(item["cgroup_memory_current_bytes"] == 45 for item in observations)
+    assert all(item["cgroup_memory_peak_bytes"] == 123 for item in observations)
 
 
 def test_checkpoint_telemetry_failure_does_not_fail_the_save(monkeypatch):
