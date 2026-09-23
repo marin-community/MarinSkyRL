@@ -183,8 +183,45 @@ def test_from_config_streams_object_store_policy_weights(monkeypatch):
 
     assert captured["pretrain"] == "s3://models/policy"
     assert captured["engine_init_kwargs"]["load_format"] == "runai_streamer"
+    assert captured["engine_init_kwargs"]["model_loader_extra_config"] == {"distributed": True}
     assert captured["engine_init_kwargs"]["_marinskyrl_metadata_path"] == "/tmp/model-metadata"
     assert "revision" not in captured["engine_init_kwargs"]
+
+
+def test_from_config_retries_s3_engine_gang_after_actor_startup_failure(monkeypatch):
+    pytest.importorskip("hydra")
+    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
+    from ray.exceptions import ActorDiedError
+
+    from skyrl_train.entrypoints import main_base
+    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
+
+    attempts = []
+
+    def fake_create(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise ActorDiedError()
+        return ["ready-engine"]
+
+    monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", fake_create)
+    cfg = get_default_config()
+    cfg.trainer.policy.model.path = "/tmp/model-metadata"
+    cfg.trainer.policy.model.source_uri = "s3://models/policy"
+    cfg.trainer.policy.model.source_identity = "sha256:" + "a" * 64
+    cfg.trainer.model_load_retry.max_retries = 1
+    cfg.trainer.model_load_retry.backoff_base_seconds = 0.001
+    cfg.trainer.model_load_retry.backoff_cap_seconds = 0.001
+
+    engines = main_base.create_ray_wrapped_inference_engines_from_config(
+        cfg,
+        colocate_pg=None,
+        tokenizer=None,
+    )
+
+    assert engines == ["ready-engine"]
+    assert len(attempts) == 2
+    assert attempts[1]["engine_init_timeout_seconds"] < attempts[0]["engine_init_timeout_seconds"]
 
 
 def test_from_config_reserves_enough_rollout_logprobs(monkeypatch):
@@ -254,7 +291,14 @@ class _RemoteCapture:
         return _Actor
 
 
-def _run_create(monkeypatch, dcp: int, attention_backend: str | None = None):
+def _run_create(
+    monkeypatch,
+    dcp: int,
+    attention_backend: str | None = None,
+    *,
+    startup_failure: BaseException | None = None,
+    removed_placement_groups: list | None = None,
+):
     """Drive the real create_ray_wrapped_inference_engines with Ray/PG/actor mocked.
 
     Uses tp=1, pp=1 (uni backend) so no real GPU/PG bundle reservation is needed; the
@@ -286,6 +330,9 @@ def _run_create(monkeypatch, dcp: int, attention_backend: str | None = None):
         rwie, "placement_group", lambda bundles, strategy=None: ("PG", tuple(len(bundles) for _ in [0]))
     )
     monkeypatch.setattr(rwie, "ray_noset_visible_devices", lambda *a, **k: False)
+    monkeypatch.setattr(rwie.ray, "kill", lambda _actor: None)
+    removed_placement_groups = [] if removed_placement_groups is None else removed_placement_groups
+    monkeypatch.setattr(rwie, "remove_placement_group", removed_placement_groups.append)
 
     fake_get_all = types.SimpleNamespace(remote=lambda: None)
     monkeypatch.setattr(rwie, "get_all_env_variables", fake_get_all)
@@ -297,7 +344,12 @@ def _run_create(monkeypatch, dcp: int, attention_backend: str | None = None):
         return {}
 
     monkeypatch.setattr(rwie.ray, "get", fake_ray_get)
-    monkeypatch.setattr(rwie, "wait_for_inference_engine_startup", lambda *a, **k: None)
+
+    def wait_for_startup(*_args, **_kwargs):
+        if startup_failure is not None:
+            raise startup_failure
+
+    monkeypatch.setattr(rwie, "wait_for_inference_engine_startup", wait_for_startup)
     # The real RayWrappedInferenceEngine wrapper is trivial (it only stores the actor
     # handle as .inference_engine_actor), so use it unmocked — the readiness gate reads
     # engine.inference_engine_actor off it.
@@ -324,6 +376,21 @@ def _run_create(monkeypatch, dcp: int, attention_backend: str | None = None):
     )
     capture.resolved_max_model_len = engines[0].max_model_len
     return capture
+
+
+def test_failed_engine_startup_releases_owned_placement_group(monkeypatch):
+    from ray.exceptions import ActorDiedError
+
+    removed_placement_groups = []
+    with pytest.raises(ActorDiedError):
+        _run_create(
+            monkeypatch,
+            dcp=1,
+            startup_failure=ActorDiedError(),
+            removed_placement_groups=removed_placement_groups,
+        )
+
+    assert removed_placement_groups == [("PG", (1,))]
 
 
 def test_dcp_disabled_kwarg_absent_from_remote(monkeypatch):

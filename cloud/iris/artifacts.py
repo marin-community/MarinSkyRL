@@ -13,13 +13,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-import fsspec
 from fsspec.spec import AbstractFileSystem
+from marinskyrl.remote_io import filesystem_and_path, open_output_stream
 from marinskyrl.resource_locator import join_resource_path, relative_resource_path
 
 CHECKPOINT_MARKER_FILENAME = "latest_ckpt_global_step.txt"
 SOURCE_MANIFEST_FILENAME = ".marinskyrl-source.json"
-S3_ADDRESSING_STYLE_ENV = "OT_AGENT_S3_ADDRESSING_STYLE"
 FILE_COPY_WORKERS = 16
 
 
@@ -43,13 +42,8 @@ class MaterializedArtifact:
 
 
 def fs_and_path(uri: str) -> tuple[AbstractFileSystem, str]:
-    """Resolve a URI, using virtual-hosted addressing for Marin's S3 store."""
-    storage_options = None
-    if uri.startswith(("s3://", "s3a://")):
-        style = os.environ.get(S3_ADDRESSING_STYLE_ENV, "virtual")
-        storage_options = {"config_kwargs": {"s3": {"addressing_style": style}}}
-    filesystem, _, paths = fsspec.get_fs_token_paths(uri, storage_options=storage_options)
-    return filesystem, paths[0]
+    """Resolve a URI through the shared guarded remote-I/O factory."""
+    return filesystem_and_path(uri)
 
 
 def write_json(uri: str, value: dict[str, Any], *, overwrite: bool = True) -> None:
@@ -60,9 +54,9 @@ def write_json(uri: str, value: dict[str, Any], *, overwrite: bool = True) -> No
     parent = posixpath.dirname(path)
     if parent:
         filesystem.makedirs(parent, exist_ok=True)
-    with filesystem.open(path, "w") as destination:
-        json.dump(value, destination, indent=2, sort_keys=True)
-        destination.write("\n")
+    payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+    with open_output_stream(filesystem, path) as destination:
+        destination.write(payload)
 
 
 def read_json(uri: str) -> dict[str, Any] | None:

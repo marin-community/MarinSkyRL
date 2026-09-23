@@ -124,6 +124,7 @@ def create_ray_wrapped_inference_engines_from_config(
     from skyrl_train.inference_engines.ray_wrapped_inference_engine import (
         MODEL_METADATA_PATH_KEY,
         create_ray_wrapped_inference_engines,
+        create_ray_wrapped_inference_engines_with_retry,
     )
 
     raw_speculative_decoding = cfg.generator.get("speculative_decoding")
@@ -147,6 +148,8 @@ def create_ray_wrapped_inference_engines_from_config(
     rollout_model_path = runai_model_uri(policy_source_uri) if policy_source_uri else cfg.trainer.policy.model.path
     if policy_source_uri is not None:
         engine_init_kwargs["load_format"] = "runai_streamer"
+        model_loader_extra_config = engine_init_kwargs.setdefault("model_loader_extra_config", {})
+        model_loader_extra_config.setdefault("distributed", True)
         engine_init_kwargs[MODEL_METADATA_PATH_KEY] = cfg.trainer.policy.model.path
     if speculative_decoding is not None:
         engine_init_kwargs["speculative_config"] = speculative_decoding.vllm_speculative_config()
@@ -209,6 +212,21 @@ def create_ray_wrapped_inference_engines_from_config(
             )
             engine_kwargs["enforce_eager"] = False
 
+    if policy_source_uri is not None and rollout_model_path.startswith("s3://") and cfg.generator.backend == "vllm":
+        retry = cfg.trainer.model_load_retry
+
+        def create_engines(remaining_timeout_seconds: float):
+            attempt_kwargs = {**engine_kwargs, "engine_init_timeout_seconds": remaining_timeout_seconds}
+            return create_ray_wrapped_inference_engines(**attempt_kwargs)
+
+        return create_ray_wrapped_inference_engines_with_retry(
+            create_engines,
+            model_path=rollout_model_path,
+            engine_init_timeout_seconds=float(engine_kwargs["engine_init_timeout_seconds"]),
+            max_retries=int(retry.max_retries),
+            backoff_base_seconds=float(retry.backoff_base_seconds),
+            backoff_cap_seconds=float(retry.backoff_cap_seconds),
+        )
     return create_ray_wrapped_inference_engines(**engine_kwargs)
 
 

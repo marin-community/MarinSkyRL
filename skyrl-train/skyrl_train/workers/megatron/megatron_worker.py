@@ -40,7 +40,7 @@ from skyrl_train.utils.utils import (
     str_to_torch_dtype,
     get_physical_gpu_id,
 )
-from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
+from marinskyrl.hugging_face_retry import load_hugging_face_with_retry
 from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
 import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
@@ -82,9 +82,10 @@ class MegatronWorker:
             return
         retry = self.cfg.trainer.model_load_retry
         revision = model_config.get("revision")
-        load_pretrained_with_retry(
+        load_hugging_face_with_retry(
             lambda: snapshot_download(model_path, revision=revision),
-            model_id=model_path,
+            resource_id=model_path,
+            resource_kind="model snapshot",
             max_retries=int(retry.max_retries),
             backoff_base=float(retry.backoff_base_seconds),
             backoff_cap=float(retry.backoff_cap_seconds),

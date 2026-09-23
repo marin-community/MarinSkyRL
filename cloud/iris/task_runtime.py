@@ -234,139 +234,7 @@ def stage_task_data(data_json: str, *, role: str) -> None:
     _log(f"{role.capitalize()} data staged to node-local paths: {resolved}")
 
 
-def _warm_model_snapshot_hash(model_path: str) -> str:
-    """Deterministic synthetic 40-hex 'commit' for the warm S3-synced snapshot dir.
-
-    Offline ``from_pretrained`` / ``snapshot_download(local_files_only=True)`` resolve a
-    repo via ``<cache>/models--<org>--<name>/refs/main`` -> a ``snapshots/<hash>/`` dir.
-    Under HF_HUB_OFFLINE=1 there is no hash validation, so a STABLE synthetic hash
-    keyed on the repo id gives an idempotent, collision-free (``otwarm:`` prefixed)
-    snapshot dir that re-syncs skip-in-place on a ``--max-retries`` re-bring.
-    """
-    import hashlib
-
-    return hashlib.sha1(("otwarm:" + model_path).encode()).hexdigest()
-
-
-def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
-    """In-region warm path for :func:`stage_model`.
-
-    Sync the FLAT weight/config/tokenizer files seeded at ``warm_source`` (an ``s3://``
-    CW-object-store prefix, convention ``s3://marin-us-east-02a/models/<org>--<name>/``)
-    INTO this node's HF hub cache under a synthetic-revision snapshot, so the offline FSDP
-    ranks + vLLM engines resolve ``from_pretrained(<repo-id>)`` from the warm node-local
-    cache — ``model.path`` stays the repo-id, the ranks are untouched.
-
-    Returns True if the warm source existed + synced cleanly; False if it is missing /
-    empty / incomplete so the caller falls back to the HF ``snapshot_download`` prestage.
-    Idempotent + resumable: size-skips files already present.
-
-    Reuses the SAME boto3 + ``AWS_ENDPOINT_URL`` creds path the rendezvous / spill /
-    term-artifact writers use; ``_pin_boto3_s3_addressing_style`` (called before this in
-    main()) already pinned virtual-hosted addressing for CW-R2, and we ALSO pass an
-    explicit botocore ``Config`` here so this call is correct even if invoked out of
-    order.
-    """
-    if not warm_source or not warm_source.startswith("s3://"):
-        _log(f"warm sync: warm_source {warm_source!r} is not an s3:// URI; skipping warm path")
-        return False
-    import boto3
-    from botocore.config import Config
-    from huggingface_hub import constants as _hf_constants
-
-    # Parse s3://bucket/prefix... -> (bucket, prefix without trailing slash).
-    without_scheme = warm_source[len("s3://") :]
-    bucket, _, prefix = without_scheme.partition("/")
-    prefix = prefix.rstrip("/")
-    if not bucket or not prefix:
-        _log(f"warm sync: malformed warm_source {warm_source!r} (need s3://bucket/prefix); skipping")
-        return False
-
-    endpoint = os.environ.get("AWS_ENDPOINT_URL")
-    style = os.environ.get("OT_AGENT_S3_ADDRESSING_STYLE", "virtual")
-    client = boto3.client("s3", endpoint_url=endpoint, config=Config(s3={"addressing_style": style}))
-
-    # List every seeded object under the prefix (paginated).
-    list_prefix = prefix + "/"
-    objects: list[tuple[str, int]] = []
-    try:
-        paginator = client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=bucket, Prefix=list_prefix):
-            for obj in page.get("Contents", []):
-                key = obj["Key"]
-                if key.endswith("/"):
-                    continue  # pseudo-dir marker
-                objects.append((key, int(obj.get("Size", 0))))
-    except Exception as exc:  # noqa: BLE001 - any S3 error -> clean HF fallback
-        _log(f"warm sync: list_objects_v2 on s3://{bucket}/{list_prefix} FAILED ({exc!r}); HF fallback")
-        return False
-
-    if not objects:
-        _log(f"warm sync: no objects under {warm_source} (not seeded yet); HF fallback")
-        return False
-    # Completeness guard: a config.json is mandatory for from_pretrained. Its absence means
-    # a half-seeded / wrong prefix -> do NOT build a broken cache; fall back to HF.
-    if not any(os.path.basename(k) == "config.json" for k, _ in objects):
-        _log(f"warm sync: {warm_source} has {len(objects)} objects but NO config.json (incomplete seed); HF fallback")
-        return False
-
-    cache = _hf_constants.HF_HUB_CACHE
-    folder = "models--" + model_path.replace("/", "--")
-    snap_hash = _warm_model_snapshot_hash(model_path)
-    snap_dir = os.path.join(cache, folder, "snapshots", snap_hash)
-    refs_dir = os.path.join(cache, folder, "refs")
-    os.makedirs(snap_dir, exist_ok=True)
-    os.makedirs(refs_dir, exist_ok=True)
-
-    total_files = total_bytes = skipped = 0
-    _log(f"warm sync: {len(objects)} object(s) from {warm_source} -> {snap_dir} (rank {_rank()}/{_num_tasks()})")
-    for key, size in objects:
-        rel = key[len(list_prefix) :]
-        if not rel:
-            continue
-        dest = os.path.join(snap_dir, rel)
-        if os.path.exists(dest) and os.path.getsize(dest) == size:
-            skipped += 1
-            continue
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        # Download to a temp sibling then rename, so an interrupted pull never leaves a
-        # truncated file that the size-skip would later treat as complete.
-        tmp_dest = dest + ".otwarm.partial"
-        last_exc: BaseException | None = None
-        for attempt in range(1, 4):
-            try:
-                client.download_file(bucket, key, tmp_dest)
-                os.replace(tmp_dest, dest)
-                total_files += 1
-                total_bytes += size
-                last_exc = None
-                break
-            except Exception as exc:  # noqa: BLE001 - retry a few times, then fail loud
-                last_exc = exc
-                _log(f"warm sync: download attempt {attempt}/3 for {key} failed ({exc!r})")
-                try:
-                    os.path.exists(tmp_dest) and os.remove(tmp_dest)
-                except OSError:
-                    pass
-                time.sleep(min(10, 2**attempt))
-        if last_exc is not None:
-            # A partial in-region sync would leave a broken cache; fail this warm attempt so
-            # the caller falls back to the HF prestage rather than shipping a corrupt cache.
-            _log(f"warm sync: giving up on {key} after 3 attempts ({last_exc!r}); HF fallback")
-            return False
-
-    # Point refs/main at the synthetic snapshot so offline resolution finds it.
-    with open(os.path.join(refs_dir, "main"), "w") as f:
-        f.write(snap_hash)
-    _log(
-        f"warm sync: DONE — {total_files} downloaded ({total_bytes / 1073741824.0:.2f} GiB), "
-        f"{skipped} already-present; refs/main -> {snap_hash}. Offline from_pretrained "
-        f"({model_path}) resolves from {snap_dir}."
-    )
-    return True
-
-
-def stage_model(model_path: str, warm_source: str | None = None, revision: str | None = None) -> None:
+def stage_model(model_path: str, revision: str | None = None) -> None:
     """Pre-download one model revision into this NODE's local HF cache on EVERY node.
 
     The controller runs on every node before Ray bootstrap, so pre-download the
@@ -381,25 +249,6 @@ def stage_model(model_path: str, warm_source: str | None = None, revision: str |
     if not model_path or os.path.isdir(model_path):
         _log(f"stage_model: skip (model_path={model_path!r} is empty or a local directory)")
         return
-
-    # WARM PATH: if a seeded in-region CW-S3 source exists, sync the weights from
-    # there (in-datacenter, reliable) into the node-local HF cache INSTEAD of pulling
-    # from HF Hub. On success the offline ranks + vLLM load from the warm cache as
-    # after the HF prestage. On a missing/empty/incomplete source or ANY error we fall
-    # through to the HF snapshot_download prestage below. Immutable historical
-    # revisions bypass this main-branch mirror because its bytes may differ.
-    if warm_source and revision is None:
-        try:
-            if _warm_sync_model_from_s3(model_path, warm_source):
-                return
-            _log(
-                f"stage_model: warm source {warm_source} missing/empty/incomplete "
-                f"-> HF snapshot_download prestage fallback"
-            )
-        except Exception as exc:  # noqa: BLE001 - never let the warm path block bring-up
-            _log(
-                f"stage_model: warm sync from {warm_source} FAILED ({exc!r}) -> HF snapshot_download prestage fallback"
-            )
 
     # Weights + config + tokenizer + repository-provided chat templates and any
     # trust_remote_code modeling files needed by from_pretrained in offline ranks.
@@ -573,13 +422,12 @@ def apply_policy_chat_template(model_path: str, template_repo_rel: str) -> None:
     template_path = resolve_repo_path(template_repo_rel)
     delphi = template_path.read_text()
 
-    # Import transformers/hf lazily (matches wait_for_nodes' local `import ray` and
-    # stage_model): the controller bootstraps Ray on every node and must not pull these
-    # heavy ML deps into the fast bootstrap path for configs that set no chat-template.
-    from huggingface_hub import snapshot_download
+    # Import transformers lazily (matches wait_for_nodes' local `import ray`): the
+    # controller bootstraps Ray on every node and must not pull this heavy dependency
+    # into the fast bootstrap path for configs that set no chat-template.
     from transformers import AutoTokenizer
 
-    snap = model_path if os.path.isdir(model_path) else snapshot_download(model_path)
+    snap = model_path if os.path.isdir(model_path) else download_hugging_face_snapshot(model_path, revision=None)
     tc_path = os.path.join(snap, "tokenizer_config.json")
     jinja_path = os.path.join(snap, "chat_template.jinja")
 
@@ -2174,8 +2022,8 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         "--prestage-model",
         default=os.environ.get("OT_AGENT_IRIS_PRESTAGE_MODEL", ""),
         help="HF repo ID of the policy model to pre-download into the node-local HF "
-        "cache on EVERY node before Ray starts. Object-store URIs are unsupported; "
-        "use --model-warm-source for an S3 mirror. Set by the launcher when the config "
+        "cache on EVERY node before Ray starts. Object-store URIs are unsupported. "
+        "Set by the launcher when the config "
         "runs HF_HUB_OFFLINE=1, so the FSDP ranks load from a warm node-local cache "
         "instead of each racing HF Hub at init.",
     )
@@ -2183,17 +2031,6 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         "--stream-model",
         default="",
         help="HF repo ID to mirror once and load directly from object storage; only metadata is staged locally.",
-    )
-    parser.add_argument(
-        "--model-warm-source",
-        default=os.environ.get("OT_AGENT_MODEL_WARM_SOURCE", ""),
-        help="Optional in-region CW-object-store prefix (s3://marin-us-east-02a/models/"
-        "<org>--<name>) that a one-time seed job (scripts/iris/mirror_hf_to_s3.py) has "
-        "populated with the model weights. When set AND --prestage-model is set, the "
-        "controller SYNCS the weights from here into the node-local HF cache (fast, "
-        "in-datacenter) instead of pulling them from HF Hub. Missing/empty/incomplete "
-        "source -> clean fallback to the HF snapshot_download prestage. Set by the "
-        "launcher (auto-derived from the repo id).",
     )
     parser.add_argument(
         "--model-revision",
@@ -2336,7 +2173,6 @@ def main() -> None:
     if args.prestage_model:
         stage_model(
             args.prestage_model,
-            warm_source=(args.model_warm_source or None),
             revision=(args.model_revision or None),
         )
     for teacher_model in args.prestage_teacher_models:

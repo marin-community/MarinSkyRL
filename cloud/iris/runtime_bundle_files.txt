@@ -23,10 +23,12 @@ marinskyrl/distillation.py
 marinskyrl/harbor_agent_names.py
 marinskyrl/hf_model.py
 marinskyrl/inference_placement.py
+marinskyrl/hugging_face_retry.py
 marinskyrl/iris_harbor_environment.py
 marinskyrl/model_manifest.py
 marinskyrl/packed_tasks.py
 marinskyrl/process_diagnostics.py
+marinskyrl/remote_io.py
 marinskyrl/resource_locator.py
 marinskyrl/environment_contract.py
 marinskyrl/runtime_options.py

@@ -42,16 +42,11 @@ from skyrl_train.utils.flash_attention import (
 )
 from packaging.version import Version
 from marinskyrl.runtime_options import GDNBackend
-
-# Rank-0 HF weight-index resolution retry (transient EOF flake). The helper now
-# lives in skyrl_train.utils.hf_load_retry (dependency-light) so the Megatron
-# worker can share it without importing this heavy module. Re-exported under the
-# original private names to keep this module's call sites + any importers stable.
-from skyrl_train.utils.hf_load_retry import (  # noqa: E402
-    DEFAULT_BACKOFF_BASE_SECONDS,
-    DEFAULT_BACKOFF_CAP_SECONDS,
-    DEFAULT_MAX_RETRIES,
-    load_pretrained_with_retry as _load_pretrained_with_retry,
+from marinskyrl.hugging_face_retry import (
+    DEFAULT_HF_BACKOFF_BASE_SECONDS,
+    DEFAULT_HF_BACKOFF_CAP_SECONDS,
+    DEFAULT_HF_MAX_RETRIES,
+    load_hugging_face_with_retry,
 )
 
 
@@ -555,13 +550,7 @@ class HFModelWrapper(nn.Module):
             if rope_theta:
                 rope_scaling_kwargs["rope_theta"] = rope_theta
 
-            # Wrapped in a transient-flake retry: at scale a single rank's
-            # weight-index/safetensors resolution here can flake (EOF /
-            # IncompleteRead / dropped connection / spurious "no .safetensors"),
-            # which previously killed the whole gang. Retries only the transient
-            # classes; a genuinely-missing repo/file still surfaces. See
-            # _load_pretrained_with_retry above (trainer.model_load_retry).
-            self.model = _load_pretrained_with_retry(
+            self.model = load_hugging_face_with_retry(
                 lambda: model_class.from_pretrained(
                     pretrain_or_model,
                     trust_remote_code=True,
@@ -572,14 +561,17 @@ class HFModelWrapper(nn.Module):
                     revision=model_revision,
                     **rope_scaling_kwargs,
                 ),
-                model_id=pretrain_or_model,
-                max_retries=int(model_load_retry.max_retries) if model_load_retry is not None else DEFAULT_MAX_RETRIES,
+                resource_id=pretrain_or_model,
+                resource_kind="model",
+                max_retries=int(model_load_retry.max_retries)
+                if model_load_retry is not None
+                else DEFAULT_HF_MAX_RETRIES,
                 backoff_base=float(model_load_retry.backoff_base_seconds)
                 if model_load_retry is not None
-                else DEFAULT_BACKOFF_BASE_SECONDS,
+                else DEFAULT_HF_BACKOFF_BASE_SECONDS,
                 backoff_cap=float(model_load_retry.backoff_cap_seconds)
                 if model_load_retry is not None
-                else DEFAULT_BACKOFF_CAP_SECONDS,
+                else DEFAULT_HF_BACKOFF_CAP_SECONDS,
             )
 
             # Qwen3.5/3.6 multimodal shell -> text CausalLM (tmax-aligned: "load
