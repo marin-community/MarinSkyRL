@@ -42,7 +42,7 @@ import tempfile
 import threading
 import time
 import uuid
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -68,7 +68,7 @@ from marinskyrl.hf_model import immutable_model_cache_key, validate_hf_model_wei
 from cloud.iris.telemetry_env import telemetry_environment
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculatorModelConfig, SpeculatorModelSourceKind
-from marinskyrl.distillation import TeacherModelSpec
+from marinskyrl.distillation import TeacherModelSpec, TeacherSource, compile_distillation_plan_from_config
 from marinskyrl.process_diagnostics import (
     ProcessOutcomeKind,
     initialize_process_diagnostics,
@@ -293,15 +293,7 @@ def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None
     source_uri = args.model_source_uri
     source_identity = args.model_source_identity
     manifest = None
-    if args.stream_model:
-        source_uri, manifest = ensure_hugging_face_model_cache(
-            args.stream_model,
-            args.model_revision or "main",
-            ttl_days=args.model_cache_ttl_days,
-            source_prefix=args.model_cache_source_prefix,
-        )
-        source_identity = manifest.identity
-    elif source_uri:
+    if source_uri:
         if not source_identity:
             raise ValueError(f"Policy source identity is required for {source_uri}")
         if source_identity.startswith("sha256:"):
@@ -1930,18 +1922,10 @@ def _json_list(value: Any) -> str:
 
 
 def _local_teacher_models(skyrl: DictConfig) -> tuple[TeacherModelSpec, ...]:
-    raw_teachers = _container(skyrl.get("teachers", {}))
-    if not isinstance(raw_teachers, Mapping):
+    plan = compile_distillation_plan_from_config(skyrl)
+    if plan is None:
         return ()
-    models: list[TeacherModelSpec] = []
-    for teacher in raw_teachers.values():
-        if not isinstance(teacher, Mapping):
-            continue
-        model = teacher.get("model")
-        if not isinstance(model, Mapping) or not model.get("path") or not model.get("revision"):
-            continue
-        models.append(TeacherModelSpec(path=str(model["path"]), revision=str(model["revision"])))
-    return tuple(models)
+    return tuple(teacher.model for teacher in plan.teachers if teacher.source is TeacherSource.LOCAL_INFERENCE)
 
 
 def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
@@ -1976,17 +1960,11 @@ def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
         driver_liveness_timeout=int(config.ray.driver_liveness_timeout),
         run_id=str(config.run.id),
         task_env=task_env,
-        train_data="",
-        val_data="",
         terminal_bench_data=_json_list(skyrl.get("data", {}).get("terminal_bench_data", [])),
         data_sources_json=_json_list(data_sources) if data_sources else "",
         prestage_model=prestage_model,
-        model_warm_source=task_env.get("OT_AGENT_MODEL_WARM_SOURCE", ""),
         model_revision=str(skyrl.get("trainer", {}).get("policy", {}).get("model", {}).get("revision") or ""),
         prestage_teacher_models=() if checkpoint_export else _local_teacher_models(skyrl),
-        stream_model="",
-        model_cache_ttl_days=None,
-        model_cache_source_prefix=str(config.artifacts.checkpoint_root),
         model_source_uri=model_uri if is_cloud_uri(model_uri) else "",
         model_local_path=str(model.local_path),
         model_source_identity=model_identity if is_cloud_uri(model_uri) else "",
@@ -2108,10 +2086,6 @@ def main() -> None:
     # with FileNotFoundError on task.toml. See stage_task_data docstring.
     if args.data_sources_json:
         materialize_data_sources(args.data_sources_json)
-    if args.train_data:
-        stage_task_data(args.train_data, role="training")
-    if args.val_data:
-        stage_task_data(args.val_data, role="validation")
     if args.terminal_bench_data:
         stage_task_data(args.terminal_bench_data, role="terminal-bench sidechannel")
     policy_model = prepare_policy_model(args)

@@ -205,7 +205,6 @@ def write_checkpoint_export_config(
 
 def build_command(spec: ExportJobSpec) -> list[str]:
     """Return the config-native command for an export-only run."""
-    _ = spec.allocated_gpus_per_node
     if spec.launch_config_path is None:
         raise ValueError("checkpoint export requires a generated launch config")
     return [
@@ -217,6 +216,14 @@ def build_command(spec: ExportJobSpec) -> list[str]:
         "--config",
         spec.launch_config_path,
     ]
+
+
+def _with_checkpoint_export_config(
+    training_config_path: Path,
+    spec: ExportJobSpec,
+) -> ExportJobSpec:
+    launch_config_path = write_checkpoint_export_config(training_config_path, spec.request, spec)
+    return replace(spec, launch_config_path=str(launch_config_path))
 
 
 def argument_parser() -> argparse.ArgumentParser:
@@ -299,10 +306,7 @@ def request_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> E
     if request is None:
         parser.error(f"no hf_export_request.json found under {args.request}")
     spec = operational_spec(args, request, no_wait=False)
-    return replace(
-        spec,
-        launch_config_path=str(write_checkpoint_export_config(Path(args.launch_config), request, spec)),
-    )
+    return _with_checkpoint_export_config(Path(args.launch_config), spec)
 
 
 def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_wait: bool) -> ExportJobSpec:
@@ -356,10 +360,7 @@ def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Ex
     except ModelLocatorError as error:
         parser.error(str(error))
     spec = operational_spec(args, request, no_wait=args.no_wait)
-    return replace(
-        spec,
-        launch_config_path=str(write_checkpoint_export_config(Path(args.launch_config), request, spec)),
-    )
+    return _with_checkpoint_export_config(Path(args.launch_config), spec)
 
 
 def _run_export(spec: ExportJobSpec, command: list[str]) -> None:
@@ -419,8 +420,7 @@ def export_terminal_policy(training_config_path: Path) -> None:
         disk=str(allocation.disk),
         allocation_gpus_per_node=int(allocation.gpus_per_node),
     )
-    export_config_path = write_checkpoint_export_config(training_config_path, request, spec)
-    resolved_spec = replace(spec, launch_config_path=str(export_config_path))
+    resolved_spec = _with_checkpoint_export_config(training_config_path, spec)
     submit_requested_export(resolved_spec, build_command(resolved_spec))
 
 

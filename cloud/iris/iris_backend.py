@@ -28,21 +28,15 @@ from urllib.parse import unquote, urlparse
 
 import yaml
 from iris.client.client import IrisClient, Job
-from iris.cluster.constraints import (
-    CLUSTER_CONSTRAINT_KEY,
-    Constraint,
-    ConstraintOp,
-    infer_preemptible_constraint,
-    preemptible_constraint,
-)
+from iris.cluster.constraints import CLUSTER_CONSTRAINT_KEY, Constraint, ConstraintOp, infer_preemptible_constraint
 from iris.cluster.platforms.k8s.coreweave_topology import gpu_gang_coscheduling_level
 from iris.cluster.types import CoschedulingConfig, ResourceSpec, gpu_device
 from iris.resources.state import JobState
 from iris.rpc import job_pb2
 from omegaconf import DictConfig, OmegaConf
 
-from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.launch_config import SubmissionMode, load_launch_config
+from cloud.iris.launch import LaunchOutcome
 from cloud.iris.export_hf_checkpoint import export_terminal_policy
 from cloud.iris.ingress_utils import (
     PARENT_CONTROLLER_CONFIG_ENV,
@@ -64,7 +58,6 @@ from marinskyrl.resource_locator import (
     is_cloud_uri,
     join_resource_path,
 )
-from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle
 from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
@@ -82,8 +75,6 @@ from cloud.iris.runtime_environment import (
     task_setup_script,
 )
 
-# Memory and disk requests may be resolved from the selected cluster's live nodes
-# before Iris submission.
 DAYTONA_RL_SECRET_PROJECT = "hai-gcp-models"
 DAYTONA_RL_SECRET_NAME = "DAYTONA_RL_API_KEY"
 DAYTONA_RL_SECRET_VERSION = "1"
@@ -179,15 +170,6 @@ class ResolvedResourceRequests:
     disk: str
 
 
-@dataclass(frozen=True)
-class IrisLaunchOutcome:
-    """Result of one Iris submission attempt."""
-
-    job_id: str
-    job_state: str
-    exit_code: int
-
-
 class _LauncherTermination(BaseException):
     """A process termination signal converted into supervised job cancellation."""
 
@@ -220,7 +202,7 @@ def _cancel_iris_job_tree(job: Job, job_id: str, cause: BaseException) -> None:
     print(f"[rl-iris] Cancelled job tree {job_id}.", file=sys.stderr, flush=True)
 
 
-def supervise_iris_job(job: Job) -> IrisLaunchOutcome:
+def supervise_iris_job(job: Job) -> LaunchOutcome:
     """Wait for a terminal state, cancelling the job tree if supervision cannot continue."""
     job_id = str(job.job_id)
     try:
@@ -229,11 +211,11 @@ def supervise_iris_job(job: Job) -> IrisLaunchOutcome:
     except (KeyboardInterrupt, _LauncherTermination) as interruption:
         _cancel_iris_job_tree(job, job_id, interruption)
         exit_code = 130 if isinstance(interruption, KeyboardInterrupt) else 128 + interruption.signum
-        return IrisLaunchOutcome(job_id=job_id, job_state=JobState.KILLED.value, exit_code=exit_code)
+        return LaunchOutcome(job_id=job_id, job_state=JobState.KILLED.value, exit_code=exit_code)
     except BaseException as error:
         _cancel_iris_job_tree(job, job_id, error)
         raise
-    return IrisLaunchOutcome(
+    return LaunchOutcome(
         job_id=job_id,
         job_state=status.state.value,
         exit_code=0 if status.state is JobState.SUCCEEDED else 1,
@@ -257,12 +239,9 @@ def _gpu_constraints(
     resources: job_pb2.ResourceSpecProto,
     *,
     replicas: int,
-    preemptible: bool | None,
     target_cluster: str | None,
 ) -> list[Constraint]:
     constraints = []
-    if preemptible is not None:
-        constraints.append(preemptible_constraint(preemptible))
     if target_cluster:
         constraints.append(Constraint.create(key=CLUSTER_CONSTRAINT_KEY, op=ConstraintOp.EQ, value=target_cluster))
     inferred = infer_preemptible_constraint(resources, replicas, constraints)
@@ -334,13 +313,12 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
         timeout=int(iris["timeout"]),
         no_wait=submission == SubmissionMode.DETACH,
         dry_run=submission == SubmissionMode.PREPARE,
-        preemptible=None,
         ingress_mode=ingress["mode"],
         ingress_host=ingress["host"] or None,
         target_cluster=iris["target_cluster"],
         parent_cluster_config=iris["parent_cluster_config"],
-        secrets_env=None,
         wandb_entity=iris["wandb_entity"],
+        config=config,
     )
     args.storage_paths = RLStoragePaths(
         checkpoint_root=artifacts["checkpoint_root"],
@@ -361,7 +339,7 @@ class IrisBackend:
     def validate(self, config_path: Path) -> None:
         _iris_submission_state(config_path, load_launch_config(config_path))
 
-    def launch(self, config_path: Path) -> IrisLaunchOutcome:
+    def launch(self, config_path: Path) -> LaunchOutcome:
         config = load_launch_config(config_path)
         args = _iris_submission_state(config_path, config)
         if config.run.submission == SubmissionMode.PREPARE:
@@ -743,8 +721,7 @@ def _purge_stale_daytona_snapshots(api_key: str) -> None:
 
 
 def _effective_gdn_backend(args: SimpleNamespace) -> str:
-    raw_config = _load_skyrl_config(args.launch_config)
-    return str((raw_config.get("generator") or {}).get("gdn_backend", "torch")).lower()
+    return str(args.config.skyrl.get("generator", {}).get("gdn_backend", "torch")).lower()
 
 
 def _cluster_dashboard_host(cluster_config_path: Optional[str]) -> Optional[str]:
@@ -764,26 +741,16 @@ def _cluster_dashboard_host(cluster_config_path: Optional[str]) -> Optional[str]
         return None
 
 
-def _rl_config_uses_daytona(rl_config: Optional[str]) -> bool:
+def _rl_config_uses_daytona(config: DictConfig) -> bool:
     """Return whether the resolved launch uses a Daytona-backed entrypoint."""
-    try:
-        if not rl_config or not os.path.isfile(rl_config):
-            return False
-        with open(rl_config, "r") as f:
-            config = yaml.safe_load(f) or {}
-        entrypoint = config.get("runtime", {}).get("entrypoint")
-        return entrypoint in {
-            RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH],
-            RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH_GENERATE],
-        }
-    except OSError:
-        return False
+    return str(config.runtime.entrypoint) in {
+        RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH],
+        RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH_GENERATE],
+    }
 
 
 def validate_controller_ingress_reachability(args: SimpleNamespace) -> None:
-    """Fail loud BEFORE submit when ``--ingress-mode controller`` would produce a
-    capability URL a Daytona sandbox CANNOT reach — the Exp2 opencode-RL blocker
-    (ported from commit 8fdabb12, extended for the federated remediation).
+    """Reject controller ingress that a Daytona sandbox cannot reach.
 
     opencode runs in a Daytona sandbox and reaches the co-located vLLM over the public
     internet at ``https://<ingress_host>/proxy/t/<token>/<endpoint>/v1``. The endpoint
@@ -798,7 +765,7 @@ def validate_controller_ingress_reachability(args: SimpleNamespace) -> None:
         endpoint for a job it DELEGATED. A direct submit → iris.oa.dev has no route →
         404 → opencode never reaches vLLM → RecordProxy captures 0 traffic, the job
         burns an H100 node making 0 trials.
-      * The **federated** path (``--target-cluster <peer>``) fixes it: marin delegates
+      * The **federated** path fixes it: Marin delegates
         the job to the peer child, so ``has_received_job_from_peer`` passes and marin
         federation-proxies ``/proxy``. The endpoint is registered on the peer AND
         MIRRORED onto marin by FederationSync; the capability token is minted at the
@@ -954,8 +921,7 @@ def prepare_federated_parent_credentials(args: SimpleNamespace) -> FederatedPare
 
 def build_debug_launch_env(args: SimpleNamespace) -> dict[str, str]:
     """Resolve the effective debug preset after the job name and RL config exist."""
-    raw = _load_skyrl_config(args.launch_config)
-    trainer = raw.get("trainer") or {}
+    trainer = args.config.skyrl.get("trainer", {})
     mode = str(trainer.get("debug_mode", DebugMode.LIGHT.value))
     try:
         resolved = DebugMode(mode)
@@ -972,34 +938,9 @@ def build_debug_launch_env(args: SimpleNamespace) -> dict[str, str]:
     ).environment_for(EnvVarScope.TASK_RUNTIME)
 
 
-def _load_yaml_mapping(config_path: str) -> dict[str, Any]:
-    full = PROJECT_ROOT / config_path
-    path = full if full.exists() else Path(config_path)
-    with path.open() as source:
-        raw = yaml.safe_load(source) or {}
-    if not isinstance(raw, dict):
-        raise ValueError(f"{path}: launch config must contain a mapping")
-    return raw
-
-
-def _load_skyrl_config(config_path: str) -> dict[str, Any]:
-    """Return the SkyRL subtree from a validated launch document."""
-    raw = _load_yaml_mapping(config_path)
-    skyrl = raw.get("skyrl")
-    if not isinstance(skyrl, dict):
-        raise ValueError(f"{config_path}: launch config must contain a skyrl mapping")
-    return skyrl
-
-
-def load_config_extra_env(rl_config_path: str) -> dict[str, str]:
+def config_task_environment(config: DictConfig) -> dict[str, str]:
     """Return task environment variables from the launch document's runtime section."""
-    try:
-        launch = _load_yaml_mapping(rl_config_path)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[rl-iris] WARNING: could not read extra_env from {rl_config_path}: {exc}", file=sys.stderr)
-        return {}
-    runtime = launch.get("runtime") or {}
-    extra = dict(runtime.get("task_env") or {})
+    extra = dict(config.runtime.task_env)
     skyrl_controls = sorted(str(key) for key in extra if str(key).startswith("SKYRL_"))
     if skyrl_controls:
         raise ValueError(
@@ -1118,7 +1059,7 @@ def build_config_task_command(args: SimpleNamespace) -> list[str]:
     return _build_task_shell(args, controller_cmd, pythonpath)
 
 
-def launch(args: SimpleNamespace, expected_launcher_commit: str) -> IrisLaunchOutcome:
+def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcome:
     """Submit a resolved launch config and, unless detached, wait for its terminal state."""
     workspace = build_runtime_bundle(expected_launcher_commit)
     parent_credentials = prepare_federated_parent_credentials(args)
@@ -1126,12 +1067,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> IrisLaunchOu
     if not args.job_name:
         args.job_name = f"rl-iris-{time.strftime('%Y%m%d-%H%M%S')}"
 
-    # Load --secrets-env into os.environ on the launch host (so launch-host
-    # hooks see it) AND collect them for injection into the task. Reuse the
-    # (file overrides shell; same semantics as the iris launchers).
-    load_secrets_env_into_os_environ(args.secrets_env)
-
-    if not _is_checkpoint_export(args) and _rl_config_uses_daytona(args.launch_config):
+    if not _is_checkpoint_export(args) and _rl_config_uses_daytona(args.config):
         daytona_api_key = _resolve_daytona_rl_api_key()
         os.environ["DAYTONA_API_KEY"] = daytona_api_key
         # The purge deletes stale snapshots across the shared RL org, so skip it on a
@@ -1187,7 +1123,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> IrisLaunchOu
 
     if args.dry_run:
         print("[rl-iris] --dry-run: not submitting", flush=True)
-        return IrisLaunchOutcome(job_id="", job_state="prepared", exit_code=0)
+        return LaunchOutcome(job_id="", job_state="prepared", exit_code=0)
 
     # Defer heavy iris imports so --dry-run / --help stay snappy.
     #
@@ -1226,7 +1162,6 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> IrisLaunchOu
     constraints = _gpu_constraints(
         resources_proto,
         replicas=replicas,
-        preemptible=args.preemptible,
         target_cluster=args.target_cluster,
     )
 
@@ -1237,7 +1172,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> IrisLaunchOu
     env_vars: dict[str, str] = {}
     # Forward runtime.task_env; launcher-owned rendezvous and secret values below
     # win on collision.
-    config_extra_env = load_config_extra_env(args.launch_config)
+    config_extra_env = config_task_environment(args.config)
     if config_extra_env:
         env_vars.update(config_extra_env)
         print(f"[rl-iris] Config extra_env: {', '.join(sorted(config_extra_env))}", flush=True)
@@ -1477,7 +1412,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> IrisLaunchOu
         )
 
         if args.no_wait:
-            return IrisLaunchOutcome(
+            return LaunchOutcome(
                 job_id=full_job_id,
                 job_state="submitted",
                 exit_code=0,

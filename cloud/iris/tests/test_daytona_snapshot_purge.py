@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
-import yaml
+from omegaconf import OmegaConf
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
@@ -54,11 +54,10 @@ def test_resolve_daytona_rl_api_key_rejects_generic_key(monkeypatch):
         ("skyrl_train.entrypoints.terminal_bench_generate", True),
     ],
 )
-def test_daytona_preflight_follows_the_resolved_entrypoint(tmp_path, entrypoint, expected):
-    config_path = tmp_path / "launch.yaml"
-    config_path.write_text(yaml.safe_dump({"runtime": {"entrypoint": entrypoint}, "skyrl": {"terminal_bench": {}}}))
+def test_daytona_preflight_follows_the_resolved_entrypoint(entrypoint, expected):
+    config = OmegaConf.create({"runtime": {"entrypoint": entrypoint}})
 
-    assert launcher._rl_config_uses_daytona(str(config_path)) is expected
+    assert launcher._rl_config_uses_daytona(config) is expected
 
 
 @dataclass

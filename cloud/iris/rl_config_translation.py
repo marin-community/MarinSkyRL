@@ -809,22 +809,8 @@ def _skyrl_config_sections(
         trainer["export_hf_artifact"] = bool(exp_args["export_hf_artifact"])
     if hf_hub_repo_id:
         trainer["hf_hub_repo_id"] = hf_hub_repo_id
-    if exp_args.get("hf_hub_private", False):
-        trainer["hf_hub_private"] = True
-
     terminal_bench = copy.deepcopy(parsed.terminal_bench)
     if terminal_bench is not None:
-        trace_upload = terminal_bench.setdefault("trace_upload", {})
-        trace_fields = {
-            "trace_upload_enabled": "enabled",
-            "trace_upload_repo_org": "repo_org",
-            "trace_upload_episodes": "episodes",
-            "trace_upload_dataset_type": "dataset_type",
-            "trace_upload_cleanup": "cleanup",
-        }
-        for input_name, config_name in trace_fields.items():
-            if exp_args.get(input_name) is not None:
-                trace_upload[config_name] = exp_args[input_name]
         if not terminal_bench.get("trials_dir") and experiments_dir and job_name:
             terminal_bench["trials_dir"] = join_resource_path(experiments_dir, job_name, "trace_jobs")
         if exp_args.get("trace_root"):

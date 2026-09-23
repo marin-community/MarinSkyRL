@@ -7,14 +7,13 @@ from pathlib import Path
 
 import yaml
 
-from cloud.iris.iris_backend import IrisLaunchOutcome
-from cloud.iris.launch import ExportedPolicy, LaunchState, execute_launch
+from cloud.iris.launch import ExportedPolicy, LaunchOutcome, LaunchState, execute_launch
 from cloud.iris.tests.test_launch_config import _raw_config
 
 
 @dataclass
 class RecordingBackend:
-    outcome: IrisLaunchOutcome = IrisLaunchOutcome("/user/job", "succeeded", 0)
+    outcome: LaunchOutcome = LaunchOutcome("/user/job", "succeeded", 0)
     validated: bool = False
     launched: bool = False
     launched_config: dict | None = None
@@ -23,7 +22,7 @@ class RecordingBackend:
     def validate(self, _config_path: Path) -> None:
         self.validated = True
 
-    def launch(self, config_path: Path) -> IrisLaunchOutcome:
+    def launch(self, config_path: Path) -> LaunchOutcome:
         self.launched = True
         self.launched_config = yaml.safe_load(config_path.read_text())
         return self.outcome
@@ -106,10 +105,10 @@ def test_detach_submits_without_exporting(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_wait_does_not_commit_nonterminal_zero_exit_outcome(tmp_path: Path, monkeypatch) -> None:
-    backend = RecordingBackend(outcome=IrisLaunchOutcome("/user/still-running", "submitted", 0))
+    backend = RecordingBackend(outcome=LaunchOutcome("/user/still-running", "submitted", 0))
     writes: list[tuple[str, dict]] = []
     monkeypatch.setattr("cloud.iris.launch.runtime_bundle_inputs", lambda _commit: ())
-    monkeypatch.setattr("cloud.iris.launch._path_exists", lambda _uri: False)
+    monkeypatch.setattr("cloud.iris.launch.StoragePath.exists", lambda _path: False)
     monkeypatch.setattr("cloud.iris.launch.write_json", lambda uri, payload: writes.append((uri, payload)))
 
     result = execute_launch(_config_path(tmp_path), backend=backend)

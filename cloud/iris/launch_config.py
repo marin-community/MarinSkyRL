@@ -231,11 +231,8 @@ def load_launch_config(path: Path) -> DictConfig:
     return config
 
 
-def _resolved_config(config: DictConfig | Mapping[str, Any]) -> dict[str, Any]:
-    if isinstance(config, DictConfig):
-        value = OmegaConf.to_container(config, resolve=True, throw_on_missing=True)
-    else:
-        value = OmegaConf.to_container(compose_launch_config(config), resolve=True, throw_on_missing=True)
+def _resolved_config(config: DictConfig) -> dict[str, Any]:
+    value = OmegaConf.to_container(config, resolve=True, throw_on_missing=True)
     if not isinstance(value, dict):
         raise TypeError("SkyRL launch config must be a mapping")
     return value
@@ -259,16 +256,15 @@ def _validate_inputs(inputs: dict[str, Any]) -> None:
             data_source(value)
 
 
-def validate_iris_allocation(config: DictConfig | Mapping[str, Any]) -> IrisAllocationConfig:
+def validate_iris_allocation(config: dict[str, Any]) -> IrisAllocationConfig:
     """Validate explicit Iris resources against the canonical SkyRL role plan."""
-    raw = _resolved_config(config)
-    skyrl = raw["skyrl"]
+    skyrl = config["skyrl"]
     if not isinstance(skyrl, dict):
         raise TypeError("skyrl must be a mapping")
     plan = derive_role_plan(skyrl)
-    allocation = raw["iris"]["allocation"]
+    allocation = config["iris"]["allocation"]
     policy = plan.claim("policy")
-    checkpoint_export = raw["run"]["mode"] == RunMode.CHECKPOINT_EXPORT
+    checkpoint_export = config["run"]["mode"] == RunMode.CHECKPOINT_EXPORT
     expected_nodes = policy.num_nodes if checkpoint_export else derive_num_nodes(plan)
     if allocation["num_nodes"] != expected_nodes:
         raise ValueError(
@@ -288,7 +284,7 @@ def validate_iris_allocation(config: DictConfig | Mapping[str, Any]) -> IrisAllo
     return IrisAllocationConfig(**allocation)
 
 
-def validate_launch_config(config: DictConfig | Mapping[str, Any]) -> LaunchTopology:
+def validate_launch_config(config: DictConfig) -> LaunchTopology:
     """Validate launch semantics before an Iris job can be submitted."""
     raw = _resolved_config(config)
     if raw["schema_version"] != 1:

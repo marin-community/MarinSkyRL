@@ -150,8 +150,6 @@ class SkyRLRolePlan:
         return len(groups) == 1
 
 
-# ROLE-SENSITIVE: use_kl_loss activates the reference claim, while generator.backend labels the rollout claim.
-# Wrappers that change either must recompile the complete role plan rather than patching only the runtime config.
 @dataclass(frozen=True)
 class _RolePlanValues:
     colocate_all: bool
