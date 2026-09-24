@@ -2,10 +2,9 @@
 set -euo pipefail
 
 : "${PIVOT_RUN_ROOT:?Set the durable run URI}"
-: "${PIVOT_TMP_ROOT:?Set the lifecycle-managed checkpoint URI}"
+: "${PIVOT_TMP_ROOT:?Set the lifecycle-managed temporary URI}"
 : "${RUN_ID:?Set a unique run ID}"
 CONFIG_NAME="${1:-pivot_swe_smoke}"
-FINAL_STEP="${2:-8}"
 
 REPOSITORY_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RUNTIME_ENV="${RUNTIME_ENV:-$REPOSITORY_ROOT/.iris-pivot-fsdp}"
@@ -22,10 +21,3 @@ export VLLM_USE_DEEP_GEMM=0
 LOG_PATH="${IRIS_OUTPUT_DIR:-/tmp}/pivot-swe-smoke.log"
 "$PYTHON" -m skyrl_train.entrypoints.pivot_swe_smoke --config-name "$CONFIG_NAME" \
   2>&1 | tee "$LOG_PATH"
-
-"$PYTHON" -m skyrl_train.entrypoints.checkpoint_export \
-  --config-name "$CONFIG_NAME" \
-  "checkpoint_export.step=${FINAL_STEP}" \
-  "checkpoint_export.checkpoint_path=\"${PIVOT_TMP_ROOT}/checkpoints/global_step_${FINAL_STEP}\"" \
-  "checkpoint_export.export_root=${PIVOT_RUN_ROOT}/exports" \
-  2>&1 | tee -a "$LOG_PATH"
