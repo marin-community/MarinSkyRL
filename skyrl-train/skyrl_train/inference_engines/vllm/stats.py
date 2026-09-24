@@ -237,7 +237,6 @@ class HistogramAccumulator:
 
 
 def _native_histogram_count(value: int) -> int:
-    """Keep the pinned vLLM reader's integer counts exact through the SQL boundary."""
     if type(value) is not int or not 0 <= value <= (1 << 63) - 1:
         raise ValueError("vLLM histogram count must be a nonnegative signed-64 integer")
     return value

@@ -230,7 +230,6 @@ def test_dual_vllm_sink_preserves_gauges_when_no_histogram_was_collected(monkeyp
 
 @pytest.mark.parametrize("histogram_format", [VllmHistogramFormat.STRUCTURED, VllmHistogramFormat.DUAL])
 def test_structured_vllm_sink_emits_one_exact_family_without_scalar_bucket_rows(monkeypatch, histogram_format) -> None:
-    # The frozen Rigging wheel is upgraded only after the new publisher is released.
     monkeypatch.setattr(rigging_metrics, "HistogramSnapshot", Record, raising=False)
     first_bucket = (1 << 53) + 1
     histogram = vllm.VLLMHistogramSnapshot(
