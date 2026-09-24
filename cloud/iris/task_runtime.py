@@ -405,7 +405,7 @@ def prepare_policy_tokenizer(args: argparse.Namespace) -> PreparedPolicyTokenize
 def prepare_draft_model(
     model: SpeculatorModelConfig,
     *,
-    cache_ttl_days: int | None,
+    cache_ttl_days: int,
     cache_source_prefix: str,
 ) -> SpeculatorModelConfig:
     """Resolve a draft locator, mirroring a Hub revision once when needed."""
@@ -416,7 +416,7 @@ def prepare_draft_model(
         validate_hf_model_weights(names, model.local_source_path)
         return model
     if model.source_kind is SpeculatorModelSourceKind.HUGGING_FACE:
-        if cache_ttl_days is None or cache_ttl_days <= 0:
+        if cache_ttl_days <= 0:
             raise ValueError("--draft-model-cache-ttl-days must be positive for a Hugging Face draft model")
         if not cache_source_prefix:
             raise ValueError("--draft-model-cache-source-prefix is required for a Hugging Face draft model")
@@ -2045,7 +2045,7 @@ def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
         policy_tokenizer_revision=str(model.tokenizer_revision),
         policy_chat_template=str(model.chat_template or ""),
         draft_model=draft_model,
-        draft_model_cache_ttl_days=None,
+        draft_model_cache_ttl_days=int(config.artifacts.draft_model_cache_ttl_days),
         draft_model_cache_source_prefix=str(config.artifacts.checkpoint_root),
     )
 
