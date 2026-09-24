@@ -31,7 +31,7 @@ The advantage estimator registry manages functions that compute advantages and r
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: skyrl_train.utils.algorithm_registry.AdvantageEstimator
+.. autoclass:: marinskyrl.runtime_options.AdvantageEstimator
    :members:
    :member-order: bysource
    :undoc-members:

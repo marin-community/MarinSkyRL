@@ -22,6 +22,13 @@ class GDNBackend(StrEnum):
 TRAJECTORY_SELECTOR_TYPE_PATH = "trainer.trajectory_selector.type"
 
 
+class RolloutGrading(StrEnum):
+    """Launcher-side mirror of skyrl_gym's NemotronUltraGrading, which marinskyrl cannot import."""
+
+    VERIFY = "verify"
+    SKIP = "skip"
+
+
 class AdvantageEstimator(StrEnum):
     GAE = "gae"
     GRPO = "grpo"
