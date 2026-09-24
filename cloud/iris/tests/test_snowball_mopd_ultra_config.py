@@ -4,8 +4,8 @@ from pathlib import Path
 
 import yaml
 
-from cloud.iris.request_builder import derive_num_nodes, derive_role_plan
-from cloud.iris.rl_config_translation import build_skyrl_hydra_args, parse_rl_config
+from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_config
+from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
 from infra.rl_data.nemotron_ultra_mopd_subset import TEACHER_ROUTES
 from marinskyrl.distillation import (
     DistillationObjectiveKind,
@@ -62,17 +62,16 @@ def test_snowball_mopd_smoke_sampler_weights_match_the_hardcoded_routes():
     assert set(TEACHER_ROUTES.values()) == route_keys
 
 
-def test_snowball_mopd_smoke_route_weights_are_appended_hydra_keys():
-    """The base config declares domain_weights as an empty map, so route keys must be force-added."""
+def test_snowball_mopd_smoke_route_weights_survive_config_composition():
+    """The base config declares domain_weights as an empty map, so route keys must be allowed in."""
 
     class _HPCStub:
         gpus_per_node = 8
 
     parsed = parse_rl_config(str(CONFIG), model_override=STUDENT)
-    args = build_skyrl_hydra_args(
+    cfg = compose_skyrl_config(
         parsed, {"job_name": "mopd-smoke-test", "experiments_dir": "/tmp/exp", "num_nodes": 8}, _HPCStub()
-    )
+    ).config
 
-    assert "data.sampling.kind=domain-weighted" in args
-    for route in ("math", "swe", "terminal"):
-        assert f"++data.sampling.domain_weights.{route}=1.0" in args
+    assert cfg.data.sampling.kind == "domain-weighted"
+    assert dict(cfg.data.sampling.domain_weights) == {"math": 1.0, "swe": 1.0, "terminal": 1.0}
