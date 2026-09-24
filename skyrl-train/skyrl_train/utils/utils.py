@@ -903,7 +903,8 @@ def resolve_strategy_limited_telemetry(cfg: DictConfig) -> None:
         elif value and not supported:
             raise ValueError(f"{key}=true needs trainer.strategy in {sorted(strategies)}; got {strategy!r}")
     if dropped:
-        logger.info(f"trainer.strategy={strategy} does not support {', '.join(dropped)}; leaving it off")
+        pronoun = "it" if len(dropped) == 1 else "them"
+        logger.info(f"trainer.strategy={strategy} does not support {', '.join(dropped)}; leaving {pronoun} off")
 
 
 def validate_batch_invariant_config(cfg: DictConfig) -> None:
