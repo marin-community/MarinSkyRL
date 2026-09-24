@@ -30,3 +30,25 @@ def test_boundaries_and_versions_must_not_move_backwards(boundary, version):
     history.record_resume(10.0, 1)
     with pytest.raises(ValueError):
         history.record_resume(boundary, version)
+
+
+def test_a_first_token_inside_the_requests_lifetime_shares_the_actors_clock():
+    history = PolicyVersionHistory()
+    history.record_resume(10.0, 0)
+
+    history.check_same_clock(12.0, submitted_at=11.0, returned_at=13.0)
+    # vLLM reports zero when no token was sampled.
+    history.check_same_clock(0.0, submitted_at=11.0, returned_at=13.0)
+
+
+@pytest.mark.parametrize("first_token_ts", [5.0, 90_000.0])
+def test_a_first_token_outside_the_requests_lifetime_is_another_hosts_clock(first_token_ts):
+    history = PolicyVersionHistory()
+    history.record_resume(10.0, 0)
+
+    with pytest.raises(RuntimeError, match="EngineCore on the engine actor's host"):
+        history.check_same_clock(first_token_ts, submitted_at=11.0, returned_at=13.0)
+
+
+def test_the_clock_is_not_checked_until_a_version_is_installed():
+    PolicyVersionHistory().check_same_clock(90_000.0, submitted_at=11.0, returned_at=13.0)

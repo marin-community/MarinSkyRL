@@ -1875,6 +1875,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         tasks = []
         request_ids: list[str] = []
+        submitted_at = time.monotonic()
         per_prompt = sampling_params if isinstance(sampling_params, list) else [sampling_params] * len(prompt_token_ids)
         for index, (prompt, row_sampling_params) in enumerate(zip(prompt_token_ids, per_prompt, strict=True)):
             # Schedule the collection of outputs for each prompt.
@@ -1910,15 +1911,19 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 )
             raise
 
+        returned_at = time.monotonic()
         result = self._postprocess_outputs(outputs, self._response_top_k(sampling_params))
         # RequestOutput.metrics is populated only while vLLM keeps request stats, which the
         # custom interval logger keeps on even though disable_log_stats is set at engine start.
-        versions = [
-            self._policy_versions.at_first_token(
-                output.metrics.first_token_ts if output is not None and output.metrics is not None else None
-            )
+        first_token_times = [
+            output.metrics.first_token_ts if output is not None and output.metrics is not None else None
             for output in outputs
         ]
+        for first_token_ts in first_token_times:
+            self._policy_versions.check_same_clock(first_token_ts, submitted_at=submitted_at, returned_at=returned_at)
+        # The whole request is stamped with the version installed at its first token; a request
+        # kept across a weight sync (pause_mode=keep) is charged to that older version.
+        versions = [self._policy_versions.at_first_token(first_token_ts) for first_token_ts in first_token_times]
         result[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = [
             ([{"start": 0, "token_count": len(token_ids), "policy_version": policy_version}] if token_ids else [])
             for token_ids, policy_version in zip(result["response_ids"], versions, strict=True)

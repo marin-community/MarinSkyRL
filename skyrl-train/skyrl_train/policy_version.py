@@ -158,6 +158,23 @@ class PolicyVersionHistory:
             raise ValueError("policy version boundaries and versions must not move backwards")
         self.boundaries.append((boundary, version))
 
+    def check_same_clock(self, timestamp: float | None, *, submitted_at: float, returned_at: float) -> None:
+        """Reject a first-token time outside the request's own lifetime on this process's clock.
+
+        vLLM stamps ``first_token_ts`` with ``time.monotonic()`` in the EngineCore process and the
+        boundaries use ``time.monotonic()`` here. The two compare only on one host, where every
+        process reads the same monotonic clock.
+        """
+        if not self.boundaries or timestamp is None or not math.isfinite(timestamp) or timestamp <= 0:
+            return
+        if not submitted_at <= timestamp <= returned_at:
+            raise RuntimeError(
+                f"vLLM reported a first token at monotonic time {timestamp:.3f}, outside the request's lifetime "
+                f"[{submitted_at:.3f}, {returned_at:.3f}] on the engine actor's clock. The EngineCore does not share "
+                "the actor's host clock, so policy versions cannot be attributed; "
+                "trainer.fully_async.first_token_admission=true needs the EngineCore on the engine actor's host"
+            )
+
     def at_first_token(self, timestamp: float | None) -> int | None:
         """Version installed when a token was sampled at ``timestamp``; None before the first boundary."""
         if timestamp is None or not math.isfinite(timestamp) or timestamp <= 0:
