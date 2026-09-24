@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-from omegaconf import open_dict
+from omegaconf import DictConfig, open_dict
 
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_train.config.utils import get_default_config
@@ -70,7 +70,7 @@ async def test_step_wise_generation_clamps_final_request_to_tokenized_window(moc
     tokenizer = _tokenizer()
     runner = SkyRLGymTrajectoryRunner(
         cfg,
-        MagicMock(max_env_workers=0),
+        DictConfig({"max_env_workers": 0}),
         engine,
         tokenizer,
         pipeline=TrajectoryPipeline(StepWiseRolloutCollector, StepWiseTrajectoryProjection(cfg, tokenizer)),
@@ -108,7 +108,7 @@ async def test_step_wise_stop_eos_keeps_published_behavior_evidence_aligned(mock
     tokenizer = _tokenizer()
     runner = SkyRLGymTrajectoryRunner(
         cfg,
-        MagicMock(max_env_workers=0),
+        DictConfig({"max_env_workers": 0}),
         _RecordingInferenceEngine(response_logprobs=[-0.1, -0.2]),
         tokenizer,
         pipeline=TrajectoryPipeline(StepWiseRolloutCollector, StepWiseTrajectoryProjection(cfg, tokenizer)),
@@ -149,7 +149,7 @@ async def test_step_wise_collector_preserves_student_topk(mock_make):
     )
     runner = SkyRLGymTrajectoryRunner(
         cfg,
-        MagicMock(max_env_workers=0),
+        DictConfig({"max_env_workers": 0}),
         engine,
         tokenizer,
         pipeline=TrajectoryPipeline(StepWiseRolloutCollector, StepWiseTrajectoryProjection(cfg, tokenizer)),

@@ -282,10 +282,7 @@ def test_tis_config_does_not_select_a_generation_strategy():
 
 @pytest.fixture
 def mock_env_cfg():
-    cfg = MagicMock()
-    cfg.max_env_workers = 0
-    cfg.env_class = "gsm8k"
-    return cfg
+    return DictConfig({"max_env_workers": 0, "env_class": "gsm8k"})
 
 
 def validate_trajectory_request(input_batch: TrajectoryRequestBatch) -> bool:
