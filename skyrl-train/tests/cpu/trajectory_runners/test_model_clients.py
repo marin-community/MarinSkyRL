@@ -357,6 +357,43 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
     assert output["routed_experts"] == [[[[4, 7]], [[0, 0]]]]
 
 
+SAMPLED_SPANS = [
+    {"start": 0, "token_count": 1, "policy_version": 2},
+    {"start": 1, "token_count": 1, "policy_version": 3},
+]
+
+
+def _stamped_chat_choice():
+    return {
+        "message": {"role": "assistant", "content": "answer"},
+        "finish_reason": "stop",
+        "token_ids": [9, 10],
+        "response_policy_version_segments": SAMPLED_SPANS,
+    }
+
+
+def _structured_chat_request():
+    return {
+        "prompts": [[{"role": "user", "content": "question"}]],
+        "session_ids": ["trajectory-1"],
+        "chat_completion_params": [{}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_direct_structured_chat_carries_the_version_spans():
+    engine = AsyncMock()
+    engine.model_name = "policy"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "answer"
+    engine.tokenize.return_value = {"tokens": [1, 2]}
+    engine.chat_completion.return_value = {"choices": [_stamped_chat_choice()]}
+
+    output = await DirectModelClient(engine).generate(_structured_chat_request())
+
+    assert output["response_policy_version_segments"] == [SAMPLED_SPANS]
+
+
 @pytest.fixture
 def http_client():
     @contextlib.asynccontextmanager
@@ -705,3 +742,17 @@ async def test_http_model_client_preserves_server_error_details(http_client):
     async with http_client(reject) as client:
         with pytest.raises(RuntimeError, match="HTTP 400.*unsupported field"):
             await client.generate({"prompts": [[{"role": "user", "content": "question"}]]})
+
+
+@pytest.mark.asyncio
+async def test_http_structured_chat_carries_the_version_spans(http_client):
+    async def tokenize(_request):
+        return web.json_response({"tokens": [1, 2]})
+
+    async def complete(_request):
+        return web.json_response({"choices": [_stamped_chat_choice()]})
+
+    async with http_client(complete, tokenize=tokenize) as client:
+        output = await client.generate(_structured_chat_request())
+
+    assert output["response_policy_version_segments"] == [SAMPLED_SPANS]

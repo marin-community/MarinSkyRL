@@ -85,9 +85,10 @@ from skyrl_train.group_admission import (
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
 
 FIRST_TOKEN_VERSION_MISSING = (
-    "trainer.fully_async.first_token_admission=true needs the version that sampled each rollout's first "
-    "token; the vLLM generate() path and the OpenAI chat route through InferenceEngineClient report it, "
-    "and this trajectory runner or model client carried none"
+    "trainer.fully_async.first_token_admission=true needs the policy version that sampled every trained token; "
+    "local vLLM engines report it through InferenceEngineClient for token generation and for chat completions "
+    "(called directly or through its HTTP endpoint), while SGLang, remote engines and external OpenAI-compatible "
+    "servers report none"
 )
 
 _QueueItem = TypeVar("_QueueItem")

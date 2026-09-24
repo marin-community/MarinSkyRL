@@ -55,6 +55,7 @@ class _ChatResult:
     stop_reason: str
     assistant_message: dict[str, Any]
     routed_experts: list[list[list[int]]] | None = None
+    policy_version_segments: list[PolicyVersionSegment] | None = None
 
 
 def _choice_routed_experts(
@@ -136,10 +137,31 @@ def _assemble_plain_results(results: list[_ChatChoice]) -> ModelClientOutput:
     return output
 
 
+def _structured_chat_result(choice: _ChatChoice, *, requested_top_k: int | None, text: str) -> _ChatResult:
+    selected = None
+    if requested_top_k is not None and choice.logprob_items is not None:
+        selected = [
+            select_chat_response_topk(item.get("top_logprobs") or [], requested_top_k) for item in choice.logprob_items
+        ]
+    return _ChatResult(
+        prompt_ids=choice.prompt_ids,
+        response_ids=choice.response_ids,
+        response_logprobs=choice.response_logprobs,
+        student_topk_indices=None if selected is None else [ids for ids, _ in selected],
+        behavior_topk_logprobs=None if selected is None else [scores for _, scores in selected],
+        text=text,
+        stop_reason=choice.finish_reason,
+        assistant_message=choice.message,
+        routed_experts=choice.routed_experts,
+        policy_version_segments=choice.policy_version_segments,
+    )
+
+
 def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
     logprobs = [result.response_logprobs for result in results]
     selected_indices = [result.student_topk_indices for result in results]
     selected_scores = [result.behavior_topk_logprobs for result in results]
+    segments = [result.policy_version_segments for result in results]
     output = ModelClientOutput(
         prompt_ids=[result.prompt_ids for result in results],
         response_ids=[result.response_ids for result in results],
@@ -153,6 +175,8 @@ def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
     if all(rows is not None for rows in selected_indices):
         output["student_topk_indices"] = selected_indices
         output["behavior_topk_logprobs"] = selected_scores
+    if all(rows is not None for rows in segments):
+        output[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = segments
     if any(result.routed_experts is not None for result in results):
         output["routed_experts"] = [result.routed_experts for result in results]
     return output
@@ -298,33 +322,15 @@ class DirectModelClient:
             response = await self._client.chat_completion({"json": body, "headers": {}})
             if "choices" not in response:
                 raise RuntimeError(f"vLLM chat completion failed: {response}")
-            choice = response["choices"][0]
-            response_ids = choice.get("token_ids")
-            if not isinstance(response_ids, list) or not all(isinstance(token, int) for token in response_ids):
-                raise RuntimeError("vLLM chat completion did not return exact token IDs")
-            message = choice["message"]
-            text = self._client.tokenizer.decode(response_ids, skip_special_tokens=True)
-            logprob_items = (choice.get("logprobs") or {}).get("content")
-            response_logprobs = (
-                [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None
+            choice = _parse_chat_choice(
+                response["choices"][0],
+                prompt_ids=prompt_ids,
+                logprobs_requested=sampling_params.get("logprobs") is not None,
             )
-            selected = None
-            if requested_top_k is not None and logprob_items is not None:
-                if len(logprob_items) != len(response_ids):
-                    raise ValueError("chat response top-K rows must align with exact token IDs")
-                selected = [
-                    select_chat_response_topk(item.get("top_logprobs") or [], requested_top_k) for item in logprob_items
-                ]
-            return _ChatResult(
-                prompt_ids,
-                response_ids,
-                response_logprobs,
-                None if selected is None else [ids for ids, _ in selected],
-                None if selected is None else [scores for _, scores in selected],
-                text,
-                choice["finish_reason"],
-                message,
-                _choice_routed_experts(choice, prompt_ids, response_ids),
+            return _structured_chat_result(
+                choice,
+                requested_top_k=requested_top_k,
+                text=self._client.tokenizer.decode(choice.response_ids, skip_special_tokens=True),
             )
 
         results = await asyncio.gather(
@@ -468,22 +474,10 @@ class OpenAIHTTPModelClient:
         choice = _parse_chat_choice(
             body["choices"][0], prompt_ids=prompt_ids, logprobs_requested=sampling_params.get("logprobs") is not None
         )
-        selected = None
-        if requested_top_k is not None and choice.logprob_items is not None:
-            selected = [
-                select_chat_response_topk(item.get("top_logprobs") or [], requested_top_k)
-                for item in choice.logprob_items
-            ]
-        return _ChatResult(
-            prompt_ids=choice.prompt_ids,
-            response_ids=choice.response_ids,
-            response_logprobs=choice.response_logprobs,
-            student_topk_indices=None if selected is None else [ids for ids, _ in selected],
-            behavior_topk_logprobs=None if selected is None else [scores for _, scores in selected],
+        return _structured_chat_result(
+            choice,
+            requested_top_k=requested_top_k,
             text=self._tokenizer.decode(choice.response_ids, skip_special_tokens=True),
-            stop_reason=choice.finish_reason,
-            assistant_message=choice.message,
-            routed_experts=choice.routed_experts,
         )
 
     async def _generate_one(
