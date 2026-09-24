@@ -200,6 +200,7 @@ class NemotronUltraEnv(BaseTextEnv):
                 return tool_turn
         # Lean verification decides whether a correction turn follows, so it runs in both modes.
         if self.grading is NemotronUltraGrading.SKIP and self.agent != _LEAN_AGENT:
+            diagnostics["graded"] = 0.0
             return BaseTextEnvStepOutput(
                 observations=[],
                 reward=0.0,
@@ -299,6 +300,7 @@ class NemotronUltraEnv(BaseTextEnv):
                 metadata=diagnostics,
                 verification=VerificationResult.error("verifier configuration failed", diagnostics=diagnostics),
             )
+        diagnostics["graded"] = 1.0
         verification = VerificationResult.verified(
             reward, passed=reward >= 1.0, diagnostics={**diagnostics, "grading_action": action}
         )

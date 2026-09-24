@@ -82,6 +82,7 @@ def test_judge_backed_row_requires_a_judge_unless_grading_is_skipped():
     assert result["reward"] == 0.0
     assert result["verification"].score is None
     assert result["verification"].reason == "grading is skipped"
+    assert result["metadata"]["graded"] == 0.0
 
 
 def test_skipped_grading_still_executes_ns_tools_turns():
