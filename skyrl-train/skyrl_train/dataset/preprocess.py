@@ -47,8 +47,20 @@ def _collate_routed_experts_from_arrays(
     """
     # Normalize each token row and learn the widest layer/top-k shape.
     L, K = 1, 1
-    sample_arrs: List[List["np.ndarray"]] = []
+    sample_arrs: List["np.ndarray | List[np.ndarray]"] = []
     for sample_re in routed_experts:
+        try:
+            sample_arr = np.asarray(sample_re, dtype=np.int16)
+        except ValueError:
+            # A few sentinel rows may have a smaller layer/top-k shape.
+            pass
+        else:
+            if sample_arr.ndim == 3:
+                L = max(L, sample_arr.shape[1])
+                K = max(K, sample_arr.shape[2])
+                sample_arrs.append(sample_arr)
+                continue
+
         rows = []
         for row in sample_re:
             arr = np.asarray(row, dtype=np.int16)
@@ -67,6 +79,10 @@ def _collate_routed_experts_from_arrays(
     # Preallocate the sentinel-zero canvas and slice-assign each real row.
     out = np.zeros((B, max_output_len, L, K), dtype=np.int16)
     for b, rows in enumerate(sample_arrs):
+        if isinstance(rows, np.ndarray):
+            token_count = min(len(rows), max_output_len)
+            out[b, :token_count, : rows.shape[1], : rows.shape[2]] = rows[:token_count]
+            continue
         for token_index, arr in enumerate(rows[:max_output_len]):
             out[b, token_index, : arr.shape[0], : arr.shape[1]] = arr
 

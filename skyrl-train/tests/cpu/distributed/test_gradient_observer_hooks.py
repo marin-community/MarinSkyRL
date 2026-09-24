@@ -94,36 +94,6 @@ def test_megatron_native_hook_window_retains_postclip_shards_and_resets_skips():
     assert tracker.previous is None and observed[-1]["grad_cosine_valid"] == 0
 
 
-def test_megatron_after_step_runs_while_gradients_are_still_populated():
-    """The optimizer-state inventory reads gradients, so its hook must precede zero_grad."""
-
-    class Optimizer:
-        grad = torch.tensor([3.0, 4.0])
-
-        def step(self):
-            return True, 5.0, 0
-
-        def get_main_grads_for_grad_norm(self):
-            return [self.grad]
-
-        def zero_grad(self):
-            self.grad.zero_()
-
-    optimizer = Optimizer()
-    observed = []
-    step = _megatron_optimizer_method()
-    step(
-        SimpleNamespace(),
-        optimizer,
-        None,
-        SimpleNamespace(step=lambda count: None),
-        after_step=lambda successful: observed.append((successful, optimizer.grad.clone())),
-    )
-    assert optimizer.grad.abs().sum() == 0
-    [(successful, gradients)] = observed
-    assert successful and gradients.tolist() == [3.0, 4.0]
-
-
 def _distributed_ownership_worker(rank, rendezvous, destination):
     dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
     try:

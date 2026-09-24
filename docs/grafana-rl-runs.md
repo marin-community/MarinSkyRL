@@ -5,10 +5,12 @@ rollout engine publishes its own vLLM metrics, and the Ray head publishes the ra
 goes to the cluster's finelog, which forwards to the `marin` hub, which is what Grafana queries.
 Nothing is scraped from your logs and nothing is written to disk.
 
-Both trainers use that contract, and every record carries `training_loop`, `sync` or `async`.
+Both trainers use that contract, and every record carries `training_type`, `sync` or `async`.
 **RL Post-training (sync)** at <https://grafana.oa.dev/d/marin-rl-runs> lists synchronous runs, and
 **RL Post-training (async)** at <https://grafana.oa.dev/d/marin-async-rl> lists fully asynchronous
 ones.
+[`docs/design/async-rl-telemetry.md`](design/async-rl-telemetry.md) explains what each panel's metrics
+measure, which switch gates them and what they cost.
 
 ## Finding it
 
@@ -32,19 +34,17 @@ uv run python -m experiments.post_training.iceball_micro --version 2026.09.10 --
 
 Your run id is the step's own `<step_name>-<version>`, so a run is findable from either side.
 
-**From MarinSkyRL.** Enter through the task entrypoint, which resolves the same variables from the
-task's Iris context and starts Ray with the metrics port the collector scrapes:
+**From MarinSkyRL.** Launch one launch document through the packaged launcher. Its pod entrypoint,
+`cloud/iris/task_runtime.py`, resolves the same variables from the task's Iris context and starts
+Ray with the metrics port the collector scrapes:
 
 ```bash
-iris --cluster marin job run --target-cluster cw-rno2a --gpu H100x1 -- \
-  python cloud/iris/task_runtime.py --run-id my-experiment-2026.09.10 --training-loop sync -- \
-  python -m skyrl_train.entrypoints.main_base <hydra args>
+uv run python -m cloud.iris.launch iris launch --config my-launch.yaml
 ```
 
-Pick a run id you will recognise next week; the picker shows it verbatim beside everyone else's.
-Without `--run-id` it defaults to the Iris job id, which reads like `/runner/…-34231183130-1` and
-has to be percent-encoded into a URL. `--training-loop` is `sync` or `async`; the packaged launcher
-derives it from the config's entrypoint, and a hand launch that omits it stamps no loop.
+The run id is the document's `run.id`. Pick one you will recognise next week; the picker shows it
+verbatim beside everyone else's. Composing the document sets `runtime.training_type` from the
+entrypoint and `trainer.placement.colocate_all`, and the task runtime exports it before Ray starts.
 
 **What does not work** is calling the trainer directly:
 
@@ -53,14 +53,15 @@ iris ... job run -- python -m skyrl_train.entrypoints.main_base ...   # publishe
 ```
 
 That skips the resolver, so the variables stay unset and the run trains normally while reporting
-nothing. If you cannot use `task_runtime.py`, the resolver alone covers everything except the two
-Ray panels, with the loop given as `SKYRL_TRAINING_LOOP`:
-`SKYRL_TRAINING_LOOP=sync python -m cloud.iris.telemetry_env -- python -m skyrl_train.entrypoints.main_base …`.
+nothing. If you cannot use the launcher, the resolver alone covers everything except the two Ray
+panels, with the training type given as `SKYRL_TRAINING_TYPE`:
+`SKYRL_TRAINING_TYPE=sync python -m cloud.iris.telemetry_env -- python -m skyrl_train.entrypoints.main_base …`.
+A hand launch that leaves it unset stamps no training type.
 
 Confirm it took by grepping your job's log:
 
 ```
-[task-runtime] [telemetry] http://finelog-…:10001/v1/telemetry run_id=<your run id> training_loop=sync
+[task-runtime] [telemetry] http://finelog-…:10001/v1/telemetry run_id=<your run id> training_type=sync
 ```
 
 If that line is absent, nothing was published, and no amount of looking at Grafana will help.

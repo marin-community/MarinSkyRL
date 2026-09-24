@@ -14,6 +14,7 @@ from skyrl_train.trajectory_runners.base import (
     TrainingPhase,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import RETENTION_METRIC_PREFIX
+from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 from skyrl_train.metric_names import (
     IDENTITY_AWARE_REWARD_METRIC_PREFIX,
     LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
@@ -1507,12 +1508,9 @@ def extract_routed_experts_from_rollout_details(
 ) -> Optional[List[Any]]:
     """Extract per-turn MoE ``routed_experts`` from Harbor's rollout_details.
 
-    Sibling of :func:`extract_logprobs_from_rollout_details`. The vLLM fork emits
-    per-token expert-selection indices ``[gen_len, L, K]`` (L = MoE layers,
-    K = top-k experts) over ``/v1`` non-streaming via ``provider_specific_fields``.
-    Harbor's ``_extract_provider_extra`` lands this in
-    ``RolloutDetail.extra["routed_experts"]`` as a per-turn list (one ``[gen_len, L, K]``
-    entry per assistant turn, aligned with ``completion_token_ids``).
+    Harbor groups vLLM's base64 NumPy payloads in
+    ``RolloutDetail.extra["routed_experts"]`` by turn. Decode each payload and
+    select the response rows using that turn's exact prompt and completion IDs.
 
     This is Stage 1 of the FSDP2 EP/router-replay port (R3 capture rail). No MoE
     math here — pure data-plane extraction. Returns None when absent so the field
@@ -1550,10 +1548,17 @@ def extract_routed_experts_from_rollout_details(
         return None
 
     logger.debug(f"Extracted routed_experts from rollout_details: {len(routed_experts)} turns")
+    prompt_ids = extract_prompt_token_ids_from_rollout_details(rollout_details)
+    completion_ids = extract_token_ids_from_rollout_details(rollout_details)
     out = []
-    for turn_re in routed_experts:
+    for index, turn_re in enumerate(routed_experts):
         if turn_re is not None and len(turn_re) > 0:
-            out.append(_as_routed_experts_array(turn_re))
+            if completion_ids is None or index >= len(completion_ids):
+                raise ValueError("routed_experts requires exact completion token IDs for each turn")
+            turn_prompt_ids = prompt_ids[index] if prompt_ids is not None and index < len(prompt_ids) else None
+            out.append(
+                _as_routed_experts_array(normalize_routed_experts(turn_re, turn_prompt_ids, completion_ids[index]))
+            )
         else:
             out.append(turn_re)
     return out

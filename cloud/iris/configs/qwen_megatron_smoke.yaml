@@ -1,7 +1,7 @@
 # Qwen3-0.6B on one colocated H100 node. This is the smallest Iris smoke that
 # exercises Hugging Face mirroring, direct S3 Megatron/vLLM reads, one optimizer
 # step, weight synchronization, and a direct S3 distributed checkpoint write.
-entrypoint: standard
+entrypoint: sync
 
 context_budget:
   request_window_tokens: 2048

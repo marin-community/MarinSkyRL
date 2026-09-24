@@ -26,7 +26,7 @@ def grug_engine_client(
     inference_engine_enable_sleep: bool = False,
     moe_backend: str | None = None,
 ) -> InferenceEngineClient:
-    """Start eager vLLM engines for a tiny Grug checkpoint."""
+    """Start vLLM engines for a tiny Grug checkpoint."""
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     engine_init_kwargs = {"max_model_len": MAX_MODEL_LEN}
     if moe_backend is not None:
@@ -41,7 +41,7 @@ def grug_engine_client(
         seed=23,
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=False,
-        enforce_eager=True,
+        enforce_eager=False,
         engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
         shared_pg=shared_pg,
         gpu_memory_utilization=cfg.generator.gpu_memory_utilization,

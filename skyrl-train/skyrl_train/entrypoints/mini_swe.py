@@ -25,9 +25,13 @@ def skyrl_entrypoint(cfg: DictConfig):
     exp.run()
 
 
+def run(cfg: DictConfig) -> None:
+    run_ray_driver(cfg, skyrl_entrypoint, TrajectoryRunnerMode.MINI_SWE)
+
+
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    run_ray_driver(cfg, skyrl_entrypoint, TrajectoryRunnerMode.MINI_SWE)
+    run(cfg)
 
 
 if __name__ == "__main__":

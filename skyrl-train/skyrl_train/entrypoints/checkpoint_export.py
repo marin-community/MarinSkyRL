@@ -23,8 +23,7 @@ def run_checkpoint_export(cfg: DictConfig):
     return checkpoint_exporter(cfg).run()
 
 
-@hydra.main(config_path=_CONFIG_DIR, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
+def run(cfg: DictConfig) -> None:
     initialize_ray(cfg)
 
     def shutdown_on_sigterm(_signum, _frame):
@@ -37,6 +36,11 @@ def main(cfg: DictConfig) -> None:
         logger.info(f"Exported global_step_{result.step} to {result.export_path}")
     finally:
         ray.shutdown()
+
+
+@hydra.main(config_path=_CONFIG_DIR, config_name="ppo_base_config", version_base=None)
+def main(cfg: DictConfig) -> None:
+    run(cfg)
 
 
 if __name__ == "__main__":

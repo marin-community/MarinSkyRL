@@ -45,7 +45,6 @@ def model_and_engine(tmp_path_factory):
             model=str(path),
             skip_tokenizer_init=True,
             dtype="float32",
-            enforce_eager=True,
             max_model_len=32,
             gpu_memory_utilization=0.2,
             **options,

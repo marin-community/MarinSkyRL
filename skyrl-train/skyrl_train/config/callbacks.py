@@ -8,4 +8,5 @@ def has_explicit_callbacks(cfg: DictConfig) -> bool:
 
 def interval_hf_export_enabled(cfg: DictConfig) -> bool:
     """Return whether legacy interval settings explicitly enable HF export."""
-    return bool(cfg.trainer.get("hf_hub_repo_id")) and int(cfg.trainer.get("hf_save_interval", -1)) > 0
+    destination_configured = bool(cfg.trainer.get("export_hf_artifact")) or bool(cfg.trainer.get("hf_hub_repo_id"))
+    return destination_configured and int(cfg.trainer.get("hf_save_interval", -1)) > 0

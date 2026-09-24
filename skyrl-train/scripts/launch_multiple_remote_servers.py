@@ -76,7 +76,6 @@ class VLLMServer:
             "skyrl_train.inference_engines.vllm.vllm_server",
             "--model",
             self.model_path,
-            "--enforce-eager",
             "--tensor-parallel-size",
             str(self.tp_size),
             "--seed",

@@ -28,6 +28,7 @@ from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEn
 from omegaconf import OmegaConf
 import asyncio
 import pytest
+from jinja2 import TemplateError
 import random
 import ray.exceptions
 from copy import deepcopy
@@ -1050,6 +1051,26 @@ async def test_tokenize_returns_native_serving_response_without_local_rendering(
         "token_strs": ["typed", "content", "parts"],
     }
     assert engine.request_payload == request_payload
+
+
+@pytest.mark.asyncio
+async def test_tokenize_surfaces_remote_chat_render_failure_as_template_error():
+    template_error = TemplateError("assistant and tool roles are incompatible")
+    validation_error = RuntimeError("chat template validation failed")
+    validation_error.__cause__ = template_error
+
+    class WrappedValidationError(RuntimeError):
+        def as_instanceof_cause(self):
+            return validation_error
+
+    class RejectingEngine:
+        async def tokenize(self, _request_payload):
+            raise WrappedValidationError()
+
+    client = InferenceEngineClient(engines=[RejectingEngine()], tokenizer=object(), full_config=_make_min_cfg())
+
+    with pytest.raises(TemplateError, match="assistant and tool roles"):
+        await client.tokenize({"json": {"messages": []}, "headers": {}})
 
 
 # -------------------------------------------

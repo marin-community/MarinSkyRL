@@ -100,9 +100,8 @@ Following ``examples/fully_async/async_run_gsm8k.sh``, select the packaged entry
     ...
 
 The RL config's ``entrypoint`` key names the training loop: ``sync`` (the synchronous loop; ``standard`` is its old
-name and still accepted) or ``fully_async``. A launcher ``--entrypoint`` naming a different training loop fails, and
-``trainer.fully_async`` settings in a config that does not run the fully async trainer are reported as inert when the
-config is parsed.
+name and still accepted) or ``fully_async``. ``trainer.fully_async`` settings in a config that does not run the fully
+async trainer are reported as inert when the config is parsed.
 
 For fully async specifically, the following are the main knobs to tune:
 

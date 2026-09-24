@@ -11,7 +11,6 @@ import os
 from enum import StrEnum
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
-from functools import partial
 from loguru import logger
 from skyrl_train.utils.progress import tqdm
 from omegaconf import OmegaConf
@@ -41,7 +40,7 @@ from skyrl_train.utils.utils import (
     str_to_torch_dtype,
     get_physical_gpu_id,
 )
-from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
+from marinskyrl.hugging_face_retry import load_hugging_face_with_retry
 from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
 import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
@@ -59,7 +58,6 @@ from skyrl_train.megatron_timing import (
     publish_megatron_train_timings,
 )
 from skyrl_train.utils.gradient_direction import gradient_direction_summary
-from skyrl_train.optimizer_state_metrics import OptimizerStateObserver
 from skyrl_train.telemetry import StepKind
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
 from skyrl_train.workers.worker import (
@@ -93,9 +91,10 @@ class MegatronWorker:
             return
         retry = self.cfg.trainer.model_load_retry
         revision = model_config.get("revision")
-        load_pretrained_with_retry(
+        load_hugging_face_with_retry(
             lambda: snapshot_download(model_path, revision=revision),
-            model_id=model_path,
+            resource_id=model_path,
+            resource_kind="model snapshot",
             max_retries=int(retry.max_retries),
             backoff_base=float(retry.backoff_base_seconds),
             backoff_cap=float(retry.backoff_cap_seconds),
@@ -107,6 +106,8 @@ class MegatronWorker:
         megatron_config,
         model_config_kwargs,
         transformer_config_kwargs,
+        tokenizer_path: str,
+        tokenizer_revision: str | None,
         bf16=True,
         flash_attn=False,
         model_revision: str | None = None,
@@ -117,7 +118,11 @@ class MegatronWorker:
         """
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
         validate_grug_training_strategy(getattr(hf_config, "model_type", None), "megatron")
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_path,
+            trust_remote_code=True,
+            revision=tokenizer_revision,
+        )
 
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
@@ -345,10 +350,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler = None
         self._warned_exact_unit_policy_ratio = False
-        self._optimizer_state_observer = OptimizerStateObserver(
-            enabled=bool(OmegaConf.select(self.cfg, "trainer.optimizer_state_metrics", default=False)),
-            rank=self._rank,
-        )
 
     def forward(self, data):
         with self._memory.span("forward", step=data.metadata.get("global_step"), step_kind=StepKind.GLOBAL_STEP):
@@ -419,6 +420,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             flash_attn=self.cfg.trainer.flash_attn,
             model_revision=self.cfg.trainer.policy.model.get("revision"),
             model_source_uri=self.cfg.trainer.policy.model.get("source_uri"),
+            tokenizer_path=self.cfg.trainer.policy.model.get("tokenizer_path"),
+            tokenizer_revision=self.cfg.trainer.policy.model.get("tokenizer_revision"),
         )
 
         self.actor_module = self.make_megatron_module(
@@ -546,8 +549,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         rank=torch.distributed.get_rank(),
                         outcome=outcome,
                     )
-            except Exception as error:
-                logger.warning("Could not publish Megatron policy timings: {}", error)
+            except Exception:
+                logger.opt(exception=True).warning("Could not publish Megatron policy timings")
 
     def _ppo_train_with_timings(self, train_data, timing: MegatronTrainTimings) -> "TrainingOutputBatch":
         self._drain_r3_decentral_stagger(train_data)
@@ -632,17 +635,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                             self.scheduler,
                             name="actor",
                             grad_observer=self._gradient_observer(megatron_optimizer=self.optimizer),
-                            after_step=(
-                                partial(
-                                    self._optimizer_state_observer.after_step,
-                                    model_chunks=self.actor_module,
-                                    optimizer=self.optimizer,
-                                    step=int(train_data.metadata["global_step"]),
-                                    minibatch=policy_update_steps + 1,
-                                )
-                                if self._optimizer_state_observer.enabled
-                                else None
-                            ),
                         )
 
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
@@ -910,6 +902,8 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             flash_attn=self.cfg.trainer.flash_attn,
             model_revision=self.cfg.trainer.ref.model.get("revision"),
             model_source_uri=self.cfg.trainer.ref.model.get("source_uri"),
+            tokenizer_path=self.cfg.trainer.ref.model.get("tokenizer_path"),
+            tokenizer_revision=self.cfg.trainer.ref.model.get("tokenizer_revision"),
         )
 
         self.actor_module = self.make_megatron_module(

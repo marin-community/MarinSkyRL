@@ -11,7 +11,7 @@ from typing import Literal, Protocol
 import ray
 from loguru import logger
 
-from marinskyrl.environment_contract import TRAINING_LOOP_ENV, TrainingLoop
+from marinskyrl.environment_contract import TRAINING_TYPE_ENV, TrainingType
 
 try:
     from rigging import telemetry
@@ -175,7 +175,7 @@ class TelemetryConfig:
     run_id: str | None = None
     execution_uid: str | None = None
     serving_job_id: str | None = None
-    training_loop: TrainingLoop | None = None
+    training_type: TrainingType | None = None
 
     @classmethod
     def from_environment(cls) -> "TelemetryConfig":
@@ -188,7 +188,7 @@ class TelemetryConfig:
             run_id=text("SKYRL_RUN_ID"),
             execution_uid=text("SKYRL_EXECUTION_UID") or _iris_execution_uid(),
             serving_job_id=text("SKYRL_SERVING_JOB_ID"),
-            training_loop=TrainingLoop(loop) if (loop := text(TRAINING_LOOP_ENV)) else None,
+            training_type=TrainingType(value) if (value := text(TRAINING_TYPE_ENV)) else None,
         )
 
 
@@ -261,8 +261,8 @@ def _resources(config: TelemetryConfig, role: str) -> dict[str, str]:
     }
     if config.serving_job_id:
         resources["serving_job_id"] = config.serving_job_id
-    if config.training_loop is not None:
-        resources["training_loop"] = config.training_loop.value
+    if config.training_type is not None:
+        resources["training_type"] = config.training_type.value
     return resources
 
 

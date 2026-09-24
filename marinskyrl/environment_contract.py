@@ -78,6 +78,10 @@ VLLM_USE_V2_MODEL_RUNNER_ENV = "VLLM_USE_V2_MODEL_RUNNER"
 VLLM_USE_DEEP_GEMM_ENV = "VLLM_USE_DEEP_GEMM"
 VLLM_BATCH_INVARIANT_ENV = "VLLM_BATCH_INVARIANT"
 VLLM_ALLOW_INSECURE_SERIALIZATION_ENV = "VLLM_ALLOW_INSECURE_SERIALIZATION"
+RUNAI_STREAMER_LOG_TO_STDERR_ENV = "RUNAI_STREAMER_LOG_TO_STDERR"
+RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV = "RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS"
+DEFAULT_RUNAI_STREAMER_LOG_TO_STDERR = "1"
+DEFAULT_RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS = "10000"
 WANDB_ENTITY_ENV = "WANDB_ENTITY"
 HF_HUB_OFFLINE_ENV = "HF_HUB_OFFLINE"
 TRANSFORMERS_OFFLINE_ENV = "TRANSFORMERS_OFFLINE"
@@ -93,14 +97,16 @@ RAY_CLUSTER_OWNER_ENV = "SKYRL_RAY_CLUSTER_OWNER"
 NUMA_AFFINITY_ENV = "SKYRL_ENABLE_NUMA_AFFINITY"
 TELEMETRY_ENDPOINT_ENV = "SKYRL_TELEMETRY_ENDPOINT"
 RUN_ID_ENV = "SKYRL_RUN_ID"
-TRAINING_LOOP_ENV = "SKYRL_TRAINING_LOOP"
-
-
+TRAINING_TYPE_ENV = "SKYRL_TRAINING_TYPE"
 EXECUTION_UID_ENV = "SKYRL_EXECUTION_UID"
 
 
-class TrainingLoop(StrEnum):
-    """The loop a run trains with, stamped on every telemetry record."""
+class TrainingType(StrEnum):
+    """The trainer a run uses, stamped on every telemetry record.
+
+    It answers which trainer the launched module runs: terminal_bench runs either one, and a generate
+    entrypoint runs none.
+    """
 
     SYNC = "sync"
     ASYNC = "async"
@@ -175,6 +181,20 @@ ENV_VAR_SPECS = (
         EnvVarSource.CONFIG,
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
     ),
+    EnvVarSpec(
+        RUNAI_STREAMER_LOG_TO_STDERR_ENV,
+        "generator.engine_init_kwargs",
+        EnvVarSource.DERIVED,
+        frozenset({EnvVarScope.INFERENCE_WORKER}),
+        frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
+    ),
+    EnvVarSpec(
+        RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV,
+        "generator.engine_init_kwargs",
+        EnvVarSource.DERIVED,
+        frozenset({EnvVarScope.INFERENCE_WORKER}),
+        frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
+    ),
     EnvVarSpec(WANDB_ENTITY_ENV, "launch.wandb_entity", EnvVarSource.EXTERNAL, frozenset({EnvVarScope.TASK_RUNTIME})),
     EnvVarSpec(
         HF_HUB_OFFLINE_ENV,
@@ -237,7 +257,7 @@ ENV_VAR_SPECS = (
         ALL_RUNTIME_SCOPES,
     ),
     EnvVarSpec(
-        TRAINING_LOOP_ENV,
+        TRAINING_TYPE_ENV,
         "runtime.telemetry",
         EnvVarSource.EXTERNAL,
         ALL_RUNTIME_SCOPES,
@@ -465,7 +485,7 @@ class EnvVarManager:
             MAX_JOBS_ENV,
             TELEMETRY_ENDPOINT_ENV,
             RUN_ID_ENV,
-            TRAINING_LOOP_ENV,
+            TRAINING_TYPE_ENV,
             EXECUTION_UID_ENV,
         )
         for name in passthrough_names:

@@ -160,9 +160,9 @@ class RolloutCoordinator:
         # BasePPOExp.get_tokenizer) — the runner uses it during
         # post-gather token/logprob extraction (apply_chat_template).
         tokenizer = create_tokenizer(
-            model_path=spec.config.trainer.policy.model.path,
+            model_path=spec.config.trainer.policy.model.tokenizer_path,
             disable_fast_tokenizer=spec.config.trainer.disable_fast_tokenizer,
-            revision=spec.config.trainer.policy.model.get("revision"),
+            revision=spec.config.trainer.policy.model.get("tokenizer_revision"),
         )
 
         self._runner = spec.build(tokenizer)

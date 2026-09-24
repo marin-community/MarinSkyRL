@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 from omegaconf import OmegaConf
 
-from cloud.iris.rl_config_translation import RL_ENTRYPOINT_MODULES
+from cloud.iris.rl_config_translation import RL_ENTRYPOINTS
 
 import skyrl_train.telemetry as training_telemetry
 from skyrl_train.entrypoints import fully_async
@@ -26,6 +26,9 @@ def test_trajectory_runner_uses_resolved_served_model_name(monkeypatch):
                 "use_conversation_multi_turn": True,
                 "http_endpoint_host": "127.0.0.1",
                 "http_endpoint_port": 8000,
+                "num_inference_engines": 3,
+                "inference_engine_data_parallel_size": 2,
+                "max_num_seqs": 16,
             },
             "environment": {"skyrl_gym": {}},
         }
@@ -46,6 +49,7 @@ def test_trajectory_runner_uses_resolved_served_model_name(monkeypatch):
         base_url="http://127.0.0.1:8000",
         model_name="served-policy",
         tokenizer=tokenizer,
+        max_concurrent_requests=96,
     )
     assert create_runner.call_args.kwargs["model_client"] is model_client
 
@@ -77,7 +81,7 @@ def test_the_async_entrypoint_trains_inside_the_trainer_telemetry_lifecycle(monk
     assert training_telemetry._process_state.owner is None
 
 
-@pytest.mark.parametrize("module_name", sorted(RL_ENTRYPOINT_MODULES.values()))
+@pytest.mark.parametrize("module_name", sorted(RL_ENTRYPOINTS.values()))
 def test_every_registered_entrypoint_runs_through_the_base_run(module_name):
     """An entrypoint that overrides run skips the trainer-role telemetry lifecycle the base run owns."""
     module = importlib.import_module(module_name)

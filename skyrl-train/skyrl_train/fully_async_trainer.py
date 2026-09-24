@@ -1138,7 +1138,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             )
             # Drain any generation outputs that arrived after the training loop
             # stopped consuming (race between producer enqueue and consumer exit).
-            n_drained = len(_drain_queue(generation_queues.completed))
+            drained = _drain_queue(generation_queues.completed)
+            for group in drained:
+                self._record_group_terminal(group, "epoch_end_drain")
+            n_drained = len(drained)
             assert generation_queues.retries.empty(), (
                 f"Epoch ended with {generation_queues.retries.qsize()} stale-group retries still pending"
             )
@@ -1446,7 +1449,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
 
     def _record_group_terminal(self, group: GeneratedOutputGroup, disposition: str) -> None:
-        """Record one terminal disposition per group, whatever ends its life."""
+        """Record a group's first terminal disposition: consumed, or the reason it was discarded.
+
+        A group still buffered at shutdown gets none; a resumed run that restores it records its end.
+        """
         if not self._async_observations_enabled or group.telemetry_finished:
             return
         record_group_disposition(
@@ -1501,8 +1507,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         inspected_count: int,
     ) -> None:
         self._groups_rejected_since_step += len(rejected_groups)
-        for _, decision in rejected_groups:
+        for group, decision in rejected_groups:
             assert decision.primary_rejection is not None
+            self._record_group_terminal(group, decision.primary_rejection.value)
             self._rejection_reasons_since_step[decision.primary_rejection.value] += 1
         self._groups_inspected_since_step += inspected_count
 
@@ -1646,6 +1653,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 admitted_groups.append(group)
             else:
                 discarded_reasons[selection_result.value] += 1
+                self._record_group_terminal(group, selection_result.value)
 
         return _CandidateSelection(
             admitted_groups=admitted_groups,

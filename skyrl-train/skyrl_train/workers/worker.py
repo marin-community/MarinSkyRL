@@ -1272,10 +1272,8 @@ class PolicyWorkerBase(Worker):
         One tracker per parameter set; a changed layout resets it.
         """
         settings = grad_cosine_settings(self.cfg.trainer.algorithm)
-        if not settings.enabled or settings.store == "off":
+        if not settings.enabled:
             return None
-        if self.cfg.trainer.strategy not in {"fsdp", "fsdp2", "megatron"}:
-            raise ValueError("Gradient direction monitoring supports only qualified Megatron/FSDP layouts")
         group = megatron_optimizer.get_grad_stats_parallel_group() if megatron_optimizer is not None else None
         identities = tuple(id(parameter) for row in self.optimizer.param_groups for parameter in row["params"])
         if self._grad_tracker is None:
@@ -1411,9 +1409,6 @@ class PolicyWorkerBase(Worker):
             self._log_ratio_monitor = LogRatioMonitor(
                 action_log_probs.device,
                 position_window=ratio_settings.position_window,
-                exact_quantiles=ratio_settings.exact_quantiles,
-                eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
-                eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
             )
         self._log_ratio_monitor.add(action_log_probs, old_action_log_probs, loss_mask)
 

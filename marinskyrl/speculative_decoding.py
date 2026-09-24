@@ -15,7 +15,7 @@ from marinskyrl.resource_locator import is_cloud_uri, is_hugging_face_repo_id
 
 _HF_SOURCE_SCHEME = "hf"
 _HF_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
-STANDARD_TRAINING_ENTRYPOINT = "skyrl_train.entrypoints.main_base"
+SYNC_TRAINING_ENTRYPOINT = "skyrl_train.entrypoints.main_base"
 
 
 def is_hugging_face_commit(value: str) -> bool:
@@ -331,7 +331,7 @@ def parse_speculative_decoding_config(
         raise SpeculativeDecodingConfigError(f"{context} requires generator.run_engines_locally=true")
     if colocate_all:
         raise SpeculativeDecodingConfigError(f"{context} requires trainer.placement.colocate_all=false")
-    if config.training is not None and entrypoint != STANDARD_TRAINING_ENTRYPOINT:
+    if config.training is not None and entrypoint != SYNC_TRAINING_ENTRYPOINT:
         raise SpeculativeDecodingConfigError(f"{context}.training is not supported by entrypoint {entrypoint!r}")
     if config.training is not None and num_inference_engines != 1:
         raise SpeculativeDecodingConfigError(f"{context}.training requires generator.num_inference_engines=1")

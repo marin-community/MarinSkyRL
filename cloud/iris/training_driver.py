@@ -1,20 +1,10 @@
 #!/usr/bin/env python3
-"""Drive SkyRL training from rank zero of an Iris-managed Ray cluster.
+"""Resolve task-local inputs and run SkyRL from one Hydra launch document.
 
-Runs on rank 0 inside the frozen Iris task environment after the controller
-(``task_runtime.py``) has bootstrapped one cross-node Ray cluster and
-exported ``RAY_ADDRESS``. This runner parses the RL config, resolves HF task data,
-builds the SkyRL Hydra args, and execs the MarinSkyRL entrypoint attached to that
-Ray cluster (SkyRL's bare ``ray.init()`` honors ``RAY_ADDRESS``).
-
-Usage::
-
-    python -m cloud.iris.training_driver \
-        --rl_config configs/56gpu_qwen3_8b.yaml \
-        --train_data '["org/my-dataset"]' \
-        --model_path Qwen/Qwen3-8B \
-        --job_name my_rl_run \
-        --num_nodes 7 --gpus 56 --gpus_per_node 8
+This process runs on rank zero after ``task_runtime.py`` has bootstrapped the
+cross-node Ray cluster. The only process boundary is ``--config``; staged model
+paths, resolved datasets, ingress values, and SkyRL settings remain structured
+configuration throughout the launch.
 """
 
 from __future__ import annotations
@@ -26,43 +16,31 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterator, List
+from typing import Any, Iterator, List
+
+from omegaconf import DictConfig, OmegaConf
 
 from cloud.iris.artifacts import fs_and_path
-from cloud.iris.paths import PROJECT_ROOT
-from cloud.iris.rl_config_translation import (
-    TRAINING_LOOP_ENTRYPOINT_MODULES,
-    apply_context_budget_overrides,
-    build_checkpoint_export_hydra_args,
-    build_skyrl_hydra_args,
-    get_skyrl_command_preview,
-    materialize_rl_config,
-    parse_checkpoint_export_config,
-    parse_rl_config,
-    write_resolved_context_budget,
-)
 from cloud.iris.rl_data import (
     check_rl_environment,
     compute_num_inference_engines,
     resolve_rl_train_data_with_sources,
 )
-from cloud.iris.storage_policy import hydra_override_value
 from marinskyrl.process_diagnostics import ProcessOutcomeKind, write_process_outcome
 from marinskyrl.resource_locator import model_source_for_path
-from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT
+from cloud.iris.launch_config import RunMode, load_launch_config
+from cloud.iris.rl_config_translation import TaskLocalSkyRLValues, apply_task_local_values
 
 
 @dataclass
 class LocalRLConfig:
     """Configuration for the in-container RL runner."""
 
-    rl_config_path: str
     job_name: str
     model_path: str
-    model_revision: str | None = None
-    entrypoint: str | None = None
     model_source_uri: str | None = None
     model_source_identity: str | None = None
     train_data: List[str | dict[str, Any]] = field(default_factory=list)
@@ -70,17 +48,11 @@ class LocalRLConfig:
     experiments_dir: str = "experiments"
     resolved_config_uri: str | None = None
     gpus: int = 4
-    cpus: int = 0  # 0 = auto-detect
     # Multi-node placement. The external controller has already bootstrapped one
     # cross-node Ray cluster and exported RAY_ADDRESS; this runner ATTACHES to it,
     # and gpus_per_node drives the SkyRL placement + num_inference_engines.
     num_nodes: int = 1
     gpus_per_node: int = 0  # 0 = use `gpus`
-    ray_port: int = 6379
-    master_port: int = 12345
-    skyrl_overrides: List[str] = field(default_factory=list)
-    dry_run: bool = False
-    tensor_parallel_size: int = 1  # auto-derived
     # --- Cross-cluster ingress (Exp2 opencode-RL literal capture) ---
     # All default to the OFF/direct value so an all-defaults run stands up NO proxy,
     # registers NO endpoint, and touches NO env — byte-identical to today.
@@ -89,7 +61,9 @@ class LocalRLConfig:
     record_literal: bool = False  # co-locate harbor RecordProxy for literal.jsonl capture
     target_cluster: str = ""  # set => federated: mint at the PARENT for the mirrored endpoint
     parent_controller_config: str = ""  # marin.yaml path for federated parent-minting
-    vllm_http_port: int = 8000  # local vLLM HTTP endpoint (= generator.http_endpoint_port)
+    vllm_http_port: int = 8000
+    tensor_parallel_size: int = 1
+    launch_config: DictConfig | None = None
 
     def __post_init__(self) -> None:
         model_source_for_path(self.model_path, self.model_source_uri, self.model_source_identity)
@@ -145,9 +119,6 @@ class LocalRLRunner:
         experiments_dir.mkdir(parents=True, exist_ok=True)
         self.config.experiments_dir = str(experiments_dir)
 
-        if self.config.cpus <= 0:
-            self.config.cpus = os.cpu_count() or 16
-
         self._setup_signal_handlers()
 
     def _setup_signal_handlers(self) -> None:
@@ -171,7 +142,7 @@ class LocalRLRunner:
     def print_banner(self) -> None:
         print("=== MarinSkyRL Iris Training Runner ===")
         print(f"  Job Name: {self.config.job_name}")
-        print(f"  RL Config: {self.config.rl_config_path}")
+        print("  Launch Config: loaded")
         print(f"  Model: {self.config.model_path}")
         print(f"  GPUs: {self.config.gpus}")
         print(f"  Train Data: {self.config.train_data}")
@@ -179,60 +150,25 @@ class LocalRLRunner:
         print(f"  Experiments Dir: {self.config.experiments_dir}")
         print("=======================================")
 
-    def _context_budget_artifact_destination(self, parsed, skyrl_overrides: List[str]) -> Path | str:
-        """Choose the durable Harbor bundle when this run writes one."""
-        trials_dir = (parsed.terminal_bench or {}).get("trials_dir")
-        override_trials_dir = hydra_override_value(skyrl_overrides, "terminal_bench_config.trials_dir")
-        if override_trials_dir is not None:
-            trials_dir = override_trials_dir
-        if trials_dir and str(trials_dir).startswith(("s3://", "gs://")) and not self.config.dry_run:
-            return f"{str(trials_dir).rstrip('/')}/resolved-context-budget.json"
-        return Path(self.config.experiments_dir) / self.config.job_name / "resolved-context-budget.json"
-
-    def _record_context_budget(self, parsed, skyrl_overrides: List[str]) -> Path | str:
-        """Print and persist the token contract resolved for this training run."""
-        budget = parsed.context_budget
-        artifact = self._context_budget_artifact_destination(parsed, skyrl_overrides)
-        write_resolved_context_budget(budget, artifact, parsed.config_path)
-        print("Resolved context budget:")
-        print(f"  request window: {budget.request_window_tokens}")
-        print(f"  client input:   {budget.max_input_tokens}")
-        print(f"  turn output:    {budget.max_new_tokens_per_turn}")
-        print(f"  max turns:      {budget.max_turns}")
-        print(f"  artifact:       {artifact}")
-        return artifact
-
-    def _write_resolved_config(self, entrypoint: str, hydra_args: List[str], source_config: Path) -> None:
+    def _write_resolved_config(self, config: DictConfig) -> None:
         if not self.config.resolved_config_uri:
             return
-        filesystem, path = fs_and_path(self.config.resolved_config_uri)
-        with filesystem.open(path, "w") as destination:
-            json.dump(
+        record = OmegaConf.to_container(
+            OmegaConf.create(
                 {
-                    "entrypoint": entrypoint,
-                    "hydra_args": hydra_args,
-                    "source_config": str(source_config),
+                    "config": config,
                     "train_data_sources": self._train_data_sources,
                     "val_data_sources": self._val_data_sources,
-                },
-                destination,
-                sort_keys=True,
-            )
+                }
+            ),
+            resolve=True,
+        )
+        assert isinstance(record, dict)
+        filesystem, path = fs_and_path(self.config.resolved_config_uri)
+        with filesystem.open(path, "w") as destination:
+            json.dump(record, destination, sort_keys=True)
 
-    def _run_checkpoint_export(self, rl_config_path: Path, exp_args: dict, hpc: "_LocalHPCStub") -> int:
-        """Run the policy-only conversion pipeline without training setup."""
-        parsed = parse_checkpoint_export_config(rl_config_path, model_override=self.config.model_path)
-        hydra_args = build_checkpoint_export_hydra_args(parsed, exp_args, hpc)
-        hydra_args.extend(self.config.skyrl_overrides)
-        print(f"Loaded RL config: {parsed.config_path}")
-        self._write_resolved_config(CHECKPOINT_EXPORT_ENTRYPOINT, hydra_args, parsed.config_path)
-        if self.config.dry_run:
-            print("\n[DRY RUN] Would execute SkyRL with:")
-            print(get_skyrl_command_preview(CHECKPOINT_EXPORT_ENTRYPOINT, hydra_args))
-            return 0
-        return self._run_skyrl(CHECKPOINT_EXPORT_ENTRYPOINT, hydra_args)
-
-    def _resolve_data_inputs(self, data_kind: str, exp_args: Dict[str, Any]) -> None:
+    def _resolve_data_inputs(self, data_kind: str) -> None:
         for role, attribute in (("train", "train_data"), ("validation", "val_data")):
             values = getattr(self.config, attribute)
             if not values:
@@ -243,67 +179,26 @@ class LocalRLRunner:
             sources = list(resolved.sources)
             setattr(self.config, attribute, paths)
             setattr(self, f"_{attribute}_sources", sources)
-            exp_args[attribute] = paths
             print(f"Resolved {role} data: {paths}")
-
-    def _resolve_terminal_bench_sidechannel(self, parsed) -> None:
-        """Resolve optional task roots without changing the primary parquet dataloader."""
-        values = parsed.data.get("terminal_bench_data")
-        if not values:
-            return
-        print(f"\nResolving terminal-bench sidechannel data (kind=tasks): {values}")
-        resolved = resolve_rl_train_data_with_sources(list(values), kind="tasks")
-        parsed.data["terminal_bench_data"] = list(resolved.paths)
-        self._terminal_bench_data_sources = list(resolved.sources)
-        print(f"Resolved terminal-bench sidechannel data: {list(resolved.paths)}")
 
     def run(self) -> int:
         """Execute the RL training job. Returns an exit code (0 for success)."""
         self.print_banner()
 
-        rl_config_path = materialize_rl_config(self.config.rl_config_path)
-        exp_args = self._build_exp_args()
-        hpc_stub = _LocalHPCStub(
-            gpus_per_node=self.config.gpus,
-            cpus_per_node=self.config.cpus,
-        )
-        if self.config.entrypoint == CHECKPOINT_EXPORT_ENTRYPOINT:
-            return self._run_checkpoint_export(rl_config_path, exp_args, hpc_stub)
-
-        parsed = parse_rl_config(
-            rl_config_path,
-            model_override=self.config.model_path,
-        )
-        parsed, skyrl_overrides = apply_context_budget_overrides(parsed, self.config.skyrl_overrides)
-        entrypoint = self.config.entrypoint or parsed.entrypoint
-        if (
-            entrypoint != parsed.entrypoint
-            and entrypoint in TRAINING_LOOP_ENTRYPOINT_MODULES
-            and parsed.entrypoint in TRAINING_LOOP_ENTRYPOINT_MODULES
-        ):
-            raise ValueError(
-                f"--entrypoint {entrypoint} contradicts the RL config's entrypoint "
-                f"({parsed.entrypoint}); the config names the training loop, so change it there"
+        launch_config = self.config.launch_config
+        if launch_config is None:
+            raise ValueError("training driver requires a loaded launch config")
+        skyrl_config = OmegaConf.create(OmegaConf.to_container(launch_config.skyrl, resolve=False))
+        if launch_config.run.mode == RunMode.CHECKPOINT_EXPORT:
+            self._write_resolved_config(launch_config)
+            return self._run_skyrl(launch_config)
+        self._resolve_data_inputs(str(launch_config.inputs.data_kind))
+        terminal_bench_data = skyrl_config.get("data", {}).get("terminal_bench_data", ())
+        if terminal_bench_data:
+            terminal_bench_data = tuple(
+                resolve_rl_train_data_with_sources(list(terminal_bench_data), kind="tasks").paths
             )
-        self.config.tensor_parallel_size = parsed.tensor_parallel_size
-        self._resolve_data_inputs(parsed.data_kind, exp_args)
-        self._resolve_terminal_bench_sidechannel(parsed)
-        hydra_args = build_skyrl_hydra_args(parsed, exp_args, hpc_stub)
-        self._record_context_budget(parsed, skyrl_overrides)
-
-        print(f"Loaded RL config: {parsed.config_path}")
-
-        if skyrl_overrides:
-            hydra_args.extend(skyrl_overrides)
-
-        self._write_resolved_config(entrypoint, hydra_args, parsed.config_path)
-
-        if self.config.dry_run:
-            print("\n[DRY RUN] Would execute SkyRL with:")
-            print(get_skyrl_command_preview(entrypoint, hydra_args))
-            return 0
-
-        self._setup_environment(exp_args)
+        self._setup_environment()
         # Cross-cluster ingress (opencode-RL literal capture): when enabled, stand up
         # the co-located RecordProxy + register the endpoint + mint the (parent, when
         # federated) capability URL and publish it as HARBOR_MODEL_ENDPOINT BEFORE the
@@ -316,16 +211,24 @@ class LocalRLRunner:
             # inside a Ray worker that never inherits this process's HARBOR_MODEL_ENDPOINT
             # env — see _ingress_context / __init__). Snapshot cadence matches the
             # existing design (one api_base string baked for the job's lifetime).
-            if self._minted_agent_api_base:
-                hydra_args = hydra_args + [f"++terminal_bench_config.agent_api_base={self._minted_agent_api_base}"]
             # Thread the RecordProxy log path as cfg DATA too (same Ray boundary): the
             # generator resolves the shared literal log from
             # terminal_bench_config.literal_log_path (env fallback) to correlate each
             # opencode trial's token_ids/logprobs + rebuild its chat_history. Without
             # this the worker's os.environ lacks the path and TIS skips 100% of the batch.
-            if self._literal_log_path:
-                hydra_args = hydra_args + [f"++terminal_bench_config.literal_log_path={self._literal_log_path}"]
-            return self._run_skyrl(entrypoint, hydra_args)
+            skyrl_config = apply_task_local_values(
+                skyrl_config,
+                TaskLocalSkyRLValues(
+                    train_data=tuple(self.config.train_data),
+                    validation_data=tuple(self.config.val_data),
+                    terminal_bench_data=terminal_bench_data,
+                    agent_api_base=self._minted_agent_api_base,
+                    literal_log_path=self._literal_log_path,
+                ),
+            )
+            launch_config.skyrl = skyrl_config
+            self._write_resolved_config(launch_config)
+            return self._run_skyrl(launch_config)
 
     @contextlib.contextmanager
     def _ingress_context(self) -> Iterator[None]:
@@ -432,8 +335,7 @@ class LocalRLRunner:
                 # LLM-judge verifiers on the worker read it), so overloading it with a vLLM
                 # endpoint would silently misroute every judge call to vLLM.
                 os.environ["HARBOR_MODEL_ENDPOINT"] = api_base
-                # Also thread the minted URL through the SkyRL Hydra cfg. run() injects
-                # ``++terminal_bench_config.agent_api_base=<api_base>`` from this, so the
+                # Also thread the minted URL through the structured SkyRL config so the
                 # value reaches the Ray tasks/actors (skyrl_entrypoint, RolloutCoordinator)
                 # where HarborTrajectoryRunner is built. The env var alone is insufficient:
                 # this runner ATTACHES to a Ray cluster the controller started BEFORE the
@@ -464,25 +366,7 @@ class LocalRLRunner:
         """GPUs per node, defaulting to total `gpus` for the single-node case."""
         return self.config.gpus_per_node or self.config.gpus
 
-    def _build_exp_args(self) -> Dict[str, Any]:
-        return {
-            "job_name": self.config.job_name,
-            "experiments_dir": self.config.experiments_dir,
-            "model_path": self.config.model_path,
-            "model_revision": self.config.model_revision,
-            "model_source_uri": self.config.model_source_uri,
-            "model_source_identity": self.config.model_source_identity,
-            "train_data": self.config.train_data,
-            "val_data": self.config.val_data,
-            "num_nodes": self.config.num_nodes,
-            "gpus_per_node": self._gpus_per_node(),
-            "cpus_per_node": self.config.cpus,
-            "tensor_parallel_size": self.config.tensor_parallel_size,
-            "ray_port": self.config.ray_port,
-            "master_port": self.config.master_port,
-        }
-
-    def _setup_environment(self, exp_args: Dict[str, Any]) -> None:
+    def _setup_environment(self) -> None:
         """Configure environment variables for RL training."""
         os.environ["TENSOR_PARALLEL_SIZE"] = str(self.config.tensor_parallel_size)
         os.environ["NUM_INFERENCE_ENGINES"] = str(
@@ -505,7 +389,7 @@ class LocalRLRunner:
         print(f"  NUM_INFERENCE_ENGINES={os.environ['NUM_INFERENCE_ENGINES']}")
         print(f"  WANDB_DIR={wandb_dir}")
 
-    def _run_skyrl(self, entrypoint: str, hydra_args: List[str]) -> int:
+    def _run_skyrl(self, launch_config: DictConfig) -> int:
         """Exec the SkyRL entrypoint attached to the externally-managed Ray cluster.
 
         The controller exported RAY_ADDRESS, so SkyRL's ``initialize_ray()`` (a bare
@@ -526,11 +410,14 @@ class LocalRLRunner:
         )
 
         python_exe = str(self.rl_env_path / "bin" / "python") if self.rl_env_path else sys.executable
-        cmd = [python_exe, "-m", entrypoint] + hydra_args
+        config_path = Path(tempfile.gettempdir()) / "marinskyrl" / "skyrl-launch.yaml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        OmegaConf.save(launch_config, config_path, resolve=True)
+        cmd = [python_exe, "-m", "cloud.iris.skyrl_entrypoint", "--config", str(config_path)]
 
         print("\nRunning SkyRL:")
-        print(f"  Entrypoint: {entrypoint}")
-        print(f"  Args: {len(hydra_args)} Hydra arguments")
+        print(f"  Entrypoint: {launch_config.runtime.entrypoint}")
+        print(f"  Config: {config_path}")
 
         skyrl_home = os.environ.get("SKYRL_HOME")
         cwd = None
@@ -550,7 +437,7 @@ class LocalRLRunner:
             "skyrl-entrypoint",
             returncode,
             pid=proc.pid,
-            metadata={"entrypoint": entrypoint},
+            metadata={"entrypoint": launch_config.runtime.entrypoint},
         )
         if outcome.kind is ProcessOutcomeKind.SIGNAL:
             print(
@@ -562,181 +449,36 @@ class LocalRLRunner:
         return outcome.public_exit_code
 
 
-@dataclass
-class _LocalHPCStub:
-    """Minimal HPC-like object for build_skyrl_hydra_args compatibility."""
-
-    gpus_per_node: int = 4
-    cpus_per_node: int = 48
-    name: str = "local"
-
-
-def parse_list_arg(value: str) -> List[str | dict[str, Any]]:
-    """Parse a JSON list argument from the CLI."""
-    if not value:
-        return []
-    parsed = json.loads(value)
-    if not isinstance(parsed, list):
-        raise ValueError("expected a JSON list")
-    return parsed
-
-
 def create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Run MarinSkyRL training inside the Iris container, attached to the "
-        "controller-bootstrapped Ray cluster.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-
-    parser.add_argument("--rl_config", required=True, help="Path to a SkyRL config YAML.")
-    parser.add_argument("--rl-config", dest="rl_config", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--entrypoint",
-        default=None,
-        help="Entrypoint module to run instead of the config's; it may not replace one training entrypoint with another.",
-    )
-
-    parser.add_argument("--model_path", required=True, help="Model path or HuggingFace ID.")
-    parser.add_argument("--model-path", dest="model_path", help=argparse.SUPPRESS)
-    parser.add_argument("--model-revision")
-    parser.add_argument("--model-source-uri")
-    parser.add_argument("--model-source-identity")
-
-    parser.add_argument("--job_name", required=True, help="Name for this training job.")
-    parser.add_argument("--job-name", dest="job_name", help=argparse.SUPPRESS)
-
-    parser.add_argument("--train_data", default="[]", help="Training data paths as a JSON list.")
-    parser.add_argument("--train-data", dest="train_data", help=argparse.SUPPRESS)
-
-    parser.add_argument("--val_data", default="[]", help="Validation data paths as a JSON list.")
-    parser.add_argument("--val-data", dest="val_data", help=argparse.SUPPRESS)
-
-    parser.add_argument("--gpus", type=int, default=4, help="Total number of GPUs to use.")
-    parser.add_argument("--cpus", type=int, default=0, help="Number of CPUs (0 = auto-detect).")
-
-    parser.add_argument(
-        "--num_nodes",
-        type=int,
-        default=1,
-        help="Number of nodes. >1 attaches to an external Ray cluster via RAY_ADDRESS.",
-    )
-    parser.add_argument("--num-nodes", dest="num_nodes", help=argparse.SUPPRESS)
-
-    parser.add_argument(
-        "--gpus_per_node",
-        type=int,
-        default=0,
-        help="GPUs per node (0 = use --gpus; set for multi-node placement).",
-    )
-    parser.add_argument("--gpus-per-node", dest="gpus_per_node", help=argparse.SUPPRESS)
-
-    parser.add_argument("--ray_port", type=int, default=6379, help="Port for the Ray cluster.")
-    parser.add_argument("--ray-port", dest="ray_port", help=argparse.SUPPRESS)
-
-    parser.add_argument("--master_port", type=int, default=12345, help="Master port for distributed training.")
-    parser.add_argument("--master-port", dest="master_port", help=argparse.SUPPRESS)
-
-    parser.add_argument("--skyrl_override", action="append", default=[], help="SkyRL Hydra override (repeatable).")
-    parser.add_argument("--skyrl-override", dest="skyrl_override", action="append", help=argparse.SUPPRESS)
-
-    parser.add_argument(
-        "--experiments_dir",
-        default=str(PROJECT_ROOT / "experiments"),
-        help="Directory for experiment outputs.",
-    )
-    parser.add_argument("--experiments-dir", dest="experiments_dir", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--resolved-config-uri",
-        default=None,
-        help="Durable JSON destination for the exact SkyRL entry point and Hydra arguments.",
-    )
-
-    parser.add_argument("--dry_run", action="store_true", help="Print config and command without running.")
-    parser.add_argument("--dry-run", dest="dry_run", action="store_true", help=argparse.SUPPRESS)
-
-    # --- Cross-cluster ingress (Exp2 opencode-RL literal capture) --- #
-    # Forwarded by the launcher under --ingress-mode controller. Default off => the
-    # standup context is a null CM (byte-identical).
-    parser.add_argument(
-        "--ingress_mode",
-        default="direct",
-        choices=["direct", "controller"],
-        help="'controller' stands up the RecordProxy + registers the endpoint + mints "
-        "the capability URL and publishes it as HARBOR_MODEL_ENDPOINT. Default 'direct' off.",
-    )
-    parser.add_argument("--ingress-mode", dest="ingress_mode", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--ingress_host",
-        default="",
-        help="Public controller-ingress host for the capability URL (iris.oa.dev for "
-        "the federated CoreWeave path). Required with --ingress_mode controller.",
-    )
-    parser.add_argument("--ingress-host", dest="ingress_host", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--record_literal",
-        action="store_true",
-        help="Co-locate harbor's RecordProxy in front of vLLM to capture literal.jsonl.",
-    )
-    parser.add_argument("--record-literal", dest="record_literal", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--target_cluster",
-        default="",
-        help="Set for federated ingress: mint the capability token at the PARENT (marin) "
-        "for the mirrored endpoint (a peer-signed token 401s at iris.oa.dev).",
-    )
-    parser.add_argument("--target-cluster", dest="target_cluster", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--parent_controller_config",
-        default="",
-        help="Parent (marin) cluster YAML for federated parent-minting; also honored via "
-        "the OTAGENT_PARENT_CONTROLLER_CONFIG env.",
-    )
-    parser.add_argument("--parent-controller-config", dest="parent_controller_config", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--vllm_http_port",
-        type=int,
-        default=8000,
-        help="Local vLLM HTTP endpoint port the RecordProxy relays to (= generator.http_endpoint_port; default 8000).",
-    )
-    parser.add_argument("--vllm-http-port", dest="vllm_http_port", type=int, help=argparse.SUPPRESS)
-
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", required=True, type=Path)
     return parser
 
 
 def main() -> None:
-    parser = create_parser()
-    args = parser.parse_args()
-
-    train_data = parse_list_arg(args.train_data)
-    val_data = parse_list_arg(args.val_data)
-    skyrl_overrides = args.skyrl_override or []
-
+    args = create_parser().parse_args()
+    launch_config = load_launch_config(args.config)
+    allocation = launch_config.iris.allocation
     config = LocalRLConfig(
-        rl_config_path=args.rl_config,
-        job_name=args.job_name,
-        model_path=args.model_path,
-        model_revision=args.model_revision,
-        entrypoint=args.entrypoint,
-        model_source_uri=args.model_source_uri,
-        model_source_identity=args.model_source_identity,
-        train_data=train_data,
-        val_data=val_data,
-        experiments_dir=args.experiments_dir,
-        resolved_config_uri=args.resolved_config_uri,
-        gpus=args.gpus,
-        cpus=args.cpus,
-        num_nodes=int(args.num_nodes),
-        gpus_per_node=int(args.gpus_per_node),
-        ray_port=args.ray_port,
-        master_port=args.master_port,
-        skyrl_overrides=skyrl_overrides,
-        dry_run=args.dry_run,
-        ingress_mode=args.ingress_mode,
-        ingress_host=args.ingress_host,
-        record_literal=bool(args.record_literal),
-        target_cluster=args.target_cluster,
-        parent_controller_config=args.parent_controller_config,
-        vllm_http_port=int(args.vllm_http_port),
+        job_name=str(launch_config.iris.job_name),
+        model_path=str(launch_config.skyrl.trainer.policy.model.path),
+        model_source_uri=str(launch_config.inputs.model.uri),
+        model_source_identity=str(launch_config.inputs.model.identity),
+        train_data=list(launch_config.inputs.train_data),
+        val_data=list(launch_config.inputs.validation_data),
+        experiments_dir=str(launch_config.runtime.experiments_dir),
+        resolved_config_uri=str(launch_config.artifacts.resolved_config_uri),
+        gpus=int(allocation.num_nodes * allocation.gpus_per_node),
+        num_nodes=int(allocation.num_nodes),
+        gpus_per_node=int(allocation.gpus_per_node),
+        tensor_parallel_size=int(launch_config.skyrl.generator.inference_engine_tensor_parallel_size),
+        ingress_mode=str(launch_config.ingress.mode),
+        ingress_host=str(launch_config.ingress.host),
+        record_literal=bool(launch_config.ingress.record_literal),
+        target_cluster=str(launch_config.iris.target_cluster or ""),
+        parent_controller_config=str(launch_config.iris.parent_cluster_config or ""),
+        vllm_http_port=int(launch_config.ingress.vllm_http_port),
+        launch_config=launch_config,
     )
 
     runner = LocalRLRunner(config)
