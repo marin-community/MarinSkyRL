@@ -1483,8 +1483,9 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         # vLLM sets these inside its GPU worker during batch-invariant startup.
         # Megatron's separate Ray rank shares a NCCL weight-update group with
         # that worker. Different per-rank NCCL settings made the first broadcast
-        # fail with "Message truncated" and left the sender blocked. Keep the
-        # group settings aligned before either worker initializes NCCL.
+        # fail with "Message truncated" and left the sender blocked. Apply the
+        # same settings to all Ray workers before NCCL initializes; this also
+        # constrains training collectives when batch invariance is enabled.
         env_vars.update(
             NCCL_LAUNCH_MODE="GROUP",
             NCCL_COLLNET_ENABLE="0",

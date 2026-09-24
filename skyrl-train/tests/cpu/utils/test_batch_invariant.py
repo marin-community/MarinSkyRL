@@ -17,7 +17,10 @@ def test_batch_invariant_is_disabled_by_default(monkeypatch):
     cfg = example_dummy_config()
 
     assert cfg.trainer.algorithm.batch_invariant is False
-    assert VLLM_BATCH_INVARIANT_ENV not in prepare_runtime_environment(cfg)
+    ray_environment = prepare_runtime_environment(cfg)
+    assert VLLM_BATCH_INVARIANT_ENV not in ray_environment
+    assert "NCCL_PROTO" not in ray_environment
+    assert "NCCL_MAX_NCHANNELS" not in ray_environment
 
 
 def test_batch_invariant_reaches_ray_and_nested_vllm_workers(monkeypatch):
