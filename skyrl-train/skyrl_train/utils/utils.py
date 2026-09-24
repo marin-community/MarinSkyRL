@@ -1471,6 +1471,25 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
             logger.info(f"Exporting `{_net_env}` to ray runtime env: {os.environ[_net_env]}")
             env_vars[_net_env] = os.environ[_net_env]
 
+    if env_vars.get("VLLM_BATCH_INVARIANT") == "1" or os.environ.get("VLLM_BATCH_INVARIANT") == "1":
+        # vLLM sets these inside its GPU worker during batch-invariant startup.
+        # Megatron's separate Ray rank shares a NCCL weight-update group with
+        # that worker. Different per-rank NCCL settings made the first broadcast
+        # fail with "Message truncated" and left the sender blocked. Keep the
+        # group settings aligned before either worker initializes NCCL.
+        env_vars.update(
+            NCCL_LAUNCH_MODE="GROUP",
+            NCCL_COLLNET_ENABLE="0",
+            NCCL_NVLS_ENABLE="0",
+            NCCL_P2P_NET_DISABLE="1",
+            NCCL_MIN_NCHANNELS="1",
+            NCCL_MAX_NCHANNELS="1",
+            NCCL_PROTO="Simple",
+            NCCL_ALGO="allreduce:tree",
+            NCCL_NTHREADS="1",
+            NCCL_SOCKET_NTHREADS="1",
+        )
+
     # EnvVarManager owns NCCL verbosity through trainer.debug_mode. Do not copy
     # ambient NCCL_DEBUG values into Ray workers: stale launcher extra_env once
     # turned an ordinary checkpoint export into a per-collective INFO trace.
