@@ -18,6 +18,11 @@ search:
 # separate judge and NeMo Skills services. Production configs should replace
 # these loopback defaults with their deployed services.
 nemotron_ultra:
+  # verify runs each row's verifier. skip keeps tool turns but returns no verdict, so
+  # judge-backed rows need no judge; Lean refinement rows are still verified because the
+  # verdict drives their correction turn. Valid only for pure on-policy distillation
+  # (distillation reward_mode=replace, uniform advantages, no eval).
+  grading: verify
   sandbox:
     host: "127.0.0.1"
     port: 6000
