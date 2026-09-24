@@ -549,8 +549,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         rank=torch.distributed.get_rank(),
                         outcome=outcome,
                     )
-            except Exception as error:
-                logger.warning("Could not publish Megatron policy timings: {}", error)
+            except Exception:
+                logger.opt(exception=True).warning("Could not publish Megatron policy timings")
 
     def _ppo_train_with_timings(self, train_data, timing: MegatronTrainTimings) -> "TrainingOutputBatch":
         self._drain_r3_decentral_stagger(train_data)

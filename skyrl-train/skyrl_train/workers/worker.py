@@ -1272,7 +1272,7 @@ class PolicyWorkerBase(Worker):
         One tracker per parameter set; a changed layout resets it.
         """
         settings = grad_cosine_settings(self.cfg.trainer.algorithm)
-        if not settings.enabled or settings.store == "off":
+        if not settings.enabled:
             return None
         group = megatron_optimizer.get_grad_stats_parallel_group() if megatron_optimizer is not None else None
         identities = tuple(id(parameter) for row in self.optimizer.param_groups for parameter in row["params"])

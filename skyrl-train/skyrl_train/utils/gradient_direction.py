@@ -14,7 +14,7 @@ CHUNK_ELEMENTS = 1 << 20
 # What a worker reports before, or without, a gradient observation.
 NO_GRADIENT_METRICS: Mapping[str, float] = MappingProxyType({})
 
-GradientStore = Literal["gpu_fp32", "cpu_bf16", "off"]
+GradientStore = Literal["gpu_fp32", "cpu_bf16"]
 DEFAULT_GRADIENT_STORE: GradientStore = "gpu_fp32"
 
 
@@ -44,7 +44,7 @@ class GradientDirectionTracker:
     update clears the history on every rank.
 
     Args:
-        store: Previous-gradient storage, or ``off`` to disable measurement.
+        store: Previous-gradient storage.
         device: Device for current gradients and the collective, including empty shards.
         world_group: Distributed group spanning the disjoint policy gradient shards.
         reduce_fn: Optional SUM collective returning the reduced moment vector.
@@ -57,7 +57,7 @@ class GradientDirectionTracker:
         world_group: dist.ProcessGroup | None = None,
         reduce_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ):
-        if store not in {"gpu_fp32", "cpu_bf16", "off"}:
+        if store not in {"gpu_fp32", "cpu_bf16"}:
             raise ValueError(f"Unknown gradient storage: {store}")
         self.store = store
         self.device = device
@@ -78,8 +78,6 @@ class GradientDirectionTracker:
         no cosine. A shape change starts a new history; a change of parameter
         identity or order needs an explicit reset.
         """
-        if self.store == "off":
-            return {}
         gradients = list(grads)
         if any(grad.device != self.device or not grad.is_contiguous() for grad in gradients):
             raise ValueError("Gradient shards must be contiguous and on the collective device")
