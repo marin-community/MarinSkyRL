@@ -84,6 +84,22 @@
         "minimum_seconds": 0.48787779454141855
       }
     },
+    "nccl-chunks-02": {
+      "bytes_per_version": 314572800,
+      "chunks": 32,
+      "first_seconds": 2.0681823719933163,
+      "receivers": [
+        "g82267a"
+      ],
+      "sender": "sjtsxs64",
+      "versions": 12,
+      "warm": {
+        "count": 11,
+        "maximum_seconds": 0.5141925709904172,
+        "median_seconds": 0.5062889939872548,
+        "minimum_seconds": 0.5024081640003715
+      }
+    },
     "nccl-fanout": {
       "bytes_per_version": 314572800,
       "chunks": 32,

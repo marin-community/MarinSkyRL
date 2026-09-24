@@ -1,0 +1,3015 @@
+{
+  "bundles": {
+    "0b9713f7f7e5531c5a5abc90873c9e90d66ab3db7e30704135cafaee01a321c8": {
+      "byte_count": 15877364,
+      "source_files": {
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json": {
+          "published_path": "executed-source/manifest-expert-32.json/215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10.json",
+          "sha256": "215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10"
+        },
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-preflight.json": {
+          "published_path": "executed-source/manifest-preflight.json/b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d.json",
+          "sha256": "b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d"
+        },
+        "scripts/bench_cross_zone_qualification.py": {
+          "published_path": "executed-source/bench_cross_zone_qualification.py/3d1457d57f5253b7ad79bde25db02152e861516dedda232ee230eb13ac4f04f6.py",
+          "sha256": "3d1457d57f5253b7ad79bde25db02152e861516dedda232ee230eb13ac4f04f6"
+        },
+        "scripts/probe_cross_zone_verbs.py": {
+          "published_path": "executed-source/probe_cross_zone_verbs.py/c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee.py",
+          "sha256": "c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee"
+        }
+      }
+    },
+    "1744c5c52c4ab6d99be49caf18074850b05e86b1e890555e9835ebb707388b13": {
+      "byte_count": 15882128,
+      "source_files": {
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json": {
+          "published_path": "executed-source/manifest-expert-32.json/215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10.json",
+          "sha256": "215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10"
+        },
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-preflight.json": {
+          "published_path": "executed-source/manifest-preflight.json/b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d.json",
+          "sha256": "b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d"
+        },
+        "scripts/bench_cross_zone_qualification.py": {
+          "published_path": "executed-source/bench_cross_zone_qualification.py/1146b2d453e9248811927b6607def1a686af21ca594f61aaec9076097e298728.py",
+          "sha256": "1146b2d453e9248811927b6607def1a686af21ca594f61aaec9076097e298728"
+        },
+        "scripts/probe_cross_zone_verbs.py": {
+          "published_path": "executed-source/probe_cross_zone_verbs.py/c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee.py",
+          "sha256": "c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee"
+        },
+        "scripts/run_cross_zone_fanout.sh": {
+          "published_path": "executed-source/run_cross_zone_fanout.sh/a4a53f5db987c86c976160f1c7869798dd877cacb94e7251110033c465fe2f3e.sh",
+          "sha256": "a4a53f5db987c86c976160f1c7869798dd877cacb94e7251110033c465fe2f3e"
+        }
+      }
+    },
+    "212a3287fe79ad615afacb1c65e2274ae93ecbd96778b19618f66411ba46cd0a": {
+      "byte_count": 15888974,
+      "source_files": {
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json": {
+          "published_path": "executed-source/manifest-expert-32.json/215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10.json",
+          "sha256": "215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10"
+        },
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-preflight.json": {
+          "published_path": "executed-source/manifest-preflight.json/b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d.json",
+          "sha256": "b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d"
+        },
+        "scripts/bench_cross_zone_nccl.py": {
+          "published_path": "executed-source/bench_cross_zone_nccl.py/82ccb39b1e16567bbb1b2cb495433006a1670c0d553deb6ad1f76afdd31551ef.py",
+          "sha256": "82ccb39b1e16567bbb1b2cb495433006a1670c0d553deb6ad1f76afdd31551ef"
+        },
+        "scripts/bench_cross_zone_one_to_two.py": {
+          "published_path": "executed-source/bench_cross_zone_one_to_two.py/e7cb4c59c5dc9a0b17732a06903556d078d99350d4399b85ac52311b276dbebc.py",
+          "sha256": "e7cb4c59c5dc9a0b17732a06903556d078d99350d4399b85ac52311b276dbebc"
+        },
+        "scripts/bench_cross_zone_qualification.py": {
+          "published_path": "executed-source/bench_cross_zone_qualification.py/1146b2d453e9248811927b6607def1a686af21ca594f61aaec9076097e298728.py",
+          "sha256": "1146b2d453e9248811927b6607def1a686af21ca594f61aaec9076097e298728"
+        },
+        "scripts/probe_cross_zone_verbs.py": {
+          "published_path": "executed-source/probe_cross_zone_verbs.py/c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee.py",
+          "sha256": "c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee"
+        },
+        "scripts/run_cross_zone_fanout.sh": {
+          "published_path": "executed-source/run_cross_zone_fanout.sh/a4a53f5db987c86c976160f1c7869798dd877cacb94e7251110033c465fe2f3e.sh",
+          "sha256": "a4a53f5db987c86c976160f1c7869798dd877cacb94e7251110033c465fe2f3e"
+        },
+        "scripts/run_cross_zone_one_to_two.sh": {
+          "published_path": "executed-source/run_cross_zone_one_to_two.sh/cae3317efcbef32a5bb84c574a8ae213e4d1e4bce61b7098dd05d1e5503bd5b6.sh",
+          "sha256": "cae3317efcbef32a5bb84c574a8ae213e4d1e4bce61b7098dd05d1e5503bd5b6"
+        }
+      }
+    },
+    "2adac1b3568eb36bfb2215c877e8aa89d374e60f05378e2bfc5f2ddf3e49445d": {
+      "byte_count": 15877345,
+      "source_files": {
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json": {
+          "published_path": "executed-source/manifest-expert-32.json/215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10.json",
+          "sha256": "215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10"
+        },
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-preflight.json": {
+          "published_path": "executed-source/manifest-preflight.json/b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d.json",
+          "sha256": "b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d"
+        },
+        "scripts/bench_cross_zone_qualification.py": {
+          "published_path": "executed-source/bench_cross_zone_qualification.py/656c45dec2dde07356be2a764d84135c341e718b66af01206ed44b273c1e6398.py",
+          "sha256": "656c45dec2dde07356be2a764d84135c341e718b66af01206ed44b273c1e6398"
+        },
+        "scripts/probe_cross_zone_verbs.py": {
+          "published_path": "executed-source/probe_cross_zone_verbs.py/c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee.py",
+          "sha256": "c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee"
+        }
+      }
+    },
+    "2d60fa3c4d939767e1409ffe4a6d5d2b13d79f111308252727929b00744ae2e5": {
+      "byte_count": 15644024,
+      "source_files": {
+        "scripts/probe_cross_zone_verbs.py": {
+          "published_path": "executed-source/probe_cross_zone_verbs.py/c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee.py",
+          "sha256": "c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee"
+        }
+      }
+    },
+    "37deb6d442c5e5bfdec09b8772f70c244683b08685f841d2d4566d0306c59353": {
+      "byte_count": 15880992,
+      "source_files": {
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json": {
+          "published_path": "executed-source/manifest-expert-32.json/215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10.json",
+          "sha256": "215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10"
+        },
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-preflight.json": {
+          "published_path": "executed-source/manifest-preflight.json/b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d.json",
+          "sha256": "b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d"
+        },
+        "scripts/bench_cross_zone_qualification.py": {
+          "published_path": "executed-source/bench_cross_zone_qualification.py/1146b2d453e9248811927b6607def1a686af21ca594f61aaec9076097e298728.py",
+          "sha256": "1146b2d453e9248811927b6607def1a686af21ca594f61aaec9076097e298728"
+        },
+        "scripts/probe_cross_zone_verbs.py": {
+          "published_path": "executed-source/probe_cross_zone_verbs.py/c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee.py",
+          "sha256": "c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee"
+        },
+        "scripts/run_cross_zone_fanout.sh": {
+          "published_path": "executed-source/run_cross_zone_fanout.sh/a4a53f5db987c86c976160f1c7869798dd877cacb94e7251110033c465fe2f3e.sh",
+          "sha256": "a4a53f5db987c86c976160f1c7869798dd877cacb94e7251110033c465fe2f3e"
+        }
+      }
+    },
+    "3d947c1784ace5a0d95232ae435a663648474f35345cfade9ce975ebf96090e0": {
+      "byte_count": 15887732,
+      "source_files": {
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json": {
+          "published_path": "executed-source/manifest-expert-32.json/215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10.json",
+          "sha256": "215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10"
+        },
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-preflight.json": {
+          "published_path": "executed-source/manifest-preflight.json/b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d.json",
+          "sha256": "b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d"
+        },
+        "scripts/bench_cross_zone_nccl.py": {
+          "published_path": "executed-source/bench_cross_zone_nccl.py/35048dc9a00f4ecb38a6f68d1bbcb71ba740d3ddf9308d6b7b00c3709d6ea465.py",
+          "sha256": "35048dc9a00f4ecb38a6f68d1bbcb71ba740d3ddf9308d6b7b00c3709d6ea465"
+        },
+        "scripts/bench_cross_zone_one_to_two.py": {
+          "published_path": "executed-source/bench_cross_zone_one_to_two.py/e7cb4c59c5dc9a0b17732a06903556d078d99350d4399b85ac52311b276dbebc.py",
+          "sha256": "e7cb4c59c5dc9a0b17732a06903556d078d99350d4399b85ac52311b276dbebc"
+        },
+        "scripts/bench_cross_zone_qualification.py": {
+          "published_path": "executed-source/bench_cross_zone_qualification.py/1146b2d453e9248811927b6607def1a686af21ca594f61aaec9076097e298728.py",
+          "sha256": "1146b2d453e9248811927b6607def1a686af21ca594f61aaec9076097e298728"
+        },
+        "scripts/probe_cross_zone_verbs.py": {
+          "published_path": "executed-source/probe_cross_zone_verbs.py/c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee.py",
+          "sha256": "c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee"
+        },
+        "scripts/run_cross_zone_fanout.sh": {
+          "published_path": "executed-source/run_cross_zone_fanout.sh/a4a53f5db987c86c976160f1c7869798dd877cacb94e7251110033c465fe2f3e.sh",
+          "sha256": "a4a53f5db987c86c976160f1c7869798dd877cacb94e7251110033c465fe2f3e"
+        },
+        "scripts/run_cross_zone_one_to_two.sh": {
+          "published_path": "executed-source/run_cross_zone_one_to_two.sh/cae3317efcbef32a5bb84c574a8ae213e4d1e4bce61b7098dd05d1e5503bd5b6.sh",
+          "sha256": "cae3317efcbef32a5bb84c574a8ae213e4d1e4bce61b7098dd05d1e5503bd5b6"
+        }
+      }
+    },
+    "84fe920f6cdbf0d010502cc71090815098bc35aba2a2970007bf847d443bd3da": {
+      "byte_count": 15898117,
+      "source_files": {
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json": {
+          "published_path": "executed-source/manifest-expert-32.json/215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10.json",
+          "sha256": "215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10"
+        },
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-preflight.json": {
+          "published_path": "executed-source/manifest-preflight.json/b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d.json",
+          "sha256": "b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d"
+        },
+        "scripts/bench_cross_zone_nccl.py": {
+          "published_path": "executed-source/bench_cross_zone_nccl.py/ad7ff14bf48c11e323f4150e284ffce42c879b99b1e049001fd2b59afa562b30.py",
+          "sha256": "ad7ff14bf48c11e323f4150e284ffce42c879b99b1e049001fd2b59afa562b30"
+        },
+        "scripts/bench_cross_zone_one_to_two.py": {
+          "published_path": "executed-source/bench_cross_zone_one_to_two.py/cad322713be535600ab63feb282a0f82f2b99287fcd247ab15a92006e2f812f6.py",
+          "sha256": "cad322713be535600ab63feb282a0f82f2b99287fcd247ab15a92006e2f812f6"
+        },
+        "scripts/bench_cross_zone_qualification.py": {
+          "published_path": "executed-source/bench_cross_zone_qualification.py/487a4dedd79d8520d8700537dc4db13e319bafb8873bc232673d2a40b3684ae5.py",
+          "sha256": "487a4dedd79d8520d8700537dc4db13e319bafb8873bc232673d2a40b3684ae5"
+        },
+        "scripts/probe_cross_zone_verbs.py": {
+          "published_path": "executed-source/probe_cross_zone_verbs.py/8a75052394030dc0e075ba7c5feebdcd1201883a14197a39d64e945b96fdec37.py",
+          "sha256": "8a75052394030dc0e075ba7c5feebdcd1201883a14197a39d64e945b96fdec37"
+        },
+        "scripts/run_cross_zone_fanout.sh": {
+          "published_path": "executed-source/run_cross_zone_fanout.sh/a4a53f5db987c86c976160f1c7869798dd877cacb94e7251110033c465fe2f3e.sh",
+          "sha256": "a4a53f5db987c86c976160f1c7869798dd877cacb94e7251110033c465fe2f3e"
+        },
+        "scripts/run_cross_zone_nccl_fanout.sh": {
+          "published_path": "executed-source/run_cross_zone_nccl_fanout.sh/0afb669c51b3fc9a7affeeac6bfa5d049344ae4e6bf7cef8cba328c02b725295.sh",
+          "sha256": "0afb669c51b3fc9a7affeeac6bfa5d049344ae4e6bf7cef8cba328c02b725295"
+        },
+        "scripts/run_cross_zone_one_to_two.sh": {
+          "published_path": "executed-source/run_cross_zone_one_to_two.sh/cae3317efcbef32a5bb84c574a8ae213e4d1e4bce61b7098dd05d1e5503bd5b6.sh",
+          "sha256": "cae3317efcbef32a5bb84c574a8ae213e4d1e4bce61b7098dd05d1e5503bd5b6"
+        }
+      }
+    },
+    "c56b5a1a9827e3a9096f5b7c272d5679a338a39216ea649023c018af3985db2e": {
+      "byte_count": 15890169,
+      "source_files": {
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json": {
+          "published_path": "executed-source/manifest-expert-32.json/215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10.json",
+          "sha256": "215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10"
+        },
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-preflight.json": {
+          "published_path": "executed-source/manifest-preflight.json/b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d.json",
+          "sha256": "b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d"
+        },
+        "scripts/bench_cross_zone_nccl.py": {
+          "published_path": "executed-source/bench_cross_zone_nccl.py/613e3806a9e62d3ebc38d04db5fb308823dc07473e2321d34519b8dfb8f712c1.py",
+          "sha256": "613e3806a9e62d3ebc38d04db5fb308823dc07473e2321d34519b8dfb8f712c1"
+        },
+        "scripts/bench_cross_zone_one_to_two.py": {
+          "published_path": "executed-source/bench_cross_zone_one_to_two.py/e7cb4c59c5dc9a0b17732a06903556d078d99350d4399b85ac52311b276dbebc.py",
+          "sha256": "e7cb4c59c5dc9a0b17732a06903556d078d99350d4399b85ac52311b276dbebc"
+        },
+        "scripts/bench_cross_zone_qualification.py": {
+          "published_path": "executed-source/bench_cross_zone_qualification.py/1146b2d453e9248811927b6607def1a686af21ca594f61aaec9076097e298728.py",
+          "sha256": "1146b2d453e9248811927b6607def1a686af21ca594f61aaec9076097e298728"
+        },
+        "scripts/probe_cross_zone_verbs.py": {
+          "published_path": "executed-source/probe_cross_zone_verbs.py/c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee.py",
+          "sha256": "c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee"
+        },
+        "scripts/run_cross_zone_fanout.sh": {
+          "published_path": "executed-source/run_cross_zone_fanout.sh/a4a53f5db987c86c976160f1c7869798dd877cacb94e7251110033c465fe2f3e.sh",
+          "sha256": "a4a53f5db987c86c976160f1c7869798dd877cacb94e7251110033c465fe2f3e"
+        },
+        "scripts/run_cross_zone_nccl_fanout.sh": {
+          "published_path": "executed-source/run_cross_zone_nccl_fanout.sh/0afb669c51b3fc9a7affeeac6bfa5d049344ae4e6bf7cef8cba328c02b725295.sh",
+          "sha256": "0afb669c51b3fc9a7affeeac6bfa5d049344ae4e6bf7cef8cba328c02b725295"
+        },
+        "scripts/run_cross_zone_one_to_two.sh": {
+          "published_path": "executed-source/run_cross_zone_one_to_two.sh/cae3317efcbef32a5bb84c574a8ae213e4d1e4bce61b7098dd05d1e5503bd5b6.sh",
+          "sha256": "cae3317efcbef32a5bb84c574a8ae213e4d1e4bce61b7098dd05d1e5503bd5b6"
+        }
+      }
+    },
+    "c6d085d1db2f8bb3c4ebca14488c463ec851c50c67295b61d565405af6872fd7": {
+      "byte_count": 15878494,
+      "source_files": {
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json": {
+          "published_path": "executed-source/manifest-expert-32.json/215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10.json",
+          "sha256": "215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10"
+        },
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-preflight.json": {
+          "published_path": "executed-source/manifest-preflight.json/b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d.json",
+          "sha256": "b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d"
+        },
+        "scripts/bench_cross_zone_qualification.py": {
+          "published_path": "executed-source/bench_cross_zone_qualification.py/3d1457d57f5253b7ad79bde25db02152e861516dedda232ee230eb13ac4f04f6.py",
+          "sha256": "3d1457d57f5253b7ad79bde25db02152e861516dedda232ee230eb13ac4f04f6"
+        },
+        "scripts/probe_cross_zone_verbs.py": {
+          "published_path": "executed-source/probe_cross_zone_verbs.py/c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee.py",
+          "sha256": "c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee"
+        }
+      }
+    },
+    "d5d854c3d8a82dcc3f0fdc87143277e6a11896b0da5f45fc7e9eee33cf7cccc3": {
+      "byte_count": 15643330,
+      "source_files": {
+        "scripts/probe_cross_zone_verbs.py": {
+          "published_path": "executed-source/probe_cross_zone_verbs.py/572cd0ed1522b8bf4173beaeeb74226aa9dbda340c8ed8e774d6ae3267f5aaaf.py",
+          "sha256": "572cd0ed1522b8bf4173beaeeb74226aa9dbda340c8ed8e774d6ae3267f5aaaf"
+        }
+      }
+    },
+    "e91d27fe6dd3f03c25e9a3d9260f9ecaee5072e8d8ae1d80c7089179f28d70f1": {
+      "byte_count": 15885372,
+      "source_files": {
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json": {
+          "published_path": "executed-source/manifest-expert-32.json/215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10.json",
+          "sha256": "215e36f5d21789db594405af4a0830a1a4a15df5287ea8e7e8aff4a23dbb5d10"
+        },
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-preflight.json": {
+          "published_path": "executed-source/manifest-preflight.json/b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d.json",
+          "sha256": "b0a1236f2273390c5a4c011995a9cddaa63a39b77c561c4973109227c2263b0d"
+        },
+        "scripts/bench_cross_zone_nccl.py": {
+          "published_path": "executed-source/bench_cross_zone_nccl.py/35048dc9a00f4ecb38a6f68d1bbcb71ba740d3ddf9308d6b7b00c3709d6ea465.py",
+          "sha256": "35048dc9a00f4ecb38a6f68d1bbcb71ba740d3ddf9308d6b7b00c3709d6ea465"
+        },
+        "scripts/bench_cross_zone_qualification.py": {
+          "published_path": "executed-source/bench_cross_zone_qualification.py/1146b2d453e9248811927b6607def1a686af21ca594f61aaec9076097e298728.py",
+          "sha256": "1146b2d453e9248811927b6607def1a686af21ca594f61aaec9076097e298728"
+        },
+        "scripts/probe_cross_zone_verbs.py": {
+          "published_path": "executed-source/probe_cross_zone_verbs.py/c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee.py",
+          "sha256": "c66c0b7f3c3ec29d781dd74d1aba2e39797e5673458a694f665e1bf5a430e7ee"
+        },
+        "scripts/run_cross_zone_fanout.sh": {
+          "published_path": "executed-source/run_cross_zone_fanout.sh/a4a53f5db987c86c976160f1c7869798dd877cacb94e7251110033c465fe2f3e.sh",
+          "sha256": "a4a53f5db987c86c976160f1c7869798dd877cacb94e7251110033c465fe2f3e"
+        }
+      }
+    }
+  },
+  "description": "Exact Iris job submissions and SHA-256-verified source bundle excerpts recovered from controller records.",
+  "jobs": [
+    {
+      "bundle_id": "2adac1b3568eb36bfb2215c877e8aa89d374e60f05378e2bfc5f2ddf3e49445d",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "sh",
+            "-lc",
+            "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role sender --host 10.168.193.223 --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/preflight-300-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --repeats 1 --tcp-streams 4 --object-streams 4"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-qual-east-300-preflight-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 17179869184,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:14:59.378027",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--no-wait",
+        "--no-sync",
+        "--enable-extra-resources",
+        "--gpu",
+        "GB200x1",
+        "--priority",
+        "interactive",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "16GB",
+        "--timeout",
+        "900",
+        "--job-name",
+        "cross-zone-qual-east-300-preflight-20260923",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "--",
+        "sh",
+        "-lc",
+        "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role sender --host 10.168.193.223 --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/preflight-300-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --repeats 1 --tcp-streams 4 --object-streams 4"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "0b9713f7f7e5531c5a5abc90873c9e90d66ab3db7e30704135cafaee01a321c8",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "sh",
+            "-lc",
+            "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role sender --host 10.168.206.9 --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/calibration-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --phase calibrate --repeats 2"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-qual-east-calibration-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 17179869184,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:18:11.274794",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--no-wait",
+        "--no-sync",
+        "--enable-extra-resources",
+        "--gpu",
+        "GB200x1",
+        "--priority",
+        "interactive",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "16GB",
+        "--timeout",
+        "1200",
+        "--job-name",
+        "cross-zone-qual-east-calibration-20260923",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "--",
+        "sh",
+        "-lc",
+        "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role sender --host 10.168.206.9 --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/calibration-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --phase calibrate --repeats 2"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "1744c5c52c4ab6d99be49caf18074850b05e86b1e890555e9835ebb707388b13",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "sh",
+            "-lc",
+            "uv pip install --system boto3==1.42.97 botocore==1.42.97 && sh scripts/run_cross_zone_fanout.sh sender both 10.168.194.103 s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/fanout-two-lane"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-qual-east-fanout-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 10737418240,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:40:26.274304",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-east-fanout-20260923",
+        "--gpu",
+        "GB200",
+        "--enable-extra-resources",
+        "--cpu",
+        "4",
+        "--memory",
+        "16GB",
+        "--disk",
+        "10GB",
+        "--no-sync",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "--",
+        "sh",
+        "-lc",
+        "uv pip install --system boto3==1.42.97 botocore==1.42.97 && sh scripts/run_cross_zone_fanout.sh sender both 10.168.194.103 s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/fanout-two-lane"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "84fe920f6cdbf0d010502cc71090815098bc35aba2a2970007bf847d443bd3da",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "python",
+            "scripts/bench_cross_zone_nccl.py",
+            "--role",
+            "sender",
+            "--host",
+            "10.168.193.13",
+            "--manifest",
+            "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json",
+            "--repeats",
+            "12",
+            "--port",
+            "49399"
+          ]
+        },
+        "setup_commands": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n",
+          "cd \"$IRIS_WORKDIR\" 2>/dev/null || true\nif [ -d \"$IRIS_VENV\" ]; then\n  echo 'installing iris runtime deps'\n  uv pip install --link-mode copy cloudpickle py-spy memray || echo '[iris setup] runtime deps install failed; continuing'\nfi\n"
+        ]
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "NCCL_DEBUG": "INFO",
+          "NCCL_DEBUG_FILE": "/tmp/cross-zone-qual-nccl.%h.%p.log",
+          "NCCL_DEBUG_SUBSYS": "INIT,NET",
+          "NCCL_IB_DISABLE": "1",
+          "NCCL_NET": "Socket",
+          "NCCL_SOCKET_IFNAME": "=enP6p3s0np0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        },
+        "setup_scripts": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n"
+        ]
+      },
+      "job_id": "/romain/cross-zone-qual-east-nccl-chunks-02-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 32212254720,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "1e9e64a6",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T23:37:40.193724",
+        "dirty": true,
+        "tree_hash": "caa80406"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-east-nccl-chunks-02-20260923",
+        "--gpu",
+        "GB200",
+        "--enable-extra-resources",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "30GB",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--sync-package",
+        "marinskyrl",
+        "--extra",
+        "cuda",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "-e",
+        "NCCL_NET",
+        "Socket",
+        "-e",
+        "NCCL_IB_DISABLE",
+        "1",
+        "-e",
+        "NCCL_SOCKET_IFNAME",
+        "=enP6p3s0np0",
+        "-e",
+        "NCCL_DEBUG",
+        "INFO",
+        "-e",
+        "NCCL_DEBUG_SUBSYS",
+        "INIT,NET",
+        "-e",
+        "NCCL_DEBUG_FILE",
+        "/tmp/cross-zone-qual-nccl.%h.%p.log",
+        "--",
+        "python",
+        "scripts/bench_cross_zone_nccl.py",
+        "--role",
+        "sender",
+        "--host",
+        "10.168.193.13",
+        "--manifest",
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json",
+        "--repeats",
+        "12",
+        "--port",
+        "49399"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "212a3287fe79ad615afacb1c65e2274ae93ecbd96778b19618f66411ba46cd0a",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "python",
+            "scripts/bench_cross_zone_nccl.py",
+            "--role",
+            "sender",
+            "--host",
+            "10.168.194.103",
+            "--manifest",
+            "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json",
+            "--repeats",
+            "12",
+            "--port",
+            "49397"
+          ]
+        },
+        "setup_commands": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n",
+          "cd \"$IRIS_WORKDIR\" 2>/dev/null || true\nif [ -d \"$IRIS_VENV\" ]; then\n  echo 'installing iris runtime deps'\n  uv pip install --link-mode copy cloudpickle py-spy memray || echo '[iris setup] runtime deps install failed; continuing'\nfi\n"
+        ]
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "NCCL_DEBUG": "INFO",
+          "NCCL_DEBUG_FILE": "/tmp/cross-zone-qual-nccl.%h.%p.log",
+          "NCCL_DEBUG_SUBSYS": "INIT,NET",
+          "NCCL_IB_DISABLE": "1",
+          "NCCL_NET": "Socket",
+          "NCCL_SOCKET_IFNAME": "=enP6p3s0np0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        },
+        "setup_scripts": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n"
+        ]
+      },
+      "job_id": "/romain/cross-zone-qual-east-nccl-chunks-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 32212254720,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T23:05:19.774674",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-east-nccl-chunks-20260923",
+        "--gpu",
+        "GB200",
+        "--enable-extra-resources",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "30GB",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--sync-package",
+        "marinskyrl",
+        "--extra",
+        "cuda",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "-e",
+        "NCCL_NET",
+        "Socket",
+        "-e",
+        "NCCL_IB_DISABLE",
+        "1",
+        "-e",
+        "NCCL_SOCKET_IFNAME",
+        "=enP6p3s0np0",
+        "-e",
+        "NCCL_DEBUG",
+        "INFO",
+        "-e",
+        "NCCL_DEBUG_SUBSYS",
+        "INIT,NET",
+        "-e",
+        "NCCL_DEBUG_FILE",
+        "/tmp/cross-zone-qual-nccl.%h.%p.log",
+        "--",
+        "python",
+        "scripts/bench_cross_zone_nccl.py",
+        "--role",
+        "sender",
+        "--host",
+        "10.168.194.103",
+        "--manifest",
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json",
+        "--repeats",
+        "12",
+        "--port",
+        "49397"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "c56b5a1a9827e3a9096f5b7c272d5679a338a39216ea649023c018af3985db2e",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "python",
+            "scripts/bench_cross_zone_nccl.py",
+            "--role",
+            "sender",
+            "--rank",
+            "2",
+            "--world-size",
+            "3",
+            "--source-rank",
+            "2",
+            "--host",
+            "10.168.194.103",
+            "--manifest",
+            "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json",
+            "--repeats",
+            "5",
+            "--port",
+            "49398"
+          ]
+        },
+        "setup_commands": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n",
+          "cd \"$IRIS_WORKDIR\" 2>/dev/null || true\nif [ -d \"$IRIS_VENV\" ]; then\n  echo 'installing iris runtime deps'\n  uv pip install --link-mode copy cloudpickle py-spy memray || echo '[iris setup] runtime deps install failed; continuing'\nfi\n"
+        ]
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "NCCL_DEBUG": "INFO",
+          "NCCL_DEBUG_FILE": "/tmp/cross-zone-qual-nccl.%h.%p.log",
+          "NCCL_DEBUG_SUBSYS": "INIT,NET",
+          "NCCL_IB_DISABLE": "1",
+          "NCCL_NET": "Socket",
+          "NCCL_SOCKET_IFNAME": "=enP6p3s0np0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        },
+        "setup_scripts": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n"
+        ]
+      },
+      "job_id": "/romain/cross-zone-qual-east-nccl-fanout-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 32212254720,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T23:10:06.462420",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-east-nccl-fanout-20260923",
+        "--gpu",
+        "GB200",
+        "--enable-extra-resources",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "30GB",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--sync-package",
+        "marinskyrl",
+        "--extra",
+        "cuda",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "-e",
+        "NCCL_NET",
+        "Socket",
+        "-e",
+        "NCCL_IB_DISABLE",
+        "1",
+        "-e",
+        "NCCL_SOCKET_IFNAME",
+        "=enP6p3s0np0",
+        "-e",
+        "NCCL_DEBUG",
+        "INFO",
+        "-e",
+        "NCCL_DEBUG_SUBSYS",
+        "INIT,NET",
+        "-e",
+        "NCCL_DEBUG_FILE",
+        "/tmp/cross-zone-qual-nccl.%h.%p.log",
+        "--",
+        "python",
+        "scripts/bench_cross_zone_nccl.py",
+        "--role",
+        "sender",
+        "--rank",
+        "2",
+        "--world-size",
+        "3",
+        "--source-rank",
+        "2",
+        "--host",
+        "10.168.194.103",
+        "--manifest",
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json",
+        "--repeats",
+        "5",
+        "--port",
+        "49398"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "e91d27fe6dd3f03c25e9a3d9260f9ecaee5072e8d8ae1d80c7089179f28d70f1",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "python",
+            "scripts/bench_cross_zone_nccl.py",
+            "--role",
+            "receiver",
+            "--payload-mib",
+            "1",
+            "--repeats",
+            "1",
+            "--port",
+            "49395"
+          ]
+        },
+        "setup_commands": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n",
+          "cd \"$IRIS_WORKDIR\" 2>/dev/null || true\nif [ -d \"$IRIS_VENV\" ]; then\n  echo 'installing iris runtime deps'\n  uv pip install --link-mode copy cloudpickle py-spy memray || echo '[iris setup] runtime deps install failed; continuing'\nfi\n"
+        ]
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "NCCL_DEBUG": "INFO",
+          "NCCL_DEBUG_FILE": "/tmp/cross-zone-qual-nccl.%h.%p.log",
+          "NCCL_DEBUG_SUBSYS": "INIT,NET",
+          "NCCL_IB_DISABLE": "0",
+          "NCCL_IB_HCA": "ibp0",
+          "NCCL_NET": "IB",
+          "NCCL_P2P_DISABLE": "1",
+          "NCCL_SHM_DISABLE": "1",
+          "NCCL_SOCKET_IFNAME": "=enP6p3s0np0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        },
+        "setup_scripts": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n"
+        ]
+      },
+      "job_id": "/romain/cross-zone-qual-east-nccl-ib-receiver-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 32212254720,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:53:08.284876",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-east-nccl-ib-receiver-20260923",
+        "--gpu",
+        "GB200",
+        "--enable-extra-resources",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "30GB",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--sync-package",
+        "marinskyrl",
+        "--extra",
+        "cuda",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "-e",
+        "NCCL_NET",
+        "IB",
+        "-e",
+        "NCCL_IB_DISABLE",
+        "0",
+        "-e",
+        "NCCL_IB_HCA",
+        "ibp0",
+        "-e",
+        "NCCL_P2P_DISABLE",
+        "1",
+        "-e",
+        "NCCL_SHM_DISABLE",
+        "1",
+        "-e",
+        "NCCL_SOCKET_IFNAME",
+        "=enP6p3s0np0",
+        "-e",
+        "NCCL_DEBUG",
+        "INFO",
+        "-e",
+        "NCCL_DEBUG_SUBSYS",
+        "INIT,NET",
+        "-e",
+        "NCCL_DEBUG_FILE",
+        "/tmp/cross-zone-qual-nccl.%h.%p.log",
+        "--",
+        "python",
+        "scripts/bench_cross_zone_nccl.py",
+        "--role",
+        "receiver",
+        "--payload-mib",
+        "1",
+        "--repeats",
+        "1",
+        "--port",
+        "49395"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "e91d27fe6dd3f03c25e9a3d9260f9ecaee5072e8d8ae1d80c7089179f28d70f1",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "python",
+            "scripts/bench_cross_zone_nccl.py",
+            "--role",
+            "sender",
+            "--host",
+            "10.186.213.63",
+            "--payload-mib",
+            "1",
+            "--repeats",
+            "1",
+            "--port",
+            "49395"
+          ]
+        },
+        "setup_commands": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n",
+          "cd \"$IRIS_WORKDIR\" 2>/dev/null || true\nif [ -d \"$IRIS_VENV\" ]; then\n  echo 'installing iris runtime deps'\n  uv pip install --link-mode copy cloudpickle py-spy memray || echo '[iris setup] runtime deps install failed; continuing'\nfi\n"
+        ]
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "NCCL_DEBUG": "INFO",
+          "NCCL_DEBUG_FILE": "/tmp/cross-zone-qual-nccl.%h.%p.log",
+          "NCCL_DEBUG_SUBSYS": "INIT,NET",
+          "NCCL_IB_DISABLE": "0",
+          "NCCL_IB_HCA": "ibp0",
+          "NCCL_NET": "IB",
+          "NCCL_P2P_DISABLE": "1",
+          "NCCL_SHM_DISABLE": "1",
+          "NCCL_SOCKET_IFNAME": "=enP6p3s0np0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        },
+        "setup_scripts": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n"
+        ]
+      },
+      "job_id": "/romain/cross-zone-qual-east-nccl-ib-sender-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 32212254720,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:53:41.269935",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-east-nccl-ib-sender-20260923",
+        "--gpu",
+        "GB200",
+        "--enable-extra-resources",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "30GB",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--sync-package",
+        "marinskyrl",
+        "--extra",
+        "cuda",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "-e",
+        "NCCL_NET",
+        "IB",
+        "-e",
+        "NCCL_IB_DISABLE",
+        "0",
+        "-e",
+        "NCCL_IB_HCA",
+        "ibp0",
+        "-e",
+        "NCCL_P2P_DISABLE",
+        "1",
+        "-e",
+        "NCCL_SHM_DISABLE",
+        "1",
+        "-e",
+        "NCCL_SOCKET_IFNAME",
+        "=enP6p3s0np0",
+        "-e",
+        "NCCL_DEBUG",
+        "INFO",
+        "-e",
+        "NCCL_DEBUG_SUBSYS",
+        "INIT,NET",
+        "-e",
+        "NCCL_DEBUG_FILE",
+        "/tmp/cross-zone-qual-nccl.%h.%p.log",
+        "--",
+        "python",
+        "scripts/bench_cross_zone_nccl.py",
+        "--role",
+        "sender",
+        "--host",
+        "10.186.213.63",
+        "--payload-mib",
+        "1",
+        "--repeats",
+        "1",
+        "--port",
+        "49395"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "e91d27fe6dd3f03c25e9a3d9260f9ecaee5072e8d8ae1d80c7089179f28d70f1",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "python",
+            "scripts/bench_cross_zone_nccl.py",
+            "--role",
+            "sender",
+            "--host",
+            "10.168.194.103",
+            "--payload-mib",
+            "300",
+            "--repeats",
+            "5"
+          ]
+        },
+        "setup_commands": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n",
+          "cd \"$IRIS_WORKDIR\" 2>/dev/null || true\nif [ -d \"$IRIS_VENV\" ]; then\n  echo 'installing iris runtime deps'\n  uv pip install --link-mode copy cloudpickle py-spy memray || echo '[iris setup] runtime deps install failed; continuing'\nfi\n"
+        ]
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "NCCL_DEBUG": "INFO",
+          "NCCL_DEBUG_FILE": "/tmp/cross-zone-qual-nccl.%h.%p.log",
+          "NCCL_DEBUG_SUBSYS": "INIT,NET",
+          "NCCL_IB_DISABLE": "1",
+          "NCCL_NET": "Socket",
+          "NCCL_SOCKET_IFNAME": "=enP6p3s0np0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        },
+        "setup_scripts": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n"
+        ]
+      },
+      "job_id": "/romain/cross-zone-qual-east-nccl-socket-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 32212254720,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:50:48.475452",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-east-nccl-socket-20260923",
+        "--gpu",
+        "GB200",
+        "--enable-extra-resources",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "30GB",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--sync-package",
+        "marinskyrl",
+        "--extra",
+        "cuda",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "-e",
+        "NCCL_NET",
+        "Socket",
+        "-e",
+        "NCCL_IB_DISABLE",
+        "1",
+        "-e",
+        "NCCL_SOCKET_IFNAME",
+        "=enP6p3s0np0",
+        "-e",
+        "NCCL_DEBUG",
+        "INFO",
+        "-e",
+        "NCCL_DEBUG_SUBSYS",
+        "INIT,NET",
+        "-e",
+        "NCCL_DEBUG_FILE",
+        "/tmp/cross-zone-qual-nccl.%h.%p.log",
+        "--",
+        "python",
+        "scripts/bench_cross_zone_nccl.py",
+        "--role",
+        "sender",
+        "--host",
+        "10.168.194.103",
+        "--payload-mib",
+        "300",
+        "--repeats",
+        "5"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "3d947c1784ace5a0d95232ae435a663648474f35345cfade9ce975ebf96090e0",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "sh",
+            "-lc",
+            "uv pip install --system boto3==1.42.97 botocore==1.42.97 && sh scripts/run_cross_zone_one_to_two.sh sender 10.168.194.103 s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/one-to-two"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-qual-east-one-to-two-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 10737418240,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T23:00:59.422126",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-east-one-to-two-20260923",
+        "--gpu",
+        "GB200",
+        "--enable-extra-resources",
+        "--cpu",
+        "4",
+        "--memory",
+        "16GB",
+        "--disk",
+        "10GB",
+        "--no-sync",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "--",
+        "sh",
+        "-lc",
+        "uv pip install --system boto3==1.42.97 botocore==1.42.97 && sh scripts/run_cross_zone_one_to_two.sh sender 10.168.194.103 s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/one-to-two"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "c6d085d1db2f8bb3c4ebca14488c463ec851c50c67295b61d565405af6872fd7",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "sh",
+            "-lc",
+            "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role sender --host 10.168.194.103 --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/paired-02 --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --phase paired --repeats 12 --tcp-streams 4 --tcp-buffer-mib 4 --object-streams 32"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-qual-east-paired-02-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 10737418240,
+        "memory_bytes": 8589934592,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:33:21.080111",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-east-paired-02-20260923",
+        "--gpu",
+        "GB200",
+        "--enable-extra-resources",
+        "--cpu",
+        "2",
+        "--memory",
+        "8GB",
+        "--disk",
+        "10GB",
+        "--no-sync",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "--",
+        "sh",
+        "-lc",
+        "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role sender --host 10.168.194.103 --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/paired-02 --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --phase paired --repeats 12 --tcp-streams 4 --tcp-buffer-mib 4 --object-streams 32"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "c6d085d1db2f8bb3c4ebca14488c463ec851c50c67295b61d565405af6872fd7",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "sh",
+            "-lc",
+            "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role sender --host 10.168.194.103 --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/paired-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --phase paired --repeats 12 --tcp-streams 4 --tcp-buffer-mib 4 --object-streams 32"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-qual-east-paired-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 17179869184,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:21:58.061086",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--no-wait",
+        "--no-sync",
+        "--enable-extra-resources",
+        "--gpu",
+        "GB200x1",
+        "--priority",
+        "interactive",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "16GB",
+        "--timeout",
+        "1200",
+        "--job-name",
+        "cross-zone-qual-east-paired-20260923",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "--",
+        "sh",
+        "-lc",
+        "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role sender --host 10.168.194.103 --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/paired-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --phase paired --repeats 12 --tcp-streams 4 --tcp-buffer-mib 4 --object-streams 32"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "2adac1b3568eb36bfb2215c877e8aa89d374e60f05378e2bfc5f2ddf3e49445d",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "sh",
+            "-lc",
+            "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role sender --host 10.168.193.223 --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/preflight-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-preflight.json --repeats 1 --tcp-streams 4 --object-streams 4"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-qual-east-preflight-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 17179869184,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:13:02.164143",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--no-wait",
+        "--no-sync",
+        "--enable-extra-resources",
+        "--gpu",
+        "GB200x1",
+        "--priority",
+        "interactive",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "16GB",
+        "--timeout",
+        "900",
+        "--job-name",
+        "cross-zone-qual-east-preflight-20260923",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "--",
+        "sh",
+        "-lc",
+        "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role sender --host 10.168.193.223 --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/preflight-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-preflight.json --repeats 1 --tcp-streams 4 --object-streams 4"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "2d60fa3c4d939767e1409ffe4a6d5d2b13d79f111308252727929b00744ae2e5",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "python",
+            "scripts/probe_cross_zone_verbs.py",
+            "--role",
+            "client",
+            "--host",
+            "10.168.193.223",
+            "--name",
+            "forward-east-client",
+            "--port",
+            "19562",
+            "--timeout",
+            "90"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-verbs-east-client-forward-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 8589934592,
+        "memory_bytes": 8589934592,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:05:48.010569",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--no-wait",
+        "--no-sync",
+        "--enable-extra-resources",
+        "--gpu",
+        "GB200x1",
+        "--priority",
+        "interactive",
+        "--cpu",
+        "2",
+        "--memory",
+        "8GB",
+        "--disk",
+        "8GB",
+        "--timeout",
+        "360",
+        "--job-name",
+        "cross-zone-verbs-east-client-forward-20260923",
+        "--exclude",
+        "^docs/",
+        "--exclude",
+        "^config/",
+        "--",
+        "python",
+        "scripts/probe_cross_zone_verbs.py",
+        "--role",
+        "client",
+        "--host",
+        "10.168.193.223",
+        "--name",
+        "forward-east-client",
+        "--port",
+        "19562",
+        "--timeout",
+        "90"
+      ],
+      "task_image": ""
+    },
+    {
+      "bundle_id": "d5d854c3d8a82dcc3f0fdc87143277e6a11896b0da5f45fc7e9eee33cf7cccc3",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "python",
+            "scripts/probe_cross_zone_verbs.py",
+            "--role",
+            "client",
+            "--host",
+            "10.186.213.63",
+            "--name",
+            "same-zone-client",
+            "--port",
+            "19557",
+            "--timeout",
+            "120"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-verbs-east-client-full-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 4,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 8589934592,
+        "memory_bytes": 8589934592,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T21:55:26.215064",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--no-wait",
+        "--no-sync",
+        "--enable-extra-resources",
+        "--gpu",
+        "GB200x4",
+        "--priority",
+        "interactive",
+        "--cpu",
+        "2",
+        "--memory",
+        "8GB",
+        "--disk",
+        "8GB",
+        "--timeout",
+        "720",
+        "--job-name",
+        "cross-zone-verbs-east-client-full-20260923",
+        "--exclude",
+        "^docs/",
+        "--exclude",
+        "^config/",
+        "--",
+        "python",
+        "scripts/probe_cross_zone_verbs.py",
+        "--role",
+        "client",
+        "--host",
+        "10.186.213.63",
+        "--name",
+        "same-zone-client",
+        "--port",
+        "19557",
+        "--timeout",
+        "120"
+      ],
+      "task_image": ""
+    },
+    {
+      "bundle_id": "d5d854c3d8a82dcc3f0fdc87143277e6a11896b0da5f45fc7e9eee33cf7cccc3",
+      "cluster": "cw-us-east-08a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "python",
+            "scripts/probe_cross_zone_verbs.py",
+            "--role",
+            "server",
+            "--name",
+            "same-zone-server",
+            "--port",
+            "19557",
+            "--timeout",
+            "300"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-verbs-east-server-full-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 4,
+            "variant": "GB200"
+          }
+        },
+        "disk_bytes": 8589934592,
+        "memory_bytes": 8589934592,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T21:54:55.612065",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-us-east-08a",
+        "job",
+        "run",
+        "--no-wait",
+        "--no-sync",
+        "--enable-extra-resources",
+        "--gpu",
+        "GB200x4",
+        "--priority",
+        "interactive",
+        "--cpu",
+        "2",
+        "--memory",
+        "8GB",
+        "--disk",
+        "8GB",
+        "--timeout",
+        "720",
+        "--job-name",
+        "cross-zone-verbs-east-server-full-20260923",
+        "--exclude",
+        "^docs/",
+        "--exclude",
+        "^config/",
+        "--",
+        "python",
+        "scripts/probe_cross_zone_verbs.py",
+        "--role",
+        "server",
+        "--name",
+        "same-zone-server",
+        "--port",
+        "19557",
+        "--timeout",
+        "300"
+      ],
+      "task_image": ""
+    },
+    {
+      "bundle_id": "2adac1b3568eb36bfb2215c877e8aa89d374e60f05378e2bfc5f2ddf3e49445d",
+      "cluster": "cw-rno2a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "sh",
+            "-lc",
+            "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role receiver --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/preflight-300-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --max-seconds 480"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-qual-rno-300-preflight-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "H100"
+          }
+        },
+        "disk_bytes": 17179869184,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:14:30.910635",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-rno2a",
+        "job",
+        "run",
+        "--no-wait",
+        "--no-sync",
+        "--enable-extra-resources",
+        "--gpu",
+        "H100x1",
+        "--priority",
+        "interactive",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "16GB",
+        "--timeout",
+        "900",
+        "--job-name",
+        "cross-zone-qual-rno-300-preflight-20260923",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "--",
+        "sh",
+        "-lc",
+        "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role receiver --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/preflight-300-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --max-seconds 480"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "0b9713f7f7e5531c5a5abc90873c9e90d66ab3db7e30704135cafaee01a321c8",
+      "cluster": "cw-rno2a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "sh",
+            "-lc",
+            "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role receiver --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/calibration-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --max-seconds 900"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-qual-rno-calibration-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "H100"
+          }
+        },
+        "disk_bytes": 17179869184,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:17:31.393524",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-rno2a",
+        "job",
+        "run",
+        "--no-wait",
+        "--no-sync",
+        "--enable-extra-resources",
+        "--gpu",
+        "H100x1",
+        "--priority",
+        "interactive",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "16GB",
+        "--timeout",
+        "1200",
+        "--job-name",
+        "cross-zone-qual-rno-calibration-20260923",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "--",
+        "sh",
+        "-lc",
+        "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role receiver --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/calibration-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --max-seconds 900"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "37deb6d442c5e5bfdec09b8772f70c244683b08685f841d2d4566d0306c59353",
+      "cluster": "cw-rno2a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "sh",
+            "-lc",
+            "uv pip install --system boto3==1.42.97 botocore==1.42.97 && sh scripts/run_cross_zone_fanout.sh receiver both - s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/fanout-two-lane"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-qual-rno-fanout-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "H100"
+          }
+        },
+        "disk_bytes": 10737418240,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:38:37.407707",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-rno2a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-rno-fanout-20260923",
+        "--gpu",
+        "H100",
+        "--enable-extra-resources",
+        "--cpu",
+        "4",
+        "--memory",
+        "16GB",
+        "--disk",
+        "10GB",
+        "--no-sync",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "--",
+        "sh",
+        "-lc",
+        "uv pip install --system boto3==1.42.97 botocore==1.42.97 && sh scripts/run_cross_zone_fanout.sh receiver both - s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/fanout-two-lane"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "84fe920f6cdbf0d010502cc71090815098bc35aba2a2970007bf847d443bd3da",
+      "cluster": "cw-rno2a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "python",
+            "scripts/bench_cross_zone_nccl.py",
+            "--role",
+            "receiver",
+            "--manifest",
+            "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json",
+            "--repeats",
+            "12",
+            "--port",
+            "49399"
+          ]
+        },
+        "setup_commands": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n",
+          "cd \"$IRIS_WORKDIR\" 2>/dev/null || true\nif [ -d \"$IRIS_VENV\" ]; then\n  echo 'installing iris runtime deps'\n  uv pip install --link-mode copy cloudpickle py-spy memray || echo '[iris setup] runtime deps install failed; continuing'\nfi\n"
+        ]
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "NCCL_DEBUG": "INFO",
+          "NCCL_DEBUG_FILE": "/tmp/cross-zone-qual-nccl.%h.%p.log",
+          "NCCL_DEBUG_SUBSYS": "INIT,NET",
+          "NCCL_IB_DISABLE": "1",
+          "NCCL_NET": "Socket",
+          "NCCL_SOCKET_IFNAME": "=enp90s0np0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        },
+        "setup_scripts": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n"
+        ]
+      },
+      "job_id": "/romain/cross-zone-qual-rno-nccl-chunks-02-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "H100"
+          }
+        },
+        "disk_bytes": 32212254720,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "1e9e64a6",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T23:36:22.978097",
+        "dirty": true,
+        "tree_hash": "caa80406"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-rno2a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-rno-nccl-chunks-02-20260923",
+        "--gpu",
+        "H100",
+        "--enable-extra-resources",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "30GB",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--sync-package",
+        "marinskyrl",
+        "--extra",
+        "cuda",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "-e",
+        "NCCL_NET",
+        "Socket",
+        "-e",
+        "NCCL_IB_DISABLE",
+        "1",
+        "-e",
+        "NCCL_SOCKET_IFNAME",
+        "=enp90s0np0",
+        "-e",
+        "NCCL_DEBUG",
+        "INFO",
+        "-e",
+        "NCCL_DEBUG_SUBSYS",
+        "INIT,NET",
+        "-e",
+        "NCCL_DEBUG_FILE",
+        "/tmp/cross-zone-qual-nccl.%h.%p.log",
+        "--",
+        "python",
+        "scripts/bench_cross_zone_nccl.py",
+        "--role",
+        "receiver",
+        "--manifest",
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json",
+        "--repeats",
+        "12",
+        "--port",
+        "49399"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "212a3287fe79ad615afacb1c65e2274ae93ecbd96778b19618f66411ba46cd0a",
+      "cluster": "cw-rno2a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "python",
+            "scripts/bench_cross_zone_nccl.py",
+            "--role",
+            "receiver",
+            "--manifest",
+            "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json",
+            "--repeats",
+            "12",
+            "--port",
+            "49397"
+          ]
+        },
+        "setup_commands": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n",
+          "cd \"$IRIS_WORKDIR\" 2>/dev/null || true\nif [ -d \"$IRIS_VENV\" ]; then\n  echo 'installing iris runtime deps'\n  uv pip install --link-mode copy cloudpickle py-spy memray || echo '[iris setup] runtime deps install failed; continuing'\nfi\n"
+        ]
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "NCCL_DEBUG": "INFO",
+          "NCCL_DEBUG_FILE": "/tmp/cross-zone-qual-nccl.%h.%p.log",
+          "NCCL_DEBUG_SUBSYS": "INIT,NET",
+          "NCCL_IB_DISABLE": "1",
+          "NCCL_NET": "Socket",
+          "NCCL_SOCKET_IFNAME": "=enp90s0np0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        },
+        "setup_scripts": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n"
+        ]
+      },
+      "job_id": "/romain/cross-zone-qual-rno-nccl-chunks-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "H100"
+          }
+        },
+        "disk_bytes": 32212254720,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T23:04:47.424002",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-rno2a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-rno-nccl-chunks-20260923",
+        "--gpu",
+        "H100",
+        "--enable-extra-resources",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "30GB",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--sync-package",
+        "marinskyrl",
+        "--extra",
+        "cuda",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "-e",
+        "NCCL_NET",
+        "Socket",
+        "-e",
+        "NCCL_IB_DISABLE",
+        "1",
+        "-e",
+        "NCCL_SOCKET_IFNAME",
+        "=enp90s0np0",
+        "-e",
+        "NCCL_DEBUG",
+        "INFO",
+        "-e",
+        "NCCL_DEBUG_SUBSYS",
+        "INIT,NET",
+        "-e",
+        "NCCL_DEBUG_FILE",
+        "/tmp/cross-zone-qual-nccl.%h.%p.log",
+        "--",
+        "python",
+        "scripts/bench_cross_zone_nccl.py",
+        "--role",
+        "receiver",
+        "--manifest",
+        "docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json",
+        "--repeats",
+        "12",
+        "--port",
+        "49397"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "c56b5a1a9827e3a9096f5b7c272d5679a338a39216ea649023c018af3985db2e",
+      "cluster": "cw-rno2a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "sh",
+            "scripts/run_cross_zone_nccl_fanout.sh"
+          ]
+        },
+        "setup_commands": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n",
+          "cd \"$IRIS_WORKDIR\" 2>/dev/null || true\nif [ -d \"$IRIS_VENV\" ]; then\n  echo 'installing iris runtime deps'\n  uv pip install --link-mode copy cloudpickle py-spy memray || echo '[iris setup] runtime deps install failed; continuing'\nfi\n"
+        ]
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "NCCL_DEBUG": "INFO",
+          "NCCL_DEBUG_FILE": "/tmp/cross-zone-qual-nccl.%h.%p.log",
+          "NCCL_DEBUG_SUBSYS": "INIT,NET",
+          "NCCL_IB_DISABLE": "1",
+          "NCCL_NET": "Socket",
+          "NCCL_SOCKET_IFNAME": "=enp90s0np0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        },
+        "setup_scripts": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n"
+        ]
+      },
+      "job_id": "/romain/cross-zone-qual-rno-nccl-fanout-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 2,
+            "variant": "H100"
+          }
+        },
+        "disk_bytes": 32212254720,
+        "memory_bytes": 25769803776,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T23:09:03.194424",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-rno2a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-rno-nccl-fanout-20260923",
+        "--gpu",
+        "H100x2",
+        "--enable-extra-resources",
+        "--cpu",
+        "4",
+        "--memory",
+        "24GB",
+        "--disk",
+        "30GB",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--sync-package",
+        "marinskyrl",
+        "--extra",
+        "cuda",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "-e",
+        "NCCL_NET",
+        "Socket",
+        "-e",
+        "NCCL_IB_DISABLE",
+        "1",
+        "-e",
+        "NCCL_SOCKET_IFNAME",
+        "=enp90s0np0",
+        "-e",
+        "NCCL_DEBUG",
+        "INFO",
+        "-e",
+        "NCCL_DEBUG_SUBSYS",
+        "INIT,NET",
+        "-e",
+        "NCCL_DEBUG_FILE",
+        "/tmp/cross-zone-qual-nccl.%h.%p.log",
+        "--",
+        "sh",
+        "scripts/run_cross_zone_nccl_fanout.sh"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "e91d27fe6dd3f03c25e9a3d9260f9ecaee5072e8d8ae1d80c7089179f28d70f1",
+      "cluster": "cw-rno2a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "python",
+            "scripts/bench_cross_zone_nccl.py",
+            "--role",
+            "receiver",
+            "--payload-mib",
+            "300",
+            "--repeats",
+            "5"
+          ]
+        },
+        "setup_commands": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n",
+          "cd \"$IRIS_WORKDIR\" 2>/dev/null || true\nif [ -d \"$IRIS_VENV\" ]; then\n  echo 'installing iris runtime deps'\n  uv pip install --link-mode copy cloudpickle py-spy memray || echo '[iris setup] runtime deps install failed; continuing'\nfi\n"
+        ]
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "NCCL_DEBUG": "INFO",
+          "NCCL_DEBUG_FILE": "/tmp/cross-zone-qual-nccl.%h.%p.log",
+          "NCCL_DEBUG_SUBSYS": "INIT,NET",
+          "NCCL_IB_DISABLE": "1",
+          "NCCL_NET": "Socket",
+          "NCCL_SOCKET_IFNAME": "=enp90s0np0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        },
+        "setup_scripts": [
+          "set -e\ncd \"$IRIS_WORKDIR\"\necho 'syncing deps'\nuv sync $([ -f uv.lock ] && echo '--frozen' || echo '') --link-mode copy --python 3.12 --package marinskyrl --no-dev --extra cuda\nif grep -q 'editable = true' pyproject.toml 2>/dev/null; then echo 'rust-dev mode: building native extensions'; for crate in lib/*/pyproject.toml; do grep -q 'build-backend = \"maturin\"' \"$crate\" 2>/dev/null && uv pip install -e \"$(dirname \"$crate\")\"; done; fi\n"
+        ]
+      },
+      "job_id": "/romain/cross-zone-qual-rno-nccl-socket-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "H100"
+          }
+        },
+        "disk_bytes": 32212254720,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:49:52.406737",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-rno2a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-rno-nccl-socket-20260923",
+        "--gpu",
+        "H100",
+        "--enable-extra-resources",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "30GB",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--sync-package",
+        "marinskyrl",
+        "--extra",
+        "cuda",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "-e",
+        "NCCL_NET",
+        "Socket",
+        "-e",
+        "NCCL_IB_DISABLE",
+        "1",
+        "-e",
+        "NCCL_SOCKET_IFNAME",
+        "=enp90s0np0",
+        "-e",
+        "NCCL_DEBUG",
+        "INFO",
+        "-e",
+        "NCCL_DEBUG_SUBSYS",
+        "INIT,NET",
+        "-e",
+        "NCCL_DEBUG_FILE",
+        "/tmp/cross-zone-qual-nccl.%h.%p.log",
+        "--",
+        "python",
+        "scripts/bench_cross_zone_nccl.py",
+        "--role",
+        "receiver",
+        "--payload-mib",
+        "300",
+        "--repeats",
+        "5"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "3d947c1784ace5a0d95232ae435a663648474f35345cfade9ce975ebf96090e0",
+      "cluster": "cw-rno2a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "sh",
+            "-lc",
+            "uv pip install --system boto3==1.42.97 botocore==1.42.97 && sh scripts/run_cross_zone_one_to_two.sh receiver - s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/one-to-two"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-qual-rno-one-to-two-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "H100"
+          }
+        },
+        "disk_bytes": 10737418240,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T23:00:15.960225",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-rno2a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-rno-one-to-two-20260923",
+        "--gpu",
+        "H100",
+        "--enable-extra-resources",
+        "--cpu",
+        "4",
+        "--memory",
+        "16GB",
+        "--disk",
+        "10GB",
+        "--no-sync",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "--",
+        "sh",
+        "-lc",
+        "uv pip install --system boto3==1.42.97 botocore==1.42.97 && sh scripts/run_cross_zone_one_to_two.sh receiver - s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/one-to-two"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "c6d085d1db2f8bb3c4ebca14488c463ec851c50c67295b61d565405af6872fd7",
+      "cluster": "cw-rno2a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "sh",
+            "-lc",
+            "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role receiver --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/paired-02 --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --max-seconds 1200"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-qual-rno-paired-02-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "H100"
+          }
+        },
+        "disk_bytes": 10737418240,
+        "memory_bytes": 8589934592,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:31:28.862469",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-rno2a",
+        "job",
+        "run",
+        "--job-name",
+        "cross-zone-qual-rno-paired-02-20260923",
+        "--gpu",
+        "H100",
+        "--enable-extra-resources",
+        "--cpu",
+        "2",
+        "--memory",
+        "8GB",
+        "--disk",
+        "10GB",
+        "--no-sync",
+        "--no-wait",
+        "--priority",
+        "interactive",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "--",
+        "sh",
+        "-lc",
+        "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role receiver --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/paired-02 --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --max-seconds 1200"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "c6d085d1db2f8bb3c4ebca14488c463ec851c50c67295b61d565405af6872fd7",
+      "cluster": "cw-rno2a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "sh",
+            "-lc",
+            "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role receiver --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/paired-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --max-seconds 1200"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-qual-rno-paired-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "H100"
+          }
+        },
+        "disk_bytes": 17179869184,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:21:25.569085",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-rno2a",
+        "job",
+        "run",
+        "--no-wait",
+        "--no-sync",
+        "--enable-extra-resources",
+        "--gpu",
+        "H100x1",
+        "--priority",
+        "interactive",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "16GB",
+        "--timeout",
+        "1200",
+        "--job-name",
+        "cross-zone-qual-rno-paired-20260923",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "--",
+        "sh",
+        "-lc",
+        "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role receiver --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/paired-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-expert-32.json --max-seconds 1200"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "2adac1b3568eb36bfb2215c877e8aa89d374e60f05378e2bfc5f2ddf3e49445d",
+      "cluster": "cw-rno2a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "sh",
+            "-lc",
+            "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role receiver --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/preflight-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-preflight.json --max-seconds 480"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-qual-rno-preflight-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "H100"
+          }
+        },
+        "disk_bytes": 17179869184,
+        "memory_bytes": 17179869184,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:12:31.167876",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-rno2a",
+        "job",
+        "run",
+        "--no-wait",
+        "--no-sync",
+        "--enable-extra-resources",
+        "--gpu",
+        "H100x1",
+        "--priority",
+        "interactive",
+        "--cpu",
+        "2",
+        "--memory",
+        "16GB",
+        "--disk",
+        "16GB",
+        "--timeout",
+        "900",
+        "--job-name",
+        "cross-zone-qual-rno-preflight-20260923",
+        "--task-image",
+        "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990",
+        "--exclude",
+        "^config/",
+        "--exclude",
+        "^docs/experiments/cross-zone-transport-qualification-2026-09-23/raw/",
+        "--",
+        "sh",
+        "-lc",
+        "uv pip install --system boto3==1.42.97 botocore==1.42.97 && python scripts/bench_cross_zone_qualification.py --role receiver --root s3://marin-us-east-02a/marin/users/romain/skyrl/cross-zone-qualification-20260923/preflight-01/ --manifest docs/experiments/cross-zone-transport-qualification-2026-09-23/manifest-preflight.json --max-seconds 480"
+      ],
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
+    },
+    {
+      "bundle_id": "2d60fa3c4d939767e1409ffe4a6d5d2b13d79f111308252727929b00744ae2e5",
+      "cluster": "cw-rno2a",
+      "entrypoint": {
+        "run_command": {
+          "argv": [
+            "python",
+            "scripts/probe_cross_zone_verbs.py",
+            "--role",
+            "server",
+            "--name",
+            "forward-rno-server",
+            "--port",
+            "19562",
+            "--timeout",
+            "180"
+          ]
+        }
+      },
+      "environment": {
+        "env_vars": {
+          "HF_DATASETS_TRUST_REMOTE_CODE": "1",
+          "HF_HOME": "~/.cache/huggingface",
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "PYTHONPATH": ".",
+          "PYTHONUNBUFFERED": "1",
+          "TOKENIZERS_PARALLELISM": "false"
+        }
+      },
+      "job_id": "/romain/cross-zone-verbs-rno-server-forward-20260923",
+      "resources": {
+        "cpu_millicores": 4000,
+        "device": {
+          "gpu": {
+            "count": 1,
+            "variant": "H100"
+          }
+        },
+        "disk_bytes": 8589934592,
+        "memory_bytes": 8589934592,
+        "priority_band": 2
+      },
+      "source_provenance": {
+        "base_commit": "5fe676b3",
+        "branch": "goal/cross-zone-qualification-draft-20260923",
+        "created_at": "2026-09-23T22:05:21.505938",
+        "dirty": true,
+        "tree_hash": "d9df3541"
+      },
+      "submit_argv": [
+        "/home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/.venv/bin/iris",
+        "--cluster=cw-rno2a",
+        "job",
+        "run",
+        "--no-wait",
+        "--no-sync",
+        "--enable-extra-resources",
+        "--gpu",
+        "H100x1",
+        "--priority",
+        "interactive",
+        "--cpu",
+        "2",
+        "--memory",
+        "8GB",
+        "--disk",
+        "8GB",
+        "--timeout",
+        "420",
+        "--job-name",
+        "cross-zone-verbs-rno-server-forward-20260923",
+        "--exclude",
+        "^docs/",
+        "--exclude",
+        "^config/",
+        "--",
+        "python",
+        "scripts/probe_cross_zone_verbs.py",
+        "--role",
+        "server",
+        "--name",
+        "forward-rno-server",
+        "--port",
+        "19562",
+        "--timeout",
+        "180"
+      ],
+      "task_image": ""
+    }
+  ]
+}

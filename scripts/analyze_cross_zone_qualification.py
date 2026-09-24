@@ -137,7 +137,7 @@ def main() -> None:
         path = args.raw / "one-to-two"
         if path.exists():
             result["one_to_two"][method] = one_to_two(path, method)
-    for name, receivers in (("nccl-socket", 1), ("nccl-chunks", 1), ("nccl-fanout", 2)):
+    for name, receivers in (("nccl-socket", 1), ("nccl-chunks", 1), ("nccl-chunks-02", 1), ("nccl-fanout", 2)):
         path = args.raw / name
         if path.exists():
             result["nccl"][name] = nccl(path, receivers)
