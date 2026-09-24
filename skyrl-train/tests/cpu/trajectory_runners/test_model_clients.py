@@ -80,6 +80,7 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
                     ],
                     "parallel_tool_calls": False,
                     "max_output_tokens": 128,
+                    "chat_template_kwargs": {"enable_thinking": False},
                 }
             ],
         }
@@ -101,6 +102,7 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
         "model": "snowball",
         "messages": [{"role": "user", "content": "look it up"}],
         "tools": expected_tools,
+        "chat_template_kwargs": {"enable_thinking": False},
         "add_generation_prompt": True,
     }
     chat_body = engine.chat_completion.await_args.args[0]["json"]
@@ -110,6 +112,7 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
         "session_id": "trajectory-2",
         "temperature": 0.7,
         "tools": expected_tools,
+        "chat_template_kwargs": {"enable_thinking": False},
         "parallel_tool_calls": False,
         "max_completion_tokens": 128,
         "return_token_ids": True,

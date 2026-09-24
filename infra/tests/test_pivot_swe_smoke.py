@@ -22,6 +22,7 @@ def _raw_row(trajectory_id):
         "expected_action": {"type": "function_call", "name": "execute_bash", "arguments": '{"command":"pwd"}'},
         "agent_ref": {"name": "single_step_tool_use_with_argument_comparison_swe"},
         "pass_rate": 0.375,
+        "metadata": {"instance_id": f"task-{trajectory_id}"},
     }
 
 
@@ -43,6 +44,9 @@ def test_prepared_swe_pivot_uses_local_action_grader():
 
 def test_smoke_sample_splits_trajectory_ids_and_writes_parquet(tmp_path, monkeypatch):
     rows = [_raw_row(1), _raw_row(1), *(_raw_row(index) for index in range(2, 258))]
+    same_task = _raw_row(999)
+    same_task["metadata"]["instance_id"] = "task-2"
+    rows.insert(3, same_task)
 
     class Tokenizer:
         def apply_chat_template(self, messages, **kwargs):
@@ -50,15 +54,20 @@ def test_smoke_sample_splits_trajectory_ids_and_writes_parquet(tmp_path, monkeyp
 
     monkeypatch.setattr(pivot_swe, "load_dataset", lambda *args, **kwargs: rows)
     monkeypatch.setattr(pivot_swe.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: Tokenizer())
-    manifest = pivot_swe.prepare_smoke_sample(tmp_path)
+    manifest = pivot_swe.prepare_smoke_sample(tmp_path, chat_template_kwargs={"enable_thinking": False})
 
     probe_ids = manifest["probe_trajectory_ids"]
     assert len(set(manifest["train_trajectory_ids"] + probe_ids)) == 192
+    assert 999 not in manifest["train_trajectory_ids"] + probe_ids
     assert probe_ids[0] == 1
     assert probe_ids[-1] >= 254
     assert max(right - left for left, right in zip(probe_ids, probe_ids[1:])) <= 3
     assert len(load_dataset("parquet", data_files=str(tmp_path / "train.parquet"), split="train")) == 64
-    assert len(load_dataset("parquet", data_files=str(tmp_path / "probe.parquet"), split="train")) == 128
+    probe_rows = load_dataset("parquet", data_files=str(tmp_path / "probe.parquet"), split="train")
+    assert len(probe_rows) == 128
+    assert json.loads(probe_rows[0]["extra_info"]["nemotron_ultra"]["request_json"])["chat_template_kwargs"] == {
+        "enable_thinking": False
+    }
 
 
 def test_report_pairs_probe_results_and_persists_training_errors(tmp_path):

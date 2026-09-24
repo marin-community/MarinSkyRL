@@ -1,0 +1,16 @@
+defaults:
+  - pivot_swe_smoke
+  - _self_
+
+trainer:
+  max_steps: 1
+  eval_num_prompts: 8
+  callbacks:
+    - type: evaluation
+      eval_steps: 1
+      eval_before_train: true
+      eval_on_train_end: false
+    - type: checkpoint
+      save_steps: 1
+      save_on_train_end: false
+    - type: logging

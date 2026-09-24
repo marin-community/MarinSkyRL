@@ -187,7 +187,11 @@ class DirectModelClient:
 
         async def generate_one(messages, row_options, session_id, continuation):
             chat_options = self._chat_options(row_options, sampling_params)
-            tokenize_options = {key: chat_options[key] for key in ("tools", "tool_choice") if key in chat_options}
+            tokenize_options = {
+                key: chat_options[key]
+                for key in ("tools", "tool_choice", "chat_template_kwargs")
+                if key in chat_options
+            }
             render_request = {
                 "json": {
                     "model": self._client.model_name,

@@ -69,7 +69,10 @@ generator:
   run_engines_locally: true
   weight_sync_backend: nccl
   async_engine: true
-  batched: true
+  batched: false
+  require_exact_chat_transport: true
+  chat_template_kwargs:
+    enable_thinking: false
   enable_http_endpoint: true
   max_num_batched_tokens: 16384
   engine_init_kwargs:
