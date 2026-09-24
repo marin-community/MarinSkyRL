@@ -1,7 +1,9 @@
 from collections.abc import Generator
 from concurrent.futures import FIRST_COMPLETED, Future as ConcurrentFuture, ThreadPoolExecutor, wait
 from contextlib import contextmanager
+from dataclasses import dataclass
 import io
+import math
 import os
 import time
 from typing import cast, Protocol, runtime_checkable
@@ -50,6 +52,14 @@ class _MultipartS3FileSystem(Protocol):
     def call_s3(self, method: str, *args, **kwargs): ...
 
 
+@dataclass(frozen=True)
+class _CompletedPart:
+    part: dict[str, int | str]
+    submitted_at: float
+    started_at: float
+    completed_at: float
+
+
 class _ConcurrentS3WriteStream:
     """Bounded file-like multipart writer with concurrent UploadPart calls."""
 
@@ -80,15 +90,28 @@ class _ConcurrentS3WriteStream:
         self._upload_id: str | None = None
         self._next_part_number = 1
         self._completed_parts: list[dict[str, int | str]] = []
-        self._pending: set[ConcurrentFuture[tuple[dict[str, int | str], float]]] = set()
+        self._pending: set[ConcurrentFuture[_CompletedPart]] = set()
         self._executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="checkpoint-s3")
         self._write_error: BaseException | None = None
+        # One bounded per-rank summary; these durations are never logged per part.
+        self._upload_part_durations: list[float] = []
+        self._first_part_started_at: float | None = None
+        self._last_part_completed_at: float | None = None
         self.create_upload_seconds = 0.0
         self.upload_part_seconds_total = 0.0
         self.upload_part_seconds_max = 0.0
+        self.upload_part_seconds_p95 = 0.0
+        self.upload_part_call_window_seconds = 0.0
+        self.upload_part_thread_wait_seconds_total = 0.0
+        self.upload_part_thread_wait_seconds_max = 0.0
+        # Both queue waits are nested in stream_write or close_drain, respectively.
         self.upload_queue_wait_seconds = 0.0
+        self.upload_queue_wait_write_seconds = 0.0
+        self.upload_queue_wait_close_seconds = 0.0
         self.write_seconds_total = 0.0
         self.buffer_copy_seconds_total = 0.0
+        self.buffer_snapshot_copy_seconds_total = 0.0
+        self.buffer_snapshot_bytes_total = 0
         self.close_drain_seconds = 0.0
         self.complete_upload_seconds = 0.0
         self.uploaded_part_count = 0
@@ -118,7 +141,7 @@ class _ConcurrentS3WriteStream:
                     self.buffer_copy_seconds_total += time.perf_counter() - copy_started
                     view = view[chunk_bytes:]
                     if len(self._buffer) == self.part_bytes:
-                        self._submit_part(bytes(self._buffer))
+                        self._submit_part(self._snapshot_buffer())
                         self._buffer.clear()
             except BaseException as error:
                 # torch.save replaces exceptions from a Python write callback with
@@ -153,7 +176,7 @@ class _ConcurrentS3WriteStream:
                 max_attempts=1,
                 Bucket=self.bucket,
                 Key=self.key,
-                Body=bytes(self._buffer),
+                Body=self._snapshot_buffer(),
             )
             self._buffer.clear()
             self._executor.shutdown(wait=True, cancel_futures=True)
@@ -161,12 +184,15 @@ class _ConcurrentS3WriteStream:
             return
 
         if self._buffer:
-            self._submit_part(bytes(self._buffer))
+            self._submit_part(self._snapshot_buffer())
             self._buffer.clear()
         drain_started = time.perf_counter()
         while self._pending:
-            self._finish_next_part()
+            self._finish_next_part(closing=True)
         self.close_drain_seconds = time.perf_counter() - drain_started
+        self.upload_part_seconds_p95 = sorted(self._upload_part_durations)[
+            math.ceil(0.95 * len(self._upload_part_durations)) - 1
+        ]
         self._executor.shutdown(wait=True)
         started = time.perf_counter()
         call_with_s3_retry(
@@ -204,6 +230,13 @@ class _ConcurrentS3WriteStream:
         self._buffer.clear()
         self.closed = True
 
+    def _snapshot_buffer(self) -> bytes:
+        started = time.perf_counter()
+        payload = bytes(self._buffer)
+        self.buffer_snapshot_copy_seconds_total += time.perf_counter() - started
+        self.buffer_snapshot_bytes_total += len(payload)
+        return payload
+
     def _submit_part(self, payload: bytes) -> None:
         if self._upload_id is None:
             started = time.perf_counter()
@@ -220,12 +253,13 @@ class _ConcurrentS3WriteStream:
 
         part_number = self._next_part_number
         self._next_part_number += 1
-        future = self._executor.submit(self._upload_part, part_number, payload)
+        submitted_at = time.perf_counter()
+        future = self._executor.submit(self._upload_part, part_number, payload, submitted_at)
         self._pending.add(future)
         if len(self._pending) >= self.concurrency:
             self._finish_next_part()
 
-    def _upload_part(self, part_number: int, payload: bytes) -> tuple[dict[str, int | str], float]:
+    def _upload_part(self, part_number: int, payload: bytes, submitted_at: float) -> _CompletedPart:
         started = time.perf_counter()
         try:
             response = call_with_s3_retry(
@@ -242,19 +276,47 @@ class _ConcurrentS3WriteStream:
         except BaseException as error:
             error.add_note(f"Multipart upload failed for {self.path}: upload_id={self._upload_id} part={part_number}")
             raise
-        return {"PartNumber": part_number, "ETag": str(response["ETag"])}, time.perf_counter() - started
+        return _CompletedPart(
+            {"PartNumber": part_number, "ETag": str(response["ETag"])},
+            submitted_at,
+            started,
+            time.perf_counter(),
+        )
 
-    def _finish_next_part(self) -> None:
+    def _finish_next_part(self, *, closing: bool = False) -> None:
         started = time.perf_counter()
         completed, _ = wait(self._pending, return_when=FIRST_COMPLETED)
         future = completed.pop()
         self._pending.remove(future)
-        part, upload_seconds = future.result()
-        self.upload_queue_wait_seconds += time.perf_counter() - started
+        result = future.result()
+        queue_wait = time.perf_counter() - started
+        self.upload_queue_wait_seconds += queue_wait
+        if closing:
+            self.upload_queue_wait_close_seconds += queue_wait
+        else:
+            self.upload_queue_wait_write_seconds += queue_wait
+        upload_seconds = result.completed_at - result.started_at
+        thread_wait = result.started_at - result.submitted_at
         self.upload_part_seconds_total += upload_seconds
         self.upload_part_seconds_max = max(self.upload_part_seconds_max, upload_seconds)
+        self._upload_part_durations.append(upload_seconds)
+        self.upload_part_thread_wait_seconds_total += thread_wait
+        self.upload_part_thread_wait_seconds_max = max(self.upload_part_thread_wait_seconds_max, thread_wait)
+        self._first_part_started_at = (
+            result.started_at
+            if self._first_part_started_at is None
+            else min(self._first_part_started_at, result.started_at)
+        )
+        self._last_part_completed_at = (
+            result.completed_at
+            if self._last_part_completed_at is None
+            else max(self._last_part_completed_at, result.completed_at)
+        )
+        # Sum(part-call durations) / this window estimates concurrent SDK calls,
+        # not live network sockets; calls can also wait in the client or retry.
+        self.upload_part_call_window_seconds = self._last_part_completed_at - self._first_part_started_at
         self.uploaded_part_count += 1
-        self._completed_parts.append(part)
+        self._completed_parts.append(result.part)
 
 
 class _AbortableFsspecFileSystem(FsspecFileSystem):
@@ -385,9 +447,12 @@ class StreamingFsspecWriter(FileSystemWriter):
 
     def write_data(self, plan: SavePlan, planner: SavePlanner) -> Future[list[WriteResult]]:
         """Write a rank shard without retaining serialized tensors until close."""
+        process_cpu_started = time.process_time()
         with checkpoint_phase("megatron", "save", "stream_shard", rank=self.rank, step=self.checkpoint_step) as phase:
             result = self._write_data(plan, planner, phase)
             phase.bytes_written = sum(item.size_in_bytes for item in result.wait())
+            # Process-wide CPU delta includes all threads active during this span.
+            phase.counters["process_cpu_seconds_during_stream"] = time.process_time() - process_cpu_started
             return result
 
     def _write_data(
@@ -475,9 +540,17 @@ class StreamingFsspecWriter(FileSystemWriter):
                     "create_upload_seconds": stream.create_upload_seconds,
                     "upload_part_seconds_total": stream.upload_part_seconds_total,
                     "upload_part_seconds_max": stream.upload_part_seconds_max,
+                    "upload_part_seconds_p95": stream.upload_part_seconds_p95,
+                    "upload_part_call_window_seconds": stream.upload_part_call_window_seconds,
+                    "upload_part_thread_wait_seconds_total": stream.upload_part_thread_wait_seconds_total,
+                    "upload_part_thread_wait_seconds_max": stream.upload_part_thread_wait_seconds_max,
                     "upload_queue_wait_seconds": stream.upload_queue_wait_seconds,
+                    "upload_queue_wait_write_seconds": stream.upload_queue_wait_write_seconds,
+                    "upload_queue_wait_close_seconds": stream.upload_queue_wait_close_seconds,
                     "stream_write_seconds_total": stream.write_seconds_total,
                     "stream_buffer_copy_seconds_total": stream.buffer_copy_seconds_total,
+                    "stream_buffer_snapshot_copy_seconds_total": stream.buffer_snapshot_copy_seconds_total,
+                    "stream_buffer_snapshot_bytes_total": stream.buffer_snapshot_bytes_total,
                     "multipart_close_drain_seconds": stream.close_drain_seconds,
                     "complete_upload_seconds": stream.complete_upload_seconds,
                     "uploaded_part_count": stream.uploaded_part_count,

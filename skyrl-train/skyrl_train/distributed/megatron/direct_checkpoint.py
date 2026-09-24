@@ -79,10 +79,12 @@ class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
         rank = dist.get_rank()
         step = extract_step_from_path(os.path.dirname(self.checkpoint_dir.rstrip("/")))
         with checkpoint_phase("megatron", "save", "dcp_translate", rank=rank, step=step):
-            sharded_state_dict, _, _ = _replace_state_dict_keys_with_sharded_keys(
-                sharded_state_dict, self.keep_only_main_replica
-            )
-            pytorch_state_dict = mcore_to_pyt_state_dict(sharded_state_dict, False)
+            with checkpoint_phase("megatron", "save", "dcp_key_replacement", rank=rank, step=step):
+                sharded_state_dict, _, _ = _replace_state_dict_keys_with_sharded_keys(
+                    sharded_state_dict, self.keep_only_main_replica
+                )
+            with checkpoint_phase("megatron", "save", "dcp_mcore_to_pyt", rank=rank, step=step):
+                pytorch_state_dict = mcore_to_pyt_state_dict(sharded_state_dict, False)
         filesystem = get_s3_fs()
         s3_refresh_if_expiring(filesystem)
         writer = StreamingFsspecWriter(self.checkpoint_dir, filesystem=filesystem)

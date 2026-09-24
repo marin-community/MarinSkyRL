@@ -179,6 +179,7 @@ def test_concurrent_s3_stream_bounds_and_parallelizes_parts():
 
     assert filesystem.peak_active_uploads == 2
     assert filesystem.uploaded_parts == {1: b"a" * part_bytes, 2: b"b" * part_bytes, 3: b"tail"}
+    assert stream.buffer_snapshot_bytes_total == sum(len(part) for part in filesystem.uploaded_parts.values())
     assert filesystem.completed_parts == [
         {"PartNumber": 1, "ETag": "etag-1"},
         {"PartNumber": 2, "ETag": "etag-2"},

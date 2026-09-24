@@ -7,17 +7,23 @@ gradients, which are not checkpointed, must be off the device for both calls.
 """
 
 import contextlib
+import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import fsspec
 import pytest
 import torch
+from loguru import logger
+from torch.distributed import checkpoint
+from torch.distributed.checkpoint import DefaultSavePlanner
 
 from tests.cpu.util import stub_megatron_modules
 
 stub_megatron_modules()
 
-from skyrl_train.distributed.megatron import megatron_strategy  # noqa: E402
+from skyrl_train.distributed.megatron import direct_checkpoint, megatron_strategy  # noqa: E402
 
 
 class _Grads:
@@ -104,3 +110,44 @@ def test_rank_rng_selection_rejects_changed_model_parallel_slice(monkeypatch):
     monkeypatch.setattr(megatron_strategy, "_rng_parallel_coordinates", lambda: (0, 1, 0, 0, 0, 0))
     with pytest.raises(ValueError, match="matching model-parallel geometry"):
         megatron_strategy._select_rank_rng_state([{"coordinates": (0, 0, 0, 0, 0, 0), "generic": "saved"}], 0)
+
+
+def test_direct_save_reports_translation_subphases_and_preserves_tensor(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "global_step_4" / "policy"
+    checkpoint_dir.mkdir(parents=True)
+    filesystem = fsspec.filesystem("file")
+    monkeypatch.setattr(direct_checkpoint.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(direct_checkpoint, "get_s3_fs", lambda: filesystem)
+    monkeypatch.setattr(direct_checkpoint, "s3_refresh_if_expiring", lambda filesystem: None)
+    monkeypatch.setattr(direct_checkpoint, "MCoreSavePlanner", DefaultSavePlanner)
+    monkeypatch.setattr(
+        direct_checkpoint, "_replace_state_dict_keys_with_sharded_keys", lambda state, _: (state, {}, {})
+    )
+    monkeypatch.setattr(direct_checkpoint, "mcore_to_pyt_state_dict", lambda state, _: state)
+
+    output = io.StringIO()
+    sink = logger.add(output, format="{message}")
+    try:
+        strategy = direct_checkpoint.DirectS3TorchDistSaveShardedStrategy(str(checkpoint_dir))
+        strategy.keep_only_main_replica = False
+        expected = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        strategy.save({"tensor": expected}, checkpoint_dir)
+    finally:
+        logger.remove(sink)
+
+    restored = {"tensor": torch.zeros_like(expected)}
+    checkpoint.load(restored, checkpoint_id=str(checkpoint_dir))
+    torch.testing.assert_close(restored["tensor"], expected, rtol=0, atol=0)
+
+    observations = [
+        json.loads(line.removeprefix("checkpoint_observation "))
+        for line in output.getvalue().splitlines()
+        if line.startswith("checkpoint_observation ")
+    ]
+    phases = {item["phase"]: item for item in observations}
+    assert {"dcp_key_replacement", "dcp_mcore_to_pyt", "dcp_translate"} <= phases.keys()
+    assert all(phases[name]["outcome"] == "success" for name in phases)
+    assert all(phases[name]["rank"] == "0" and phases[name]["step"] == "4" for name in phases)
+    assert phases["dcp_translate"]["duration_seconds"] >= (
+        phases["dcp_key_replacement"]["duration_seconds"] + phases["dcp_mcore_to_pyt"]["duration_seconds"]
+    )
