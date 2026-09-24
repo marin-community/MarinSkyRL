@@ -5,7 +5,7 @@ set -euo pipefail
 : "${PIVOT_TMP_ROOT:?Set the lifecycle-managed checkpoint URI}"
 : "${RUN_ID:?Set a unique run ID}"
 
-REPOSITORY_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+REPOSITORY_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RUNTIME_ENV="${RUNTIME_ENV:-$REPOSITORY_ROOT/.iris-pivot-fsdp}"
 source "$REPOSITORY_ROOT/skyrl-train/ci/marin_nightly/resolve_runtime.sh" \
   "$REPOSITORY_ROOT" "$RUNTIME_ENV" production fsdp
