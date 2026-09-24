@@ -1,0 +1,92 @@
+{
+  "apt_install": {
+    "elapsed_seconds": 1.6516800662502646,
+    "returncode": 0
+  },
+  "apt_update": {
+    "elapsed_seconds": 1.7481744661927223,
+    "returncode": 0
+  },
+  "command": [
+    "ib_write_bw",
+    "-d",
+    "ibp0",
+    "-i",
+    "1",
+    "-x",
+    "0",
+    "-s",
+    "1024",
+    "-n",
+    "10",
+    "-p",
+    "19562",
+    "10.168.193.223"
+  ],
+  "counters_after": {
+    "VL15_dropped": "0",
+    "excessive_buffer_overrun_errors": "0",
+    "link_downed": "0",
+    "link_error_recovery": "0",
+    "local_link_integrity_errors": "0",
+    "multicast_rcv_packets": "69793593",
+    "multicast_xmit_packets": "87266",
+    "port_rcv_constraint_errors": "0",
+    "port_rcv_data": "1082248163813299",
+    "port_rcv_errors": "0",
+    "port_rcv_packets": "1199783538979",
+    "port_rcv_remote_physical_errors": "0",
+    "port_rcv_switch_relay_errors": "0",
+    "port_xmit_constraint_errors": "0",
+    "port_xmit_data": "1085429218872064",
+    "port_xmit_discards": "0",
+    "port_xmit_packets": "1248721221756",
+    "port_xmit_wait": "4294967295",
+    "symbol_error": "0",
+    "unicast_rcv_packets": "1199713745386",
+    "unicast_xmit_packets": "1248721134490"
+  },
+  "counters_before": {
+    "VL15_dropped": "0",
+    "excessive_buffer_overrun_errors": "0",
+    "link_downed": "0",
+    "link_error_recovery": "0",
+    "local_link_integrity_errors": "0",
+    "multicast_rcv_packets": "69793538",
+    "multicast_xmit_packets": "87266",
+    "port_rcv_constraint_errors": "0",
+    "port_rcv_data": "1082248163807964",
+    "port_rcv_errors": "0",
+    "port_rcv_packets": "1199783538924",
+    "port_rcv_remote_physical_errors": "0",
+    "port_rcv_switch_relay_errors": "0",
+    "port_xmit_constraint_errors": "0",
+    "port_xmit_data": "1085429218838944",
+    "port_xmit_discards": "0",
+    "port_xmit_packets": "1248721221636",
+    "port_xmit_wait": "4294967295",
+    "symbol_error": "0",
+    "unicast_rcv_packets": "1199713745386",
+    "unicast_xmit_packets": "1248721134370"
+  },
+  "device": "ibp0",
+  "gid_0": "fe80:0000:0000:0000:e09d:7303:0029:1f06",
+  "hostname": "s90vxs64",
+  "name": "forward-east-client",
+  "peer_ip": "10.168.193.223",
+  "port": 19562,
+  "probe": {
+    "elapsed_seconds": 5.088745096698403,
+    "returncode": 1
+  },
+  "role": "client",
+  "socket_control": {
+    "bytes": 1048576,
+    "elapsed_seconds": 0.33560833148658276,
+    "matched": true,
+    "peer_ip": "10.168.193.223",
+    "sha256": "6a3f80151749c1dbf32285a4d3bfcc1e77f248614b383d2780380bdbf9ca240c"
+  },
+  "state": "4: ACTIVE",
+  "success": false
+}

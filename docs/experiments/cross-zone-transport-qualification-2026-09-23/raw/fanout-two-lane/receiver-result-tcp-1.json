@@ -1,0 +1,175 @@
+{
+  "facts": {
+    "boto3": "1.42.97",
+    "botocore": "1.42.97",
+    "bucket": "marin-us-east-02a",
+    "endpoint": "http://cwlota.com",
+    "hostname": "gb977f0",
+    "interface": "enp90s0np0",
+    "ip": "10.168.194.103",
+    "mtu": 9000,
+    "prefix": "marin/users/romain/skyrl/cross-zone-qualification-20260923/fanout-two-lane/tcp/lane-1"
+  },
+  "role": "receiver",
+  "samples": [
+    {
+      "legs": [
+        {
+          "receive_buffer_bytes": 8388608,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56982,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "receive_buffer_bytes": 8388608,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56487,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "receive_buffer_bytes": 8388608,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56993,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "receive_buffer_bytes": 8388608,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 54000,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        }
+      ],
+      "method": "tcp",
+      "network_delta": {
+        "receive": 535277765,
+        "transmit": 1584443
+      },
+      "peak_rss_kib": 435268,
+      "process_delta": {
+        "system_seconds": 0.309231,
+        "user_seconds": 0.26698299999999997
+      },
+      "receive_and_hash_seconds": 1.51314358972013,
+      "sample": "paired-000-4ac65a869f1e4ce898cf01344bb995fe-tcp-4-4194304",
+      "sha256": "2f7ced64fd18296d9f8603587a69bb19265f881b41aa54023cb104de89f775f3"
+    },
+    {
+      "legs": [
+        {
+          "receive_buffer_bytes": 8388608,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56982,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "receive_buffer_bytes": 8388608,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56487,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "receive_buffer_bytes": 8388608,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56993,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "receive_buffer_bytes": 8388608,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 54000,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        }
+      ],
+      "method": "tcp",
+      "network_delta": {
+        "receive": 323940043,
+        "transmit": 832895
+      },
+      "peak_rss_kib": 762688,
+      "process_delta": {
+        "system_seconds": 0.257597,
+        "user_seconds": 0.2990569999999999
+      },
+      "receive_and_hash_seconds": 1.4313774439506233,
+      "sample": "paired-001-17f60cdcd13f40fa81b1a35c0a5f004a-tcp-4-4194304",
+      "sha256": "c47bf4fc87fe9ae174103327824f3a24e9115923830d487d7887b9c6b16be80f"
+    },
+    {
+      "legs": [
+        {
+          "receive_buffer_bytes": 8388608,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56982,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "receive_buffer_bytes": 8388608,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56487,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "receive_buffer_bytes": 8388608,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56993,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "receive_buffer_bytes": 8388608,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 54000,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        }
+      ],
+      "method": "tcp",
+      "network_delta": {
+        "receive": 323985075,
+        "transmit": 843584
+      },
+      "peak_rss_kib": 834596,
+      "process_delta": {
+        "system_seconds": 0.194932,
+        "user_seconds": 0.27350299999999983
+      },
+      "receive_and_hash_seconds": 1.4497438771650195,
+      "sample": "paired-002-26e76c4536b743a4b33e0959ad110162-tcp-4-4194304",
+      "sha256": "517a6981f78a4710431ec26a8f78a341e746a0e60dd350dd7029ba2a2b4bf77d"
+    }
+  ]
+}

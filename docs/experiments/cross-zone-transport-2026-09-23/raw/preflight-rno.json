@@ -1,0 +1,270 @@
+{
+  "facts": {
+    "aws_endpoint": "http://cwlota.com",
+    "commands": {
+      "ibv_devinfo": null,
+      "ibv_rc_pingpong": null,
+      "nvidia-smi": "/usr/bin/nvidia-smi",
+      "rdma": null,
+      "ucx_info": null,
+      "ucx_perftest": null
+    },
+    "hostname": "gb95a00",
+    "infiniband_devices": [
+      "ibp0",
+      "ibp1",
+      "ibp2",
+      "ibp3",
+      "ibp4",
+      "ibp5",
+      "ibp6",
+      "ibp7",
+      "mlx5_0",
+      "mlx5_1",
+      "mlx5_2",
+      "mlx5_3",
+      "mlx5_4",
+      "mlx5_5",
+      "mlx5_6",
+      "mlx5_7",
+      "mlx5_8"
+    ],
+    "interfaces": [
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc98ad81ce6d5a"
+      },
+      {
+        "ipv4": "127.0.0.1",
+        "mtu": 65536,
+        "name": "lo"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp220s0f0"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp220s0f1"
+      },
+      {
+        "ipv4": "10.168.192.27",
+        "mtu": 9000,
+        "name": "enp90s0np0"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs0"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs1"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs2"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs3"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs4"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs5"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs6"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs7"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v0"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v1"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v2"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v3"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v4"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v5"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v6"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v7"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "cilium_net"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc423373b33cee"
+      },
+      {
+        "ipv4": "10.0.32.133",
+        "mtu": 9000,
+        "name": "cilium_host"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc_health"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc3e2d287df79b"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc00833119aae7"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcdddabd1dd234"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc190cf887404a"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxce498a6db3e19"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc73423ce3750d"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc2b5f83d56807"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcc35bec813589"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcbd4f6393bbf5"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcb71d59bf7476"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcacc7ef6e2335"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcc6d3114c6209"
+      }
+    ],
+    "primary_ip": "10.168.192.27",
+    "route_table": "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT                                                       \nenp90s0np0\t00000000\t1AC0A80A\t0003\t0\t0\t1024\t00000000\t0\t0\t0                                                                      \nenp90s0np0\t01010101\t1AC0A80A\t0007\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                      \nenp90s0np0\t08080808\t1AC0A80A\t0007\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                      \nlxcc6d3114c6209\t8420000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxcc35bec813589\t8820000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxcdddabd1dd234\t8E20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc3e2d287df79b\t9420000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxcb71d59bf7476\t9D20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxcbd4f6393bbf5\tAA20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxce498a6db3e19\tAB20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxcacc7ef6e2335\tC920000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc190cf887404a\tDD20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc98ad81ce6d5a\tE620000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc423373b33cee\tE720000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc73423ce3750d\tEB20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc2b5f83d56807\tF120000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc_health\tFB20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                         \nlxc00833119aae7\tFD20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nenp90s0np0\t1AC0A80A\t00000000\t0005\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                      \nenp90s0np0\t1AC0A80A\t00000000\t0001\t0\t0\t1024\tFEFFFFFF\t0\t0\t0                                                                      \nenp90s0np0\t0064FEA9\t00000000\t0005\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                      \n"
+  },
+  "object": {
+    "cold_get_seconds": 0.13978566322475672,
+    "cold_headers": {
+      "accept-ranges": "bytes",
+      "content-length": "1024",
+      "content-type": "application/octet-stream",
+      "date": "Thu, 24 Sep 2026 00:09:08 GMT",
+      "etag": "\"a65b62142e16c596d27400897435e130\"",
+      "last-modified": "Thu, 24 Sep 2026 00:09:08 GMT",
+      "server": "CoreWeaveObjectStorage",
+      "vary": "Origin",
+      "x-amz-checksum-crc32": "zHAEAg==",
+      "x-amz-checksum-type": "FULL_OBJECT",
+      "x-amz-delete-marker": "false",
+      "x-amz-request-id": "f5eccb88-d1f9-417b-9756-28813dff2857, f5eccb88-d1f9-417b-9756-28813dff2857",
+      "x-amz-storage-class": "STANDARD",
+      "x-amz-version-id": "null"
+    },
+    "put_headers": {
+      "content-length": "0",
+      "date": "Thu, 24 Sep 2026 00:09:08 GMT",
+      "etag": "\"a65b62142e16c596d27400897435e130\"",
+      "server": "CoreWeaveObjectStorage",
+      "vary": "Origin",
+      "x-amz-checksum-crc32": "zHAEAg==",
+      "x-amz-checksum-type": "FULL_OBJECT",
+      "x-amz-request-id": "f7825946-7e2c-4765-a3b7-e05e0e11d894, f7825946-7e2c-4765-a3b7-e05e0e11d894"
+    },
+    "put_seconds": 0.8647687798365951,
+    "sha256": "1213d63cbd4d959e018c2c3f0cfbbb456b3244428673e3f99a3e797a1f8a5ad9",
+    "warm_get_seconds": 0.13542709033936262,
+    "warm_headers": {
+      "accept-ranges": "bytes",
+      "content-length": "1024",
+      "content-type": "application/octet-stream",
+      "date": "Thu, 24 Sep 2026 00:09:09 GMT",
+      "etag": "\"a65b62142e16c596d27400897435e130\"",
+      "last-modified": "Thu, 24 Sep 2026 00:09:08 GMT",
+      "server": "CoreWeaveObjectStorage",
+      "vary": "Origin",
+      "x-amz-checksum-crc32": "zHAEAg==",
+      "x-amz-checksum-type": "FULL_OBJECT",
+      "x-amz-delete-marker": "false",
+      "x-amz-request-id": "95458565-e77d-4304-a735-95efc4508e48, 95458565-e77d-4304-a735-95efc4508e48",
+      "x-amz-storage-class": "STANDARD",
+      "x-amz-version-id": "null"
+    }
+  }
+}

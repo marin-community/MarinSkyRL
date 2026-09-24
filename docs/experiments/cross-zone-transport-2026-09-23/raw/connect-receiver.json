@@ -1,0 +1,363 @@
+{
+  "facts": {
+    "aws_endpoint": "http://cwlota.com",
+    "commands": {
+      "ibv_devinfo": null,
+      "ibv_rc_pingpong": null,
+      "nvidia-smi": "/usr/bin/nvidia-smi",
+      "rdma": null,
+      "ucx_info": null,
+      "ucx_perftest": null
+    },
+    "hostname": "gb95a00",
+    "infiniband_devices": [
+      "ibp0",
+      "ibp1",
+      "ibp2",
+      "ibp3",
+      "ibp4",
+      "ibp5",
+      "ibp6",
+      "ibp7",
+      "mlx5_0",
+      "mlx5_1",
+      "mlx5_2",
+      "mlx5_3",
+      "mlx5_4",
+      "mlx5_5",
+      "mlx5_6",
+      "mlx5_7",
+      "mlx5_8"
+    ],
+    "interfaces": [
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc98ad81ce6d5a"
+      },
+      {
+        "ipv4": "127.0.0.1",
+        "mtu": 65536,
+        "name": "lo"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp220s0f0"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp220s0f1"
+      },
+      {
+        "ipv4": "10.168.192.27",
+        "mtu": 9000,
+        "name": "enp90s0np0"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs0"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs1"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs2"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs3"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs4"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs5"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs6"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs7"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v0"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v1"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v2"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v3"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v4"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v5"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v6"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enp90s0v7"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "cilium_net"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc423373b33cee"
+      },
+      {
+        "ipv4": "10.0.32.133",
+        "mtu": 9000,
+        "name": "cilium_host"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc_health"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc3e2d287df79b"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc00833119aae7"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcdddabd1dd234"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc190cf887404a"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxce498a6db3e19"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc73423ce3750d"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc2b5f83d56807"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcc35bec813589"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcbd4f6393bbf5"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcb71d59bf7476"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcacc7ef6e2335"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcc6d3114c6209"
+      }
+    ],
+    "primary_ip": "10.168.192.27",
+    "route_table": "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT                                                       \nenp90s0np0\t00000000\t1AC0A80A\t0003\t0\t0\t1024\t00000000\t0\t0\t0                                                                      \nenp90s0np0\t01010101\t1AC0A80A\t0007\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                      \nenp90s0np0\t08080808\t1AC0A80A\t0007\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                      \nlxcc6d3114c6209\t8420000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxcc35bec813589\t8820000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxcdddabd1dd234\t8E20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc3e2d287df79b\t9420000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxcb71d59bf7476\t9D20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxcbd4f6393bbf5\tAA20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxce498a6db3e19\tAB20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxcacc7ef6e2335\tC920000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc190cf887404a\tDD20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc98ad81ce6d5a\tE620000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc423373b33cee\tE720000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc73423ce3750d\tEB20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc2b5f83d56807\tF120000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc_health\tFB20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                         \nlxc00833119aae7\tFD20000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nenp90s0np0\t1AC0A80A\t00000000\t0005\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                      \nenp90s0np0\t1AC0A80A\t00000000\t0001\t0\t0\t1024\tFEFFFFFF\t0\t0\t0                                                                      \nenp90s0np0\t0064FEA9\t00000000\t0005\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                      \n"
+  },
+  "role": "receiver",
+  "samples": [
+    {
+      "method": "tcp",
+      "receive_and_verify_seconds": 0.4600101988762617,
+      "sample": "8m-1streams-0-tcp",
+      "sha256": "94cbde3c7fb9f1095b6fcc635cc60b56e93021c7e375e95a6c32130b870ec6ac",
+      "size": 8388608,
+      "streams": 1,
+      "tcp_info": [
+        {
+          "pmtu": 9000,
+          "rtt_us": 56799,
+          "snd_mss": 8948,
+          "total_retrans": 0
+        }
+      ]
+    },
+    {
+      "first_delivery_seconds": 2.2965550599619746,
+      "method": "object",
+      "reads": [
+        {
+          "attempts": 2,
+          "first_get_seconds": 2.29621559754014,
+          "headers": {
+            "accept-ranges": "bytes",
+            "content-length": "8388608",
+            "content-type": "application/octet-stream",
+            "date": "Thu, 24 Sep 2026 00:11:06 GMT",
+            "etag": "\"3fb4cca92c42960c97d23e0598316aaa\"",
+            "last-modified": "Thu, 24 Sep 2026 00:11:06 GMT",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "tfROYw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-delete-marker": "false",
+            "x-amz-request-id": "a9885c3d-fb31-4fe1-b629-1f5d28d9736c, a9885c3d-fb31-4fe1-b629-1f5d28d9736c",
+            "x-amz-storage-class": "STANDARD",
+            "x-amz-version-id": "null"
+          }
+        }
+      ],
+      "receive_and_verify_seconds": 2.302651571109891,
+      "sample": "8m-1streams-0-object",
+      "sha256": "94cbde3c7fb9f1095b6fcc635cc60b56e93021c7e375e95a6c32130b870ec6ac",
+      "size": 8388608,
+      "streams": 1,
+      "warm_get_seconds": 0.12632919196039438,
+      "warm_reads": [
+        {
+          "headers": {
+            "accept-ranges": "bytes",
+            "content-length": "8388608",
+            "content-type": "application/octet-stream",
+            "date": "Thu, 24 Sep 2026 00:11:08 GMT",
+            "etag": "\"3fb4cca92c42960c97d23e0598316aaa\"",
+            "last-modified": "Thu, 24 Sep 2026 00:11:06 GMT",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "tfROYw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-delete-marker": "false",
+            "x-amz-request-id": "aace296e-378c-4156-80e2-38f5864b693f, aace296e-378c-4156-80e2-38f5864b693f",
+            "x-amz-storage-class": "STANDARD",
+            "x-amz-version-id": "null"
+          },
+          "sha256": "94cbde3c7fb9f1095b6fcc635cc60b56e93021c7e375e95a6c32130b870ec6ac"
+        }
+      ]
+    },
+    {
+      "method": "tcp",
+      "receive_and_verify_seconds": 0.3986968928948045,
+      "sample": "8m-1streams-1-tcp",
+      "sha256": "94cbde3c7fb9f1095b6fcc635cc60b56e93021c7e375e95a6c32130b870ec6ac",
+      "size": 8388608,
+      "streams": 1,
+      "tcp_info": [
+        {
+          "pmtu": 9000,
+          "rtt_us": 56460,
+          "snd_mss": 8948,
+          "total_retrans": 0
+        }
+      ]
+    },
+    {
+      "first_delivery_seconds": 0.8502454804256558,
+      "method": "object",
+      "reads": [
+        {
+          "attempts": 1,
+          "first_get_seconds": 0.849931051954627,
+          "headers": {
+            "accept-ranges": "bytes",
+            "content-length": "8388608",
+            "content-type": "application/octet-stream",
+            "date": "Thu, 24 Sep 2026 00:11:09 GMT",
+            "etag": "\"3fb4cca92c42960c97d23e0598316aaa\"",
+            "last-modified": "Thu, 24 Sep 2026 00:11:09 GMT",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "tfROYw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-delete-marker": "false",
+            "x-amz-request-id": "23533e76-808b-46d9-bc1c-2aca58908004, 23533e76-808b-46d9-bc1c-2aca58908004",
+            "x-amz-storage-class": "STANDARD",
+            "x-amz-version-id": "null"
+          }
+        }
+      ],
+      "receive_and_verify_seconds": 0.8562686638906598,
+      "sample": "8m-1streams-1-object",
+      "sha256": "94cbde3c7fb9f1095b6fcc635cc60b56e93021c7e375e95a6c32130b870ec6ac",
+      "size": 8388608,
+      "streams": 1,
+      "warm_get_seconds": 0.148468560539186,
+      "warm_reads": [
+        {
+          "headers": {
+            "accept-ranges": "bytes",
+            "content-length": "8388608",
+            "content-type": "application/octet-stream",
+            "date": "Thu, 24 Sep 2026 00:11:10 GMT",
+            "etag": "\"3fb4cca92c42960c97d23e0598316aaa\"",
+            "last-modified": "Thu, 24 Sep 2026 00:11:09 GMT",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "tfROYw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-delete-marker": "false",
+            "x-amz-request-id": "c0a38016-2472-4cb3-a0a1-dc4408799e09, c0a38016-2472-4cb3-a0a1-dc4408799e09",
+            "x-amz-storage-class": "STANDARD",
+            "x-amz-version-id": "null"
+          },
+          "sha256": "94cbde3c7fb9f1095b6fcc635cc60b56e93021c7e375e95a6c32130b870ec6ac"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+{
+  "bytes": 314572800,
+  "cuda": "13.2",
+  "device": "NVIDIA GB200",
+  "env": {
+    "NCCL_DEBUG": "INFO",
+    "NCCL_DEBUG_SUBSYS": "INIT,NET",
+    "NCCL_IB_DISABLE": "1",
+    "NCCL_IB_HCA": null,
+    "NCCL_NET": "Socket",
+    "NCCL_P2P_DISABLE": null,
+    "NCCL_SHM_DISABLE": null,
+    "NCCL_SOCKET_IFNAME": "=enP6p3s0np0"
+  },
+  "hostname": "s90vxs64",
+  "nccl": [
+    2,
+    29,
+    7
+  ],
+  "primary_ip": "10.186.213.63",
+  "rank": 1,
+  "repeats": 5,
+  "role": "sender",
+  "samples": [
+    {
+      "acknowledged_seconds": 2.6695800395682454,
+      "receiver_sha256": "4a3d5f990ab9819e066a658daa155bb2f88dc7b70d8426ca208445659ba630b9",
+      "repeat": 0,
+      "sender_sha256": "4a3d5f990ab9819e066a658daa155bb2f88dc7b70d8426ca208445659ba630b9",
+      "sha256": "4a3d5f990ab9819e066a658daa155bb2f88dc7b70d8426ca208445659ba630b9"
+    },
+    {
+      "acknowledged_seconds": 0.61015051510185,
+      "receiver_sha256": "dd559e7f21d240d15f7aa14427aba8dcd4d112d36af9784036ebcbbb4c614ea1",
+      "repeat": 1,
+      "sender_sha256": "dd559e7f21d240d15f7aa14427aba8dcd4d112d36af9784036ebcbbb4c614ea1",
+      "sha256": "dd559e7f21d240d15f7aa14427aba8dcd4d112d36af9784036ebcbbb4c614ea1"
+    },
+    {
+      "acknowledged_seconds": 0.6231175344437361,
+      "receiver_sha256": "8a61563c6edf666ebbd8f1f2fdb272e650d30aed0aaf1c1e6b6e787797b809c1",
+      "repeat": 2,
+      "sender_sha256": "8a61563c6edf666ebbd8f1f2fdb272e650d30aed0aaf1c1e6b6e787797b809c1",
+      "sha256": "8a61563c6edf666ebbd8f1f2fdb272e650d30aed0aaf1c1e6b6e787797b809c1"
+    },
+    {
+      "acknowledged_seconds": 0.6149890795350075,
+      "receiver_sha256": "e6dac4118dfe3ad992244658c089d9296164164739176ae4225dbabb23ee47ff",
+      "repeat": 3,
+      "sender_sha256": "e6dac4118dfe3ad992244658c089d9296164164739176ae4225dbabb23ee47ff",
+      "sha256": "e6dac4118dfe3ad992244658c089d9296164164739176ae4225dbabb23ee47ff"
+    },
+    {
+      "acknowledged_seconds": 0.6144578456878662,
+      "receiver_sha256": "c185e1a26d24e3b94709cc6d83bc5d118d98d9102e1402e5134692bf645dd1fe",
+      "repeat": 4,
+      "sender_sha256": "c185e1a26d24e3b94709cc6d83bc5d118d98d9102e1402e5134692bf645dd1fe",
+      "sha256": "c185e1a26d24e3b94709cc6d83bc5d118d98d9102e1402e5134692bf645dd1fe"
+    }
+  ],
+  "setup_seconds": 0.18638629652559757,
+  "success": true,
+  "torch": "2.13.0+cu132"
+}

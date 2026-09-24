@@ -1,0 +1,10 @@
+{
+  "device": "ibp0",
+  "gid_0": "fe80:0000:0000:0000:a088:c203:0094:cec8",
+  "hostname": "ga8b3d8",
+  "name": "forward-rno-server",
+  "peer_ip": null,
+  "port": 19562,
+  "role": "server",
+  "state": "4: ACTIVE"
+}

@@ -1,0 +1,499 @@
+{
+  "facts": {
+    "boto3": "1.42.97",
+    "botocore": "1.42.97",
+    "bucket": "marin-us-east-02a",
+    "endpoint": "http://cwlota.com",
+    "hostname": "s90vxs64",
+    "interface": "enP6p3s0np0",
+    "ip": "10.186.213.63",
+    "mtu": 9000,
+    "prefix": "marin/users/romain/skyrl/cross-zone-qualification-20260923/fanout-two-lane/tcp/lane-1"
+  },
+  "phase": "paired",
+  "receiver_ip": "10.168.194.103",
+  "role": "sender",
+  "samples": [
+    {
+      "ack_epoch": 1790228444.2226138,
+      "ack_wait_seconds": 0.2625156855210662,
+      "bytes": 314572800,
+      "delivery_seconds": 1.5676701022312045,
+      "legs": [
+        {
+          "send_buffer_bytes": 8388608,
+          "send_seconds": 1.2521954206749797,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56474,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "send_buffer_bytes": 8388608,
+          "send_seconds": 0.8267525658011436,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56964,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "send_buffer_bytes": 8388608,
+          "send_seconds": 1.303692014887929,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56462,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "send_buffer_bytes": 8388608,
+          "send_seconds": 0.7638170775026083,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 53777,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        }
+      ],
+      "method": "tcp",
+      "network_delta": {
+        "receive": 1346726,
+        "transmit": 615922659
+      },
+      "peak_rss_kib": 313344,
+      "process_delta": {
+        "system_seconds": 0.044601,
+        "user_seconds": 0.0004919999999999369
+      },
+      "queue_seconds": 0.0012874603271484375,
+      "ready_epoch": 1790228442.6545048,
+      "receiver": {
+        "legs": [
+          {
+            "receive_buffer_bytes": 8388608,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 56982,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          },
+          {
+            "receive_buffer_bytes": 8388608,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 56487,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          },
+          {
+            "receive_buffer_bytes": 8388608,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 56993,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          },
+          {
+            "receive_buffer_bytes": 8388608,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 54000,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          }
+        ],
+        "method": "tcp",
+        "network_delta": {
+          "receive": 535277765,
+          "transmit": 1584443
+        },
+        "peak_rss_kib": 435268,
+        "process_delta": {
+          "system_seconds": 0.309231,
+          "user_seconds": 0.26698299999999997
+        },
+        "receive_and_hash_seconds": 1.51314358972013,
+        "sample": "paired-000-4ac65a869f1e4ce898cf01344bb995fe-tcp-4-4194304",
+        "sha256": "2f7ced64fd18296d9f8603587a69bb19265f881b41aa54023cb104de89f775f3"
+      },
+      "repeat": 0,
+      "sample": "paired-000-4ac65a869f1e4ce898cf01344bb995fe-tcp-4-4194304",
+      "scheduled_epoch": 1790228442.6532173,
+      "sender_phase_seconds": 1.3051544167101383,
+      "sha256": "2f7ced64fd18296d9f8603587a69bb19265f881b41aa54023cb104de89f775f3",
+      "sizes": [
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600
+      ],
+      "streams": 4,
+      "tcp_buffer_bytes": 4194304
+    },
+    {
+      "ack_epoch": 1790228461.5198152,
+      "ack_wait_seconds": 0.3111147405579686,
+      "bytes": 314572800,
+      "delivery_seconds": 1.4859187873080373,
+      "legs": [
+        {
+          "send_buffer_bytes": 8388608,
+          "send_seconds": 1.1737916618585587,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56487,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "send_buffer_bytes": 8388608,
+          "send_seconds": 0.65920699108392,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 57176,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "send_buffer_bytes": 8388608,
+          "send_seconds": 1.173879629932344,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56456,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "send_buffer_bytes": 8388608,
+          "send_seconds": 0.6915405597537756,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 53721,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        }
+      ],
+      "method": "tcp",
+      "network_delta": {
+        "receive": 373604,
+        "transmit": 323436478
+      },
+      "peak_rss_kib": 608256,
+      "process_delta": {
+        "system_seconds": 0.04574700000000001,
+        "user_seconds": 0.0
+      },
+      "queue_seconds": 8.440017700195312e-05,
+      "ready_epoch": 1790228460.0333018,
+      "receiver": {
+        "legs": [
+          {
+            "receive_buffer_bytes": 8388608,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 56982,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          },
+          {
+            "receive_buffer_bytes": 8388608,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 56487,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          },
+          {
+            "receive_buffer_bytes": 8388608,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 56993,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          },
+          {
+            "receive_buffer_bytes": 8388608,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 54000,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          }
+        ],
+        "method": "tcp",
+        "network_delta": {
+          "receive": 323940043,
+          "transmit": 832895
+        },
+        "peak_rss_kib": 762688,
+        "process_delta": {
+          "system_seconds": 0.257597,
+          "user_seconds": 0.2990569999999999
+        },
+        "receive_and_hash_seconds": 1.4313774439506233,
+        "sample": "paired-001-17f60cdcd13f40fa81b1a35c0a5f004a-tcp-4-4194304",
+        "sha256": "c47bf4fc87fe9ae174103327824f3a24e9115923830d487d7887b9c6b16be80f"
+      },
+      "repeat": 1,
+      "sample": "paired-001-17f60cdcd13f40fa81b1a35c0a5f004a-tcp-4-4194304",
+      "scheduled_epoch": 1790228460.0332174,
+      "sender_phase_seconds": 1.1748040467500687,
+      "sha256": "c47bf4fc87fe9ae174103327824f3a24e9115923830d487d7887b9c6b16be80f",
+      "sizes": [
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600
+      ],
+      "streams": 4,
+      "tcp_buffer_bytes": 4194304
+    },
+    {
+      "ack_epoch": 1790228478.918168,
+      "ack_wait_seconds": 0.2959356540814042,
+      "bytes": 314572800,
+      "delivery_seconds": 1.5043091736733913,
+      "legs": [
+        {
+          "send_buffer_bytes": 8388608,
+          "send_seconds": 1.2077699359506369,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56449,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "send_buffer_bytes": 8388608,
+          "send_seconds": 0.7194318193942308,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 57246,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "send_buffer_bytes": 8388608,
+          "send_seconds": 1.135019464418292,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56481,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "send_buffer_bytes": 8388608,
+          "send_seconds": 0.6782741136848927,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 53808,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        }
+      ],
+      "method": "tcp",
+      "network_delta": {
+        "receive": 427424,
+        "transmit": 323605063
+      },
+      "peak_rss_kib": 608448,
+      "process_delta": {
+        "system_seconds": 0.04319400000000001,
+        "user_seconds": 0.0
+      },
+      "queue_seconds": 7.963180541992188e-05,
+      "ready_epoch": 1790228477.413297,
+      "receiver": {
+        "legs": [
+          {
+            "receive_buffer_bytes": 8388608,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 56982,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          },
+          {
+            "receive_buffer_bytes": 8388608,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 56487,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          },
+          {
+            "receive_buffer_bytes": 8388608,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 56993,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          },
+          {
+            "receive_buffer_bytes": 8388608,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 54000,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          }
+        ],
+        "method": "tcp",
+        "network_delta": {
+          "receive": 323985075,
+          "transmit": 843584
+        },
+        "peak_rss_kib": 834596,
+        "process_delta": {
+          "system_seconds": 0.194932,
+          "user_seconds": 0.27350299999999983
+        },
+        "receive_and_hash_seconds": 1.4497438771650195,
+        "sample": "paired-002-26e76c4536b743a4b33e0959ad110162-tcp-4-4194304",
+        "sha256": "517a6981f78a4710431ec26a8f78a341e746a0e60dd350dd7029ba2a2b4bf77d"
+      },
+      "repeat": 2,
+      "sample": "paired-002-26e76c4536b743a4b33e0959ad110162-tcp-4-4194304",
+      "scheduled_epoch": 1790228477.4132173,
+      "sender_phase_seconds": 1.2083735195919871,
+      "sha256": "517a6981f78a4710431ec26a8f78a341e746a0e60dd350dd7029ba2a2b4bf77d",
+      "sizes": [
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600,
+        13107200,
+        6553600
+      ],
+      "streams": 4,
+      "tcp_buffer_bytes": 4194304
+    }
+  ],
+  "setup_seconds": 0.2840059455484152,
+  "tcp_connections": [
+    {
+      "local_ip": "10.186.213.63",
+      "peer_ip": "10.168.194.103"
+    },
+    {
+      "local_ip": "10.186.213.63",
+      "peer_ip": "10.168.194.103"
+    },
+    {
+      "local_ip": "10.186.213.63",
+      "peer_ip": "10.168.194.103"
+    },
+    {
+      "local_ip": "10.186.213.63",
+      "peer_ip": "10.168.194.103"
+    }
+  ]
+}

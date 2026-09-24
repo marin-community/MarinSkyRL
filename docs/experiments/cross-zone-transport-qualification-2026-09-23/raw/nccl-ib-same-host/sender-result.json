@@ -1,0 +1,37 @@
+{
+  "bytes": 1048576,
+  "cuda": "13.2",
+  "device": "NVIDIA GB200",
+  "env": {
+    "NCCL_DEBUG": "INFO",
+    "NCCL_DEBUG_SUBSYS": "INIT,NET",
+    "NCCL_IB_DISABLE": "0",
+    "NCCL_IB_HCA": "ibp0",
+    "NCCL_NET": "IB",
+    "NCCL_P2P_DISABLE": "1",
+    "NCCL_SHM_DISABLE": "1",
+    "NCCL_SOCKET_IFNAME": "=enP6p3s0np0"
+  },
+  "hostname": "s90vxs64",
+  "nccl": [
+    2,
+    29,
+    7
+  ],
+  "primary_ip": "10.186.213.63",
+  "rank": 1,
+  "repeats": 1,
+  "role": "sender",
+  "samples": [
+    {
+      "acknowledged_seconds": 0.45438752323389053,
+      "receiver_sha256": "7d531dfe22918efb8b93f4566f6ada6ba20412a7e531b03ce768fe9a9b37d51a",
+      "repeat": 0,
+      "sender_sha256": "7d531dfe22918efb8b93f4566f6ada6ba20412a7e531b03ce768fe9a9b37d51a",
+      "sha256": "7d531dfe22918efb8b93f4566f6ada6ba20412a7e531b03ce768fe9a9b37d51a"
+    }
+  ],
+  "setup_seconds": 0.02370270900428295,
+  "success": true,
+  "torch": "2.13.0+cu132"
+}

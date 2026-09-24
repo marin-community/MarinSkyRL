@@ -1,0 +1,10 @@
+{
+  "device": "ibp0",
+  "gid_0": "fe80:0000:0000:0000:e09d:7303:0029:1f06",
+  "hostname": "s90vxs64",
+  "name": "cross-zone-server",
+  "peer_ip": null,
+  "port": 19558,
+  "role": "server",
+  "state": "4: ACTIVE"
+}

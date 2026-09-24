@@ -1,0 +1,127 @@
+{
+  "bytes": 314572800,
+  "cuda": "13.2",
+  "device": "NVIDIA GB200",
+  "device_index": 0,
+  "env": {
+    "NCCL_DEBUG": "INFO",
+    "NCCL_DEBUG_SUBSYS": "INIT,NET",
+    "NCCL_IB_DISABLE": "1",
+    "NCCL_IB_HCA": null,
+    "NCCL_NET": "Socket",
+    "NCCL_P2P_DISABLE": null,
+    "NCCL_SHM_DISABLE": null,
+    "NCCL_SOCKET_IFNAME": "=enP6p3s0np0"
+  },
+  "hostname": "s90vxs64",
+  "nccl": [
+    2,
+    29,
+    7
+  ],
+  "primary_ip": "10.186.213.63",
+  "rank": 2,
+  "repeats": 5,
+  "role": "sender",
+  "samples": [
+    {
+      "acknowledged_seconds": 2.305942118167877,
+      "rank_sha256": [
+        "6da87b19359027441f1ffcc3830c5251cbdf2805d8dbaf220af0a0de6596bdcb",
+        "6da87b19359027441f1ffcc3830c5251cbdf2805d8dbaf220af0a0de6596bdcb",
+        "6da87b19359027441f1ffcc3830c5251cbdf2805d8dbaf220af0a0de6596bdcb"
+      ],
+      "receiver_sha256": "6da87b19359027441f1ffcc3830c5251cbdf2805d8dbaf220af0a0de6596bdcb",
+      "repeat": 0,
+      "sender_sha256": "6da87b19359027441f1ffcc3830c5251cbdf2805d8dbaf220af0a0de6596bdcb",
+      "sha256": "6da87b19359027441f1ffcc3830c5251cbdf2805d8dbaf220af0a0de6596bdcb"
+    },
+    {
+      "acknowledged_seconds": 0.5654635336250067,
+      "rank_sha256": [
+        "fb421ebfe3f31d475866a4c9642c1b35c6159d88ba1541039c9fbff36e03013e",
+        "fb421ebfe3f31d475866a4c9642c1b35c6159d88ba1541039c9fbff36e03013e",
+        "fb421ebfe3f31d475866a4c9642c1b35c6159d88ba1541039c9fbff36e03013e"
+      ],
+      "receiver_sha256": "fb421ebfe3f31d475866a4c9642c1b35c6159d88ba1541039c9fbff36e03013e",
+      "repeat": 1,
+      "sender_sha256": "fb421ebfe3f31d475866a4c9642c1b35c6159d88ba1541039c9fbff36e03013e",
+      "sha256": "fb421ebfe3f31d475866a4c9642c1b35c6159d88ba1541039c9fbff36e03013e"
+    },
+    {
+      "acknowledged_seconds": 0.5551292197778821,
+      "rank_sha256": [
+        "f2362645d0c0fab3b4acc6b6d0321de792fea43b09b12e380d3fceedc2c83e4c",
+        "f2362645d0c0fab3b4acc6b6d0321de792fea43b09b12e380d3fceedc2c83e4c",
+        "f2362645d0c0fab3b4acc6b6d0321de792fea43b09b12e380d3fceedc2c83e4c"
+      ],
+      "receiver_sha256": "f2362645d0c0fab3b4acc6b6d0321de792fea43b09b12e380d3fceedc2c83e4c",
+      "repeat": 2,
+      "sender_sha256": "f2362645d0c0fab3b4acc6b6d0321de792fea43b09b12e380d3fceedc2c83e4c",
+      "sha256": "f2362645d0c0fab3b4acc6b6d0321de792fea43b09b12e380d3fceedc2c83e4c"
+    },
+    {
+      "acknowledged_seconds": 0.5565350772812963,
+      "rank_sha256": [
+        "bc53d2ea26a798cf5a29d76fb71b38aa080dc5511d149d5297652cf1724c4c03",
+        "bc53d2ea26a798cf5a29d76fb71b38aa080dc5511d149d5297652cf1724c4c03",
+        "bc53d2ea26a798cf5a29d76fb71b38aa080dc5511d149d5297652cf1724c4c03"
+      ],
+      "receiver_sha256": "bc53d2ea26a798cf5a29d76fb71b38aa080dc5511d149d5297652cf1724c4c03",
+      "repeat": 3,
+      "sender_sha256": "bc53d2ea26a798cf5a29d76fb71b38aa080dc5511d149d5297652cf1724c4c03",
+      "sha256": "bc53d2ea26a798cf5a29d76fb71b38aa080dc5511d149d5297652cf1724c4c03"
+    },
+    {
+      "acknowledged_seconds": 0.5591802643612027,
+      "rank_sha256": [
+        "35c3e2270ef8b7fea25814988f464ad9d888c46c0a25bde41055a96a34b495da",
+        "35c3e2270ef8b7fea25814988f464ad9d888c46c0a25bde41055a96a34b495da",
+        "35c3e2270ef8b7fea25814988f464ad9d888c46c0a25bde41055a96a34b495da"
+      ],
+      "receiver_sha256": "35c3e2270ef8b7fea25814988f464ad9d888c46c0a25bde41055a96a34b495da",
+      "repeat": 4,
+      "sender_sha256": "35c3e2270ef8b7fea25814988f464ad9d888c46c0a25bde41055a96a34b495da",
+      "sha256": "35c3e2270ef8b7fea25814988f464ad9d888c46c0a25bde41055a96a34b495da"
+    }
+  ],
+  "setup_seconds": 0.19300441350787878,
+  "sizes": [
+    13107200,
+    6553600,
+    13107200,
+    6553600,
+    13107200,
+    6553600,
+    13107200,
+    6553600,
+    13107200,
+    6553600,
+    13107200,
+    6553600,
+    13107200,
+    6553600,
+    13107200,
+    6553600,
+    13107200,
+    6553600,
+    13107200,
+    6553600,
+    13107200,
+    6553600,
+    13107200,
+    6553600,
+    13107200,
+    6553600,
+    13107200,
+    6553600,
+    13107200,
+    6553600,
+    13107200,
+    6553600
+  ],
+  "source_rank": 2,
+  "success": true,
+  "torch": "2.13.0+cu132",
+  "world_size": 3
+}

@@ -1,0 +1,341 @@
+{
+  "facts": {
+    "boto3": "1.42.97",
+    "botocore": "1.42.97",
+    "bucket": "marin-us-east-02a",
+    "endpoint": "http://cwlota.com",
+    "hostname": "s90vxs64",
+    "interface": "enP6p3s0np0",
+    "ip": "10.186.213.63",
+    "mtu": 9000,
+    "prefix": "marin/users/romain/skyrl/cross-zone-qualification-20260923/preflight-01"
+  },
+  "phase": "paired",
+  "receiver_ip": "10.168.193.223",
+  "role": "sender",
+  "samples": [
+    {
+      "ack_wait_seconds": 0.16826826892793179,
+      "bytes": 39321600,
+      "delivery_seconds": 0.5269882855936885,
+      "legs": [
+        {
+          "send_buffer_bytes": 499200,
+          "send_seconds": 0.35787188820540905,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56480,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "send_buffer_bytes": 499200,
+          "send_seconds": 0.2984325625002384,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56428,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "send_buffer_bytes": 499200,
+          "send_seconds": 0.34546957165002823,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56437,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        },
+        {
+          "send_buffer_bytes": 499200,
+          "send_seconds": 0.28596064634621143,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_microseconds": 56432,
+            "send_mss": 8948,
+            "total_retransmissions": 0
+          }
+        }
+      ],
+      "method": "tcp",
+      "network_delta": {
+        "receive": 113689,
+        "transmit": 39617231
+      },
+      "peak_rss_kib": 73728,
+      "process_delta": {
+        "system_seconds": 0.007169000000000009,
+        "user_seconds": 0.0010679999999999579
+      },
+      "receiver": {
+        "legs": [
+          {
+            "receive_buffer_bytes": 262144,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 56764,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          },
+          {
+            "receive_buffer_bytes": 262144,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 56602,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          },
+          {
+            "receive_buffer_bytes": 262144,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 56810,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          },
+          {
+            "receive_buffer_bytes": 262144,
+            "tcp_info": {
+              "pmtu": 9000,
+              "rtt_microseconds": 56502,
+              "send_mss": 8948,
+              "total_retransmissions": 0
+            }
+          }
+        ],
+        "method": "tcp",
+        "network_delta": {
+          "receive": 39613578,
+          "transmit": 181302
+        },
+        "peak_rss_kib": 107528,
+        "process_delta": {
+          "system_seconds": 0.069211,
+          "user_seconds": 0.029695999999999945
+        },
+        "receive_and_hash_seconds": 0.469696843996644,
+        "sample": "paired-000-7d3f02768062410c9cd1c47cc773811b-tcp-4-0",
+        "sha256": "7c953271f9e2593459c8485a1e8c07483e6c52afd3b4451f92d026d879d453dc"
+      },
+      "repeat": 0,
+      "sample": "paired-000-7d3f02768062410c9cd1c47cc773811b-tcp-4-0",
+      "sender_phase_seconds": 0.3587200166657567,
+      "sha256": "7c953271f9e2593459c8485a1e8c07483e6c52afd3b4451f92d026d879d453dc",
+      "sizes": [
+        13107200,
+        6553600,
+        13107200,
+        6553600
+      ],
+      "streams": 4,
+      "tcp_buffer_bytes": 0
+    },
+    {
+      "ack_wait_seconds": 0.9838899401947856,
+      "bytes": 39321600,
+      "delivery_seconds": 1.4293144941329956,
+      "legs": [
+        {
+          "etag": "\"3385b24dc6827ebc78e7ec2647091f1f\"",
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 05:13:13 GMT",
+            "etag": "\"3385b24dc6827ebc78e7ec2647091f1f\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "0NXU1Q==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "48d10b83-940d-4a71-8228-678c36c1f744, 48d10b83-940d-4a71-8228-678c36c1f744"
+          },
+          "put_seconds": 0.4449155619367957
+        },
+        {
+          "etag": "\"7dd4f9b7679101e3eb4e88010477967b\"",
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 05:13:13 GMT",
+            "etag": "\"7dd4f9b7679101e3eb4e88010477967b\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "UwKEpw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "4bde588c-8749-4c23-9988-fa492b141997, 4bde588c-8749-4c23-9988-fa492b141997"
+          },
+          "put_seconds": 0.28997562639415264
+        },
+        {
+          "etag": "\"03a506c12943ec4d08455e48eaa807b1\"",
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 05:13:13 GMT",
+            "etag": "\"03a506c12943ec4d08455e48eaa807b1\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "SQSE8Q==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "8a6d9e7c-012a-418a-9f25-c08baef373ef, 8a6d9e7c-012a-418a-9f25-c08baef373ef"
+          },
+          "put_seconds": 0.3701130850240588
+        },
+        {
+          "etag": "\"7060d5d169d5569850194ddcad5c4f2d\"",
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 05:13:13 GMT",
+            "etag": "\"7060d5d169d5569850194ddcad5c4f2d\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "AmYe0Q==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "7cd700b2-8bec-4c91-83d9-bdbffdb56869, 7cd700b2-8bec-4c91-83d9-bdbffdb56869"
+          },
+          "put_seconds": 0.3895499361678958
+        }
+      ],
+      "method": "object",
+      "network_delta": {
+        "receive": 121426,
+        "transmit": 39722971
+      },
+      "peak_rss_kib": 73728,
+      "process_delta": {
+        "system_seconds": 0.010784000000000016,
+        "user_seconds": 0.044511999999999996
+      },
+      "receiver": {
+        "legs": [
+          {
+            "etag": "\"3385b24dc6827ebc78e7ec2647091f1f\"",
+            "get_seconds": 1.3478210624307394,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "13107200",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 05:13:13 GMT",
+              "etag": "\"3385b24dc6827ebc78e7ec2647091f1f\"",
+              "last-modified": "Thu, 24 Sep 2026 05:13:13 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "0NXU1Q==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "18fcb8ce-b596-433c-9e54-47dbcf1f5954, 18fcb8ce-b596-433c-9e54-47dbcf1f5954",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            }
+          },
+          {
+            "etag": "\"7dd4f9b7679101e3eb4e88010477967b\"",
+            "get_seconds": 1.121657958254218,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "6553600",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 05:13:13 GMT",
+              "etag": "\"7dd4f9b7679101e3eb4e88010477967b\"",
+              "last-modified": "Thu, 24 Sep 2026 05:13:13 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "UwKEpw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "827b507b-a6fb-468b-83e5-6d18074b3551, 827b507b-a6fb-468b-83e5-6d18074b3551",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            }
+          },
+          {
+            "etag": "\"03a506c12943ec4d08455e48eaa807b1\"",
+            "get_seconds": 1.1952559249475598,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "13107200",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 05:13:13 GMT",
+              "etag": "\"03a506c12943ec4d08455e48eaa807b1\"",
+              "last-modified": "Thu, 24 Sep 2026 05:13:13 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "SQSE8Q==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "d4856678-e1e1-4108-acf1-66a114582f83, d4856678-e1e1-4108-acf1-66a114582f83",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            }
+          },
+          {
+            "etag": "\"7060d5d169d5569850194ddcad5c4f2d\"",
+            "get_seconds": 1.16181047167629,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "6553600",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 05:13:13 GMT",
+              "etag": "\"7060d5d169d5569850194ddcad5c4f2d\"",
+              "last-modified": "Thu, 24 Sep 2026 05:13:13 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "AmYe0Q==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "8fea9bcf-f2a2-4179-a5fa-fa7dfd5b691a, 8fea9bcf-f2a2-4179-a5fa-fa7dfd5b691a",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            }
+          }
+        ],
+        "method": "object",
+        "network_delta": {
+          "receive": 39771501,
+          "transmit": 203734
+        },
+        "peak_rss_kib": 167004,
+        "process_delta": {
+          "system_seconds": 0.04938000000000001,
+          "user_seconds": 0.06820099999999996
+        },
+        "receive_and_hash_seconds": 1.3720663823187351,
+        "sample": "paired-000-7d3f02768062410c9cd1c47cc773811b-object-4-0",
+        "sha256": "7c953271f9e2593459c8485a1e8c07483e6c52afd3b4451f92d026d879d453dc"
+      },
+      "repeat": 0,
+      "sample": "paired-000-7d3f02768062410c9cd1c47cc773811b-object-4-0",
+      "sender_phase_seconds": 0.44542455393821,
+      "sha256": "7c953271f9e2593459c8485a1e8c07483e6c52afd3b4451f92d026d879d453dc",
+      "sizes": [
+        13107200,
+        6553600,
+        13107200,
+        6553600
+      ],
+      "streams": 4,
+      "tcp_buffer_bytes": 0
+    }
+  ],
+  "setup_seconds": 0.28922596108168364,
+  "tcp_connections": [
+    {
+      "local_ip": "10.186.213.63",
+      "peer_ip": "10.168.193.223"
+    },
+    {
+      "local_ip": "10.186.213.63",
+      "peer_ip": "10.168.193.223"
+    },
+    {
+      "local_ip": "10.186.213.63",
+      "peer_ip": "10.168.193.223"
+    },
+    {
+      "local_ip": "10.186.213.63",
+      "peer_ip": "10.168.193.223"
+    }
+  ]
+}

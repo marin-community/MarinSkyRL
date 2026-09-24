@@ -1,0 +1,10 @@
+{
+  "device": "ibp0",
+  "gid_0": "fe80:0000:0000:0000:e09d:7303:0029:1f06",
+  "hostname": "s90vxs64",
+  "name": "forward-east-client",
+  "peer_ip": "10.168.193.223",
+  "port": 19562,
+  "role": "client",
+  "state": "4: ACTIVE"
+}

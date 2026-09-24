@@ -1,0 +1,10 @@
+{
+  "device": "ibp0",
+  "gid_0": "fe80:0000:0000:0000:a088:c203:0094:cec8",
+  "hostname": "ga8b3d8",
+  "name": "paired-rno-client",
+  "peer_ip": "10.186.213.63",
+  "port": 19560,
+  "role": "client",
+  "state": "4: ACTIVE"
+}

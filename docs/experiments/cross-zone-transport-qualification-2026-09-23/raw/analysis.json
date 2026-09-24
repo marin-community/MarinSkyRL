@@ -1,0 +1,231 @@
+{
+  "fanout": {
+    "object": {
+      "lanes": 2,
+      "method": "object",
+      "versions": [
+        {
+          "lane_delivery_seconds": [
+            1.8537271851673722,
+            1.8215620340779424
+          ],
+          "maximum_start_queue_seconds": 8.082389831542969e-05,
+          "slowest_ack_after_schedule_seconds": 1.8542964458465576,
+          "version": 0
+        },
+        {
+          "lane_delivery_seconds": [
+            1.5579668590798974,
+            1.3383949929848313
+          ],
+          "maximum_start_queue_seconds": 8.749961853027344e-05,
+          "slowest_ack_after_schedule_seconds": 1.558570384979248,
+          "version": 1
+        },
+        {
+          "lane_delivery_seconds": [
+            1.3104483745992184,
+            1.3275233022868633
+          ],
+          "maximum_start_queue_seconds": 8.273124694824219e-05,
+          "slowest_ack_after_schedule_seconds": 1.3281810283660889,
+          "version": 2
+        }
+      ]
+    },
+    "tcp": {
+      "lanes": 2,
+      "method": "tcp",
+      "versions": [
+        {
+          "lane_delivery_seconds": [
+            24.659565201960504,
+            1.5676701022312045
+          ],
+          "maximum_start_queue_seconds": 0.0012874603271484375,
+          "slowest_ack_after_schedule_seconds": 24.660190105438232,
+          "version": 0
+        },
+        {
+          "lane_delivery_seconds": [
+            24.816126220859587,
+            1.4859187873080373
+          ],
+          "maximum_start_queue_seconds": 8.326541185379028,
+          "slowest_ack_after_schedule_seconds": 33.14329695701599,
+          "version": 1
+        },
+        {
+          "lane_delivery_seconds": [
+            24.579283201135695,
+            1.5043091736733913
+          ],
+          "maximum_start_queue_seconds": 16.80657386779785,
+          "slowest_ack_after_schedule_seconds": 41.386399030685425,
+          "version": 2
+        }
+      ]
+    }
+  },
+  "nccl": {
+    "nccl-chunks": {
+      "bytes_per_version": 314572800,
+      "chunks": 32,
+      "first_seconds": 2.350631894543767,
+      "receivers": [
+        "gb977f0"
+      ],
+      "sender": "s90vxs64",
+      "versions": 12,
+      "warm": {
+        "count": 11,
+        "maximum_seconds": 0.5219630133360624,
+        "median_seconds": 0.4973371000960469,
+        "minimum_seconds": 0.48787779454141855
+      }
+    },
+    "nccl-fanout": {
+      "bytes_per_version": 314572800,
+      "chunks": 32,
+      "first_seconds": 2.305942118167877,
+      "receivers": [
+        "gb977f0",
+        "gb977f0"
+      ],
+      "sender": "s90vxs64",
+      "versions": 5,
+      "warm": {
+        "count": 4,
+        "maximum_seconds": 0.5654635336250067,
+        "median_seconds": 0.5578576708212495,
+        "minimum_seconds": 0.5551292197778821
+      }
+    },
+    "nccl-socket": {
+      "bytes_per_version": 314572800,
+      "chunks": 1,
+      "first_seconds": 2.6695800395682454,
+      "receivers": [
+        "gb977f0"
+      ],
+      "sender": "s90vxs64",
+      "versions": 5,
+      "warm": {
+        "count": 4,
+        "maximum_seconds": 0.6231175344437361,
+        "median_seconds": 0.6147234626114368,
+        "minimum_seconds": 0.61015051510185
+      }
+    }
+  },
+  "one_to_two": {
+    "object": {
+      "bytes_per_version": 314572800,
+      "method": "object",
+      "receivers": 2,
+      "versions": [
+        {
+          "slowest_ack_after_schedule_seconds": 1.572420597076416,
+          "slowest_ack_after_start_seconds": 1.572235588915646,
+          "start_queue_seconds": 8.988380432128906e-05,
+          "version": 0
+        },
+        {
+          "slowest_ack_after_schedule_seconds": 1.3907644748687744,
+          "slowest_ack_after_start_seconds": 1.3905895547941327,
+          "start_queue_seconds": 8.368492126464844e-05,
+          "version": 1
+        },
+        {
+          "slowest_ack_after_schedule_seconds": 1.377953052520752,
+          "slowest_ack_after_start_seconds": 1.3777791736647487,
+          "start_queue_seconds": 9.322166442871094e-05,
+          "version": 2
+        }
+      ]
+    },
+    "tcp": {
+      "bytes_per_version": 314572800,
+      "method": "tcp",
+      "receivers": 2,
+      "versions": [
+        {
+          "slowest_ack_after_schedule_seconds": 1.5813086032867432,
+          "slowest_ack_after_start_seconds": 1.5811134856194258,
+          "start_queue_seconds": 8.7738037109375e-05,
+          "version": 0
+        },
+        {
+          "slowest_ack_after_schedule_seconds": 1.4659521579742432,
+          "slowest_ack_after_start_seconds": 1.4657663330435753,
+          "start_queue_seconds": 8.225440979003906e-05,
+          "version": 1
+        },
+        {
+          "slowest_ack_after_schedule_seconds": 1.4474890232086182,
+          "slowest_ack_after_start_seconds": 1.4473067941144109,
+          "start_queue_seconds": 8.058547973632812e-05,
+          "version": 2
+        }
+      ]
+    }
+  },
+  "paired": {
+    "paired-01": {
+      "bytes_per_version": 314572800,
+      "object": {
+        "count": 12,
+        "maximum_seconds": 2.4303690372034907,
+        "median_seconds": 1.3847718965262175,
+        "minimum_seconds": 1.3294216133654118
+      },
+      "receiver": "gb977f0",
+      "sender": "s90vxs64",
+      "sender_retransmissions": [
+        0
+      ],
+      "tcp": {
+        "count": 12,
+        "maximum_seconds": 25.556330144405365,
+        "median_seconds": 25.203997899778187,
+        "minimum_seconds": 25.038871560245752
+      },
+      "tcp_faster_count": 0,
+      "tcp_minus_object": {
+        "count": 12,
+        "maximum_seconds": 24.12242724187672,
+        "median_seconds": 23.77829752722755,
+        "minimum_seconds": 22.860746723599732
+      },
+      "versions": 12
+    },
+    "paired-02": {
+      "bytes_per_version": 314572800,
+      "object": {
+        "count": 12,
+        "maximum_seconds": 1.639005048200488,
+        "median_seconds": 1.3646979918703437,
+        "minimum_seconds": 0.7601597737520933
+      },
+      "receiver": "gb977f0",
+      "sender": "s90vxs64",
+      "sender_retransmissions": [
+        0
+      ],
+      "tcp": {
+        "count": 12,
+        "maximum_seconds": 1.5924763586372137,
+        "median_seconds": 1.2708491580560803,
+        "minimum_seconds": 1.2218548506498337
+      },
+      "tcp_faster_count": 7,
+      "tcp_minus_object": {
+        "count": 12,
+        "maximum_seconds": 0.46169507689774036,
+        "median_seconds": -0.07582638319581747,
+        "minimum_seconds": -0.31572833098471165
+      },
+      "versions": 12
+    }
+  }
+}

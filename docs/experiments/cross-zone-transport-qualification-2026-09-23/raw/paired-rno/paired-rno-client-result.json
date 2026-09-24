@@ -1,0 +1,92 @@
+{
+  "apt_install": {
+    "elapsed_seconds": 1.7505507990717888,
+    "returncode": 0
+  },
+  "apt_update": {
+    "elapsed_seconds": 4.049580674618483,
+    "returncode": 0
+  },
+  "command": [
+    "ib_write_bw",
+    "-d",
+    "ibp0",
+    "-i",
+    "1",
+    "-x",
+    "0",
+    "-s",
+    "1024",
+    "-n",
+    "10",
+    "-p",
+    "19560",
+    "10.186.213.63"
+  ],
+  "counters_after": {
+    "VL15_dropped": "0",
+    "excessive_buffer_overrun_errors": "0",
+    "link_downed": "0",
+    "link_error_recovery": "0",
+    "local_link_integrity_errors": "0",
+    "multicast_rcv_packets": "57014678",
+    "multicast_xmit_packets": "113540",
+    "port_rcv_constraint_errors": "0",
+    "port_rcv_data": "2143338747515178",
+    "port_rcv_errors": "0",
+    "port_rcv_packets": "2400444942292",
+    "port_rcv_remote_physical_errors": "0",
+    "port_rcv_switch_relay_errors": "0",
+    "port_xmit_constraint_errors": "0",
+    "port_xmit_data": "2145305053790643",
+    "port_xmit_discards": "0",
+    "port_xmit_packets": "2430135822099",
+    "port_xmit_wait": "3105568931",
+    "symbol_error": "0",
+    "unicast_rcv_packets": "2400387927614",
+    "unicast_xmit_packets": "2430135708559"
+  },
+  "counters_before": {
+    "VL15_dropped": "0",
+    "excessive_buffer_overrun_errors": "0",
+    "link_downed": "0",
+    "link_error_recovery": "0",
+    "local_link_integrity_errors": "0",
+    "multicast_rcv_packets": "57014633",
+    "multicast_xmit_packets": "113540",
+    "port_rcv_constraint_errors": "0",
+    "port_rcv_data": "2143338747510741",
+    "port_rcv_errors": "0",
+    "port_rcv_packets": "2400444942246",
+    "port_rcv_remote_physical_errors": "0",
+    "port_rcv_switch_relay_errors": "0",
+    "port_xmit_constraint_errors": "0",
+    "port_xmit_data": "2145305053754691",
+    "port_xmit_discards": "0",
+    "port_xmit_packets": "2430135821968",
+    "port_xmit_wait": "3105568931",
+    "symbol_error": "0",
+    "unicast_rcv_packets": "2400387927613",
+    "unicast_xmit_packets": "2430135708428"
+  },
+  "device": "ibp0",
+  "gid_0": "fe80:0000:0000:0000:a088:c203:0094:cec8",
+  "hostname": "ga8b3d8",
+  "name": "paired-rno-client",
+  "peer_ip": "10.186.213.63",
+  "port": 19560,
+  "probe": {
+    "elapsed_seconds": 4.997721940279007,
+    "returncode": 1
+  },
+  "role": "client",
+  "socket_control": {
+    "bytes": 1048576,
+    "elapsed_seconds": 0.35521991550922394,
+    "matched": true,
+    "peer_ip": "10.186.213.63",
+    "sha256": "6a3f80151749c1dbf32285a4d3bfcc1e77f248614b383d2780380bdbf9ca240c"
+  },
+  "state": "4: ACTIVE",
+  "success": false
+}
