@@ -5,6 +5,8 @@ defaults:
 trainer:
   max_steps: 1
   eval_num_prompts: 8
+  train_batch_size: 16
+  policy_mini_batch_size: 16
   callbacks:
     - type: evaluation
       eval_steps: 1
@@ -14,3 +16,8 @@ trainer:
       save_steps: 1
       save_on_train_end: false
     - type: logging
+
+generator:
+  n_samples_per_prompt: 4
+  trajectory_retention:
+    sample_count_per_step: 64
