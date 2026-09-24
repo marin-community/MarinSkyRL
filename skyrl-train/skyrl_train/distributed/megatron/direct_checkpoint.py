@@ -1,6 +1,9 @@
+import cProfile
+import json
 import os
 from pathlib import Path
 
+from loguru import logger
 from megatron.core.dist_checkpointing.dict_utils import nested_values
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict, ShardedTensor
 from megatron.core.dist_checkpointing.strategies.torch import (
@@ -24,6 +27,47 @@ from skyrl_train.io.s3fs import get_s3_fs, s3_refresh_if_expiring
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.timing_observability import checkpoint_phase
+
+
+def _profile_mcore_conversion(rank: int, step: int | None) -> cProfile.Profile | None:
+    """Opt-in diagnostic for one warm save; never enabled in production by default."""
+    requested_step = os.environ.get("SKYRL_PROFILE_MCORE_TO_PYT_STEP")
+    requested_ranks = os.environ.get("SKYRL_PROFILE_MCORE_TO_PYT_RANKS", "0")
+    if requested_step is None or str(step) != requested_step:
+        return None
+    if str(rank) not in requested_ranks.split(","):
+        return None
+    return cProfile.Profile()
+
+
+def _log_mcore_conversion_profile(profile: cProfile.Profile, rank: int, step: int | None) -> None:
+    def describe(entry):
+        code = entry.code
+        name = f"{code.co_filename}:{code.co_firstlineno}:{code.co_name}" if hasattr(code, "co_filename") else str(code)
+        return {
+            "function": name,
+            "calls": entry.callcount,
+            "self_seconds": round(entry.inlinetime, 4),
+            "cumulative_seconds": round(entry.totaltime, 4),
+        }
+
+    entries = profile.getstats()
+    logger.info(
+        "checkpoint_mcore_profile {}",
+        json.dumps(
+            {
+                "rank": rank,
+                "step": step,
+                "top_self": [
+                    describe(entry) for entry in sorted(entries, key=lambda entry: entry.inlinetime, reverse=True)[:25]
+                ],
+                "top_cumulative": [
+                    describe(entry) for entry in sorted(entries, key=lambda entry: entry.totaltime, reverse=True)[:25]
+                ],
+            },
+            sort_keys=True,
+        ),
+    )
 
 
 # MCore 0.18 does not expose a storage-writer hook. Keep the adapter narrow: it
@@ -78,11 +122,20 @@ class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
     def save(self, sharded_state_dict: ShardedStateDict, _checkpoint_dir: Path) -> None:
         rank = dist.get_rank()
         step = extract_step_from_path(os.path.dirname(self.checkpoint_dir.rstrip("/")))
+        conversion_profile = _profile_mcore_conversion(rank, step)
         with checkpoint_phase("megatron", "save", "dcp_translate", rank=rank, step=step):
             sharded_state_dict, _, _ = _replace_state_dict_keys_with_sharded_keys(
                 sharded_state_dict, self.keep_only_main_replica
             )
-            pytorch_state_dict = mcore_to_pyt_state_dict(sharded_state_dict, False)
+            if conversion_profile is not None:
+                conversion_profile.enable()
+            try:
+                pytorch_state_dict = mcore_to_pyt_state_dict(sharded_state_dict, False)
+            finally:
+                if conversion_profile is not None:
+                    conversion_profile.disable()
+        if conversion_profile is not None:
+            _log_mcore_conversion_profile(conversion_profile, rank, step)
         filesystem = get_s3_fs()
         s3_refresh_if_expiring(filesystem)
         writer = StreamingFsspecWriter(self.checkpoint_dir, filesystem=filesystem)
