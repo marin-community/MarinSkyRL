@@ -14,6 +14,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from enum import StrEnum
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -29,12 +30,45 @@ FIDELITY_CONFIG = ROOT / "cloud/iris/configs/open_mopd_fidelity.json"
 SCHEDULE_SHA256 = "01d9c3904b13324f218f61e51db187e52872c641a466025b300295eef707dae5"
 SCHEDULE_ROWS = 204_800
 SCHEDULE_STEPS = 200
-POLICY_GPUS = 4
+PARTITIONED_POLICY_GPUS = 4
+COLOCATED_POLICY_GPUS = 5
+COLOCATED_GPU_MEMORY_UTILIZATION = 0.75
 CHECKPOINT_INTERVAL = load_config(FIDELITY_CONFIG).training.save_every
 
 
+class Placement(StrEnum):
+    PARTITIONED = "partitioned"
+    COLOCATED = "colocated"
+
+
+def placement_arguments(placement: Placement) -> tuple[str, ...]:
+    if placement is Placement.PARTITIONED:
+        return ()
+    if placement is Placement.COLOCATED:
+        return (
+            "trainer.placement.colocate_all=true",
+            f"trainer.placement.policy_num_gpus_per_node={COLOCATED_POLICY_GPUS}",
+            f"generator.num_inference_engines={COLOCATED_POLICY_GPUS}",
+            f"generator.gpu_memory_utilization={COLOCATED_GPU_MEMORY_UTILIZATION}",
+        )
+    raise ValueError(f"Unsupported Open-MOPD placement: {placement}")
+
+
+def _replace_overrides(base: list[str], replacements: tuple[str, ...]) -> tuple[str, ...]:
+    """Append ``replacements``, dropping any base override for the same key so no key repeats."""
+    replaced_keys = {override.split("=", 1)[0].lstrip("+") for override in replacements}
+    kept = [override for override in base if override.split("=", 1)[0].lstrip("+") not in replaced_keys]
+    return (*kept, *replacements)
+
+
 def hydra_arguments(
-    data_path: Path, validation_path: Path, checkpoint_uri: str, export_uri: str, *, resume: bool = False
+    data_path: Path,
+    validation_path: Path,
+    checkpoint_uri: str,
+    export_uri: str,
+    *,
+    resume: bool = False,
+    placement: Placement = Placement.PARTITIONED,
 ) -> tuple[str, ...]:
     config = load_config(FIDELITY_CONFIG)
     training = config.training
@@ -61,7 +95,7 @@ def hydra_arguments(
         "trainer.use_sample_packing=false",
         "trainer.flash_attn=true",
         "trainer.placement.colocate_all=false",
-        f"trainer.placement.policy_num_gpus_per_node={POLICY_GPUS}",
+        f"trainer.placement.policy_num_gpus_per_node={PARTITIONED_POLICY_GPUS}",
         "trainer.epochs=1",
         f"trainer.max_steps={SCHEDULE_STEPS}",
         f"trainer.train_batch_size={training.train_batch_size}",
@@ -137,7 +171,7 @@ def hydra_arguments(
             )
         )
     args.append("++teacher_routing.opd.revision=open-mopd-native-200step-v1")
-    return tuple(args)
+    return _replace_overrides(args, placement_arguments(placement))
 
 
 def stage_schedule(source_uri: str, destination: Path) -> None:
@@ -174,6 +208,7 @@ def run(
     source_commit: str,
     *,
     resume: bool = False,
+    placement: Placement = Placement.PARTITIONED,
 ) -> int:
     if any(not uri.startswith("s3://") or "/users/" not in uri for uri in (checkpoint_uri, export_uri, manifest_uri)):
         raise ValueError("Native artifacts require durable user-owned s3:// paths")
@@ -188,6 +223,7 @@ def run(
         "export_uri": export_uri,
         "checkpoint_interval": CHECKPOINT_INTERVAL,
         "target_eval_interval": CHECKPOINT_INTERVAL,
+        "placement": placement.value,
     }
     existing = filesystem.exists(manifest_path)
     if existing != resume:
@@ -212,7 +248,7 @@ def run(
             sys.executable,
             "-m",
             "skyrl_train.entrypoints.main_base",
-            *hydra_arguments(schedule, validation, checkpoint_uri, export_uri, resume=resume),
+            *hydra_arguments(schedule, validation, checkpoint_uri, export_uri, resume=resume, placement=placement),
         ]
         manifest = {
             "schema_version": 1,
@@ -237,6 +273,7 @@ def main() -> int:
     parser.add_argument("--export-uri", required=True)
     parser.add_argument("--manifest-uri", required=True)
     parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--placement", choices=Placement, type=Placement, default=Placement.PARTITIONED)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -250,6 +287,7 @@ def main() -> int:
                         args.checkpoint_uri,
                         args.export_uri,
                         resume=args.resume,
+                        placement=args.placement,
                     )
                 },
                 indent=2,
@@ -265,6 +303,7 @@ def main() -> int:
         args.manifest_uri,
         args.source_commit,
         resume=args.resume,
+        placement=args.placement,
     )
 
 

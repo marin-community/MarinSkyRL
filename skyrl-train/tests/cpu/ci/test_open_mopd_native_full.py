@@ -27,12 +27,16 @@ sys.modules["open_mopd_native_full"] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
-def test_full_schedule_preserves_released_objective_and_every_checkpoint():
-    arguments = MODULE.hydra_arguments(
+@pytest.mark.parametrize("placement", [None, MODULE.Placement.COLOCATED])
+def test_full_schedule_preserves_released_objective_and_every_checkpoint(placement):
+    paths = (
         Path("/data/schedule.parquet"),
         Path("/data/aime24.parquet"),
         "s3://bucket/users/operator/checkpoints",
         "s3://bucket/users/operator/exports",
+    )
+    arguments = (
+        MODULE.hydra_arguments(*paths) if placement is None else MODULE.hydra_arguments(*paths, placement=placement)
     )
 
     with initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
@@ -62,6 +66,16 @@ def test_full_schedule_preserves_released_objective_and_every_checkpoint():
     assert config.environment.skyrl_gym.aime.strict_box_verify is True
     assert set(config.teachers) == {"math", "code", "if"}
     assert config.trainer.resume_mode is None
+    if placement is None:
+        assert config.trainer.placement.colocate_all is False
+        assert config.trainer.placement.policy_num_gpus_per_node == 4
+        assert config.generator.num_inference_engines == 1
+        assert config.generator.gpu_memory_utilization == 0.75
+    else:
+        assert config.trainer.placement.colocate_all is True
+        assert config.trainer.placement.policy_num_gpus_per_node == 5
+        assert config.generator.num_inference_engines == 5
+        assert config.generator.gpu_memory_utilization == 0.75
 
 
 def test_schedule_rejects_changed_bytes_before_training(monkeypatch, tmp_path):
