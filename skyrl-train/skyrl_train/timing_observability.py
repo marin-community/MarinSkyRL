@@ -13,6 +13,7 @@ TIMING_PARENTS: dict[str, str | None] = {
     "step": None,
     "generate": "step",
     "wait_for_generation_buffer": "step",
+    "assemble_generation_group_mini_batch": "step",
     "postprocess_trajectory_batch": "step",
     "convert_to_training_input": "step",
     "run_training": "step",
