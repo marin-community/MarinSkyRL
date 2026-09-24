@@ -4,13 +4,12 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
 import sys
 from typing import Any
-
-_COLORS = [str(index) for index in range(10)]
 
 _SUBPROCESS_TEMPLATE = r"""
 import io
@@ -87,7 +86,8 @@ except Exception as error:
 
 
 def _strip_thinking(text: str) -> str:
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    text = re.sub(r"<think>.*?</think>|<\|start_think\|>.*?<\|end_think\|>", "", text, flags=re.DOTALL)
+    return "" if "<think>" in text or "<|start_think|>" in text else text.strip()
 
 
 def _valid_grid(value: Any) -> bool:
@@ -97,7 +97,7 @@ def _valid_grid(value: Any) -> bool:
         and isinstance(value[0], list)
         and bool(value[0])
         and all(isinstance(row, list) and len(row) == len(value[0]) for row in value)
-        and all(isinstance(cell, int) for row in value for cell in row)
+        and all(type(cell) is int and 0 <= cell <= 9 for row in value for cell in row)
     )
 
 
@@ -106,9 +106,18 @@ def parse_grid(text: str) -> list[list[int]] | None:
     text = _strip_thinking(text)
     if match := re.search(r"\\boxed\{(.+)\}", text, re.DOTALL):
         text = match.group(1)
-    text = re.sub(r"[^\s\w]", "", text)
-    text = re.sub(r"\b\w+\b", lambda match: match.group(0) if match.group(0) in _COLORS else "", text)
-    grid = [[int(cell) for cell in line.split()] for line in text.split("\n") if line.strip()]
+    if blocks := re.findall(r"```[^\n]*\n(.*?)```", text, re.DOTALL):
+        text = blocks[-1].strip()
+    if text.startswith("["):
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return value if _valid_grid(value) else None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not all(re.fullmatch(r"[0-9]+(?:[\s,]+[0-9]+)*", line) for line in lines):
+        return None
+    grid = [[int(cell) for cell in (list(line) if line.isdigit() else re.findall(r"[0-9]+", line))] for line in lines]
     return grid if _valid_grid(grid) else None
 
 
@@ -120,7 +129,17 @@ def _extract_python(text: str) -> str | None:
     blocks = re.findall(r"```\s*\n(.*?)```", text, re.DOTALL)
     if blocks:
         return blocks[-1].strip()
-    return text.strip() if "def transform" in text else None
+    if match := re.search(r"(?m)^(?:from \S+ import |import |def transform\s*\()", text):
+        lines = text[match.start() :].splitlines()
+        for end in range(len(lines), 0, -1):
+            code = "\n".join(lines[:end]).strip()
+            try:
+                tree = ast.parse(code)
+            except SyntaxError:
+                continue
+            if tree.body and isinstance(tree.body[-1], ast.FunctionDef) and tree.body[-1].name == "transform":
+                return code
+    return None
 
 
 def _execute_python(code: str, input_grid: list[list[int]], timeout_seconds: int) -> list[list[int]] | None:

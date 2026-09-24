@@ -351,6 +351,46 @@ def transform(grid):
     assert grade_nvarc(code, record, inductive=True, python_timeout_seconds=2)[0] == 1.0
 
 
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ("[[1, 3], [1, 3]]", [[1, 3], [1, 3]]),
+        ("1313\n1313", [[1, 3, 1, 3], [1, 3, 1, 3]]),
+        ("```text\n1 3\n1 3\n```", [[1, 3], [1, 3]]),
+        ("<|start_think|>\nCandidate color: 2\n<|end_think|>\n1 3\n1 3", [[1, 3], [1, 3]]),
+        ("[[1, 3], [1]]", None),
+        ("<|start_think|>\n1 3\n1 3", None),
+    ],
+)
+def test_nvarc_grid_parser_preserves_final_answer_rows(response, expected):
+    assert parse_grid(response) == expected
+
+
+def test_nvarc_grading_extracts_final_code_and_rejects_wrong_grid():
+    record = {"test_input": [[1, 2]], "expected_output": [[2, 3]]}
+    transform = "def transform(grid):\n    return [[cell + 1 for cell in row] for row in grid]"
+    reasoning = "<|start_think|>\nCandidate color: 9\n<|end_think|>\n"
+
+    assert (
+        grade_nvarc(
+            reasoning + "Here is the code:\n" + transform + "\nThis solves it.",
+            record,
+            inductive=True,
+            python_timeout_seconds=2,
+        )[0]
+        == 1.0
+    )
+    assert (
+        grade_nvarc(reasoning + "```python\n" + transform + "\n```", record, inductive=True, python_timeout_seconds=2)[
+            0
+        ]
+        == 1.0
+    )
+    reward, details = grade_nvarc(reasoning + "1 3", record, inductive=False)
+    assert reward == 0.0
+    assert details["extraction_successful"] is True
+
+
 def test_code_gen_reward_runs_every_row_unit_test():
     record = {
         "verifier_metadata": {
