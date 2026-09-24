@@ -23,6 +23,9 @@ from tests.gpu.test_megatron_worker import get_test_training_batch
 from tests.gpu.utils import import_worker
 
 
+MODEL_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
+
+
 class FailingOnceMegatronPolicyWorker(MegatronPolicyWorkerBase):
     def fail_after_next_distributed_save(self) -> int:
         """Fail after all ranks finish DCP, before trainer generation publication."""
@@ -61,6 +64,7 @@ def _test_root() -> str:
 
 def _config(root: str, *, resume: bool = False):
     cfg = get_test_trainer_config("megatron", optimizer_checkpoint_sharding_type="dp_reshardable")
+    cfg.trainer.policy.model.revision = MODEL_REVISION
     cfg.trainer.ckpt_path = os.path.join(root, "checkpoints")
     cfg.trainer.export_path = os.path.join(root, "exports")
     cfg.trainer.max_ckpts_to_keep = -1
