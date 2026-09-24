@@ -18,14 +18,10 @@ export SKYRL_HOME="$REPOSITORY_ROOT"
 export VLLM_USE_DEEP_GEMM=0
 
 LOG_PATH="${IRIS_OUTPUT_DIR:-/tmp}/pivot-swe-smoke.log"
-"$PYTHON" "$REPOSITORY_ROOT/cloud/iris/task_runtime.py" \
-  --run-id "$RUN_ID" \
-  -- "$PYTHON" -m skyrl_train.entrypoints.pivot_swe_smoke \
+"$PYTHON" -m skyrl_train.entrypoints.pivot_swe_smoke \
   2>&1 | tee "$LOG_PATH"
 
-"$PYTHON" "$REPOSITORY_ROOT/cloud/iris/task_runtime.py" \
-  --run-id "${RUN_ID}-export" \
-  -- "$PYTHON" -m skyrl_train.entrypoints.checkpoint_export \
+"$PYTHON" -m skyrl_train.entrypoints.checkpoint_export \
   --config-name pivot_swe_smoke \
   checkpoint_export.step=1 \
   "checkpoint_export.checkpoint_path=${PIVOT_TMP_ROOT}/checkpoints/global_step_1" \
