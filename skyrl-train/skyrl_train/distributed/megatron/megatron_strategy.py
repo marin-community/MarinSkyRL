@@ -88,6 +88,47 @@ def _saved_optimizer_sharding_type(common_state: dict) -> str:
 _NODE_LOCAL_CHECKPOINT_CACHE = os.path.join(tempfile.gettempdir(), "marinskyrl-megatron-checkpoints")
 
 
+def _rng_parallel_coordinates() -> tuple[int, int, int, int, int, int]:
+    """Identify the model-parallel slice and DP replica that owns local RNG state."""
+    return (
+        mpu.get_tensor_model_parallel_rank(),
+        mpu.get_pipeline_model_parallel_rank(),
+        mpu.get_context_parallel_rank(),
+        mpu.get_expert_model_parallel_rank(),
+        mpu.get_expert_tensor_parallel_rank(),
+        mpu.get_data_parallel_rank(),
+    )
+
+
+def _select_rank_rng_state(rank_states: list[dict], rank: int) -> dict:
+    """Restore the exact rank on an unchanged mesh, or a matching DP replica on a resized mesh."""
+    if not rank_states:
+        raise ValueError("Checkpoint has no rank-specific Megatron RNG states")
+    coordinates = _rng_parallel_coordinates()
+    if len(rank_states) == dist.get_world_size() and tuple(rank_states[rank]["coordinates"]) == coordinates:
+        return rank_states[rank]
+
+    matching = sorted(
+        (state for state in rank_states if tuple(state["coordinates"][:5]) == coordinates[:5]),
+        key=lambda state: state["coordinates"][5],
+    )
+    if not matching:
+        raise ValueError(
+            "Checkpoint has no Megatron RNG state for the current TP/PP/CP/EP/ETP slice; "
+            "full-state resume requires matching model-parallel geometry"
+        )
+    selected = matching[coordinates[5] % len(matching)]
+    logger.warning(
+        "Megatron RNG rank layout differs from the checkpoint (saved world {}, current world {}); "
+        "mapping RNG replica {} to saved replica {}. Exact replay is not guaranteed for changed-layout resume.",
+        len(rank_states),
+        dist.get_world_size(),
+        coordinates[5],
+        selected["coordinates"][5],
+    )
+    return selected
+
+
 class MegatronStrategy(DistributedStrategy):
     """
     The strategy for training with Megatron.
@@ -230,8 +271,18 @@ class MegatronStrategy(DistributedStrategy):
         if scheduler:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
-        # Save RNG state.
-        sharded_state_dict["rng"] = self.get_rng_state()
+        # Preserve the common-state contract and each rank's separate CUDA tracker.
+        generic_rng_state = self.get_rng_state()
+        sharded_state_dict["rng"] = generic_rng_state
+        from megatron.core import tensor_parallel
+
+        local_rng_state = {
+            "coordinates": _rng_parallel_coordinates(),
+            "generic": generic_rng_state,
+            "cuda_tracker": tensor_parallel.get_cuda_rng_tracker().get_states(),
+        }
+        rank_rng_states = [None] * dist.get_world_size()
+        dist.all_gather_object(rank_rng_states, local_rng_state)
 
         # Save the checkpoint across ranks in parallel. Each S3 rank shard is one
         # multipart object; the local work directory contains only small control files.
@@ -279,7 +330,7 @@ class MegatronStrategy(DistributedStrategy):
                 # single rank-0 file suffices; every rank reads it back on load.
                 extra_state_path = os.path.join(work_dir, "extra_state.pt")
                 with io.open_file(extra_state_path, "wb") as f:
-                    torch.save({"client_state": client_state, "tag": tag}, f)
+                    torch.save({"client_state": client_state, "tag": tag, "rank_rng_states": rank_rng_states}, f)
 
         dist.barrier()
         ckpt_base.async_calls.close()
@@ -390,8 +441,15 @@ class MegatronStrategy(DistributedStrategy):
             with checkpoint_phase("megatron", operation, "apply_client_and_rank_rng_state", rank=rank, step=step):
                 with io.open_file(extra_state_path, "rb") as f:
                     extra_state = torch.load(f, weights_only=False)
-                states = extra_state.get("client_state", {}) or {}
+                states = {"client_state": extra_state.get("client_state", {}) or {}}
                 self.log("Loaded client state (ZClip / StaleClip) from checkpoint.")
+                if "rank_rng_states" in extra_state:
+                    from megatron.core import tensor_parallel
+
+                    rank_rng_state = _select_rank_rng_state(extra_state["rank_rng_states"], rank)
+                    self.load_rng_state(rank_rng_state["generic"])
+                    tensor_parallel.get_cuda_rng_tracker().set_states(rank_rng_state["cuda_tracker"])
+                    self.log("Loaded rank-specific Megatron RNG and CUDA RNG tracker state.")
 
         return ckpt_dir, states
 
