@@ -764,7 +764,7 @@ class FSDPStrategy(DistributedStrategy):
         tag=None,
         tokenizer=None,
     ):
-        """Save model checkpoint for FSDP"""
+        """Stage an FSDP checkpoint and return its deferred cloud upload, if any."""
         import warnings
         from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDictConfig, StateDictType
 
@@ -791,7 +791,8 @@ class FSDPStrategy(DistributedStrategy):
         rank = self.get_rank()
         world_size = self.world_size
 
-        with io.local_work_dir(ckpt_dir) as work_dir:
+        staging = io.DeferredLocalWorkDir(ckpt_dir)
+        with staging as work_dir:
             model_path = os.path.join(work_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
             optim_path = os.path.join(work_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
             extra_path = os.path.join(work_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
@@ -848,15 +849,20 @@ class FSDPStrategy(DistributedStrategy):
                 with io.open_file(fsdp_config_path, "w") as f:
                     json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
 
-        # Save LoRA adapters if using LoRA
-        if self.is_lora and hasattr(save_model, "peft_config"):
-            self._save_lora_adapters(save_model, ckpt_dir)
+        try:
+            # Save LoRA adapters if using LoRA
+            if self.is_lora and hasattr(save_model, "peft_config"):
+                self._save_lora_adapters(save_model, ckpt_dir)
 
-        # Final barrier to ensure all operations complete
-        dist.barrier()
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+            # Final barrier to ensure all operations complete
+            dist.barrier()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+        except BaseException:
+            staging.discard()
+            raise
         self.log(f"[rank-{rank}]: Checkpoint saved to {ckpt_dir}")
+        return staging.pending_upload()
 
     def load_checkpoint(
         self,

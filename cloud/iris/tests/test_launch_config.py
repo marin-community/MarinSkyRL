@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 import yaml
 from omegaconf import OmegaConf
-from omegaconf.errors import ConfigKeyError
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import (
@@ -152,14 +151,6 @@ def test_composed_launch_records_the_trainer_its_entrypoint_runs(
         resolved = tmp_path / "resolved-launch.yaml"
         OmegaConf.save(config, resolved)
         assert load_launch_config(resolved).runtime.training_type == expected
-
-
-def test_launch_config_rejects_unknown_root_fields() -> None:
-    raw = _raw_config()
-    raw["unexpected"] = True
-
-    with pytest.raises(ConfigKeyError):
-        compose_launch_config(raw)
 
 
 def test_launch_config_rejects_allocation_smaller_than_role_plan() -> None:

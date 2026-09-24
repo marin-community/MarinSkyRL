@@ -56,7 +56,9 @@ service rate during each trainer phase (panel 42). The synchronous trainer recor
 breakdown under `generate_spans`.
 
 **Trainer.** `Timer` spans give the driver's step, buffer wait, training and weight-sync walls
-(panel 6). `async_step_metrics` derives the core and cycle walls, useful tokens per second and per
+(panel 6). The fully async trainer times batch preparation as
+`assemble_generation_group_mini_batch`, `postprocess_trajectory_batch` and `convert_to_training_input`,
+all under `step`. `async_step_metrics` derives the core and cycle walls, useful tokens per second and per
 configured GPU, and cumulative core GPU-hours (panels 34, 35, 38, 39, 43). On Megatron,
 `MegatronTrainTimings` splits one policy update into the forward-backward schedule, pipeline metric
 broadcast, optimizer step, world reduction and final barrier, with the unattributed remainder as a
