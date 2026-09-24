@@ -27,6 +27,9 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
+_WANDB_STEP_METRIC = "trainer/global_step"
+
+
 @ray.remote
 class WandbNodeLogger:
     """
@@ -91,6 +94,8 @@ class Tracking:
                 ),
             )
             run_id = run.id
+            run.define_metric(_WANDB_STEP_METRIC)
+            run.define_metric("*", step_metric=_WANDB_STEP_METRIC)
             self.logger["wandb"] = run
             self._prepare_worker_nodes_systems_logging_wandb(
                 project_name, experiment_name, run_id, config, current_node_ip
@@ -177,10 +182,10 @@ class Tracking:
         else:
             logger.warning("Ray is not initialized, skipping distributed wandb logging")
 
-    def log(self, data, step, commit=False):
+    def log(self, data, step, commit=True):
         for logger_name, logger_instance in self.logger.items():
             if logger_name == "wandb":
-                logger_instance.log(data=data, step=step, commit=commit)
+                logger_instance.log(data={**data, _WANDB_STEP_METRIC: step}, commit=commit)
             else:
                 logger_instance.log(data=data, step=step)
 
@@ -351,7 +356,7 @@ class ValidationGenerationsLogger:
         new_table.add_data(*row_data)
 
         # Update reference and log
-        wandb.log({"val/generations": new_table}, step=step)
+        wandb.log({"val/generations": new_table, _WANDB_STEP_METRIC: step})
         self.validation_table = new_table
 
     def log_generations_to_swanlab(self, samples, step):

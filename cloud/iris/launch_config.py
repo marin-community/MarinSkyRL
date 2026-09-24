@@ -26,6 +26,9 @@ from marinskyrl.resource_locator import join_resource_path
 from marinskyrl.task_sources import data_source
 
 
+DEFAULT_DRAFT_MODEL_CACHE_TTL_DAYS = 14
+
+
 class RunMode(StrEnum):
     TRAIN = "train"
     CHECKPOINT_EXPORT = "checkpoint_export"
@@ -144,6 +147,7 @@ class ArtifactsConfig:
     resolved_config_uri: str = MISSING
     terminal_manifest_uri: str = MISSING
     resume_checkpoint_count: int = 2
+    draft_model_cache_ttl_days: int = DEFAULT_DRAFT_MODEL_CACHE_TTL_DAYS
 
 
 @dataclass

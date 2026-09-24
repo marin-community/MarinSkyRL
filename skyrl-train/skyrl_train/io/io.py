@@ -16,6 +16,7 @@ import shutil
 import tempfile
 from contextlib import contextmanager
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -26,6 +27,54 @@ from marinskyrl.resource_locator import is_cloud_uri
 
 class DirectoryPublisher(Protocol):
     def __call__(self, local_path: str, cloud_path: str) -> None: ...
+
+
+@dataclass
+class PendingDirectoryUpload:
+    """A cloud directory staged on local disk and ready for publication."""
+
+    local_path: str
+    output_path: str
+
+    def publish(self) -> None:
+        try:
+            upload_directory(self.local_path, self.output_path)
+        finally:
+            try:
+                shutil.rmtree(self.local_path)
+            except OSError:
+                logger.exception(f"Failed to remove checkpoint staging directory {self.local_path}")
+
+
+class DeferredLocalWorkDir:
+    """Stage cloud output locally while leaving publication to the caller."""
+
+    def __init__(self, output_path: str) -> None:
+        self.output_path = output_path
+        self._local_path: str | None = None
+        self._cloud_backed = is_cloud_path(output_path)
+
+    def __enter__(self) -> str:
+        if self._cloud_backed:
+            self._local_path = tempfile.mkdtemp(prefix="skyrl-checkpoint-")
+        else:
+            makedirs(self.output_path, exist_ok=True)
+            self._local_path = self.output_path
+        return self._local_path
+
+    def __exit__(self, exc_type, _exc_value, _traceback) -> None:
+        if exc_type is not None and self._cloud_backed and self._local_path is not None:
+            shutil.rmtree(self._local_path, ignore_errors=True)
+
+    def pending_upload(self) -> PendingDirectoryUpload | None:
+        if not self._cloud_backed:
+            return None
+        assert self._local_path is not None
+        return PendingDirectoryUpload(self._local_path, self.output_path)
+
+    def discard(self) -> None:
+        if self._cloud_backed and self._local_path is not None:
+            shutil.rmtree(self._local_path, ignore_errors=True)
 
 
 def is_cloud_path(path: str) -> bool:

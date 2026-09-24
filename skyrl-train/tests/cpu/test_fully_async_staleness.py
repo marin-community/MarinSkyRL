@@ -157,6 +157,42 @@ def _batch_assembly_state(
     return trainer, queues
 
 
+def test_async_batch_conversion_reports_comparable_stage_timings(monkeypatch):
+    trainer, _ = _batch_assembly_state(mini_batch_size=1, accepted=1)
+    trainer.cfg = SimpleNamespace(
+        trainer=SimpleNamespace(algorithm=SimpleNamespace(policy_loss_type="pg", tis_lcs_alert_threshold=0.0))
+    )
+    trainer.all_timings = {}
+    trainer.tokenizer = SimpleNamespace(decode=lambda response: str(response))
+    now = [0.0]
+    monkeypatch.setattr("skyrl_train.utils.utils.time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    def postprocess(batch, uids):
+        now[0] += 7.0
+        return batch
+
+    def select(batch, uids):
+        now[0] += 11.0
+        return batch, uids
+
+    def convert(batch, uids, *, rollout_staleness):
+        now[0] += 3.0
+        return {"rewards": batch["rewards"], "uids": uids}
+
+    trainer.postprocess_trajectory_batch = postprocess
+    trainer.select_trajectories = select
+    trainer.convert_to_training_input = convert
+
+    result = trainer.convert_generation_group_mini_batch_to_training_input([_generated_group("group", 10)])
+
+    assert result == {"rewards": [0.0, 1.0], "uids": ["group", "group"]}
+    assert trainer.all_timings == {
+        "assemble_generation_group_mini_batch": 0.0,
+        "postprocess_trajectory_batch": 18.0,
+        "convert_to_training_input": 3.0,
+    }
+
+
 class _TeacherTicket:
     async def result(self):
         raise AssertionError("batch admission must not wait for teacher evidence")
