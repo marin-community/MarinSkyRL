@@ -58,13 +58,11 @@ def propagate_data_sources(input_batch: TrajectoryRequestBatch, output: Trajecto
             source = extras.get("data_source")
         sources.append(source if isinstance(source, str) else None)
 
-    if len(sources) == len(output["response_ids"]):
-        output["data_sources"] = sources
-        return
-
     request_ids = input_batch.get("trajectory_ids")
     output_ids = output.get("trajectory_ids")
     if request_ids is None or output_ids is None:
+        if len(sources) == len(output["response_ids"]):
+            output["data_sources"] = sources
         return
     if len(request_ids) != len(sources) or len(output_ids) != len(output["response_ids"]):
         raise ValueError("trajectory IDs and source labels must align with their rows")

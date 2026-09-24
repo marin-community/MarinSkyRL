@@ -157,7 +157,8 @@ SkyRL automatically computes the following metrics for logging purposes:
 When ``env_extras`` includes ``data_source``, training also logs ``reward/domain/<source>/avg_raw_reward``
 at each optimizer step using the same reward values as ``reward/avg_raw_reward``. Step-wise training uses each trajectory's final step.
 Source names replace ``/`` with ``_`` (as in evaluation metrics); missing names use ``unknown``.
-The first 32 names in sorted order get separate metrics, and any remaining names are grouped under ``__other__``.
+The first 32 names in sorted order get separate metrics, and any remaining names are grouped under
+``reward/domain_overflow/avg_raw_reward``.
 
 Whether you use turn-level rewards or outcome rewards, the rewards used to train the model will be translated to per-token rewards. For example, if there are 3 turns with 4 response tokens each and the turn-level rewards are ``[1.0, 2.0, 3.0]``, the resulting per-token rewards are:
 

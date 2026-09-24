@@ -169,7 +169,7 @@ def _domain_reward_metrics(data_sources: List[str | None], rewards: List[float])
     }
     if len(sources) > MAX_DOMAIN_REWARD_METRICS:
         overflow = [reward for source in sources[MAX_DOMAIN_REWARD_METRICS:] for reward in rewards_by_source[source]]
-        metrics["reward/domain/__other__/avg_raw_reward"] = float(np.mean(overflow))
+        metrics["reward/domain_overflow/avg_raw_reward"] = float(np.mean(overflow))
     return metrics
 
 

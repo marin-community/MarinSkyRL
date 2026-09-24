@@ -200,9 +200,10 @@ def test_domain_reward_metrics_aggregate_and_bound_metric_keys():
         "reward/domain/zeta/avg_raw_reward": 0.0,
     }
 
-    overflow_metrics = _domain_reward_metrics([f"domain-{i:02}" for i in range(40)], [1.0] * 40)
+    overflow_metrics = _domain_reward_metrics(["__other__", *[f"domain-{i:02}" for i in range(40)]], [0.0] + [1.0] * 40)
     assert len(overflow_metrics) == 33
-    assert overflow_metrics["reward/domain/__other__/avg_raw_reward"] == 1.0
+    assert overflow_metrics["reward/domain/__other__/avg_raw_reward"] == 0.0
+    assert overflow_metrics["reward/domain_overflow/avg_raw_reward"] == 1.0
 
 
 def test_step_wise_rollout_rows_keep_request_data_sources():
@@ -218,6 +219,13 @@ def test_step_wise_rollout_rows_keep_request_data_sources():
     propagate_data_sources(request, output)
 
     assert output["data_sources"] == ["math", "math", "tools"]
+
+    output_with_empty_first_trajectory = {
+        "response_ids": [[1], [2]],
+        "trajectory_ids": [TrajectoryID("b", 0), TrajectoryID("b", 0)],
+    }
+    propagate_data_sources(request, output_with_empty_first_trajectory)
+    assert output_with_empty_first_trajectory["data_sources"] == ["tools", "tools"]
 
 
 def test_postprocess_logs_training_reward_by_domain():
