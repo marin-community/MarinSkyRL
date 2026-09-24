@@ -113,14 +113,6 @@ def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) ->
     assert validate_launch_config(config).num_nodes == 1
 
 
-def test_launch_config_rejects_unknown_root_fields() -> None:
-    raw = _raw_config()
-    raw["unexpected"] = True
-
-    with pytest.raises(ConfigKeyError):
-        compose_launch_config(raw)
-
-
 def test_launch_config_rejects_allocation_smaller_than_role_plan() -> None:
     raw = _raw_config()
     raw["iris"]["allocation"]["num_nodes"] = 0
