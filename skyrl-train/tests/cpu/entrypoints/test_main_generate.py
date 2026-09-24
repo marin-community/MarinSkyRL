@@ -39,7 +39,7 @@ async def test_eval_only_uses_generation_engine_without_initial_wake(monkeypatch
     monkeypatch.setattr(main_generate, "build_dataloader", lambda *_args, **_kwargs: "dataloader")
     monkeypatch.setattr(main_generate, "evaluate", evaluate)
 
-    result = await experiment.run()
+    result = await experiment._evaluate()
 
     assert result == {"reward": 1.0}
     assert tracker.calls == [(({"reward": 1.0},), {"step": 0, "commit": True})]
