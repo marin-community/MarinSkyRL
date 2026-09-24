@@ -932,7 +932,8 @@ def policy_model_config(model: DictConfig) -> dict | None:
 
     try:
         config, _ = PretrainedConfig.get_config_dict(model.path, revision=model.get("revision"))
-    except Exception:
+    except Exception as error:
+        logger.warning(f"Cannot read the policy's config.json at {model.path!r}: {type(error).__name__}: {error}")
         return None
     return config
 

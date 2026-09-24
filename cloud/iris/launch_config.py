@@ -20,7 +20,7 @@ from cloud.iris.rl_config_translation import (
     inert_fully_async_settings,
     parse_rl_config,
     registered_rl_entrypoint_module,
-    training_type_for_entrypoint,
+    training_type_for_skyrl_config,
     validate_tp_divides_heads,
     warn_inert_fully_async_settings,
 )
@@ -227,9 +227,7 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
 
 
 def _training_type(entrypoint: str, skyrl: Mapping[str, Any]) -> str | None:
-    # The terminal_bench entrypoint runs async only for an explicit false, so null means colocated.
-    colocate_all = skyrl.get("trainer", {}).get("placement", {}).get("colocate_all")
-    training_type = training_type_for_entrypoint(entrypoint, colocate_all=colocate_all is not False)
+    training_type = training_type_for_skyrl_config(entrypoint, skyrl)
     return None if training_type is None else training_type.value
 
 

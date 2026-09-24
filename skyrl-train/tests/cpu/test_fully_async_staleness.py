@@ -127,13 +127,6 @@ def test_first_token_admission_rejects_an_oldest_version_newer_than_installed():
         _trainer_at_step(2, first_token_admission=True)._admission_step(batch, fallback_step=1)
 
 
-def test_first_token_admission_rejects_a_sampled_token_without_a_version():
-    rows = [[{"start": 0, "token_count": 1, "policy_version": 2}, {"start": 5, "token_count": 2, "policy_version": 3}]]
-    batch = _completed_batch(rows, response_ids=(MULTI_TURN_RESPONSE,), loss_masks=(MULTI_TURN_LOSS_MASK,))
-    with pytest.raises(RuntimeError, match="first_token_admission"):
-        _trainer_at_step(4, first_token_admission=True)._admission_step(batch, fallback_step=4)
-
-
 def test_admission_step_is_the_captured_step_unless_first_token_admission_is_on():
     # Same completed group, same trainer state; only the flag differs. Off is the stamp the
     # runner captured; on is the oldest version that sampled the group plus one, because
@@ -154,11 +147,28 @@ def test_a_response_continued_under_newer_weights_counts_from_its_oldest_span():
     assert _trainer_at_step(4, first_token_admission=True)._admission_step(batch, fallback_step=4) == 2
 
 
-@pytest.mark.parametrize("rows", [None, _spans(None, 3)])
-def test_first_token_admission_fails_loudly_when_a_sampled_group_carries_no_version(rows):
+@pytest.mark.parametrize(
+    ("rows", "shape"),
+    [
+        (None, {}),
+        (_spans(None, 3), {}),
+        # A sampled token between the spans carries no version.
+        (
+            [
+                [
+                    {"start": 0, "token_count": 1, "policy_version": 2},
+                    {"start": 5, "token_count": 2, "policy_version": 3},
+                ]
+            ],
+            {"response_ids": (MULTI_TURN_RESPONSE,), "loss_masks": (MULTI_TURN_LOSS_MASK,)},
+        ),
+    ],
+    ids=["no_spans", "unknown_version", "uncovered_sampled_token"],
+)
+def test_first_token_admission_fails_loudly_when_a_sampled_token_carries_no_version(rows, shape):
     trainer = _trainer_at_step(4, first_token_admission=True)
     with pytest.raises(RuntimeError, match="first_token_admission"):
-        trainer._admission_step(_completed_batch(rows), fallback_step=4)
+        trainer._admission_step(_completed_batch(rows, **shape), fallback_step=4)
 
 
 def test_first_token_admission_keeps_the_captured_step_for_a_group_that_sampled_nothing():

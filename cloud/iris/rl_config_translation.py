@@ -100,6 +100,15 @@ def training_type_for_entrypoint(module: str, *, colocate_all: bool) -> Training
     return TrainingType.SYNC
 
 
+def training_type_for_skyrl_config(module: str, skyrl: Mapping[str, Any]) -> TrainingType | None:
+    """The trainer an entrypoint module runs under a SkyRL config's placement."""
+    trainer = skyrl.get("trainer")
+    placement = trainer.get("placement") if isinstance(trainer, Mapping) else None
+    colocate_all = placement.get("colocate_all") if isinstance(placement, Mapping) else None
+    # The terminal_bench entrypoint runs async only for an explicit false, so null means colocated.
+    return training_type_for_entrypoint(module, colocate_all=colocate_all is not False)
+
+
 def registered_rl_entrypoint_module(module: str) -> str:
     """Validate and return one registered direct-call module."""
     if module not in (*RL_ENTRYPOINTS.values(), CHECKPOINT_EXPORT_ENTRYPOINT):
@@ -554,12 +563,7 @@ def inert_fully_async_settings(
     ``defaults`` drops keys that hold their base-config value, for a composed document that carries every key.
     """
     trainer = skyrl.get("trainer")
-    if not isinstance(trainer, Mapping):
-        return ()
-    placement = trainer.get("placement")
-    colocate_all = placement.get("colocate_all") if isinstance(placement, Mapping) else None
-    # The terminal_bench entrypoint runs async only for an explicit false, so null means colocated.
-    if training_type_for_entrypoint(module, colocate_all=colocate_all is not False) is TrainingType.ASYNC:
+    if not isinstance(trainer, Mapping) or training_type_for_skyrl_config(module, skyrl) is TrainingType.ASYNC:
         return ()
     fully_async = trainer.get("fully_async")
     if not isinstance(fully_async, Mapping):
