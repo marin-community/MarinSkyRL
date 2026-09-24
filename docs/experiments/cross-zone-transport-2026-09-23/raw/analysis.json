@@ -5,7 +5,9 @@
     "relay": "846d127e1d1d773e78a468d04681a248f10fa37940cde4b67d2a8cfef31d6a24",
     "screen": "d83fc94960a79e70cdedc3a695174929994e51968b1588d929a6b84260e3e362",
     "sender": "9838991b5622169450db38978572eb0457a78cfada0c41da050cea871d1b7813",
-    "sparse": "5b9fd9612279f9f8d9b79d82e143a0a525fc0402b3ea8796bf8df416fd5d659e"
+    "sparse": "5b9fd9612279f9f8d9b79d82e143a0a525fc0402b3ea8796bf8df416fd5d659e",
+    "unique_receiver": "b849930c4d221b932e5c818940db5130ae865ae741e348129e2ec6997b809e6f",
+    "unique_sender": "251f0d5225d67a7b2ad0e64fa42bfa2bb2479396da179296ca2d542f109d27e3"
   },
   "measured": {
     "pings_seconds": {
@@ -861,12 +863,472 @@
       }
     ]
   },
+  "measured_unique_content_followup": {
+    "pings_seconds": {
+      "count": 20,
+      "maximum": 1.1590252660098486,
+      "minimum": 0.10769383498700336,
+      "p50": 0.11321387650968973,
+      "p90": 0.11446802641730755
+    },
+    "receiver_host": "g1cc6b2",
+    "receiver_ip": "10.168.194.197",
+    "reverse_8_mib_seconds": 0.7167990909947548,
+    "samples": 30,
+    "sender_host": "sjtsxs64",
+    "sender_ip": "10.186.213.73",
+    "table": [
+      {
+        "ack_wait_seconds": {
+          "count": 5,
+          "maximum": 0.6071946989977732,
+          "minimum": 0.24489874197752215,
+          "p50": 0.2867939279822167,
+          "p90": 0.48483021139400084
+        },
+        "cache_response_headers": [],
+        "delivery_seconds": {
+          "count": 5,
+          "maximum": 0.8950412980047986,
+          "minimum": 0.4229522440000437,
+          "p50": 0.44752021698514,
+          "p90": 0.7219657612033188
+        },
+        "head_attempts": [
+          [
+            2,
+            2,
+            2,
+            2
+          ],
+          [
+            1,
+            1,
+            1,
+            1
+          ],
+          [
+            1,
+            1,
+            1,
+            1
+          ],
+          [
+            1,
+            1,
+            1,
+            1
+          ],
+          [
+            1,
+            1,
+            1,
+            1
+          ]
+        ],
+        "max_part_download_seconds": {
+          "count": 5,
+          "maximum": 0.524345196026843,
+          "minimum": 0.14734456699807197,
+          "p50": 0.151180894987192,
+          "p90": 0.3799737384193577
+        },
+        "method": "object",
+        "sample_ids": [
+          "8m-4streams-0-object",
+          "8m-4streams-1-object",
+          "8m-4streams-2-object",
+          "8m-4streams-3-object",
+          "8m-4streams-4-object"
+        ],
+        "send_or_upload_phase_seconds": {
+          "count": 5,
+          "maximum": 0.23392201800015755,
+          "minimum": 0.10409060699748807,
+          "p50": 0.1071449709997978,
+          "p90": 0.1900186928047333
+        },
+        "setup_seconds": {
+          "count": 5,
+          "maximum": 0.05663568200543523,
+          "minimum": 0.05388979701092467,
+          "p50": 0.05392458100686781,
+          "p90": 0.05662736201193184
+        },
+        "size_mib": 8,
+        "streams": 4,
+        "visibility_from_command_seconds": {
+          "count": 5,
+          "maximum": 0.22676926804706454,
+          "minimum": 0.09167790599167347,
+          "p50": 0.09258975397096947,
+          "p90": 0.18055992561858147
+        },
+        "warm_read_seconds": {
+          "count": 5,
+          "maximum": 0.6088316430104896,
+          "minimum": 0.5392515240237117,
+          "p50": 0.5940933450474404,
+          "p90": 0.6038863346213474
+        }
+      },
+      {
+        "ack_wait_seconds": {
+          "count": 5,
+          "maximum": 0.009964532975573093,
+          "minimum": 0.003455803991528228,
+          "p50": 0.008536823006579652,
+          "p90": 0.009576808579731732
+        },
+        "delivery_seconds": {
+          "count": 5,
+          "maximum": 1.5984888839884661,
+          "minimum": 0.4655271410010755,
+          "p50": 1.2463337469962426,
+          "p90": 1.4846114399959334
+        },
+        "method": "tcp",
+        "sample_ids": [
+          "8m-4streams-0-tcp",
+          "8m-4streams-1-tcp",
+          "8m-4streams-2-tcp",
+          "8m-4streams-3-tcp",
+          "8m-4streams-4-tcp"
+        ],
+        "send_or_upload_phase_seconds": {
+          "count": 5,
+          "maximum": 1.5410897149995435,
+          "minimum": 0.3987330060044769,
+          "p50": 1.1858857170154806,
+          "p90": 1.4239148534077686
+        },
+        "sender_mss": [
+          8948
+        ],
+        "sender_pmtu": [
+          9000
+        ],
+        "sender_total_retrans": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "setup_seconds": {
+          "count": 5,
+          "maximum": 0.056829602021025494,
+          "minimum": 0.05394336499739438,
+          "p50": 0.05419462898862548,
+          "p90": 0.056756757613038646
+        },
+        "size_mib": 8,
+        "streams": 4
+      },
+      {
+        "ack_wait_seconds": {
+          "count": 5,
+          "maximum": 1.397835406998638,
+          "minimum": 1.1600572330062278,
+          "p50": 1.3211831060179975,
+          "p90": 1.377699402999133
+        },
+        "cache_response_headers": [],
+        "delivery_seconds": {
+          "count": 5,
+          "maximum": 1.7009561960003339,
+          "minimum": 1.6111761660140473,
+          "p50": 1.626602869015187,
+          "p90": 1.6813544127973727
+        },
+        "head_attempts": [
+          [
+            3,
+            2,
+            2,
+            2
+          ],
+          [
+            2,
+            2,
+            2,
+            2
+          ],
+          [
+            2,
+            2,
+            2,
+            2
+          ],
+          [
+            2,
+            2,
+            2,
+            3
+          ],
+          [
+            2,
+            2,
+            2,
+            2
+          ]
+        ],
+        "max_part_download_seconds": {
+          "count": 5,
+          "maximum": 1.1276050740270875,
+          "minimum": 1.0385889220051467,
+          "p50": 1.055692694033496,
+          "p90": 1.1151928932289592
+        },
+        "method": "object",
+        "sample_ids": [
+          "128m-4streams-0-object",
+          "128m-4streams-1-object",
+          "128m-4streams-2-object",
+          "128m-4streams-3-object",
+          "128m-4streams-4-object"
+        ],
+        "send_or_upload_phase_seconds": {
+          "count": 5,
+          "maximum": 0.4011693229840603,
+          "minimum": 0.200228486006381,
+          "p50": 0.236111454985803,
+          "p90": 0.3989770053944085
+        },
+        "setup_seconds": {
+          "count": 5,
+          "maximum": 0.05393392499536276,
+          "minimum": 0.05388160501024686,
+          "p50": 0.05389206900144927,
+          "p90": 0.05391930739860982
+        },
+        "size_mib": 128,
+        "streams": 4,
+        "visibility_from_command_seconds": {
+          "count": 5,
+          "maximum": 0.34709422499872744,
+          "minimum": 0.2169775270158425,
+          "p50": 0.22170444001676515,
+          "p90": 0.3458321778103709
+        },
+        "warm_read_seconds": {
+          "count": 5,
+          "maximum": 0.7341055260039866,
+          "minimum": 0.5974301539827138,
+          "p50": 0.6288959940429777,
+          "p90": 0.7278993592131883
+        }
+      },
+      {
+        "ack_wait_seconds": {
+          "count": 5,
+          "maximum": 0.15213343501091003,
+          "minimum": 0.1491503020224627,
+          "p50": 0.15115612299996428,
+          "p90": 0.1520350670092739
+        },
+        "delivery_seconds": {
+          "count": 5,
+          "maximum": 2.517188715020893,
+          "minimum": 0.8768336060165893,
+          "p50": 2.227518183994107,
+          "p90": 2.4479608738154637
+        },
+        "method": "tcp",
+        "sample_ids": [
+          "128m-4streams-0-tcp",
+          "128m-4streams-1-tcp",
+          "128m-4streams-2-tcp",
+          "128m-4streams-3-tcp",
+          "128m-4streams-4-tcp"
+        ],
+        "send_or_upload_phase_seconds": {
+          "count": 5,
+          "maximum": 2.3137925530027132,
+          "minimum": 0.6709823420096654,
+          "p50": 2.021385798987467,
+          "p90": 2.2438679829996544
+        },
+        "sender_mss": [
+          8948
+        ],
+        "sender_pmtu": [
+          9000
+        ],
+        "sender_total_retrans": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "setup_seconds": {
+          "count": 5,
+          "maximum": 0.05401850101770833,
+          "minimum": 0.053963749000104144,
+          "p50": 0.05399894999573007,
+          "p90": 0.05401692660525441
+        },
+        "size_mib": 128,
+        "streams": 4
+      },
+      {
+        "ack_wait_seconds": {
+          "count": 5,
+          "maximum": 2.020904392004013,
+          "minimum": 1.3078821600065567,
+          "p50": 1.9154999630118255,
+          "p90": 2.0075170144089496
+        },
+        "cache_response_headers": [],
+        "delivery_seconds": {
+          "count": 5,
+          "maximum": 3.0837524509988725,
+          "minimum": 1.883451484987745,
+          "p50": 2.6425972830038518,
+          "p90": 2.9164744765963406
+        },
+        "head_attempts": [
+          [
+            4,
+            4,
+            4,
+            4
+          ],
+          [
+            4,
+            4,
+            4,
+            4
+          ],
+          [
+            4,
+            8,
+            4,
+            4
+          ],
+          [
+            5,
+            4,
+            4,
+            4
+          ],
+          [
+            4,
+            4,
+            4,
+            5
+          ]
+        ],
+        "max_part_download_seconds": {
+          "count": 5,
+          "maximum": 1.2505281259655021,
+          "minimum": 0.599632797006052,
+          "p50": 1.2276043469901197,
+          "p90": 1.2474511067732237
+        },
+        "method": "object",
+        "sample_ids": [
+          "512m-4streams-0-object",
+          "512m-4streams-1-object",
+          "512m-4streams-2-object",
+          "512m-4streams-3-object",
+          "512m-4streams-4-object"
+        ],
+        "send_or_upload_phase_seconds": {
+          "count": 5,
+          "maximum": 1.006195639987709,
+          "minimum": 0.5216561359993648,
+          "p50": 0.5985349959810264,
+          "p90": 0.8821910263912287
+        },
+        "setup_seconds": {
+          "count": 5,
+          "maximum": 0.056652419007150456,
+          "minimum": 0.053873445984208956,
+          "p50": 0.056626339006470516,
+          "p90": 0.056644162599695846
+        },
+        "size_mib": 512,
+        "streams": 4,
+        "visibility_from_command_seconds": {
+          "count": 5,
+          "maximum": 1.0406182120204903,
+          "minimum": 0.47967377497116104,
+          "p50": 0.6075172909768298,
+          "p90": 0.8706901448196731
+        },
+        "warm_read_seconds": {
+          "count": 5,
+          "maximum": 1.6522570179658942,
+          "minimum": 1.4567716069868766,
+          "p50": 1.4671405880362727,
+          "p90": 1.5820358291617596
+        }
+      },
+      {
+        "ack_wait_seconds": {
+          "count": 5,
+          "maximum": 0.6174593280011322,
+          "minimum": 0.5967078300018329,
+          "p50": 0.6073183789849281,
+          "p90": 0.6166007560037542
+        },
+        "delivery_seconds": {
+          "count": 5,
+          "maximum": 4.067489364009816,
+          "minimum": 1.7255458650179207,
+          "p50": 3.7833609060035087,
+          "p90": 4.010511429212056
+        },
+        "method": "tcp",
+        "sample_ids": [
+          "512m-4streams-0-tcp",
+          "512m-4streams-1-tcp",
+          "512m-4streams-2-tcp",
+          "512m-4streams-3-tcp",
+          "512m-4streams-4-tcp"
+        ],
+        "send_or_upload_phase_seconds": {
+          "count": 5,
+          "maximum": 3.4034258620231412,
+          "minimum": 1.0748176130000502,
+          "p50": 3.1091438150033355,
+          "p90": 3.3432498640147967
+        },
+        "sender_mss": [
+          8948
+        ],
+        "sender_pmtu": [
+          9000
+        ],
+        "sender_total_retrans": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "setup_seconds": {
+          "count": 5,
+          "maximum": 0.056757762999041006,
+          "minimum": 0.05402042201603763,
+          "p50": 0.05674576200544834,
+          "p90": 0.05675529220025055
+        },
+        "size_mib": 512,
+        "streams": 4
+      }
+    ]
+  },
   "model_limits": [
     "TCP and object curves interpolate single-payload medians up to 512 MiB; dense 8.179 GB uses sequential 512 MiB chunks.",
+    "The main object repeats reused identical content at each size under fresh keys; per-request cache state is unknown. The unique-content follow-up tests this confound on four streams but uses a different H100 host and later time.",
+    "Socket buffers and TCP window sizes were not recorded or tuned; the single-stream 128 MiB TCP cell spans 0.917\u201310.262 s and makes the direct sparse interpolation fragile.",
     "The 2.4% GPU-index scenario exceeds 512 MiB by about 10% and linearly extrapolates the 128-to-512 MiB TCP median slope.",
     "The GPU index byte formula is 3*rho*BF16 dense bytes and omits headers and nonexpert weights.",
     "The CPU XOR byte ratio comes from one 128 MiB random-XOR RNO object relay at 1.9% and is scaled linearly by density.",
-    "CPU local times come from one H100 low-bit-flip bucket screen and are scaled sequentially; full-model batching, B200 encode, H100 apply, and overlap are unmeasured.",
+    "CPU local times come from one H100 low-bit-flip bucket screen that includes D2H, detect, pack, compression/decompression, H2D, apply, and baseline commit. Sequential scaling omits the split B200/H100 execution, full-model batching, and overlap.",
     "One root is 1/16 of global routed-expert bytes; receiver placement, fan-out, nonexpert tensors, and acknowledgement are not modeled.",
     "Visibility time starts when the receiver got the control command and overlaps source upload; components are not additive."
   ],

@@ -1,0 +1,28 @@
+I20260923 18:01:33 127394809947968 iris.cli.main Resolved cluster 'cw-rno2a' to config: /home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/lib/iris/config/cw-rno2a.yaml
+I20260923 18:01:33 127394809947968 iris.cluster.config Loading config from /home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/lib/iris/config/cw-rno2a.yaml
+I20260923 18:01:33 127394809947968 iris.cli.connect Establishing tunnel to controller...
+I20260923 18:01:34 127394809947968 iris.cluster.platforms.k8s.service Tunnel ready: 127.0.0.1:10000 -> iris-controller-svc:10000
+Job: /romain/cross-zone-nccl-rno-paired-20260923 (/romain/cross-zone-nccl-rno-paired-20260923)
+State: failed  exit=0  failures=1  preemptions=0
+Tasks: 0/1 completed  failed=1
+Error: Cumulative failed task attempts exceeded max_task_failures: failures=1, limit=0; d4FRne/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #5: c10d::ProcessGroupNCCL::Watchdog::runLoop() + 0xb74 (0x766e863d0da4 in /uv/cache/archive-v0/OgCVCWYyx4GKunjd4FRne/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #6: c10d::ProcessGroupNCCL::Watchdog::run() + 0x157 (0x766e863d2a57 in /uv/cache/archive-v0/OgCVCWYyx4GKunjd4FRne/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0xe1224 (0x766f0e47b224 in /lib/x86_64-linux-gnu/libstdc++.so.6)
+frame #8: <unknown function> + 0x928bb (0x766f3f81f8bb in /lib/x86_64-linux-gnu/libc.so.6)
+frame #9: <unknown function> + 0x110538 (0x766f3f89d538 in /lib/x86_64-linux-gnu/libc.so.6)
+
+Exception raised from run at /__w/pytorch/pytorch/torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp:2198 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x9d (0x766f3e1f060d in /uv/cache/archive-v0/OgCVCWYyx4GKunjd4FRne/lib/python3.12/site-packages/torch/lib/libc10.so)
+frame #1: c10::DistError::DistError(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x72 (0x766f3e1f15e2 in /uv/cache/archive-v0/OgCVCWYyx4GKunjd4FRne/lib/python3.12/site-packages/torch/lib/libc10.so)
+frame #2: c10::DistBackendError::DistBackendError(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x72 (0x766f3e1f1712 in /uv/cache/archive-v0/OgCVCWYyx4GKunjd4FRne/lib/python3.12/site-packages/torch/lib/libc10.so)
+frame #3: <unknown function> + 0x6cf968 (0x766e85acf968 in /uv/cache/archive-v0/OgCVCWYyx4GKunjd4FRne/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #4: <unknown function> + 0xe1224 (0x766f0e47b224 in /lib/x86_64-linux-gnu/libstdc++.so.6)
+frame #5: <unknown function> + 0x928bb (0x766f3f81f8bb in /lib/x86_64-linux-gnu/libc.so.6)
+frame #6: <unknown function> + 0x110538 (0x766f3f89d538 in /lib/x86_64-linux-gnu/libc.so.6)
+
+
+
+  TASK  STATE      EXIT  DURATION                   PEAK MEM    CUR MEM    DIAGNOSTIC
+     0  failed      134  3 minutes and 1.1 seconds  -           -          d4FRne/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+                                                                           frame #5: c10d::ProcessGroupNCCL::Watchdog::runLoop()...

@@ -1,0 +1,4127 @@
+{
+  "facts": {
+    "aws_endpoint": "http://cwlota.com",
+    "commands": {
+      "ibv_devinfo": null,
+      "ibv_rc_pingpong": null,
+      "nvidia-smi": "/usr/bin/nvidia-smi",
+      "rdma": null,
+      "ucx_info": null,
+      "ucx_perftest": null
+    },
+    "hostname": "sjtsxs64",
+    "infiniband_devices": [
+      "ibp0",
+      "ibp1",
+      "ibp2",
+      "ibp3",
+      "mlx5_0",
+      "mlx5_1",
+      "mlx5_2",
+      "mlx5_3",
+      "mlx5_4",
+      "mlx5_5",
+      "mlx5_6",
+      "mlx5_7",
+      "mlx5_8"
+    ],
+    "interfaces": [
+      {
+        "ipv4": "127.0.0.1",
+        "mtu": 65536,
+        "name": "lo"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP5p9s0"
+      },
+      {
+        "ipv4": "10.186.213.73",
+        "mtu": 9000,
+        "name": "enP6p3s0np0"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs0"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs1"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs2"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs3"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v0"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v1"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v2"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v3"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v4"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v5"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v6"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v7"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "cilium_net"
+      },
+      {
+        "ipv4": "10.0.74.27",
+        "mtu": 9000,
+        "name": "cilium_host"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc7f35f2c29119"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc03848acffe0e"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc345171979bf9"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc1de809e09e40"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxccafd898e2b1f"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc406b597f93da"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxced4154cd9a9e"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc_health"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcdb91916faefb"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc67cbc09d227e"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc7af419c8617f"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcaf647f3b2e09"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc64fe3f942636"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcfce54ada5e52"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxce308f8248648"
+      }
+    ],
+    "primary_ip": "10.186.213.73",
+    "route_table": "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT                                                       \nenP6p3s0np0\t00000000\t48D5BA0A\t0003\t0\t0\t1024\t00000000\t0\t0\t0                                                                     \nenP6p3s0np0\t01010101\t48D5BA0A\t0007\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                     \nenP6p3s0np0\t08080808\t48D5BA0A\t0007\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                     \nlxcdb91916faefb\t044A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxcfce54ada5e52\t054A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc406b597f93da\t0B4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc1de809e09e40\t0D4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc345171979bf9\t1C4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxce308f8248648\t2F4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc7af419c8617f\t304A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc67cbc09d227e\t3F4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxccafd898e2b1f\t404A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxcaf647f3b2e09\t464A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxced4154cd9a9e\t524A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc03848acffe0e\t534A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc_health\t6A4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                         \nlxc7f35f2c29119\t6C4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc64fe3f942636\t6E4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nenP6p3s0np0\t48D5BA0A\t00000000\t0005\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                     \nenP6p3s0np0\t48D5BA0A\t00000000\t0001\t0\t0\t1024\tFEFFFFFF\t0\t0\t0                                                                     \nenP6p3s0np0\t0064FEA9\t00000000\t0005\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                     \n"
+  },
+  "pings": [
+    {
+      "rtt_seconds": 0.11430093200760894,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 55254,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11446784401778132,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 57159,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11398688401095569,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 57031,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.10911357699660584,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 54730,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 1.1590252660098486,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56943,
+        "snd_mss": 8948,
+        "total_retrans": 1
+      }
+    },
+    {
+      "rtt_seconds": 0.1144696680130437,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 57160,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.10846189802396111,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 54297,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11388928501401097,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56848,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11389251600485295,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56944,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.10785898601170629,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 53799,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11352413301938213,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56622,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.10809940201579593,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 54030,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.1077907950093504,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 53772,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11325194101664238,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56498,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.10808461898704991,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 54061,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11317581200273708,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56476,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.10769383498700336,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 53749,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.10823501800769009,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 54269,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11341901301057078,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56790,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.10812650600564666,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 54102,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    }
+  ],
+  "receiver_ip": "10.168.194.197",
+  "reverse": {
+    "ack": {
+      "sha256": "eb514d1c0712d5d5f69a54f4c6d9964926e2ffbc026d542cd526e88edac02e3f",
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 53717,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    "seconds": 0.7167990909947548,
+    "sha256": "eb514d1c0712d5d5f69a54f4c6d9964926e2ffbc026d542cd526e88edac02e3f"
+  },
+  "role": "sender",
+  "samples": [
+    {
+      "ack_wait_seconds": 0.009964532975573093,
+      "delivery_seconds": 0.4655271410010755,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 0.3519877130165696,
+        "sample": "8m-4streams-0-tcp",
+        "sha256": "5a27a71e27e1597e53c6dfabb00cf6f67b6910df29bd2c3909ef40e345151ebe",
+        "size": 8388608,
+        "streams": 4,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 53780,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 54076,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56510,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56459,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "8m-4streams-0-tcp",
+      "send_or_upload_parts": [
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.19514100399101153,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56444,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.18194735399447381,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53753,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.18324802498682402,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56436,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.1783569899853319,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53701,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.3987330060044769,
+      "setup_seconds": 0.056829602021025494,
+      "sha256": "5a27a71e27e1597e53c6dfabb00cf6f67b6910df29bd2c3909ef40e345151ebe",
+      "size": 8388608,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.6071946989977732,
+      "delivery_seconds": 0.8950412980047986,
+      "method": "object",
+      "put_max_seconds": 0.23162867600331083,
+      "receiver": {
+        "first_delivery_seconds": 0.7536493529914878,
+        "method": "object",
+        "reads": [
+          {
+            "download_seconds": 0.4375491539831273,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:09 GMT",
+              "etag": "\"616ae75b3ecff7e5d60f6f335fedde5f\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:08 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "BZi1xQ==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "73cb3f89-9827-4a9c-9d7e-c9b2a7318c7b, 73cb3f89-9827-4a9c-9d7e-c9b2a7318c7b",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.22585513204103336
+          },
+          {
+            "download_seconds": 0.524345196026843,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:09 GMT",
+              "etag": "\"d11f0dafc80e9489cf0731eab40c8772\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:08 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "Xrkrtw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "237623b6-4767-4d01-8e39-446fc9b53607, 237623b6-4767-4d01-8e39-446fc9b53607",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.22676926804706454
+          },
+          {
+            "download_seconds": 0.45713069703197107,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:09 GMT",
+              "etag": "\"9b21620bcffa6190c4e666bee3234357\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:08 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "gz9i3Q==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "5c7f730a-6d67-42a1-b451-edadccd37dcc, 5c7f730a-6d67-42a1-b451-edadccd37dcc",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.22135507501661777
+          },
+          {
+            "download_seconds": 0.4832113040029071,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:09 GMT",
+              "etag": "\"ebff7eaf98bca5dee15514871f916c63\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:08 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "08NLDw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "b72becbf-6662-4284-ab29-02a12073d63e, b72becbf-6662-4284-ab29-02a12073d63e",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.2238776870071888
+          }
+        ],
+        "receive_and_verify_seconds": 0.7623777800472453,
+        "sample": "8m-4streams-0-object",
+        "sha256": "5a27a71e27e1597e53c6dfabb00cf6f67b6910df29bd2c3909ef40e345151ebe",
+        "size": 8388608,
+        "streams": 4
+      },
+      "sample": "8m-4streams-0-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:08 GMT",
+            "etag": "\"616ae75b3ecff7e5d60f6f335fedde5f\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "BZi1xQ==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "67f3cb43-6777-4b4b-9711-5a25cb9c08da, 67f3cb43-6777-4b4b-9711-5a25cb9c08da"
+          },
+          "put_seconds": 0.20245552400592715
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:08 GMT",
+            "etag": "\"d11f0dafc80e9489cf0731eab40c8772\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "Xrkrtw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "9c799e80-a7d2-41e0-9d3d-5e8817b0171c, 9c799e80-a7d2-41e0-9d3d-5e8817b0171c"
+          },
+          "put_seconds": 0.20218285199371167
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:08 GMT",
+            "etag": "\"9b21620bcffa6190c4e666bee3234357\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "gz9i3Q==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "f7f336a1-1374-48a9-aaa9-9f7baa5c8467, f7f336a1-1374-48a9-aaa9-9f7baa5c8467"
+          },
+          "put_seconds": 0.20766927799559198
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:08 GMT",
+            "etag": "\"ebff7eaf98bca5dee15514871f916c63\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "08NLDw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "30f64ee9-8fd3-4833-ad86-8bd186570c06, 30f64ee9-8fd3-4833-ad86-8bd186570c06"
+          },
+          "put_seconds": 0.23162867600331083
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.23392201800015755,
+      "setup_seconds": 0.05392458100686781,
+      "sha256": "5a27a71e27e1597e53c6dfabb00cf6f67b6910df29bd2c3909ef40e345151ebe",
+      "size": 8388608,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.008536823006579652,
+      "delivery_seconds": 1.2097234510001726,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 0.5150225730030797,
+        "sample": "8m-4streams-1-tcp",
+        "sha256": "b8a225783818017f97d9d74e7ce9446514719fcaf0b90d0844d3e354e32a2882",
+        "size": 8388608,
+        "streams": 4,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 53792,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 53749,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56510,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56499,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "8m-4streams-1-tcp",
+      "send_or_upload_parts": [
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.15746501300600357,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53696,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.7057002880028449,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56433,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.15708469299715944,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53710,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.16407502099173144,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56428,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 1.1471311030036304,
+      "setup_seconds": 0.05405552498996258,
+      "sha256": "b8a225783818017f97d9d74e7ce9446514719fcaf0b90d0844d3e354e32a2882",
+      "size": 8388608,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.27328360598767176,
+      "delivery_seconds": 0.43592730100499466,
+      "method": "object",
+      "put_max_seconds": 0.10566094098612666,
+      "receiver": {
+        "first_delivery_seconds": 0.2577516339952126,
+        "method": "object",
+        "reads": [
+          {
+            "download_seconds": 0.1327734689693898,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:11 GMT",
+              "etag": "\"daaf7dd73860b992917e12703262d8f4\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:11 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "df7nQg==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "53d334e3-8b88-4698-8ac2-22d66acc6dd0, 53d334e3-8b88-4698-8ac2-22d66acc6dd0",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.08175063598901033
+          },
+          {
+            "download_seconds": 0.16341655200812966,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:11 GMT",
+              "etag": "\"727248c788e7126c604457d3acf0b51e\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:11 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "WX6V8Q==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "96c503db-1dad-402a-bbfc-c621d68f8f3f, 96c503db-1dad-402a-bbfc-c621d68f8f3f",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.09258975397096947
+          },
+          {
+            "download_seconds": 0.1608677399926819,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:11 GMT",
+              "etag": "\"8bd5bd0a47b6c3953a088e18a3e269fa\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:11 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "4F/hMw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "d0fe9628-a96c-471d-8491-9d4da9d4c7b9, d0fe9628-a96c-471d-8491-9d4da9d4c7b9",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.08791381103219464
+          },
+          {
+            "download_seconds": 0.15337174403248355,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:11 GMT",
+              "etag": "\"e36dd33cb7dde66046677fb4da4efdd8\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:11 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "sbo7vw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "55acfffd-324a-4996-845d-04cebff284df, 55acfffd-324a-4996-845d-04cebff284df",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.08446957799606025
+          }
+        ],
+        "receive_and_verify_seconds": 0.26391580497147515,
+        "sample": "8m-4streams-1-object",
+        "sha256": "b8a225783818017f97d9d74e7ce9446514719fcaf0b90d0844d3e354e32a2882",
+        "size": 8388608,
+        "streams": 4
+      },
+      "sample": "8m-4streams-1-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:11 GMT",
+            "etag": "\"daaf7dd73860b992917e12703262d8f4\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "df7nQg==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "bd530eeb-7425-4d8c-a403-722bb3865890, bd530eeb-7425-4d8c-a403-722bb3865890"
+          },
+          "put_seconds": 0.10566094098612666
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:11 GMT",
+            "etag": "\"727248c788e7126c604457d3acf0b51e\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "WX6V8Q==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "f5798670-e680-4cff-abfa-0d78730075c2, f5798670-e680-4cff-abfa-0d78730075c2"
+          },
+          "put_seconds": 0.10255607997532934
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:11 GMT",
+            "etag": "\"8bd5bd0a47b6c3953a088e18a3e269fa\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "4F/hMw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "2432f424-a4f6-467f-911d-284446b49ae5, 2432f424-a4f6-467f-911d-284446b49ae5"
+          },
+          "put_seconds": 0.10008977897814475
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:11 GMT",
+            "etag": "\"e36dd33cb7dde66046677fb4da4efdd8\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "sbo7vw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "644778a6-0b97-4f79-9d10-ee687d45ca5c, 644778a6-0b97-4f79-9d10-ee687d45ca5c"
+          },
+          "put_seconds": 0.10013198701199144
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.10602881299564615,
+      "setup_seconds": 0.05661488202167675,
+      "sha256": "b8a225783818017f97d9d74e7ce9446514719fcaf0b90d0844d3e354e32a2882",
+      "size": 8388608,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.006253400992136449,
+      "delivery_seconds": 1.2463337469962426,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 0.45270726102171466,
+        "sample": "8m-4streams-2-tcp",
+        "sha256": "ece4a9505b3908c04045b6f679bd0e7b55965b756eb8c415ab6b1945c2c82a63",
+        "size": 8388608,
+        "streams": 4,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 53757,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56501,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56462,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56489,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "8m-4streams-2-tcp",
+      "send_or_upload_parts": [
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.8044343239744194,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56433,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.8042864839953836,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56433,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.15852565100067295,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53701,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.8002878650149796,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56439,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 1.1858857170154806,
+      "setup_seconds": 0.05419462898862548,
+      "sha256": "ece4a9505b3908c04045b6f679bd0e7b55965b756eb8c415ab6b1945c2c82a63",
+      "size": 8388608,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.30128347998834215,
+      "delivery_seconds": 0.4623524560010992,
+      "method": "object",
+      "put_max_seconds": 0.10674173998995684,
+      "receiver": {
+        "first_delivery_seconds": 0.243248151964508,
+        "method": "object",
+        "reads": [
+          {
+            "download_seconds": 0.15086999401682988,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:13 GMT",
+              "etag": "\"70b3ca3ee188cbe383c1ee129b6daa0e\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:13 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "dHQ9xA==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "0bdf5229-8e75-41fd-aef8-33bb0845f703, 0bdf5229-8e75-41fd-aef8-33bb0845f703",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.09167790599167347
+          },
+          {
+            "download_seconds": 0.144032069016248,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:13 GMT",
+              "etag": "\"2b7726708b455c26d6ba3bee97b10063\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:13 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "Ooma+g==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "6c233c11-6bc1-48ed-a817-661a5690785f, 6c233c11-6bc1-48ed-a817-661a5690785f",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.08676660800119862
+          },
+          {
+            "download_seconds": 0.14075552602298558,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:13 GMT",
+              "etag": "\"76643538e273894d746140236fb5e481\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:13 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "etY7Lg==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "e72809cb-a24f-4c47-b9b9-686f8b6c211e, e72809cb-a24f-4c47-b9b9-686f8b6c211e",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.08405200898414478
+          },
+          {
+            "download_seconds": 0.1336837540147826,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:13 GMT",
+              "etag": "\"877365288fadb9c553feaa685a3bcc99\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:13 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "E9trmg==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "5c2ef9cb-9165-44c7-8a68-db8a69437416, 5c2ef9cb-9165-44c7-8a68-db8a69437416",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.08133067097514868
+          }
+        ],
+        "receive_and_verify_seconds": 0.24898855498759076,
+        "sample": "8m-4streams-2-object",
+        "sha256": "ece4a9505b3908c04045b6f679bd0e7b55965b756eb8c415ab6b1945c2c82a63",
+        "size": 8388608,
+        "streams": 4
+      },
+      "sample": "8m-4streams-2-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:13 GMT",
+            "etag": "\"70b3ca3ee188cbe383c1ee129b6daa0e\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "dHQ9xA==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "a2dcd093-8e61-43c6-b2af-f983cf5edfca, a2dcd093-8e61-43c6-b2af-f983cf5edfca"
+          },
+          "put_seconds": 0.10674173998995684
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:13 GMT",
+            "etag": "\"2b7726708b455c26d6ba3bee97b10063\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "Ooma+g==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "aa48a4b6-8949-4f4f-b4a5-ab891161e6d0, aa48a4b6-8949-4f4f-b4a5-ab891161e6d0"
+          },
+          "put_seconds": 0.09998897899640724
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:13 GMT",
+            "etag": "\"76643538e273894d746140236fb5e481\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "etY7Lg==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "9d2fc482-f95c-48df-abc7-5b8f28b4327f, 9d2fc482-f95c-48df-abc7-5b8f28b4327f"
+          },
+          "put_seconds": 0.09915598799125291
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:13 GMT",
+            "etag": "\"877365288fadb9c553feaa685a3bcc99\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "E9trmg==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "cbb28eb0-d258-449d-b28d-55e329952655, cbb28eb0-d258-449d-b28d-55e329952655"
+          },
+          "put_seconds": 0.0970160230062902
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.1071449709997978,
+      "setup_seconds": 0.05392400501295924,
+      "sha256": "ece4a9505b3908c04045b6f679bd0e7b55965b756eb8c415ab6b1945c2c82a63",
+      "size": 8388608,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.003455803991528228,
+      "delivery_seconds": 1.5984888839884661,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 0.8088399770203978,
+        "sample": "8m-4streams-3-tcp",
+        "sha256": "91b6507aa1aec90478dff38ed981caa3c6e26e6840ac5d4400568083e02444a5",
+        "size": 8388608,
+        "streams": 4,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 53741,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 53760,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56500,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56487,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "8m-4streams-3-tcp",
+      "send_or_upload_parts": [
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.7965314850152936,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56429,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 1.0120173300092574,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56436,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.7945710709900595,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53689,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.7982093709870242,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53689,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 1.5410897149995435,
+      "setup_seconds": 0.05394336499739438,
+      "sha256": "91b6507aa1aec90478dff38ed981caa3c6e26e6840ac5d4400568083e02444a5",
+      "size": 8388608,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.2867939279822167,
+      "delivery_seconds": 0.44752021698514,
+      "method": "object",
+      "put_max_seconds": 0.10347614402417094,
+      "receiver": {
+        "first_delivery_seconds": 0.24451979395234957,
+        "method": "object",
+        "reads": [
+          {
+            "download_seconds": 0.151180894987192,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:15 GMT",
+              "etag": "\"eb37f1da68a55d4165b7b0318192998e\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:15 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "Q5GDBg==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "ec60f37d-6cef-4cc1-8947-0a91e4a74db0, ec60f37d-6cef-4cc1-8947-0a91e4a74db0",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.092549696972128
+          },
+          {
+            "download_seconds": 0.1424731620354578,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:15 GMT",
+              "etag": "\"7975b50eda471efe58f811a3054594c2\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:15 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "Dy7IxQ==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "7cf349ca-36cc-4172-aa8b-7045c60805ff, 7cf349ca-36cc-4172-aa8b-7045c60805ff",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.08704619901254773
+          },
+          {
+            "download_seconds": 0.13140086102066562,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:15 GMT",
+              "etag": "\"8f653f461affd1c1d40815eff272bcab\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:15 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "zJky5A==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "b13a1367-f4a2-4408-887e-5c922ac9a46a, b13a1367-f4a2-4408-887e-5c922ac9a46a",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.08425674098543823
+          },
+          {
+            "download_seconds": 0.13854945002822205,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:15 GMT",
+              "etag": "\"953616cb63ce1085c3226867bbabbcc8\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:15 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "WS/Wlw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "2e1645fd-e04e-4198-8b82-d915e11f6b3c, 2e1645fd-e04e-4198-8b82-d915e11f6b3c",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.0820611990056932
+          }
+        ],
+        "receive_and_verify_seconds": 0.2503472300013527,
+        "sample": "8m-4streams-3-object",
+        "sha256": "91b6507aa1aec90478dff38ed981caa3c6e26e6840ac5d4400568083e02444a5",
+        "size": 8388608,
+        "streams": 4
+      },
+      "sample": "8m-4streams-3-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:15 GMT",
+            "etag": "\"eb37f1da68a55d4165b7b0318192998e\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "Q5GDBg==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "6297e9a8-aae6-4141-a0b8-88135cefe74c, 6297e9a8-aae6-4141-a0b8-88135cefe74c"
+          },
+          "put_seconds": 0.10347614402417094
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:15 GMT",
+            "etag": "\"7975b50eda471efe58f811a3054594c2\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "Dy7IxQ==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "e51d8b6f-cf4f-4c4a-a018-57bba83df083, e51d8b6f-cf4f-4c4a-a018-57bba83df083"
+          },
+          "put_seconds": 0.09266543498961255
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:15 GMT",
+            "etag": "\"8f653f461affd1c1d40815eff272bcab\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "zJky5A==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "63abbe1e-4dc3-4037-8cb6-e730485075e8, 63abbe1e-4dc3-4037-8cb6-e730485075e8"
+          },
+          "put_seconds": 0.09526248899055645
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:15 GMT",
+            "etag": "\"953616cb63ce1085c3226867bbabbcc8\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "WS/Wlw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "b87312bb-11c6-4be9-8fd3-7f2dce521c50, b87312bb-11c6-4be9-8fd3-7f2dce521c50"
+          },
+          "put_seconds": 0.09974449899164028
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.10409060699748807,
+      "setup_seconds": 0.05663568200543523,
+      "sha256": "91b6507aa1aec90478dff38ed981caa3c6e26e6840ac5d4400568083e02444a5",
+      "size": 8388608,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.008995221985969692,
+      "delivery_seconds": 1.3137952740071341,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 0.5411489679827355,
+        "sample": "8m-4streams-4-tcp",
+        "sha256": "7edef046bfeaecf874ff3be9ac7632478103992d222e2c5672120650d83e96cc",
+        "size": 8388608,
+        "streams": 4,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 53782,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56512,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56504,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56500,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "8m-4streams-4-tcp",
+      "send_or_upload_parts": [
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.7725891429872718,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56430,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.15718475700123236,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53691,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.7745046289928723,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56434,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.1641751500137616,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56433,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 1.248152561020106,
+      "setup_seconds": 0.05664749100105837,
+      "sha256": "7edef046bfeaecf874ff3be9ac7632478103992d222e2c5672120650d83e96cc",
+      "size": 8388608,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.24489874197752215,
+      "delivery_seconds": 0.4229522440000437,
+      "method": "object",
+      "put_max_seconds": 0.12337832897901535,
+      "receiver": {
+        "first_delivery_seconds": 0.25948345800861716,
+        "method": "object",
+        "reads": [
+          {
+            "download_seconds": 0.14734456699807197,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:17 GMT",
+              "etag": "\"4b107d090cf027db258d167acff188e5\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:17 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "C6JR5A==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "db14b1b3-3db3-4f4b-9874-ea07c86bd05b, db14b1b3-3db3-4f4b-9874-ea07c86bd05b",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.11124591197585687
+          },
+          {
+            "download_seconds": 0.1440275670029223,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:17 GMT",
+              "etag": "\"b6f8b147f3da93af670121ac23b0b3ca\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:17 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "HK8Obw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "01ed7e6c-9cd7-42ff-b4cb-d1c01d3135f0, 01ed7e6c-9cd7-42ff-b4cb-d1c01d3135f0",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.09199506498407573
+          },
+          {
+            "download_seconds": 0.1353379279607907,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:17 GMT",
+              "etag": "\"502512fc6e738ce926b26c8aced3bc8e\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:17 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "+ujoLA==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "1684412b-c437-4540-ad46-5d3404727e49, 1684412b-c437-4540-ad46-5d3404727e49",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.08458946098107845
+          },
+          {
+            "download_seconds": 0.13349100900813937,
+            "head_attempts": 1,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "2097152",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:17 GMT",
+              "etag": "\"022326767842b7a653eeacbf1ebd38d7\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:17 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "3q4gyg==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "2953ead8-a01e-401b-a914-567459808b7f, 2953ead8-a01e-401b-a914-567459808b7f",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.08160268404753879
+          }
+        ],
+        "receive_and_verify_seconds": 0.2651457139872946,
+        "sample": "8m-4streams-4-object",
+        "sha256": "7edef046bfeaecf874ff3be9ac7632478103992d222e2c5672120650d83e96cc",
+        "size": 8388608,
+        "streams": 4
+      },
+      "sample": "8m-4streams-4-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:17 GMT",
+            "etag": "\"4b107d090cf027db258d167acff188e5\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "C6JR5A==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "2304f15e-d457-47d9-8729-46963cd71868, 2304f15e-d457-47d9-8729-46963cd71868"
+          },
+          "put_seconds": 0.11027149599976838
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:17 GMT",
+            "etag": "\"b6f8b147f3da93af670121ac23b0b3ca\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "HK8Obw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "1efd1a09-e15b-4c2e-8ef7-aaa1bd834322, 1efd1a09-e15b-4c2e-8ef7-aaa1bd834322"
+          },
+          "put_seconds": 0.12337832897901535
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:17 GMT",
+            "etag": "\"502512fc6e738ce926b26c8aced3bc8e\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "+ujoLA==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "5146ec1d-88e5-4997-bb34-5513bfcde338, 5146ec1d-88e5-4997-bb34-5513bfcde338"
+          },
+          "put_seconds": 0.09614901599707082
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:17 GMT",
+            "etag": "\"022326767842b7a653eeacbf1ebd38d7\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "3q4gyg==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "402a7087-24eb-4747-bbaa-e68395c3d647, 402a7087-24eb-4747-bbaa-e68395c3d647"
+          },
+          "put_seconds": 0.11254275700775906
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.1241637050115969,
+      "setup_seconds": 0.05388979701092467,
+      "sha256": "7edef046bfeaecf874ff3be9ac7632478103992d222e2c5672120650d83e96cc",
+      "size": 8388608,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.15188751500681974,
+      "delivery_seconds": 0.8768336060165893,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 0.6785561220021918,
+        "sample": "128m-4streams-0-tcp",
+        "sha256": "2e0672631bb3a814823ebcbed9f820c0dea497629a94a603e0919a45914b1969",
+        "size": 134217728,
+        "streams": 4,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 53751,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 53733,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56465,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56814,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "128m-4streams-0-tcp",
+      "send_or_upload_parts": [
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.4102855380042456,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53720,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.4135825260018464,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53717,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.4330223450087942,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 58561,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.41391548499814235,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 58618,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.6709823420096654,
+      "setup_seconds": 0.053963749000104144,
+      "sha256": "2e0672631bb3a814823ebcbed9f820c0dea497629a94a603e0919a45914b1969",
+      "size": 134217728,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 1.2513702859869227,
+      "delivery_seconds": 1.7009561960003339,
+      "method": "object",
+      "put_max_seconds": 0.3949533289996907,
+      "receiver": {
+        "first_delivery_seconds": 1.3494151670020074,
+        "method": "object",
+        "reads": [
+          {
+            "download_seconds": 0.25293891300680116,
+            "head_attempts": 3,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:19 GMT",
+              "etag": "\"e4e3ec913735713e595ff2ff11e80c0b\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:19 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "6PWhsg==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "4786a93b-d12b-4bab-9652-6a82a613c245, 4786a93b-d12b-4bab-9652-6a82a613c245",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.34709422499872744
+          },
+          {
+            "download_seconds": 0.3481801089947112,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:19 GMT",
+              "etag": "\"839d20ed0d07f4e9958b114a2c61d262\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:19 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "uB4ecg==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "8f5f9711-e014-4b38-9227-33bdf3db1753, 8f5f9711-e014-4b38-9227-33bdf3db1753",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.2162163809989579
+          },
+          {
+            "download_seconds": 1.1276050740270875,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:19 GMT",
+              "etag": "\"9d247af288ee8b4dea4ddf091c9f5093\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:19 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "Hxs83w==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "46a49f0b-a077-475d-b307-895fc6dea7f3, 46a49f0b-a077-475d-b307-895fc6dea7f3",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.2190961340093054
+          },
+          {
+            "download_seconds": 0.22882287303218618,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:19 GMT",
+              "etag": "\"cf1600e3a3958453dd9f8dc2813b9562\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:19 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "1cCzDQ==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "bdcd44e6-4434-4e76-9736-b3cc7e7deb81, bdcd44e6-4434-4e76-9736-b3cc7e7deb81",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.21715376805514097
+          }
+        ],
+        "receive_and_verify_seconds": 1.5005774240125902,
+        "sample": "128m-4streams-0-object",
+        "sha256": "2e0672631bb3a814823ebcbed9f820c0dea497629a94a603e0919a45914b1969",
+        "size": 134217728,
+        "streams": 4
+      },
+      "sample": "128m-4streams-0-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:19 GMT",
+            "etag": "\"e4e3ec913735713e595ff2ff11e80c0b\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "6PWhsg==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "d06076f4-14fe-4f5b-b132-7002d4b736bf, d06076f4-14fe-4f5b-b132-7002d4b736bf"
+          },
+          "put_seconds": 0.3949533289996907
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:19 GMT",
+            "etag": "\"839d20ed0d07f4e9958b114a2c61d262\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "uB4ecg==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "8f3de3ac-032b-492b-8bc8-64868869af69, 8f3de3ac-032b-492b-8bc8-64868869af69"
+          },
+          "put_seconds": 0.21529291800106876
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:19 GMT",
+            "etag": "\"9d247af288ee8b4dea4ddf091c9f5093\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "Hxs83w==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "df1de319-50d5-4913-b66d-384cab918711, df1de319-50d5-4913-b66d-384cab918711"
+          },
+          "put_seconds": 0.23294134601019323
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:19 GMT",
+            "etag": "\"cf1600e3a3958453dd9f8dc2813b9562\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "1cCzDQ==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "f35e8bbf-ffda-471c-969b-b5746cc796d8, f35e8bbf-ffda-471c-969b-b5746cc796d8"
+          },
+          "put_seconds": 0.23799974098801613
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.3956885290099308,
+      "setup_seconds": 0.053897381003480405,
+      "sha256": "2e0672631bb3a814823ebcbed9f820c0dea497629a94a603e0919a45914b1969",
+      "size": 134217728,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.15213343501091003,
+      "delivery_seconds": 2.227518183994107,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 1.7463581019546837,
+        "sample": "128m-4streams-1-tcp",
+        "sha256": "144c19a138afdfde5ace437d78c135e1aa955542cc5500d66bab9bac4ec5659c",
+        "size": 134217728,
+        "streams": 4,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 53750,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 53769,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 53752,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56489,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "128m-4streams-1-tcp",
+      "send_or_upload_parts": [
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.7246573549928144,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 54622,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 1.5104570760158822,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53734,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.742400280025322,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 57290,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 1.572805903997505,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53706,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 2.021385798987467,
+      "setup_seconds": 0.05399894999573007,
+      "sha256": "144c19a138afdfde5ace437d78c135e1aa955542cc5500d66bab9bac4ec5659c",
+      "size": 134217728,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 1.397835406998638,
+      "delivery_seconds": 1.6519517379929312,
+      "method": "object",
+      "put_max_seconds": 0.19855136799742468,
+      "receiver": {
+        "first_delivery_seconds": 1.314774655038491,
+        "method": "object",
+        "reads": [
+          {
+            "download_seconds": 0.23518501000944525,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:24 GMT",
+              "etag": "\"71f060140e14ee4d00408dff0d8df9e0\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:23 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "xw+yuA==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "5d06966a-1be9-4b88-911b-de6569c07afc, 5d06966a-1be9-4b88-911b-de6569c07afc",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.21651274495525286
+          },
+          {
+            "download_seconds": 1.096574622031767,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:24 GMT",
+              "etag": "\"d70d4926c7290caf0b9803a81770586b\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:24 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "GvCjsA==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "fa5a246a-bd97-4f90-ab5a-97674136aab4, fa5a246a-bd97-4f90-ab5a-97674136aab4",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.21656349499244243
+          },
+          {
+            "download_seconds": 0.2748666920233518,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:24 GMT",
+              "etag": "\"3268a67d4368fd601f668e2813a6ddc0\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:23 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "2bKBDA==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "8710dffe-aa15-4426-8a25-520f8c8861b2, 8710dffe-aa15-4426-8a25-520f8c8861b2",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.21665960300015286
+          },
+          {
+            "download_seconds": 0.2673777680029161,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:24 GMT",
+              "etag": "\"1aa7b88d41dede5e397eb4fd8d49b85f\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:24 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "0DuoHg==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "127dbeb1-2f66-415f-9995-5952005dda8e, 127dbeb1-2f66-415f-9995-5952005dda8e",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.2169775270158425
+          }
+        ],
+        "receive_and_verify_seconds": 1.4660237669595517,
+        "sample": "128m-4streams-1-object",
+        "sha256": "144c19a138afdfde5ace437d78c135e1aa955542cc5500d66bab9bac4ec5659c",
+        "size": 134217728,
+        "streams": 4
+      },
+      "sample": "128m-4streams-1-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:24 GMT",
+            "etag": "\"71f060140e14ee4d00408dff0d8df9e0\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "xw+yuA==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "bc248e04-fae4-45c3-97bb-eb45bf7b15fa, bc248e04-fae4-45c3-97bb-eb45bf7b15fa"
+          },
+          "put_seconds": 0.1843236070126295
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:24 GMT",
+            "etag": "\"d70d4926c7290caf0b9803a81770586b\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "GvCjsA==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "b381fbcf-fcb7-4cdc-80a7-0b856ceb521e, b381fbcf-fcb7-4cdc-80a7-0b856ceb521e"
+          },
+          "put_seconds": 0.19855136799742468
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:24 GMT",
+            "etag": "\"3268a67d4368fd601f668e2813a6ddc0\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "2bKBDA==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "6a318776-2c84-4fc7-be80-7e75cbde76e4, 6a318776-2c84-4fc7-be80-7e75cbde76e4"
+          },
+          "put_seconds": 0.17921564501011744
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:24 GMT",
+            "etag": "\"1aa7b88d41dede5e397eb4fd8d49b85f\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "0DuoHg==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "1e4f1767-fe09-4a4d-ad2c-0171ff11742f, 1e4f1767-fe09-4a4d-ad2c-0171ff11742f"
+          },
+          "put_seconds": 0.19164468799135648
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.200228486006381,
+      "setup_seconds": 0.053887844987912104,
+      "sha256": "144c19a138afdfde5ace437d78c135e1aa955542cc5500d66bab9bac4ec5659c",
+      "size": 134217728,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.14937766100047156,
+      "delivery_seconds": 2.517188715020893,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 1.883661400002893,
+        "sample": "128m-4streams-2-tcp",
+        "sha256": "d4793f4ee088e77bb81ea0fc5fa5bb4fc517ec1ab67a9fc073c2cc605aa55bbf",
+        "size": 134217728,
+        "streams": 4,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 53752,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56498,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56472,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56482,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "128m-4streams-2-tcp",
+      "send_or_upload_parts": [
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 1.8181571559980512,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56483,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.8891813030058984,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 57185,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 1.7390152259904426,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53745,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.8944979700027034,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 57390,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 2.3137925530027132,
+      "setup_seconds": 0.05401850101770833,
+      "sha256": "d4793f4ee088e77bb81ea0fc5fa5bb4fc517ec1ab67a9fc073c2cc605aa55bbf",
+      "size": 134217728,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 1.347495396999875,
+      "delivery_seconds": 1.626602869015187,
+      "method": "object",
+      "put_max_seconds": 0.22336065300623886,
+      "receiver": {
+        "first_delivery_seconds": 1.272336455003824,
+        "method": "object",
+        "reads": [
+          {
+            "download_seconds": 0.2718826840282418,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:28 GMT",
+              "etag": "\"4b94bf720da7ffe546c9b5b488f3c1c7\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:28 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "Zh2xZA==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "6b4d08d3-73f5-4505-a369-eeaa3121c301, 6b4d08d3-73f5-4505-a369-eeaa3121c301",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.21684136905241758
+          },
+          {
+            "download_seconds": 1.055692694033496,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:28 GMT",
+              "etag": "\"262d27f5caaf5914edbf52b7dd7d62cb\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:28 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "WHovYw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "532b5389-8b74-4d9a-9501-590a19e6a439, 532b5389-8b74-4d9a-9501-590a19e6a439",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.21484058303758502
+          },
+          {
+            "download_seconds": 0.27632282295962796,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:28 GMT",
+              "etag": "\"d36087daeeb538ebd733728cd3dd9cee\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:28 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "TltwNg==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "5a89b9c0-924c-4048-9743-4001fb39b793, 5a89b9c0-924c-4048-9743-4001fb39b793",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.217158657964319
+          },
+          {
+            "download_seconds": 0.25347602099645883,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:28 GMT",
+              "etag": "\"caa9c3259ff626391e4c393f0c66e658\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:28 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "lhIWhw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "be854fbe-9296-45b4-93c4-60e7d0f0a50c, be854fbe-9296-45b4-93c4-60e7d0f0a50c",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.21539644402218983
+          }
+        ],
+        "receive_and_verify_seconds": 1.4218196379952133,
+        "sample": "128m-4streams-2-object",
+        "sha256": "d4793f4ee088e77bb81ea0fc5fa5bb4fc517ec1ab67a9fc073c2cc605aa55bbf",
+        "size": 134217728,
+        "streams": 4
+      },
+      "sample": "128m-4streams-2-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:28 GMT",
+            "etag": "\"4b94bf720da7ffe546c9b5b488f3c1c7\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "Zh2xZA==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "eada7119-c329-42a8-a7ad-ab1926d90a1d, eada7119-c329-42a8-a7ad-ab1926d90a1d"
+          },
+          "put_seconds": 0.21273259998997673
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:28 GMT",
+            "etag": "\"262d27f5caaf5914edbf52b7dd7d62cb\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "WHovYw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "289ecae9-710f-42b9-879c-7f6a5bd80622, 289ecae9-710f-42b9-879c-7f6a5bd80622"
+          },
+          "put_seconds": 0.22336065300623886
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:28 GMT",
+            "etag": "\"d36087daeeb538ebd733728cd3dd9cee\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "TltwNg==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "19fe36cd-c805-410e-a775-bcac7aa8515f, 19fe36cd-c805-410e-a775-bcac7aa8515f"
+          },
+          "put_seconds": 0.1907391520217061
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:28 GMT",
+            "etag": "\"caa9c3259ff626391e4c393f0c66e658\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "lhIWhw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "4e7b20ad-36d2-43b3-8042-5d93e7a565be, 4e7b20ad-36d2-43b3-8042-5d93e7a565be"
+          },
+          "put_seconds": 0.20650758300325833
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.22517354701994918,
+      "setup_seconds": 0.05393392499536276,
+      "sha256": "d4793f4ee088e77bb81ea0fc5fa5bb4fc517ec1ab67a9fc073c2cc605aa55bbf",
+      "size": 134217728,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.1491503020224627,
+      "delivery_seconds": 2.199530245998176,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 1.669242006028071,
+        "sample": "128m-4streams-3-tcp",
+        "sha256": "d48271fd63622f31fbbc3f0597d1174c4eba4790730e52d4a6bfd17268137922",
+        "size": 134217728,
+        "streams": 4,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 56483,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56484,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56466,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56476,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "128m-4streams-3-tcp",
+      "send_or_upload_parts": [
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.7911684510181658,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 58599,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.7893475890159607,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 58521,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 1.6001340019865893,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56476,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.7881967420107685,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 58489,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 1.9963653789891396,
+      "setup_seconds": 0.05401456498657353,
+      "sha256": "d48271fd63622f31fbbc3f0597d1174c4eba4790730e52d4a6bfd17268137922",
+      "size": 134217728,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 1.1600572330062278,
+      "delivery_seconds": 1.6151186249917373,
+      "method": "object",
+      "put_max_seconds": 0.39833079898380674,
+      "receiver": {
+        "first_delivery_seconds": 1.2644128130050376,
+        "method": "object",
+        "reads": [
+          {
+            "download_seconds": 0.3612972570117563,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:33 GMT",
+              "etag": "\"d720810395f53fd639d3bcc1191fab9f\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:32 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "ddTJTw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "d7d2a482-709e-4596-84c6-7e08e2db8938, d7d2a482-709e-4596-84c6-7e08e2db8938",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.21434226597193629
+          },
+          {
+            "download_seconds": 1.0476358840242028,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:33 GMT",
+              "etag": "\"b13315f95bfd3fc8d3104ad822afc175\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:33 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "cGDU3g==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "eaa1e62d-5cfb-405d-9b6a-e2d7d8ae2043, eaa1e62d-5cfb-405d-9b6a-e2d7d8ae2043",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.2150092279771343
+          },
+          {
+            "download_seconds": 0.2565436909790151,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:33 GMT",
+              "etag": "\"1cf1b3ecb401bb4af5be69c01b97c5c6\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:33 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "wIyfTg==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "ce4a9d78-873a-4e68-9d5c-35c3ae391350, ce4a9d78-873a-4e68-9d5c-35c3ae391350",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.21503106597810984
+          },
+          {
+            "download_seconds": 0.3180241669761017,
+            "head_attempts": 3,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:33 GMT",
+              "etag": "\"59142a58ea599efd9d5dfe81957c695d\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:33 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "fVsOBw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "f48e51e8-8e94-4dfc-bd95-1977b79e9ceb, f48e51e8-8e94-4dfc-bd95-1977b79e9ceb",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.34393910702783614
+          }
+        ],
+        "receive_and_verify_seconds": 1.4146756760310382,
+        "sample": "128m-4streams-3-object",
+        "sha256": "d48271fd63622f31fbbc3f0597d1174c4eba4790730e52d4a6bfd17268137922",
+        "size": 134217728,
+        "streams": 4
+      },
+      "sample": "128m-4streams-3-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:32 GMT",
+            "etag": "\"d720810395f53fd639d3bcc1191fab9f\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "ddTJTw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "c4f841dc-6542-481c-b753-ce3a047e6fd0, c4f841dc-6542-481c-b753-ce3a047e6fd0"
+          },
+          "put_seconds": 0.18633861298440024
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:33 GMT",
+            "etag": "\"b13315f95bfd3fc8d3104ad822afc175\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "cGDU3g==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "d4375279-c2c0-46b8-8936-39c565eb9e90, d4375279-c2c0-46b8-8936-39c565eb9e90"
+          },
+          "put_seconds": 0.2167627720045857
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:33 GMT",
+            "etag": "\"1cf1b3ecb401bb4af5be69c01b97c5c6\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "wIyfTg==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "3a6e410d-09c2-4471-a602-71a228a03c6e, 3a6e410d-09c2-4471-a602-71a228a03c6e"
+          },
+          "put_seconds": 0.2075072939915117
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:33 GMT",
+            "etag": "\"59142a58ea599efd9d5dfe81957c695d\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "fVsOBw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "a38fdd25-4d37-43f5-8420-83e309aff45a, a38fdd25-4d37-43f5-8420-83e309aff45a"
+          },
+          "put_seconds": 0.39833079898380674
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.4011693229840603,
+      "setup_seconds": 0.05389206900144927,
+      "sha256": "d48271fd63622f31fbbc3f0597d1174c4eba4790730e52d4a6bfd17268137922",
+      "size": 134217728,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.15115612299996428,
+      "delivery_seconds": 2.34411911200732,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 1.719217084988486,
+        "sample": "128m-4streams-4-tcp",
+        "sha256": "8256270cc9e0fafbf3e7613133209eb6aab557d2ee3011096fd3c793100664d4",
+        "size": 134217728,
+        "streams": 4,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 53797,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 53742,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 53746,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 53748,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "128m-4streams-4-tcp",
+      "send_or_upload_parts": [
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 1.7031322580005508,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53796,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 1.7168606909981463,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53725,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 1.6416171580203809,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53710,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 1.6393796560005285,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56840,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 2.1389811279950663,
+      "setup_seconds": 0.0539818610122893,
+      "sha256": "8256270cc9e0fafbf3e7613133209eb6aab557d2ee3011096fd3c793100664d4",
+      "size": 134217728,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 1.3211831060179975,
+      "delivery_seconds": 1.6111761660140473,
+      "method": "object",
+      "put_max_seconds": 0.2334901459980756,
+      "receiver": {
+        "first_delivery_seconds": 1.2621463109971955,
+        "method": "object",
+        "reads": [
+          {
+            "download_seconds": 0.2809815130312927,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:37 GMT",
+              "etag": "\"3ab85d05d753ce86549e9c452367000e\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:37 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "WG2nEw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "9e043962-9654-4c70-b8c5-c374c40a190f, 9e043962-9654-4c70-b8c5-c374c40a190f",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.21776624699123204
+          },
+          {
+            "download_seconds": 1.0385889220051467,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:37 GMT",
+              "etag": "\"748f5872667af43c231cc27900969cc2\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:37 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "2qVNtw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "e1af3cfd-1ab4-458c-bd52-adcdb81dd024, e1af3cfd-1ab4-458c-bd52-adcdb81dd024",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.22170444001676515
+          },
+          {
+            "download_seconds": 0.23043023701757193,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:37 GMT",
+              "etag": "\"f7465c306f56698538e245e1b0b9fdaa\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:37 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "dbuABA==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "6a157dbb-58c7-42b0-ac43-7279b434a40a, 6a157dbb-58c7-42b0-ac43-7279b434a40a",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.21251854300498962
+          },
+          {
+            "download_seconds": 0.2756273539853282,
+            "head_attempts": 2,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "33554432",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:37 GMT",
+              "etag": "\"10e8874802e2e51e3b9665bacd4a290b\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:37 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "yCu6wA==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "4e0c0249-236b-429c-b84a-839bb90af307, 4e0c0249-236b-429c-b84a-839bb90af307",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.21340942301321775
+          }
+        ],
+        "receive_and_verify_seconds": 1.412518811004702,
+        "sample": "128m-4streams-4-object",
+        "sha256": "8256270cc9e0fafbf3e7613133209eb6aab557d2ee3011096fd3c793100664d4",
+        "size": 134217728,
+        "streams": 4
+      },
+      "sample": "128m-4streams-4-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:37 GMT",
+            "etag": "\"3ab85d05d753ce86549e9c452367000e\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "WG2nEw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "5c86e21b-1253-4269-8a2d-e327d97686f1, 5c86e21b-1253-4269-8a2d-e327d97686f1"
+          },
+          "put_seconds": 0.19554954700288363
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:37 GMT",
+            "etag": "\"748f5872667af43c231cc27900969cc2\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "2qVNtw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "8a03287f-3c00-4087-a55e-3b8ff8b9acbf, 8a03287f-3c00-4087-a55e-3b8ff8b9acbf"
+          },
+          "put_seconds": 0.20894514900282957
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:37 GMT",
+            "etag": "\"f7465c306f56698538e245e1b0b9fdaa\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "dbuABA==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "1afa7a42-17c9-4a87-8db1-e323930db0e1, 1afa7a42-17c9-4a87-8db1-e323930db0e1"
+          },
+          "put_seconds": 0.20515872098621912
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:37 GMT",
+            "etag": "\"10e8874802e2e51e3b9665bacd4a290b\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "yCu6wA==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "e3ab0669-aef7-455a-b237-609cc3682079, e3ab0669-aef7-455a-b237-609cc3682079"
+          },
+          "put_seconds": 0.2334901459980756
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.236111454985803,
+      "setup_seconds": 0.05388160501024686,
+      "sha256": "8256270cc9e0fafbf3e7613133209eb6aab557d2ee3011096fd3c793100664d4",
+      "size": 134217728,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.5967078300018329,
+      "delivery_seconds": 1.7255458650179207,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 1.6175334799918346,
+        "sample": "512m-4streams-0-tcp",
+        "sha256": "af4da69ddb3819e390542bd30dcb6cd7ebfc264a496995756c9e72f9d263852c",
+        "size": 536870912,
+        "streams": 4,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 53764,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56503,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56499,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56481,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "512m-4streams-0-tcp",
+      "send_or_upload_parts": [
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.5629596750077326,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 62522,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.5164644609903917,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 54737,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.5624724429799244,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 62274,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.5486267300148029,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 67945,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 1.0748176130000502,
+      "setup_seconds": 0.05402042201603763,
+      "sha256": "af4da69ddb3819e390542bd30dcb6cd7ebfc264a496995756c9e72f9d263852c",
+      "size": 536870912,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 1.3155304079991765,
+      "delivery_seconds": 1.8954633759858552,
+      "method": "object",
+      "put_max_seconds": 0.5204973540094215,
+      "receiver": {
+        "first_delivery_seconds": 1.0908402890199795,
+        "method": "object",
+        "reads": [
+          {
+            "download_seconds": 0.5839294850011356,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:43 GMT",
+              "etag": "\"b1ce5afd84a108b92812f744a1d055d0\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:43 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "Gs0BCA==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "3ca539dc-a91d-46c0-ba9d-89d2d40ffa2c, 3ca539dc-a91d-46c0-ba9d-89d2d40ffa2c",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.47886232001474127
+          },
+          {
+            "download_seconds": 0.5061609429540113,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:43 GMT",
+              "etag": "\"7ec23fcf1cc6e36b34afb17250c784b5\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:43 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "UJ/aHQ==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "66f9a1bd-794f-427f-81ca-05b9ebe03a60, 66f9a1bd-794f-427f-81ca-05b9ebe03a60",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.4769796959590167
+          },
+          {
+            "download_seconds": 0.540933987009339,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:43 GMT",
+              "etag": "\"0a121ba5b55cf858c30d7e34e8ced997\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:43 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "HUag/w==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "b3043bd3-bb48-4217-9839-b05ba6e9c8fa, b3043bd3-bb48-4217-9839-b05ba6e9c8fa",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.47991652303608134
+          },
+          {
+            "download_seconds": 0.6098292469978333,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:43 GMT",
+              "etag": "\"c8a5af296aba2a431107aec8a0d1e51f\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:43 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "CdKojw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "2f133199-bd15-4107-b5ec-e57847c71807, 2f133199-bd15-4107-b5ec-e57847c71807",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.47769545699702576
+          }
+        ],
+        "receive_and_verify_seconds": 1.6874487070017494,
+        "sample": "512m-4streams-0-object",
+        "sha256": "af4da69ddb3819e390542bd30dcb6cd7ebfc264a496995756c9e72f9d263852c",
+        "size": 536870912,
+        "streams": 4
+      },
+      "sample": "512m-4streams-0-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:43 GMT",
+            "etag": "\"b1ce5afd84a108b92812f744a1d055d0\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "Gs0BCA==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "4f61565c-43c0-4fd3-b2cb-4a069572e68c, 4f61565c-43c0-4fd3-b2cb-4a069572e68c"
+          },
+          "put_seconds": 0.49357053500716574
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:43 GMT",
+            "etag": "\"7ec23fcf1cc6e36b34afb17250c784b5\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "UJ/aHQ==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "36036ca4-19f8-4ed5-b890-4648847e7b74, 36036ca4-19f8-4ed5-b890-4648847e7b74"
+          },
+          "put_seconds": 0.5012431020149961
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:43 GMT",
+            "etag": "\"0a121ba5b55cf858c30d7e34e8ced997\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "HUag/w==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "d8e71dc3-a4fa-4a52-a38c-af8daeb315db, d8e71dc3-a4fa-4a52-a38c-af8daeb315db"
+          },
+          "put_seconds": 0.5109178760030773
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:43 GMT",
+            "etag": "\"c8a5af296aba2a431107aec8a0d1e51f\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "CdKojw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "07fd7cc5-ec02-4734-bea9-acb9af9a2365, 07fd7cc5-ec02-4734-bea9-acb9af9a2365"
+          },
+          "put_seconds": 0.5204973540094215
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.5233011899981648,
+      "setup_seconds": 0.05663177798851393,
+      "sha256": "af4da69ddb3819e390542bd30dcb6cd7ebfc264a496995756c9e72f9d263852c",
+      "size": 536870912,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.6153128980076872,
+      "delivery_seconds": 3.925044527015416,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 3.421324121998623,
+        "sample": "512m-4streams-1-tcp",
+        "sha256": "afc2432af1dc59124746615e444834b278cd057fc10400b2dd5269907606d1fc",
+        "size": 536870912,
+        "streams": 4,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 53771,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 53735,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56472,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56464,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "512m-4streams-1-tcp",
+      "send_or_upload_parts": [
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 2.4870156930119265,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53703,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 2.6029133910196833,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56473,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 2.275787122984184,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53711,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 2.3983710530155804,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56440,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 3.2529858670022804,
+      "setup_seconds": 0.05674576200544834,
+      "sha256": "afc2432af1dc59124746615e444834b278cd057fc10400b2dd5269907606d1fc",
+      "size": 536870912,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 1.3078821600065567,
+      "delivery_seconds": 1.883451484987745,
+      "method": "object",
+      "put_max_seconds": 0.5175511479901616,
+      "receiver": {
+        "first_delivery_seconds": 1.0800209929584526,
+        "method": "object",
+        "reads": [
+          {
+            "download_seconds": 0.599632797006052,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:51 GMT",
+              "etag": "\"97fc51372d064bfcf24da8eb95dbfc68\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:50 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "3Iq3xg==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "dda0ee50-b75d-498b-a25e-400d95eb9bd0, dda0ee50-b75d-498b-a25e-400d95eb9bd0",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.47967377497116104
+          },
+          {
+            "download_seconds": 0.4842604930163361,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:51 GMT",
+              "etag": "\"bc073441db548850fda3230989ac17d0\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:50 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "A7g5tg==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "4ecd8501-f008-4951-915b-3211cff7b4c3, 4ecd8501-f008-4951-915b-3211cff7b4c3",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.4772120349807665
+          },
+          {
+            "download_seconds": 0.5721084970282391,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:51 GMT",
+              "etag": "\"5ee57e7799f7c56d238b5116a4c26f1d\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:50 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "+e+6Tw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "9ebec129-521c-4bbd-90b8-49c31374a0c6, 9ebec129-521c-4bbd-90b8-49c31374a0c6",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.47910711204167455
+          },
+          {
+            "download_seconds": 0.5256151140201837,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:51 GMT",
+              "etag": "\"9d2eb366f50cd20ab28bf65c52b5ee3b\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:50 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "xNG9JA==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "cf4f25cf-dd68-4668-861c-4a824e9c6576, cf4f25cf-dd68-4668-861c-4a824e9c6576",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.47441916400566697
+          }
+        ],
+        "receive_and_verify_seconds": 1.6793039619806223,
+        "sample": "512m-4streams-1-object",
+        "sha256": "afc2432af1dc59124746615e444834b278cd057fc10400b2dd5269907606d1fc",
+        "size": 536870912,
+        "streams": 4
+      },
+      "sample": "512m-4streams-1-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:50 GMT",
+            "etag": "\"97fc51372d064bfcf24da8eb95dbfc68\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "3Iq3xg==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "e910068c-a5fb-4de1-a651-b3f04299e7a6, e910068c-a5fb-4de1-a651-b3f04299e7a6"
+          },
+          "put_seconds": 0.484508912981255
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:50 GMT",
+            "etag": "\"bc073441db548850fda3230989ac17d0\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "A7g5tg==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "ff5b2af2-7108-4e1e-8b2f-c35f642ea187, ff5b2af2-7108-4e1e-8b2f-c35f642ea187"
+          },
+          "put_seconds": 0.5175511479901616
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:50 GMT",
+            "etag": "\"5ee57e7799f7c56d238b5116a4c26f1d\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "+e+6Tw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "3c8f4055-992d-4904-ae1b-515b0bb1f740, 3c8f4055-992d-4904-ae1b-515b0bb1f740"
+          },
+          "put_seconds": 0.5136483690002933
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:50 GMT",
+            "etag": "\"9d2eb366f50cd20ab28bf65c52b5ee3b\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "xNG9JA==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "25184934-d1a3-437d-8e0a-925701dff6eb, 25184934-d1a3-437d-8e0a-925701dff6eb"
+          },
+          "put_seconds": 0.5028231960022822
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.5216561359993648,
+      "setup_seconds": 0.05391318898182362,
+      "sha256": "afc2432af1dc59124746615e444834b278cd057fc10400b2dd5269907606d1fc",
+      "size": 536870912,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.6001684670045506,
+      "delivery_seconds": 3.5711787049949635,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 3.0691853390308097,
+        "sample": "512m-4streams-2-tcp",
+        "sha256": "2c5674cf3c174d99a5be81ba3d51b5988357a8f1cf66b4f759aec03670bd8214",
+        "size": 536870912,
+        "streams": 4,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 53792,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 53750,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56505,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56477,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "512m-4streams-2-tcp",
+      "send_or_upload_parts": [
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.8470039099920541,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53888,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 2.4337283599888906,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56505,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.8470273019920569,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53843,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.8720818030124065,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 57140,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 2.914258651988348,
+      "setup_seconds": 0.05675158600206487,
+      "sha256": "2c5674cf3c174d99a5be81ba3d51b5988357a8f1cf66b4f759aec03670bd8214",
+      "size": 536870912,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 2.020904392004013,
+      "delivery_seconds": 3.0837524509988725,
+      "method": "object",
+      "put_max_seconds": 1.002338429010706,
+      "receiver": {
+        "first_delivery_seconds": 2.2926820770371705,
+        "method": "object",
+        "reads": [
+          {
+            "download_seconds": 0.4762802079785615,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:57 GMT",
+              "etag": "\"9688a6a5902a94eb80c80ac9dba263b0\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:57 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "Pl/m7g==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "096a824d-b36e-4bd1-b4ac-32ccd0c14eec, 096a824d-b36e-4bd1-b4ac-32ccd0c14eec",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.4732138100080192
+          },
+          {
+            "download_seconds": 1.2505281259655021,
+            "head_attempts": 8,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:58 GMT",
+              "etag": "\"a68e3035b9b60256bffa5a00c6d6fb7a\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:58 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "Xp7t4g==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "6d609953-741a-4f79-a6c4-71e38eff29fc, 6d609953-741a-4f79-a6c4-71e38eff29fc",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 1.0406182120204903
+          },
+          {
+            "download_seconds": 0.4994635049952194,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:57 GMT",
+              "etag": "\"62f72f7aba36ab7a7380eee0495a7891\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:57 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "LoosVQ==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "85f26a6c-9c4a-46a2-8e59-f0e78a329305, 85f26a6c-9c4a-46a2-8e59-f0e78a329305",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.4742465309682302
+          },
+          {
+            "download_seconds": 1.2097661760053597,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:01:57 GMT",
+              "etag": "\"520eaf7b8bcb5a84a29de3edc05b2b33\"",
+              "last-modified": "Thu, 24 Sep 2026 01:01:57 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "+qwRXw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "6c06b545-12dd-4438-9dfc-cf9bdb16015c, 6c06b545-12dd-4438-9dfc-cf9bdb16015c",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.46887769899331033
+          }
+        ],
+        "receive_and_verify_seconds": 2.887102330045309,
+        "sample": "512m-4streams-2-object",
+        "sha256": "2c5674cf3c174d99a5be81ba3d51b5988357a8f1cf66b4f759aec03670bd8214",
+        "size": 536870912,
+        "streams": 4
+      },
+      "sample": "512m-4streams-2-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:57 GMT",
+            "etag": "\"9688a6a5902a94eb80c80ac9dba263b0\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "Pl/m7g==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "90c78925-d3a4-4d5e-a50d-84c773f88552, 90c78925-d3a4-4d5e-a50d-84c773f88552"
+          },
+          "put_seconds": 0.4891966840077657
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:58 GMT",
+            "etag": "\"a68e3035b9b60256bffa5a00c6d6fb7a\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "Xp7t4g==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "cc09448c-a240-47ff-a835-463532f1eb43, cc09448c-a240-47ff-a835-463532f1eb43"
+          },
+          "put_seconds": 1.002338429010706
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:57 GMT",
+            "etag": "\"62f72f7aba36ab7a7380eee0495a7891\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "LoosVQ==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "be83748b-7db2-4a4c-b65f-855c76bbb296, be83748b-7db2-4a4c-b65f-855c76bbb296"
+          },
+          "put_seconds": 0.5048714820004534
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:01:57 GMT",
+            "etag": "\"520eaf7b8bcb5a84a29de3edc05b2b33\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "+qwRXw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "8711eb5f-5b36-4606-9f4d-34a49fd484b5, 8711eb5f-5b36-4606-9f4d-34a49fd484b5"
+          },
+          "put_seconds": 0.5081135259824805
+        }
+      ],
+      "send_or_upload_phase_seconds": 1.006195639987709,
+      "setup_seconds": 0.056652419007150456,
+      "sha256": "2c5674cf3c174d99a5be81ba3d51b5988357a8f1cf66b4f759aec03670bd8214",
+      "size": 536870912,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.6174593280011322,
+      "delivery_seconds": 3.7833609060035087,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 3.3198502599843778,
+        "sample": "512m-4streams-3-tcp",
+        "sha256": "ef0aa448ca247745ae5a3c3d589f34f5b312a239042a925f28df9565b20e4dfa",
+        "size": 536870912,
+        "streams": 4,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 53774,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 53756,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 53724,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56494,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "512m-4streams-3-tcp",
+      "send_or_upload_parts": [
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 2.3436706969805527,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53698,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.8090293270070106,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53854,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 2.467777122015832,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56435,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 2.5713109289936256,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53693,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 3.1091438150033355,
+      "setup_seconds": 0.056757762999041006,
+      "sha256": "ef0aa448ca247745ae5a3c3d589f34f5b312a239042a925f28df9565b20e4dfa",
+      "size": 536870912,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 1.9154999630118255,
+      "delivery_seconds": 2.6655575149925426,
+      "method": "object",
+      "put_max_seconds": 0.6925602060218807,
+      "receiver": {
+        "first_delivery_seconds": 1.8511665840051137,
+        "method": "object",
+        "reads": [
+          {
+            "download_seconds": 1.2428355779848062,
+            "head_attempts": 5,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:02:06 GMT",
+              "etag": "\"b54343928af92448de58c41d77a6fb9f\"",
+              "last-modified": "Thu, 24 Sep 2026 01:02:06 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "fkvVMw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "3c302196-26ed-4223-8cde-fcc8feba4002, 3c302196-26ed-4223-8cde-fcc8feba4002",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.6075172909768298
+          },
+          {
+            "download_seconds": 0.5505180989857763,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:02:06 GMT",
+              "etag": "\"3d7bc17e5d167d44ec1badbbd4395957\"",
+              "last-modified": "Thu, 24 Sep 2026 01:02:06 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "alHQNw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "e34a7990-fa71-4c31-8f09-7ca7d56cb69b, e34a7990-fa71-4c31-8f09-7ca7d56cb69b",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.47923846199410036
+          },
+          {
+            "download_seconds": 0.5885183799546212,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:02:06 GMT",
+              "etag": "\"523ad191d59071bd351597f5a835518c\"",
+              "last-modified": "Thu, 24 Sep 2026 01:02:06 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "BCCf9Q==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "cd4673e8-fda2-4ba1-9876-b11b5a28e53b, cd4673e8-fda2-4ba1-9876-b11b5a28e53b",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.4663152039865963
+          },
+          {
+            "download_seconds": 0.414086175034754,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:02:06 GMT",
+              "etag": "\"973452221f7efa9104ae1b7d5ad1742f\"",
+              "last-modified": "Thu, 24 Sep 2026 01:02:05 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "PvDxlA==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "51f6f3d5-4e4f-43bd-a465-7924f1c50a37, 51f6f3d5-4e4f-43bd-a465-7924f1c50a37",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.4815518249524757
+          }
+        ],
+        "receive_and_verify_seconds": 2.4561689749825746,
+        "sample": "512m-4streams-3-object",
+        "sha256": "ef0aa448ca247745ae5a3c3d589f34f5b312a239042a925f28df9565b20e4dfa",
+        "size": 536870912,
+        "streams": 4
+      },
+      "sample": "512m-4streams-3-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:02:06 GMT",
+            "etag": "\"b54343928af92448de58c41d77a6fb9f\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "fkvVMw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "d6140d07-ed98-4efe-8fe0-006a1a0d78d0, d6140d07-ed98-4efe-8fe0-006a1a0d78d0"
+          },
+          "put_seconds": 0.6925602060218807
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:02:06 GMT",
+            "etag": "\"3d7bc17e5d167d44ec1badbbd4395957\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "alHQNw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "1b198b62-6ca5-48a6-99f3-b1fe53a9cb94, 1b198b62-6ca5-48a6-99f3-b1fe53a9cb94"
+          },
+          "put_seconds": 0.5535400689987
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:02:06 GMT",
+            "etag": "\"523ad191d59071bd351597f5a835518c\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "BCCf9Q==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "b51e9faf-bf44-45a0-805a-4a8a2fec3c73, b51e9faf-bf44-45a0-805a-4a8a2fec3c73"
+          },
+          "put_seconds": 0.5352561220061034
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:02:05 GMT",
+            "etag": "\"973452221f7efa9104ae1b7d5ad1742f\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "PvDxlA==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "11f85d40-469b-4e3f-aa44-828d16048cb8, 11f85d40-469b-4e3f-aa44-828d16048cb8"
+          },
+          "put_seconds": 0.522799111000495
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.6961841059965082,
+      "setup_seconds": 0.053873445984208956,
+      "sha256": "ef0aa448ca247745ae5a3c3d589f34f5b312a239042a925f28df9565b20e4dfa",
+      "size": 536870912,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 0.6073183789849281,
+      "delivery_seconds": 4.067489364009816,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 3.5446606330224313,
+        "sample": "512m-4streams-4-tcp",
+        "sha256": "a4313203c90a65a9e917e085fa8b71f32465dc0aa343a75a916554bd405fb2ab",
+        "size": 536870912,
+        "streams": 4,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 53768,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56492,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56491,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          },
+          {
+            "pmtu": 9000,
+            "rtt_us": 56489,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "512m-4streams-4-tcp",
+      "send_or_upload_parts": [
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 2.9848433099978138,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56480,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.8751856070011854,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 62697,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.8698307650047354,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 53907,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        },
+        {
+          "local_address": "10.186.213.73",
+          "send_seconds": 0.9108007039758377,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 62706,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 3.4034258620231412,
+      "setup_seconds": 0.05674512300174683,
+      "sha256": "a4313203c90a65a9e917e085fa8b71f32465dc0aa343a75a916554bd405fb2ab",
+      "size": 536870912,
+      "streams": 4
+    },
+    {
+      "ack_wait_seconds": 1.9874359480163548,
+      "delivery_seconds": 2.6425972830038518,
+      "method": "object",
+      "put_max_seconds": 0.5928678030031733,
+      "receiver": {
+        "first_delivery_seconds": 1.8469666130258702,
+        "method": "object",
+        "reads": [
+          {
+            "download_seconds": 0.48146498698042706,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:02:14 GMT",
+              "etag": "\"538392c552d8b00604b26680f1d35618\"",
+              "last-modified": "Thu, 24 Sep 2026 01:02:14 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "FCv3EA==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "8abdb3a1-47df-4552-a2cf-b4a8166e92bf, 8abdb3a1-47df-4552-a2cf-b4a8166e92bf",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.4799379769829102
+          },
+          {
+            "download_seconds": 0.4428086020052433,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:02:14 GMT",
+              "etag": "\"66339af4bb98548aac031e1886dc5566\"",
+              "last-modified": "Thu, 24 Sep 2026 01:02:14 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "9vXGQg==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "b0a22de2-b946-46bd-968a-ff0a28c3d719, b0a22de2-b946-46bd-968a-ff0a28c3d719",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.4804105960065499
+          },
+          {
+            "download_seconds": 0.5084017650224268,
+            "head_attempts": 4,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:02:14 GMT",
+              "etag": "\"acf78fdbcc2b8b0f0a071a2abbdfd2cf\"",
+              "last-modified": "Thu, 24 Sep 2026 01:02:14 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "XU+F3A==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "3aff04a8-9053-4bba-961a-13aea597f717, 3aff04a8-9053-4bba-961a-13aea597f717",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.47705293097533286
+          },
+          {
+            "download_seconds": 1.2276043469901197,
+            "head_attempts": 5,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "134217728",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 01:02:14 GMT",
+              "etag": "\"a0edcaac6b9190c7c6855a2b72540d30\"",
+              "last-modified": "Thu, 24 Sep 2026 01:02:14 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "4xxnUg==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "c54ec78f-e963-4180-a9fc-af3ecc1a9817, c54ec78f-e963-4180-a9fc-af3ecc1a9817",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            },
+            "visibility_seconds": 0.6157980440184474
+          }
+        ],
+        "receive_and_verify_seconds": 2.4500641229678877,
+        "sample": "512m-4streams-4-object",
+        "sha256": "a4313203c90a65a9e917e085fa8b71f32465dc0aa343a75a916554bd405fb2ab",
+        "size": 536870912,
+        "streams": 4
+      },
+      "sample": "512m-4streams-4-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:02:14 GMT",
+            "etag": "\"538392c552d8b00604b26680f1d35618\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "FCv3EA==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "51212154-37e1-49c2-9264-2110156bd952, 51212154-37e1-49c2-9264-2110156bd952"
+          },
+          "put_seconds": 0.5143595050030854
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:02:14 GMT",
+            "etag": "\"66339af4bb98548aac031e1886dc5566\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "9vXGQg==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "2ee6d846-c8fa-4f40-aac1-4cf5c600c8c3, 2ee6d846-c8fa-4f40-aac1-4cf5c600c8c3"
+          },
+          "put_seconds": 0.5311262699833605
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:02:14 GMT",
+            "etag": "\"acf78fdbcc2b8b0f0a071a2abbdfd2cf\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "XU+F3A==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "04c97f37-97d3-40d1-b75c-072d49cc590a, 04c97f37-97d3-40d1-b75c-072d49cc590a"
+          },
+          "put_seconds": 0.5243114619806875
+        },
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 01:02:14 GMT",
+            "etag": "\"a0edcaac6b9190c7c6855a2b72540d30\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "4xxnUg==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "ccf71a60-7d65-40d1-aca8-20320129a6b1, ccf71a60-7d65-40d1-aca8-20320129a6b1"
+          },
+          "put_seconds": 0.5928678030031733
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.5985349959810264,
+      "setup_seconds": 0.056626339006470516,
+      "sha256": "a4313203c90a65a9e917e085fa8b71f32465dc0aa343a75a916554bd405fb2ab",
+      "size": 536870912,
+      "streams": 4
+    }
+  ]
+}

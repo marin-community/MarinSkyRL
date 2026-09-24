@@ -56,11 +56,14 @@ def interpolate(rows: list[dict], size: float, *, above: str = "chunks") -> floa
     return points[0][1]
 
 
-def summarize(sender: dict, receiver: dict) -> dict:
+def summarize(
+    sender: dict, receiver: dict, *, stream_counts: tuple[int, ...] = (1, 4), unique_content: bool = False
+) -> dict:
     sender_samples = sender["samples"]
     receiver_samples = {row["sample"]: row for row in receiver["samples"]}
-    if len(sender_samples) != 60 or len(receiver_samples) != 60:
-        raise ValueError("Expected 60 sender and 60 receiver samples")
+    expected = 3 * len(stream_counts) * 2 * 5
+    if len(sender_samples) != expected or len(receiver_samples) != expected:
+        raise ValueError(f"Expected {expected} sender and receiver samples")
     groups = defaultdict(list)
     for row in sender_samples:
         name = row["sample"]
@@ -69,9 +72,18 @@ def summarize(sender: dict, receiver: dict) -> dict:
             raise ValueError(f"Receiver checksum mismatch: {name}")
         groups[(row["size"] // MIB, row["streams"], row["method"])].append((row, peer))
     if set(groups) != {
-        (size, streams, method) for size in (8, 128, 512) for streams in (1, 4) for method in ("tcp", "object")
+        (size, streams, method) for size in (8, 128, 512) for streams in stream_counts for method in ("tcp", "object")
     }:
         raise ValueError("A matched condition is missing")
+    if unique_content:
+        for size in (8, 128, 512):
+            for streams in stream_counts:
+                tcp = {row["sample"].removesuffix("-tcp"): row["sha256"] for row, _ in groups[size, streams, "tcp"]}
+                obj = {
+                    row["sample"].removesuffix("-object"): row["sha256"] for row, _ in groups[size, streams, "object"]
+                }
+                if tcp != obj or len(set(tcp.values())) != 5:
+                    raise ValueError(f"Unique contents or TCP/object match failed: {size}, {streams}")
     table = []
     for (size, streams, method), pairs in sorted(groups.items()):
         if len(pairs) != 5:
@@ -193,6 +205,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("sender", "receiver", "dense", "sparse", "screen", "relay"):
         parser.add_argument(f"--{name}", type=Path, required=True)
+    parser.add_argument("--unique-sender", type=Path)
+    parser.add_argument("--unique-receiver", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     paths = {name: getattr(args, name) for name in ("sender", "receiver", "dense", "sparse", "screen", "relay")}
@@ -207,14 +221,24 @@ def main() -> None:
         "modeled_one_unique_root": envelope(measurements["table"], inputs),
         "model_limits": [
             "TCP and object curves interpolate single-payload medians up to 512 MiB; dense 8.179 GB uses sequential 512 MiB chunks.",
+            "The main object repeats reused identical content at each size under fresh keys; per-request cache state is unknown. The unique-content follow-up tests this confound on four streams but uses a different H100 host and later time.",
+            "Socket buffers and TCP window sizes were not recorded or tuned; the single-stream 128 MiB TCP cell spans 0.917–10.262 s and makes the direct sparse interpolation fragile.",
             "The 2.4% GPU-index scenario exceeds 512 MiB by about 10% and linearly extrapolates the 128-to-512 MiB TCP median slope.",
             "The GPU index byte formula is 3*rho*BF16 dense bytes and omits headers and nonexpert weights.",
             "The CPU XOR byte ratio comes from one 128 MiB random-XOR RNO object relay at 1.9% and is scaled linearly by density.",
-            "CPU local times come from one H100 low-bit-flip bucket screen and are scaled sequentially; full-model batching, B200 encode, H100 apply, and overlap are unmeasured.",
+            "CPU local times come from one H100 low-bit-flip bucket screen that includes D2H, detect, pack, compression/decompression, H2D, apply, and baseline commit. Sequential scaling omits the split B200/H100 execution, full-model batching, and overlap.",
             "One root is 1/16 of global routed-expert bytes; receiver placement, fan-out, nonexpert tensors, and acknowledgement are not modeled.",
             "Visibility time starts when the receiver got the control command and overlaps source upload; components are not additive.",
         ],
     }
+    if bool(args.unique_sender) != bool(args.unique_receiver):
+        parser.error("Provide both --unique-sender and --unique-receiver")
+    if args.unique_sender:
+        result["input_sha256"]["unique_sender"] = sha256(args.unique_sender)
+        result["input_sha256"]["unique_receiver"] = sha256(args.unique_receiver)
+        result["measured_unique_content_followup"] = summarize(
+            load(args.unique_sender), load(args.unique_receiver), stream_counts=(4,), unique_content=True
+        )
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
 
 

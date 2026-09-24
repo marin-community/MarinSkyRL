@@ -280,7 +280,16 @@ def receiver(store: Store, max_seconds: int) -> None:
     save(store, "receiver", result)
 
 
-def sender(store: Store, host: str, repeats: int, sizes_mib: list[int], stream_counts: list[int]) -> None:
+def sender(
+    store: Store,
+    host: str,
+    repeats: int,
+    sizes_mib: list[int],
+    stream_counts: list[int],
+    *,
+    unique_per_repeat: bool,
+    seed_base: int,
+) -> None:
     result = {"role": "sender", "facts": host_facts(), "receiver_ip": host, "samples": [], "pings": [], "reverse": None}
     for _ in range(20):
         start = now()
@@ -299,19 +308,29 @@ def sender(store: Store, host: str, repeats: int, sizes_mib: list[int], stream_c
         result["reverse"] = {"seconds": now() - reverse_start, "sha256": digest(payload), "ack": acknowledgement}
 
     for size_mib in sizes_mib:
-        payload = synthetic_bytes(size_mib * 2**20, 17017 + size_mib)
+        payload = synthetic_bytes(size_mib * 2**20, seed_base + size_mib)
         payload_hash = digest(payload)
         for streams in stream_counts:
             pieces = split_bytes(payload, streams)
             for repeat in range(repeats):
+                if unique_per_repeat:
+                    sample_payload = synthetic_bytes(
+                        size_mib * 2**20, seed_base + size_mib + (repeat + 1) * 1_000_003 + streams * 1009
+                    )
+                    sample_hash = digest(sample_payload)
+                    sample_pieces = split_bytes(sample_payload, streams)
+                else:
+                    sample_payload = payload
+                    sample_hash = payload_hash
+                    sample_pieces = pieces
                 for method in ("tcp", "object"):
                     sample = f"{size_mib}m-{streams}streams-{repeat}-{method}"
                     spec = {
                         "method": method,
                         "sample": sample,
-                        "size": len(payload),
+                        "size": len(sample_payload),
                         "streams": streams,
-                        "sha256": payload_hash,
+                        "sha256": sample_hash,
                     }
                     started = now()
                     with socket.create_connection((host, PORT), timeout=15) as control:
@@ -320,7 +339,7 @@ def sender(store: Store, host: str, repeats: int, sizes_mib: list[int], stream_c
                         send_json(control, spec)
                         if method == "tcp":
 
-                            def send_part(index: int, parts: list[bytes] = pieces) -> dict:
+                            def send_part(index: int, parts: list[bytes] = sample_pieces) -> dict:
                                 part = parts[index]
                                 with socket.create_connection((host, PORT + 1), timeout=15) as data_conn:
                                     start = now()
@@ -340,7 +359,9 @@ def sender(store: Store, host: str, repeats: int, sizes_mib: list[int], stream_c
                             upload = None
                         else:
 
-                            def put_part(index: int, sample_name: str = sample, parts: list[bytes] = pieces) -> dict:
+                            def put_part(
+                                index: int, sample_name: str = sample, parts: list[bytes] = sample_pieces
+                            ) -> dict:
                                 start = now()
                                 headers = store.put(f"objects/{sample_name}/{index}", parts[index])
                                 return {"put_seconds": now() - start, "headers": headers}
@@ -351,7 +372,7 @@ def sender(store: Store, host: str, repeats: int, sizes_mib: list[int], stream_c
                         sent = now() - started
                         ack = read_json(control)
                         elapsed = now() - started
-                    if ack["sha256"] != payload_hash:
+                    if ack["sha256"] != sample_hash:
                         raise ValueError("Receiver hash mismatch")
                     result["samples"].append(
                         {
@@ -415,6 +436,8 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--sizes-mib", type=int, nargs="+", default=[8, 128, 512])
     parser.add_argument("--streams", type=int, nargs="+", default=[1, 4])
+    parser.add_argument("--unique-per-repeat", action="store_true")
+    parser.add_argument("--seed-base", type=int, default=17017)
     parser.add_argument("--max-seconds", type=int, default=1800)
     args = parser.parse_args()
     store = Store(args.root)
@@ -425,7 +448,15 @@ def main() -> None:
     else:
         if not args.host:
             parser.error("--host is required for sender")
-        sender(store, args.host, args.repeats, args.sizes_mib, args.streams)
+        sender(
+            store,
+            args.host,
+            args.repeats,
+            args.sizes_mib,
+            args.streams,
+            unique_per_repeat=args.unique_per_repeat,
+            seed_base=args.seed_base,
+        )
 
 
 if __name__ == "__main__":
