@@ -1,0 +1,57 @@
+gb95a00:80:80 [0] NCCL INFO ncclOsDlopen(libnccl-env.so) failed: libnccl-env.so: cannot open shared object file: No such file or directory
+gb95a00:80:80 [0] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+gb95a00:80:80 [0] NCCL INFO NCCL_SOCKET_IFNAME set to =enp90s0np0
+gb95a00:80:80 [0] NCCL INFO cudaDriverVersion 13020
+gb95a00:80:80 [0] NCCL INFO NCCL version 2.30.7+cuda13.3
+gb95a00:80:80 [0] NCCL INFO NCCL git version HEAD a5187fa2e
+gb95a00:80:80 [0] NCCL INFO ncclOsDlopen(libnccl-net.so) failed: libnccl-net.so: cannot open shared object file: No such file or directory
+gb95a00:80:80 [0] NCCL INFO NET/Plugin: Could not find: libnccl-net.so
+gb95a00:80:80 [0] NCCL INFO NET/Socket : Using [0]enp90s0np0:10.168.192.27<0>
+gb95a00:80:80 [0] NCCL INFO Initialized NET plugin Socket
+gb95a00:80:80 [0] NCCL INFO Assigned NET plugin Socket to comm
+gb95a00:80:80 [0] NCCL INFO ncclOsDlopen(libnccl-rma.so) failed: libnccl-rma.so: cannot open shared object file: No such file or directory
+gb95a00:80:80 [0] NCCL INFO RMA/Plugin: Could not find: libnccl-rma.so
+gb95a00:80:80 [0] NCCL INFO RMA/Plugin: Failed to load external plugin libnccl-rma.so, dlHandle: (nil), ncclRma: (nil)
+gb95a00:80:80 [0] NCCL INFO transport/net_ib/gin.cc:77 (ncclGinIbInitType) -> 3
+gb95a00:80:80 [0] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+gb95a00:80:80 [0] NCCL INFO ncclOsDlopen(libnccl-gin.so) failed: libnccl-gin.so: cannot open shared object file: No such file or directory
+gb95a00:80:80 [0] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+gb95a00:80:80 [0] NCCL INFO GIN/Plugin: Failed to load external plugin libnccl-gin.so, dlHandle: (nil), ncclGin: (nil)
+gb95a00:80:80 [0] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+gb95a00:80:80 [0] NCCL INFO Using network Socket
+gb95a00:80:80 [0] NCCL INFO Loaded NVML from libnvidia-ml.so.1
+gb95a00:80:80 [0] NCCL INFO [Rank 0] ncclCommInitRankConfig comm 0x4ae5d610 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId ae000 commId 0x4f94ff06228a1533 - Init START
+gb95a00:80:80 [0] NCCL INFO RAS client listening socket at ::1<28028>
+gb95a00:80:80 [0] NCCL INFO MNNVL busId 0xae000 fabric UUID 0.0 cliqueId 0x0 state 3 healthMask 0x0
+gb95a00:80:80 [0] NCCL INFO NET/Socket : GPU Direct RDMA Disabled for HCA 0 'enp90s0np0'
+gb95a00:80:80 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is 32-63,96-127. (GPU affinity = 32-63,96-127 ; CPU affinity = 0-127).
+gb95a00:80:80 [0] NCCL INFO Rank 0: 1 Net devices
+gb95a00:80:80 [0] NCCL INFO Rank 0: 0 CollNet devices
+gb95a00:80:80 [0] NCCL INFO Local Net device counts across ranks: min 1 max 1
+gb95a00:80:80 [0] NCCL INFO Local CollNet device counts across ranks: min 0 max 0
+gb95a00:80:80 [0] NCCL INFO comm 0x4ae5d610 rank 0 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+gb95a00:80:80 [0] NCCL INFO Channel 00/02 : 0 1
+gb95a00:80:80 [0] NCCL INFO Channel 01/02 : 0 1
+gb95a00:80:80 [0] NCCL INFO Trees [0] 1/-1/-1->0->-1 [1] -1/-1/-1->0->1
+gb95a00:80:80 [0] NCCL INFO P2P Chunksize set to 131072
+gb95a00:80:80 [0] NCCL INFO Tuning P2P operations with maxP2pPeers = 2
+gb95a00:80:80 [0] NCCL INFO ncclOsDlopen(libnccl-profiler.so) failed: libnccl-profiler.so: cannot open shared object file: No such file or directory
+gb95a00:80:80 [0] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+gb95a00:80:80 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+gb95a00:80:90 [0] NCCL INFO [Proxy Service] Device 0 CPU core 33
+gb95a00:80:91 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 102
+gb95a00:80:90 [0] NCCL INFO proxy listening socket at 10.168.192.27<45181>
+gb95a00:80:80 [0] NCCL INFO ncclOsDlopen(libnccl-tuner.so) failed: libnccl-tuner.so: cannot open shared object file: No such file or directory
+gb95a00:80:80 [0] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+gb95a00:80:80 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+gb95a00:80:80 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 1 p2p channels per peer
+gb95a00:80:80 [0] NCCL INFO Symmetric memory is not supported. cuMemEnable 1, globalGinSupport 0, cuMemGdrSupport 1
+gb95a00:80:80 [0] NCCL INFO CC Off, workFifoBytes 1048576
+gb95a00:80:80 [0] NCCL INFO ncclCommInitRankConfig comm 0x4ae5d610 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId ae000 commId 0x4f94ff06228a1533 - Init COMPLETE
+gb95a00:80:80 [0] NCCL INFO Init timings - ncclCommInitRankConfig: rank 0 nranks 2 total 0.74 (kernels 0.29, alloc 0.02, bootstrap 0.30, allgathers 0.11, topo 0.02, graphs 0.00, connections 0.00, rest 0.00)
+gb95a00:80:92 [0] NCCL INFO [Proxy Progress] Device 0 CPU core 39
+gb95a00:80:80 [0] NCCL INFO Channel 00/0 : 1[0] -> 0[0] [receive] via NET/Socket/0
+gb95a00:80:80 [0] NCCL INFO Channel 01/0 : 1[0] -> 0[0] [receive] via NET/Socket/0
+gb95a00:80:80 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[0] [send] via NET/Socket/0
+gb95a00:80:80 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[0] [send] via NET/Socket/0
+gb95a00:80:80 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 0

@@ -1,0 +1,47 @@
+gb977f0:354:354 [1] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+gb977f0:354:354 [1] NCCL INFO cudaDriverVersion 13020
+gb977f0:354:354 [1] NCCL INFO NCCL_SOCKET_IFNAME set to =enp90s0np0
+gb977f0:354:354 [1] NCCL INFO NCCL version 2.29.7+cuda13.2
+gb977f0:354:354 [1] NCCL INFO NCCL git version stable b81d6a5a3
+gb977f0:354:354 [1] NCCL INFO NET/Plugin: Could not find: libnccl-net.so
+gb977f0:354:354 [1] NCCL INFO NET/Socket : Using [0]enp90s0np0:10.168.194.103<0>
+gb977f0:354:354 [1] NCCL INFO Initialized NET plugin Socket
+gb977f0:354:354 [1] NCCL INFO Assigned NET plugin Socket to comm
+gb977f0:354:354 [1] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+gb977f0:354:354 [1] NCCL INFO transport/net_ib/gin.cc:76 -> 3
+gb977f0:354:354 [1] NCCL INFO Failed to initialize any GIN plugin
+gb977f0:354:354 [1] NCCL INFO Using network Socket
+gb977f0:354:354 [1] NCCL INFO [Rank 1] ncclCommInitRankConfig comm 0x31ca4970 rank 1 nranks 3 cudaDev 1 nvmlDev 1 busId 66000 commId 0xfa4b9e1989825717 - Init START
+gb977f0:354:354 [1] NCCL INFO RAS client listening socket at ::1<28028>
+gb977f0:354:354 [1] NCCL INFO MNNVL busId 0x66000 fabric UUID 0.0 cliqueId 0x0 state 3 healthMask 0x0
+gb977f0:354:354 [1] NCCL INFO NET/Socket : GPU Direct RDMA Disabled for HCA 0 'enp90s0np0'
+gb977f0:354:354 [1] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 1 is 0-31,64-95. (GPU affinity = 0-31,64-95 ; CPU affinity = 0-127).
+gb977f0:354:354 [1] NCCL INFO NVLS multicast support is available on dev 1 (NVLS_NCHANNELS 16)
+gb977f0:354:354 [1] NCCL INFO comm 0x31ca4970 rank 1 nRanks 3 nNodes 2 localRanks 2 localRank 1 MNNVL 0
+gb977f0:354:354 [1] NCCL INFO Trees [0] -1/-1/-1->1->0 [1] -1/-1/-1->1->0
+gb977f0:354:354 [1] NCCL INFO P2P Chunksize set to 131072
+gb977f0:354:354 [1] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+gb977f0:354:354 [1] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+gb977f0:354:500 [0] NCCL INFO [Proxy Service UDS] Device 1 CPU core 68
+gb977f0:354:497 [0] NCCL INFO [Proxy Service] Device 1 CPU core 2
+gb977f0:354:354 [1] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+gb977f0:354:354 [1] NCCL INFO threadThresholds 8/8/64 | 24/8/64 | 512 | 512
+gb977f0:354:354 [1] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 1 p2p channels per peer
+gb977f0:354:354 [1] NCCL INFO Symmetric VA size=188GB
+gb977f0:354:354 [1] NCCL INFO Symmetric memory is not supported. cuMemEnable 1, globalGinSupport 0, globalNicFused 0 cuMemGdrSupport 1
+gb977f0:354:354 [1] NCCL INFO ncclCommInitRankConfig comm 0x31ca4970 rank 1 nranks 3 cudaDev 1 nvmlDev 1 busId 66000 commId 0xfa4b9e1989825717 - Init COMPLETE
+gb977f0:354:354 [1] NCCL INFO Init timings - ncclCommInitRankConfig: rank 1 nranks 3 total 0.98 (kernels 0.28, alloc 0.03, bootstrap 0.49, allgathers 0.17, topo 0.02, graphs 0.00, connections 0.00, rest 0.00)
+gb977f0:354:497 [1] NCCL INFO New proxy recv connection 0 from local rank 1, transport 0
+gb977f0:354:354 [1] NCCL INFO Connected to proxy localRank 1 -> connection 0x7f35b8004fa0
+gb977f0:354:497 [1] NCCL INFO New proxy recv connection 1 from local rank 1, transport 0
+gb977f0:354:354 [1] NCCL INFO Connected to proxy localRank 1 -> connection 0x7f35b8005028
+gb977f0:354:497 [1] NCCL INFO New proxy send connection 2 from local rank 1, transport 2
+gb977f0:354:502 [0] NCCL INFO [Proxy Progress] Device 1 CPU core 8
+gb977f0:354:354 [1] NCCL INFO Connected to proxy localRank 1 -> connection 0x7f35b80050b0
+gb977f0:354:354 [1] NCCL INFO Channel 00/0 : 1[1] -> 2[0] [send] via NET/Socket/0
+gb977f0:354:497 [1] NCCL INFO New proxy send connection 3 from local rank 1, transport 2
+gb977f0:354:354 [1] NCCL INFO Connected to proxy localRank 1 -> connection 0x7f35b8005138
+gb977f0:354:354 [1] NCCL INFO Channel 01/0 : 1[1] -> 2[0] [send] via NET/Socket/0
+gb977f0:354:354 [1] NCCL INFO Connected to proxy localRank 0 -> connection 0x7fc94c0051c0
+gb977f0:354:497 [1] NCCL INFO New proxy send connection 4 from local rank 0, transport 0
+gb977f0:354:354 [1] NCCL INFO Connected all rings, use ring PXN 0 GDR 0

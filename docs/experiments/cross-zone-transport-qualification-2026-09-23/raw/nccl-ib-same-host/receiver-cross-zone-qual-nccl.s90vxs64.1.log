@@ -1,0 +1,80 @@
+s90vxs64:1:1 [0] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+s90vxs64:1:1 [0] NCCL INFO NCCL_SOCKET_IFNAME set to =enP6p3s0np0
+s90vxs64:1:1 [0] NCCL INFO cudaDriverVersion 13020
+s90vxs64:1:1 [0] NCCL INFO NCCL version 2.29.7+cuda13.2
+s90vxs64:1:1 [0] NCCL INFO NCCL git version stable b81d6a5a3
+s90vxs64:1:1 [0] NCCL INFO NET/Plugin: Could not find: libnccl-net.so
+s90vxs64:1:1 [0] NCCL INFO NCCL_IB_HCA set to ibp0
+s90vxs64:1:1 [0] NCCL INFO NET/IB: [0] ibp0:uverbs0:1/IB provider=Mlx5 speed=400000 context=0xb6fdc375c7c0 pciPath=/sys/devices/pci0000:00/0000:00:00.0/0000:01:00.0/0000:02:00.0/0000:03:00.0 ar=1
+s90vxs64:1:1 [0] NCCL INFO NET/IB : Made virtual device [0] name=ibp0 speed=400000 ndevs=1
+s90vxs64:1:1 [0] NCCL INFO NET/IB : Using [0]ibp0:1/IB [RO]; OOB enP6p3s0np0:10.186.213.63<0>
+s90vxs64:1:1 [0] NCCL INFO Initialized NET plugin IB
+s90vxs64:1:1 [0] NCCL INFO Assigned NET plugin IB to comm
+s90vxs64:1:1 [0] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+s90vxs64:1:1 [0] NCCL INFO Assigned GIN plugin GIN_IB_GDAKI to comm
+s90vxs64:1:1 [0] NCCL INFO Assigned RMA plugin GIN_IB_PROXY to comm
+s90vxs64:1:1 [0] NCCL INFO Using network IB
+s90vxs64:1:1 [0] NCCL INFO DMA-BUF is available on GPU device 0
+s90vxs64:1:1 [0] NCCL INFO [Rank 0] ncclCommInitRankConfig comm 0xb6fdbbeb1fd0 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 801000 commId 0xced0d16b392d6562 - Init START
+s90vxs64:1:1 [0] NCCL INFO RAS client listening socket at ::1<28028>
+s90vxs64:1:1 [0] NCCL INFO MNNVL busId 0x801000 fabric UUID 5c4fca6a2126518e.620fac452cdd6a9d cliqueId 0x7ffe state 3 healthMask 0xaa
+s90vxs64:1:1 [0] NCCL INFO NCCL_P2P_DISABLE set by environment to 1
+s90vxs64:1:1 [0] NCCL INFO NET/GIN_IB_GDAKI : GPU Direct RDMA Enabled for HCA 0 'ibp0'
+s90vxs64:1:1 [0] NCCL INFO NET/IB : GPU Direct RDMA Enabled for HCA 0 'ibp0'
+s90vxs64:1:1 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-8392704 (rank 0) - NET/0-0 (distance 6 <= 6, read 0, mode Default)
+s90vxs64:1:1 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-8392704 (rank 0) - NET/0-0 (distance 6 <= 6, read 0, mode Default)
+s90vxs64:1:1 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is 0-71. (GPU affinity = 0-71 ; CPU affinity = 0-143).
+s90vxs64:1:1 [0] NCCL INFO comm 0xb6fdbbeb1fd0 rank 0 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+s90vxs64:1:1 [0] NCCL INFO Channel 00/02 : 0 1
+s90vxs64:1:1 [0] NCCL INFO Channel 01/02 : 0 1
+s90vxs64:1:1 [0] NCCL INFO Trees [0] 1/-1/-1->0->-1 [1] -1/-1/-1->0->1
+s90vxs64:1:1 [0] NCCL INFO P2P Chunksize set to 262144
+s90vxs64:1:1 [0] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+s90vxs64:1:1 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+s90vxs64:1:450 [0] NCCL INFO [Proxy Service] Device 0 CPU core 51
+s90vxs64:1:451 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 58
+s90vxs64:1:1 [0] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+s90vxs64:1:1 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+s90vxs64:1:1 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 1 p2p channels per peer
+s90vxs64:1:1 [0] NCCL INFO Symmetric VA size=188GB
+s90vxs64:1:1 [0] NCCL INFO CC Off, workFifoBytes 1048576
+s90vxs64:1:1 [0] NCCL INFO ncclCommInitRankConfig comm 0xb6fdbbeb1fd0 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 801000 commId 0xced0d16b392d6562 - Init COMPLETE
+s90vxs64:1:1 [0] NCCL INFO Init timings - ncclCommInitRankConfig: rank 0 nranks 2 total 0.29 (kernels 0.16, alloc 0.03, bootstrap 0.05, allgathers 0.01, topo 0.04, graphs 0.00, connections 0.00, rest 0.00)
+s90vxs64:1:1 [0] NCCL INFO Symmetric VA size=188GB
+s90vxs64:1:1 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-8392704 (rank 0) - NET/0-0 (distance 6 <= 6, read 0, mode Default)
+s90vxs64:1:450 [0] NCCL INFO New proxy recv connection 0 from local rank 0, transport 2
+s90vxs64:1:452 [0] NCCL INFO [Proxy Progress] Device 0 CPU core 59
+s90vxs64:1:1 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0xe5f6ac004f70
+s90vxs64:1:1 [0] NCCL INFO Channel 00/0 : 1[0] -> 0[0] [receive] via NET/IB/0/GDRDMA
+s90vxs64:1:1 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-8392704 (rank 0) - NET/0-0 (distance 6 <= 6, read 0, mode Default)
+s90vxs64:1:450 [0] NCCL INFO New proxy recv connection 1 from local rank 0, transport 2
+s90vxs64:1:1 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0xe5f6ac004ff8
+s90vxs64:1:1 [0] NCCL INFO Channel 01/0 : 1[0] -> 0[0] [receive] via NET/IB/0/GDRDMA
+s90vxs64:1:1 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-8392704 (rank 0) - NET/0-0 (distance 6 <= 6, read 1, mode Default)
+s90vxs64:1:450 [0] NCCL INFO New proxy send connection 2 from local rank 0, transport 2
+s90vxs64:1:1 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0xe5f6ac005080
+s90vxs64:1:1 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[0] [send] via NET/IB/0/GDRDMA
+s90vxs64:1:1 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-8392704 (rank 0) - NET/0-0 (distance 6 <= 6, read 1, mode Default)
+s90vxs64:1:450 [0] NCCL INFO New proxy send connection 3 from local rank 0, transport 2
+s90vxs64:1:1 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0xe5f6ac005108
+s90vxs64:1:1 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[0] [send] via NET/IB/0/GDRDMA
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0xe5f6ac010000)
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0xe5f6ac080000)
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0xe5f6ac0f0000)
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0xe5f6ac160000)
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=ibp0 ndevs=1 nmdevs=1 qp_num=27838 pkey=0 pd=0xe5f6ac00cae0
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbConnect: NCCL Dev 0 IbDev 0 Port 1 qp_num 27838 mtu 5 LID 877 subnet-prefix 33022  FLID 0 ctsFifoRkey=0x2401ce ctsFifoLkey=0x2401ce
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbConnect: IbDev 0 Port 1 qp_num 27838 query_ece={supported=1, vendor_id=0x15b3, options=0x30000200, comp_mask=0x0}
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=ibp0 ndevs=1 nmdevs=1 qp_num=27841 pkey=0 pd=0xe5f6ac00cae0
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=ibp0 ndevs=1 nmdevs=1 qp_num=27842 pkey=0 pd=0xe5f6ac00cae0
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbSenderQpsToRts: Set ECE: IbDev 0 Port 1 qp_num 27838 set_ece={supported=1, vendor_id=0x15b3, options=0x30000200, comp_mask=0x0}
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=ibp0 ndevs=1 nmdevs=1 qp_num=27845 pkey=0 pd=0xe5f6ac00cae0
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=ibp0 ndevs=1 nmdevs=1 qp_num=27846 pkey=0 pd=0xe5f6ac00cae0
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=ibp0 ndevs=1 nmdevs=1 qp_num=27847 pkey=0 pd=0xe5f6ac00cae0
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbConnect: NCCL Dev 0 IbDev 0 Port 1 qp_num 27847 mtu 5 LID 877 subnet-prefix 33022  FLID 0 ctsFifoRkey=0x2341b3 ctsFifoLkey=0x2341b3
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbConnect: IbDev 0 Port 1 qp_num 27847 query_ece={supported=1, vendor_id=0x15b3, options=0x30000200, comp_mask=0x0}
+s90vxs64:1:450 [0] NCCL INFO NET/IB: ncclIbSenderQpsToRts: Set ECE: IbDev 0 Port 1 qp_num 27847 set_ece={supported=1, vendor_id=0x15b3, options=0x30000200, comp_mask=0x0}
+s90vxs64:1:1 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 0
+s90vxs64:1:1 [0] NCCL INFO comm 0xb6fdbbeb1fd0 rank 0 nranks 2 cudaDev 0 busId 801000 - Destroy COMPLETE

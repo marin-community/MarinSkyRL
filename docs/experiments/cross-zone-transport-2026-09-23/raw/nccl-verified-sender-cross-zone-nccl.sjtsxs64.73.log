@@ -1,0 +1,52 @@
+sjtsxs64:73:73 [0] NCCL INFO ncclOsDlopen(libnccl-env.so) failed: libnccl-env.so: cannot open shared object file: No such file or directory
+sjtsxs64:73:73 [0] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+sjtsxs64:73:73 [0] NCCL INFO cudaDriverVersion 13020
+sjtsxs64:73:73 [0] NCCL INFO NCCL_SOCKET_IFNAME set to =enP6p3s0np0
+sjtsxs64:73:73 [0] NCCL INFO NCCL version 2.30.7+cuda13.3
+sjtsxs64:73:73 [0] NCCL INFO NCCL git version HEAD a5187fa2e
+sjtsxs64:73:73 [0] NCCL INFO ncclOsDlopen(libnccl-net.so) failed: libnccl-net.so: cannot open shared object file: No such file or directory
+sjtsxs64:73:73 [0] NCCL INFO NET/Plugin: Could not find: libnccl-net.so
+sjtsxs64:73:73 [0] NCCL INFO NET/Socket : Using [0]enP6p3s0np0:10.186.213.73<0>
+sjtsxs64:73:73 [0] NCCL INFO Initialized NET plugin Socket
+sjtsxs64:73:73 [0] NCCL INFO Assigned NET plugin Socket to comm
+sjtsxs64:73:73 [0] NCCL INFO ncclOsDlopen(libnccl-rma.so) failed: libnccl-rma.so: cannot open shared object file: No such file or directory
+sjtsxs64:73:73 [0] NCCL INFO RMA/Plugin: Could not find: libnccl-rma.so
+sjtsxs64:73:73 [0] NCCL INFO RMA/Plugin: Failed to load external plugin libnccl-rma.so, dlHandle: (nil), ncclRma: (nil)
+sjtsxs64:73:73 [0] NCCL INFO transport/net_ib/gin.cc:77 (ncclGinIbInitType) -> 3
+sjtsxs64:73:73 [0] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+sjtsxs64:73:73 [0] NCCL INFO ncclOsDlopen(libnccl-gin.so) failed: libnccl-gin.so: cannot open shared object file: No such file or directory
+sjtsxs64:73:73 [0] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+sjtsxs64:73:73 [0] NCCL INFO GIN/Plugin: Failed to load external plugin libnccl-gin.so, dlHandle: (nil), ncclGin: (nil)
+sjtsxs64:73:73 [0] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+sjtsxs64:73:73 [0] NCCL INFO Using network Socket
+sjtsxs64:73:73 [0] NCCL INFO Loaded NVML from libnvidia-ml.so.1
+sjtsxs64:73:73 [0] NCCL INFO [Rank 1] ncclCommInitRankConfig comm 0xbbceb335aa80 rank 1 nranks 2 cudaDev 0 nvmlDev 0 busId 1901000 commId 0x4f94ff06228a1533 - Init START
+sjtsxs64:73:73 [0] NCCL INFO RAS client listening socket at ::1<28028>
+sjtsxs64:73:73 [0] NCCL INFO MNNVL busId 0x1901000 fabric UUID 5c4fca6a2126518e.620fac452cdd6a9d cliqueId 0x7ffe state 3 healthMask 0xaa
+sjtsxs64:73:73 [0] NCCL INFO NET/Socket : GPU Direct RDMA Disabled for HCA 0 'enP6p3s0np0'
+sjtsxs64:73:73 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is 72-143. (GPU affinity = 72-143 ; CPU affinity = 0-143).
+sjtsxs64:73:73 [0] NCCL INFO Rank 1: 1 Net devices
+sjtsxs64:73:73 [0] NCCL INFO Rank 1: 0 CollNet devices
+sjtsxs64:73:73 [0] NCCL INFO comm 0xbbceb335aa80 rank 1 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+sjtsxs64:73:73 [0] NCCL INFO Trees [0] -1/-1/-1->1->0 [1] 0/-1/-1->1->-1
+sjtsxs64:73:73 [0] NCCL INFO P2P Chunksize set to 131072
+sjtsxs64:73:73 [0] NCCL INFO Tuning P2P operations with maxP2pPeers = 2
+sjtsxs64:73:73 [0] NCCL INFO ncclOsDlopen(libnccl-profiler.so) failed: libnccl-profiler.so: cannot open shared object file: No such file or directory
+sjtsxs64:73:73 [0] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+sjtsxs64:73:73 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+sjtsxs64:73:81 [0] NCCL INFO [Proxy Service] Device 0 CPU core 110
+sjtsxs64:73:82 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 111
+sjtsxs64:73:81 [0] NCCL INFO proxy listening socket at 10.186.213.73<16585>
+sjtsxs64:73:73 [0] NCCL INFO ncclOsDlopen(libnccl-tuner.so) failed: libnccl-tuner.so: cannot open shared object file: No such file or directory
+sjtsxs64:73:73 [0] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+sjtsxs64:73:73 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+sjtsxs64:73:73 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 1 p2p channels per peer
+sjtsxs64:73:73 [0] NCCL INFO Symmetric memory is not supported. cuMemEnable 1, globalGinSupport 0, cuMemGdrSupport 1
+sjtsxs64:73:73 [0] NCCL INFO ncclCommInitRankConfig comm 0xbbceb335aa80 rank 1 nranks 2 cudaDev 0 nvmlDev 0 busId 1901000 commId 0x4f94ff06228a1533 - Init COMPLETE
+sjtsxs64:73:73 [0] NCCL INFO Init timings - ncclCommInitRankConfig: rank 1 nranks 2 total 0.59 (kernels 0.14, alloc 0.04, bootstrap 0.27, allgathers 0.11, topo 0.02, graphs 0.00, connections 0.00, rest 0.00)
+sjtsxs64:73:83 [0] NCCL INFO [Proxy Progress] Device 0 CPU core 112
+sjtsxs64:73:73 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[0] [receive] via NET/Socket/0
+sjtsxs64:73:73 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[0] [receive] via NET/Socket/0
+sjtsxs64:73:73 [0] NCCL INFO Channel 00/0 : 1[0] -> 0[0] [send] via NET/Socket/0
+sjtsxs64:73:73 [0] NCCL INFO Channel 01/0 : 1[0] -> 0[0] [send] via NET/Socket/0
+sjtsxs64:73:73 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 0

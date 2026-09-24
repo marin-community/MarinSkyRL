@@ -1,0 +1,47 @@
+s90vxs64:1:1 [0] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+s90vxs64:1:1 [0] NCCL INFO cudaDriverVersion 13020
+s90vxs64:1:1 [0] NCCL INFO NCCL_SOCKET_IFNAME set to =enP6p3s0np0
+s90vxs64:1:1 [0] NCCL INFO NCCL version 2.29.7+cuda13.2
+s90vxs64:1:1 [0] NCCL INFO NCCL git version stable b81d6a5a3
+s90vxs64:1:1 [0] NCCL INFO NET/Plugin: Could not find: libnccl-net.so
+s90vxs64:1:1 [0] NCCL INFO NET/Socket : Using [0]enP6p3s0np0:10.186.213.63<0>
+s90vxs64:1:1 [0] NCCL INFO Initialized NET plugin Socket
+s90vxs64:1:1 [0] NCCL INFO Assigned NET plugin Socket to comm
+s90vxs64:1:1 [0] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+s90vxs64:1:1 [0] NCCL INFO transport/net_ib/gin.cc:76 -> 3
+s90vxs64:1:1 [0] NCCL INFO Failed to initialize any GIN plugin
+s90vxs64:1:1 [0] NCCL INFO Using network Socket
+s90vxs64:1:1 [0] NCCL INFO [Rank 1] ncclCommInitRankConfig comm 0xb1d6cb85ae50 rank 1 nranks 2 cudaDev 0 nvmlDev 0 busId 801000 commId 0x29fefd45e9bf0775 - Init START
+s90vxs64:1:1 [0] NCCL INFO RAS client listening socket at ::1<28028>
+s90vxs64:1:1 [0] NCCL INFO MNNVL busId 0x801000 fabric UUID 5c4fca6a2126518e.620fac452cdd6a9d cliqueId 0x7ffe state 3 healthMask 0xaa
+s90vxs64:1:1 [0] NCCL INFO NET/Socket : GPU Direct RDMA Disabled for HCA 0 'enP6p3s0np0'
+s90vxs64:1:1 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is 0-71. (GPU affinity = 0-71 ; CPU affinity = 0-143).
+s90vxs64:1:1 [0] NCCL INFO comm 0xb1d6cb85ae50 rank 1 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+s90vxs64:1:1 [0] NCCL INFO Trees [0] -1/-1/-1->1->0 [1] 0/-1/-1->1->-1
+s90vxs64:1:1 [0] NCCL INFO P2P Chunksize set to 131072
+s90vxs64:1:1 [0] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+s90vxs64:1:1 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+s90vxs64:1:450 [0] NCCL INFO [Proxy Service] Device 0 CPU core 6
+s90vxs64:1:451 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 8
+s90vxs64:1:1 [0] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+s90vxs64:1:1 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+s90vxs64:1:1 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 1 p2p channels per peer
+s90vxs64:1:1 [0] NCCL INFO Symmetric VA size=188GB
+s90vxs64:1:1 [0] NCCL INFO Symmetric memory is not supported. cuMemEnable 1, globalGinSupport 0, globalNicFused 0 cuMemGdrSupport 1
+s90vxs64:1:1 [0] NCCL INFO ncclCommInitRankConfig comm 0xb1d6cb85ae50 rank 1 nranks 2 cudaDev 0 nvmlDev 0 busId 801000 commId 0x29fefd45e9bf0775 - Init COMPLETE
+s90vxs64:1:1 [0] NCCL INFO Init timings - ncclCommInitRankConfig: rank 1 nranks 2 total 0.99 (kernels 0.14, alloc 0.04, bootstrap 0.64, allgathers 0.12, topo 0.02, graphs 0.00, connections 0.02, rest 0.01)
+s90vxs64:1:450 [0] NCCL INFO New proxy recv connection 0 from local rank 0, transport 2
+s90vxs64:1:452 [0] NCCL INFO [Proxy Progress] Device 0 CPU core 11
+s90vxs64:1:1 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0xe96c18004f70
+s90vxs64:1:1 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[0] [receive] via NET/Socket/0
+s90vxs64:1:450 [0] NCCL INFO New proxy recv connection 1 from local rank 0, transport 2
+s90vxs64:1:1 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0xe96c18004ff8
+s90vxs64:1:1 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[0] [receive] via NET/Socket/0
+s90vxs64:1:450 [0] NCCL INFO New proxy send connection 2 from local rank 0, transport 2
+s90vxs64:1:1 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0xe96c18005080
+s90vxs64:1:1 [0] NCCL INFO Channel 00/0 : 1[0] -> 0[0] [send] via NET/Socket/0
+s90vxs64:1:450 [0] NCCL INFO New proxy send connection 3 from local rank 0, transport 2
+s90vxs64:1:1 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0xe96c18005108
+s90vxs64:1:1 [0] NCCL INFO Channel 01/0 : 1[0] -> 0[0] [send] via NET/Socket/0
+s90vxs64:1:1 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 0
+s90vxs64:1:1 [0] NCCL INFO comm 0xb1d6cb85ae50 rank 1 nranks 2 cudaDev 0 busId 801000 - Destroy COMPLETE

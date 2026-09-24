@@ -1,0 +1,4 @@
+ Completion with error at client
+ Failed status 12: wr_id 0 syndrom 0x81
+scnt=10, ccnt=0
+ Failed to complete run_iter_bw function successfully

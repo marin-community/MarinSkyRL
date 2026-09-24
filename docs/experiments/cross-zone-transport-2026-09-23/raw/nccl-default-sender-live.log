@@ -1,0 +1,85 @@
+I20260923 17:35:21 134494964082496 iris.cli.main Resolved cluster 'cw-us-east-08a' to config: /home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/lib/iris/config/cw-us-east-08a.yaml
+I20260923 17:35:21 134494964082496 iris.cluster.config Loading config from /home/romain/work/marin-community/marin/cross-zone-iris-launch-20260923/lib/iris/config/cw-us-east-08a.yaml
+I20260923 17:35:21 134494964082496 iris.cli.connect Establishing tunnel to controller...
+I20260923 17:35:22 134494964082496 iris.cluster.platforms.k8s.service Tunnel ready: 127.0.0.1:10000 -> iris-controller-svc:10000
+/tmp/cross-zone-nccl.sjtsxs64.221.log
+sjtsxs64:221:221 [0] NCCL INFO RAS client listening socket at ::1<28028>
+sjtsxs64:221:221 [0] NCCL INFO MNNVL busId 0x1901000 fabric UUID 5c4fca6a2126518e.620fac452cdd6a9d cliqueId 0x7ffe state 3 healthMask 0xaa
+sjtsxs64:221:221 [0] NCCL INFO NET/GIN_IB_GDAKI : GPU Direct RDMA Enabled for HCA 0 'ibp0'
+sjtsxs64:221:221 [0] NCCL INFO NET/GIN_IB_GDAKI : GPU Direct RDMA Enabled for HCA 1 'ibp1'
+sjtsxs64:221:221 [0] NCCL INFO NET/GIN_IB_GDAKI : GPU Direct RDMA Enabled for HCA 2 'ibp2'
+sjtsxs64:221:221 [0] NCCL INFO NET/GIN_IB_GDAKI : GPU Direct RDMA Enabled for HCA 3 'ibp3'
+sjtsxs64:221:221 [0] NCCL INFO NET/RMA_IB_PROXY : GPU Direct RDMA Enabled for HCA 0 'ibp0'
+sjtsxs64:221:221 [0] NCCL INFO NET/RMA_IB_PROXY : GPU Direct RDMA Enabled for HCA 1 'ibp1'
+sjtsxs64:221:221 [0] NCCL INFO NET/RMA_IB_PROXY : GPU Direct RDMA Enabled for HCA 2 'ibp2'
+sjtsxs64:221:221 [0] NCCL INFO NET/RMA_IB_PROXY : GPU Direct RDMA Enabled for HCA 3 'ibp3'
+sjtsxs64:221:221 [0] NCCL INFO NET/IB : GPU Direct RDMA Enabled for HCA 0 'ibp0'
+sjtsxs64:221:221 [0] NCCL INFO NET/IB : GPU Direct RDMA Enabled for HCA 1 'ibp1'
+sjtsxs64:221:221 [0] NCCL INFO NET/IB : GPU Direct RDMA Enabled for HCA 2 'ibp2'
+sjtsxs64:221:221 [0] NCCL INFO NET/IB : GPU Direct RDMA Enabled for HCA 3 'ibp3'
+sjtsxs64:221:221 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is 72-143. (GPU affinity = 72-143 ; CPU affinity = 0-143).
+sjtsxs64:221:221 [0] NCCL INFO Rank 1: 4 Net devices
+sjtsxs64:221:221 [0] NCCL INFO Rank 1: 0 CollNet devices
+sjtsxs64:221:221 [0] NCCL INFO comm 0xb534d3d4dee0 rank 1 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+sjtsxs64:221:221 [0] NCCL INFO Trees [0] -1/-1/-1->1->0 [1] -1/-1/-1->1->0 [2] 0/-1/-1->1->-1 [3] 0/-1/-1->1->-1
+sjtsxs64:221:221 [0] NCCL INFO P2P Chunksize set to 131072
+sjtsxs64:221:221 [0] NCCL INFO Tuning P2P operations with maxP2pPeers = 2
+sjtsxs64:221:221 [0] NCCL INFO ncclOsDlopen(libnccl-profiler.so) failed: libnccl-profiler.so: cannot open shared object file: No such file or directory
+sjtsxs64:221:221 [0] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+sjtsxs64:221:221 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+sjtsxs64:221:233 [0] NCCL INFO [Proxy Service] Device 0 CPU core 74
+sjtsxs64:221:233 [0] NCCL INFO proxy listening socket at 10.186.213.73<39535>
+sjtsxs64:221:234 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 75
+sjtsxs64:221:221 [0] NCCL INFO ncclOsDlopen(libnccl-tuner.so) failed: libnccl-tuner.so: cannot open shared object file: No such file or directory
+sjtsxs64:221:221 [0] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+sjtsxs64:221:221 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+sjtsxs64:221:221 [0] NCCL INFO 4 coll channels, 4 collnet channels, 0 nvls channels, 4 p2p channels, 4 p2p channels per peer
+sjtsxs64:221:221 [0] NCCL INFO ncclCommInitRankConfig comm 0xb534d3d4dee0 rank 1 nranks 2 cudaDev 0 nvmlDev 0 busId 1901000 commId 0x8e193a334780a55b - Init COMPLETE
+sjtsxs64:221:221 [0] NCCL INFO Init timings - ncclCommInitRankConfig: rank 1 nranks 2 total 0.66 (kernels 0.15, alloc 0.08, bootstrap 0.28, allgathers 0.14, topo 0.02, graphs 0.00, connections 0.00, rest 0.00)
+sjtsxs64:221:221 [0] NCCL INFO Symmetric VA size=188GB
+sjtsxs64:221:235 [0] NCCL INFO [Proxy Progress] Device 0 CPU core 76
+sjtsxs64:221:221 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[0] [receive] via NET/IB/2/GDRDMA
+sjtsxs64:221:221 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[0] [receive] via NET/IB/3/GDRDMA
+sjtsxs64:221:221 [0] NCCL INFO Channel 02/0 : 0[0] -> 1[0] [receive] via NET/IB/2/GDRDMA
+sjtsxs64:221:221 [0] NCCL INFO Channel 03/0 : 0[0] -> 1[0] [receive] via NET/IB/3/GDRDMA
+sjtsxs64:221:221 [0] NCCL INFO Channel 00/0 : 1[0] -> 0[0] [send] via NET/IB/2/GDRDMA
+sjtsxs64:221:221 [0] NCCL INFO Channel 01/0 : 1[0] -> 0[0] [send] via NET/IB/3/GDRDMA
+sjtsxs64:221:221 [0] NCCL INFO Channel 02/0 : 1[0] -> 0[0] [send] via NET/IB/2/GDRDMA
+sjtsxs64:221:221 [0] NCCL INFO Channel 03/0 : 1[0] -> 0[0] [send] via NET/IB/3/GDRDMA
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0xfb11dc020000)
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0xfb11dc070000)
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0xfb11dc0f0000)
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0xfb11dc140000)
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0xfb11dc1c0000)
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0xfb11dc210000)
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0xfb11dc290000)
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0xfb11dc2e0000)
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=2 devName=ibp2 ndevs=4 nmdevs=4 qp_num=11496 pkey=0 pd=0xfb11dc0187b0 oooRq=0
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 2 IbDev 2 Port 1 qp_num 11496 mtu 5 LID 620 subnet-prefix 33022  FLID 0 ctsFifoRkey=0x1f7938 ctsFifoLkey=0x1f7938
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbConnectImpl: IbDev 2 Port 1 qp_num 11496 query_ece={supported=1, vendor_id=0x15b3, options=0x30000200, comp_mask=0x0}
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=3 devName=ibp3 ndevs=4 nmdevs=4 qp_num=11496 pkey=0 pd=0xfb11dc0ca490 oooRq=0
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: Flush QP created: port=1 dev=3 devName=ibp3 ndevs=4 nmdevs=4 qp_num=11497 pkey=0 pd=0xfb11dc0ca490
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=2 devName=ibp2 ndevs=4 nmdevs=4 qp_num=11497 pkey=0 pd=0xfb11dc0187b0 oooRq=0
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: Flush QP created: port=1 dev=2 devName=ibp2 ndevs=4 nmdevs=4 qp_num=11498 pkey=0 pd=0xfb11dc0187b0
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=2 devName=ibp2 ndevs=4 nmdevs=4 qp_num=11499 pkey=0 pd=0xfb11dc0187b0 oooRq=0
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 2 IbDev 2 Port 1 qp_num 11499 mtu 5 LID 620 subnet-prefix 33022  FLID 0 ctsFifoRkey=0x1f6b2a ctsFifoLkey=0x1f6b2a
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbConnectImpl: IbDev 2 Port 1 qp_num 11499 query_ece={supported=1, vendor_id=0x15b3, options=0x30000200, comp_mask=0x0}
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=3 devName=ibp3 ndevs=4 nmdevs=4 qp_num=11498 pkey=0 pd=0xfb11dc0ca490 oooRq=0
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 3 IbDev 3 Port 1 qp_num 11498 mtu 5 LID 636 subnet-prefix 33022  FLID 0 ctsFifoRkey=0x1ff0af ctsFifoLkey=0x1ff0af
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbConnectImpl: IbDev 3 Port 1 qp_num 11498 query_ece={supported=1, vendor_id=0x15b3, options=0x30000200, comp_mask=0x0}
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=2 devName=ibp2 ndevs=4 nmdevs=4 qp_num=11500 pkey=0 pd=0xfb11dc0187b0 oooRq=0
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: Flush QP created: port=1 dev=2 devName=ibp2 ndevs=4 nmdevs=4 qp_num=11501 pkey=0 pd=0xfb11dc0187b0
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=3 devName=ibp3 ndevs=4 nmdevs=4 qp_num=11499 pkey=0 pd=0xfb11dc0ca490 oooRq=0
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: Flush QP created: port=1 dev=3 devName=ibp3 ndevs=4 nmdevs=4 qp_num=11500 pkey=0 pd=0xfb11dc0ca490
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=3 devName=ibp3 ndevs=4 nmdevs=4 qp_num=11501 pkey=0 pd=0xfb11dc0ca490 oooRq=0
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 3 IbDev 3 Port 1 qp_num 11501 mtu 5 LID 636 subnet-prefix 33022  FLID 0 ctsFifoRkey=0x1fd594 ctsFifoLkey=0x1fd594
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbConnectImpl: IbDev 3 Port 1 qp_num 11501 query_ece={supported=1, vendor_id=0x15b3, options=0x30000200, comp_mask=0x0}
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbSenderQpsToRts: Set ECE: IbDev 2 Port 1 qp_num 11496 set_ece={supported=1, vendor_id=0x15b3, options=0x30000200, comp_mask=0x0}
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbSenderQpsToRts: Set ECE: IbDev 2 Port 1 qp_num 11499 set_ece={supported=1, vendor_id=0x15b3, options=0x30000200, comp_mask=0x0}
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbSenderQpsToRts: Set ECE: IbDev 3 Port 1 qp_num 11498 set_ece={supported=1, vendor_id=0x15b3, options=0x30000200, comp_mask=0x0}
+sjtsxs64:221:233 [0] NCCL INFO NET/IB: ncclIbSenderQpsToRts: Set ECE: IbDev 3 Port 1 qp_num 11501 set_ece={supported=1, vendor_id=0x15b3, options=0x30000200, comp_mask=0x0}
+sjtsxs64:221:221 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 1
