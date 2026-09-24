@@ -164,6 +164,72 @@ def test_megatron_direct_save_failure_invalidates_every_plan_cache(monkeypatch):
     assert all(cache_key not in cache for cache in caches)
 
 
+@pytest.mark.megatron
+@pytest.mark.parametrize("shard_count", [1, 2])
+def test_megatron_prepended_shard_save_preserves_dcp_format_and_load_values(tmp_path, shard_count):
+    from megatron.core.dist_checkpointing.mapping import ShardedTensor
+    from megatron.core.dist_checkpointing.strategies.torch import (
+        MCoreLoadPlanner,
+        MCoreSavePlanner,
+        mcore_to_pyt_state_dict,
+    )
+    from skyrl_train.distributed.megatron.direct_checkpoint import _mcore_to_pyt_save_state_dict
+
+    value = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    rendezvous = tmp_path / "rendezvous"
+    dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=0, world_size=1)
+    try:
+        metadata = []
+        stored_data = []
+        for name, convert in (
+            ("legacy", lambda state: mcore_to_pyt_state_dict(state, False)),
+            ("checkpointable", _mcore_to_pyt_save_state_dict),
+        ):
+            shards = [
+                ShardedTensor.from_rank_offsets(
+                    "weight", value.clone() + index * 100, (0, index, shard_count), prepend_axis_num=1
+                )
+                for index in range(shard_count)
+            ]
+            state = convert({"weight": shards})
+            path = tmp_path / name
+            checkpoint.save(
+                state,
+                storage_writer=checkpoint.FileSystemWriter(path),
+                planner=MCoreSavePlanner(flatten_state_dict=False, flatten_sharded_tensors=False),
+            )
+
+            with (path / ".metadata").open("rb") as source:
+                saved_metadata = pickle.load(source)
+            metadata.append(saved_metadata.state_dict_metadata)
+            shard_bytes = []
+            for index, storage in sorted(saved_metadata.storage_data.items(), key=lambda pair: pair[0].offset):
+                with (path / storage.relative_path).open("rb") as source:
+                    source.seek(storage.offset)
+                    shard_bytes.append((index.offset, source.read(storage.length)))
+            stored_data.append(shard_bytes)
+
+            destination = [
+                ShardedTensor.from_rank_offsets(
+                    "weight", torch.empty_like(value), (0, index, shard_count), prepend_axis_num=1
+                )
+                for index in range(shard_count)
+            ]
+            loaded = mcore_to_pyt_state_dict({"weight": destination}, True)
+            checkpoint.load(
+                loaded,
+                storage_reader=checkpoint.FileSystemReader(path),
+                planner=MCoreLoadPlanner(flatten_state_dict=False, flatten_sharded_tensors=False),
+            )
+            for index, local_shard in enumerate(loaded["weight"].local_shards()):
+                torch.testing.assert_close(local_shard.tensor.view_as(value), value + index * 100, rtol=0, atol=0)
+
+        assert metadata[0] == metadata[1]
+        assert stored_data[0] == stored_data[1]
+    finally:
+        dist.destroy_process_group()
+
+
 def run_one_training_step(
     actor_group,
     strategy,

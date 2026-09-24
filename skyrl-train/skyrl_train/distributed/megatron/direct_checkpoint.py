@@ -2,12 +2,17 @@ import cProfile
 import json
 import os
 import time
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 
 from loguru import logger
 from megatron.core.dist_checkpointing.dict_utils import nested_values
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict, ShardedTensor
+from megatron.core.dist_checkpointing.strategies.checkpointable import (
+    CheckpointableShardedTensor,
+    LocalShardsContainer,
+)
 from megatron.core.dist_checkpointing.strategies.torch import (
     MCoreLoadPlanner,
     MCoreSavePlanner,
@@ -127,6 +132,45 @@ def invalidate_checkpoint_plan_cache(cache_key: str) -> None:
         cache.pop(cache_key, None)
 
 
+def _mcore_to_pyt_save_state_dict(state_dict: dict) -> dict:
+    """Use DCP's checkpointable shard path for tensors with prepended axes.
+
+    MCore 0.18 sends these regular-grid tensors through legacy PyTorch
+    ShardedTensor construction, which validates a large synthetic global grid
+    on every save. The checkpointable path describes only real local shards.
+    The expanded local view has the same shape and offsets as the legacy path.
+    """
+    legacy_keys = {
+        key
+        for key, shards in state_dict.items()
+        if isinstance(shards[0], ShardedTensor)
+        and shards[0].prepend_axis_num > 0
+        and shards[0].flattened_range is None
+        and shards[0].has_regular_grid
+    }
+    if not legacy_keys:
+        return mcore_to_pyt_state_dict(state_dict, False)
+
+    converted = mcore_to_pyt_state_dict(
+        {key: shards for key, shards in state_dict.items() if key not in legacy_keys}, False
+    )
+    for key in legacy_keys:
+        normalized_shards = []
+        for shard in state_dict[key]:
+            if shard.data is None:
+                raise ValueError(f"Missing checkpoint tensor data for {key}")
+            if shard.prepend_axis_num != state_dict[key][0].prepend_axis_num:
+                raise ValueError(f"Inconsistent prepended axes for {key}")
+            data = shard.data.detach()
+            if not data.is_contiguous():
+                data = data.contiguous()
+            data = data.view((1,) * shard.prepend_axis_num + shard.local_shape)
+            normalized = replace(shard, data=data, local_shape=tuple(data.shape), prepend_axis_num=0)
+            normalized_shards.append(CheckpointableShardedTensor.from_sh_ten(normalized))
+        converted[key] = LocalShardsContainer(normalized_shards) if len(normalized_shards) > 1 else normalized_shards[0]
+    return {key: converted[key] for key in state_dict}
+
+
 class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
     """Save MCore torch-dist shards directly to S3 through PyTorch DCP."""
 
@@ -148,7 +192,7 @@ class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
                 conversion_cpu_started = time.process_time()
                 conversion_profile.enable()
             try:
-                pytorch_state_dict = mcore_to_pyt_state_dict(sharded_state_dict, False)
+                pytorch_state_dict = _mcore_to_pyt_save_state_dict(sharded_state_dict)
             finally:
                 if conversion_profile is not None:
                     conversion_profile.disable()
