@@ -24,6 +24,7 @@ from skyrl_train.inference_engines.base import InferenceEngineInput, Conversatio
 from skyrl_train.error_treatment import ErrorTreatment
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraGrading
 from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group, response_object
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
@@ -210,6 +211,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         self.global_step_fn: Optional[Callable[[], int]] = None
 
         ultra_config = skyrl_gym_cfg.get("nemotron_ultra", {})
+        self.nemotron_ultra_grading = NemotronUltraGrading(ultra_config.get("grading", NemotronUltraGrading.VERIFY))
         self.genrm_config = dict(ultra_config.get("genrm", {}))
         genrm_judge = self.genrm_config.get("judge")
         self.genrm_judge = OpenAIJudge(**dict(genrm_judge)) if genrm_judge is not None else None
@@ -975,6 +977,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         outputs: list[AgentLoopOutput],
         input_batch: TrajectoryRequestBatch,
     ) -> None:
+        if self.nemotron_ultra_grading is NemotronUltraGrading.SKIP:
+            return
         env_extras = input_batch.get("env_extras") or []
         genrm_agents = {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}
 

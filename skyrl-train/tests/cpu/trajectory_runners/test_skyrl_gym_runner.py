@@ -508,6 +508,43 @@ async def test_genrm_cohort_ranking_is_skipped_for_single_sample_evaluation(gene
 
 
 @pytest.mark.asyncio
+async def test_genrm_cohort_ranking_is_skipped_when_grading_is_skipped(generator_cfg, mock_tokenizer):
+    generator_cfg.batched = False
+    skyrl_gym_cfg = DictConfig(
+        {"max_env_workers": 0, "nemotron_ultra": {"grading": "skip", "genrm": {"num_rollouts_per_prompt": 1}}}
+    )
+    runner = SkyRLGymTrajectoryRunner(generator_cfg, skyrl_gym_cfg, MagicMock(), mock_tokenizer)
+    runner.genrm_judge = MagicMock()
+    verification = VerificationResult.unavailable("grading is skipped")
+    output = AgentLoopOutput(
+        evidence=RolloutEvidence(
+            messages=({"role": "user", "content": "q"}, {"role": "assistant", "content": "answer"}),
+            response="answer",
+            response_token_ids=(10, 11),
+        ),
+        verification=verification,
+        reward=RewardResult(unshaped_reward=None, optimization_reward=0.0, token_rewards=(0.0, 0.0)),
+        disposition=TrainingDisposition.train(),
+        loss_mask=[1, 1],
+        env_metrics={},
+    )
+    request = {
+        "prompts": [[{"role": "user", "content": "q"}]],
+        "env_classes": ["nemotron_ultra"],
+        "env_extras": [{"extra_info": {"nemotron_ultra": {"agent": "genrm_simple_agent", "record_json": "{}"}}}],
+        "sampling_params": None,
+        "trajectory_ids": [TrajectoryID("prompt", 0)],
+        "batch_metadata": BatchMetadata(global_step=0, training_phase="train"),
+    }
+
+    await runner._apply_genrm_cohort_rewards([output], request)
+
+    runner.genrm_judge.generate_response.assert_not_called()
+    assert output.verification is verification
+    assert output.disposition.loss_eligible
+
+
+@pytest.mark.asyncio
 @patch("skyrl_gym.make")
 @pytest.mark.parametrize("use_conversation_multi_turn", [True, False])
 async def test_agent_loop_single_turn(

@@ -11,6 +11,7 @@ import ray
 import torch
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraGrading
 from ray.util.placement_group import (
     placement_group,
     PlacementGroupSchedulingStrategy,
@@ -36,6 +37,8 @@ from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.process_diagnostics import initialize_process_diagnostics
 from marinskyrl.distillation import (
     DistillationObjectiveKind,
+    DistillationPlan,
+    DistillationRewardMode,
     compile_distillation_plan_from_config,
     validate_distillation_runtime_support,
 )
@@ -44,6 +47,7 @@ from marinskyrl.runtime_options import GDNBackend, R3Transport
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from .algorithm_registry import (
+    AdvantageEstimator,
     AdvantageEstimatorRegistry,
     NoGroupAdvantage,
     PolicyLossRegistry,
@@ -590,9 +594,30 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
             )
 
 
+def validate_nemotron_ultra_grading(cfg: DictConfig, distillation_plan: DistillationPlan | None) -> None:
+    """Allow skipped Nemotron Ultra grading only when nothing in training or eval reads the reward."""
+    grading = NemotronUltraGrading(cfg.environment.skyrl_gym.nemotron_ultra.grading)
+    if grading is NemotronUltraGrading.VERIFY:
+        return
+    prefix = "environment.skyrl_gym.nemotron_ultra.grading=skip requires"
+    if distillation_plan is None or distillation_plan.reward_mode is not DistillationRewardMode.REPLACE:
+        raise ValueError(f"{prefix} trainer.algorithm.distillation.reward_mode=replace")
+    if cfg.trainer.algorithm.advantage_estimator != AdvantageEstimator.UNIFORM:
+        raise ValueError(
+            f"{prefix} trainer.algorithm.advantage_estimator=uniform; got {cfg.trainer.algorithm.advantage_estimator}"
+        )
+    if cfg.trainer.algorithm.dynamic_sampling.type is not None:
+        raise ValueError(f"{prefix} trainer.algorithm.dynamic_sampling.type=null")
+    if trajectory_selector_from_config(cfg) is not None:
+        raise ValueError(f"{prefix} no trajectory selector")
+    if cfg.trainer.eval_before_train or cfg.trainer.eval_interval > 0:
+        raise ValueError(f"{prefix} trainer.eval_before_train=false and trainer.eval_interval<=0")
+
+
 def validate_cfg(cfg: DictConfig):
     distillation_plan = compile_distillation_plan_from_config(cfg)
     validate_distillation_runtime_support(distillation_plan)
+    validate_nemotron_ultra_grading(cfg, distillation_plan)
     if (
         distillation_plan is not None
         and distillation_plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE

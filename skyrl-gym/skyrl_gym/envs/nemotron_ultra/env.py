@@ -6,6 +6,7 @@ import json
 import re
 import uuid
 from collections.abc import Mapping
+from enum import StrEnum
 from typing import Any
 
 import reasoning_gym
@@ -32,6 +33,8 @@ from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_ou
 from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
 from skyrl_gym.verification import RolloutEvidence, VerificationResult
 
+_NS_TOOLS_AGENT = "ns_tools_simple_agent"
+_LEAN_AGENT = "math_formal_lean_refinement_agent"
 _TOOL_COMPARISON_AGENTS = {
     "single_step_tool_use_with_argument_comparison_agent",
     "swe_pivot_single_step_tool_use_with_argument_comparison_agent",
@@ -45,6 +48,18 @@ _JAILBREAK_AGENTS = {
     "jailbreak_hard_refusal_with_helplines",
     "jailbreak_refusal_with_explanation",
 }
+
+
+class NemotronUltraGrading(StrEnum):
+    """Whether terminal steps run the row's verifier.
+
+    ``skip`` keeps tool execution and turn control but returns no verdict, so rows whose
+    verifier needs a judge endpoint can train under objectives that ignore the reward. Lean
+    refinement rows are still verified, because the verdict decides their correction turn.
+    """
+
+    VERIFY = "verify"
+    SKIP = "skip"
 
 
 def _extract_reasoning_gym_answer(text: str) -> str:
@@ -61,6 +76,7 @@ class NemotronUltraEnv(BaseTextEnv):
 
     def __init__(self, env_config: DictConfig, extras: dict[str, Any] | None = None):
         super().__init__()
+        self.grading = NemotronUltraGrading(env_config.get("grading", NemotronUltraGrading.VERIFY))
         judges = env_config.get("judges", {})
         general_judge = judges.get("general") if isinstance(judges, Mapping) else None
         safety_judge = judges.get("safety") if isinstance(judges, Mapping) else None
@@ -96,9 +112,9 @@ class NemotronUltraEnv(BaseTextEnv):
         )
         if self.agent in {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}:
             self.max_turns = 1
-        elif self.agent == "ns_tools_simple_agent":
+        elif self.agent == _NS_TOOLS_AGENT:
             self.max_turns = 50
-        elif self.agent == "math_formal_lean_refinement_agent":
+        elif self.agent == _LEAN_AGENT:
             self.max_turns = 3
         else:
             self.max_turns = 1
@@ -135,31 +151,49 @@ class NemotronUltraEnv(BaseTextEnv):
             raise RuntimeError(f"Nemotron Ultra verifier {self.agent!r} requires the safety judge")
         return self.safety_judge
 
+    def _ns_tools_turn(self, action: str, diagnostics: dict[str, Any]) -> BaseTextEnvStepOutput | None:
+        """Execute the turn's Python calls; return the continuing step, or None when the rollout ends."""
+        observations = execute_python_calls(
+            self._assistant_message(action),
+            sandbox=self.sandbox,
+            session_id=self.sandbox_session_id,
+        )
+        if observations is not None and self.turns < self.max_turns:
+            return BaseTextEnvStepOutput(
+                observations=observations,
+                reward=0.0,
+                done=False,
+                metadata={**diagnostics, "num_tool_calls": len(observations)},
+                verification=VerificationResult.unavailable("tool execution is not a terminal verdict"),
+            )
+        diagnostics["max_steps_exhausted"] = observations is not None
+        return None
+
     def step(self, action: str) -> BaseTextEnvStepOutput:
         diagnostics: dict[str, Any] = {"agent": self.agent}
         self.turns += 1
+        if self.agent == _NS_TOOLS_AGENT:
+            tool_turn = self._ns_tools_turn(action, diagnostics)
+            if tool_turn is not None:
+                return tool_turn
+        # Lean verification decides whether a correction turn follows, so it runs in both modes.
+        if self.grading is NemotronUltraGrading.SKIP and self.agent != _LEAN_AGENT:
+            return BaseTextEnvStepOutput(
+                observations=[],
+                reward=0.0,
+                done=True,
+                metadata=diagnostics,
+                verification=VerificationResult.unavailable("grading is skipped", diagnostics=diagnostics),
+            )
+
         if self.agent in {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}:
             # Replaced cohort-wise by SkyRLGymTrajectoryRunner before projection.
             reward = float(self.genrm_config.get("default_score", 3.0))
             diagnostics["cohort_reward_pending"] = True
-        elif self.agent == "ns_tools_simple_agent":
-            observations = execute_python_calls(
-                self._assistant_message(action),
-                sandbox=self.sandbox,
-                session_id=self.sandbox_session_id,
-            )
-            if observations is not None and self.turns < self.max_turns:
-                return BaseTextEnvStepOutput(
-                    observations=observations,
-                    reward=0.0,
-                    done=False,
-                    metadata={**diagnostics, "num_tool_calls": len(observations)},
-                    verification=VerificationResult.unavailable("tool execution is not a terminal verdict"),
-                )
+        elif self.agent == _NS_TOOLS_AGENT:
             reward, details = grade_math(action, self.record, judge=self.general_judge)
             diagnostics.update(details)
-            diagnostics["max_steps_exhausted"] = observations is not None
-        elif self.agent == "math_formal_lean_refinement_agent":
+        elif self.agent == _LEAN_AGENT:
             reward, details, correction_prompt = verify_lean_attempt(action, self.record, sandbox=self.sandbox)
             diagnostics.update(details)
             if correction_prompt is not None and self.turns < self.max_turns:

@@ -14,7 +14,7 @@ def test_packaged_entrypoints_reject_ad_hoc_teacher_configuration():
         validate_cfg(cfg)
 
 
-def test_packaged_entrypoints_accept_distillation_only_replace_mode():
+def replace_mode_config() -> DictConfig:
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         cfg = compose(config_name="ppo_base_config")
     OmegaConf.set_struct(cfg, False)
@@ -52,8 +52,42 @@ def test_packaged_entrypoints_accept_distillation_only_replace_mode():
         },
     )
     cfg.trainer.logger = "console"
+    return cfg
 
-    validate_cfg(cfg)
+
+def test_packaged_entrypoints_accept_distillation_only_replace_mode():
+    validate_cfg(replace_mode_config())
+
+
+def skipped_grading_config() -> DictConfig:
+    cfg = replace_mode_config()
+    cfg.environment.skyrl_gym.nemotron_ultra.grading = "skip"
+    cfg.trainer.algorithm.advantage_estimator = "uniform"
+    cfg.trainer.eval_before_train = False
+    cfg.trainer.eval_interval = -1
+    return cfg
+
+
+def test_skipped_grading_is_accepted_for_pure_distillation():
+    validate_cfg(skipped_grading_config())
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "message"),
+    [
+        ("trainer.algorithm.distillation.reward_mode", "add", "reward_mode=replace"),
+        ("trainer.algorithm.advantage_estimator", "grpo", "advantage_estimator=uniform"),
+        ("trainer.algorithm.dynamic_sampling.type", "filter", "dynamic_sampling.type=null"),
+        ("trainer.eval_interval", 5, "eval_interval<=0"),
+        ("trainer.eval_before_train", True, "eval_before_train=false"),
+    ],
+)
+def test_skipped_grading_rejects_configs_that_read_the_reward(path, value, message):
+    cfg = skipped_grading_config()
+    OmegaConf.update(cfg, path, value)
+
+    with pytest.raises(ValueError, match=message):
+        validate_cfg(cfg)
 
 
 def selected_topk_config() -> DictConfig:
