@@ -218,3 +218,122 @@ def test_streaming_fsspec_writer_preserves_upload_part_failure(monkeypatch):
             )
 
     assert filesystem.aborted
+
+
+def test_checkpoint_stream_progresses_past_a_slow_first_part(monkeypatch):
+    monkeypatch.setattr(S3MultipartWriteStream, "part_bytes", _TEST_PART_BYTES)
+
+    class _SlowFirstPartFilesystem(_RecordingMultipartFilesystem):
+        def __init__(self):
+            super().__init__()
+            self.third_part_started = threading.Event()
+
+        def call_s3(self, method: str, **kwargs):
+            if method == "upload_part":
+                part = int(kwargs["PartNumber"])
+                if part == 1 and not self.third_part_started.wait(timeout=3):
+                    raise TimeoutError("part three never started while part one was slow")
+                if part == 3:
+                    self.third_part_started.set()
+                self.uploaded_parts[part] = bytes(kwargs["Body"])
+                return {"ETag": f"etag-{part}"}
+            return super().call_s3(method, **kwargs)
+
+    filesystem = _SlowFirstPartFilesystem()
+    stream = S3MultipartWriteStream(
+        filesystem,
+        "s3://bucket/checkpoint/__0_0.distcp",
+        concurrency=2,
+        complete_out_of_order=True,
+        wait_before_abort=True,
+    )
+
+    stream.write(b"a" * _TEST_PART_BYTES + b"b" * _TEST_PART_BYTES + b"c" * _TEST_PART_BYTES)
+    stream.commit()
+
+    assert filesystem.uploaded_parts == {
+        1: b"a" * _TEST_PART_BYTES,
+        2: b"b" * _TEST_PART_BYTES,
+        3: b"c" * _TEST_PART_BYTES,
+    }
+    assert filesystem.completed_parts == [
+        {"PartNumber": 1, "ETag": "etag-1"},
+        {"PartNumber": 2, "ETag": "etag-2"},
+        {"PartNumber": 3, "ETag": "etag-3"},
+    ]
+
+
+def test_checkpoint_stream_waits_for_inflight_part_before_abort(monkeypatch):
+    monkeypatch.setattr(S3MultipartWriteStream, "part_bytes", _TEST_PART_BYTES)
+
+    class _FailedPartFilesystem(_RecordingMultipartFilesystem):
+        def __init__(self):
+            super().__init__()
+            self.first_part_started = threading.Event()
+            self.second_part_failed = threading.Event()
+            self.first_part_finished = threading.Event()
+
+        def call_s3(self, method: str, **kwargs):
+            if method == "upload_part":
+                part = int(kwargs["PartNumber"])
+                if part == 1:
+                    self.first_part_started.set()
+                    if not self.second_part_failed.wait(timeout=3):
+                        raise TimeoutError("second part never failed")
+                    self.first_part_finished.set()
+                    return {"ETag": "etag-1"}
+                if not self.first_part_started.wait(timeout=3):
+                    raise TimeoutError("first part never started")
+                self.second_part_failed.set()
+                raise OSError("injected second-part failure")
+            if method == "abort_multipart_upload":
+                assert self.first_part_finished.is_set(), "abort raced an in-flight UploadPart"
+            return super().call_s3(method, **kwargs)
+
+    filesystem = _FailedPartFilesystem()
+    stream = S3MultipartWriteStream(
+        filesystem,
+        "s3://bucket/checkpoint/__0_0.distcp",
+        concurrency=2,
+        complete_out_of_order=True,
+        wait_before_abort=True,
+    )
+
+    with pytest.raises(OSError, match="injected second-part failure"):
+        stream.write(b"a" * _TEST_PART_BYTES + b"b" * _TEST_PART_BYTES)
+
+    assert filesystem.aborted
+    assert filesystem.completed_parts is None
+    assert stream.closed
+
+
+def test_dcp_writer_uses_eight_concurrent_parts(monkeypatch):
+    monkeypatch.setattr(S3MultipartWriteStream, "part_bytes", _TEST_PART_BYTES)
+
+    class _EightWayFilesystem(_RecordingMultipartFilesystem):
+        def __init__(self):
+            super().__init__()
+            self.all_parts_started = threading.Event()
+            self.started = 0
+
+        def call_s3(self, method: str, **kwargs):
+            if method == "upload_part":
+                with self._lock:
+                    self.started += 1
+                    if self.started == 8:
+                        self.all_parts_started.set()
+                if not self.all_parts_started.wait(timeout=3):
+                    raise TimeoutError("fewer than eight checkpoint parts started")
+                part = int(kwargs["PartNumber"])
+                return {"ETag": f"etag-{part}"}
+            return super().call_s3(method, **kwargs)
+
+    filesystem = _EightWayFilesystem()
+    writer = StreamingFsspecWriter("s3://bucket/checkpoint", filesystem=filesystem)
+    with writer.fs.create_stream("s3://bucket/checkpoint/__0_0.distcp", "wb") as stream:
+        stream.write(b"x" * (_TEST_PART_BYTES * 8))
+
+    assert filesystem.started == 8
+    assert filesystem.completed_parts is not None
+    assert len(filesystem.completed_parts) == 8
+    assert [part["PartNumber"] for part in filesystem.completed_parts] == list(range(1, 9))
