@@ -244,13 +244,6 @@ trainer:
       # elsewhere, since only Megatron has a pooling path; true on another strategy fails
       # validation.
       pooled: null
-    grad_cosine:
-      # Cosine between consecutive gradient directions. Off by default: it holds a copy of
-      # every local gradient shard (fp32 on GPU, or bf16 on CPU with store: cpu_bf16) and adds
-      # one all-reduce per update. Supported on fsdp, fsdp2 and megatron; null resolves on
-      # there, and true on another strategy fails validation.
-      enabled: false
-      store: gpu_fp32
     batch_invariant: false
     advantage_estimator: "grpo"
     group_advantage_min_size: null

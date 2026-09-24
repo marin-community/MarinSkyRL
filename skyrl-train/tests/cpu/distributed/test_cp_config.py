@@ -91,7 +91,6 @@ RUNTIME_CONFIG_TRAINER_FIELDS = {
 ADDITIVE_ALGORITHM_FIELDS = {
     "batch_invariant": False,
     "ratio_diagnostics": {"position_window": 256, "pooled": None},
-    "grad_cosine": {"enabled": False, "store": "gpu_fp32"},
 }
 ADDITIVE_DYNAMIC_SAMPLING_FIELDS = {
     "informative_on": "shaped",

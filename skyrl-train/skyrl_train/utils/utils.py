@@ -876,7 +876,6 @@ STRATEGY_LIMITED_TELEMETRY = MappingProxyType(
     {
         # Pooling reduces across Megatron's data-parallel ranks; FSDP has no such path.
         "trainer.algorithm.ratio_diagnostics.pooled": frozenset({"megatron"}),
-        "trainer.algorithm.grad_cosine.enabled": frozenset({"fsdp", "fsdp2", "megatron"}),
     }
 )
 

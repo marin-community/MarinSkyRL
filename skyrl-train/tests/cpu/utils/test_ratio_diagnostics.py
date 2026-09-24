@@ -273,14 +273,12 @@ def test_shipped_ratio_diagnostics_pool_on_megatron_and_cost_nothing_elsewhere()
     assert megatron.trainer.algorithm.ratio_diagnostics.pooled is True
 
 
-@pytest.mark.parametrize(
-    ("strategy", "section", "switch"),
-    [("fsdp2", "ratio_diagnostics", "pooled"), ("deepspeed", "grad_cosine", "enabled")],
-)
-def test_an_explicit_strategy_limited_setting_is_rejected_where_its_family_cannot_measure(strategy, section, switch):
+def test_an_explicit_strategy_limited_setting_is_rejected_where_its_family_cannot_measure():
     config = OmegaConf.load(Path(__file__).parents[3] / "skyrl_train/config/ppo_base_config.yaml")
-    requested = OmegaConf.merge(config, {"trainer": {"strategy": strategy, "algorithm": {section: {switch: True}}}})
-    with pytest.raises(ValueError, match=f"{section}.{switch}=true"):
+    requested = OmegaConf.merge(
+        config, {"trainer": {"strategy": "fsdp2", "algorithm": {"ratio_diagnostics": {"pooled": True}}}}
+    )
+    with pytest.raises(ValueError, match="ratio_diagnostics.pooled=true"):
         resolve_strategy_limited_telemetry(requested)
 
 
