@@ -18,22 +18,19 @@ from infra.rl_data.sources import prepare_pivot_swe_row
 
 DATASET_ID = "nvidia/Nemotron-RL-Agentic-SWE-Pivot-v1"
 DATASET_REVISION = "4947a3c8ea803413a65f9eca14a96ef521b2ddf5"
-TRAIN_PREFIXES = 8
-PROBE_PREFIXES = 4
-MAX_CANDIDATES = 128
+TRAIN_PREFIXES = 64
+PROBE_PREFIXES = 128
+MAX_CANDIDATES = 1024
 MAX_PROMPT_TOKENS = 15_872
 TOKENIZER_REVISION = "c1899de"
 
 
 def prepare_smoke_sample(output_dir: Path, tokenizer_name: str = "Qwen/Qwen3-0.6B") -> dict[str, Any]:
-    """Stream at most 128 pinned rows and write eight train and four probe pivots."""
+    """Write eight train batches and trajectory-ID-stratified probes."""
     output_dir.mkdir(parents=True, exist_ok=True)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, revision=TOKENIZER_REVISION)
     dataset = load_dataset(DATASET_ID, revision=DATASET_REVISION, split="train", streaming=True)
-    train: list[dict[str, Any]] = []
-    probe: list[dict[str, Any]] = []
-    train_trajectory_ids: list[int] = []
-    probe_trajectory_ids: list[int] = []
+    eligible: list[tuple[int, dict[str, Any]]] = []
     trajectory_ids: set[int] = set()
 
     for index, raw in enumerate(dataset):
@@ -57,17 +54,19 @@ def prepare_smoke_sample(output_dir: Path, tokenizer_name: str = "Qwen/Qwen3-0.6
         if len(prompt_tokens) > MAX_PROMPT_TOKENS:
             continue
         trajectory_ids.add(trajectory_id)
-        if len(train) < TRAIN_PREFIXES:
-            train.append(prepared)
-            train_trajectory_ids.append(trajectory_id)
-        else:
-            probe.append(prepared)
-            probe_trajectory_ids.append(trajectory_id)
-        if len(probe) == PROBE_PREFIXES:
-            break
+        eligible.append((trajectory_id, prepared))
 
-    if len(train) != TRAIN_PREFIXES or len(probe) != PROBE_PREFIXES:
-        raise RuntimeError(f"Only found {len(train)} train and {len(probe)} probe SWE pivots")
+    if len(eligible) < TRAIN_PREFIXES + PROBE_PREFIXES:
+        raise RuntimeError(f"Only found {len(eligible)} eligible SWE pivots")
+    sorted_ids = sorted(trajectory_id for trajectory_id, _ in eligible)
+    probe_ids = {sorted_ids[index * len(sorted_ids) // PROBE_PREFIXES] for index in range(PROBE_PREFIXES)}
+    probe = [prepared for trajectory_id, prepared in eligible if trajectory_id in probe_ids]
+    train_pairs = [(trajectory_id, prepared) for trajectory_id, prepared in eligible if trajectory_id not in probe_ids][
+        :TRAIN_PREFIXES
+    ]
+    train = [prepared for _, prepared in train_pairs]
+    train_trajectory_ids = [trajectory_id for trajectory_id, _ in train_pairs]
+    probe_trajectory_ids = sorted(probe_ids)
     Dataset.from_list(train).to_parquet(str(output_dir / "train.parquet"))
     Dataset.from_list(probe).to_parquet(str(output_dir / "probe.parquet"))
     manifest = {
@@ -88,6 +87,7 @@ def write_smoke_report(
     retention_root: str,
     manifest: dict[str, Any],
     *,
+    final_step: int,
     training_completed: bool,
 ) -> dict[str, Any]:
     """Persist paired probe predictions and all retained training actions."""
@@ -107,7 +107,7 @@ def write_smoke_report(
         }
 
     before = read_evaluation(0)
-    after = read_evaluation(1)
+    after = read_evaluation(final_step)
     paired = [
         {"trajectory_id": trajectory_id, "before": before.get(trajectory_id), "after": after.get(trajectory_id)}
         for trajectory_id in manifest["probe_trajectory_ids"]
@@ -119,12 +119,15 @@ def write_smoke_report(
 
     filesystem, key = fsspec.core.url_to_fs(retention_root)
     training_records: list[dict[str, Any]] = []
-    for archive_path in filesystem.glob(f"{key}/schema_v*/archives/phase=train/step=00000001/*.zip"):
+    records_per_step: dict[int, int] = defaultdict(int)
+    for archive_path in filesystem.glob(f"{key}/schema_v*/archives/phase=train/step=*/*.zip"):
+        step = int(Path(archive_path).parent.name.removeprefix("step="))
         with filesystem.open(archive_path, "rb") as file:
             with ZipFile(BytesIO(file.read())) as archive:
                 for name in archive.namelist():
                     if name.startswith("records/") and name.endswith(".json.gz"):
                         training_records.append(json.loads(gzip.decompress(archive.read(name))))
+                        records_per_step[step] += 1
     with fsspec.open(f"{diagnostics_root}/training.jsonl", "w") as file:
         for row in training_records:
             file.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -139,6 +142,7 @@ def write_smoke_report(
         "before_probe_count": len(before),
         "after_probe_count": len(after),
         "training_response_count": len(training_records),
+        "training_responses_per_step": dict(sorted(records_per_step.items())),
         "mixed_reward_groups": sum(len(rewards) > 1 for rewards in reward_groups.values()),
         "before_mean_reward": sum(row["score"] for row in before.values()) / len(before) if before else None,
         "after_mean_reward": sum(row["score"] for row in after.values()) / len(after) if after else None,

@@ -23,7 +23,7 @@ LOG_PATH="${IRIS_OUTPUT_DIR:-/tmp}/pivot-swe-smoke.log"
 
 "$PYTHON" -m skyrl_train.entrypoints.checkpoint_export \
   --config-name pivot_swe_smoke \
-  checkpoint_export.step=1 \
-  "checkpoint_export.checkpoint_path=\"${PIVOT_TMP_ROOT}/checkpoints/global_step_1\"" \
+  checkpoint_export.step=8 \
+  "checkpoint_export.checkpoint_path=\"${PIVOT_TMP_ROOT}/checkpoints/global_step_8\"" \
   "checkpoint_export.export_root=${PIVOT_RUN_ROOT}/exports" \
   2>&1 | tee -a "$LOG_PATH"

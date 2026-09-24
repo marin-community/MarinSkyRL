@@ -1,4 +1,4 @@
-"""One-update SWE PivotRL smoke with fixed probes before and after training."""
+"""Multi-update SWE PivotRL smoke with fixed probes before and after training."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import ray
 from loguru import logger
 from omegaconf import DictConfig
 
-from infra.rl_data.pivot_swe import prepare_smoke_sample, write_smoke_report
+from infra.rl_data.pivot_swe import PROBE_PREFIXES, TRAIN_PREFIXES, prepare_smoke_sample, write_smoke_report
 from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
 
@@ -29,6 +29,7 @@ def skyrl_entrypoint(cfg: DictConfig) -> None:
             json.dump(manifest, file, indent=2, sort_keys=True)
         logger.info("Pivot SWE smoke artifacts: {}", diagnostics_root)
         retention_root = str(cfg.generator.trajectory_retention.output_path)
+        final_step = int(cfg.trainer.max_steps)
         try:
             BasePPOExp(cfg).run()
         except BaseException:
@@ -38,21 +39,29 @@ def skyrl_entrypoint(cfg: DictConfig) -> None:
                     diagnostics_root,
                     retention_root,
                     manifest,
+                    final_step=final_step,
                     training_completed=False,
                 )
             except Exception:
                 logger.exception("Could not write partial Pivot SWE smoke report")
             raise
         summary = write_smoke_report(
-            str(cfg.trainer.export_path), diagnostics_root, retention_root, manifest, training_completed=True
+            str(cfg.trainer.export_path),
+            diagnostics_root,
+            retention_root,
+            manifest,
+            final_step=final_step,
+            training_completed=True,
         )
         logger.info("Pivot SWE smoke result: {}", json.dumps(summary, sort_keys=True))
         if (summary["before_probe_count"], summary["after_probe_count"], summary["training_response_count"]) != (
-            4,
-            4,
-            16,
+            PROBE_PREFIXES,
+            PROBE_PREFIXES,
+            TRAIN_PREFIXES * int(cfg.generator.n_samples_per_prompt),
         ):
-            raise RuntimeError("Pivot SWE smoke did not retain the expected 4+4 probe and 16 training responses")
+            raise RuntimeError("Pivot SWE smoke did not retain the expected probe and training responses")
+        if len(summary["training_responses_per_step"]) != final_step:
+            raise RuntimeError("Pivot SWE smoke did not retain responses from every training step")
 
 
 @hydra.main(config_path=config_dir, config_name="pivot_swe_smoke", version_base=None)

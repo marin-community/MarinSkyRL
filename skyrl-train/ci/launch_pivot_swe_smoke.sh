@@ -27,7 +27,7 @@ echo "Training actions: ${PIVOT_RUN_ROOT}/diagnostics/training.jsonl"
   --job-name "$RUN_ID" \
   --gpu H100x1 --enable-extra-resources \
   --cpu 8 --memory 64GB --disk 200GB \
-  --timeout 3600 --no-sync \
+  --timeout 7200 --no-sync \
   -e RUN_ID "$RUN_ID" \
   -e PIVOT_RUN_ROOT "$PIVOT_RUN_ROOT" \
   -e PIVOT_TMP_ROOT "$PIVOT_TMP_ROOT" \
