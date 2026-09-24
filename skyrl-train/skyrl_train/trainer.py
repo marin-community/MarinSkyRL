@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 import json
 import math
 import os
@@ -2956,16 +2957,6 @@ class RayPPOTrainer:
                 f"completed checkpoint marker is missing at {trainer_state_path}"
             )
 
-        existing = read_hf_export_request(checkpoint_path)
-        if existing is not None:
-            if existing.status is HFExportStatus.COMPLETE:
-                logger.info(f"HF export for global_step_{self.global_step} is already complete")
-            else:
-                logger.info(
-                    f"HF export for global_step_{self.global_step} is already recorded with status={existing.status.value}"
-                )
-            return
-
         placement = self.cfg.trainer.placement
         model = self.cfg.trainer.policy.model
         request = HFExportRequest(
@@ -2983,6 +2974,21 @@ class RayPPOTrainer:
             hf_hub_revision=self.cfg.trainer.get("hf_hub_revision", DEFAULT_HF_HUB_REVISION),
             hf_upload_mode=HFUploadMode(self.cfg.trainer.get("hf_upload_mode", DEFAULT_HF_UPLOAD_MODE)),
         )
+        existing = read_hf_export_request(checkpoint_path)
+        if existing is not None:
+            if existing.status is HFExportStatus.COMPLETE:
+                logger.info(f"HF export for global_step_{self.global_step} is already complete")
+                return
+            if existing.status is HFExportStatus.IN_PROGRESS:
+                logger.info(f"HF export for global_step_{self.global_step} is already in progress")
+                return
+            request = replace(
+                request,
+                attempts=existing.attempts,
+                timeout=existing.timeout,
+                last_exit_code=existing.last_exit_code,
+            )
+            logger.info(f"Refreshing pending HF export request for global_step_{self.global_step}")
         request_path = write_hf_export_request(request)
         logger.info(f"Queued out-of-band HF export for global_step_{self.global_step}: {request_path}")
 

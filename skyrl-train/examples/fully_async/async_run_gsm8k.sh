@@ -75,5 +75,4 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.fully_as
   generator.enable_http_endpoint=true \
   generator.http_endpoint_host="127.0.0.1" \
   generator.http_endpoint_port=8000 \
-  generator.enforce_eager=true \
   $@

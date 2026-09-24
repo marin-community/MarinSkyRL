@@ -24,11 +24,12 @@ def test_training_driver_starts_from_the_immutable_runtime_checkout(monkeypatch)
     monkeypatch.setattr(task_runtime.subprocess, "Popen", fake_popen)
     environment = {"SKYRL_HOME": "/app/marinskyrl", "PYTHONPATH": "/app/marinskyrl:/app"}
 
-    launched = task_runtime.launch_training_driver(["python", "-m", "cloud.iris.training_driver"], environment)
+    config_path = Path("/tmp/launch.yaml")
+    launched = task_runtime.launch_training_driver(config_path, environment)
 
     assert launched is process
     assert observed == {
-        "argv": ["python", "-m", "cloud.iris.training_driver"],
+        "argv": [sys.executable, "-m", "cloud.iris.training_driver", "--config", str(config_path)],
         "env": environment,
         "cwd": "/app/marinskyrl",
         "start_new_session": True,
@@ -39,7 +40,7 @@ def test_training_driver_starts_from_the_immutable_runtime_checkout(monkeypatch)
 
 def test_training_driver_requires_the_runtime_checkout() -> None:
     with pytest.raises(RuntimeError, match="SKYRL_HOME"):
-        task_runtime.launch_training_driver(["python"], {})
+        task_runtime.launch_training_driver(Path("/tmp/launch.yaml"), {})
 
 
 def test_head_returns_driver_abort_when_failure_artifact_upload_blocks(tmp_path, monkeypatch) -> None:
@@ -70,7 +71,7 @@ def test_head_returns_driver_abort_when_failure_artifact_upload_blocks(tmp_path,
     result = []
 
     def run_head():
-        result.append(task_runtime.run_head(args, [sys.executable, "-c", "import os; os.abort()"]))
+        result.append(_run_head_script(args, "import os; os.abort()", monkeypatch))
 
     runtime_thread = threading.Thread(target=run_head)
     runtime_thread.start()
@@ -119,6 +120,20 @@ def _isolate_head_runtime(tmp_path: Path, monkeypatch) -> None:
     )
 
 
+def _run_head_script(args: SimpleNamespace, script: str, monkeypatch) -> int:
+    def launch(_config_path, environment):
+        return task_runtime.subprocess.Popen(
+            [sys.executable, "-c", script],
+            env=environment,
+            start_new_session=True,
+            stdout=task_runtime.subprocess.PIPE,
+            stderr=task_runtime.subprocess.STDOUT,
+        )
+
+    monkeypatch.setattr(task_runtime, "launch_training_driver", launch)
+    return task_runtime.run_head(args, Path("/tmp/unused-launch-config.yaml"))
+
+
 def test_head_kills_a_silent_driver_and_records_the_stall_reason(tmp_path, monkeypatch) -> None:
     _isolate_head_runtime(tmp_path, monkeypatch)
     rendezvous_dir = tmp_path / "rendezvous"
@@ -138,9 +153,8 @@ print("training started", flush=True)
 os.kill(os.getpid(), signal.SIGABRT)
 """
 
-    exit_code = task_runtime.run_head(
-        _runtime_args(tmp_path, liveness_timeout=0.1, rendezvous_dir=str(rendezvous_dir)),
-        [sys.executable, "-c", script],
+    exit_code = _run_head_script(
+        _runtime_args(tmp_path, liveness_timeout=0.1, rendezvous_dir=str(rendezvous_dir)), script, monkeypatch
     )
 
     artifacts = list((rendezvous_dir / "term_artifacts").glob("*.txt"))
@@ -159,10 +173,7 @@ for phase in range(5):
     threading.Event().wait(0.03)
 """
 
-    exit_code = task_runtime.run_head(
-        _runtime_args(tmp_path, liveness_timeout=0.05),
-        [sys.executable, "-c", script],
-    )
+    exit_code = _run_head_script(_runtime_args(tmp_path, liveness_timeout=0.05), script, monkeypatch)
 
     assert exit_code == 0
 
@@ -175,9 +186,6 @@ import threading
 threading.Event().wait(0.1)
 """
 
-    exit_code = task_runtime.run_head(
-        _runtime_args(tmp_path, liveness_timeout=0),
-        [sys.executable, "-c", script],
-    )
+    exit_code = _run_head_script(_runtime_args(tmp_path, liveness_timeout=0), script, monkeypatch)
 
     assert exit_code == 0

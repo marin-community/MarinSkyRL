@@ -202,7 +202,7 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: marin-community/marin-style/actions/report-failure@727f180cd423246ca1a6164163a5883cda5bf52b  # v0.4.0
+      - uses: marin-community/marin-style/actions/report-failure@727f180cd423246ca1a6164163a5883cda5bf52b
         with:
           lane: gsm8k-h100-and-grug-vllm-gb200
           trigger-token: ${{ secrets.LOOM_TRIGGER_GH_TOKEN }}

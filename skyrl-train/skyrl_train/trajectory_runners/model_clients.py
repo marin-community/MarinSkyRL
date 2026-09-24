@@ -1,20 +1,30 @@
 """Model transports used by trajectory runners."""
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Protocol
+from collections.abc import Awaitable, Callable
+from functools import partial
+from typing import Any, Protocol, TypeVar
 
 import aiohttp
 from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInput, InferenceEngineOutput
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY, render_exact_chat_continuation
+from skyrl_train.inference_engines.chat_template import (
+    SINGLE_TOOL_CALL_TEMPLATE_ERROR,
+    sequentialize_multi_tool_call_turns,
+    template_error_from_exception,
+)
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.response_topk import select_chat_response_topk
 from skyrl_train.trajectory_runners.types import TokenProvenance
+from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 
 
 _CHAT_SAMPLING_EXCLUSIONS = frozenset({"max_generate_length", "logprobs", "stop"})
+_T = TypeVar("_T")
 
 
 class ModelClientOutput(InferenceEngineOutput):
@@ -42,20 +52,14 @@ class _ChatResult:
     routed_experts: list[list[list[int]]] | None = None
 
 
-def _choice_routed_experts(choice: dict[str, Any], response_ids: list[int]) -> list[list[list[int]]] | None:
+def _choice_routed_experts(
+    choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]
+) -> list[list[list[int]]] | None:
     provider_fields = choice.get("provider_specific_fields") or {}
     routes = choice.get("routed_experts", provider_fields.get("routed_experts"))
     if routes is None:
         return None
-    if not isinstance(routes, list) or len(routes) != len(response_ids):
-        raise ValueError("chat response routed_experts must align with exact response token IDs")
-    if not all(
-        isinstance(token, list)
-        and all(isinstance(layer, list) and all(isinstance(expert, int) for expert in layer) for layer in token)
-        for token in routes
-    ):
-        raise ValueError("chat response routed_experts must have [token, layer, expert] integer shape")
-    return routes
+    return normalize_routed_experts(routes, prompt_ids, response_ids)
 
 
 def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
@@ -78,6 +82,56 @@ def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
     if any(result.routed_experts is not None for result in results):
         output["routed_experts"] = [result.routed_experts for result in results]
     return output
+
+
+async def _render_chat_prompt(
+    tokenize: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+    render_request: dict[str, Any],
+    continuation: ChatContinuation | None,
+) -> tuple[list[dict[str, Any]], list[int]]:
+    async def render(request: dict[str, Any], current_continuation: ChatContinuation | None) -> list[int] | None:
+        if current_continuation is None:
+            return (await tokenize(request)).get("tokens")
+        return await render_exact_chat_continuation(
+            tokenize,
+            request,
+            assistant_message_index=current_continuation["assistant_message_index"],
+            served_prefix_token_ids=current_continuation["served_prefix_token_ids"],
+        )
+
+    messages = render_request["json"]["messages"]
+    try:
+        prompt_ids = await render(render_request, continuation)
+    except Exception as error:
+        template_error = template_error_from_exception(error)
+        if template_error is None:
+            raise
+        if SINGLE_TOOL_CALL_TEMPLATE_ERROR not in str(template_error):
+            raise template_error from error
+        assistant_index = continuation["assistant_message_index"] if continuation is not None else None
+        messages, assistant_index = sequentialize_multi_tool_call_turns(messages, assistant_index)
+        if messages == render_request["json"]["messages"]:
+            raise template_error from error
+        render_request = deepcopy(render_request)
+        render_request["json"]["messages"] = messages
+        if continuation is not None:
+            assert assistant_index is not None
+            continuation = ChatContinuation(
+                served_prefix_token_ids=continuation["served_prefix_token_ids"],
+                assistant_message_index=assistant_index,
+            )
+        try:
+            prompt_ids = await render(render_request, continuation)
+        except Exception as retry_error:
+            retry_template_error = template_error_from_exception(retry_error)
+            if retry_template_error is not None:
+                raise retry_template_error from retry_error
+            raise
+    if prompt_ids is None:
+        raise RuntimeError("Cannot preserve the exact served token prefix across this chat turn")
+    if not isinstance(prompt_ids, list) or not all(isinstance(token, int) for token in prompt_ids):
+        raise RuntimeError("vLLM tokenization did not return prompt token IDs")
+    return messages, prompt_ids
 
 
 class DirectModelClient:
@@ -147,20 +201,7 @@ class DirectModelClient:
                 },
                 "headers": {},
             }
-            if continuation is None:
-                tokenize_response = await self._client.tokenize(render_request)
-                prompt_ids = tokenize_response.get("tokens")
-            else:
-                prompt_ids = await render_exact_chat_continuation(
-                    self._client.tokenize,
-                    render_request,
-                    assistant_message_index=continuation["assistant_message_index"],
-                    served_prefix_token_ids=continuation["served_prefix_token_ids"],
-                )
-                if prompt_ids is None:
-                    raise RuntimeError("Cannot preserve the exact served token prefix across this chat turn")
-            if not isinstance(prompt_ids, list) or not all(isinstance(token, int) for token in prompt_ids):
-                raise RuntimeError("vLLM tokenization did not return prompt token IDs")
+            messages, prompt_ids = await _render_chat_prompt(self._client.tokenize, render_request, continuation)
 
             body = {
                 "model": self._client.model_name,
@@ -209,7 +250,7 @@ class DirectModelClient:
                 text,
                 choice["finish_reason"],
                 message,
-                _choice_routed_experts(choice, response_ids),
+                _choice_routed_experts(choice, prompt_ids, response_ids),
             )
 
         results = await asyncio.gather(
@@ -224,10 +265,22 @@ class DirectModelClient:
 class OpenAIHTTPModelClient:
     """Call an OpenAI-compatible chat endpoint and normalize its response."""
 
-    def __init__(self, *, base_url: str, model_name: str, tokenizer: PreTrainedTokenizerBase):
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model_name: str,
+        tokenizer: PreTrainedTokenizerBase,
+        max_concurrent_requests: int,
+    ):
         self._base_url = base_url.rstrip("/")
         self._model_name = model_name
         self._tokenizer = tokenizer
+        self._request_slots = asyncio.Semaphore(max_concurrent_requests)
+
+    async def _with_request_slot(self, operation: Callable[[], Awaitable[_T]]) -> _T:
+        async with self._request_slots:
+            return await operation()
 
     async def generate(self, request: InferenceEngineInput) -> ModelClientOutput:
         prompts = request.get("prompts")
@@ -250,13 +303,16 @@ class OpenAIHTTPModelClient:
             if chat_options is not None:
                 results = await asyncio.gather(
                     *(
-                        self._generate_structured_chat(
-                            session,
-                            messages=messages,
-                            session_id=session_id,
-                            sampling_params=request.get("sampling_params") or {},
-                            chat_options=options,
-                            continuation=continuation,
+                        self._with_request_slot(
+                            partial(
+                                self._generate_structured_chat,
+                                session,
+                                messages=messages,
+                                session_id=session_id,
+                                sampling_params=request.get("sampling_params") or {},
+                                chat_options=options,
+                                continuation=continuation,
+                            )
                         )
                         for messages, session_id, options, continuation in zip(
                             prompts, session_ids, chat_options, continuations, strict=True
@@ -266,11 +322,14 @@ class OpenAIHTTPModelClient:
                 return _assemble_chat_results(results)
             responses = await asyncio.gather(
                 *(
-                    self._generate_one(
-                        session,
-                        messages=messages,
-                        session_id=session_id,
-                        sampling_params=request.get("sampling_params") or {},
+                    self._with_request_slot(
+                        partial(
+                            self._generate_one,
+                            session,
+                            messages=messages,
+                            session_id=session_id,
+                            sampling_params=request.get("sampling_params") or {},
+                        )
                     )
                     for messages, session_id in zip(prompts, session_ids)
                 )
@@ -315,19 +374,7 @@ class OpenAIHTTPModelClient:
                     raise RuntimeError(f"OpenAI chat tokenization returned HTTP {response.status}: {body}")
                 return body
 
-        if continuation is None:
-            prompt_ids = (await tokenize(render_request)).get("tokens")
-        else:
-            prompt_ids = await render_exact_chat_continuation(
-                tokenize,
-                render_request,
-                assistant_message_index=continuation["assistant_message_index"],
-                served_prefix_token_ids=continuation["served_prefix_token_ids"],
-            )
-            if prompt_ids is None:
-                raise RuntimeError("Cannot preserve the exact served token prefix across this chat turn")
-        if not isinstance(prompt_ids, list) or not all(isinstance(token, int) for token in prompt_ids):
-            raise RuntimeError("OpenAI chat tokenization did not return prompt token IDs")
+        messages, prompt_ids = await _render_chat_prompt(tokenize, render_request, continuation)
 
         payload = {
             "model": self._model_name,
@@ -374,7 +421,7 @@ class OpenAIHTTPModelClient:
             text=self._tokenizer.decode(response_ids, skip_special_tokens=True),
             stop_reason=choice["finish_reason"],
             assistant_message=choice["message"],
-            routed_experts=_choice_routed_experts(choice, response_ids),
+            routed_experts=_choice_routed_experts(choice, prompt_ids, response_ids),
         )
 
     async def _generate_one(

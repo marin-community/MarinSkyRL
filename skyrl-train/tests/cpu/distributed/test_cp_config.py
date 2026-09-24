@@ -65,6 +65,8 @@ RUNTIME_CONFIG_TRAINER_FIELDS = {
     "async_spans": False,
     "optimizer_state_metrics": False,
     "distillation_token_budget": None,
+    "eval_num_prompts": None,
+    "export_hf_artifact": False,
     "offload_optimizer_during_rollouts": False,
     "reset_distillation_token_count_on_resume": False,
     "reset_global_step_on_resume": False,
@@ -127,6 +129,8 @@ ADDITIVE_MODEL_FIELDS = {
     "source_uri": None,
     "source_identity": None,
     "revision": None,
+    "tokenizer_path": None,
+    "tokenizer_revision": None,
 }
 ADDITIVE_POLICY_LORA_FIELDS = {
     "adapter_path": None,

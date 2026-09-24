@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import struct
-from typing import Literal, Self
+from typing import BinaryIO, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
@@ -18,6 +18,8 @@ from marinskyrl.hf_model import (
 
 MODEL_MANIFEST_FILENAME = ".marinskyrl-model-manifest.json"
 HF_WEIGHT_INDEX_FILENAME = "model.safetensors.index.json"
+MAX_SAFETENSORS_HEADER_BYTES = 100 * 2**20
+_HEADER_READ_CHUNK_BYTES = 8 * 2**20
 
 
 class ModelManifestFile(BaseModel):
@@ -25,15 +27,17 @@ class ModelManifestFile(BaseModel):
 
     path: str
     size: int = Field(ge=0, strict=True)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sha256: str
 
     @field_validator("path")
     @classmethod
     def validate_path(cls, value: str) -> str:
-        path = PurePosixPath(value)
-        if value in ("", ".") or path.is_absolute() or ".." in path.parts:
-            raise ValueError(f"model file path must be relative and contained: {value!r}")
-        return value
+        return validate_model_file_path(value)
+
+    @field_validator("sha256")
+    @classmethod
+    def validate_sha256(cls, value: str) -> str:
+        return validate_sha256_digest(value)
 
 
 class ModelManifest(BaseModel):
@@ -62,14 +66,37 @@ class ModelManifest(BaseModel):
         expected = _manifest_identity(self.model_id, self.revision, self.files, self.tokenizer_mode)
         if self.identity != expected:
             raise ValueError(f"Model manifest identity mismatch at {source}: {self.identity} != {expected}")
-        names = set(paths)
-        if self.tokenizer_mode == "embedded":
-            validate_portable_hf_model_files(names, source)
-        else:
-            validate_hf_model_weights(names, source)
+        validate_model_file_names(set(paths), source, self.tokenizer_mode)
         if HF_WEIGHT_INDEX_FILENAME not in paths:
             raise ValueError(f"Model manifest is missing {HF_WEIGHT_INDEX_FILENAME}: {source}")
         return self
+
+
+def validate_model_file_path(value: str) -> str:
+    """Validate one relative path stored in a model manifest."""
+    path = PurePosixPath(value)
+    if value in ("", ".") or path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"model file path must be relative and contained: {value!r}")
+    return value
+
+
+def validate_sha256_digest(value: str) -> str:
+    """Validate and return a lowercase SHA-256 digest."""
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError(f"invalid SHA-256 digest: {value!r}")
+    return value
+
+
+def validate_model_file_names(
+    names: set[str],
+    source: str,
+    tokenizer_mode: Literal["embedded", "policy"],
+) -> None:
+    """Validate a model file inventory for its tokenizer contract."""
+    if tokenizer_mode == "embedded":
+        validate_portable_hf_model_files(names, source)
+    else:
+        validate_hf_model_weights(names, source)
 
 
 def sha256_file(path: Path) -> str:
@@ -100,41 +127,96 @@ def _manifest_identity(
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
-def _safetensors_keys(path: Path) -> tuple[str, ...]:
-    with path.open("rb") as source:
-        prefix = source.read(8)
-        if len(prefix) != 8:
-            raise ValueError(f"Truncated safetensors header: {path}")
-        header_size = struct.unpack("<Q", prefix)[0]
-        header = json.loads(source.read(header_size))
+def read_safetensors_header(source: BinaryIO, source_name: str) -> tuple[bytes, tuple[str, ...]]:
+    """Consume and validate one safetensors header, returning its bytes and tensor keys."""
+
+    def read_exact(size: int) -> bytes:
+        chunks = []
+        remaining = size
+        while remaining:
+            chunk = source.read(min(remaining, _HEADER_READ_CHUNK_BYTES))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    prefix = read_exact(8)
+    if len(prefix) != 8:
+        raise ValueError(f"Truncated safetensors header: {source_name}")
+    header_size = struct.unpack("<Q", prefix)[0]
+    if header_size > MAX_SAFETENSORS_HEADER_BYTES:
+        raise ValueError(f"Safetensors header exceeds {MAX_SAFETENSORS_HEADER_BYTES} bytes: {source_name}")
+    header_bytes = read_exact(header_size)
+    if len(header_bytes) != header_size:
+        raise ValueError(f"Truncated safetensors header: {source_name}")
+    header = json.loads(header_bytes)
     if not isinstance(header, dict):
-        raise ValueError(f"Invalid safetensors header: {path}")
-    return tuple(sorted(key for key in header if key != "__metadata__"))
+        raise ValueError(f"Invalid safetensors header: {source_name}")
+    return prefix + header_bytes, tuple(sorted(key for key in header if key != "__metadata__"))
+
+
+def build_safetensors_weight_index(
+    shards: dict[str, tuple[int, tuple[str, ...]]],
+    source: str,
+    *,
+    existing: bytes | None = None,
+) -> bytes:
+    """Build or validate a Transformers safetensors index from shard headers."""
+    if not shards:
+        raise ValueError(f"Hugging Face mirror requires safetensors weights: {source}")
+    weight_map: dict[str, str] = {}
+    for shard_name, (_size, keys) in sorted(shards.items()):
+        for key in keys:
+            if key in weight_map:
+                raise ValueError(f"Duplicate tensor {key!r} in {source}")
+            weight_map[key] = shard_name
+    if not weight_map:
+        raise ValueError(f"Hugging Face mirror has no indexed tensors: {source}")
+    if existing is not None:
+        parsed = json.loads(existing)
+        if parsed.get("weight_map") != weight_map:
+            raise ValueError(f"Safetensors weight index does not match its shards: {source}")
+        return existing
+    index = {
+        "metadata": {"total_size": sum(size for size, _keys in shards.values())},
+        "weight_map": weight_map,
+    }
+    return (json.dumps(index, indent=2, sort_keys=True) + "\n").encode()
+
+
+def build_model_manifest(
+    files: tuple[ModelManifestFile, ...],
+    model_id: str | None,
+    revision: str | None,
+    *,
+    tokenizer_mode: Literal["embedded", "policy"] = "embedded",
+) -> ModelManifest:
+    """Validate manifest entries and bind them to an immutable identity."""
+    return ModelManifest(
+        model_id=model_id,
+        revision=revision,
+        tokenizer_mode=tokenizer_mode,
+        identity=_manifest_identity(model_id, revision, files, tokenizer_mode),
+        files=files,
+    )
 
 
 def _ensure_weight_index(snapshot: Path) -> None:
     shards = sorted(snapshot.glob("*.safetensors"))
-    if not shards:
-        raise ValueError(f"Hugging Face mirror requires safetensors weights: {snapshot}")
-    weight_map: dict[str, str] = {}
+    shard_headers = {}
     for shard in shards:
-        for key in _safetensors_keys(shard):
-            if key in weight_map:
-                raise ValueError(f"Duplicate tensor {key!r} in {snapshot}")
-            weight_map[key] = shard.name
-    if not weight_map:
-        raise ValueError(f"Hugging Face mirror has no indexed tensors: {snapshot}")
-    index = {
-        "metadata": {"total_size": sum(path.stat().st_size for path in shards)},
-        "weight_map": weight_map,
-    }
+        with shard.open("rb") as source:
+            _header, keys = read_safetensors_header(source, str(shard))
+        shard_headers[shard.name] = (shard.stat().st_size, keys)
     index_path = snapshot / HF_WEIGHT_INDEX_FILENAME
-    if index_path.is_file():
-        existing = json.loads(index_path.read_text())
-        if existing.get("weight_map") != weight_map:
-            raise ValueError(f"Safetensors weight index does not match its shards: {index_path}")
-    else:
-        index_path.write_text(json.dumps(index, indent=2, sort_keys=True) + "\n")
+    index_bytes = build_safetensors_weight_index(
+        shard_headers,
+        str(index_path),
+        existing=index_path.read_bytes() if index_path.is_file() else None,
+    )
+    if not index_path.is_file():
+        index_path.write_bytes(index_bytes)
 
 
 def snapshot_model_manifest(
@@ -150,10 +232,7 @@ def snapshot_model_manifest(
         path for path in snapshot.rglob("*") if path.is_file() and path.relative_to(snapshot).parts[0] != ".cache"
     )
     names = {path.relative_to(snapshot).as_posix() for path in paths}
-    if tokenizer_mode == "embedded":
-        validate_portable_hf_model_files(names, str(snapshot))
-    else:
-        validate_hf_model_weights(names, str(snapshot))
+    validate_model_file_names(names, str(snapshot), tokenizer_mode)
     files = tuple(
         ModelManifestFile(
             path=path.relative_to(snapshot).as_posix(),
@@ -162,12 +241,11 @@ def snapshot_model_manifest(
         )
         for path in paths
     )
-    return ModelManifest(
-        model_id=model_id,
-        revision=revision,
+    return build_model_manifest(
+        files,
+        model_id,
+        revision,
         tokenizer_mode=tokenizer_mode,
-        identity=_manifest_identity(model_id, revision, files, tokenizer_mode),
-        files=files,
     )
 
 

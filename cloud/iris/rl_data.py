@@ -18,12 +18,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, List, Mapping, Optional
 
-import fsspec
-
 from cloud.iris.hf_datasets import resolve_hf_dataset_selector
 from cloud.iris.tasks_parquet import from_parquet
+from marinskyrl.remote_io import filesystem_and_path
 from marinskyrl.resource_locator import parse_hf_dataset_selector
-from marinskyrl.task_sources import TaskTroveParquetSource, data_source
+from marinskyrl.task_sources import DirectoryDataSource, TaskTroveParquetSource, data_source
 
 
 @dataclass(frozen=True)
@@ -40,7 +39,8 @@ def _stage_remote_file(uri: str, destination: Path, *, overwrite: bool) -> None:
         return
     staging = destination.parent / f".{destination.name}.{os.getpid()}.tmp"
     try:
-        with fsspec.open(uri, "rb") as src, open(staging, "wb") as dst:
+        filesystem, source_path = filesystem_and_path(uri)
+        with filesystem.open(source_path, "rb") as src, open(staging, "wb") as dst:
             shutil.copyfileobj(src, dst)
         os.replace(staging, destination)
     finally:
@@ -119,13 +119,20 @@ def resolve_rl_train_data_with_sources(
 
     if kind == "parquet":
         resolved: List[str] = []
+        sources: List[str | dict[str, Any]] = []
         stage_root = Path(scratch_dir) / "rl_parquet" if scratch_dir else Path("/tmp/skyrl_rl_parquet")
         for entry in train_data:
-            if not isinstance(entry, str):
-                raise ValueError("Structured task sources require data kind 'tasks'")
+            if isinstance(entry, Mapping):
+                source = data_source(entry)
+                if not isinstance(source, DirectoryDataSource):
+                    raise ValueError(f"Structured parquet data must use a directory source, found {source.kind!r}")
+                resolved.append(source.resolved_path())
+                sources.append(asdict(source))
+                continue
             # A local path or a bare HF dataset id is read directly by PromptDataset.
             if "://" not in entry or entry.startswith("file://"):
                 resolved.append(entry)
+                sources.append(entry)
                 continue
             # Object-store URI: pull to node-local disk (offline mode blocks the remote read).
             local = stage_root / Path(entry.split("?", 1)[0]).name
@@ -133,7 +140,8 @@ def resolve_rl_train_data_with_sources(
             if verbose:
                 print(f"[rl_data] data.kind=parquet: staged {entry} -> {local}")
             resolved.append(str(local))
-        return ResolvedRLData(tuple(resolved), tuple(train_data))
+            sources.append(entry)
+        return ResolvedRLData(tuple(resolved), tuple(sources))
 
     # Determine the scratch directory for extracted tasks. It MUST be a shared
     # filesystem visible to all compute nodes; /tmp is node-local (last resort).
@@ -157,10 +165,11 @@ def resolve_rl_train_data_with_sources(
     for data_path in train_data:
         if isinstance(data_path, Mapping):
             source = data_source(data_path)
-            if not isinstance(source, TaskTroveParquetSource):
-                raise ValueError(f"Unsupported structured task data source: {source.kind!r}")
             packed_source = asdict(source)
-            resolved_paths.append(packed_source)
+            if isinstance(source, DirectoryDataSource):
+                resolved_paths.append(source.resolved_path())
+            elif isinstance(source, TaskTroveParquetSource):
+                resolved_paths.append(packed_source)
             sources.append(packed_source)
             continue
         if "://" in data_path and not data_path.startswith("file://"):

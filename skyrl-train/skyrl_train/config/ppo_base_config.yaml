@@ -119,6 +119,8 @@ trainer:
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
       revision: null
+      tokenizer_path: ${trainer.policy.model.path}
+      tokenizer_revision: ${trainer.policy.model.revision}
       source_uri: null
       source_identity: null
       lora:
@@ -168,6 +170,8 @@ trainer:
     model:
       path: ${trainer.policy.model.path}
       revision: ${trainer.policy.model.revision}
+      tokenizer_path: ${trainer.policy.model.tokenizer_path}
+      tokenizer_revision: ${trainer.policy.model.tokenizer_revision}
       source_uri: ${trainer.policy.model.source_uri}
       source_identity: ${trainer.policy.model.source_identity}
     sequence_parallel_size: 1
@@ -363,6 +367,7 @@ trainer:
   max_ckpts_to_keep: -1
   ckpt_interval: 5
   hf_save_interval: ${trainer.ckpt_interval}
+  export_hf_artifact: false
   hf_upload_mode: latest
   export_path: "${oc.env:HOME}/exports"
   bf16: true
@@ -382,6 +387,9 @@ trainer:
   # for the export's gathered expert tensors and for a colocated reference model.
   offload_optimizer_during_rollouts: false
   eval_batch_size: 1024
+  # Deterministically sample this many validation prompts. Null evaluates the
+  # complete validation dataset.
+  eval_num_prompts: null
   eval_before_train: true
   eval_interval: 5
   preflight_gate:
@@ -459,7 +467,8 @@ generator:
   enable_prefix_caching: true
   enable_chunked_prefill: true
   max_num_batched_tokens: 8192
-  enforce_eager: true
+  # Enable eager rollouts only with evidence that CUDA graphs affect this run's correctness.
+  enforce_eager: false
   fully_sharded_loras: false
   inference_stats_interval: 1
   gpu_memory_utilization: 0.8

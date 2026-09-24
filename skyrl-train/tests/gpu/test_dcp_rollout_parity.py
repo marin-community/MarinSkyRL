@@ -160,7 +160,7 @@ def _build_engine(dcp):
     kwargs = dict(
         model=MODEL_NAME,
         tensor_parallel_size=TP,
-        enforce_eager=True,  # determinism: no cudagraph capture differences
+        enforce_eager=True,  # Compare DCP numerics without CUDA graph capture differences.
         seed=SEED,
         dtype="bfloat16",
         gpu_memory_utilization=0.45,  # two engines may coexist; keep each modest

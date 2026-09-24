@@ -116,7 +116,7 @@ def engine_client(cfg, model_path: str, geometry: Geometry) -> InferenceEngineCl
         seed=23,
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=False,
-        enforce_eager=True,
+        enforce_eager=False,
         engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
         gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
         async_engine=True,

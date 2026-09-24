@@ -1,5 +1,6 @@
 from omegaconf import OmegaConf
 
+from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation
 from skyrl_train.entrypoints.terminal_bench_generate import TerminalBenchGenerateExp
 from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryRequestBatch
 
@@ -18,14 +19,6 @@ class RecordingTrajectoryRunner:
 
     async def shutdown(self) -> None:
         self.events.append("shutdown")
-
-
-class RecordingInferenceClient:
-    def __init__(self, events: list[str]) -> None:
-        self.events = events
-
-    async def wake_up(self) -> None:
-        self.events.append("wake_up")
 
 
 def test_terminal_bench_generate_builds_complete_evaluation_request():
@@ -63,13 +56,18 @@ def test_terminal_bench_generate_builds_complete_evaluation_request():
         {"uid": "task-b", "prompt": "task-b-path", "env_class": None, "env_extras": {"split": "train"}},
     ]
     experiment.tokenizer = object()
-    inference_client = RecordingInferenceClient(runner.events)
-    experiment.create_inference_engine_client = lambda: inference_client
+    inference_client = object()
+
+    def create_inference_engine_client(*, operation: EntrypointOperation):
+        assert operation is EntrypointOperation.GENERATE
+        return inference_client
+
+    experiment.create_inference_engine_client = create_inference_engine_client
     experiment.get_trajectory_runner = lambda cfg, tokenizer, client: runner
 
     experiment.run()
 
-    assert runner.events == ["wake_up", "startup", "run", "shutdown"]
+    assert runner.events == ["startup", "run", "shutdown"]
     assert runner.request is not None
     assert runner.request["prompts"] == ["task-a-path"] * 8 + ["task-b-path"] * 8
     trajectory_ids = runner.request["trajectory_ids"]

@@ -116,6 +116,7 @@ def create_ray_wrapped_inference_engines_from_config(
     tokenizer: PreTrainedTokenizerBase,
     *,
     entrypoint: str = STANDARD_TRAINING_ENTRYPOINT,
+    operation: EntrypointOperation = EntrypointOperation.TRAIN,
 ):
     from skyrl_train.inference_engines.configuration import (
         InferenceEngineRoleConfig,
@@ -124,6 +125,7 @@ def create_ray_wrapped_inference_engines_from_config(
     from skyrl_train.inference_engines.ray_wrapped_inference_engine import (
         MODEL_METADATA_PATH_KEY,
         create_ray_wrapped_inference_engines,
+        create_ray_wrapped_inference_engines_with_retry,
     )
 
     raw_speculative_decoding = cfg.generator.get("speculative_decoding")
@@ -143,10 +145,16 @@ def create_ray_wrapped_inference_engines_from_config(
         **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
         "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
     }
+    engine_init_kwargs["tokenizer"] = cfg.trainer.policy.model.tokenizer_path
+    tokenizer_revision = cfg.trainer.policy.model.get("tokenizer_revision")
+    if tokenizer_revision is not None:
+        engine_init_kwargs["tokenizer_revision"] = tokenizer_revision
     policy_source_uri = cfg.trainer.policy.model.get("source_uri")
     rollout_model_path = runai_model_uri(policy_source_uri) if policy_source_uri else cfg.trainer.policy.model.path
     if policy_source_uri is not None:
         engine_init_kwargs["load_format"] = "runai_streamer"
+        model_loader_extra_config = engine_init_kwargs.setdefault("model_loader_extra_config", {})
+        model_loader_extra_config.setdefault("distributed", True)
         engine_init_kwargs[MODEL_METADATA_PATH_KEY] = cfg.trainer.policy.model.path
     if speculative_decoding is not None:
         engine_init_kwargs["speculative_config"] = speculative_decoding.vllm_speculative_config()
@@ -179,7 +187,7 @@ def create_ray_wrapped_inference_engines_from_config(
         # standard and terminal_bench entrypoints via this shared config-assembly seam (G5).
         decode_context_parallel_size=cfg.generator.get("inference_engine_decode_context_parallel_size", 1),
         shared_pg=colocate_pg,
-        inference_engine_enable_sleep=cfg.trainer.placement.colocate_all,
+        inference_engine_enable_sleep=(cfg.trainer.placement.colocate_all and operation is EntrypointOperation.TRAIN),
         max_logprobs=max([1, *requested_logprobs]),
     )
     model_revision = cfg.trainer.policy.model.get("revision")
@@ -209,6 +217,21 @@ def create_ray_wrapped_inference_engines_from_config(
             )
             engine_kwargs["enforce_eager"] = False
 
+    if policy_source_uri is not None and rollout_model_path.startswith("s3://") and cfg.generator.backend == "vllm":
+        retry = cfg.trainer.model_load_retry
+
+        def create_engines(remaining_timeout_seconds: float):
+            attempt_kwargs = {**engine_kwargs, "engine_init_timeout_seconds": remaining_timeout_seconds}
+            return create_ray_wrapped_inference_engines(**attempt_kwargs)
+
+        return create_ray_wrapped_inference_engines_with_retry(
+            create_engines,
+            model_path=rollout_model_path,
+            engine_init_timeout_seconds=float(engine_kwargs["engine_init_timeout_seconds"]),
+            max_retries=int(retry.max_retries),
+            backoff_base_seconds=float(retry.backoff_base_seconds),
+            backoff_cap_seconds=float(retry.backoff_cap_seconds),
+        )
     return create_ray_wrapped_inference_engines(**engine_kwargs)
 
 
@@ -253,7 +276,9 @@ class BasePPOExp:
         # eligible (disaggregated, no-ref) run.
         self.policy_pg = self.get_policy_pg()
 
-    def create_inference_engine_client(self) -> InferenceEngineClient:
+    def create_inference_engine_client(
+        self, *, operation: EntrypointOperation = EntrypointOperation.TRAIN
+    ) -> InferenceEngineClient:
         """Create the configured local or remote inference-engine client."""
         from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient  # noqa: PLC0415
 
@@ -266,6 +291,7 @@ class BasePPOExp:
                 self.colocate_pg,
                 self.tokenizer,
                 entrypoint=entrypoint,
+                operation=operation,
             )
         else:
             inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
@@ -303,10 +329,10 @@ class BasePPOExp:
         from skyrl_train.tokenizer import create_tokenizer  # noqa: PLC0415
 
         return create_tokenizer(
-            model_path=self.cfg.trainer.policy.model.path,
+            model_path=self.cfg.trainer.policy.model.tokenizer_path,
             disable_fast_tokenizer=self.cfg.trainer.disable_fast_tokenizer,
             padding_side=padding_side,
-            revision=self.cfg.trainer.policy.model.get("revision"),
+            revision=self.cfg.trainer.policy.model.get("tokenizer_revision"),
         )
 
     def get_train_dataset(self):
@@ -741,9 +767,13 @@ def run_ray_driver(
     exit_without_ray_destructors()
 
 
+def run(cfg: DictConfig) -> None:
+    run_ray_driver(cfg, skyrl_entrypoint, TrajectoryRunnerMode.SKYRL_GYM)
+
+
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    run_ray_driver(cfg, skyrl_entrypoint, TrajectoryRunnerMode.SKYRL_GYM)
+    run(cfg)
 
 
 if __name__ == "__main__":
