@@ -4,17 +4,19 @@
 
 `checkpoint_failure_retry.py` is an opt-in Megatron test that writes real
 checkpoint shards to S3. Run its two cases in separate Python processes, in
-order, on one otherwise idle four-H100 node. Set `CHECKPOINT_TEST_ROOT` to a
+order, on one otherwise idle four-H100 node. Run from the repository root with
+`skyrl-train/` on `PYTHONPATH`: Ray's uv runtime hook requires the root
+`pyproject.toml` to be inside the working directory. Set `CHECKPOINT_TEST_ROOT` to a
 fresh, unique east-region `s3://marin-us-east-02a/tmp/ttl=14d/skyrl/users/atqamar/…`
 prefix visible to both processes. Do not reuse a prior test root.
 
 ```bash
-cd skyrl-train
-uv run --project .. --frozen --group dev --extra vllm --extra megatron \
-  pytest -s tests/gpu/fault_injection/checkpoint_failure_retry.py \
+export PYTHONPATH="$PWD/skyrl-train${PYTHONPATH:+:$PYTHONPATH}"
+uv run --frozen --group dev --extra vllm --extra megatron \
+  pytest -s skyrl-train/tests/gpu/fault_injection/checkpoint_failure_retry.py \
   -k failed_save_preserves_latest_and_retry_commits
-uv run --project .. --frozen --group dev --extra vllm --extra megatron \
-  pytest -s tests/gpu/fault_injection/checkpoint_failure_retry.py \
+uv run --frozen --group dev --extra vllm --extra megatron \
+  pytest -s skyrl-train/tests/gpu/fault_injection/checkpoint_failure_retry.py \
   -k fresh_process_resumes_retry_and_saves_next_step
 ```
 
@@ -38,15 +40,16 @@ with a unique local scratch directory and a unique east-region TTL S3 prefix:
 ```bash
 export CHECKPOINT_PARITY_LOCAL_ROOT=/local/scratch/<unique-case>
 export CHECKPOINT_PARITY_S3_ROOT=s3://marin-us-east-02a/tmp/ttl=14d/skyrl/users/atqamar/<unique-case>
-uv run --project .. --frozen --group dev --extra vllm --extra megatron \
-  pytest -s tests/gpu/fault_injection/checkpoint_step_parity.py \
+export PYTHONPATH="$PWD/skyrl-train${PYTHONPATH:+:$PYTHONPATH}"
+uv run --frozen --group dev --extra vllm --extra megatron \
+  pytest -s skyrl-train/tests/gpu/fault_injection/checkpoint_step_parity.py \
   -k reference_records_uninterrupted_step
-uv run --project .. --frozen --group dev --extra vllm --extra megatron \
-  pytest -s tests/gpu/fault_injection/checkpoint_step_parity.py \
+uv run --frozen --group dev --extra vllm --extra megatron \
+  pytest -s skyrl-train/tests/gpu/fault_injection/checkpoint_step_parity.py \
   -k fresh_actors_match_next_step
 ```
 
-Run from `skyrl-train/` in the pinned GPU runtime; the Iris job should have at
+Run from the repository root in the pinned GPU runtime; the Iris job should have at
 least four H100s and enough local scratch for two copies of all four ranks'
 model and optimizer state. The first process performs an optimizer step, saves
 the full checkpoint through the real S3 writer, verifies save did not advance
