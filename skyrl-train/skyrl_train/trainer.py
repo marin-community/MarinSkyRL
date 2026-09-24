@@ -617,7 +617,9 @@ class RayPPOTrainer:
 
         await self.inference_engine_client.sleep()
         try:
-            with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "policy_backload", rank=-1, step=self.global_step):
+            with checkpoint_phase(
+                str(self.cfg.trainer.strategy), "save", "policy_backload", rank=-1, step=self.global_step
+            ):
                 self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
             await asyncio.to_thread(self._save_checkpoint_payloads)
         finally:
@@ -2702,7 +2704,9 @@ class RayPPOTrainer:
 
         # Save dataloader state
         dataloader_save_path = os.path.join(global_step_folder, "data.pt")
-        with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "dataloader_state", rank=-1, step=self.global_step):
+        with checkpoint_phase(
+            str(self.cfg.trainer.strategy), "save", "dataloader_state", rank=-1, step=self.global_step
+        ):
             dataloader_state_dict = self.train_dataloader.state_dict()
             with io.open_file(dataloader_save_path, "wb") as f:
                 torch.save(dataloader_state_dict, f)

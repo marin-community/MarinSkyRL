@@ -301,6 +301,7 @@ def test_checkpoint_stream_waits_for_inflight_part_before_abort(monkeypatch):
 
     with pytest.raises(OSError, match="injected second-part failure"):
         stream.write(b"a" * _TEST_PART_BYTES + b"b" * _TEST_PART_BYTES)
+        stream.commit()
 
     assert filesystem.aborted
     assert filesystem.completed_parts is None

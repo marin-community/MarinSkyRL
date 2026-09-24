@@ -123,7 +123,7 @@ def test_checkpoint_exporter_loads_only_a_committed_generation(tmp_path):
     workers = FakePolicyExportWorkers()
 
     with pytest.raises(FileNotFoundError, match="No committed checkpoint"):
-        CheckpointExporter(plan, workers, object(), backend="fsdp2").run()
+        CheckpointExporter(plan, workers, object()).run()
     assert workers.checkpoint_path is None
 
     commit_attempt(
@@ -131,7 +131,7 @@ def test_checkpoint_exporter_loads_only_a_committed_generation(tmp_path):
         str(attempt),
         required_files={"policy/model.pt", "trainer_state.pt", "data.pt"},
     )
-    CheckpointExporter(plan, workers, object(), backend="fsdp2").run()
+    CheckpointExporter(plan, workers, object()).run()
     assert workers.checkpoint_path == str(attempt / "policy")
 
 
