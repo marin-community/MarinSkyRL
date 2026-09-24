@@ -664,6 +664,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if getattr(self, "_shutdown_complete", False):
             return
         try:
+            await self._drain_checkpoint_upload()
             await self._flush_generation_buffer_on_shutdown()
         finally:
             if self._expert_block_sync is not None:
@@ -1699,15 +1700,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         with Timer("convert_to_training_input", self.all_timings):
             return self.convert_to_training_input(trajectory_batch, uids)
-
-    def save_checkpoints(self):
-        """
-        Save checkpoints. Data consumption state is persisted by DataTrackingCallback.on_save,
-        which fires after the base checkpoint save completes.
-        """
-        # The base method saves model, dataloader state, trainer_state, and latest_ckpt_global_step.txt.
-        # DataTrackingCallback.on_save (registered in __init__) writes data_consumption_state.pt.
-        super().save_checkpoints()
 
     def load_checkpoints(self) -> Tuple[int, str]:
         """

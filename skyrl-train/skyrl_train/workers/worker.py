@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import contextlib
 import logging
 import os
@@ -186,11 +187,35 @@ class DistributedTorchRayActor:
         set_numa_affinity_for_gpu(physical_gpu_id)
         os.environ["LOCAL_RANK"] = resolved_local_rank
         self.sequence_parallel_size: int = sequence_parallel_size
-
+        self._checkpoint_upload_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="checkpoint-upload",
+        )
+        self._checkpoint_upload_future: concurrent.futures.Future[None] | None = None
         self.record_memory = record_memory
         if record_memory:
             torch.cuda.memory._record_memory_history()
         configure_ray_worker_logging()
+
+    def _start_checkpoint_upload(self, upload: io.PendingDirectoryUpload | None) -> None:
+        if upload is None:
+            return
+        if self._checkpoint_upload_future is not None:
+            if not self._checkpoint_upload_future.done():
+                raise RuntimeError("cannot stage a checkpoint while the previous upload is still running")
+            self._checkpoint_upload_future.result()
+        self._checkpoint_upload_future = self._checkpoint_upload_executor.submit(upload.publish)
+
+    async def wait_checkpoint_upload(self) -> None:
+        """Wait without blocking this actor's event loop for its staged shard upload."""
+        future = self._checkpoint_upload_future
+        if future is None:
+            return
+        try:
+            await asyncio.wrap_future(future)
+        finally:
+            if self._checkpoint_upload_future is future:
+                self._checkpoint_upload_future = None
 
     def get_node_local_rank(self):
         return self._local_rank
@@ -1433,7 +1458,7 @@ class PolicyWorkerBase(Worker):
             sc_state = getattr(self._stale_clip, "state_dict", lambda: None)()
             if sc_state is not None:
                 client_state["stale_clip_state"] = sc_state
-        self.strategy.save_checkpoint(
+        upload = self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
@@ -1442,6 +1467,7 @@ class PolicyWorkerBase(Worker):
             tokenizer=tokenizer,
             client_state=client_state,
         )
+        self._start_checkpoint_upload(upload)
 
     def load_checkpoint(
         self,
@@ -1661,7 +1687,7 @@ class CriticWorkerBase(Worker):
         return status
 
     def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
-        self.strategy.save_checkpoint(
+        upload = self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
@@ -1669,6 +1695,7 @@ class CriticWorkerBase(Worker):
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
         )
+        self._start_checkpoint_upload(upload)
 
     def load_checkpoint(
         self,
