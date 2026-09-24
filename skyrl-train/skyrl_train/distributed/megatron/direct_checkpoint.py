@@ -1,6 +1,8 @@
 import cProfile
 import json
 import os
+import time
+from io import BytesIO
 from pathlib import Path
 
 from loguru import logger
@@ -40,7 +42,14 @@ def _profile_mcore_conversion(rank: int, step: int | None) -> cProfile.Profile |
     return cProfile.Profile()
 
 
-def _log_mcore_conversion_profile(profile: cProfile.Profile, rank: int, step: int | None) -> None:
+def _log_mcore_conversion_profile(
+    profile: cProfile.Profile,
+    rank: int,
+    step: int | None,
+    wall_seconds: float,
+    process_cpu_seconds: float,
+    converted_state_dict: dict,
+) -> None:
     def describe(entry):
         code = entry.code
         name = f"{code.co_filename}:{code.co_firstlineno}:{code.co_name}" if hasattr(code, "co_filename") else str(code)
@@ -58,6 +67,13 @@ def _log_mcore_conversion_profile(profile: cProfile.Profile, rank: int, step: in
             {
                 "rank": rank,
                 "step": step,
+                "wall_seconds": round(wall_seconds, 4),
+                "process_cpu_seconds": round(process_cpu_seconds, 4),
+                "converted_key_count": len(converted_state_dict),
+                "byte_object_count": sum(isinstance(value, BytesIO) for value in converted_state_dict.values()),
+                "byte_object_bytes": sum(
+                    value.getbuffer().nbytes for value in converted_state_dict.values() if isinstance(value, BytesIO)
+                ),
                 "top_self": [
                     describe(entry) for entry in sorted(entries, key=lambda entry: entry.inlinetime, reverse=True)[:25]
                 ],
@@ -128,14 +144,25 @@ class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
                 sharded_state_dict, self.keep_only_main_replica
             )
             if conversion_profile is not None:
+                conversion_started = time.perf_counter()
+                conversion_cpu_started = time.process_time()
                 conversion_profile.enable()
             try:
                 pytorch_state_dict = mcore_to_pyt_state_dict(sharded_state_dict, False)
             finally:
                 if conversion_profile is not None:
                     conversion_profile.disable()
+                    conversion_wall_seconds = time.perf_counter() - conversion_started
+                    conversion_process_cpu_seconds = time.process_time() - conversion_cpu_started
         if conversion_profile is not None:
-            _log_mcore_conversion_profile(conversion_profile, rank, step)
+            _log_mcore_conversion_profile(
+                conversion_profile,
+                rank,
+                step,
+                conversion_wall_seconds,
+                conversion_process_cpu_seconds,
+                pytorch_state_dict,
+            )
         filesystem = get_s3_fs()
         s3_refresh_if_expiring(filesystem)
         writer = StreamingFsspecWriter(self.checkpoint_dir, filesystem=filesystem)
