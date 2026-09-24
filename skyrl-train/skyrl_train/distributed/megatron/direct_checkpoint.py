@@ -21,7 +21,10 @@ from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as Fsspec
 from torch.distributed.checkpoint.metadata import Metadata
 
 from skyrl_train.io.s3fs import get_s3_fs, s3_refresh_if_expiring
-from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
+from skyrl_train.io.torch_distributed_checkpoint import (
+    DEFAULT_S3_MULTIPART_CONCURRENCY,
+    StreamingFsspecWriter,
+)
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.timing_observability import checkpoint_phase
 
@@ -70,10 +73,17 @@ def invalidate_checkpoint_plan_cache(cache_key: str) -> None:
 class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
     """Save MCore torch-dist shards directly to S3 through PyTorch DCP."""
 
-    def __init__(self, checkpoint_dir: str, *, plan_cache_key: str | None = None) -> None:
+    def __init__(
+        self,
+        checkpoint_dir: str,
+        *,
+        plan_cache_key: str | None = None,
+        multipart_concurrency: int = DEFAULT_S3_MULTIPART_CONCURRENCY,
+    ) -> None:
         super().__init__()
         self.checkpoint_dir = checkpoint_dir
         self.plan_cache_key = plan_cache_key
+        self.multipart_concurrency = multipart_concurrency
 
     def save(self, sharded_state_dict: ShardedStateDict, _checkpoint_dir: Path) -> None:
         rank = dist.get_rank()
@@ -87,7 +97,9 @@ class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
                 pytorch_state_dict = mcore_to_pyt_state_dict(sharded_state_dict, False)
         filesystem = get_s3_fs()
         s3_refresh_if_expiring(filesystem)
-        writer = StreamingFsspecWriter(self.checkpoint_dir, filesystem=filesystem)
+        writer = StreamingFsspecWriter(
+            self.checkpoint_dir, filesystem=filesystem, multipart_concurrency=self.multipart_concurrency
+        )
         planner_kwargs = {
             "dedup_replicated_tensors": not self.keep_only_main_replica,
             "flatten_state_dict": False,

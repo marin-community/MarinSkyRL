@@ -36,6 +36,7 @@ from skyrl_train.distributed.megatron.direct_checkpoint import (
 )
 from skyrl_train.distributed.megatron.checkpoint_metadata import remote_checkpoint_metadata
 from skyrl_train.io.s3fs import abort_multipart_uploads
+from skyrl_train.io.torch_distributed_checkpoint import DEFAULT_S3_MULTIPART_CONCURRENCY
 
 from megatron.core.dist_checkpointing.strategies import base as ckpt_base
 from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
@@ -154,6 +155,7 @@ class MegatronStrategy(DistributedStrategy):
         optimizer_config=None,
         seed: int = 42,
         checkpoint_plan_cache: bool = False,
+        checkpoint_multipart_concurrency_schedule: tuple[int, ...] = (),
     ) -> None:
         super().__init__()
         self.megatron_config = megatron_config
@@ -162,6 +164,7 @@ class MegatronStrategy(DistributedStrategy):
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
         self._checkpoint_plan_cache_key = uuid.uuid4().hex if checkpoint_plan_cache else None
         self._checkpoint_plan_cache_committed = False
+        self._checkpoint_multipart_concurrency_schedule = checkpoint_multipart_concurrency_schedule
         if optimizer_config is not None:
             _optimizer_checkpoint_metadata(megatron_config.optimizer_checkpoint_sharding_type)
 
@@ -316,8 +319,15 @@ class MegatronStrategy(DistributedStrategy):
                             ckpt_dir,
                         )
             dist.barrier()
+            upload_concurrency = DEFAULT_S3_MULTIPART_CONCURRENCY
+            if self._checkpoint_multipart_concurrency_schedule:
+                upload_concurrency = self._checkpoint_multipart_concurrency_schedule[
+                    (step - 1) % len(self._checkpoint_multipart_concurrency_schedule)
+                ]
             save_strategy = DirectS3TorchDistSaveShardedStrategy(
-                ckpt_dir, plan_cache_key=self._checkpoint_plan_cache_key
+                ckpt_dir,
+                plan_cache_key=self._checkpoint_plan_cache_key,
+                multipart_concurrency=upload_concurrency,
             )
         else:
             save_strategy = get_default_save_sharded_strategy("torch_dist")

@@ -377,6 +377,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             optimizer_config=self.cfg.trainer.policy.optimizer_config,
             seed=self.cfg.trainer.seed,
             checkpoint_plan_cache=self.cfg.trainer.policy.megatron_config.checkpoint_plan_cache,
+            checkpoint_multipart_concurrency_schedule=tuple(
+                self.cfg.trainer.policy.megatron_config.checkpoint_multipart_concurrency_schedule
+            ),
         )
         self.strategy.setup_distributed()
 

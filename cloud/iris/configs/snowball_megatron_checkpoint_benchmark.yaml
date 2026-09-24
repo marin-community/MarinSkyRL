@@ -1,5 +1,5 @@
 # Matched control/candidate checkpoint benchmark, not a production RLVR2 run.
-# Keep the 32-policy-H100 Snowball TP1/PP2/CP2/EP8 mesh and batch geometry;
+# Keep the 32-policy-H100 Snowball TP1/PP2/CP1/EP8 benchmark geometry;
 # use a bounded GSM8K rollout on one separate H100x8 node to isolate saves.
 entrypoint: standard
 
@@ -30,10 +30,10 @@ trainer:
     use_kl_in_reward: false
     loss_reduction: token_mean
   epochs: 1
-  max_steps: 5
+  max_steps: 9
   update_epochs_per_batch: 1
-  train_batch_size: 512
-  policy_mini_batch_size: 512
+  train_batch_size: 32
+  policy_mini_batch_size: 32
   eval_batch_size: 100
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
@@ -52,10 +52,13 @@ trainer:
     megatron_config:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 2
-      context_parallel_size: 2
+      context_parallel_size: 1
       expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
       optimizer_checkpoint_sharding_type: dp_reshardable
+      checkpoint_plan_cache: true
+      # Benchmark-only, fixed sequence: one cold six-part save, then four warm saves per arm.
+      checkpoint_multipart_concurrency_schedule: [6, 6, 8, 8, 6, 8, 6, 8, 6]
       # Transformer Engine's default p2p mode rejects this model's sliding-window attention.
       transformer_config_kwargs:
         cp_comm_type: a2a
@@ -76,7 +79,7 @@ generator:
   inference_engine_data_parallel_size: 8
   inference_engine_expert_parallel_size: 8
   num_inference_engines: 1
-  n_samples_per_prompt: 16
+  n_samples_per_prompt: 4
   gpu_memory_utilization: 0.75
   max_num_seqs: 16
   max_num_batched_tokens: 16384

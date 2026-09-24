@@ -41,6 +41,7 @@ optimizer_checkpoint_sharding_type: fully_reshardable
 # Experimental direct-S3 save-plan reuse. Keep opt-in until Snowball recovery,
 # changed-schema, and repeated-save comparisons pass.
 checkpoint_plan_cache: false
+checkpoint_multipart_concurrency_schedule: []
 
 # Re-run the eval-mode and train-mode forwards inside ppo_train and log how far each is
 # from the old log-probs, separating eval repeatability from train/eval drift.
