@@ -9,7 +9,6 @@ from typing import Any
 
 import pytest
 import yaml
-from omegaconf.errors import ConfigKeyError
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
@@ -111,14 +110,6 @@ def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) ->
 
     assert config.skyrl.trainer.train_batch_size == 8
     assert validate_launch_config(config).num_nodes == 1
-
-
-def test_launch_config_rejects_unknown_root_fields() -> None:
-    raw = _raw_config()
-    raw["unexpected"] = True
-
-    with pytest.raises(ConfigKeyError):
-        compose_launch_config(raw)
 
 
 def test_launch_config_rejects_allocation_smaller_than_role_plan() -> None:

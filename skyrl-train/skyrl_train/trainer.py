@@ -1,11 +1,13 @@
 import asyncio
 from dataclasses import replace
+import io as stdlib_io
 import json
 import math
 import os
 import shutil
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
@@ -138,6 +140,24 @@ from skyrl_train.hf_export_schema import (
     TRAINER_STATE_FILENAME,
 )
 
+
+@dataclass(frozen=True)
+class CheckpointSnapshot:
+    step: int
+    step_path: str
+    attempt_path: str
+    required_files: frozenset[str]
+    upload_started_at: float
+    dataloader_payload: bytes
+    trainer_state_path: str
+    trainer_state_payload: bytes
+    optimizer_step_finished_at: float | None = None
+
+
+class CheckpointUploadNotDrainedError(RuntimeError):
+    """An upload may still be active, so another save must not start."""
+
+
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
 
@@ -229,6 +249,7 @@ class RayPPOTrainer:
         self._active_checkpoint_payload_path: str | None = None
         self._checkpoint_required_files: set[str] | None = None
         self._last_optimizer_step_finished_at: tuple[int, float] | None = None
+        self._pending_checkpoint_upload: tuple[asyncio.Task[tuple[float, float]], TrainerState] | None = None
         raw_speculative_decoding = cfg.generator.get("speculative_decoding")
         if raw_speculative_decoding is not None:
             raw_speculative_decoding = OmegaConf.to_container(raw_speculative_decoding, resolve=True)
@@ -520,8 +541,11 @@ class RayPPOTrainer:
         """Run trainer teardown once, including after partial startup."""
         if getattr(self, "_shutdown_complete", False):
             return
-        await self._teardown()
-        self._shutdown_complete = True
+        try:
+            await self._drain_checkpoint_upload()
+        finally:
+            await self._teardown()
+            self._shutdown_complete = True
 
     @staticmethod
     def _start_exit_watchdog(timeout: int = 120) -> None:
@@ -576,6 +600,7 @@ class RayPPOTrainer:
 
     async def _finalize_training(self, *, completed_step: int, epoch: int) -> None:
         """Run train-end callbacks, evaluation, and saves at the last completed optimizer step."""
+        await self._drain_checkpoint_upload()
         self.global_step = completed_step
         final_state = self._create_trainer_state(epoch=epoch)
         self._control.reset()
@@ -600,25 +625,48 @@ class RayPPOTrainer:
 
             # The interval save may have just written this same step; do not write it twice.
             if self._control.should_save and self._last_saved_step != self.global_step:
-                try:
-                    with Timer("save_checkpoints", self.all_timings):
-                        await asyncio.to_thread(self._save_checkpoint_payloads)
-                        await self.callback_handler.call_event_async(
-                            "on_save", final_state, self._control, trainer=self
-                        )
-                        await asyncio.to_thread(self._publish_checkpoint)
-                        logger.info("Saved final checkpoint.")
-                finally:
-                    self._active_checkpoint_payload_path = None
-                    self._checkpoint_required_files = None
+                if self._uses_background_checkpoint_upload():
+                    try:
+                        with Timer("save_checkpoints", self.all_timings):
+                            snapshot = await asyncio.to_thread(self._snapshot_checkpoint)
+                        try:
+                            await self.callback_handler.call_event_async(
+                                "on_save", final_state, self._control, trainer=self
+                            )
+                        except BaseException:
+                            await self._await_checkpoint_upload(snapshot)
+                            raise
+                        self._start_checkpoint_upload(snapshot, final_state)
+                        if await self._drain_checkpoint_upload():
+                            logger.info("Saved final checkpoint.")
+                    finally:
+                        self._active_checkpoint_payload_path = None
+                        self._checkpoint_required_files = None
+                else:
+                    try:
+                        with Timer("save_checkpoints", self.all_timings):
+                            await asyncio.to_thread(self._save_checkpoint_payloads)
+                            await self.callback_handler.call_event_async(
+                                "on_save", final_state, self._control, trainer=self
+                            )
+                            await asyncio.to_thread(self._publish_checkpoint)
+                            logger.info("Saved final checkpoint.")
+                    finally:
+                        self._active_checkpoint_payload_path = None
+                        self._checkpoint_required_files = None
             if self._control.should_save_hf_model:
                 await asyncio.to_thread(self.handle_hf_export)
 
-    async def _save_checkpoints_with_residency(self) -> None:
+    def _uses_background_checkpoint_upload(self) -> bool:
+        return str(self.cfg.trainer.strategy) in {"fsdp", "fsdp2"}
+
+    async def _save_checkpoints_with_residency(self) -> CheckpointSnapshot | None:
         """Save a checkpoint, swapping colocated training and inference residency when needed."""
+        save_payloads = (
+            self._snapshot_checkpoint if self._uses_background_checkpoint_upload() else self._save_checkpoint_payloads
+        )
         if not self.colocate_all:
-            await asyncio.to_thread(self._save_checkpoint_payloads)
-            return
+            return await asyncio.to_thread(save_payloads)
 
         await self.inference_engine_client.sleep()
         try:
@@ -626,7 +674,7 @@ class RayPPOTrainer:
                 str(self.cfg.trainer.strategy), "save", "policy_backload", rank=-1, step=self.global_step
             ):
                 self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
-            await asyncio.to_thread(self._save_checkpoint_payloads)
+            return await asyncio.to_thread(save_payloads)
         finally:
             await self._sync_policy_for_rollouts(reason="checkpoint_restore")
 
@@ -637,8 +685,37 @@ class RayPPOTrainer:
             f"Checkpoint save failed at global step {state.global_step}; continuing from the last complete checkpoint"
         )
 
+    def _settle_checkpoint_refs(self, refs: list[ObjectRef], *, operation: str) -> list[Any]:
+        """Wait for every rank, including after one fails, before permitting a retry."""
+        if not refs:
+            return []
+        distributed = getattr(self.cfg.trainer, "distributed", None)
+        timeout = int(getattr(distributed, "worker_collective_timeout_seconds", 1800))
+        deadline = time.monotonic() + timeout
+        pending = list(refs)
+        results: dict[ObjectRef, Any] = {}
+        errors: list[Exception] = []
+        while pending:
+            ready, pending = ray.wait(pending, num_returns=1, timeout=max(0.0, deadline - time.monotonic()))
+            if not ready:
+                raise CheckpointUploadNotDrainedError(
+                    f"{operation} did not settle all {len(refs)} worker refs within {timeout}s; "
+                    f"{len(pending)} may still be active"
+                )
+            for ref in ready:
+                try:
+                    results[ref] = ray.get(ref)
+                except Exception as error:
+                    errors.append(error)
+        if errors:
+            raise errors[0]
+        return [results[ref] for ref in refs]
+
     async def _save_intermediate_checkpoint(self, state: TrainerState) -> None:
         """Save one requested step checkpoint without terminating training on storage failure."""
+        await self._drain_checkpoint_upload()
+        snapshot: CheckpointSnapshot | None = None
+        started_upload = False
         try:
             with (
                 Timer("save_checkpoints", self.all_timings),
@@ -650,23 +727,94 @@ class RayPPOTrainer:
                     step=self.global_step,
                 ),
             ):
-                await self._save_checkpoints_with_residency()
+                snapshot = await self._save_checkpoints_with_residency()
                 with checkpoint_phase(
                     str(self.cfg.trainer.strategy), "save", "on_save_callbacks", rank=-1, step=self.global_step
                 ):
                     await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
-                await asyncio.to_thread(self._publish_checkpoint)
-        except OSError:
-            self._record_checkpoint_save_failure(state)
-            return
-        except ray.exceptions.RayTaskError as error:
-            if not isinstance(error.as_instanceof_cause(), OSError):
-                raise
-            self._record_checkpoint_save_failure(state)
-            return
+                if snapshot is None:
+                    await asyncio.to_thread(self._publish_checkpoint)
+                else:
+                    self._start_checkpoint_upload(snapshot, state)
+                    started_upload = True
+        except BaseException as error:
+            if snapshot is not None and not started_upload:
+                await self._await_checkpoint_upload(snapshot)
+            if isinstance(error, OSError):
+                self._record_checkpoint_save_failure(state)
+                return
+            if isinstance(error, ray.exceptions.RayTaskError) and isinstance(error.as_instanceof_cause(), OSError):
+                self._record_checkpoint_save_failure(state)
+                return
+            raise
         finally:
             self._active_checkpoint_payload_path = None
             self._checkpoint_required_files = None
+
+    def _start_checkpoint_upload(self, snapshot: CheckpointSnapshot, state: TrainerState) -> None:
+        if self._pending_checkpoint_upload is not None:
+            raise CheckpointUploadNotDrainedError("Cannot start a checkpoint while a prior upload is pending")
+        task = asyncio.create_task(self._finish_checkpoint_upload(snapshot, commit=True))
+        self._pending_checkpoint_upload = (task, state)
+
+    def _wait_checkpoint_uploads_blocking(self) -> None:
+        refs = self.policy_model.async_run_ray_method("pass_through", "wait_checkpoint_upload")
+        if self.critic_model is not None:
+            refs.extend(self.critic_model.async_run_ray_method("pass_through", "wait_checkpoint_upload"))
+        self._settle_checkpoint_refs(refs, operation="checkpoint upload")
+
+    def _finish_checkpoint_upload_blocking(self, snapshot: CheckpointSnapshot, *, commit: bool) -> tuple[float, float]:
+        self._wait_checkpoint_uploads_blocking()
+        cleanup_duration = 0.0
+        if commit:
+            io.write_bytes_atomic(snapshot.trainer_state_path, snapshot.trainer_state_payload)
+            io.write_bytes_atomic(os.path.join(snapshot.attempt_path, "data.pt"), snapshot.dataloader_payload)
+            self._commit_checkpoint_generation(
+                snapshot.step,
+                snapshot.step_path,
+                snapshot.attempt_path,
+                set(snapshot.required_files),
+                optimizer_step_finished_at=snapshot.optimizer_step_finished_at,
+            )
+            cleanup_started = time.monotonic()
+            self._cleanup_committed_checkpoint(snapshot.step)
+            cleanup_duration = time.monotonic() - cleanup_started
+        return time.monotonic() - snapshot.upload_started_at, cleanup_duration
+
+    async def _finish_checkpoint_upload(self, snapshot: CheckpointSnapshot, *, commit: bool) -> tuple[float, float]:
+        return await asyncio.to_thread(self._finish_checkpoint_upload_blocking, snapshot, commit=commit)
+
+    async def _await_checkpoint_upload(self, snapshot: CheckpointSnapshot) -> None:
+        await self._finish_checkpoint_upload(snapshot, commit=False)
+
+    async def _drain_checkpoint_upload(self) -> bool:
+        # Shutdown can run after partial initialization, before checkpoint
+        # upload state has been installed on the trainer.
+        pending = getattr(self, "_pending_checkpoint_upload", None)
+        if pending is None:
+            return True
+        task, state = pending
+        try:
+            duration, cleanup_duration = await task
+        except CheckpointUploadNotDrainedError:
+            # A rank might still be writing its attempt; retrying in this process is unsafe.
+            raise
+        except OSError:
+            self._pending_checkpoint_upload = None
+            self._record_checkpoint_save_failure(state)
+            return False
+        except ray.exceptions.RayTaskError as error:
+            self._pending_checkpoint_upload = None
+            if not isinstance(error.as_instanceof_cause(), OSError):
+                raise
+            self._record_checkpoint_save_failure(state)
+            return False
+        self._pending_checkpoint_upload = None
+        self.all_timings["checkpoint_upload"] = self.all_timings.get("checkpoint_upload", 0.0) + duration
+        self.all_timings["cleanup_old_checkpoints"] = (
+            self.all_timings.get("cleanup_old_checkpoints", 0.0) + cleanup_duration
+        )
+        return True
 
     async def _run_step_end_callbacks(self, state: TrainerState) -> None:
         """Run callback-requested work that belongs to the current training step."""
@@ -678,7 +826,11 @@ class RayPPOTrainer:
             self._control.should_save = False
 
         if self._control.should_save_hf_model:
-            await asyncio.to_thread(self.handle_hf_export)
+            # HF export reads the committed checkpoint. When checkpoint and HF
+            # export share a cadence, wait for the background shard uploads and
+            # marker publication before asking the exporter to consume it.
+            if await self._drain_checkpoint_upload():
+                await asyncio.to_thread(self.handle_hf_export)
             self._control.should_save_hf_model = False
 
         if self._control.should_evaluate and self.eval_dataset is not None:
@@ -2627,11 +2779,12 @@ class RayPPOTrainer:
 
     def _save_checkpoint_payloads(self):
         """
-        Save the model, optimizer, and training states to disk.
+        Save model shards and trainer state into a fresh, uncommitted attempt.
 
         If colocate_all is True, assumes that the policy model is currently on GPU.
         """
         # Create global step folder structure
+        step = self.global_step
         step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
         global_step_folder = new_attempt_path(step_folder)
         self._active_checkpoint_payload_path = global_step_folder
@@ -2672,7 +2825,7 @@ class RayPPOTrainer:
                 ckpt_dir=policy_save_dir,
                 tokenizer=self.tokenizer,
             )
-            policy_ranks = ray.get(policy_refs)
+            policy_ranks = self._settle_checkpoint_refs(policy_refs, operation="policy save")
         if sorted(policy_ranks) != list(range(len(policy_refs))) or not policy_refs:
             raise RuntimeError(f"Policy checkpoint worker receipts incomplete: {policy_ranks}")
         require_component_files(POLICY_CHECKPOINT_SUBDIRECTORY, policy_ranks)
@@ -2694,7 +2847,7 @@ class RayPPOTrainer:
                     ckpt_dir=critic_save_dir,
                     tokenizer=self.tokenizer,
                 )
-                critic_ranks = ray.get(critic_refs)
+                critic_ranks = self._settle_checkpoint_refs(critic_refs, operation="critic save")
             if sorted(critic_ranks) != list(range(len(critic_refs))) or not critic_refs:
                 raise RuntimeError(f"Critic checkpoint worker receipts incomplete: {critic_ranks}")
             require_component_files("critic", critic_ranks)
@@ -2708,7 +2861,7 @@ class RayPPOTrainer:
                 self.critic_model.offload_to_cpu()
                 self.policy_model.backload_to_gpu()
 
-        # Save dataloader state
+        # Serialize dataloader state for publication after the rank uploads complete.
         dataloader_save_path = os.path.join(global_step_folder, "data.pt")
         with checkpoint_phase(
             str(self.cfg.trainer.strategy), "save", "dataloader_state", rank=-1, step=self.global_step
@@ -2720,7 +2873,7 @@ class RayPPOTrainer:
 
         # Save additional trainer state
         trainer_state = {
-            "global_step": self.global_step,
+            "global_step": step,
             "config": self.cfg,
             "pending_sync_prompts": self._pending_sync_prompts,
             "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
@@ -2733,40 +2886,164 @@ class RayPPOTrainer:
 
         logger.info(f"Prepared checkpoint for global_step_{self.global_step} at: {global_step_folder}")
 
+    def _snapshot_checkpoint(self) -> CheckpointSnapshot:
+        """Stage immutable FSDP rank files into a fresh attempt before background upload."""
+        if not self._uses_background_checkpoint_upload():
+            raise RuntimeError("Background checkpoint snapshots are supported only for FSDP")
+        step = self.global_step
+        step_path = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{step}")
+        attempt_path = new_attempt_path(step_path)
+        self._active_checkpoint_payload_path = attempt_path
+        required_files = {"data.pt", TRAINER_STATE_FILENAME, f"{POLICY_CHECKPOINT_SUBDIRECTORY}/worker_receipts.json"}
+        required_files.update(getattr(self, "_required_checkpoint_callback_files", set()))
+        self._checkpoint_required_files = required_files
+        io.makedirs(attempt_path, exist_ok=True)
+
+        def stage_component(component: str, actors: PPORayActorGroup) -> None:
+            component_path = os.path.join(attempt_path, component)
+            refs = actors.async_run_ray_method(
+                "pass_through", "save_checkpoint", ckpt_dir=component_path, tokenizer=self.tokenizer
+            )
+            with checkpoint_phase(str(self.cfg.trainer.strategy), "save", f"{component}_workers", rank=-1, step=step):
+                ranks = self._settle_checkpoint_refs(refs, operation=f"{component} snapshot")
+            if not refs or sorted(ranks) != list(range(len(refs))):
+                raise RuntimeError(f"{component} checkpoint worker receipts incomplete: {ranks}")
+            world_size = len(refs)
+            for rank in ranks:
+                for name in ("model", "optim", "extra_state"):
+                    required_files.add(f"{component}/{name}_world_size_{world_size}_rank_{rank}.pt")
+            required_files.add(f"{component}/fsdp_config.json")
+            required_files.add(f"{component}/worker_receipts.json")
+            io.write_bytes_atomic(
+                os.path.join(component_path, "worker_receipts.json"),
+                json.dumps({"component": component, "ranks": ranks}, sort_keys=True).encode(),
+            )
+
+        try:
+            stage_component(POLICY_CHECKPOINT_SUBDIRECTORY, self.policy_model)
+            if self.critic_model is not None:
+                if self.colocate_all:
+                    self.policy_model.offload_to_cpu()
+                    self.critic_model.backload_to_gpu()
+                try:
+                    stage_component("critic", self.critic_model)
+                finally:
+                    if self.colocate_all:
+                        self.critic_model.offload_to_cpu()
+                        self.policy_model.backload_to_gpu()
+
+            with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "dataloader_state", rank=-1, step=step):
+                dataloader_buffer = stdlib_io.BytesIO()
+                torch.save(self.train_dataloader.state_dict(), dataloader_buffer)
+                dataloader_payload = dataloader_buffer.getvalue()
+            trainer_state = {
+                "global_step": step,
+                "config": self.cfg,
+                "pending_sync_prompts": self._pending_sync_prompts,
+                "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
+                "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
+            }
+            trainer_state_buffer = stdlib_io.BytesIO()
+            torch.save(trainer_state, trainer_state_buffer)
+            last_optimizer_step = getattr(self, "_last_optimizer_step_finished_at", None)
+            return CheckpointSnapshot(
+                step=step,
+                step_path=step_path,
+                attempt_path=attempt_path,
+                required_files=frozenset(required_files),
+                upload_started_at=time.monotonic(),
+                dataloader_payload=dataloader_payload,
+                trainer_state_path=os.path.join(attempt_path, TRAINER_STATE_FILENAME),
+                trainer_state_payload=trainer_state_buffer.getvalue(),
+                optimizer_step_finished_at=(
+                    last_optimizer_step[1]
+                    if last_optimizer_step is not None and last_optimizer_step[0] == step
+                    else None
+                ),
+            )
+        except BaseException as error:
+            if not isinstance(error, CheckpointUploadNotDrainedError):
+                try:
+                    self._wait_checkpoint_uploads_blocking()
+                except CheckpointUploadNotDrainedError:
+                    raise
+                except Exception:
+                    logger.opt(exception=True).warning("An incomplete FSDP snapshot also had an upload error")
+            raise
+
     def _publish_checkpoint(self) -> None:
         """Advance latest only after payloads and on-save callback state are durable."""
-        global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
+        step = self.global_step
+        global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{step}")
         attempt_path = getattr(self, "_active_checkpoint_payload_path", None)
         required_files = getattr(self, "_checkpoint_required_files", None)
         if attempt_path is None or required_files is None:
             raise RuntimeError("No prepared checkpoint attempt to publish")
-        with checkpoint_phase(
-            str(self.cfg.trainer.strategy), "save", "generation_commit", rank=-1, step=self.global_step
-        ):
-            commit_attempt(global_step_folder, attempt_path, required_files=required_files)
+        self._commit_checkpoint_generation(step, global_step_folder, attempt_path, required_files)
+        with Timer("cleanup_old_checkpoints", self.all_timings):
+            self._cleanup_committed_checkpoint(step)
+
+    def _commit_checkpoint_generation(
+        self,
+        step: int,
+        step_path: str,
+        attempt_path: str,
+        required_files: set[str],
+        *,
+        optimizer_step_finished_at: float | None = None,
+    ) -> None:
+        """Publish one fully durable generation before advertising it as latest."""
+        with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "generation_commit", rank=-1, step=step):
+            commit_attempt(step_path, attempt_path, required_files=required_files)
         latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
-        with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "latest_pointer", rank=-1, step=self.global_step):
-            io.write_bytes_atomic(latest_checkpoint_file, str(self.global_step).encode())
-        last_optimizer_step = getattr(self, "_last_optimizer_step_finished_at", None)
-        if last_optimizer_step is not None and last_optimizer_step[0] == self.global_step:
-            self.all_timings["checkpoint_pointer_lag"] = time.monotonic() - last_optimizer_step[1]
+        with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "latest_pointer", rank=-1, step=step):
+            io.write_bytes_atomic(latest_checkpoint_file, str(step).encode())
+        if optimizer_step_finished_at is None:
+            last_optimizer_step = getattr(self, "_last_optimizer_step_finished_at", None)
+            if last_optimizer_step is not None and last_optimizer_step[0] == step:
+                optimizer_step_finished_at = last_optimizer_step[1]
+        if optimizer_step_finished_at is not None:
+            pointer_lag = time.monotonic() - optimizer_step_finished_at
+            self.all_timings["checkpoint_pointer_lag"] = pointer_lag
+            logger.info(
+                "checkpoint_durability_observation {}",
+                json.dumps({"schema": "checkpoint_durability_v1", "step": step, "pointer_lag_seconds": pointer_lag}),
+            )
 
-        logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
-        self._last_saved_step = self.global_step
+        logger.info(f"Successfully saved checkpoint for global_step_{step} to: {step_path}")
+        self._last_saved_step = step
 
+    def _cleanup_committed_checkpoint(self, step: int | None = None) -> None:
         # Retention is best-effort after publication. A cleanup I/O failure must
         # not make a committed checkpoint look like a failed save.
         try:
-            with Timer("cleanup_old_checkpoints", self.all_timings):
-                with checkpoint_phase(
-                    str(self.cfg.trainer.strategy), "save", "retention", rank=-1, step=self.global_step
-                ):
-                    self._cleanup_old_checkpoints()
+            with checkpoint_phase(
+                str(self.cfg.trainer.strategy),
+                "save",
+                "retention",
+                rank=-1,
+                step=self.global_step if step is None else step,
+            ):
+                self._cleanup_old_checkpoints()
         except OSError as error:
             logger.warning(f"Checkpoint retention failed after publication; continuing: {error}")
 
-    def save_checkpoints(self):
+    def save_checkpoints(self) -> None:
         """Save and publish a checkpoint when no on-save callbacks are involved."""
+        if getattr(self, "_pending_checkpoint_upload", None) is not None:
+            raise CheckpointUploadNotDrainedError("Cannot save synchronously while an upload is pending")
+        if self._uses_background_checkpoint_upload():
+            try:
+                snapshot = self._snapshot_checkpoint()
+                upload_duration, cleanup_duration = self._finish_checkpoint_upload_blocking(snapshot, commit=True)
+                self.all_timings["checkpoint_upload"] = self.all_timings.get("checkpoint_upload", 0.0) + upload_duration
+                self.all_timings["cleanup_old_checkpoints"] = (
+                    self.all_timings.get("cleanup_old_checkpoints", 0.0) + cleanup_duration
+                )
+            finally:
+                self._active_checkpoint_payload_path = None
+                self._checkpoint_required_files = None
+            return
         try:
             self._save_checkpoint_payloads()
             self._publish_checkpoint()

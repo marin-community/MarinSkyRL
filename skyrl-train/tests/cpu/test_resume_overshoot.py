@@ -56,6 +56,7 @@ def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocat
     """
     trainer = cls.__new__(cls)
     trainer._last_saved_step = None
+    trainer._pending_checkpoint_upload = None
     trainer.global_step = global_step
     trainer.total_training_steps = total_training_steps
     trainer.colocate_all = colocate_all
@@ -68,6 +69,7 @@ def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocat
     # epochs is read from cfg in _handle_resume_at_max_steps
     cfg = MagicMock()
     cfg.trainer.epochs = 1
+    cfg.trainer.strategy = "fsdp2"
     trainer.cfg = cfg
 
     # _create_trainer_state for the base trainer reads len(self.train_dataloader);
@@ -76,8 +78,8 @@ def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocat
     dl.__len__ = lambda _self: max(total_training_steps, 1)
     trainer.train_dataloader = dl
 
-    trainer._save_checkpoint_payloads = MagicMock(name="save_checkpoint_payloads")
-    trainer._publish_checkpoint = MagicMock(name="publish_checkpoint")
+    trainer._snapshot_checkpoint = MagicMock(name="snapshot_checkpoint")
+    trainer._finish_checkpoint_upload = AsyncMock(name="finish_checkpoint_upload", return_value=(0.0, 0.0))
     trainer.handle_hf_export = MagicMock(name="handle_hf_export")
     trainer.eval = AsyncMock(name="eval", return_value={"eval/accuracy": 0.75})
     trainer._log_metrics_stdout = MagicMock(name="_log_metrics_stdout")
@@ -160,7 +162,7 @@ def test_train_end_saves_the_last_completed_step(cls):
     requested.should_save_hf_model = True
     trainer.callback_handler = _RecordingCallbackHandler(requested)
     saved_steps = []
-    trainer._publish_checkpoint.side_effect = lambda: saved_steps.append(trainer.global_step)
+    trainer._snapshot_checkpoint.side_effect = lambda: saved_steps.append(trainer.global_step)
     trainer.handle_hf_export.side_effect = lambda: saved_steps.append(trainer.global_step)
 
     asyncio.run(trainer._finalize_training(completed_step=16, epoch=0))
@@ -198,8 +200,7 @@ def test_train_end_still_saves_when_the_final_evaluation_fails(cls):
     with pytest.raises(RuntimeError, match="evaluation failed"):
         asyncio.run(trainer._finalize_training(completed_step=16, epoch=0))
 
-    trainer._save_checkpoint_payloads.assert_called_once()
-    trainer._publish_checkpoint.assert_called_once()
+    trainer._snapshot_checkpoint.assert_called_once()
     assert trainer.callback_handler.events == ["on_train_end", "on_save"]
 
 
@@ -222,8 +223,7 @@ def test_handle_resume_at_max_steps_triggers_export_when_requested(cls):
     asyncio.run(trainer._handle_resume_at_max_steps())
 
     assert "on_train_end" in trainer.callback_handler.events
-    trainer._save_checkpoint_payloads.assert_called_once()
-    trainer._publish_checkpoint.assert_called_once()
+    trainer._snapshot_checkpoint.assert_called_once()
     trainer.handle_hf_export.assert_called_once()
 
 
@@ -236,8 +236,7 @@ def test_handle_resume_at_max_steps_no_save_when_not_requested(cls):
 
     asyncio.run(trainer._handle_resume_at_max_steps())
 
-    trainer._save_checkpoint_payloads.assert_not_called()
-    trainer._publish_checkpoint.assert_not_called()
+    trainer._snapshot_checkpoint.assert_not_called()
     trainer.handle_hf_export.assert_not_called()
 
 

@@ -51,12 +51,16 @@ def _json_bytes(payload: dict) -> bytes:
 
 
 def _inventory(attempt_path: str) -> dict[str, int]:
-    """Inventory exact object names/sizes; S3 find returns scheme-less keys."""
-    normalized_root = attempt_path.removeprefix("s3://").rstrip("/")
+    """Inventory exact object names/sizes; cloud find may return scheme-less keys."""
+
+    def without_scheme(path: str) -> str:
+        return path.split("://", 1)[1] if "://" in path else path
+
+    normalized_root = without_scheme(attempt_path).rstrip("/")
     prefix = f"{normalized_root}/"
     files = {}
     for path, size in io.find_files(attempt_path).items():
-        normalized_path = path.removeprefix("s3://")
+        normalized_path = without_scheme(path)
         if not normalized_path.startswith(prefix):
             raise ValueError(f"Checkpoint object escaped attempt prefix: {path}")
         relative = normalized_path[len(prefix) :]

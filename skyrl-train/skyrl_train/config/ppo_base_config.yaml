@@ -380,7 +380,7 @@ trainer:
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"
-  tracker_commit_each_step: false
+  tracker_commit_each_step: true
   dump_data_batch: false
   dump_eval_results: true
   log_level: "INFO"

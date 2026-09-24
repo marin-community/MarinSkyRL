@@ -117,8 +117,9 @@ def test_legacy_checkpoint_remains_readable_and_corrupt_commit_does_not_fall_bac
         resolve_checkpoint_payload(str(step_path))
 
 
-def test_s3_inventory_uses_exact_attempt_prefix(monkeypatch):
-    path = "s3://bucket/checkpoints/global_step_1/_attempts/" + "a" * 32
+@pytest.mark.parametrize("scheme", ["s3", "gs", "gcs"])
+def test_cloud_inventory_uses_exact_attempt_prefix(monkeypatch, scheme):
+    path = f"{scheme}://bucket/checkpoints/global_step_1/_attempts/" + "a" * 32
     monkeypatch.setattr(
         io,
         "find_files",
