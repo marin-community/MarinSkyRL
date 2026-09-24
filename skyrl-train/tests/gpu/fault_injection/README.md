@@ -1,4 +1,32 @@
-# NCCL fault injection
+# GPU fault injection
+
+## Checkpoint generation failure and retry
+
+`checkpoint_failure_retry.py` is an opt-in Megatron test that writes real
+checkpoint shards to S3. Run its two cases in separate Python processes, in
+order, on one otherwise idle four-H100 node. Set `CHECKPOINT_TEST_ROOT` to a
+fresh, unique east-region `s3://marin-us-east-02a/tmp/ttl=14d/skyrl/users/atqamar/…`
+prefix visible to both processes. Do not reuse a prior test root.
+
+```bash
+cd skyrl-train
+uv run --project .. --frozen --group dev --extra vllm --extra megatron \
+  pytest -s tests/gpu/fault_injection/checkpoint_failure_retry.py \
+  -k failed_save_preserves_latest_and_retry_commits
+uv run --project .. --frozen --group dev --extra vllm --extra megatron \
+  pytest -s tests/gpu/fault_injection/checkpoint_failure_retry.py \
+  -k fresh_process_resumes_retry_and_saves_next_step
+```
+
+The first process saves step 1, injects an error after the step-2 distributed
+save but before trainer publication, verifies that `latest` still selects step
+1, and retries step 2 with a fresh attempt ID. The second process resumes the
+committed retry through `latest`, performs an optimizer step, and saves step 3.
+Both processes must exit zero; an expected injected exception is caught inside
+the first test. The S3 root is not deleted by the test and should expire under
+the bucket's TTL policy.
+
+## NCCL collective contracts
 
 This opt-in suite validates healthy expert-parallel communication and the failure bound for real
 ProcessGroupNCCL collectives. It is intentionally outside `tests/gpu/gpu_ci/`, and its Python filename does not
