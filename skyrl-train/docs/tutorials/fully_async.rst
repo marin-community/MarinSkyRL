@@ -115,19 +115,28 @@ For fully async specifically, the following are the main knobs to tune:
   and ``<= trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)`` since it would be wasted due to capacity control.
   The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
 - ``trainer.fully_async.pause_mode``: What the engines do with requests still generating when the weights are
-  reloaded. ``abort`` (the default) cancels them; the client then resubmits each prompt with the tokens it already
-  generated, so the answer continues under the new weights after one prefill. ``keep`` freezes them in the scheduler
-  and resumes them with the cache the old weights built, saving the prefill. Either way one answer can mix policy
-  versions, which the recorded engine logprobs make visible to the ratio diagnostics.
-- ``trainer.fully_async.clear_kv_cache_on_weight_sync``: Drop the engines' KV/prefix cache at the pause so nothing
-  computed by the old weights is reused (default ``true``); ``false`` keeps it across the resume.
+  reloaded. ``abort`` (the default) cancels them; the client then resubmits each prompt followed by the tokens it
+  already generated, so the answer continues from exactly those tokens under the new weights after one prefill.
+  ``keep`` holds them in the scheduler and resumes them. They reuse the cache the old weights built only with
+  ``clear_kv_cache_on_weight_sync: false``; with the default ``true`` they are preempted at the pause and recomputed
+  under the new weights. Either way one answer can mix policy versions, which the recorded engine logprobs make
+  visible to the ratio diagnostics.
+- ``trainer.fully_async.clear_kv_cache_on_weight_sync``: Clear vLLM's caches at the pause (vLLM's ``clear_cache``):
+  the KV/prefix cache and the multimodal, encoder and KV-connector caches, so nothing computed by the old weights is
+  reused. It also preempts requests kept by ``pause_mode: keep``. Default ``true``; ``false`` keeps the caches across
+  the resume.
 - ``trainer.fully_async.first_token_admission``: Where a group's staleness is counted from. ``false`` (the default)
-  counts from the trainer's step at submission, which can be earlier than the version that sampled the group when a
-  request waited in the engine's queue across a weight sync. ``true`` counts from the oldest policy version that
-  sampled any of the group's tokens, plus one. The engines stamp every sampled span with the version they had
-  installed, so a span sampled after a weight sync carries the newer one. On the OpenAI chat route the
-  client stamps each attempt with the version installed when it was sent, never newer than the version that sampled
-  it; other engines carry no version, and a run sampling through them fails at its first admission with this on.
+  counts from the trainer's step when each trajectory's first model call returned. That step can be newer than the
+  version that sampled the tokens, for example when a request sampled under one version and returned after a weight
+  sync, so staleness is under-counted. ``true`` counts from the oldest policy version that sampled any of the group's
+  tokens, plus one. On ``generate()`` the engine stamps each request with the version it had installed when the
+  request's first token was sampled, so a request kept across a weight sync is charged to the older version. On the
+  chat routes the client stamps each attempt with the version installed when it was sent. Neither stamp is newer
+  than the version that sampled the tokens. SGLang, remote engines and external OpenAI-compatible servers carry no
+  version, and a run sampling through them fails at its first admission with this on. The engine compares vLLM's
+  first-token time with the version boundaries on the host's monotonic clock, so each EngineCore must run on its
+  engine actor's host; SkyRL launches it there, and a first-token time outside the request's own lifetime on the
+  actor's clock fails the request.
 - ``trainer.fully_async.max_buffered_groups``: How many finished groups the completed buffer holds before a
   generation worker waits with its finished group in hand. ``null`` (the default) means one slot per generation
   worker, so no worker ever waits. A finished group's staleness grows the same whether it waits in the buffer or in
@@ -136,9 +145,12 @@ For fully async specifically, the following are the main knobs to tune:
 - ``generator.weight_sync_transport``: How each weight sync reaches the engines. ``auto`` (the default) picks
   ``expert_block``, which sends each MoE expert matrix from a Megatron rank that holds it to the vLLM workers that
   serve it, when the run qualifies: this trainer, a Grug MoE on the megatron strategy at TP=1 and ETP=1, local vLLM
-  engines at TP=1 with EP=DP>1, ``weight_sync_backend: nccl``, ``engine_init_kwargs.moe_backend: triton`` and a policy
-  ``config.json`` that can be read. Otherwise it picks ``broadcast`` and the startup log names the
-  unmet requirements. An explicit ``expert_block`` fails at startup when a requirement is unmet.
+  engines at TP=1 with EP=DP>1, ``weight_sync_backend: nccl``, an explicit ``engine_init_kwargs.moe_backend: triton``
+  and a policy ``config.json`` that ``PretrainedConfig.get_config_dict`` can read from a local directory or a Hugging
+  Face hub id; a ``gs://`` or ``s3://`` policy path always resolves to ``broadcast``. Otherwise it picks ``broadcast``
+  and the startup log names the unmet requirements. An explicit ``expert_block`` fails at startup when a trainer or
+  engine topology requirement is unmet; it checks neither ``moe_backend`` nor the policy's ``config.json`` at config
+  time, and the engines check them when they load.
 - ``trainer.algorithm.group_admission.stall_timeout``: An optional maximum number of seconds without newly admitted groups while
   assembling a training batch. The same progress watchdog applies to synchronous and fully asynchronous entrypoints. The null
   default allows 30 minutes before any step timing exists, then adapts to ``max(5 * recent median step time, 10 minutes)``. Set a

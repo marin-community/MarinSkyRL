@@ -350,16 +350,22 @@ trainer:
     # value bounds the head-node backlog without changing a group's staleness.
     max_buffered_groups: null
     # Count a group's staleness from the oldest policy version that sampled it, plus one.
-    # Off counts from the trainer's step at submission. Chat attempts are stamped with the
-    # version installed when sent, never newer than the version that sampled them.
+    # Off counts from the trainer's step when the trajectory's first model call returned,
+    # which can be newer than the version that sampled it, so staleness is under-counted.
+    # A generate() request is stamped with the version installed at its first token; a chat
+    # attempt with the version installed when it was sent. Either is never newer than the
+    # version that sampled its tokens. Needs each vLLM EngineCore on its engine actor's host,
+    # since first-token times and version boundaries are read from that host's monotonic clock.
     first_token_admission: false
     # What the engines do with requests still generating at each weight sync. abort cancels
-    # them and the client resubmits each prompt with the tokens it already generated, so the
-    # answer continues under the new weights after one prefill; keep freezes them in the
-    # scheduler and resumes them with the cache the old weights built.
+    # them and the client resubmits each prompt followed by the tokens it already generated, so
+    # the answer continues under the new weights after one prefill. keep holds them in the
+    # scheduler and resumes them; they reuse the cache the old weights built only with
+    # clear_kv_cache_on_weight_sync false, and are otherwise preempted and recomputed.
     pause_mode: abort
-    # Drop the engines' KV/prefix cache at the pause, so nothing computed by the old weights
-    # is reused. Set false to keep the cache across the resume.
+    # Clear vLLM's caches at the pause (vLLM's clear_cache): the KV/prefix cache and the
+    # multimodal, encoder and KV-connector caches, preempting any request kept by
+    # pause_mode keep. Set false to keep them across the resume.
     clear_kv_cache_on_weight_sync: true
 
     # Bound teacher-scoring work independently for each logical teacher. Queue
@@ -453,7 +459,10 @@ generator:
   # workers that serve it. Needs FullyAsyncRayPPOTrainer, a Grug MoE on the megatron strategy at TP=1
   # and ETP=1, local vLLM engines at TP=1 with EP=DP>1, the NCCL weight-sync backend and
   # engine_init_kwargs.moe_backend triton. "auto": the entrypoint picks expert_block when the run meets
-  # all of that and the policy's config.json is readable locally, and broadcast otherwise, logging why.
+  # all of that, moe_backend is set to triton explicitly, and the policy's config.json can be read
+  # from a local directory or a Hugging Face hub id (never from gs:// or s3://); otherwise broadcast,
+  # logging why. An explicit expert_block checks neither moe_backend nor the policy's config.json
+  # at config time; the engines check them when they load.
   weight_sync_transport: "auto"
   expert_block_sync:
     timeout_seconds: 600  # For creating the sync groups and for the broadcasts of each sync.
