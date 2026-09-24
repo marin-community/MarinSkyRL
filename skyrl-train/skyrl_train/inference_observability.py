@@ -15,6 +15,7 @@ from skyrl_train.inference_engines.vllm.stats import (
     InferenceStatsSnapshot,
     VLLMEngineStatsSnapshot,
     VLLMHistogramSnapshot,
+    explicit_histogram_bins,
 )
 from skyrl_train.telemetry import TelemetryConfig
 
@@ -167,9 +168,8 @@ class FinelogInferenceMetricsSink:
         from rigging import telemetry  # noqa: PLC0415
         from rigging.telemetry.metrics import MetricSnapshot  # noqa: PLC0415
 
-        if self._histogram_format is not VllmHistogramFormat.SCALAR:
-            from rigging.telemetry.metrics import HistogramSnapshot  # noqa: PLC0415
-
+        emit_structured = self._histogram_format is not VllmHistogramFormat.SCALAR
+        emit_scalar = self._histogram_format is not VllmHistogramFormat.STRUCTURED
         sample_limit_dropped = 0
         telemetry_lost = 0
         for engine in snapshot.engines:
@@ -255,11 +255,9 @@ class FinelogInferenceMetricsSink:
                 )
             for histogram in engine.histograms:
                 structured = None
-                if self._histogram_format is not VllmHistogramFormat.SCALAR:
+                if emit_structured:
                     try:
-                        structured = _structured_histogram_snapshot(
-                            histogram, engine, cumulative_base, HistogramSnapshot
-                        )
+                        structured = _structured_histogram_snapshot(histogram, engine, cumulative_base)
                     except ValueError as error:
                         telemetry_lost += 1
                         logger.warning(
@@ -269,7 +267,7 @@ class FinelogInferenceMetricsSink:
                             error,
                         )
                         continue
-                if self._histogram_format is not VllmHistogramFormat.STRUCTURED:
+                if emit_scalar:
                     publication_attributes = (
                         {HISTOGRAM_PUBLICATION_ATTRIBUTE: _histogram_publication_id(engine)}
                         if self._histogram_format is VllmHistogramFormat.DUAL
@@ -444,34 +442,18 @@ def _structured_histogram_snapshot(
     histogram: VLLMHistogramSnapshot,
     engine: VLLMEngineStatsSnapshot,
     base: Mapping[str, str],
-    snapshot_type,
 ):
+    from rigging.telemetry.metrics import HistogramSnapshot  # noqa: PLC0415
+
     if engine.histogram_timestamp_ms is None or engine.histogram_sequence is None:
         raise ValueError("native histogram has no collection timestamp or sequence")
-    bounds = []
-    counts = []
-    previous = 0
-    seen_overflow = False
-    for index, (bound, cumulative) in enumerate(histogram.buckets):
-        if math.isinf(bound):
-            if bound < 0 or cumulative != histogram.count or seen_overflow or index != len(histogram.buckets) - 1:
-                raise ValueError("histogram requires one terminal +Inf bucket matching total count")
-            seen_overflow = True
-            continue
-        if not math.isfinite(bound) or (bounds and bound <= bounds[-1]) or cumulative < previous:
-            raise ValueError("histogram buckets are unordered or decreasing")
-        bounds.append(bound)
-        counts.append(cumulative - previous)
-        previous = cumulative
-    if not seen_overflow or histogram.count < previous:
-        raise ValueError("histogram is missing a valid overflow bucket")
-    counts.append(histogram.count - previous)
-    return snapshot_type(
+    bounds, counts = explicit_histogram_bins(histogram)
+    return HistogramSnapshot(
         name=histogram.name,
-        explicit_bounds=tuple(bounds),
-        bucket_counts=tuple(counts),
+        explicit_bounds=bounds,
+        bucket_counts=counts,
         count=histogram.count,
-        total=histogram.total,
+        sum=histogram.total,
         unit=histogram.unit,
         attributes={**histogram.attributes, **base},
         timestamp_ms=engine.histogram_timestamp_ms,

@@ -236,19 +236,34 @@ class HistogramAccumulator:
         )
 
 
-def _native_histogram_count(value: int | float) -> int:
-    """Keep native counts exact; a large float may already have lost integer bits."""
-    if isinstance(value, bool):
-        raise ValueError("vLLM histogram count must be an integer")
-    if isinstance(value, int):
-        count = value
-    elif isinstance(value, float) and math.isfinite(value) and value.is_integer() and value < 1 << 53:
-        count = int(value)
-    else:
-        raise ValueError("vLLM histogram count is not an exact supported integer")
-    if not 0 <= count <= (1 << 63) - 1:
-        raise ValueError("vLLM histogram count exceeds the signed-64 range")
-    return count
+def _native_histogram_count(value: int) -> int:
+    """Keep the pinned vLLM reader's integer counts exact through the SQL boundary."""
+    if type(value) is not int or not 0 <= value <= (1 << 63) - 1:
+        raise ValueError("vLLM histogram count must be a nonnegative signed-64 integer")
+    return value
+
+
+def explicit_histogram_bins(histogram: VLLMHistogramSnapshot) -> tuple[tuple[float, ...], tuple[int, ...]]:
+    """Convert classic cumulative buckets to exact per-bin counts."""
+    bounds = []
+    counts = []
+    previous = 0
+    seen_overflow = False
+    for index, (bound, cumulative) in enumerate(histogram.buckets):
+        if math.isinf(bound):
+            if bound < 0 or cumulative != histogram.count or seen_overflow or index != len(histogram.buckets) - 1:
+                raise ValueError("histogram requires one terminal +Inf bucket matching total count")
+            seen_overflow = True
+            continue
+        if not math.isfinite(bound) or (bounds and bound <= bounds[-1]) or cumulative < previous:
+            raise ValueError("histogram buckets are unordered or decreasing")
+        bounds.append(bound)
+        counts.append(cumulative - previous)
+        previous = cumulative
+    if not seen_overflow or histogram.count < previous:
+        raise ValueError("histogram is missing a valid overflow bucket")
+    counts.append(histogram.count - previous)
+    return tuple(bounds), tuple(counts)
 
 
 def snapshot_vllm_prometheus_metrics(metrics: Sequence[Any], engine_index: str) -> VLLMNativeStatsSnapshot:
@@ -289,7 +304,7 @@ def snapshot_vllm_prometheus_metrics(metrics: Sequence[Any], engine_index: str) 
                     unit=VLLM_HISTOGRAM_UNITS[name],
                     attributes=attributes,
                 )
-            except (ValueError, TypeError, OverflowError):
+            except (ValueError, TypeError, OverflowError, AttributeError):
                 # One unsupported source family must not erase the rest of the engine scrape.
                 histogram_dropped_count += 1
             else:
