@@ -63,7 +63,7 @@ generator:
   model_dtype: bfloat16
   num_inference_engines: 1
   inference_engine_tensor_parallel_size: 1
-  n_samples_per_prompt: 2
+  n_samples_per_prompt: 4
   eval_n_samples_per_prompt: 1
   gpu_memory_utilization: 0.7
   run_engines_locally: true
@@ -90,7 +90,7 @@ generator:
     enabled: true
     output_path: ${oc.env:PIVOT_TMP_ROOT}/trajectories
     phases: [train]
-    sample_count_per_step: 16
+    sample_count_per_step: 32
     sample_fraction: 1.0
     required: true
 
