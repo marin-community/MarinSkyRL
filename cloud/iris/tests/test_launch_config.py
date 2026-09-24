@@ -238,11 +238,45 @@ def test_a_source_recipe_reports_fully_async_settings_its_trainer_never_reads(
     assert bool(warnings) is warned
 
 
-def test_the_old_sync_entrypoint_name_resolves_with_a_warning(
+def test_a_composed_document_reports_only_non_default_fully_async_settings(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    config = load_launch_config(_launch_document(tmp_path, "sync", {}))
+    config.skyrl.trainer.fully_async.pause_mode = "keep"
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=TRANSLATION_LOGGER):
+        validate_launch_config(config)
+
+    assert _translation_warnings(caplog) == [
+        "launch config smoke: entrypoint skyrl_train.entrypoints.main_base never runs the fully async trainer "
+        "and never reads trainer.fully_async.pause_mode"
+    ]
+
+
+def test_the_old_sync_entrypoint_name_resolves_with_a_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING, logger=TRANSLATION_LOGGER):
         parsed = parse_rl_config(str(_launch_document(tmp_path, "standard", {}, recipe_only=True)))
 
     assert parsed.entrypoint == RL_ENTRYPOINTS[RLEntrypoint.SYNC]
     assert any("old name for 'sync'" in message for message in _translation_warnings(caplog))
+
+
+def test_fully_async_and_generator_knobs_compose_into_the_launch_document(tmp_path: Path) -> None:
+    fully_async = {
+        "first_token_admission": True,
+        "pause_mode": "keep",
+        "clear_kv_cache_on_weight_sync": False,
+        "max_buffered_groups": 16,
+    }
+    raw = _raw_config()
+    raw["skyrl"]["trainer"]["fully_async"] = fully_async
+    raw["skyrl"]["generator"]["weight_sync_transport"] = "auto"
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    config = load_launch_config(path)
+
+    for key, value in fully_async.items():
+        assert config.skyrl.trainer.fully_async[key] == value
+    assert config.skyrl.generator.weight_sync_transport == "auto"

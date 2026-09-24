@@ -16,10 +16,13 @@ from cloud.iris.rl_config_translation import (
     RL_ENTRYPOINTS,
     RLEntrypoint,
     compose_skyrl_config,
+    fully_async_defaults,
+    inert_fully_async_settings,
     parse_rl_config,
     registered_rl_entrypoint_module,
     training_type_for_entrypoint,
     validate_tp_divides_heads,
+    warn_inert_fully_async_settings,
 )
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
 from marinskyrl.resource_locator import join_resource_path
@@ -351,6 +354,11 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
     validate_tp_divides_heads(
         int(generator["inference_engine_tensor_parallel_size"]),
         skyrl.get("model_num_attention_heads"),
+    )
+    warn_inert_fully_async_settings(
+        inert_fully_async_settings(skyrl, entrypoint, defaults=fully_async_defaults()),
+        entrypoint,
+        source=f"launch config {raw['iris']['job_name']}",
     )
     if entrypoint == RL_ENTRYPOINTS[RLEntrypoint.FULLY_ASYNC]:
         trainer = skyrl.get("trainer", {})
