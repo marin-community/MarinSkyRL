@@ -20,7 +20,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     apply_overlong_filtering,
     get_rollout_metrics,
     minimum_captured_global_step,
-    minimum_first_token_policy_version,
+    minimum_oldest_policy_version,
     scalar_reward_token_credit,
 )
 
@@ -93,7 +93,7 @@ class WholeTrajectoryProjection:
             rollout_logprobs=rollout_logprobs,
             exclude_from_baseline=[not output.disposition.baseline_eligible for output in outputs],
             actual_global_step=minimum_captured_global_step(outputs),
-            first_token_policy_version=minimum_first_token_policy_version(outputs),
+            oldest_policy_version=minimum_oldest_policy_version(outputs),
         )
         attach_student_topk(batch, outputs, responses, loss_masks)
         _attach_behavior_policy_versions(batch, outputs)
@@ -157,7 +157,7 @@ class StepWiseTrajectoryProjection:
             is_last_step=is_last_step,
             exclude_from_baseline=[not step.disposition.baseline_eligible for step in steps],
             actual_global_step=minimum_captured_global_step(steps),
-            first_token_policy_version=minimum_first_token_policy_version(steps),
+            oldest_policy_version=minimum_oldest_policy_version(steps),
         )
         attach_student_topk(batch, steps, responses, loss_masks)
         _attach_behavior_policy_versions(batch, steps)

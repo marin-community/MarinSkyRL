@@ -457,7 +457,7 @@ async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepat
 
 
 @pytest.mark.asyncio
-async def test_retokenized_chat_history_keeps_the_first_sampled_token_version_without_spans():
+async def test_retokenized_chat_history_keeps_the_oldest_version_without_spans():
     _register_test_env_if_needed()
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
     mock_llm = MagicMock()
@@ -485,7 +485,7 @@ async def test_retokenized_chat_history_keeps_the_first_sampled_token_version_wi
     trajectory_batch = await runner.run(_make_input_batch(prompt, extras))
 
     assert trajectory_batch.get("behavior_policy_version_segments") is None
-    assert trajectory_batch["first_token_policy_version"] == 2
+    assert trajectory_batch["oldest_policy_version"] == 2
 
 
 def _rendered_assistant_ids(tokenizer, runner, content: str) -> list[int]:
@@ -525,7 +525,7 @@ async def test_single_turn_chat_trajectory_trains_on_the_engines_tokens():
     assert batch["rollout_logprobs"][0] == [-0.25 * (index + 1) for index in range(len(sampled_ids))]
     assert batch["stop_reasons"] == ["stop"]
     assert batch["rollout_routed_experts"][0] == [[[index, index + 1]] for index in range(len(sampled_ids))]
-    assert batch["first_token_policy_version"] == 5
+    assert batch["oldest_policy_version"] == 5
     spans = batch["behavior_policy_version_segments"][0]
     assert spans == [{"start": 0, "token_count": len(sampled_ids), "policy_version": 5}]
     # The trainer's admission check: every loss-bearing token carries a known sampled version.
@@ -575,4 +575,4 @@ async def test_a_trajectory_with_an_observation_still_re_renders_the_chat_histor
     assert batch["rollout_logprobs"] is None
     assert "behavior_policy_version_segments" not in batch
     assert "rollout_routed_experts" not in batch
-    assert batch["first_token_policy_version"] == 4
+    assert batch["oldest_policy_version"] == 4

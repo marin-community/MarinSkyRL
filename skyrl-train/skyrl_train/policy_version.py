@@ -7,9 +7,13 @@ from dataclasses import dataclass, field
 from typing import TypedDict
 
 
+# The key under which an engine output, a model client output and an OpenAI chat choice carry
+# each response's spans. The chat choice key is added by SkyRL's InferenceEngineClient; vLLM never
+# emits it.
+RESPONSE_POLICY_VERSION_SEGMENTS_KEY = "response_policy_version_segments"
+# The trajectory batch field holding each response's spans after the trajectory runner aligns
+# them with training tokens.
 BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY = "behavior_policy_version_segments"
-# The per-choice key an OpenAI chat completion carries its spans under.
-POLICY_VERSION_SEGMENTS_KEY = "policy_version_segments"
 
 
 class PolicyVersionSegment(TypedDict):

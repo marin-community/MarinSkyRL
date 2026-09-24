@@ -23,6 +23,7 @@ from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenanc
 from skyrl_train.policy_version import (
     policy_version_bounds,
     BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY,
+    RESPONSE_POLICY_VERSION_SEGMENTS_KEY,
     PolicyVersionSegment,
     append_policy_version_segment_at,
     truncate_policy_version_segments,
@@ -454,7 +455,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         saw_behavior_policy_versions = False
         # The oldest version that sampled a token. Re-tokenized history cannot align spans to
         # tokens, so this version is kept apart from them.
-        first_token_policy_version: int | None = None
+        oldest_policy_version: int | None = None
         # On the re-tokenize path, the engine tokens of the only assistant turn. Kept while no
         # observation has been appended, so a trajectory that never re-rendered trains on what
         # the engine served and sampled; cleared by an observation, a second turn, or a rewrite.
@@ -519,7 +520,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     generated_topk_ids.extend(topk_ids)
                     generated_topk_scores.extend(topk_scores)
             sampled_output_length = len(output_ids)
-            version_rows = engine_output.get("response_policy_version_segments")
+            version_rows = engine_output.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY)
             output_version_segments = list(version_rows[0]) if version_rows is not None else None
             if version_rows is not None:
                 if len(version_rows) != 1:
@@ -531,8 +532,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 )
                 saw_behavior_policy_versions = True
                 turn_bounds = policy_version_bounds([output_version_segments])
-                if turn_bounds is not None and first_token_policy_version is None:
-                    first_token_policy_version = turn_bounds[0]
+                if turn_bounds is not None and oldest_policy_version is None:
+                    oldest_policy_version = turn_bounds[0]
             if chat_completion_params is not None:
                 rendered_prompt_ids = engine_output.get("prompt_ids")
                 if rendered_prompt_ids is None:
@@ -904,7 +905,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             loss_mask=loss_mask,
             env_metrics=env_metrics,
             captured_global_step=captured_global_step,
-            first_token_policy_version=first_token_policy_version,
+            oldest_policy_version=oldest_policy_version,
             behavior_policy_version_segments=(
                 tuple(behavior_policy_version_segments)
                 if saw_behavior_policy_versions and behavior_policy_version_segments is not None
@@ -967,7 +968,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             len(selected_indices) != len(responses) or len(selected_logprobs) != len(responses)
         ):
             raise ValueError("Inference engine student top-K rows must align with responses")
-        version_rows = engine_output.get("response_policy_version_segments")
+        version_rows = engine_output.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY)
 
         truncated_responses = []
         rewards = []
@@ -1077,7 +1078,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 for segments, response in zip(version_rows, truncated_responses, strict=True)
             ]
             bounds = policy_version_bounds(version_rows)
-            trajectory_batch["first_token_policy_version"] = None if bounds is None else bounds[0]
+            trajectory_batch["oldest_policy_version"] = None if bounds is None else bounds[0]
         attach_unshaped_rewards(trajectory_batch, unshaped_rewards)
 
         return trajectory_batch

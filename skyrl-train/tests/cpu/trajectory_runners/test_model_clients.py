@@ -406,7 +406,7 @@ async def test_http_model_client_returns_the_engines_tokens_logprobs_version_spa
                         "finish_reason": "stop",
                         "token_ids": [7, 8],
                         "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
-                        "policy_version_segments": [{"start": 0, "token_count": 2, "policy_version": 3}],
+                        "response_policy_version_segments": [{"start": 0, "token_count": 2, "policy_version": 3}],
                         "provider_specific_fields": {"routed_experts": [[[4, 7]], [[5, 6]]]},
                     }
                 ],

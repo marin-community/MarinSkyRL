@@ -21,7 +21,7 @@ from vllm.renderers.online_renderer import OnlineRenderer
 
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
-from skyrl_train.policy_version import PolicyVersionHistory
+from skyrl_train.policy_version import RESPONSE_POLICY_VERSION_SEGMENTS_KEY, PolicyVersionHistory
 from skyrl_train.config.behavior_logprobs import (
     ROLLOUT_LOGPROB_VALIDATION_KEY,
     validate_behavior_logprob_sampling,
@@ -1919,7 +1919,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             )
             for output in outputs
         ]
-        result["response_policy_version_segments"] = [
+        result[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = [
             ([{"start": 0, "token_count": len(token_ids), "policy_version": policy_version}] if token_ids else [])
             for token_ids, policy_version in zip(result["response_ids"], versions, strict=True)
         ]

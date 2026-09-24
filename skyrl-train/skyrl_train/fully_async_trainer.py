@@ -1263,12 +1263,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         rows = trajectory_batch.get(BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY)
         bounds = policy_version_bounds(rows) if rows is not None else None
         if bounds is not None and bounds[1] > self.global_step:
-            raise RuntimeError(f"first-token policy version {bounds[1]} is newer than the installed policy")
+            raise RuntimeError(f"sampled policy version {bounds[1]} is newer than the installed policy")
         if not self.first_token_admission or not any(trajectory_batch["response_ids"]):
             return captured_step
-        first_token_version = trajectory_batch.get("first_token_policy_version")
-        if first_token_version is not None and first_token_version > self.global_step:
-            raise RuntimeError(f"first-token policy version {first_token_version} is newer than the installed policy")
+        oldest_version = trajectory_batch.get("oldest_policy_version")
+        if oldest_version is not None and oldest_version > self.global_step:
+            raise RuntimeError(f"oldest policy version {oldest_version} is newer than the installed policy")
         if rows is not None:
             try:
                 for ids, loss_mask, segments in zip(
@@ -1284,10 +1284,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             except ValueError as error:
                 raise RuntimeError(f"{FIRST_TOKEN_VERSION_MISSING} ({error})") from error
             return bounds[0] + 1
-        # Re-tokenized chat history carries no spans, only the version that sampled the first token.
-        if first_token_version is None:
+        # Re-tokenized chat history carries no spans, only the oldest version that sampled it.
+        if oldest_version is None:
             raise RuntimeError(FIRST_TOKEN_VERSION_MISSING)
-        return first_token_version + 1
+        return oldest_version + 1
 
     async def _run_generate_for_a_group_loop(self, queues: _GenerationQueues):
         """Generate dataset rows or retries and route only fresh groups to the completed queue."""

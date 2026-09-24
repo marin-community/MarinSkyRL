@@ -905,7 +905,7 @@ async def test_non_batched_terminal_assembly_masks_unsampled_tokens(
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
-async def test_generate_non_batched_multiturn_keeps_the_first_sampled_token_version(
+async def test_generate_non_batched_multiturn_keeps_the_oldest_version(
     mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
 ):
     generator_cfg.batched = False
@@ -952,7 +952,7 @@ async def test_generate_non_batched_multiturn_keeps_the_first_sampled_token_vers
     rows = output["behavior_policy_version_segments"]
     assert [segment["policy_version"] for segment in rows[0]] == [2, 3]
     assert policy_version_bounds(rows) == (2, 3)
-    assert output["first_token_policy_version"] == 2
+    assert output["oldest_policy_version"] == 2
 
 
 @pytest.mark.asyncio
@@ -1171,7 +1171,7 @@ async def test_non_batched_postprocessed_action_preserves_aligned_logprobs(
 
     assert output["response_ids"] == [MOCK_LLM_OUTPUT_IDS]
     assert output["rollout_logprobs"] == [[0.1] * len(MOCK_LLM_OUTPUT_IDS)]
-    assert output["first_token_policy_version"] == 0
+    assert output["oldest_policy_version"] == 0
     assert output["behavior_policy_version_segments"] == [
         [{"start": 0, "token_count": len(MOCK_LLM_OUTPUT_IDS), "policy_version": 0}]
     ]

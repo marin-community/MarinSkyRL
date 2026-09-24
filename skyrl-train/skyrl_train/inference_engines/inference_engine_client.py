@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from skyrl_train.config.trajectory_runner_capabilities import opencode_exact_continuation_enabled
 from skyrl_train.policy_version import (
-    POLICY_VERSION_SEGMENTS_KEY,
+    RESPONSE_POLICY_VERSION_SEGMENTS_KEY,
     PolicyVersionSegment,
     append_contiguous_policy_version_segment,
     validate_policy_version_segments,
@@ -381,7 +381,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 responses[original_idx] = result["responses"][local_idx]
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
                 response_ids[original_idx] = result["response_ids"][local_idx]
-                version_segments = result.get("response_policy_version_segments")
+                version_segments = result.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY)
                 if version_segments is not None:
                     row = version_segments[local_idx]
                     validate_policy_version_segments(
@@ -417,7 +417,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             output["student_topk_indices"] = student_topk_indices
             output["behavior_topk_logprobs"] = behavior_topk_logprobs
         if any(segments is not None for segments in response_policy_version_segments):
-            output["response_policy_version_segments"] = [
+            output[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = [
                 segments
                 if segments is not None
                 else ([{"start": 0, "token_count": len(ids), "policy_version": None}] if ids else [])
@@ -582,7 +582,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_behavior_topk_logprobs.extend(selected_scores[0])
 
             # 3.5 Accumulate outputs
-            partial_segments = partial_response.get("response_policy_version_segments")
+            partial_segments = partial_response.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY)
             if partial_segments is not None:
                 if len(partial_segments) != 1:
                     raise ValueError("single-response generation requires one policy-version segment row")
@@ -636,7 +636,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             output["student_topk_indices"] = [accum_student_topk_indices]
             output["behavior_topk_logprobs"] = [accum_behavior_topk_logprobs]
         if saw_policy_version_segments:
-            output["response_policy_version_segments"] = [accum_policy_version_segments]
+            output[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = [accum_policy_version_segments]
         return output
 
     async def _chat_completion_with_retry(
@@ -788,7 +788,9 @@ class InferenceEngineClient(InferenceEngineInterface):
                     # If we only made one request and it is not aborted, return the partial result directly.
                     # This is the codepath that will hit when we do not use `pause_generation()` or `resume_generation()`.
                     if accum.policy_version_segments:
-                        partial_response["choices"][0][POLICY_VERSION_SEGMENTS_KEY] = accum.policy_version_segments
+                        partial_response["choices"][0][RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = (
+                            accum.policy_version_segments
+                        )
                     return partial_response
                 # NOTE(Charlie): not doing deepcopy here to avoid copying large logprobs, so be careful when modifying this.
                 base_response = partial_response.copy()
@@ -1436,7 +1438,7 @@ def _build_final_response(
     if final_choice.get("token_ids", None) is not None:
         final_choice["token_ids"] = accum.token_ids
     if accum.policy_version_segments:
-        final_choice[POLICY_VERSION_SEGMENTS_KEY] = accum.policy_version_segments
+        final_choice[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = accum.policy_version_segments
 
     # Set last response's finish_reason and stop_reason.
     final_choice["finish_reason"] = finish_reason

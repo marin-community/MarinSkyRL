@@ -20,7 +20,7 @@ from skyrl_train.trajectory_runners.skyrl_gym_contracts import (
     reward_from_env_step,
     verification_from_env_step,
 )
-from skyrl_train.policy_version import policy_version_bounds
+from skyrl_train.policy_version import RESPONSE_POLICY_VERSION_SEGMENTS_KEY, policy_version_bounds
 from skyrl_train.trajectory_runners.trajectory_processing import normalize_token_ids
 from skyrl_train.trajectory_runners.collectors import collect_agent_loops
 from skyrl_train.trajectory_runners.selected_topk import align_student_topk
@@ -137,7 +137,7 @@ class StepWiseRolloutCollector:
         per_step_outputs: List[AgentLoopOutput] = []
         # Capture global_step at first inference for accurate staleness tracking
         captured_global_step: Optional[int] = None
-        first_token_policy_version: Optional[int] = None
+        oldest_policy_version: Optional[int] = None
         max_model_len = self.trajectory_runner_cfg.get("engine_init_kwargs", {}).get("max_model_len")
         while not done:
             if retokenize_chat_history:
@@ -185,10 +185,10 @@ class StepWiseRolloutCollector:
                 captured_global_step = global_step_fn()
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
-            version_rows = engine_output.get("response_policy_version_segments")
-            if version_rows is not None and first_token_policy_version is None:
+            version_rows = engine_output.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY)
+            if version_rows is not None and oldest_policy_version is None:
                 bounds = policy_version_bounds(version_rows)
-                first_token_policy_version = None if bounds is None else bounds[0]
+                oldest_policy_version = None if bounds is None else bounds[0]
             sampled_ids = list(output_ids)
             topk_ids_batch = engine_output.get("student_topk_indices")
             topk_scores_batch = engine_output.get("behavior_topk_logprobs")
@@ -306,8 +306,8 @@ class StepWiseRolloutCollector:
         # Attach captured global_step to the first per-step output
         if per_step_outputs and captured_global_step is not None:
             per_step_outputs[0].captured_global_step = captured_global_step
-        if per_step_outputs and first_token_policy_version is not None:
-            per_step_outputs[0].first_token_policy_version = first_token_policy_version
+        if per_step_outputs and oldest_policy_version is not None:
+            per_step_outputs[0].oldest_policy_version = oldest_policy_version
 
         await self._run_in_executor_if_available(env.close)
 

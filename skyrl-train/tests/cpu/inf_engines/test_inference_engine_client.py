@@ -1796,7 +1796,7 @@ async def test_chat_attempts_are_stamped_with_the_version_installed_when_they_we
     out = await client.chat_completion(_chat_request())
 
     assert out["choices"][0]["token_ids"] == [11, 12, 13]
-    assert out["choices"][0]["policy_version_segments"] == [
+    assert out["choices"][0]["response_policy_version_segments"] == [
         {"start": 0, "token_count": 1, "policy_version": expected_first_span_version},
         {"start": 1, "token_count": 2, "policy_version": 4},
     ]
@@ -1811,7 +1811,9 @@ async def test_a_single_attempt_carries_one_span_of_the_installed_version():
 
     out = await client.chat_completion(_chat_request())
 
-    assert out["choices"][0]["policy_version_segments"] == [{"start": 0, "token_count": 2, "policy_version": 5}]
+    assert out["choices"][0]["response_policy_version_segments"] == [
+        {"start": 0, "token_count": 2, "policy_version": 5}
+    ]
 
 
 @pytest.mark.asyncio
@@ -1821,7 +1823,7 @@ async def test_chat_responses_carry_no_span_until_a_version_is_named():
 
     out = await client.chat_completion(_chat_request())
 
-    assert "policy_version_segments" not in out["choices"][0]
+    assert "response_policy_version_segments" not in out["choices"][0]
 
 
 # -------------------------------------------

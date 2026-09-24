@@ -20,7 +20,7 @@ from skyrl_train.inference_engines.chat_template import (
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.response_topk import select_chat_response_topk
 from skyrl_train.policy_version import (
-    POLICY_VERSION_SEGMENTS_KEY,
+    RESPONSE_POLICY_VERSION_SEGMENTS_KEY,
     PolicyVersionSegment,
     validate_policy_version_segments,
 )
@@ -102,7 +102,7 @@ def _parse_chat_choice(choice: dict[str, Any], *, prompt_ids: Any, logprobs_requ
     response_logprobs = [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None
     if response_logprobs is not None and len(response_logprobs) != len(response_ids):
         raise RuntimeError("OpenAI chat completion logprobs do not align with exact response token IDs")
-    segments = choice.get(POLICY_VERSION_SEGMENTS_KEY)
+    segments = choice.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY)
     if segments is not None:
         validate_policy_version_segments(segments, response_length=len(response_ids), require_known=False)
     return _ChatChoice(
@@ -130,7 +130,7 @@ def _assemble_plain_results(results: list[_ChatChoice]) -> ModelClientOutput:
         token_provenance=TokenProvenance.ENGINE,
     )
     if all(rows is not None for rows in segments):
-        output["response_policy_version_segments"] = segments
+        output[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = segments
     if any(result.routed_experts is not None for result in results):
         output["routed_experts"] = [result.routed_experts for result in results]
     return output
