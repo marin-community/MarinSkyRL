@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 import yaml
+from omegaconf import OmegaConf
 from omegaconf.errors import ConfigKeyError
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
@@ -120,11 +121,12 @@ def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) ->
         ("standard", True, 1, "sync"),
         ("terminal_bench", True, 1, "sync"),
         ("terminal_bench", False, 2, "async"),
+        ("terminal_bench", None, 1, "sync"),
         ("generate", True, 1, None),
     ],
 )
 def test_composed_launch_records_the_trainer_its_entrypoint_runs(
-    tmp_path: Path, entrypoint: str, colocate_all: bool, num_nodes: int, expected: str | None
+    tmp_path: Path, entrypoint: str, colocate_all: bool | None, num_nodes: int, expected: str | None
 ) -> None:
     raw = _raw_config()
     raw["skyrl"]["entrypoint"] = entrypoint
@@ -133,7 +135,16 @@ def test_composed_launch_records_the_trainer_its_entrypoint_runs(
     path = tmp_path / "launch.yaml"
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
-    assert load_launch_config(path).runtime.training_type == expected
+    config = load_launch_config(path)
+    assert config.runtime.training_type == expected
+    if colocate_all is None:
+        # Composition fills a null colocate_all, but a resolved document can carry one. The role
+        # plan then places the roles on separate nodes while the entrypoint still trains synchronously.
+        config.skyrl.trainer.placement.colocate_all = None
+        config.iris.allocation.num_nodes = 2
+        resolved = tmp_path / "resolved-launch.yaml"
+        OmegaConf.save(config, resolved)
+        assert load_launch_config(resolved).runtime.training_type == expected
 
 
 def test_launch_config_rejects_unknown_root_fields() -> None:

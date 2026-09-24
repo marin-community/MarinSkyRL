@@ -224,8 +224,9 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
 
 
 def _training_type(entrypoint: str, skyrl: Mapping[str, Any]) -> str | None:
-    colocate_all = skyrl.get("trainer", {}).get("placement", {}).get("colocate_all", True)
-    training_type = training_type_for_entrypoint(entrypoint, colocate_all=bool(colocate_all))
+    # The terminal_bench entrypoint runs async only for an explicit false, so null means colocated.
+    colocate_all = skyrl.get("trainer", {}).get("placement", {}).get("colocate_all")
+    training_type = training_type_for_entrypoint(entrypoint, colocate_all=colocate_all is not False)
     return None if training_type is None else training_type.value
 
 
