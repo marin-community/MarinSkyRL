@@ -14,7 +14,6 @@ from omegaconf import OmegaConf
 from skyrl_train.utils.utils import resolve_strategy_limited_telemetry
 
 from skyrl_train.utils.importance_ratio_diagnostics import (
-    QUANTILE_ELEMENT_LIMIT,
     LogRatioMonitor,
     absolute_quantiles,
     mismatch_ratio_metrics,
@@ -58,6 +57,53 @@ def test_mismatch_metrics_bucket_by_staleness_and_absolute_position():
     changed[1, 343:345] = torch.tensor([10.0, 20.0])
     boundary = mismatch_ratio_metrics(changed, rollout, mask, torch.tensor([0, 0, 3, 9]))
     assert boundary["policy/mismatch/staleness0/pos_last256/log_ratio_abs_mean"] == pytest.approx(20 / 512)
+
+
+# Every policy/mismatch key the async RL Grafana dashboard reads
+# (marin infra/grafana/src/async_rl_observability.py).
+DASHBOARD_MISMATCH_KEYS = (
+    # Panel 30, pre-update model log-ratio drift.
+    "pooled/log_ratio_mean",
+    "pooled/log_ratio_abs_mean",
+    "pooled/log_ratio_abs_p95",
+    "pooled/log_ratio_abs_p99",
+    "pooled/log_ratio_abs_max",
+    # Panel 31, PPO-window pressure.
+    "pooled/lower_clip_pressure",
+    "pooled/upper_clip_pressure",
+    # Panels 32, 47 and 48: coverage, ESS and the uniform-staleness tables.
+    "pooled/finite_fraction",
+    "pooled/missing_behavior",
+    "pooled/ess_fraction",
+    # Panels 44, 47 and 48, mean squared log-ratio.
+    "pooled/log_ratio_mean_squared",
+    # Panel 54, staleness-zero mismatch.
+    "staleness0/log_ratio_abs_mean",
+    "staleness0/log_ratio_abs_p99",
+    "staleness0/log_ratio_abs_p999",
+    "staleness0/frac_outside_0_5_2",
+    "staleness0/ess_fraction",
+    "staleness0/kl_k3",
+    "staleness0/chi2",
+    # Panel 55, mismatch by staleness bucket.
+    *(f"staleness{bucket}/log_ratio_abs_mean" for bucket in ("0", "1", "2", "3", "4-7", "8+")),
+    # Panel 57, position dependence.
+    "pooled/pos_first256/log_ratio_abs_mean",
+    "pooled/pos_last256/log_ratio_abs_mean",
+    "pooled/pos_middle/log_ratio_abs_mean",
+)
+
+
+@pytest.mark.parametrize("staleness", [[0, 1, 2, 3, 5, 9], [0, 0, 0, 0, 0, 0]])
+def test_mismatch_metrics_emit_every_key_the_dashboard_reads(staleness):
+    mask = torch.ones(6, 800)
+    learner = torch.randn(6, 800, dtype=torch.float64)
+    result = mismatch_ratio_metrics(learner, torch.zeros_like(learner), mask, torch.tensor(staleness))
+    read = {f"policy/mismatch/{key}" for key in DASHBOARD_MISMATCH_KEYS if staleness[-1] or "staleness0" in key}
+    assert read - result.keys() == set()
+    assert all(math.isfinite(result[key]) for key in read)
+    staleness0 = ratio_statistics(learner[torch.tensor(staleness) == 0].reshape(-1))
+    assert {key: result[f"policy/mismatch/staleness0/{key}"] for key in staleness0} == pytest.approx(staleness0)
 
 
 def test_worker_accumulator_matches_pooled_ess_and_tail_under_unequal_microbatches():
@@ -191,14 +237,18 @@ def test_a_nonfinite_token_invalidates_the_worker_statistics():
 
 def test_quantiles_stay_exact_above_the_size_torch_refuses():
     """numpy is the independent reference: torch.quantile refuses this population outright."""
-    values = torch.rand(QUANTILE_ELEMENT_LIMIT + 1, dtype=torch.float32)
+    values = torch.rand(2**24 + 1, dtype=torch.float32)
     probabilities = (0.5, 0.95, 0.99)
     with pytest.raises(RuntimeError):
         torch.quantile(values, values.new_tensor(probabilities))
     expected = numpy.quantile(values.numpy(), probabilities, method="linear")
     assert absolute_quantiles(values, probabilities) == pytest.approx(expected, abs=1e-6)
     small = torch.rand(1000, dtype=torch.float64)
-    assert absolute_quantiles(small, probabilities) == torch.quantile(small, small.new_tensor(probabilities)).tolist()
+    expected = torch.quantile(small, small.new_tensor(probabilities)).tolist()
+    assert absolute_quantiles(small, probabilities) == pytest.approx(expected, rel=1e-12)
+    ties = torch.tensor([0.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0], dtype=torch.float64)
+    tied = torch.quantile(ties, ties.new_tensor(probabilities)).tolist()
+    assert absolute_quantiles(ties, probabilities) == pytest.approx(tied, rel=1e-12)
 
 
 def test_shipped_ratio_diagnostics_pool_on_megatron_and_cost_nothing_elsewhere():

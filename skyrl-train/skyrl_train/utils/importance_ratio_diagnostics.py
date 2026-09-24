@@ -19,14 +19,21 @@ DEFAULT_POSITION_WINDOW = 256
 
 LOG_RATIO_TAIL_CAPACITY = 8192
 
-# torch.quantile rejects inputs above this size. A full policy batch reaches it
-# at a few million tokens per rank, so larger inputs are sorted in full.
-QUANTILE_ELEMENT_LIMIT = 2**24
-
 # A token whose probability changed by more than 2x, and one that collapsed below
 # 1e-5 of its behaviour probability. Each threshold selects tokens; neither clips.
 LOG_RATIO_DOUBLING = math.log(2)
 LOG_RATIO_COLLAPSE = math.log(1e-5)
+
+# Staleness buckets for the consume-time mismatch, with the inclusive lower bound
+# of each; the last bucket is open-ended.
+MISMATCH_STALENESS_BUCKETS = (
+    ("staleness0", 0),
+    ("staleness1", 1),
+    ("staleness2", 2),
+    ("staleness3", 3),
+    ("staleness4-7", 4),
+    ("staleness8+", 8),
+)
 
 TIS_DIAG_KEYS = ("tis/imp_ratio_mean", "tis/imp_ratio_capped_fraction", "tis/log_ratio_abs_mean")
 LOG_RATIO_BASE_METRIC_KEYS = (
@@ -67,17 +74,22 @@ def ratio_diagnostics_settings(algorithm_cfg) -> RatioDiagnosticsSettings:
 
 
 def absolute_quantiles(values: torch.Tensor, probabilities: tuple[float, ...]) -> list[float]:
-    """Linear-interpolated quantiles of a finite 1-D tensor of any size.
+    """Linear-interpolated quantiles of a finite 1-D tensor of any size, as torch.quantile computes them.
 
-    Matches torch.quantile and accepts the large token populations it refuses.
+    One selection finds the lowest requested order statistic and only the values
+    above it are sorted, so upper-tail quantiles cost far less than a full sort.
+    torch.quantile also refuses inputs above 2**24 elements, which a policy batch reaches.
     """
-    if values.numel() <= QUANTILE_ELEMENT_LIMIT:
-        return torch.quantile(values, values.new_tensor(probabilities)).tolist()
-    ordered = values.sort().values
-    positions = values.new_tensor(probabilities) * (ordered.numel() - 1)
+    count = values.numel()
+    positions = torch.tensor(probabilities, dtype=torch.float64) * (count - 1)
+    lowest = int(positions.min().floor())
+    threshold = values.kthvalue(lowest + 1).values
+    greater = values[values > threshold].sort().values
+    tail = torch.cat([threshold.expand(count - lowest - greater.numel()), greater]).double()
     lower = positions.floor()
-    below = ordered[lower.long()]
-    return (below + (ordered[positions.ceil().long()] - below) * (positions - lower)).tolist()
+    below = tail[(lower - lowest).long()]
+    above = tail[(positions.ceil() - lowest).long()]
+    return (below + (above - below) * (positions - lower)).tolist()
 
 
 def ratio_statistics(delta: torch.Tensor, *, eps_clip_low: float = 0.2, eps_clip_high: float = 0.2) -> dict[str, float]:
@@ -90,37 +102,81 @@ def ratio_statistics(delta: torch.Tensor, *, eps_clip_low: float = 0.2, eps_clip
     """
     delta = delta.detach().double().reshape(-1)
     selected = delta.numel()
-    delta = delta[torch.isfinite(delta)]
-    result = {"selected_tokens": float(selected), "finite_tokens": float(delta.numel())}
+    finite = torch.isfinite(delta)
+    if not finite.all():
+        delta = delta[finite]
+    count = delta.numel()
+    result = {"selected_tokens": float(selected), "finite_tokens": float(count)}
     if selected:
-        result["finite_fraction"] = delta.numel() / selected
-    if not delta.numel():
+        result["finite_fraction"] = count / selected
+    if not count:
         return result
     absolute = delta.abs()
-    quantiles = absolute_quantiles(absolute, (0.5, 0.95, 0.99, 0.999))
-    weights = (delta - delta.max()).exp()
+    quantiles = absolute_quantiles(absolute, (0.95, 0.99, 0.999))
+    maximum = delta.max()
+    weights = (delta - maximum).exp()
+    weight_sum = weights.sum()
+    clipped_ratio = delta.clamp(-LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP).exp()
+    lower_bound = math.log1p(-eps_clip_low) if eps_clip_low < 1 else -math.inf
+
+    def fraction(selection: torch.Tensor) -> float:
+        return selection.sum().item() / count
+
+    mean = delta.mean().item()
     result.update(
-        log_ratio_mean=delta.mean().item(),
+        log_ratio_mean=mean,
         log_ratio_abs_mean=absolute.mean().item(),
-        log_ratio_abs_p50=quantiles[0],
-        log_ratio_abs_p95=quantiles[1],
-        log_ratio_abs_p99=quantiles[2],
-        log_ratio_abs_p999=quantiles[3],
+        log_ratio_abs_p95=quantiles[0],
+        log_ratio_abs_p99=quantiles[1],
+        log_ratio_abs_p999=quantiles[2],
         log_ratio_abs_max=absolute.max().item(),
-        lower_clip_pressure=(delta < (math.log1p(-eps_clip_low) if eps_clip_low < 1 else -math.inf))
-        .double()
-        .mean()
-        .item(),
-        upper_clip_pressure=(delta > math.log1p(eps_clip_high)).double().mean().item(),
-        frac_outside_0_5_2=(absolute > LOG_RATIO_DOUBLING).double().mean().item(),
-        frac_below_1e_5=(delta < LOG_RATIO_COLLAPSE).double().mean().item(),
-        ess_fraction=(weights.sum().square() / (delta.numel() * weights.square().sum())).item(),
-        kl_k1=(-delta).mean().item(),
-        kl_k3=(delta.clamp(-LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP).exp() - delta - 1).mean().item(),
-        chi2=(2 * delta.clamp(-LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP)).exp().mean().item() - 1,
+        lower_clip_pressure=fraction(delta < lower_bound),
+        upper_clip_pressure=fraction(delta > math.log1p(eps_clip_high)),
+        frac_outside_0_5_2=fraction(absolute > LOG_RATIO_DOUBLING),
+        frac_below_1e_5=fraction(delta < LOG_RATIO_COLLAPSE),
+        ess_fraction=(weight_sum.square() / (count * weights.square().sum())).item(),
+        kl_k1=-mean,
+        kl_k3=clipped_ratio.mean().item() - mean - 1,
+        chi2=clipped_ratio.square().mean().item() - 1,
         log_ratio_mean_squared=delta.square().mean().item(),
-        log_mean_ratio=(delta.logsumexp(0) - math.log(delta.numel())).item(),
+        log_mean_ratio=(maximum + weight_sum.log()).item() - math.log(count),
     )
+    return result
+
+
+def _grouped_moments(values: torch.Tensor | None, groups: torch.Tensor, n_groups: int) -> dict[str, torch.Tensor]:
+    """Per-group token counts and finite-token sums of delta, |delta| and the 2x indicator."""
+
+    def total(weights: torch.Tensor | None = None) -> torch.Tensor:
+        return torch.bincount(groups, weights, minlength=n_groups).double()
+
+    if values is None:
+        return {"selected": total(), "finite": torch.zeros(n_groups, dtype=torch.float64)}
+    finite = torch.isfinite(values)
+    all_finite = bool(finite.all())
+    finite_values = values if all_finite else torch.where(finite, values, 0)
+    absolute = finite_values.abs()
+    selected = total()
+    return {
+        "selected": selected,
+        "finite": selected if all_finite else total(finite.double()),
+        "sum": total(finite_values),
+        "abs_sum": total(absolute),
+        "outside": total((absolute > LOG_RATIO_DOUBLING).double()),
+    }
+
+
+def _moment_metrics(totals: dict[str, float]) -> dict[str, float]:
+    selected, finite = totals["selected"], totals["finite"]
+    result = {"selected_tokens": selected, "finite_tokens": finite}
+    if selected:
+        result["finite_fraction"] = finite / selected
+    if finite:
+        result.update(
+            log_ratio_mean=totals["sum"] / finite,
+            log_ratio_abs_mean=totals["abs_sum"] / finite,
+            frac_outside_0_5_2=totals["outside"] / finite,
+        )
     return result
 
 
@@ -138,6 +194,9 @@ def mismatch_ratio_metrics(
 
     Only staleness0 isolates engine mismatch. Other buckets and the pooled values
     measure its product with policy drift. Position buckets overlap on short responses.
+    The pooled and staleness0 buckets report every ratio_statistics value. The other
+    buckets and every position bucket report token counts, finite_fraction,
+    log_ratio_mean, log_ratio_abs_mean and frac_outside_0_5_2.
     """
     if type(position_window) is not int or position_window <= 0:
         raise ValueError("position_window must be a positive integer")
@@ -147,43 +206,60 @@ def mismatch_ratio_metrics(
     )
     if staleness.shape != (mask.shape[0],) or (staleness < 0).any() or not torch.equal(staleness, staleness.int()):
         raise ValueError("rollout_staleness must contain one nonnegative integer per response row")
-    buckets = {"pooled": torch.ones_like(staleness, dtype=torch.bool)}
-    buckets.update({f"staleness{step}": staleness == step for step in range(4)})
-    buckets.update({"staleness4-7": (staleness >= 4) & (staleness <= 7), "staleness8+": staleness >= 8})
-    delta = None
-    if rollout_logprobs is not None:
-        # CPU float64 and masking before subtraction avoid padded NaNs.
-        delta = torch.zeros_like(mask, dtype=torch.float64)
-        delta[mask] = learner_logprobs.detach().cpu().double()[mask] - rollout_logprobs.detach().cpu().double()[mask]
+    row_bucket = torch.zeros(mask.shape[0], dtype=torch.uint8)
+    for index, (_, lower) in enumerate(MISMATCH_STALENESS_BUCKETS):
+        row_bucket[staleness >= lower] = index
     positions = torch.arange(mask.shape[1]).unsqueeze(0)
     lengths = mask.sum(-1, keepdim=True)
-    position_masks = {
-        f"first{position_window}": positions < position_window,
-        f"last{position_window}": positions >= lengths - position_window,
+    # A token's group is its staleness bucket times four plus its position class:
+    # 1 in the first window, 2 in the last window, 3 in both and 0 in neither.
+    groups = torch.masked_select(
+        4 * row_bucket.unsqueeze(1)
+        + (positions < position_window).to(torch.uint8)
+        + 2 * (positions >= lengths - position_window).to(torch.uint8),
+        mask,
+    ).long()
+    values = None
+    if rollout_logprobs is not None:
+        # CPU float64 and masking before subtraction avoid padded NaNs.
+        values = (
+            torch.masked_select(learner_logprobs.detach().cpu(), mask).double()
+            - torch.masked_select(rollout_logprobs.detach().cpu(), mask).double()
+        )
+    grid = {
+        key: total.view(len(MISMATCH_STALENESS_BUCKETS), 4)
+        for key, total in _grouped_moments(values, groups, 4 * len(MISMATCH_STALENESS_BUCKETS)).items()
     }
-    position_masks["middle"] = ~position_masks[f"first{position_window}"] & ~position_masks[f"last{position_window}"]
+    position_classes = {f"first{position_window}": [1, 3], f"last{position_window}": [2, 3], "middle": [0]}
+    # The async RL dashboard reads quantile, KL and ESS statistics only for these two
+    # buckets; the rest take their moments from the grid and need no sort.
+    full_statistics = {}
+    if values is not None:
+        full_statistics["pooled"] = ratio_statistics(values, eps_clip_low=eps_clip_low, eps_clip_high=eps_clip_high)
+        staleness0 = groups < 4
+        full_statistics["staleness0"] = (
+            full_statistics["pooled"]
+            if bool(staleness0.all())
+            else ratio_statistics(values[staleness0], eps_clip_low=eps_clip_low, eps_clip_high=eps_clip_high)
+        )
+    bucket_rows = {"pooled": slice(None)}
+    bucket_rows.update({name: slice(index, index + 1) for index, (name, _) in enumerate(MISMATCH_STALENESS_BUCKETS)})
+
+    def moments(rows: slice, classes: list[int]) -> dict[str, float]:
+        totals = {key: total[rows][:, classes].sum().item() for key, total in grid.items()}
+        return _moment_metrics({"sum": 0.0, "abs_sum": 0.0, "outside": 0.0, **totals})
+
     result = {}
-    for name, rows in buckets.items():
-        selected = mask & rows.unsqueeze(1)
+    for name, rows in bucket_rows.items():
         prefix = f"policy/mismatch/{name}/"
-        if delta is None:
-            metrics = {"selected_tokens": float(selected.sum()), "finite_tokens": 0.0, "missing_behavior": 1.0}
+        if values is None:
+            metrics = {**moments(rows, [0, 1, 2, 3]), "missing_behavior": 1.0}
+            metrics.pop("finite_fraction", None)
         else:
-            metrics = {
-                **ratio_statistics(delta[selected], eps_clip_low=eps_clip_low, eps_clip_high=eps_clip_high),
-                "missing_behavior": 0.0,
-            }
+            metrics = {**(full_statistics.get(name) or moments(rows, [0, 1, 2, 3])), "missing_behavior": 0.0}
         result.update({prefix + key: value for key, value in metrics.items()})
-        for position, position_mask in position_masks.items():
-            selected_position = selected & position_mask
-            stats = (
-                ratio_statistics(delta[selected_position])
-                if delta is not None
-                else {
-                    "selected_tokens": float(selected_position.sum()),
-                    "finite_tokens": 0.0,
-                }
-            )
+        for position, classes in position_classes.items():
+            stats = moments(rows, classes)
             for key in ("selected_tokens", "finite_tokens", "log_ratio_abs_mean", "frac_outside_0_5_2"):
                 if key in stats:
                     result[f"{prefix}pos_{position}/{key}"] = stats[key]
