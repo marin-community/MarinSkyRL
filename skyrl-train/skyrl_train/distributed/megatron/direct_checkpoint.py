@@ -31,8 +31,8 @@ from skyrl_train.timing_observability import checkpoint_phase
 
 def _profile_mcore_conversion(rank: int, step: int | None) -> cProfile.Profile | None:
     """Opt-in diagnostic for one warm save; never enabled in production by default."""
-    requested_step = os.environ.get("SKYRL_PROFILE_MCORE_TO_PYT_STEP")
-    requested_ranks = os.environ.get("SKYRL_PROFILE_MCORE_TO_PYT_RANKS", "0")
+    requested_step = os.environ.get("CHECKPOINT_MCORE_PROFILE_STEP")
+    requested_ranks = os.environ.get("CHECKPOINT_MCORE_PROFILE_RANKS", "0")
     if requested_step is None or str(step) != requested_step:
         return None
     if str(rank) not in requested_ranks.split(","):
