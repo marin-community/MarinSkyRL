@@ -5,6 +5,7 @@ uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/te
 import pytest
 from typing import Dict, Any
 from unittest.mock import AsyncMock, MagicMock
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
 from omegaconf import OmegaConf
@@ -535,6 +536,55 @@ async def test_single_turn_chat_trajectory_trains_on_the_engines_tokens():
         require_known=True,
         required_mask=[bool(m) for m in batch["loss_masks"][0]],
     )
+
+
+class _TokenEngine:
+    """The shape a vLLM engine returns from generate(): sampled ids and spans, no prompt ids."""
+
+    def __init__(self, sampled_ids):
+        self.sampled_ids = sampled_ids
+        self.served_prompts = []
+
+    async def generate(self, input_batch):
+        self.served_prompts.extend(input_batch["prompt_token_ids"])
+        return {
+            "responses": ["b\n"],
+            "stop_reasons": ["stop"],
+            "response_ids": [list(self.sampled_ids)],
+            "response_logprobs": None,
+            "response_policy_version_segments": [
+                [{"start": 0, "token_count": len(self.sampled_ids), "policy_version": 6}]
+            ],
+        }
+
+
+@pytest.mark.asyncio
+async def test_single_turn_chat_through_the_inference_engine_client_trains_on_the_served_prompt():
+    _register_test_env_if_needed()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    sampled_ids = tokenizer.encode("b\n" + tokenizer.eos_token, add_special_tokens=False)
+    engine = _TokenEngine(sampled_ids)
+    config = OmegaConf.create(
+        {
+            "trainer": {"policy": {"model": {"path": "Qwen/Qwen3-0.6B"}}},
+            "generator": {
+                "backend": "vllm",
+                "enable_http_endpoint": False,
+                "http_endpoint_host": "127.0.0.1",
+                "http_endpoint_port": 0,
+                "weight_sync_pause_timeout_seconds": 30.0,
+            },
+        }
+    )
+    client = InferenceEngineClient(engines=[engine], tokenizer=tokenizer, full_config=config)
+    runner = _build_runner(tokenizer, QWEN3_WITHOUT_THINKING, client)
+    prompt, extras = _default_prompt_and_extras()
+
+    batch = await runner.run(_make_input_batch(prompt, extras, env_class="cpu_single_turn_env"))
+
+    assert batch["prompt_token_ids"][0] == engine.served_prompts[0]
+    assert batch["response_ids"][0] == sampled_ids
+    assert batch["oldest_policy_version"] == 6
 
 
 @pytest.mark.asyncio

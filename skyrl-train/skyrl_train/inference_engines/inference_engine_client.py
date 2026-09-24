@@ -410,6 +410,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_ids=response_ids,
             response_logprobs=response_logprobs if add_resp_logprobs else None,
             prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
+            prompt_ids=[list(ids) for ids in prompt_token_ids],
         )
         if add_student_topk:
             if any(row is None for row in student_topk_indices) or any(row is None for row in behavior_topk_logprobs):
@@ -631,6 +632,8 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_ids=[accum_response_ids],
             response_logprobs=[accum_response_logprobs] if len(accum_response_logprobs) > 0 else None,
             prompt_logprobs=final_prompt_logprobs,
+            # Retries extend the prompt with earlier attempts' tokens, which belong to the response.
+            prompt_ids=[list(original_prompt_ids)],
         )
         if saw_student_topk:
             output["student_topk_indices"] = [accum_student_topk_indices]

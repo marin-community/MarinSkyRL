@@ -8,7 +8,7 @@ uv run --isolated --group dev --extra cpu pytest tests/cpu/inf_engines/test_infe
 
 from http import HTTPStatus
 import socket
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from transformers import AutoTokenizer
 from skyrl_train.inference_engines.utils import (
@@ -1283,7 +1283,7 @@ async def test_generate_retry_no_gen_finish():
     assert first_call["sampling_params"]["max_tokens"] == 16
     assert second_call["sampling_params"]["max_tokens"] == 16
 
-    assert out == {**engines[0].responses[1], "prompt_logprobs": None}
+    assert out == {**engines[0].responses[1], "prompt_logprobs": None, "prompt_ids": [original_prompt_ids]}
 
 
 # -------------------------------------------
@@ -1700,6 +1700,23 @@ async def test_batched_generate_synthesizes_an_unknown_span_for_an_engine_report
         [{"start": 0, "token_count": 1, "policy_version": 2}],
         [{"start": 0, "token_count": 2, "policy_version": None}],
     ]
+
+
+@pytest.mark.asyncio
+async def test_generate_returns_the_served_prompt_without_earlier_attempts_tokens():
+    engine = _VersionedEngine(
+        [
+            InferenceEngineOutput(responses=["a"], response_ids=[[5]], stop_reasons=["abort"], response_logprobs=None),
+            InferenceEngineOutput(responses=["b"], response_ids=[[6]], stop_reasons=["stop"], response_logprobs=None),
+        ]
+    )
+    client = InferenceEngineClient(engines=[engine], tokenizer=MagicMock(), full_config=_make_min_cfg())
+
+    output = await client.generate(InferenceEngineInput(prompt_token_ids=[[1, 2]], sampling_params={"max_tokens": 4}))
+
+    assert engine.calls[1]["prompt_token_ids"] == [[1, 2, 5]]
+    assert output["prompt_ids"] == [[1, 2]]
+    assert output["response_ids"] == [[5, 6]]
 
 
 @pytest.mark.asyncio
