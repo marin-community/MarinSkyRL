@@ -30,7 +30,7 @@ trainer:
     use_kl_in_reward: false
     loss_reduction: token_mean
   epochs: 1
-  max_steps: 2
+  max_steps: 5
   update_epochs_per_batch: 1
   train_batch_size: 512
   policy_mini_batch_size: 512
@@ -103,6 +103,4 @@ extra_env:
   UV_CACHE_DIR: /uv/cache/checkpoint-benchmark-20260923
   RUNAI_STREAMER_CONCURRENCY: "2"
   # Preserve every rank's checkpoint phases without forwarding repeated startup noise.
-  RAY_DEDUP_LOGS_ALLOW_REGEX: checkpoint_observation|checkpoint_mcore_profile
-  CHECKPOINT_MCORE_PROFILE_STEP: "2"
-  CHECKPOINT_MCORE_PROFILE_RANKS: "0,4"
+  RAY_DEDUP_LOGS_ALLOW_REGEX: checkpoint_observation
