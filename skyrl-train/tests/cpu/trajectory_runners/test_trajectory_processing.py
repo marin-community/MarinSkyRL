@@ -936,6 +936,17 @@ def test_failure_metrics_survive_concatenation():
     assert merged["rollout_metrics"]["generate/errors/ContextLengthExceededError"] == 1
 
 
+def test_data_sources_survive_async_batch_concatenation():
+    first = _generated_group(1, 0)
+    first["data_sources"] = ["math"]
+    second = _generated_group(2, 0)
+    second["data_sources"] = ["tools", None]
+
+    merged = concatenate_trajectory_batches([first, second], tis_lcs_alert_threshold=0.005)
+
+    assert merged["data_sources"] == ["math", "tools", None]
+
+
 def test_unaligned_logprob_alert_survives_concatenation():
     groups = [_generated_group(1, 0), _generated_group(1, 0)]
     clean = AlignmentStats()

@@ -148,6 +148,30 @@ class CheckpointSnapshot:
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
+MAX_DOMAIN_REWARD_METRICS = 32
+
+
+def _domain_reward_metrics(data_sources: List[str | None], rewards: List[float]) -> Dict[str, float]:
+    """Return bounded per-source means using the existing evaluation key normalization."""
+    if len(data_sources) != len(rewards):
+        raise ValueError(
+            f"Expected one data source per reward, got {len(data_sources)} sources and {len(rewards)} rewards"
+        )
+
+    rewards_by_source: Dict[str, List[float]] = defaultdict(list)
+    for source, reward in zip(data_sources, rewards, strict=True):
+        rewards_by_source[trainer_utils.sanitize_data_source(source)].append(reward)
+
+    sources = sorted(rewards_by_source)
+    metrics = {
+        f"reward/domain/{source}/avg_raw_reward": float(np.mean(rewards_by_source[source]))
+        for source in sources[:MAX_DOMAIN_REWARD_METRICS]
+    }
+    if len(sources) > MAX_DOMAIN_REWARD_METRICS:
+        overflow = [reward for source in sources[MAX_DOMAIN_REWARD_METRICS:] for reward in rewards_by_source[source]]
+        metrics["reward/domain/__other__/avg_raw_reward"] = float(np.mean(overflow))
+    return metrics
+
 
 def _active_online_eagle_results(results: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
     return [item for engine_results in results for item in engine_results if item.get("active", False)]
@@ -1976,6 +2000,14 @@ class RayPPOTrainer:
             "reward/avg_raw_reward": mean_reward,
         }
         self.all_metrics.update(reward_metrics)
+        data_sources = trajectory_batch_for_metrics.get("data_sources")
+        if data_sources is not None:
+            self.all_metrics.update(
+                _domain_reward_metrics(
+                    data_sources,
+                    [float(sum(reward) if isinstance(reward, list) else reward) for reward in step_rewards],
+                )
+            )
         logger.info(f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, reward/avg_raw_reward: {mean_reward}")
 
         # re-assign reward but now it's per token rewards

@@ -397,6 +397,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
             4.0,
         ],  # uid1: [1.0, 2.0] (good), uid2: [1.0, 1.0] (bad), uid3: [3.0, 4.0] (good)
         "unshaped_rewards": [0.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+        "data_sources": ["math", "math", "unused", "unused", "code", "code"],
         "loss_masks": [[1, 1]] * 6,
         "stop_reasons": ["length"] * 6,
         "rollout_metrics": None,
@@ -426,6 +427,9 @@ def test_handle_replace_sampling_sufficient_good_samples():
     # After replacement, uid2 indices should now contain UIDs from good samples
     assert len(uid2_indices) == 0  # uid2 should be completely replaced
     assert result_output["unshaped_rewards"][2:4] in ([0.0, 1.0], [1.0, 0.0])
+    assert all(
+        result_output["data_sources"][index] == {"uid1": "math", "uid3": "code"}[result_uids[index]] for index in (2, 3)
+    )
 
 
 def test_handle_replace_sampling_insufficient_good_samples():

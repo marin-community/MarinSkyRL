@@ -9,8 +9,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.trajectory_runners.base import TrajectoryBatch
+from skyrl_train.trainer import RayPPOTrainer, _domain_reward_metrics
+from skyrl_train.trajectory_runners.base import TrajectoryBatch, propagate_data_sources
+from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.config.utils import get_default_config
 from omegaconf import OmegaConf
 
@@ -189,3 +190,57 @@ def test_pass_at_k_uses_unshaped_outcomes():
 
     assert trainer.all_metrics["reward/avg_pass_at_2"] == 0.5
     assert trainer.all_metrics["reward/avg_raw_reward"] == pytest.approx(0.35)
+
+
+def test_domain_reward_metrics_aggregate_and_bound_metric_keys():
+    metrics = _domain_reward_metrics(["alpha", "alpha", None, "zeta"], [0.0, 1.0, 0.5, 0.0])
+    assert metrics == {
+        "reward/domain/alpha/avg_raw_reward": 0.5,
+        "reward/domain/unknown/avg_raw_reward": 0.5,
+        "reward/domain/zeta/avg_raw_reward": 0.0,
+    }
+
+    overflow_metrics = _domain_reward_metrics([f"domain-{i:02}" for i in range(40)], [1.0] * 40)
+    assert len(overflow_metrics) == 33
+    assert overflow_metrics["reward/domain/__other__/avg_raw_reward"] == 1.0
+
+
+def test_step_wise_rollout_rows_keep_request_data_sources():
+    request = {
+        "env_extras": [{"extra_info": {"data_source": "math"}}, {"data_source": "tools"}],
+        "trajectory_ids": [TrajectoryID("a", 0), TrajectoryID("b", 0)],
+    }
+    output = {
+        "response_ids": [[1], [2], [3]],
+        "trajectory_ids": [TrajectoryID("a", 0), TrajectoryID("a", 0), TrajectoryID("b", 0)],
+    }
+
+    propagate_data_sources(request, output)
+
+    assert output["data_sources"] == ["math", "math", "tools"]
+
+
+def test_postprocess_logs_training_reward_by_domain():
+    trainer = RayPPOTrainer(
+        cfg=create_config(2),
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=None,
+        inference_engine_client=None,
+        trajectory_runner=MagicMock(),
+    )
+    trajectory_batch: TrajectoryBatch = {
+        "prompt_token_ids": [[1], [2]],
+        "response_ids": [[3], [4]],
+        "rewards": [0.8, 0.6],
+        "unshaped_rewards": [0.0, 1.0],
+        "data_sources": ["math", "tools"],
+        "loss_masks": [[1], [1]],
+        "rollout_metrics": None,
+    }
+
+    trainer.postprocess_trajectory_batch(trajectory_batch, ["a", "b"])
+
+    assert trainer.all_metrics["reward/domain/math/avg_raw_reward"] == 0.8
+    assert trainer.all_metrics["reward/domain/tools/avg_raw_reward"] == 0.6

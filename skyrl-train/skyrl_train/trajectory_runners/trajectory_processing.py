@@ -786,6 +786,14 @@ def concatenate_trajectory_batches(
     elif any(output.get("behavior_topk_logprobs") is not None for output in trajectory_batches):
         raise ValueError("student-selected behavior scores require selected token IDs")
 
+    data_sources_concat = None
+    if any(output.get("data_sources") is not None for output in trajectory_batches):
+        data_sources_concat = [
+            source
+            for output in trajectory_batches
+            for source in (output.get("data_sources") or [None] * len(output["response_ids"]))
+        ]
+
     unshaped_rewards_concat = None
     unshaped_reward_available_concat = None
     if any(output.get("unshaped_rewards") is not None for output in trajectory_batches):
@@ -906,6 +914,8 @@ def concatenate_trajectory_batches(
     if selected_topk_concat is not None:
         result["student_topk_indices"] = selected_topk_concat
         result["behavior_topk_logprobs"] = behavior_topk_concat
+    if data_sources_concat is not None:
+        result["data_sources"] = data_sources_concat
     if token_level_shaping_concat is not None:
         result["token_level_shaping"] = token_level_shaping_concat
     if response_span_tags_concat is not None:
@@ -1017,6 +1027,11 @@ def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatc
         raise RuntimeError("No outputs generated")
 
     num_responses = len(trajectory_batch["response_ids"])
+    data_sources = trajectory_batch.get("data_sources")
+    if data_sources is not None and len(data_sources) != num_responses:
+        raise ValueError(
+            f"data_sources must match response_ids: got {len(data_sources)} sources for {num_responses} rows"
+        )
     num_prompt_tokens = len(trajectory_batch["prompt_token_ids"])
     assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
     assert num_responses == num_prompt_tokens, (
