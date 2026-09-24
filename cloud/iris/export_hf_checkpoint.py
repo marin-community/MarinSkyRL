@@ -116,6 +116,7 @@ def checkpoint_export_launch_config(
     config.run.submission = SubmissionMode.DETACH.value if spec.no_wait else SubmissionMode.WAIT.value
     config.run.attempt_id = f"{config.run.attempt_id}-export-{request.step}"
     config.runtime.entrypoint = CHECKPOINT_EXPORT_ENTRYPOINT
+    config.runtime.training_type = None
     config.runtime.profile = runtime_profile_for_strategy(strategy, mode=RuntimeMode.CHECKPOINT_EXPORT).value
     config.iris.job_name = spec.job_name or f"{config.iris.job_name}-export-step-{request.step}"
     config.iris.cluster = spec.cluster

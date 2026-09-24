@@ -20,6 +20,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from cloud.iris.paths import resolve_paths_in_dict
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT as CHECKPOINT_EXPORT_MODULE
+from marinskyrl.environment_contract import TrainingType
 from marinskyrl.distillation import DistillationPlan, compile_distillation_plan, validate_distillation_runtime_support
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
@@ -33,7 +34,10 @@ RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
 
 
 class RLEntrypoint(StrEnum):
-    """Execution modes supported by Iris RL configurations."""
+    """Execution modes supported by Iris RL configurations.
+
+    It answers which module a recipe launches; TrainingType answers which trainer that module runs.
+    """
 
     FULLY_ASYNC = "fully_async"
     GENERATE = "generate"
@@ -69,6 +73,19 @@ def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
         ) from error
 
     return RL_ENTRYPOINTS[entrypoint]
+
+
+_RL_ENTRYPOINTS_BY_MODULE = MappingProxyType({module: name for name, module in RL_ENTRYPOINTS.items()})
+
+
+def training_type_for_entrypoint(module: str, *, colocate_all: bool) -> TrainingType | None:
+    """The trainer an entrypoint module runs, or None for a module that trains nothing."""
+    entrypoint = _RL_ENTRYPOINTS_BY_MODULE.get(module)
+    if entrypoint is None or entrypoint in (RLEntrypoint.GENERATE, RLEntrypoint.TERMINAL_BENCH_GENERATE):
+        return None
+    if entrypoint is RLEntrypoint.FULLY_ASYNC or (entrypoint is RLEntrypoint.TERMINAL_BENCH and not colocate_all):
+        return TrainingType.ASYNC
+    return TrainingType.SYNC
 
 
 def registered_rl_entrypoint_module(module: str) -> str:

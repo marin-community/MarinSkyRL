@@ -97,14 +97,16 @@ RAY_CLUSTER_OWNER_ENV = "SKYRL_RAY_CLUSTER_OWNER"
 NUMA_AFFINITY_ENV = "SKYRL_ENABLE_NUMA_AFFINITY"
 TELEMETRY_ENDPOINT_ENV = "SKYRL_TELEMETRY_ENDPOINT"
 RUN_ID_ENV = "SKYRL_RUN_ID"
-TRAINING_LOOP_ENV = "SKYRL_TRAINING_LOOP"
-
-
+TRAINING_TYPE_ENV = "SKYRL_TRAINING_TYPE"
 EXECUTION_UID_ENV = "SKYRL_EXECUTION_UID"
 
 
-class TrainingLoop(StrEnum):
-    """The loop a run trains with, stamped on every telemetry record."""
+class TrainingType(StrEnum):
+    """The trainer a run uses, stamped on every telemetry record.
+
+    It answers which trainer the launched module runs: terminal_bench runs either one, and a generate
+    entrypoint runs none.
+    """
 
     SYNC = "sync"
     ASYNC = "async"
@@ -255,7 +257,7 @@ ENV_VAR_SPECS = (
         ALL_RUNTIME_SCOPES,
     ),
     EnvVarSpec(
-        TRAINING_LOOP_ENV,
+        TRAINING_TYPE_ENV,
         "runtime.telemetry",
         EnvVarSource.EXTERNAL,
         ALL_RUNTIME_SCOPES,
@@ -483,7 +485,7 @@ class EnvVarManager:
             MAX_JOBS_ENV,
             TELEMETRY_ENDPOINT_ENV,
             RUN_ID_ENV,
-            TRAINING_LOOP_ENV,
+            TRAINING_TYPE_ENV,
             EXECUTION_UID_ENV,
         )
         for name in passthrough_names:

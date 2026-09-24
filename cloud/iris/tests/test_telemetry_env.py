@@ -4,8 +4,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-import pytest
-
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -18,10 +16,9 @@ from marinskyrl.environment_contract import (  # noqa: E402
     EXECUTION_UID_ENV,
     RUN_ID_ENV,
     TELEMETRY_ENDPOINT_ENV,
-    TRAINING_LOOP_ENV,
-    TrainingLoop,
+    TRAINING_TYPE_ENV,
+    TrainingType,
 )
-from cloud.iris.rl_config_translation import RLEntrypoint, training_loop_for_entrypoint  # noqa: E402
 from skyrl_train.telemetry import TelemetryConfig, _resources  # noqa: E402
 
 
@@ -91,7 +88,7 @@ def test_telemetry_environment_unreachable_controller_returns_nothing(monkeypatc
 
 def test_telemetry_environment_round_trips_through_trainer_config(monkeypatch) -> None:
     _in_cluster(monkeypatch)
-    exported = telemetry_env.telemetry_environment(training_loop=TrainingLoop.ASYNC)
+    exported = telemetry_env.telemetry_environment(training_type=TrainingType.ASYNC)
     for name, value in exported.items():
         monkeypatch.setenv(name, value)
 
@@ -99,35 +96,17 @@ def test_telemetry_environment_round_trips_through_trainer_config(monkeypatch) -
     assert config.endpoint == exported[TELEMETRY_ENDPOINT_ENV]
     assert config.run_id == exported[RUN_ID_ENV]
     assert config.execution_uid == exported[EXECUTION_UID_ENV]
-    assert config.training_loop is TrainingLoop.ASYNC
-    assert exported[TRAINING_LOOP_ENV] == "async"
+    assert config.training_type is TrainingType.ASYNC
+    assert exported[TRAINING_TYPE_ENV] == "async"
 
 
-def test_telemetry_environment_omits_an_unset_training_loop(monkeypatch) -> None:
+def test_telemetry_environment_omits_an_unset_training_type(monkeypatch) -> None:
     _in_cluster(monkeypatch)
-    monkeypatch.delenv(TRAINING_LOOP_ENV, raising=False)
-    assert TRAINING_LOOP_ENV not in telemetry_env.telemetry_environment()
+    monkeypatch.delenv(TRAINING_TYPE_ENV, raising=False)
+    assert TRAINING_TYPE_ENV not in telemetry_env.telemetry_environment()
 
 
-def test_training_loop_lands_in_every_record_resource() -> None:
-    stamped = _resources(TelemetryConfig(run_id="run", execution_uid="x", training_loop=TrainingLoop.ASYNC), "trainer")
-    assert stamped["training_loop"] == "async"
-    assert "training_loop" not in _resources(TelemetryConfig(run_id="run", execution_uid="x"), "trainer")
-
-
-@pytest.mark.parametrize(
-    ("yaml_colocate", "overrides", "expected"),
-    [
-        (True, [], TrainingLoop.SYNC),
-        (False, [], TrainingLoop.ASYNC),
-        (True, ["trainer.placement.colocate_all=false"], TrainingLoop.ASYNC),
-        (False, ["+trainer.placement.colocate_all=True"], TrainingLoop.SYNC),
-        (True, ["trainer.placement.colocate_all=false", "trainer.placement.colocate_all=true"], TrainingLoop.SYNC),
-        (True, ["++trainer.placement.colocate_all=false"], TrainingLoop.ASYNC),
-        (False, ["~trainer.placement.colocate_all"], TrainingLoop.SYNC),
-        (False, ["trainer.placement=null"], TrainingLoop.SYNC),
-    ],
-)
-def test_terminal_bench_loop_follows_the_effective_colocate_placement(yaml_colocate, overrides, expected) -> None:
-    raw = {"trainer": {"placement": {"colocate_all": yaml_colocate}}}
-    assert training_loop_for_entrypoint(RLEntrypoint.TERMINAL_BENCH, raw, overrides) is expected
+def test_training_type_lands_in_every_record_resource() -> None:
+    stamped = _resources(TelemetryConfig(run_id="run", execution_uid="x", training_type=TrainingType.ASYNC), "trainer")
+    assert stamped["training_type"] == "async"
+    assert "training_type" not in _resources(TelemetryConfig(run_id="run", execution_uid="x"), "trainer")

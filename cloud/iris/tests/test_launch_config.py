@@ -113,6 +113,29 @@ def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) ->
     assert validate_launch_config(config).num_nodes == 1
 
 
+@pytest.mark.parametrize(
+    ("entrypoint", "colocate_all", "num_nodes", "expected"),
+    [
+        ("fully_async", True, 1, "async"),
+        ("standard", True, 1, "sync"),
+        ("terminal_bench", True, 1, "sync"),
+        ("terminal_bench", False, 2, "async"),
+        ("generate", True, 1, None),
+    ],
+)
+def test_composed_launch_records_the_trainer_its_entrypoint_runs(
+    tmp_path: Path, entrypoint: str, colocate_all: bool, num_nodes: int, expected: str | None
+) -> None:
+    raw = _raw_config()
+    raw["skyrl"]["entrypoint"] = entrypoint
+    raw["skyrl"]["trainer"]["placement"]["colocate_all"] = colocate_all
+    raw["iris"]["allocation"]["num_nodes"] = num_nodes
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    assert load_launch_config(path).runtime.training_type == expected
+
+
 def test_launch_config_rejects_unknown_root_fields() -> None:
     raw = _raw_config()
     raw["unexpected"] = True

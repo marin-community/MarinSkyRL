@@ -62,6 +62,8 @@ from marinskyrl.environment_contract import (
     NCCL_DEBUG_INFO_TEMP_FILE_ENV,
     RUN_ID_ENV,
     TELEMETRY_ENDPOINT_ENV,
+    TRAINING_TYPE_ENV,
+    TrainingType,
     ensure_debug_artifact_directories,
     ray_cluster_owner_environment,
 )
@@ -650,13 +652,14 @@ def pin_socket_ifname() -> str | None:
     return iface
 
 
-def export_telemetry_environment(run_id: str | None) -> None:
-    resolved = telemetry_environment(run_id=run_id)
+def export_telemetry_environment(run_id: str | None, training_type: TrainingType | None) -> None:
+    resolved = telemetry_environment(run_id=run_id, training_type=training_type)
     if not resolved:
         _log("[telemetry] no telemetry environment resolved; MarinSkyRL telemetry stays inert")
         return
     os.environ.update(resolved)
-    _log(f"[telemetry] {resolved[TELEMETRY_ENDPOINT_ENV]} run_id={resolved[RUN_ID_ENV]}")
+    stamped = f" training_type={resolved[TRAINING_TYPE_ENV]}" if TRAINING_TYPE_ENV in resolved else ""
+    _log(f"[telemetry] {resolved[TELEMETRY_ENDPOINT_ENV]} run_id={resolved[RUN_ID_ENV]}{stamped}")
 
 
 def training_driver_env(derived_gloo_ifname: str | None) -> dict[str, str]:
@@ -2031,6 +2034,7 @@ def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
         cluster_join_timeout=int(config.ray.cluster_join_timeout),
         driver_liveness_timeout=int(config.ray.driver_liveness_timeout),
         run_id=str(config.run.id),
+        training_type=None if config.runtime.training_type is None else TrainingType(config.runtime.training_type),
         task_env=task_env,
         terminal_bench_data=_json_list(skyrl.get("data", {}).get("terminal_bench_data", [])),
         data_sources_json=_json_list(data_sources) if data_sources else "",
@@ -2156,7 +2160,7 @@ def main() -> None:
     # would otherwise broadcast the head's name to every node.
     derived_gloo_ifname = pin_socket_ifname()
     # Resolve before Ray starts so its actors inherit this task's telemetry settings.
-    export_telemetry_environment(args.run_id)
+    export_telemetry_environment(args.run_id, args.training_type)
     # Ensure the NCCL flight-recorder dump dir exists on THIS node BEFORE any torch/NCCL
     # init, so a collective-timeout FR dump actually writes. See ensure_fr_dump_dir.
     ensure_fr_dump_dir()
