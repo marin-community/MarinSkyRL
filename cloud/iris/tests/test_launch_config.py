@@ -5,17 +5,14 @@ from __future__ import annotations
 import base64
 from copy import deepcopy
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import yaml
 from omegaconf.errors import ConfigKeyError
 
-from cloud.iris import task_runtime
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
-from cloud.iris.task_runtime import _runtime_namespace, prepare_draft_model
 
 
 def _raw_config() -> dict[str, Any]:
