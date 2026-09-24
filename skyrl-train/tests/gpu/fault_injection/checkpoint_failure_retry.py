@@ -31,7 +31,7 @@ class FailingOnceMegatronPolicyWorker(MegatronPolicyWorkerBase):
         real_save = direct_checkpoint.checkpoint.save
 
         def save_then_fail(*args, **kwargs):
-            result = real_save(*args, **kwargs)
+            real_save(*args, **kwargs)
             direct_checkpoint.checkpoint.save = real_save
             raise OSError("injected post-DCP save failure")
 
@@ -135,7 +135,9 @@ def test_megatron_failed_save_preserves_latest_and_retry_commits(ray_init_fixtur
             "failed_attempt": failed_attempt,
             "retry_attempt": retry_commit["attempt_id"],
             "step_one_commit_sha256": hashlib.sha256(previous_commit).hexdigest(),
-            "step_two_commit_sha256": hashlib.sha256(io.read_bytes(os.path.join(step_two, COMMIT_FILENAME))).hexdigest(),
+            "step_two_commit_sha256": hashlib.sha256(
+                io.read_bytes(os.path.join(step_two, COMMIT_FILENAME))
+            ).hexdigest(),
         }
         io.write_bytes_atomic(os.path.join(root, "fault-evidence.json"), json.dumps(evidence, sort_keys=True).encode())
     finally:
