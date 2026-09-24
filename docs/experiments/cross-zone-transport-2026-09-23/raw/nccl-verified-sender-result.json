@@ -1,0 +1,52 @@
+{
+  "broadcast_seconds": 1.063547130994266,
+  "cuda": "13.0",
+  "device": "NVIDIA GB200",
+  "hostname": "sjtsxs64",
+  "init_seconds": 0.18580994100193493,
+  "nccl": [
+    2,
+    30,
+    7
+  ],
+  "nccl_env": {
+    "NCCL_DEBUG": "INFO",
+    "NCCL_DEBUG_SUBSYS": "INIT,NET",
+    "NCCL_IB_DISABLE": "1",
+    "NCCL_NET": "Socket",
+    "NCCL_SOCKET_IFNAME": "=enP6p3s0np0"
+  },
+  "nccl_log_keys": [
+    "sender-cross-zone-nccl.sjtsxs64.73.log"
+  ],
+  "primary_ip": "10.186.213.73",
+  "rank": 1,
+  "role": "sender",
+  "sha256": "fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83",
+  "staging": {
+    "bytes": 134217728,
+    "gpu_to_pageable_seconds": [
+      0.014499343989882618,
+      0.001300158997764811,
+      0.0007183359994087368,
+      0.0007175669888965786,
+      0.0007159989909268916
+    ],
+    "gpu_to_pinned_seconds": [
+      0.0008722869970370084,
+      0.0007531830051448196,
+      0.0007102710078470409,
+      0.000705982994986698,
+      0.0007070080027915537
+    ],
+    "pinned_to_gpu_seconds": [
+      0.0006631040014326572,
+      0.0006532470288220793,
+      0.000650718982797116,
+      0.0006513269909191877,
+      0.0006477109855040908
+    ]
+  },
+  "success": true,
+  "torch": "2.14.0+cu130"
+}

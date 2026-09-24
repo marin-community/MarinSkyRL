@@ -1,0 +1,586 @@
+{
+  "facts": {
+    "aws_endpoint": "http://cwlota.com",
+    "commands": {
+      "ibv_devinfo": null,
+      "ibv_rc_pingpong": null,
+      "nvidia-smi": "/usr/bin/nvidia-smi",
+      "rdma": null,
+      "ucx_info": null,
+      "ucx_perftest": null
+    },
+    "hostname": "sjtsxs64",
+    "infiniband_devices": [
+      "ibp0",
+      "ibp1",
+      "ibp2",
+      "ibp3",
+      "mlx5_0",
+      "mlx5_1",
+      "mlx5_2",
+      "mlx5_3",
+      "mlx5_4",
+      "mlx5_5",
+      "mlx5_6",
+      "mlx5_7",
+      "mlx5_8"
+    ],
+    "interfaces": [
+      {
+        "ipv4": "127.0.0.1",
+        "mtu": 65536,
+        "name": "lo"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP5p9s0"
+      },
+      {
+        "ipv4": "10.186.213.73",
+        "mtu": 9000,
+        "name": "enP6p3s0np0"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs0"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs1"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs2"
+      },
+      {
+        "ipv4": null,
+        "mtu": 2044,
+        "name": "ibs3"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v0"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v1"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v2"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v3"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v4"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v5"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v6"
+      },
+      {
+        "ipv4": null,
+        "mtu": 1500,
+        "name": "enP6p3s0v7"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "cilium_net"
+      },
+      {
+        "ipv4": "10.0.74.27",
+        "mtu": 9000,
+        "name": "cilium_host"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc7f35f2c29119"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc03848acffe0e"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc345171979bf9"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc1de809e09e40"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxccafd898e2b1f"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc406b597f93da"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxced4154cd9a9e"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc_health"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcdb91916faefb"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc67cbc09d227e"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc7af419c8617f"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcaf647f3b2e09"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxc64fe3f942636"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxcfce54ada5e52"
+      },
+      {
+        "ipv4": null,
+        "mtu": 9000,
+        "name": "lxce308f8248648"
+      }
+    ],
+    "primary_ip": "10.186.213.73",
+    "route_table": "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT                                                       \nenP6p3s0np0\t00000000\t48D5BA0A\t0003\t0\t0\t1024\t00000000\t0\t0\t0                                                                     \nenP6p3s0np0\t01010101\t48D5BA0A\t0007\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                     \nenP6p3s0np0\t08080808\t48D5BA0A\t0007\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                     \nlxcdb91916faefb\t044A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxcfce54ada5e52\t054A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc406b597f93da\t0B4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc1de809e09e40\t0D4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc345171979bf9\t1C4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxce308f8248648\t2F4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc7af419c8617f\t304A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc67cbc09d227e\t3F4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxccafd898e2b1f\t404A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxcaf647f3b2e09\t464A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxced4154cd9a9e\t524A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc03848acffe0e\t534A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc_health\t6A4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                         \nlxc7f35f2c29119\t6C4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nlxc64fe3f942636\t6E4A000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0                                                                    \nenP6p3s0np0\t48D5BA0A\t00000000\t0005\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                     \nenP6p3s0np0\t48D5BA0A\t00000000\t0001\t0\t0\t1024\tFEFFFFFF\t0\t0\t0                                                                     \nenP6p3s0np0\t0064FEA9\t00000000\t0005\t0\t0\t1024\tFFFFFFFF\t0\t0\t0                                                                     \n"
+  },
+  "pings": [
+    {
+      "rtt_seconds": 0.11368180200224742,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 54820,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11376033001579344,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56983,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.10820273600984365,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 54213,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.10814590399968438,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 54133,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11366413798532449,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56926,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11390301797655411,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 57128,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.10804510398884304,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 53990,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.1132772590208333,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56487,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11346765799680725,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56790,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.10826708798413165,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 54200,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.10775057598948479,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 53769,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11318842699984089,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56486,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.10766577601316385,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 53756,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11343789799138904,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56760,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.10764708899660036,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 53758,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11310570599744096,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56487,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11350026598665863,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56832,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.1076200169918593,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 53759,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.107627823977964,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 53745,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    {
+      "rtt_seconds": 0.11315351500525139,
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56510,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    }
+  ],
+  "receiver_ip": "10.168.192.27",
+  "reverse": {
+    "ack": {
+      "sha256": "eb514d1c0712d5d5f69a54f4c6d9964926e2ffbc026d542cd526e88edac02e3f",
+      "tcp_info": {
+        "pmtu": 9000,
+        "rtt_us": 56456,
+        "snd_mss": 8948,
+        "total_retrans": 0
+      }
+    },
+    "seconds": 0.8103667449904606,
+    "sha256": "eb514d1c0712d5d5f69a54f4c6d9964926e2ffbc026d542cd526e88edac02e3f"
+  },
+  "role": "sender",
+  "samples": [
+    {
+      "ack_wait_seconds": 0.0024205730005633086,
+      "delivery_seconds": 0.5679522430000361,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 0.4600101988762617,
+        "sample": "8m-1streams-0-tcp",
+        "sha256": "94cbde3c7fb9f1095b6fcc635cc60b56e93021c7e375e95a6c32130b870ec6ac",
+        "size": 8388608,
+        "streams": 1,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 56799,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "8m-1streams-0-tcp",
+      "send_or_upload_parts": [
+        {
+          "send_seconds": 0.29832964300294407,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56877,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.511470189987449,
+      "setup_seconds": 0.05406148001202382,
+      "sha256": "94cbde3c7fb9f1095b6fcc635cc60b56e93021c7e375e95a6c32130b870ec6ac",
+      "size": 8388608,
+      "streams": 1
+    },
+    {
+      "ack_wait_seconds": 2.251725186011754,
+      "delivery_seconds": 2.6119500609929673,
+      "method": "object",
+      "put_max_seconds": 0.30587961900164373,
+      "receiver": {
+        "first_delivery_seconds": 2.2965550599619746,
+        "method": "object",
+        "reads": [
+          {
+            "attempts": 2,
+            "first_get_seconds": 2.29621559754014,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "8388608",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 00:11:06 GMT",
+              "etag": "\"3fb4cca92c42960c97d23e0598316aaa\"",
+              "last-modified": "Thu, 24 Sep 2026 00:11:06 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "tfROYw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "a9885c3d-fb31-4fe1-b629-1f5d28d9736c, a9885c3d-fb31-4fe1-b629-1f5d28d9736c",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            }
+          }
+        ],
+        "receive_and_verify_seconds": 2.302651571109891,
+        "sample": "8m-1streams-0-object",
+        "sha256": "94cbde3c7fb9f1095b6fcc635cc60b56e93021c7e375e95a6c32130b870ec6ac",
+        "size": 8388608,
+        "streams": 1
+      },
+      "sample": "8m-1streams-0-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 00:11:06 GMT",
+            "etag": "\"3fb4cca92c42960c97d23e0598316aaa\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "tfROYw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "0c917948-6fb2-494a-80db-659533c1b6eb, 0c917948-6fb2-494a-80db-659533c1b6eb"
+          },
+          "put_seconds": 0.30587961900164373
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.30622022700845264,
+      "setup_seconds": 0.05400464797276072,
+      "sha256": "94cbde3c7fb9f1095b6fcc635cc60b56e93021c7e375e95a6c32130b870ec6ac",
+      "size": 8388608,
+      "streams": 1
+    },
+    {
+      "ack_wait_seconds": 0.002977565018227324,
+      "delivery_seconds": 0.7897424130060244,
+      "method": "tcp",
+      "put_max_seconds": null,
+      "receiver": {
+        "method": "tcp",
+        "receive_and_verify_seconds": 0.3986968928948045,
+        "sample": "8m-1streams-1-tcp",
+        "sha256": "94cbde3c7fb9f1095b6fcc635cc60b56e93021c7e375e95a6c32130b870ec6ac",
+        "size": 8388608,
+        "streams": 1,
+        "tcp_info": [
+          {
+            "pmtu": 9000,
+            "rtt_us": 56460,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        ]
+      },
+      "sample": "8m-1streams-1-tcp",
+      "send_or_upload_parts": [
+        {
+          "send_seconds": 0.5143941550049931,
+          "tcp_info": {
+            "pmtu": 9000,
+            "rtt_us": 56488,
+            "snd_mss": 8948,
+            "total_retrans": 0
+          }
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.7329008719825651,
+      "setup_seconds": 0.05386397600523196,
+      "sha256": "94cbde3c7fb9f1095b6fcc635cc60b56e93021c7e375e95a6c32130b870ec6ac",
+      "size": 8388608,
+      "streams": 1
+    },
+    {
+      "ack_wait_seconds": 0.8351901419810019,
+      "delivery_seconds": 1.0409556569939014,
+      "method": "object",
+      "put_max_seconds": 0.15120691500487737,
+      "receiver": {
+        "first_delivery_seconds": 0.8502454804256558,
+        "method": "object",
+        "reads": [
+          {
+            "attempts": 1,
+            "first_get_seconds": 0.849931051954627,
+            "headers": {
+              "accept-ranges": "bytes",
+              "content-length": "8388608",
+              "content-type": "application/octet-stream",
+              "date": "Thu, 24 Sep 2026 00:11:09 GMT",
+              "etag": "\"3fb4cca92c42960c97d23e0598316aaa\"",
+              "last-modified": "Thu, 24 Sep 2026 00:11:09 GMT",
+              "server": "CoreWeaveObjectStorage",
+              "vary": "Origin",
+              "x-amz-checksum-crc32": "tfROYw==",
+              "x-amz-checksum-type": "FULL_OBJECT",
+              "x-amz-delete-marker": "false",
+              "x-amz-request-id": "23533e76-808b-46d9-bc1c-2aca58908004, 23533e76-808b-46d9-bc1c-2aca58908004",
+              "x-amz-storage-class": "STANDARD",
+              "x-amz-version-id": "null"
+            }
+          }
+        ],
+        "receive_and_verify_seconds": 0.8562686638906598,
+        "sample": "8m-1streams-1-object",
+        "sha256": "94cbde3c7fb9f1095b6fcc635cc60b56e93021c7e375e95a6c32130b870ec6ac",
+        "size": 8388608,
+        "streams": 1
+      },
+      "sample": "8m-1streams-1-object",
+      "send_or_upload_parts": [
+        {
+          "headers": {
+            "content-length": "0",
+            "date": "Thu, 24 Sep 2026 00:11:09 GMT",
+            "etag": "\"3fb4cca92c42960c97d23e0598316aaa\"",
+            "server": "CoreWeaveObjectStorage",
+            "vary": "Origin",
+            "x-amz-checksum-crc32": "tfROYw==",
+            "x-amz-checksum-type": "FULL_OBJECT",
+            "x-amz-request-id": "b6fb64e5-e2a8-4cf7-9f17-42912ef9e0d7, b6fb64e5-e2a8-4cf7-9f17-42912ef9e0d7"
+          },
+          "put_seconds": 0.15120691500487737
+        }
+      ],
+      "send_or_upload_phase_seconds": 0.15160659499815665,
+      "setup_seconds": 0.05415892001474276,
+      "sha256": "94cbde3c7fb9f1095b6fcc635cc60b56e93021c7e375e95a6c32130b870ec6ac",
+      "size": 8388608,
+      "streams": 1
+    }
+  ]
+}
