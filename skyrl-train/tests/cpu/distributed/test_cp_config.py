@@ -59,10 +59,10 @@ DEBUG_MODE_TRAINER_FIELDS = {
 }
 RUNTIME_CONFIG_TRAINER_FIELDS = {
     "collective_phase_diagnostics": None,
-    "training_metrics": False,
-    "policy_train_spans": False,
-    "generate_spans": False,
-    "async_spans": False,
+    "training_metrics": True,
+    "policy_train_spans": True,
+    "generate_spans": True,
+    "async_spans": True,
     "optimizer_state_metrics": False,
     "distillation_token_budget": None,
     "eval_num_prompts": None,

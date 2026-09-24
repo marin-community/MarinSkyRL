@@ -50,16 +50,19 @@ trainer:
   debug_mode: "light"
   # null follows debug_mode (on for light/distributed); true/false explicitly overrides it.
   collective_phase_diagnostics: null
-  # Mirror the trainer's scalar metric families and lifecycle events to Finelog for the
-  # async RL dashboard. Off by default: it adds one record per scalar per optimizer step.
-  training_metrics: false
-  # Per-rank Megatron phase walls and CUDA memory spans around the policy update.
-  policy_train_spans: false
-  # The synchronous trainer's span around each rollout call. The async loop's
-  # rollout phases follow async_spans below.
-  generate_spans: false
+  # Telemetry families published to Finelog when the task resolved a telemetry endpoint.
+  # Each is on by default.
+  # The trainer's scalar metrics and lifecycle events, one record per scalar per step, plus
+  # the trainer-minus-sampler log-ratio statistics computed on the driver for each batch.
+  training_metrics: true
+  # Per-rank policy-update walls and CUDA allocator peaks. The Megatron phase breakdown
+  # emits only on Megatron.
+  policy_train_spans: true
+  # The synchronous trainer's span around each rollout call. The async loop's rollout
+  # phases follow async_spans.
+  generate_spans: true
   # Async-loop windows and producer waits; the highest-volume family here.
-  async_spans: false
+  async_spans: true
   # One aggregate Megatron Adam inventory after a successful update.
   optimizer_state_metrics: false
   distributed:
@@ -238,16 +241,18 @@ trainer:
     ratio_diagnostics:
       # Absolute position buckets the dashboard reads as pos_first256/pos_last256.
       position_window: 256
-      # Pool the mismatch statistics across data-parallel ranks, gathering each rank's
-      # statistics on every optimizer minibatch. null follows the strategy: on for Megatron,
-      # off for FSDP, which has no pooling path. true or false overrides it; true is rejected
-      # on FSDP.
+      # Pool the mismatch statistics across data-parallel ranks with one gather per optimizer
+      # minibatch. null resolves on for Megatron and off elsewhere, since only Megatron has a
+      # pooling path; true on another strategy fails validation.
       pooled: null
       # Exact pooled |log ratio| p50/p95 and clip pressure for the stale family.
       # Retains up to 4M float32 values per rank and syncs once per micro-batch.
       exact_quantiles: false
     grad_cosine:
-      # Holds an fp32 copy of every gradient shard and adds an all-reduce per update.
+      # Cosine between consecutive gradient directions. Off by default: it holds a copy of
+      # every local gradient shard (fp32 on GPU, or bf16 on CPU with store: cpu_bf16) and adds
+      # one all-reduce per update. Supported on fsdp, fsdp2 and megatron; null resolves on
+      # there, and true on another strategy fails validation.
       enabled: false
       store: gpu_fp32
     batch_invariant: false

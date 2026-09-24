@@ -6,6 +6,7 @@ import sys
 import logging
 import math
 import socket
+from types import MappingProxyType
 
 import ray
 import torch
@@ -31,7 +32,6 @@ from skyrl_train.trajectory_runners.trajectory_retention_config import parse_tra
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, DEBUG_MODE_ENV, EnvVarManager, EnvVarScope
 from skyrl_train.group_admission import resolve_group_advantage_invariant
-from skyrl_train.utils.importance_ratio_diagnostics import ratio_diagnostics_settings
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt, trajectory_selector_from_config
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.process_diagnostics import initialize_process_diagnostics
@@ -666,7 +666,7 @@ def validate_cfg(cfg: DictConfig):
     if cfg.generator.gdn_backend not in set(GDNBackend):
         raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
     validate_generator_cfg(cfg)
-    resolve_ratio_diagnostics_pooled(cfg)
+    resolve_strategy_limited_telemetry(cfg)
     validate_telemetry_gates(cfg)
     validate_batch_invariant_config(cfg)
     validate_moe_router_replay_config(cfg)
@@ -880,19 +880,41 @@ def validate_telemetry_gates(cfg: DictConfig) -> None:
         cfg.trainer.strategy != "megatron" or not cfg.trainer.policy_train_spans
     ):
         raise ValueError("optimizer_state_metrics requires Megatron and policy_train_spans for phase memory peaks")
-    if ratio_diagnostics_settings(cfg.trainer.algorithm).pooled and cfg.trainer.strategy != "megatron":
-        raise ValueError(
-            "trainer.algorithm.ratio_diagnostics.pooled reduces across Megatron data-parallel ranks; "
-            "FSDP has no such path"
-        )
 
 
-def resolve_ratio_diagnostics_pooled(cfg: DictConfig) -> None:
-    """Write the strategy's pooling default where the config left ``pooled`` null."""
-    ratio_diagnostics = cfg.trainer.algorithm.get("ratio_diagnostics")
-    if ratio_diagnostics is not None and ratio_diagnostics.get("pooled") is None:
-        # Megatron's data-parallel ranks can pool; FSDP has no such path.
-        ratio_diagnostics["pooled"] = cfg.trainer.strategy == "megatron"
+# Telemetry families that measure only on some trainer strategies, keyed by their switch.
+STRATEGY_LIMITED_TELEMETRY = MappingProxyType(
+    {
+        # Pooling reduces across Megatron's data-parallel ranks; FSDP has no such path.
+        "trainer.algorithm.ratio_diagnostics.pooled": frozenset({"megatron"}),
+        "trainer.algorithm.grad_cosine.enabled": frozenset({"fsdp", "fsdp2", "megatron"}),
+    }
+)
+
+
+def resolve_strategy_limited_telemetry(cfg: DictConfig) -> None:
+    """Resolve each strategy-limited telemetry switch against ``trainer.strategy``.
+
+    A null switch turns on where the strategy supports its family and off elsewhere. An explicit
+    true on an unsupported strategy raises. An absent switch leaves its family off.
+    """
+    strategy = cfg.trainer.strategy
+    dropped = []
+    for key, strategies in STRATEGY_LIMITED_TELEMETRY.items():
+        section_key, _, switch = key.rpartition(".")
+        section = OmegaConf.select(cfg, section_key)
+        if section is None or switch not in section:
+            continue
+        value = section.get(switch)
+        supported = strategy in strategies
+        if value is None:
+            section[switch] = supported
+            if not supported:
+                dropped.append(key)
+        elif value and not supported:
+            raise ValueError(f"{key}=true needs trainer.strategy in {sorted(strategies)}; got {strategy!r}")
+    if dropped:
+        logger.info(f"trainer.strategy={strategy} does not support {', '.join(dropped)}; leaving it off")
 
 
 def validate_batch_invariant_config(cfg: DictConfig) -> None:

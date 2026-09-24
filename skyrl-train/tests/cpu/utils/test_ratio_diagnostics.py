@@ -7,10 +7,11 @@ from threading import Barrier
 import numpy
 import pytest
 import torch
+from loguru import logger
 
 from omegaconf import OmegaConf
 
-from skyrl_train.utils.utils import resolve_ratio_diagnostics_pooled, validate_telemetry_gates
+from skyrl_train.utils.utils import resolve_strategy_limited_telemetry
 
 from skyrl_train.utils.importance_ratio_diagnostics import (
     QUANTILE_ELEMENT_LIMIT,
@@ -253,24 +254,34 @@ def test_shipped_ratio_diagnostics_pool_on_megatron_and_cost_nothing_elsewhere()
     assert not absent.pooled and not absent.exact_quantiles and absent.position_window == 256
 
     fsdp = OmegaConf.merge(config, {"trainer": {"strategy": "fsdp2"}})
-    resolve_ratio_diagnostics_pooled(fsdp)
-    validate_telemetry_gates(fsdp)
+    messages = []
+    sink = logger.add(messages.append, level="INFO")
+    try:
+        resolve_strategy_limited_telemetry(fsdp)
+    finally:
+        logger.remove(sink)
     assert fsdp.trainer.algorithm.ratio_diagnostics.pooled is False
+    assert ["trainer.algorithm.ratio_diagnostics.pooled" in message for message in messages] == [True]
     megatron = OmegaConf.merge(config, {"trainer": {"strategy": "megatron"}})
-    resolve_ratio_diagnostics_pooled(megatron)
-    validate_telemetry_gates(megatron)
+    resolve_strategy_limited_telemetry(megatron)
     assert megatron.trainer.algorithm.ratio_diagnostics.pooled is True
 
 
-def test_an_explicit_pooled_setting_is_kept_and_rejected_where_it_cannot_pool():
+@pytest.mark.parametrize(
+    ("strategy", "section", "switch"),
+    [("fsdp2", "ratio_diagnostics", "pooled"), ("deepspeed", "grad_cosine", "enabled")],
+)
+def test_an_explicit_strategy_limited_setting_is_rejected_where_its_family_cannot_measure(strategy, section, switch):
+    config = OmegaConf.load(Path(__file__).parents[3] / "skyrl_train/config/ppo_base_config.yaml")
+    requested = OmegaConf.merge(config, {"trainer": {"strategy": strategy, "algorithm": {section: {switch: True}}}})
+    with pytest.raises(ValueError, match=f"{section}.{switch}=true"):
+        resolve_strategy_limited_telemetry(requested)
+
+
+def test_an_explicit_off_is_kept_where_the_family_could_measure():
     config = OmegaConf.load(Path(__file__).parents[3] / "skyrl_train/config/ppo_base_config.yaml")
     off_on_megatron = OmegaConf.merge(
         config, {"trainer": {"strategy": "megatron", "algorithm": {"ratio_diagnostics": {"pooled": False}}}}
     )
-    validate_telemetry_gates(off_on_megatron)
+    resolve_strategy_limited_telemetry(off_on_megatron)
     assert off_on_megatron.trainer.algorithm.ratio_diagnostics.pooled is False
-    on_fsdp = OmegaConf.merge(
-        config, {"trainer": {"strategy": "fsdp2", "algorithm": {"ratio_diagnostics": {"pooled": True}}}}
-    )
-    with pytest.raises(ValueError, match="pooled"):
-        validate_telemetry_gates(on_fsdp)
