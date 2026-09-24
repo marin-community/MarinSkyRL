@@ -25,35 +25,44 @@ MAX_PROMPT_TOKENS = 15_872
 TOKENIZER_REVISION = "c1899de"
 
 
-def prepare_smoke_sample(output_dir: Path, tokenizer_name: str = "Qwen/Qwen3-0.6B") -> dict[str, Any]:
+def prepare_smoke_sample(
+    output_dir: Path,
+    tokenizer_name: str = "Qwen/Qwen3-0.6B",
+    chat_template_kwargs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Write eight train batches and trajectory-ID-stratified probes."""
     output_dir.mkdir(parents=True, exist_ok=True)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, revision=TOKENIZER_REVISION)
+    template_kwargs = chat_template_kwargs or {}
     dataset = load_dataset(DATASET_ID, revision=DATASET_REVISION, split="train", streaming=True)
     eligible: list[tuple[int, dict[str, Any]]] = []
     trajectory_ids: set[int] = set()
+    instance_ids: set[str] = set()
 
     for index, raw in enumerate(dataset):
         if index >= MAX_CANDIDATES:
             break
         trajectory_id = raw["trajectory_id"]
-        if trajectory_id in trajectory_ids:
+        instance_id = raw["metadata"]["instance_id"]
+        if trajectory_id in trajectory_ids or instance_id in instance_ids:
             continue
         if not 0.0 < raw["pass_rate"] < 1.0:
             continue
-        prepared = prepare_pivot_swe_row(raw, index)
-        request = raw["responses_create_params"]
+        request = {**raw["responses_create_params"], "chat_template_kwargs": template_kwargs}
+        prepared = prepare_pivot_swe_row({**raw, "responses_create_params": request}, index)
         prompt_tokens = tokenizer.apply_chat_template(
             prepared["prompt"],
             tools=request.get("tools"),
             add_generation_prompt=True,
             tokenize=True,
+            **template_kwargs,
         )
         if hasattr(prompt_tokens, "keys"):
             prompt_tokens = prompt_tokens["input_ids"]
         if len(prompt_tokens) > MAX_PROMPT_TOKENS:
             continue
         trajectory_ids.add(trajectory_id)
+        instance_ids.add(instance_id)
         eligible.append((trajectory_id, prepared))
 
     if len(eligible) < TRAIN_PREFIXES + PROBE_PREFIXES:
