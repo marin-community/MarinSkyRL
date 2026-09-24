@@ -29,7 +29,13 @@ from skyrl_train.debug_mode import apply_debug_mode
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.trajectory_runners.trajectory_retention_config import parse_trajectory_retention_config
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
-from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, DEBUG_MODE_ENV, EnvVarManager, EnvVarScope
+from skyrl_train.env_vars import (
+    DEBUG_ARTIFACT_DIR_ENV,
+    DEBUG_MODE_ENV,
+    VLLM_BATCH_INVARIANT_ENV,
+    EnvVarManager,
+    EnvVarScope,
+)
 from skyrl_train.group_admission import resolve_group_advantage_invariant
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt, trajectory_selector_from_config
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
@@ -1471,7 +1477,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
             logger.info(f"Exporting `{_net_env}` to ray runtime env: {os.environ[_net_env]}")
             env_vars[_net_env] = os.environ[_net_env]
 
-    if env_vars.get("VLLM_BATCH_INVARIANT") == "1" or os.environ.get("VLLM_BATCH_INVARIANT") == "1":
+    if env_vars.get(VLLM_BATCH_INVARIANT_ENV) == "1" or os.environ.get(VLLM_BATCH_INVARIANT_ENV) == "1":
         # vLLM sets these inside its GPU worker during batch-invariant startup.
         # Megatron's separate Ray rank shares a NCCL weight-update group with
         # that worker. Different per-rank NCCL settings made the first broadcast
