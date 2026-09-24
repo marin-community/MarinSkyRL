@@ -812,6 +812,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             if rollout_routes:
                 route_sentinel = _sentinel_routed_experts_row(rollout_routes[0])
         elif retokenize_chat_history:
+            # An observation, a second turn or a rewrite forces the whole history to be re-rendered.
+            token_provenance = TokenProvenance.RECONSTRUCTED
             response_encodings = time_tokenization(
                 self.tokenizer.apply_chat_template,
                 chat_history[initial_chat_history_length : len(chat_history) - len(new_obs)],

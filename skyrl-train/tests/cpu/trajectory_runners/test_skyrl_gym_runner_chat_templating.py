@@ -5,6 +5,7 @@ uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/te
 import pytest
 from typing import Dict, Any
 from unittest.mock import AsyncMock, MagicMock
+from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
 from skyrl_train.dataset.preprocess import _collate_routed_experts_from_arrays
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
@@ -533,6 +534,7 @@ async def test_single_turn_chat_trajectory_trains_on_the_engines_tokens():
     assert collated[0, : len(sampled_ids)].tolist() == batch["rollout_routed_experts"][0]
     assert not collated[0, len(sampled_ids) :].any()
     assert batch["oldest_policy_version"] == 5
+    assert batch["rollout_metrics"][TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC] == 0.0
     spans = batch["behavior_policy_version_segments"][0]
     assert spans == [{"start": 0, "token_count": len(sampled_ids), "policy_version": 5}]
     # The trainer's admission check: every loss-bearing token carries a known sampled version.
@@ -632,3 +634,4 @@ async def test_a_trajectory_with_an_observation_still_re_renders_the_chat_histor
     assert "behavior_policy_version_segments" not in batch
     assert "rollout_routed_experts" not in batch
     assert batch["oldest_policy_version"] == 4
+    assert batch["rollout_metrics"][TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC] == 1.0
