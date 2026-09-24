@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import random
 from collections import defaultdict
 from io import BytesIO
 from pathlib import Path
@@ -70,9 +71,12 @@ def prepare_smoke_sample(
     sorted_ids = sorted(trajectory_id for trajectory_id, _ in eligible)
     probe_ids = {sorted_ids[index * len(sorted_ids) // PROBE_PREFIXES] for index in range(PROBE_PREFIXES)}
     probe = [prepared for trajectory_id, prepared in eligible if trajectory_id in probe_ids]
-    train_pairs = [(trajectory_id, prepared) for trajectory_id, prepared in eligible if trajectory_id not in probe_ids][
-        :TRAIN_PREFIXES
-    ]
+    train_candidates = sorted(
+        ((trajectory_id, prepared) for trajectory_id, prepared in eligible if trajectory_id not in probe_ids),
+        key=lambda pair: pair[0],
+    )
+    train_pairs = [train_candidates[index * len(train_candidates) // TRAIN_PREFIXES] for index in range(TRAIN_PREFIXES)]
+    random.Random(17).shuffle(train_pairs)
     train = [prepared for _, prepared in train_pairs]
     train_trajectory_ids = [trajectory_id for trajectory_id, _ in train_pairs]
     probe_trajectory_ids = sorted(probe_ids)
@@ -153,8 +157,8 @@ def write_smoke_report(
         "training_response_count": len(training_records),
         "training_responses_per_step": dict(sorted(records_per_step.items())),
         "mixed_reward_groups": sum(len(rewards) > 1 for rewards in reward_groups.values()),
-        "before_mean_reward": sum(row["score"] for row in before.values()) / len(before) if before else None,
-        "after_mean_reward": sum(row["score"] for row in after.values()) / len(after) if after else None,
+        "before_mean_reward": sum(sum(row["score"]) for row in before.values()) / len(before) if before else None,
+        "after_mean_reward": sum(sum(row["score"]) for row in after.values()) / len(after) if after else None,
         "comparison_uri": comparison_path,
         "training_uri": f"{diagnostics_root}/training.jsonl",
         "raw_evaluation_root": eval_root,

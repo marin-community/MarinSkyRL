@@ -62,6 +62,8 @@ def test_smoke_sample_splits_trajectory_ids_and_writes_parquet(tmp_path, monkeyp
     assert probe_ids[0] == 1
     assert probe_ids[-1] >= 254
     assert max(right - left for left, right in zip(probe_ids, probe_ids[1:])) <= 3
+    assert min(manifest["train_trajectory_ids"]) < 20
+    assert max(manifest["train_trajectory_ids"]) > 240
     assert len(load_dataset("parquet", data_files=str(tmp_path / "train.parquet"), split="train")) == 64
     probe_rows = load_dataset("parquet", data_files=str(tmp_path / "probe.parquet"), split="train")
     assert len(probe_rows) == 128
@@ -81,7 +83,7 @@ def test_report_pairs_probe_results_and_persists_training_errors(tmp_path):
             json.dumps(
                 {
                     "output_response": f"action-{step}",
-                    "score": score,
+                    "score": [0.0, score],
                     "exception_type": None,
                     "env_extras": {"extra_info": {"nemotron_ultra": {"record_json": '{"trajectory_id":7}'}}},
                 }
