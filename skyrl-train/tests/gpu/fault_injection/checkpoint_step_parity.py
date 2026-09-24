@@ -167,7 +167,8 @@ def test_megatron_checkpoint_reference_records_uninterrupted_step(ray_init_fixtu
         pre = _rank_results(trainer, "parity_write_snapshot", str(local / "pre-step"))
         assert all(parameters > 0 and optimizer_tensors > 0 for _, parameters, optimizer_tensors in pre)
 
-        ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
+        replay_batch = torch.load(batch_path, map_location="cpu", weights_only=False)
+        ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", replay_batch))
         changed = _rank_results(trainer, "parity_model_changed_since", str(local / "pre-step"))
         assert any(count > 0 for _, count in changed), "The reference optimizer step did not change model weights"
         post = _rank_results(trainer, "parity_write_snapshot", str(local / "post-step"))
