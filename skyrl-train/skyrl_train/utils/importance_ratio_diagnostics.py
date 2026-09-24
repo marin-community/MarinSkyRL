@@ -81,11 +81,12 @@ def absolute_quantiles(values: torch.Tensor, probabilities: tuple[float, ...]) -
 
 
 def ratio_statistics(delta: torch.Tensor, *, eps_clip_low: float = 0.2, eps_clip_high: float = 0.2) -> dict[str, float]:
-    """Finite-token likelihood-ratio diagnostics; exponentials alone are clipped.
+    """Summarize per-token log-ratios, trainer minus sampler, over the finite tokens.
 
-    The statistics are empirical token diagnostics and are biased as policy KL
-    estimates. Async consume-time ratios combine policy drift from staleness with
-    engine mismatch. An empty population reports its coverage and no statistics.
+    Returns |log-ratio| quantiles, PPO clip pressure, the fractions outside
+    [0.5x, 2x] and below 1e-5, the importance-weight ESS fraction, the k1 and k3
+    KL estimators and chi-squared, clipping the exponent inside k3 and
+    chi-squared. An empty population reports only its coverage.
     """
     delta = delta.detach().double().reshape(-1)
     selected = delta.numel()

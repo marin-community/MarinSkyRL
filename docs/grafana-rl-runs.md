@@ -9,6 +9,8 @@ Both trainers use that contract, and every record carries `training_type`, `sync
 **RL Post-training (sync)** at <https://grafana.oa.dev/d/marin-rl-runs> lists synchronous runs, and
 **RL Post-training (async)** at <https://grafana.oa.dev/d/marin-async-rl> lists fully asynchronous
 ones.
+[`docs/design/async-rl-telemetry.md`](design/async-rl-telemetry.md) explains what each panel's metrics
+measure, which switch gates them and what they cost.
 
 ## Finding it
 
