@@ -14,6 +14,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_config  # noqa: E402
+from marinskyrl.runtime_options import RolloutGrading  # noqa: E402
+from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraGrading  # noqa: E402
 
 _BASE_CONFIG = _REPO_ROOT / "cloud/iris/configs/nemotron_ultra_rlvr_acceptance.yaml"
 
@@ -69,3 +71,7 @@ def test_launcher_rejects_skipped_grading_with_eval_before_submission(tmp_path):
 
     with pytest.raises(ValueError, match="eval_interval<=0"):
         compose_skyrl_config(parsed, {"job_name": "grading-test", "num_nodes": 1}, _HPCStub())
+
+
+def test_launcher_grading_modes_match_the_environment():
+    assert {mode.value for mode in RolloutGrading} == {mode.value for mode in NemotronUltraGrading}

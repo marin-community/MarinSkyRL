@@ -3,14 +3,13 @@
 from omegaconf import DictConfig, OmegaConf
 
 from marinskyrl.distillation import DistillationPlan, DistillationRewardMode
-from marinskyrl.runtime_options import TRAJECTORY_SELECTOR_TYPE_PATH, AdvantageEstimator
-from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraGrading
+from marinskyrl.runtime_options import TRAJECTORY_SELECTOR_TYPE_PATH, AdvantageEstimator, RolloutGrading
 
 
 def validate_nemotron_ultra_grading(cfg: DictConfig, distillation_plan: DistillationPlan | None) -> None:
     """Allow skipped Nemotron Ultra grading only when nothing in training or eval reads the reward."""
-    grading = NemotronUltraGrading(cfg.environment.skyrl_gym.nemotron_ultra.grading)
-    if grading is NemotronUltraGrading.VERIFY:
+    grading = RolloutGrading(cfg.environment.skyrl_gym.nemotron_ultra.grading)
+    if grading is RolloutGrading.VERIFY:
         return
     prefix = "environment.skyrl_gym.nemotron_ultra.grading=skip requires"
     if distillation_plan is None or distillation_plan.reward_mode is not DistillationRewardMode.REPLACE:
