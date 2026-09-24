@@ -23,10 +23,14 @@ from skyrl_train.inference_engines.utils import (
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     ErrorResponse,
 )
+from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.trajectory_runners.model_clients import DirectModelClient
+from skyrl_train.trajectory_runners.routed_experts import decode_routed_experts, encode_routed_experts
 from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
 from omegaconf import OmegaConf
 import asyncio
+import numpy as np
 import pytest
 from jinja2 import TemplateError
 import random
@@ -1998,3 +2002,114 @@ def test_resume_wakes_a_request_parked_on_another_event_loop():
 
     assert engines[0].entered.is_set()
     assert any("[DONE]" in chunk for chunk in chunks)
+
+
+# -------------------------------------------
+# chat retries continue from the exact sampled tokens
+# --------------------------------------------
+
+
+SERVED_PROMPT = [1, 2, 3]
+
+
+def _routes(rows):
+    return encode_routed_experts(np.asarray(rows, dtype=np.int16))
+
+
+def _exact_chat_partial(content, finish_reason, token_ids, *, prompt_token_ids, routes=None):
+    response = _chat_partial(content, finish_reason, token_ids)
+    response["prompt_token_ids"] = list(prompt_token_ids)
+    if routes is not None:
+        response["choices"][0]["routed_experts"] = _routes(routes)
+    return response
+
+
+class _ExactChatEngine(_StampedChatEngine):
+    async def tokenize(self, request_payload):
+        return {"tokens": list(SERVED_PROMPT)}
+
+
+def _spanning_abort_engine(*, second_routes=((40,), (41,), (42,), (43,), (44,))):
+    # Attempt 1 forwards the served prompt and its first sampled token's predecessor: 3 + 1 - 1 rows.
+    # Attempt 2 is served prompt + token 11, and forwards 4 + 2 - 1 rows.
+    return _ExactChatEngine(
+        [
+            _exact_chat_partial("A", "abort", [11], prompt_token_ids=SERVED_PROMPT, routes=[[[10]], [[11]], [[12]]]),
+            _exact_chat_partial(
+                " B",
+                "stop",
+                [12, 13],
+                prompt_token_ids=SERVED_PROMPT + [11],
+                routes=None if second_routes is None else [[list(row)] for row in second_routes],
+            ),
+        ]
+    )
+
+
+def _exact_chat_request():
+    request = _chat_request()
+    request["json"]["return_token_ids"] = True
+    return request
+
+
+@pytest.mark.asyncio
+async def test_a_chat_retry_samples_after_the_exact_served_prompt_and_sampled_tokens():
+    engine = _spanning_abort_engine()
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+
+    out = await client.chat_completion(_exact_chat_request())
+
+    retry = engine.calls[1]["json"]
+    assert retry[EXACT_PROMPT_TOKEN_IDS_KEY] == SERVED_PROMPT + [11]
+    assert retry["messages"] == [{"role": "user", "content": "q"}]
+    assert "continue_final_message" not in retry
+    assert retry["max_tokens"] == 15
+    choice = out["choices"][0]
+    assert out["prompt_token_ids"] + choice["token_ids"] == SERVED_PROMPT + [11] + [12, 13]
+    # Attempt 1's rows for positions 0-2, then attempt 2's rows from position 3, which only it forwarded.
+    assert decode_routed_experts(choice["routed_experts"]).tolist() == [[[10]], [[11]], [[12]], [[43]], [[44]]]
+
+
+@pytest.mark.asyncio
+async def test_an_exact_continuation_retry_extends_the_requests_own_exact_prompt():
+    engine = _ExactChatEngine([_chat_partial("A", "abort", [11]), _chat_partial("B", "stop", [12])])
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    request = _chat_request()
+    request["json"][EXACT_PROMPT_TOKEN_IDS_KEY] = [7, 8]
+
+    await client.chat_completion(request)
+
+    assert engine.calls[1]["json"][EXACT_PROMPT_TOKEN_IDS_KEY] == [7, 8, 11]
+    assert "continue_final_message" not in engine.calls[1]["json"]
+
+
+@pytest.mark.asyncio
+async def test_a_chat_retry_refuses_routes_from_only_some_attempts():
+    engine = _spanning_abort_engine(second_routes=None)
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+
+    with pytest.raises(RuntimeError, match="routed_experts for only some"):
+        await client.chat_completion(_exact_chat_request())
+
+
+@pytest.mark.asyncio
+async def test_a_structured_chat_response_spanning_an_abort_trains_on_the_exact_tokens():
+    engine = _spanning_abort_engine()
+    tokenizer = MagicMock()
+    tokenizer.decode.return_value = "A B"
+    client = InferenceEngineClient(engines=[engine], tokenizer=tokenizer, full_config=_make_min_cfg())
+
+    output = await DirectModelClient(client).generate(
+        {
+            "prompts": [[{"role": "user", "content": "q"}]],
+            "session_ids": ["s"],
+            "sampling_params": {"max_generate_length": 16},
+            "chat_completion_params": [{}],
+        }
+    )
+
+    assert engine.calls[1]["json"][EXACT_PROMPT_TOKEN_IDS_KEY] == SERVED_PROMPT + [11]
+    assert output["prompt_ids"][0] + output["response_ids"][0] == SERVED_PROMPT + [11, 12, 13]
+    # One route per response token, from the forward that consumed it; the last token was never
+    # forwarded and carries the sentinel.
+    assert output["routed_experts"] == [[[[43]], [[44]], [[0]]]]

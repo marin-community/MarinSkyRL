@@ -5,6 +5,7 @@ uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/te
 import pytest
 from typing import Dict, Any
 from unittest.mock import AsyncMock, MagicMock
+from skyrl_train.dataset.preprocess import _collate_routed_experts_from_arrays
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
@@ -526,6 +527,11 @@ async def test_single_turn_chat_trajectory_trains_on_the_engines_tokens():
     assert batch["rollout_logprobs"][0] == [-0.25 * (index + 1) for index in range(len(sampled_ids))]
     assert batch["stop_reasons"] == ["stop"]
     assert batch["rollout_routed_experts"][0] == [[[index, index + 1]] for index in range(len(sampled_ids))]
+    # The sole turn's rows are rectangular, so collation takes the one-slice path and pads with zeros.
+    collated = _collate_routed_experts_from_arrays(batch["rollout_routed_experts"], len(sampled_ids) + 2, 64)
+    assert collated.shape == (1, len(sampled_ids) + 2, 1, 2)
+    assert collated[0, : len(sampled_ids)].tolist() == batch["rollout_routed_experts"][0]
+    assert not collated[0, len(sampled_ids) :].any()
     assert batch["oldest_policy_version"] == 5
     spans = batch["behavior_policy_version_segments"][0]
     assert spans == [{"start": 0, "token_count": len(sampled_ids), "policy_version": 5}]

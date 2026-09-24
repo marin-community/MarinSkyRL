@@ -16,7 +16,9 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
     ErrorInfo,
     is_engine_error_response,
 )
+from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.inference_engines.chat_template import template_error_from_exception
+from skyrl_train.trajectory_runners.routed_experts import decode_routed_experts, encode_routed_experts
 from transformers import PreTrainedTokenizerBase
 import asyncio
 from typing import List, Any, Optional, Dict, Union, Hashable
@@ -32,6 +34,7 @@ import threading
 from collections import OrderedDict
 from loguru import logger
 import random
+import numpy as np
 import ray.exceptions
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -654,8 +657,12 @@ class InferenceEngineClient(InferenceEngineInterface):
         This method is equivalent to a single `chat_completion()` call if we do not use `pause_generation()`.
 
         For subsequent retry requests, we can reuse the original request with the following exceptions:
-        - Update the last assistant message content to accumulated content, where the role uses the first non-empty response's role.
-        - Set continue_final_message=True and add_generation_prompt=False.
+        - When the engine returned the served prompt and the sampled token IDs (``return_token_ids``), send
+          the served prompt followed by every token sampled so far as the exact prompt, so the answer
+          continues from the tokens the trainer trains on.
+        - Otherwise update the last assistant message content to the accumulated content, where the role
+          uses the first non-empty response's role, and set continue_final_message=True and
+          add_generation_prompt=False.
         - Adjust remaining max tokens if `max_tokens` or `max_completion_tokens` is present.
         - If no tokens have been generated yet, resend the original request unchanged.
 
@@ -665,6 +672,7 @@ class InferenceEngineClient(InferenceEngineInterface):
           - `choices[0]["logprobs"]["content"]`
           - `choices[0]["token_ids"]`
           - `choices[0]["message"]["content"]`
+          - `choices[0]["routed_experts"]`, joined at the token each attempt started from
         - Use the last response's finish_reason and stop_reason
         """
         original_request_json: Dict[str, Any] = original_request_payload.get("json", {}).copy()
@@ -765,6 +773,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                     partial_response=partial_response,
                     accum=accum,
                     response_role=response_role,
+                    original_request_json=original_request_json,
                 )
             )
 
@@ -1311,6 +1320,23 @@ class AccumulatedResponse:
     completion_tokens: int = 0
     # One span per attempt that produced tokens, stamped with the version installed when it was sent.
     policy_version_segments: List[PolicyVersionSegment] = field(default_factory=list)
+    # The prompt the first attempt was served, when the engine returned it.
+    served_prompt_token_ids: Optional[List[int]] = None
+    # Each attempt's encoded expert routes with its prompt length and new token count, while every
+    # attempt so far returned routes after an exact prompt; None once they cannot be joined.
+    route_attempts: Optional[List[tuple[str, int, int]]] = field(default_factory=list)
+
+
+def _exact_continuation_prefix(accum: AccumulatedResponse) -> Optional[List[int]]:
+    """The served prompt followed by every token sampled so far, when the engine returned both."""
+    if accum.served_prompt_token_ids is None or len(accum.token_ids) != accum.completion_tokens:
+        return None
+    return accum.served_prompt_token_ids + accum.token_ids
+
+
+def _choice_routes(choice: Dict[str, Any]) -> Any:
+    provider_fields = choice.get("provider_specific_fields") or {}
+    return choice.get("routed_experts", provider_fields.get("routed_experts"))
 
 
 def _prepare_retry_request(
@@ -1329,15 +1355,24 @@ def _prepare_retry_request(
     if accum.completion_tokens == 0:
         return original_request_json.copy()
 
-    assert accum.content != "", "accum.content must be non-empty for a continuation request"
-    assert response_role is not None, "response_role must be set for a continuation request"
-
     cur_request_json = original_request_json.copy()
-    cur_request_json["messages"] = original_request_json["messages"] + [
-        {"role": response_role, "content": accum.content}
-    ]
-    cur_request_json["continue_final_message"] = True
-    cur_request_json["add_generation_prompt"] = False
+    exact_prefix = _exact_continuation_prefix(accum)
+    if exact_prefix is not None:
+        # Re-rendering the partial answer as text can trim it or move token boundaries; the exact
+        # prefix makes the engine sample the continuation after the tokens the trainer trains on.
+        cur_request_json[EXACT_PROMPT_TOKEN_IDS_KEY] = exact_prefix
+    else:
+        if EXACT_PROMPT_TOKEN_IDS_KEY in original_request_json:
+            raise RuntimeError(
+                "an exact-prompt chat request was aborted without returning its served prompt and sampled token IDs"
+            )
+        assert accum.content != "", "accum.content must be non-empty for a continuation request"
+        assert response_role is not None, "response_role must be set for a continuation request"
+        cur_request_json["messages"] = original_request_json["messages"] + [
+            {"role": response_role, "content": accum.content}
+        ]
+        cur_request_json["continue_final_message"] = True
+        cur_request_json["add_generation_prompt"] = False
     if orig_max_tokens is not None:
         assert orig_max_tokens - accum.completion_tokens >= 0, (
             "orig_max_tokens - accum.completion_tokens must be non-negative"
@@ -1375,10 +1410,47 @@ def _completion_engine_error_response(results: List[Dict[str, Any]]) -> Optional
     return None
 
 
+def _accumulate_routed_experts(
+    accum: AccumulatedResponse, routes: Any, *, prompt_length: Optional[int], new_tokens: int
+) -> None:
+    """Keep one attempt's encoded routes for joining once the response finishes."""
+    if accum.route_attempts is None:
+        return
+    if routes is None:
+        if accum.route_attempts:
+            raise RuntimeError("an aborted chat response returned routed_experts for only some of its attempts")
+        accum.route_attempts = None
+    elif prompt_length is None or not isinstance(routes, str):
+        # A retry that re-rendered text has no known prompt length, so its routes cannot be joined.
+        accum.route_attempts = None
+    else:
+        accum.route_attempts.append((routes, prompt_length, new_tokens))
+
+
+def _join_routed_experts(route_attempts: List[tuple[str, int, int]]) -> str:
+    """Join the attempts' routes into one row per forwarded position of the final prompt and response.
+
+    vLLM returns one row per forwarded position, prompt first, ending at the attempt's penultimate
+    token. A retry's prompt is the served prompt plus the tokens sampled so far, and its last prompt
+    position is the one the earlier attempts never forwarded, so the join keeps each retry's rows from
+    that position on.
+    """
+    joined = []
+    for index, (routes, prompt_length, new_tokens) in enumerate(route_attempts):
+        rows = decode_routed_experts(routes)
+        if rows.shape[0] != prompt_length + new_tokens - 1:
+            raise ValueError(
+                f"routed_experts has {rows.shape[0]} token rows; expected {prompt_length + new_tokens - 1}"
+            )
+        joined.append(rows if index == 0 else rows[prompt_length - 1 :])
+    return encode_routed_experts(np.concatenate(joined))
+
+
 def _parse_partial_response_and_inplace_update_accum(
     partial_response: Dict[str, Any],
     accum: AccumulatedResponse,
     response_role: Optional[str],
+    original_request_json: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, Optional[str], Optional[str], bool]:
     """Parse the partial response and in-place update accumulators.
 
@@ -1402,6 +1474,19 @@ def _parse_partial_response_and_inplace_update_accum(
     # If aborted without generating tokens, ignore this partial response.
     aborted_without_generating = finish_reason == ABORT_FINISH_REASON and new_completion_tokens == 0
     if not aborted_without_generating:
+        if accum.completion_tokens == 0:
+            served = partial_response.get("prompt_token_ids")
+            if served is None and original_request_json is not None:
+                served = original_request_json.get(EXACT_PROMPT_TOKEN_IDS_KEY)
+            accum.served_prompt_token_ids = None if served is None else list(served)
+        exact_prefix = _exact_continuation_prefix(accum)
+        if choice.get("token_ids") is not None:
+            _accumulate_routed_experts(
+                accum,
+                _choice_routes(choice),
+                prompt_length=None if exact_prefix is None else len(exact_prefix),
+                new_tokens=len(choice["token_ids"]),
+            )
         if new_content is not None:
             accum.content += new_content
         logprobs = choice.get("logprobs")
@@ -1442,6 +1527,12 @@ def _build_final_response(
         final_choice["token_ids"] = accum.token_ids
     if accum.policy_version_segments:
         final_choice[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = accum.policy_version_segments
+    joined_routes = _join_routed_experts(accum.route_attempts) if accum.route_attempts else None
+    if "routed_experts" in final_choice:
+        final_choice["routed_experts"] = joined_routes
+    provider_fields = final_choice.get("provider_specific_fields")
+    if isinstance(provider_fields, dict) and "routed_experts" in provider_fields:
+        final_choice["provider_specific_fields"] = {**provider_fields, "routed_experts": joined_routes}
 
     # Set last response's finish_reason and stop_reason.
     final_choice["finish_reason"] = finish_reason
