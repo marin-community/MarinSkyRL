@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPOSITORY_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+REPOSITORY_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RUN_ID="pivot-swe-smoke-$(date -u +%Y%m%d-%H%M%S)"
 STORAGE_USER="${USER:?Set the storage user}"
 PIVOT_RUN_ROOT="s3://marin-us-east-02a/marin/users/${STORAGE_USER}/skyrl/${RUN_ID}"
 PIVOT_TMP_ROOT="s3://marin-us-east-02a/tmp/ttl=1d/skyrl/users/${STORAGE_USER}/${RUN_ID}"
 
 cd "$REPOSITORY_ROOT"
-PYTHONPATH="$REPOSITORY_ROOT" python3 -c '
+PYTHONPATH="$REPOSITORY_ROOT" "$REPOSITORY_ROOT/.venv/bin/python" -c '
 import shutil
 import subprocess
 from pathlib import Path
