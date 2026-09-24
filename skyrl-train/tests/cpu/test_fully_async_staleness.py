@@ -6,6 +6,7 @@ import pytest
 import torch
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+from skyrl_train import fully_async_trainer
 from skyrl_train.fully_async_trainer import (
     FullyAsyncRayPPOTrainer,
     GeneratedOutputGroup,
@@ -146,6 +147,7 @@ def _batch_assembly_state(
         rollout_logprobs_required=False,
     )
     trainer.data_tracker = DataConsumptionTracker(mini_batch_size=mini_batch_size, num_steps_per_epoch=1)
+    trainer._async_observations_enabled = False
     queues = _GenerationQueues(
         completed=asyncio.Queue(),
         retries=asyncio.Queue(),
@@ -431,6 +433,33 @@ async def test_batch_assembly_routes_stale_and_uniform_groups_differently():
     batch = await asyncio.wait_for(pending_batch, timeout=1)
 
     assert [group.uid for group in batch] == ["fresh"]
+
+
+@pytest.mark.asyncio
+async def test_batch_assembly_records_the_disposition_of_every_discarded_group(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(
+        fully_async_trainer,
+        "record_group_disposition",
+        lambda *, disposition, **_: recorded.append(disposition),
+    )
+    trainer, queues = _batch_assembly_state(
+        mini_batch_size=1, accepted=5, dynamic_sampling_type="filter", informative_on="unshaped"
+    )
+    trainer._async_observations_enabled = True
+    for group in [
+        _generated_group("stale", earliest_model_step=7),
+        _generated_group("masked", earliest_model_step=10, fully_masked=True),
+        _generated_group("uniform", earliest_model_step=10, unshaped_rewards=[1.0, 1.0]),
+        _generated_group("fresh", earliest_model_step=10),
+        _generated_group("fresh", earliest_model_step=10),
+    ]:
+        queues.completed.put_nowait(group)
+
+    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+
+    assert [group.uid for group in batch] == ["fresh"]
+    assert sorted(recorded) == ["duplicate_uid", "fully_masked", "insufficient_reward_spread", "stale"]
 
 
 @pytest.mark.asyncio
