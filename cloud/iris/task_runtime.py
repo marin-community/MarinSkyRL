@@ -2045,7 +2045,7 @@ def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
         policy_tokenizer_revision=str(model.tokenizer_revision),
         policy_chat_template=str(model.chat_template or ""),
         draft_model=draft_model,
-        draft_model_cache_ttl_days=None,
+        draft_model_cache_ttl_days=int(config.artifacts.draft_model_cache_ttl_days),
         draft_model_cache_source_prefix=str(config.artifacts.checkpoint_root),
     )
 

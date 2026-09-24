@@ -5,14 +5,17 @@ from __future__ import annotations
 import base64
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import yaml
 from omegaconf.errors import ConfigKeyError
 
+from cloud.iris import task_runtime
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
+from cloud.iris.task_runtime import _runtime_namespace, prepare_draft_model
 
 
 def _raw_config() -> dict[str, Any]:
@@ -111,6 +114,33 @@ def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) ->
 
     assert config.skyrl.trainer.train_batch_size == 8
     assert validate_launch_config(config).num_nodes == 1
+
+
+def test_default_launch_stages_a_hugging_face_draft_model(monkeypatch) -> None:
+    raw = _raw_config()
+    revision = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
+    raw["skyrl"]["generator"]["speculative_decoding"] = {
+        "model": {"source_uri": "hf://laion/draft", "source_identity": revision}
+    }
+    identity = "sha256:" + "a" * 64
+
+    def ensure(model_id, requested_revision, **kwargs):
+        assert (model_id, requested_revision) == ("laion/draft", revision)
+        assert kwargs["ttl_days"] == 14
+        assert kwargs["source_prefix"] == raw["artifacts"]["checkpoint_root"]
+        return "s3://models/draft", SimpleNamespace(identity=identity)
+
+    monkeypatch.setattr(task_runtime, "ensure_hugging_face_model_cache", ensure)
+    args = _runtime_namespace(compose_launch_config(raw))
+
+    prepared = prepare_draft_model(
+        args.draft_model,
+        cache_ttl_days=args.draft_model_cache_ttl_days,
+        cache_source_prefix=args.draft_model_cache_source_prefix,
+    )
+
+    assert prepared.source_uri == "s3://models/draft"
+    assert prepared.source_identity == identity
 
 
 def test_launch_config_rejects_unknown_root_fields() -> None:
