@@ -23,6 +23,11 @@ def snapshot_value(value: Any) -> Any:
         return torch.from_numpy(np.array(value, copy=True))
     if isinstance(value, np.generic):
         return value.item()
+    if (
+        type(value).__module__.startswith("megatron.core.dist_checkpointing.")
+        and type(value).__name__ == "LocalNonpersistentObject"
+    ):
+        return "<intentionally nonpersistent MCore object>"
     if type(value).__module__.startswith("megatron.core.dist_checkpointing.") and hasattr(value, "data"):
         return snapshot_value(value.data)
     if isinstance(value, Mapping):
