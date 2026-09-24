@@ -5,7 +5,7 @@ Asserts the engine-launch wiring, with NO GPU and NO real Ray actor / vLLM init:
   (seam / G5) `create_ray_wrapped_inference_engines_from_config` reads
       `cfg.generator.inference_engine_decode_context_parallel_size` and forwards it as
       `decode_context_parallel_size`. This single config-assembly seam is shared by both
-      `BasePPOExp` (standard) and `TerminalBenchExp` entrypoints (both inherit
+      `BasePPOExp` (sync) and `TerminalBenchExp` entrypoints (both inherit
       `_setup_trainer`), so wiring here covers both (G5).
 
   (G1 byte-identity) `create_ray_wrapped_inference_engines` forwards
@@ -86,7 +86,7 @@ def test_from_config_forwards_vllm_engine_options(monkeypatch):
     assert captured["inference_engine_enable_sleep"] is False
 
 
-def test_standard_entrypoint_identity_survives_python_module_execution(monkeypatch):
+def test_sync_entrypoint_identity_survives_python_module_execution(monkeypatch):
     """Online EAGLE remains supported when ``python -m`` names the module ``__main__``."""
     pytest.importorskip("hydra")
     pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")

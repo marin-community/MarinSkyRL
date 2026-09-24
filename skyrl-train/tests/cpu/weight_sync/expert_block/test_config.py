@@ -224,7 +224,7 @@ def test_only_an_entrypoint_running_the_fully_async_trainer_may_select_expert_bl
     validate_expert_block_trainer(example_dummy_config(), uses_fully_async_trainer=False)
 
 
-def test_the_standard_entrypoint_refuses_expert_block_instead_of_syncing_by_broadcast():
+def test_the_sync_entrypoint_refuses_expert_block_instead_of_syncing_by_broadcast():
     # BasePPOExp runs RayPPOTrainer, which ignores the option. The check is the first line of
     # trainer setup, so the test skips tokenizer and dataset loading.
     exp = object.__new__(BasePPOExp)
