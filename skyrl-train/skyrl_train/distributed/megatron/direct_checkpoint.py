@@ -33,8 +33,6 @@ from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
 from skyrl_train.timing_observability import checkpoint_phase
 
 
-# MCore 0.18 does not expose a storage-writer hook. Keep the adapter narrow: it
-# preserves MCore's state translation and planner and replaces only the writer.
 class _SchemaGuardedMCoreSavePlanner(MCoreSavePlanner):
     """Reuse DCP plans only when all rank-local write properties are identical."""
 
@@ -112,7 +110,11 @@ def _mcore_to_pyt_save_state_dict(state_dict: dict) -> dict:
 
 
 class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
-    """Save MCore torch-dist shards directly to S3 through PyTorch DCP."""
+    """Save MCore torch-dist shards directly to S3 through PyTorch DCP.
+
+    MCore 0.18 has no storage-writer hook, so this adapter preserves its state
+    translation and planner while replacing only the writer.
+    """
 
     def __init__(self, checkpoint_dir: str, *, plan_cache_key: str | None = None) -> None:
         super().__init__()

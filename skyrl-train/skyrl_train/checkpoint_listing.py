@@ -50,7 +50,12 @@ def list_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
 
 
 def list_committed_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
-    """Exclude incomplete generation prefixes from resume consistency and retention."""
+    """Exclude incomplete or invalid generations from retention candidates.
+
+    A bad commit record must not make us delete an older valid checkpoint.
+    Direct resume still resolves the advertised pointer and raises on corruption.
+    """
+    # checkpoint_generation imports extract_step_from_path from this module.
     from skyrl_train.checkpoint_generation import resolve_checkpoint_payload
 
     committed = []

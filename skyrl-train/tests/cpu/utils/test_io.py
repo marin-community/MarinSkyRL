@@ -165,8 +165,8 @@ class TestCheckpointUtilities:
             for step in steps:
                 checkpoint_dir = os.path.join(temp_dir, f"global_step_{step}")
                 os.makedirs(checkpoint_dir)
-                # Add a dummy file to make it more realistic
-                with open(os.path.join(checkpoint_dir, "model.pt"), "w") as f:
+                # Legacy checkpoints need a trainer-state marker to be recoverable.
+                with open(os.path.join(checkpoint_dir, "trainer_state.pt"), "w") as f:
                     f.write("dummy")
 
             # Keep only 3 most recent
@@ -221,8 +221,9 @@ class TestCloudFileOperationsMocked:
         expected = ["global_step_1000", "global_step_2000"]
         assert sorted(result) == sorted(expected)
 
+    @patch("skyrl_train.utils.trainer_utils.list_committed_checkpoint_dirs")
     @patch("skyrl_train.io.io._get_filesystem")
-    def test_cleanup_old_checkpoints_cloud(self, mock_get_filesystem):
+    def test_cleanup_old_checkpoints_cloud(self, mock_get_filesystem, mock_list_committed):
         """Test cleanup_old_checkpoints with cloud storage."""
         mock_fs = Mock()
         mock_fs.exists.return_value = True
@@ -234,6 +235,12 @@ class TestCloudFileOperationsMocked:
         ]
         mock_fs.isdir.return_value = True
         mock_get_filesystem.return_value = mock_fs
+        mock_list_committed.return_value = [
+            "global_step_1000",
+            "global_step_1500",
+            "global_step_2000",
+            "global_step_2500",
+        ]
 
         cloud_path = "s3://bucket/checkpoints"
 

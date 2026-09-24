@@ -56,7 +56,10 @@ def test_first_resumed_optimizer_step_emits_one_machine_readable_duration():
         assert observations == []
 
         trainer.global_step = 6
+        before_optimizer_log = time.monotonic()
         trainer._log_optimizer_step_completed(epoch=0, training_input={"sequences": [1]}, duration_seconds=0.1)
+        assert trainer._last_optimizer_step_finished_at[0] == 6
+        assert before_optimizer_log <= trainer._last_optimizer_step_finished_at[1] <= time.monotonic()
         trainer._log_optimizer_step_completed(epoch=0, training_input={"sequences": [1]}, duration_seconds=0.1)
         assert len(observations) == 1
         assert observations[0]["schema"] == "checkpoint_resume_v1"

@@ -94,7 +94,12 @@ from marinskyrl.checkpoint_paths import (
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculativeDecodingConfig, runai_model_uri
 from skyrl_train.checkpoint_listing import extract_step_from_path
-from skyrl_train.checkpoint_generation import commit_attempt, new_attempt_path, resolve_checkpoint_payload
+from skyrl_train.checkpoint_generation import (
+    ATTEMPTS_DIRECTORY,
+    commit_attempt,
+    new_attempt_path,
+    resolve_checkpoint_payload,
+)
 from skyrl_train.utils.trainer_utils import (
     cleanup_old_checkpoints,
     run_on_each_node,
@@ -1010,6 +1015,7 @@ class RayPPOTrainer:
         training_input: TrainingInputBatch,
         duration_seconds: float,
     ) -> None:
+        self._last_optimizer_step_finished_at = (self.global_step, time.monotonic())
         logger.info(
             "Optimizer step completed: step={} epoch={} sequences={} duration_seconds={:.3f}",
             self.global_step,
@@ -2907,12 +2913,12 @@ class RayPPOTrainer:
                 self._pending_sync_prompts = trainer_state.get("pending_sync_prompts", [])
                 logger.info("Successfully loaded dataloader state")
             except Exception as e:
-                if os.path.basename(os.path.dirname(checkpoint_path)) == "_attempts":
+                if os.path.basename(os.path.dirname(checkpoint_path)) == ATTEMPTS_DIRECTORY:
                     raise RuntimeError(f"Failed to restore required dataloader state: {dataloader_state_path}") from e
                 logger.warning(f"Failed to load dataloader state: {e}. Dataloader will start from beginning.")
         else:
             if (
-                os.path.basename(os.path.dirname(checkpoint_path)) == "_attempts"
+                os.path.basename(os.path.dirname(checkpoint_path)) == ATTEMPTS_DIRECTORY
                 and self.cfg.trainer.restore_dataloader_state
             ):
                 raise FileNotFoundError(f"Required dataloader state missing: {dataloader_state_path}")

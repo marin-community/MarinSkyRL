@@ -14,7 +14,10 @@ import re
 import time
 import uuid
 
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
+
 from skyrl_train.checkpoint_listing import extract_step_from_path
+from skyrl_train.hf_export_schema import TRAINER_STATE_FILENAME
 from skyrl_train.io import io
 
 ATTEMPTS_DIRECTORY = "_attempts"
@@ -23,12 +26,13 @@ MANIFEST_FILENAME = "checkpoint_manifest.json"
 SHUTDOWN_OVERLAYS_DIRECTORY = "_shutdown_buffers"
 SHUTDOWN_OVERLAY_COMMIT_FILENAME = "shutdown_buffer_commit.json"
 _ATTEMPT_ID = re.compile(r"^[0-9a-f]{32}$")
+_STEP_DIRECTORY = re.compile(rf"{re.escape(GLOBAL_STEP_PREFIX)}\d+")
 _SCHEMA_VERSION = 1
 
 
 def new_attempt_path(step_path: str) -> str:
     """Return a fresh attempt path without mutating the step's committed state."""
-    if not re.fullmatch(r"global_step_\d+", os.path.basename(step_path.rstrip("/"))):
+    if not _STEP_DIRECTORY.fullmatch(os.path.basename(step_path.rstrip("/"))):
         raise ValueError(f"Not a global-step checkpoint path: {step_path}")
     return os.path.join(step_path.rstrip("/"), ATTEMPTS_DIRECTORY, uuid.uuid4().hex)
 
@@ -104,7 +108,7 @@ def resolve_checkpoint_payload(step_path: str, *, verify_files: bool = False) ->
     """
     commit_path = os.path.join(step_path, COMMIT_FILENAME)
     if not io.exists(commit_path):
-        if io.exists(os.path.join(step_path, "trainer_state.pt")):
+        if io.exists(os.path.join(step_path, TRAINER_STATE_FILENAME)):
             return step_path
         raise FileNotFoundError(f"No committed checkpoint at {step_path}")
 
@@ -142,7 +146,7 @@ def _payload_step_and_id(payload_path: str) -> tuple[str, str]:
     if os.path.basename(os.path.dirname(payload_path)) == ATTEMPTS_DIRECTORY:
         step_path = os.path.dirname(os.path.dirname(payload_path))
         return step_path, _attempt_id(step_path, payload_path)
-    if not re.fullmatch(r"global_step_\d+", os.path.basename(payload_path)):
+    if not _STEP_DIRECTORY.fullmatch(os.path.basename(payload_path)):
         raise ValueError(f"Not a checkpoint payload path: {payload_path}")
     return payload_path, "legacy"
 

@@ -43,10 +43,6 @@ class CheckpointExportPlan:
     model_path: str
 
     @property
-    def policy_checkpoint_path(self) -> str:
-        return os.path.join(resolve_checkpoint_payload(self.checkpoint_path), POLICY_CHECKPOINT_SUBDIRECTORY)
-
-    @property
     def policy_export_path(self) -> str:
         return policy_export_path(self.export_root, self.step)
 

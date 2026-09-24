@@ -99,8 +99,8 @@ data:
 
 extra_env:
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
-  # Work around a corrupt NumPy wheel in one east node's shared uv cache.
-  UV_CACHE_DIR: /uv/cache/checkpoint-benchmark-20260923
+  # Isolate benchmark dependencies from the shared uv cache.
+  UV_CACHE_DIR: /uv/cache/checkpoint-benchmark
   RUNAI_STREAMER_CONCURRENCY: "2"
   # Preserve every rank's checkpoint phases without forwarding repeated startup noise.
   RAY_DEDUP_LOGS_ALLOW_REGEX: checkpoint_observation

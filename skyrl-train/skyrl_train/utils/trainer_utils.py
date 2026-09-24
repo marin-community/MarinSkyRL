@@ -153,8 +153,9 @@ def validate_consistency_for_latest_checkpoint(
 ):
     """Validate that the checkpoint folder is consistent with the latest checkpoint file.
 
-    Asserts that the folder with the highest global step is the latest checkpoint tracked by `latest_checkpoint_file`.
-    Otherwise, the folder state is inconsistent and the user should delete other checkpoints.
+    Reject a newer legacy flat checkpoint that exceeds the allowed save interval.
+
+    Generation commits are safe to ignore until the latest pointer advertises them.
     """
     if io.exists(root_ckpt_folder):
         checkpoint_dirs = list_committed_checkpoint_dirs(root_ckpt_folder)
@@ -163,12 +164,12 @@ def validate_consistency_for_latest_checkpoint(
             # latter fails, the complete but unadvertised generation is safe
             # to ignore while resuming from the last advertised step. Keep
             # the historical mismatch check for older flat checkpoints.
-            newer_legacy_steps = [
+            legacy_steps = [
                 extract_step_from_path(directory)
                 for directory in checkpoint_dirs
                 if not io.exists(os.path.join(root_ckpt_folder, directory, COMMIT_FILENAME))
             ]
-            max_global_step_in_folder = max(newer_legacy_steps, default=ckpt_iteration)
+            max_global_step_in_folder = max(legacy_steps, default=ckpt_iteration)
             if max_global_step_in_folder - ckpt_iteration > save_interval:
                 max_global_step_in_folder_path = os.path.join(
                     root_ckpt_folder, f"{GLOBAL_STEP_PREFIX}{max_global_step_in_folder}"
