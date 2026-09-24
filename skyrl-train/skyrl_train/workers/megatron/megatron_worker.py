@@ -57,7 +57,6 @@ from skyrl_train.megatron_timing import (
     MegatronTrainTimings,
     publish_megatron_train_timings,
 )
-from skyrl_train.utils.gradient_direction import gradient_direction_summary
 from skyrl_train.telemetry import StepKind
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
 from skyrl_train.workers.worker import (
@@ -528,7 +527,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             enabled=bool(OmegaConf.select(self.cfg, "trainer.policy_train_spans", default=False))
         )
         outcome = "failure"
-        self._grad_updates = ()
         try:
             with self._memory.span(
                 "ppo_train",
@@ -634,7 +632,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                             self.model,
                             self.scheduler,
                             name="actor",
-                            grad_observer=self._gradient_observer(megatron_optimizer=self.optimizer),
                         )
 
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
@@ -648,8 +645,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         # Attach grad norm only for the last micro in the mini-batch
                         if i == len(metrics_list) - 1 and grad_norm is not None:
                             status["raw_grad_norm"] = grad_norm
-                        if i == len(metrics_list) - 1:
-                            status.update(self._last_grad_metrics)
 
                         # attach response_length
                         status["response_length"] = micro_buffer[i].num_actions
@@ -675,8 +670,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.profiler.stop_trace()
 
         status_mean = policy_training_metrics(all_metrics, policy_update_steps)
-        # The range over this call's updates.
-        status_mean.update(gradient_direction_summary(self._grad_updates))
         if status_mean.get("ppo_ratio_exact_unit_fraction") == 1.0 and not self._warned_exact_unit_policy_ratio:
             logger.warning(
                 "Megatron's recomputed old log probabilities exactly match the training forward for every policy "

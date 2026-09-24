@@ -1,7 +1,6 @@
 import os
 import random
 import tempfile
-from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import timedelta
 from typing import List, Union, Optional
@@ -167,16 +166,10 @@ class MegatronStrategy(DistributedStrategy):
         model,
         scheduler,
         name="model",
-        grad_observer: Callable[..., dict[str, float]] | None = None,
         **kwargs,
     ) -> Optional[Float[torch.Tensor, "1"]]:
         """Perform optimizer step"""
-        successful, grad_norm, _ = optimizer.step()
-        self.last_optimizer_step_succeeded = bool(successful)
-        if grad_observer is not None:
-            # Main-gradient shards remain populated after clipping/step and before
-            # zero_grad. Even a skipped update must reset every rank's history.
-            grad_observer(optimizer.get_main_grads_for_grad_norm(), successful=bool(successful))
+        _, grad_norm, _ = optimizer.step()
         scheduler.step(1)
         optimizer.zero_grad()
         return grad_norm

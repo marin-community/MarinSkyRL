@@ -104,23 +104,6 @@ pooled values, 57 the dependence on token position, and 47 and 48 batches of uni
 shows the same statistics within one update, the trainer against its own pre-update log probabilities.
 Panels 46 and 59 show how often TIS and the off-policy masks act on these tokens.
 
-**Gradient direction.** `GradientDirectionTracker` records the cosine between successive policy-update
-gradients, with the minimum and maximum across the optimizer steps of one training call and the gradient
-norm (panel 58).
-Xu et al., "GAC: Stabilizing Asynchronous RL Training for LLMs via Gradient Alignment Control"
-(arXiv:2603.01501) report persistently high cosine between consecutive policy gradients under
-asynchronous training, near-orthogonal updates under synchronous training, and tie the high-cosine regime
-to divergence. The cosine lets us check whether our staleness settings enter that regime.
-
-On fresh data, consecutive gradients come out near-orthogonal for two reasons. Each step removes most of
-the objective's slope along the direction it just moved, as an exact line search would. The minibatch
-noise that remains is high-dimensional, and independent high-dimensional vectors are nearly orthogonal.
-Stale data breaks the first reason. A batch sampled several versions ago carries the reward signal of the
-policy that sampled it, so it keeps pointing the trainer in the direction the last few updates already
-moved. The trainer sees the effect of an update only after the staleness delay, which acts like momentum
-nobody configured: successive updates stay aligned, and their sum can overshoot. A cosine that stays near
-1 across updates is that feedback delay made visible.
-
 ## 5. Gates, defaults and costs
 
 Records reach Finelog only when the run has a telemetry endpoint, run id and execution uid, which the
@@ -135,13 +118,10 @@ Iris task runtime sets. Within that, each family has its own switch.
 | Sync rollout spans | `trainer.generate_spans` | on | several records per rollout call | sync board drill-downs |
 | Learner memory and Megatron phase walls | `trainer.policy_train_spans` | on | a few records per phase per rank; no CUDA synchronization | 16, 26, 27, 41 |
 | Pooled within-update log-ratio statistics (`policy/log_ratio_*`) | `trainer.algorithm.ratio_diagnostics.pooled` | null: on for Megatron, off elsewhere | gathers each rank's statistics on every optimizer minibatch; off, each rank summarizes its own tokens | 56, 57 (`policy/log_ratio_pos_*`) |
-| Gradient direction | `trainer.algorithm.grad_cosine.enabled` | off; supported on fsdp, fsdp2 and megatron | an fp32 copy of every gradient shard and one all-reduce per update | 58 |
 
 The light families are on by default because a run without them cannot be diagnosed from the
-dashboards, and they add records without adding GPU work. The gradient cosine stays off because it holds
-a second copy of the gradients; turn it on for a run that is being studied.
+dashboards, and they add records without adding GPU work.
 
-Two families measure only on some trainer strategies. Config validation resolves both against
-`trainer.strategy` with one table: a null switch turns on where the strategy supports the family and off
-elsewhere, with one info log naming what was left off, and an explicit true on an unsupported strategy
-fails validation.
+Pooled log-ratio statistics measure only on Megatron. Config validation resolves the switch against
+`trainer.strategy`: null turns on where the strategy supports pooling and off elsewhere, with one info log
+naming what was left off, and an explicit true on an unsupported strategy fails validation.
