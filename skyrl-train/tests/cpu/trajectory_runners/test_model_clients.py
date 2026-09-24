@@ -1,6 +1,9 @@
 import asyncio
+import base64
+import io
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
 from aiohttp import web
 from jinja2 import TemplateError
@@ -8,6 +11,12 @@ from jinja2 import TemplateError
 from skyrl_train.inference_engines.chat_template import SINGLE_TOOL_CALL_TEMPLATE_ERROR
 from skyrl_train.trajectory_runners import model_clients
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, OpenAIHTTPModelClient
+
+
+def _encoded_routes(rows):
+    buffer = io.BytesIO()
+    np.save(buffer, np.asarray(rows, dtype=np.uint16), allow_pickle=False)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
 @pytest.mark.asyncio
@@ -305,8 +314,8 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
             {
                 "message": {"role": "assistant", "content": "answer"},
                 "finish_reason": "stop",
-                "token_ids": [9],
-                "provider_specific_fields": {"routed_experts": [[[4, 7]]]},
+                "token_ids": [9, 10],
+                "provider_specific_fields": {"routed_experts": _encoded_routes([[[1, 2]], [[3, 4]], [[4, 7]]])},
                 "logprobs": {
                     "content": [
                         {
@@ -316,7 +325,14 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
                                 {"token": "token_id:3", "logprob": -0.2},
                                 {"token": "token_id:2", "logprob": -0.1},
                             ],
-                        }
+                        },
+                        {
+                            "logprob": -0.1,
+                            "top_logprobs": [
+                                {"token": "token_id:10", "logprob": -0.1},
+                                {"token": "token_id:11", "logprob": -0.2},
+                            ],
+                        },
                     ]
                 },
             }
@@ -335,9 +351,9 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
     body = engine.chat_completion.await_args.args[0]["json"]
     assert body["top_logprobs"] == 3
     assert body["return_tokens_as_token_ids"] is True
-    assert output["student_topk_indices"] == [[[2, 3]]]
-    assert output["behavior_topk_logprobs"] == [[[-0.1, -0.2]]]
-    assert output["routed_experts"] == [[[[4, 7]]]]
+    assert output["student_topk_indices"] == [[[2, 3], [10, 11]]]
+    assert output["behavior_topk_logprobs"] == [[[-0.1, -0.2], [-0.1, -0.2]]]
+    assert output["routed_experts"] == [[[[4, 7]], [[0, 0]]]]
 
 
 @pytest.mark.asyncio

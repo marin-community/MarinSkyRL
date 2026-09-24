@@ -39,7 +39,6 @@ TRAIN_BATCH_SIZE=512
 MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
-ENFORCE_EAGER=true # cuda graphs can cause some instability
 LR=1e-6
 
 uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
@@ -50,7 +49,6 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   +trainer.algorithm.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
   +trainer.algorithm.overlong_buffer.penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
-  generator.enforce_eager=$ENFORCE_EAGER \
   generator.apply_overlong_filtering=$APPLY_OVERLONG_FILTERING \
   generator.sampling_params.temperature=$TEMPERATURE \
   generator.sampling_params.top_p=$TOP_P \

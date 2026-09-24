@@ -17,7 +17,7 @@ from torch.distributed import checkpoint
 from torch.distributed.checkpoint import FileSystemReader
 from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as FsspecFileSystem
 
-from skyrl_train.io.s3fs import get_s3_fs, s3_refresh_if_expiring
+from marinskyrl.remote_io import create_s3_filesystem
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
 
 
@@ -35,8 +35,7 @@ class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
             sharded_state_dict, self.keep_only_main_replica
         )
         pytorch_state_dict = mcore_to_pyt_state_dict(sharded_state_dict, False)
-        filesystem = get_s3_fs()
-        s3_refresh_if_expiring(filesystem)
+        filesystem = create_s3_filesystem()
         writer = StreamingFsspecWriter(self.checkpoint_dir, filesystem=filesystem)
         checkpoint.save(
             pytorch_state_dict,
@@ -63,8 +62,7 @@ class DirectS3TorchDistLoadShardedStrategy(TorchDistLoadShardedStrategy):
         converted, flat_mapping, rename_mapping = _replace_state_dict_keys_with_sharded_keys(original)
         pytorch_state_dict = mcore_to_pyt_state_dict(converted, True)
 
-        filesystem = get_s3_fs()
-        s3_refresh_if_expiring(filesystem)
+        filesystem = create_s3_filesystem()
         reader = FileSystemReader(self.checkpoint_dir)
         reader.fs = FsspecFileSystem()
         reader.fs.fs = filesystem

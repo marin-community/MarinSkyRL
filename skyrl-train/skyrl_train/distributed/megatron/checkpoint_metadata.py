@@ -12,7 +12,7 @@ from skyrl_train.io import io
 def remote_checkpoint_metadata(checkpoint_dir: str):
     """Stage Megatron control files while leaving DCP rank tensors remote."""
     with tempfile.TemporaryDirectory(prefix="megatron-metadata-") as directory:
-        root = Path(directory)
+        root = Path(directory).resolve()
         for filename in io.find_files(checkpoint_dir):
             relative = relative_resource_path(checkpoint_dir, filename)
             if relative.endswith(".distcp"):

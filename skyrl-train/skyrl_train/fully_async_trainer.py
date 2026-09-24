@@ -664,6 +664,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if getattr(self, "_shutdown_complete", False):
             return
         try:
+            await self._drain_checkpoint_upload()
             await self._flush_generation_buffer_on_shutdown()
         finally:
             if self._expert_block_sync is not None:
@@ -852,12 +853,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 cur_generation_group_mini_batch
                             )
 
-                    # 2. Post-process the complete generated mini-batch and convert it to training format.
-                    with Timer("convert_to_training_input", self.all_timings):
-                        training_input = await asyncio.to_thread(
-                            self.convert_generation_group_mini_batch_to_training_input,
-                            cur_generation_group_mini_batch,
-                        )
+                    # 2. Assemble, post-process, and convert the complete generated mini-batch.
+                    training_input = await asyncio.to_thread(
+                        self.convert_generation_group_mini_batch_to_training_input,
+                        cur_generation_group_mini_batch,
+                    )
                     if scored_distillation is not None:
                         self.all_metrics.update(
                             self._async_distillation_runtime.attach_to_training_input(
@@ -1652,58 +1652,54 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert len(cur_generation_group_mini_batch) == self.mini_batch_size, (
             f"Expected {self.mini_batch_size} generated groups, got {len(cur_generation_group_mini_batch)}"
         )
-        trajectory_batches = []
-        uids = []
-        stalenesses = []
-        for cur_generated_output_group in cur_generation_group_mini_batch:
-            cur_staleness = self.global_step - cur_generated_output_group.earliest_model_step
-            stalenesses.append(cur_staleness)
-            trajectory_batches.append(cur_generated_output_group.trajectory_batch)
-            group_size = len(cur_generated_output_group.trajectory_batch["response_ids"])
-            uids.extend([cur_generated_output_group.uid] * group_size)
+        with Timer("assemble_generation_group_mini_batch", self.all_timings):
+            trajectory_batches = []
+            uids = []
+            stalenesses = []
+            for cur_generated_output_group in cur_generation_group_mini_batch:
+                cur_staleness = self.global_step - cur_generated_output_group.earliest_model_step
+                stalenesses.append(cur_staleness)
+                trajectory_batches.append(cur_generated_output_group.trajectory_batch)
+                group_size = len(cur_generated_output_group.trajectory_batch["response_ids"])
+                uids.extend([cur_generated_output_group.uid] * group_size)
 
-        record_rollout_staleness(stalenesses, self.global_step)
+            record_rollout_staleness(stalenesses, self.global_step)
 
-        assert max(stalenesses) <= self.max_staleness_steps, (
-            f"Fresh batch assembly returned staleness {max(stalenesses)} above max {self.max_staleness_steps}"
-        )
+            assert max(stalenesses) <= self.max_staleness_steps, (
+                f"Fresh batch assembly returned staleness {max(stalenesses)} above max {self.max_staleness_steps}"
+            )
 
-        trajectory_batch = concatenate_trajectory_batches(
-            trajectory_batches,
-            require_rollout_logprobs=policy_loss_requires_rollout_logprobs(self.cfg.trainer.algorithm.policy_loss_type),
-            tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
-        )
-        assert trajectory_batch["rollout_metrics"] is not None, "Rollout metrics should be non-null."
-        self.all_metrics.update(trajectory_batch["rollout_metrics"])
+            trajectory_batch = concatenate_trajectory_batches(
+                trajectory_batches,
+                require_rollout_logprobs=policy_loss_requires_rollout_logprobs(
+                    self.cfg.trainer.algorithm.policy_loss_type
+                ),
+                tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
+            )
+            assert trajectory_batch["rollout_metrics"] is not None, "Rollout metrics should be non-null."
+            self.all_metrics.update(trajectory_batch["rollout_metrics"])
 
-        # Log staleness statistics for this step
-        self.all_metrics.update(
-            {
-                "async/staleness_mean": sum(stalenesses) / len(stalenesses),
-                "async/staleness_max": max(stalenesses),
-                "async/staleness_min": min(stalenesses),
-                "async/staleness_ratio": sum(1 for s in stalenesses if s > 0) / len(stalenesses),
-            }
-        )
+            # Log staleness statistics for this step
+            self.all_metrics.update(
+                {
+                    "async/staleness_mean": sum(stalenesses) / len(stalenesses),
+                    "async/staleness_max": max(stalenesses),
+                    "async/staleness_min": min(stalenesses),
+                    "async/staleness_ratio": sum(1 for s in stalenesses if s > 0) / len(stalenesses),
+                }
+            )
 
         # Convert rewards to per-token form and compute reward metrics before training conversion
-        trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
-        trajectory_batch, uids = self.select_trajectories(trajectory_batch, uids)
+        with Timer("postprocess_trajectory_batch", self.all_timings):
+            trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
+            trajectory_batch, uids = self.select_trajectories(trajectory_batch, uids)
 
         # print example just for debugging
         vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
         logger.debug(f"Example generated: {vis}")
 
-        return self.convert_to_training_input(trajectory_batch, uids)
-
-    def save_checkpoints(self):
-        """
-        Save checkpoints. Data consumption state is persisted by DataTrackingCallback.on_save,
-        which fires after the base checkpoint save completes.
-        """
-        # The base method saves model, dataloader state, trainer_state, and latest_ckpt_global_step.txt.
-        # DataTrackingCallback.on_save (registered in __init__) writes data_consumption_state.pt.
-        super().save_checkpoints()
+        with Timer("convert_to_training_input", self.all_timings):
+            return self.convert_to_training_input(trajectory_batch, uids)
 
     def load_checkpoints(self) -> Tuple[int, str]:
         """

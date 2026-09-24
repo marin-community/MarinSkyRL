@@ -16,17 +16,65 @@ import shutil
 import tempfile
 from contextlib import contextmanager
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-import fsspec
 from loguru import logger
+from marinskyrl.remote_io import filesystem_and_path
 from marinskyrl.resource_locator import is_cloud_uri
-from .s3fs import get_s3_fs, s3_refresh_if_expiring, call_with_s3_retry
 
 
 class DirectoryPublisher(Protocol):
     def __call__(self, local_path: str, cloud_path: str) -> None: ...
+
+
+@dataclass
+class PendingDirectoryUpload:
+    """A cloud directory staged on local disk and ready for publication."""
+
+    local_path: str
+    output_path: str
+
+    def publish(self) -> None:
+        try:
+            upload_directory(self.local_path, self.output_path)
+        finally:
+            try:
+                shutil.rmtree(self.local_path)
+            except OSError:
+                logger.exception(f"Failed to remove checkpoint staging directory {self.local_path}")
+
+
+class DeferredLocalWorkDir:
+    """Stage cloud output locally while leaving publication to the caller."""
+
+    def __init__(self, output_path: str) -> None:
+        self.output_path = output_path
+        self._local_path: str | None = None
+        self._cloud_backed = is_cloud_path(output_path)
+
+    def __enter__(self) -> str:
+        if self._cloud_backed:
+            self._local_path = tempfile.mkdtemp(prefix="skyrl-checkpoint-")
+        else:
+            makedirs(self.output_path, exist_ok=True)
+            self._local_path = self.output_path
+        return self._local_path
+
+    def __exit__(self, exc_type, _exc_value, _traceback) -> None:
+        if exc_type is not None and self._cloud_backed and self._local_path is not None:
+            shutil.rmtree(self._local_path, ignore_errors=True)
+
+    def pending_upload(self) -> PendingDirectoryUpload | None:
+        if not self._cloud_backed:
+            return None
+        assert self._local_path is not None
+        return PendingDirectoryUpload(self._local_path, self.output_path)
+
+    def discard(self) -> None:
+        if self._cloud_backed and self._local_path is not None:
+            shutil.rmtree(self._local_path, ignore_errors=True)
 
 
 def is_cloud_path(path: str) -> bool:
@@ -36,26 +84,18 @@ def is_cloud_path(path: str) -> bool:
 
 def _get_filesystem(path: str):
     """Get the appropriate filesystem for the given path."""
-    if not is_cloud_path(path):
-        return fsspec.filesystem("file")
+    fs, _ = filesystem_and_path(path)
+    return fs
 
-    proto = path.split("://", 1)[0]
-    if proto == "s3":
-        fs = get_s3_fs()
-        s3_refresh_if_expiring(fs)
-        return fs
-    return fsspec.filesystem(proto)
+
+def _normalized_path(filesystem, path: str) -> str:
+    return filesystem._strip_protocol(path) if is_cloud_path(path) else path
 
 
 def open_file(path: str, mode: str = "rb"):
     """Open a file using fsspec, works with both local and cloud paths."""
-    if not is_cloud_path(path):
-        return fsspec.open(path, mode)
-
     fs = _get_filesystem(path)
-    norm = fs._strip_protocol(path)
-    if path.startswith("s3://"):
-        return call_with_s3_retry(fs, fs.open, norm, mode)
+    norm = _normalized_path(fs, path)
     return fs.open(norm, mode)
 
 
@@ -89,22 +129,16 @@ def read_bytes(path: str) -> bytes:
 def find_files(path: str) -> dict[str, int]:
     """Return recursive file paths and sizes below a local or cloud prefix."""
     filesystem = _get_filesystem(path)
-    normalized = filesystem._strip_protocol(path) if is_cloud_path(path) else path
-    if path.startswith("s3://"):
-        details = call_with_s3_retry(filesystem, filesystem.find, normalized, detail=True, withdirs=False)
-    else:
-        details = filesystem.find(normalized, detail=True, withdirs=False)
+    normalized = _normalized_path(filesystem, path)
+    details = filesystem.find(normalized, detail=True, withdirs=False)
     return {str(file_path): int(detail["size"]) for file_path, detail in details.items()}
 
 
 def file_size(path: str) -> int:
     """Return the size of one exact local or cloud object."""
     filesystem = _get_filesystem(path)
-    normalized = filesystem._strip_protocol(path) if is_cloud_path(path) else path
-    if path.startswith("s3://"):
-        detail = call_with_s3_retry(filesystem, filesystem.info, normalized)
-    else:
-        detail = filesystem.info(normalized)
+    normalized = _normalized_path(filesystem, path)
+    detail = filesystem.info(normalized)
     if detail.get("type") == "directory":
         raise IsADirectoryError(path)
     return int(detail["size"])
@@ -119,36 +153,24 @@ def makedirs(path: str, exist_ok: bool = True) -> None:
 def exists(path: str) -> bool:
     """Check if a file or directory exists."""
     fs = _get_filesystem(path)
-    if is_cloud_path(path) and path.startswith("s3://"):
-        return call_with_s3_retry(fs, fs.exists, path)
     return fs.exists(path)
 
 
 def isdir(path: str) -> bool:
     """Check if path is a directory."""
     fs = _get_filesystem(path)
-    if is_cloud_path(path) and path.startswith("s3://"):
-        return call_with_s3_retry(fs, fs.isdir, path)
     return fs.isdir(path)
 
 
 def list_dir(path: str) -> list[str]:
     """List contents of a directory."""
     fs = _get_filesystem(path)
-    if is_cloud_path(path) and path.startswith("s3://"):
-        return call_with_s3_retry(fs, fs.ls, path, detail=False)
     return fs.ls(path, detail=False)
 
 
 def remove(path: str) -> None:
     """Remove a file or directory."""
     fs = _get_filesystem(path)
-    if is_cloud_path(path) and path.startswith("s3://"):
-        if call_with_s3_retry(fs, fs.isdir, path):
-            call_with_s3_retry(fs, fs.rm, path, recursive=True)
-        else:
-            call_with_s3_retry(fs, fs.rm, path)
-        return
     if fs.isdir(path):
         fs.rm(path, recursive=True)
     else:
@@ -158,27 +180,14 @@ def remove(path: str) -> None:
 def _upload(local_path: str, cloud_path: str, *, recursive: bool) -> None:
     if not is_cloud_path(cloud_path):
         raise ValueError(f"Destination must be a cloud path, got: {cloud_path}")
-    filesystem = _get_filesystem(cloud_path)
+    fs = _get_filesystem(cloud_path)
     is_s3_path = cloud_path.startswith("s3://")
-    destination = filesystem._strip_protocol(cloud_path) if is_s3_path else cloud_path
-    if is_s3_path:
-        try:
-            # Botocore retries a request within its current multipart upload. Retrying
-            # the whole directory here would restart completed shard uploads and
-            # multiply the whole-request deadline.
-            call_with_s3_retry(
-                filesystem,
-                filesystem.put,
-                local_path,
-                destination,
-                recursive=recursive,
-                max_attempts=1,
-            )
-        except Exception as error:
-            error.add_note(f"S3 upload failed from {local_path} to {cloud_path}")
-            raise
-    else:
-        filesystem.put(local_path, destination, recursive=recursive)
+    destination = fs._strip_protocol(cloud_path) if is_s3_path else cloud_path
+    try:
+        fs.put(local_path, destination, recursive=recursive)
+    except Exception as error:
+        error.add_note(f"Cloud upload failed from {local_path} to {cloud_path}")
+        raise
 
 
 def upload_file(local_path: str, cloud_path: str) -> None:
@@ -203,7 +212,7 @@ def download_directory(cloud_path: str, local_path: str) -> None:
     # _strip_protocol, which rstrips separators and would silently undo it.
     if cloud_path.startswith("s3://"):
         source_path = fs._strip_protocol(cloud_path) + "/"
-        call_with_s3_retry(fs, fs.get, source_path, local_path, recursive=True)
+        fs.get(source_path, local_path, recursive=True)
     else:
         fs.get(cloud_path.rstrip("/") + "/", local_path, recursive=True)
     logger.info(f"Downloaded {cloud_path} to {local_path}")
@@ -221,7 +230,7 @@ def download_file(cloud_path: str, local_path: str) -> None:
     partial_path = f"{local_path}.partial"
     try:
         if cloud_path.startswith("s3://"):
-            call_with_s3_retry(fs, fs.get, fs._strip_protocol(cloud_path), partial_path, recursive=False)
+            fs.get(fs._strip_protocol(cloud_path), partial_path, recursive=False)
         else:
             fs.get(cloud_path, partial_path, recursive=False)
         os.replace(partial_path, local_path)

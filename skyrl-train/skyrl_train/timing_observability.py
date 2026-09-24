@@ -28,6 +28,7 @@ TIMING_PARENTS: dict[str, str | None] = {
     "dump_data_batch": "run_training",
     "init_weight_sync_state": None,
     "save_checkpoints": "step",
+    "checkpoint_upload": "step",
     "cleanup_old_checkpoints": "save_checkpoints",
     "save_hf_model": "step",
     "queue_hf_export": "step",

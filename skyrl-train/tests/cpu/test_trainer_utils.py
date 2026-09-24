@@ -1127,6 +1127,25 @@ def test_build_dataloader_can_preserve_training_source_order(dummy_config):
     assert batches == [dataset.data[:5], dataset.data[5:]]
 
 
+def test_build_dataloader_eval_num_prompts_is_bounded_and_reproducible(dummy_config):
+    dataset = MultiItemDataset(size=20)
+
+    def selected_prompts(seed):
+        config = dummy_config.copy()
+        config.trainer.seed = seed
+        config.trainer.eval_batch_size = 4
+        config.trainer.eval_num_prompts = 6
+        config.generator.enable_http_endpoint = True
+        return [item for batch in build_dataloader(config, dataset, is_train=False) for item in batch]
+
+    first = selected_prompts(42)
+
+    assert len(first) == 6
+    assert len(set(first)) == 6
+    assert first == selected_prompts(42)
+    assert first != selected_prompts(123)
+
+
 def test_validate_trajectory_batch_invalid_rewards():
     """Test validate_trajectory_batch raises AssertionError when rewards is neither List[float-like] nor List[List[float-like]]."""
     input_batch = TrajectoryRequestBatch(

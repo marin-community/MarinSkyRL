@@ -15,7 +15,7 @@ import pytest
 from hydra import compose, initialize_config_dir
 from skyrl_train.utils.utils import validate_cfg
 
-from cloud.iris.rl_config_translation import build_checkpoint_export_hydra_args, parse_checkpoint_export_config
+from cloud.iris.rl_config_translation import compose_checkpoint_export_config, parse_checkpoint_export_config
 
 SCRIPT = Path(__file__).parents[3] / "ci" / "opd" / "open_mopd_native_full.py"
 CONFIG_ROOT = Path(__file__).parents[3] / "skyrl_train" / "config"
@@ -83,13 +83,11 @@ def test_export_uses_four_checkpoint_ranks_on_reserved_eight_gpu_node():
     parsed = parse_checkpoint_export_config(
         str(EXPORT_CONFIG), model_override="BytedTsinghua-SIA/Open-MOPD-SmolLM3-3B-MixSFT"
     )
-    arguments = build_checkpoint_export_hydra_args(
+    config = compose_checkpoint_export_config(
         parsed,
         {"num_nodes": 1, "gpus_per_node": 8, "model_path": "BytedTsinghua-SIA/Open-MOPD-SmolLM3-3B-MixSFT"},
         SimpleNamespace(gpus_per_node=8),
-    )
-    with initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
-        config = compose(config_name="ppo_base_config", overrides=arguments)
+    ).config
 
     assert config.trainer.placement.policy_num_nodes == 1
     assert config.trainer.placement.policy_num_gpus_per_node == 4

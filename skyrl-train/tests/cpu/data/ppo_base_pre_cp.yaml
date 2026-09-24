@@ -261,7 +261,7 @@ trainer:
   project_name: skyrl
   run_name: test_run
   logger: wandb
-  tracker_commit_each_step: false
+  tracker_commit_each_step: true
   dump_data_batch: false
   dump_eval_results: true
   log_level: INFO
@@ -291,7 +291,7 @@ generator:
   enable_prefix_caching: true
   enable_chunked_prefill: true
   max_num_batched_tokens: 8192
-  enforce_eager: true
+  enforce_eager: false
   fully_sharded_loras: false
   inference_stats_interval: 1
   vllm_histogram_format: scalar

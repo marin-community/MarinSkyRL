@@ -1,6 +1,8 @@
 import json
 import signal
 
+from omegaconf import OmegaConf
+
 from cloud.iris.training_driver import LocalRLConfig, LocalRLRunner
 from marinskyrl.environment_contract import DEBUG_ARTIFACT_DIR_ENV
 
@@ -21,13 +23,13 @@ def test_training_driver_preserves_child_signal_outcome(tmp_path, monkeypatch) -
     monkeypatch.setattr("cloud.iris.training_driver.subprocess.Popen", lambda *_args, **_kwargs: _AbortedProcess())
     runner = LocalRLRunner(
         LocalRLConfig(
-            rl_config_path="config.yaml",
             job_name="signal-test",
             model_path="org/model",
         )
     )
+    launch_config = OmegaConf.create({"runtime": {"entrypoint": "skyrl_train.entrypoints.main_base"}, "skyrl": {}})
 
-    exit_code = runner._run_skyrl("skyrl_train.entrypoints.main_base", [])
+    exit_code = runner._run_skyrl(launch_config)
 
     assert exit_code == 128 + signal.SIGABRT
     receipts = list((artifact_root / "outcomes").glob("*.json"))

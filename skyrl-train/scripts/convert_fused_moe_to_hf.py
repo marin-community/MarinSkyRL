@@ -72,7 +72,10 @@ import os
 import shutil
 from pathlib import Path
 
+from huggingface_hub import snapshot_download
 import torch
+
+from marinskyrl.hugging_face_retry import load_hugging_face_with_retry
 
 # --------------------------------------------------------------------------- #
 # Reuse the trainer's verified grouped->HF converter WITHOUT importing the      #
@@ -216,14 +219,16 @@ def _resolve_src(src: str, cache_dir: str | None) -> Path:
     if p.exists() and p.is_dir():
         return p
     # treat as HF repo id
-    from huggingface_hub import snapshot_download
-
     token = os.environ.get("HF_TOKEN")
-    local = snapshot_download(
-        repo_id=src,
-        cache_dir=cache_dir,
-        token=token,
-        allow_patterns=["*.safetensors", "*.json", "*.txt", "*.model", "tokenizer*"],
+    local = load_hugging_face_with_retry(
+        lambda: snapshot_download(
+            repo_id=src,
+            cache_dir=cache_dir,
+            token=token,
+            allow_patterns=["*.safetensors", "*.json", "*.txt", "*.model", "tokenizer*"],
+        ),
+        resource_id=src,
+        resource_kind="model snapshot",
     )
     return Path(local)
 

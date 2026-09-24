@@ -12,6 +12,7 @@ import json
 import torch
 import numpy as np
 from collections import defaultdict
+from torch.utils.data import Dataset, Subset
 from skyrl_train.dynamic_sampling import (
     DynamicSamplingCriteria,
     DynamicSamplingType,
@@ -504,6 +505,19 @@ def get_bad_sample_replacements(good_uids: List[str], bad_uids: List[str]) -> Li
     return chosen_replacement_uids
 
 
+def _evaluation_dataset(dataset: PromptDataset, num_prompts: int | None, seed: int) -> Dataset:
+    if num_prompts is None:
+        return dataset
+    if num_prompts <= 0:
+        raise ValueError("trainer.eval_num_prompts must be positive")
+    if num_prompts >= len(dataset):
+        return dataset
+
+    generator = torch.Generator().manual_seed(seed)
+    indices = torch.randperm(len(dataset), generator=generator)[:num_prompts].tolist()
+    return Subset(dataset, indices)
+
+
 def build_dataloader(
     cfg: DictConfig, dataset: PromptDataset, is_train=True, is_fully_async=False
 ) -> StatefulDataLoader:
@@ -523,6 +537,10 @@ def build_dataloader(
     # Seed the dataloader for reproducibility.
     seeded_generator = torch.Generator()
     seeded_generator.manual_seed(cfg.trainer.seed)
+
+    loader_dataset = (
+        dataset if is_train else _evaluation_dataset(dataset, cfg.trainer.eval_num_prompts, cfg.trainer.seed)
+    )
 
     sampler = None
     if is_train and cfg.data.sampling.kind is not None:
@@ -547,7 +565,7 @@ def build_dataloader(
             )
 
     dataloader = StatefulDataLoader(
-        dataset,
+        loader_dataset,
         batch_size=batch_size if not is_fully_async else 1,
         shuffle=is_train and cfg.data.shuffle and sampler is None,
         sampler=sampler,
