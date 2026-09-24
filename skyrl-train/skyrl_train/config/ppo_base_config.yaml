@@ -63,8 +63,6 @@ trainer:
   generate_spans: true
   # Async-loop windows and producer waits; the highest-volume family here.
   async_spans: true
-  # One aggregate Megatron Adam inventory after a successful update.
-  optimizer_state_metrics: false
   distributed:
     placement_group_timeout_seconds: 180
     worker_collective_timeout_seconds: 1800
@@ -245,9 +243,6 @@ trainer:
       # minibatch. null resolves on for Megatron and off elsewhere, since only Megatron has a
       # pooling path; true on another strategy fails validation.
       pooled: null
-      # Exact pooled |log ratio| p50/p95 and clip pressure for the stale family.
-      # Retains up to 4M float32 values per rank and syncs once per micro-batch.
-      exact_quantiles: false
     grad_cosine:
       # Cosine between consecutive gradient directions. Off by default: it holds a copy of
       # every local gradient shard (fp32 on GPU, or bf16 on CPU with store: cpu_bf16) and adds

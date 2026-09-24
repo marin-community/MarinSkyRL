@@ -63,7 +63,6 @@ RUNTIME_CONFIG_TRAINER_FIELDS = {
     "policy_train_spans": True,
     "generate_spans": True,
     "async_spans": True,
-    "optimizer_state_metrics": False,
     "distillation_token_budget": None,
     "eval_num_prompts": None,
     "export_hf_artifact": False,
@@ -91,7 +90,7 @@ RUNTIME_CONFIG_TRAINER_FIELDS = {
 }
 ADDITIVE_ALGORITHM_FIELDS = {
     "batch_invariant": False,
-    "ratio_diagnostics": {"position_window": 256, "pooled": None, "exact_quantiles": False},
+    "ratio_diagnostics": {"position_window": 256, "pooled": None},
     "grad_cosine": {"enabled": False, "store": "gpu_fp32"},
 }
 ADDITIVE_DYNAMIC_SAMPLING_FIELDS = {

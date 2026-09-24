@@ -167,7 +167,6 @@ class MegatronStrategy(DistributedStrategy):
         model,
         scheduler,
         name="model",
-        after_step: Callable[[bool], None] | None = None,
         grad_observer: Callable[..., dict[str, float]] | None = None,
         **kwargs,
     ) -> Optional[Float[torch.Tensor, "1"]]:
@@ -178,8 +177,6 @@ class MegatronStrategy(DistributedStrategy):
             # Main-gradient shards remain populated after clipping/step and before
             # zero_grad. Even a skipped update must reset every rank's history.
             grad_observer(optimizer.get_main_grads_for_grad_norm(), successful=bool(successful))
-        if after_step is not None:
-            after_step(successful)
         scheduler.step(1)
         optimizer.zero_grad()
         return grad_norm

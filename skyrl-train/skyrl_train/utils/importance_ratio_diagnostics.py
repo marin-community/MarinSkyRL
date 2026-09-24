@@ -10,7 +10,6 @@ from typing import Optional
 import torch
 from loguru import logger
 
-from skyrl_train.utils.distributed_quantiles import AbsoluteQuantileBuffer
 from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_delta
 
 # Absolute-position bucket width. The async RL dashboard reads pos_first256 and
@@ -47,7 +46,6 @@ class RatioDiagnosticsSettings:
 
     position_window: int
     pooled: bool
-    exact_quantiles: bool
 
 
 def ratio_diagnostics_settings(algorithm_cfg) -> RatioDiagnosticsSettings:
@@ -65,7 +63,6 @@ def ratio_diagnostics_settings(algorithm_cfg) -> RatioDiagnosticsSettings:
     return RatioDiagnosticsSettings(
         position_window=int(section.get("position_window", DEFAULT_POSITION_WINDOW)),
         pooled=bool(pooled),
-        exact_quantiles=bool(section.get("exact_quantiles", False)),
     )
 
 
@@ -249,36 +246,17 @@ class LogRatioMonitor:
         device: torch.device,
         *,
         position_window: int = DEFAULT_POSITION_WINDOW,
-        exact_quantiles: bool = False,
-        eps_clip_low: float = 0.2,
-        eps_clip_high: float = 0.2,
     ):
         if type(position_window) is not int or position_window <= 0:
             raise ValueError("position_window must be a positive integer")
         self.position_window = position_window
-        self.exact_quantiles = exact_quantiles
         self._accumulator = _empty_log_ratio_accumulator(device)
-        self._quantiles = AbsoluteQuantileBuffer(device)
-        self._clip_counts = torch.zeros(2, device=device, dtype=torch.float64)
-        self._clip_lower = math.log1p(-eps_clip_low) if eps_clip_low < 1 else -math.inf
-        self._clip_upper = math.log1p(eps_clip_high)
         self._failed = False
 
     def add(self, log_probs: torch.Tensor, old_log_probs: torch.Tensor, loss_mask: torch.Tensor) -> None:
         if self._failed:
             return
         try:
-            # Inside the guard with the accumulation below: a malformed batch marks the
-            # diagnostics failed and the training step continues.
-            if self.exact_quantiles:
-                # Retention and a host sync per micro-batch; the accumulator below is neither.
-                selected = loss_mask > 0
-                delta = log_probs.detach().double()[selected] - old_log_probs.detach().double()[selected]
-                self._quantiles.add(delta)
-                finite_delta = delta[torch.isfinite(delta)]
-                self._clip_counts += torch.stack(
-                    [(finite_delta < self._clip_lower).sum(), (finite_delta > self._clip_upper).sum()]
-                )
             partial = compute_log_ratio_partial(
                 log_probs, old_log_probs, loss_mask, position_window=self.position_window
             )
@@ -291,7 +269,6 @@ class LogRatioMonitor:
         self,
         *,
         gather_fn: Callable[[torch.Tensor], list[torch.Tensor]] | None = None,
-        sum_reduce_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> dict[str, float]:
         accumulator = self._accumulator
         failed = self._failed
@@ -302,47 +279,13 @@ class LogRatioMonitor:
             header, tail = pack_log_ratio_accumulator(accumulator, failed=failed)
             headers, tails = gather_fn(header), gather_fn(tail)
             accumulator, failed = pool_log_ratio_accumulators(headers, tails)
-
-        def sum_reduce(tensor):
-            if sum_reduce_fn is not None:
-                return sum_reduce_fn(tensor)
-            return torch.stack(gather_fn(tensor)).sum(0) if gather_fn is not None else tensor
-
-        quantiles = self._quantiles.quantiles(sum_reduce)
-        clip_counts = sum_reduce(self._clip_counts)
         if failed:
-            metrics = _failed_log_ratio_metrics(self.position_window)
-        else:
-            try:
-                metrics = finalize_log_ratio_metrics(accumulator, position_window=self.position_window)
-            except Exception as error:
-                logger.warning(f"Log-ratio diagnostics marked failed after finalization failed: {error!r}")
-                metrics = _failed_log_ratio_metrics(self.position_window)
-                failed = True
-        if failed:
-            quantiles.update(p50=0.0, p95=0.0, quantiles_valid=0.0)
-        # The exact-quantile family takes the gate's own name; the buffer reports |log ratio|.
-        exact = {
-            "p50": "abs_p50",
-            "p95": "abs_p95",
-            "quantiles_valid": "valid",
-            "quantiles_overflow": "overflow",
-            "quantiles_overflow_ranks": "overflow_ranks",
-            "quantiles_nonrepresentable_tokens": "nonrepresentable_tokens",
-        }
-        metrics.update({f"log_ratio_exact_{exact.get(name, name)}": value for name, value in quantiles.items()})
-        finite_count = max(1, quantiles["finite_tokens"])
-        metrics["log_ratio_exact_lower_clip_pressure"] = clip_counts[0].item() / finite_count
-        metrics["log_ratio_exact_upper_clip_pressure"] = clip_counts[1].item() / finite_count
-        return metrics
-
-
-def sum_ratio_tensor(tensor: torch.Tensor, *, group=None) -> torch.Tensor:
-    """SUM fixed-size coverage or radix histograms over the token ownership group."""
-    result = tensor.clone()
-    if torch.distributed.is_initialized():
-        torch.distributed.all_reduce(result, op=torch.distributed.ReduceOp.SUM, group=group)
-    return result
+            return _failed_log_ratio_metrics(self.position_window)
+        try:
+            return finalize_log_ratio_metrics(accumulator, position_window=self.position_window)
+        except Exception as error:
+            logger.warning(f"Log-ratio diagnostics marked failed after finalization failed: {error!r}")
+            return _failed_log_ratio_metrics(self.position_window)
 
 
 def gather_ratio_tensor(tensor: torch.Tensor, *, group=None) -> list[torch.Tensor]:

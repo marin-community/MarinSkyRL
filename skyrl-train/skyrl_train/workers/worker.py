@@ -1409,9 +1409,6 @@ class PolicyWorkerBase(Worker):
             self._log_ratio_monitor = LogRatioMonitor(
                 action_log_probs.device,
                 position_window=ratio_settings.position_window,
-                exact_quantiles=ratio_settings.exact_quantiles,
-                eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
-                eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
             )
         self._log_ratio_monitor.add(action_log_probs, old_action_log_probs, loss_mask)
 

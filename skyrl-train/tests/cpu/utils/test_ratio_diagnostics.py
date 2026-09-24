@@ -21,7 +21,6 @@ from skyrl_train.utils.importance_ratio_diagnostics import (
     ratio_diagnostics_settings,
     ratio_statistics,
     gather_ratio_tensor,
-    sum_ratio_tensor,
 )
 
 
@@ -109,7 +108,7 @@ def test_rank_reduction_pools_unequal_token_counts_and_excludes_replicas():
     shards = [torch.arange(1, 101, dtype=torch.float64) / 10, torch.zeros(19_900, dtype=torch.float64)]
     monitors = []
     for values in shards:
-        monitor = LogRatioMonitor(torch.device("cpu"), exact_quantiles=True)
+        monitor = LogRatioMonitor(torch.device("cpu"))
         values = values.unsqueeze(0)
         monitor.add(values, torch.zeros_like(values), torch.ones_like(values))
         monitors.append(monitor)
@@ -137,9 +136,6 @@ def test_rank_reduction_pools_unequal_token_counts_and_excludes_replicas():
         return results[0]
 
     actual = pooled_monitors()
-    assert actual["log_ratio_exact_abs_p50"] == 0
-    assert actual["log_ratio_exact_abs_p95"] == 0
-    assert actual["log_ratio_exact_finite_fraction"] == 1
     assert actual["log_ratio_selected_tokens"] == 20_000
     assert actual["log_ratio_ess_fraction"] == pytest.approx(expected["ess_fraction"], rel=1e-10)
     assert actual["log_ratio_mean"] == pytest.approx(expected["log_ratio_mean"], abs=1e-10)
@@ -159,13 +155,13 @@ def _distributed_ratio_worker(rank, directory):
     torch.distributed.init_process_group("gloo", init_method=f"file://{directory}/group", rank=rank, world_size=2)
     try:
         values = torch.arange(1, 101, dtype=torch.float64) / 10 if rank == 0 else torch.zeros(19_900)
-        monitor = LogRatioMonitor(torch.device("cpu"), exact_quantiles=True)
+        monitor = LogRatioMonitor(torch.device("cpu"))
         values = values.unsqueeze(0)
         monitor.add(values, torch.zeros_like(values), torch.ones_like(values))
-        pooled = monitor.metrics(gather_fn=gather_ratio_tensor, sum_reduce_fn=sum_ratio_tensor)
+        pooled = monitor.metrics(gather_fn=gather_ratio_tensor)
         if rank == 1:
             monitor._failed = True
-        failed = monitor.metrics(gather_fn=gather_ratio_tensor, sum_reduce_fn=sum_ratio_tensor)
+        failed = monitor.metrics(gather_fn=gather_ratio_tensor)
         Path(directory, f"rank{rank}.json").write_text(json.dumps({"pooled": pooled, "failed": failed}))
     finally:
         torch.distributed.destroy_process_group()
@@ -184,30 +180,13 @@ def test_two_actual_gloo_ranks_emit_identical_token_pooled_statistics(tmp_path):
     assert left["failed"]["log_ratio_diagnostics_failed"] == 1
 
 
-def test_worker_full_statistic_coverage_clip_bounds_and_nonfinite_counts():
+def test_a_nonfinite_token_invalidates_the_worker_statistics():
     values = torch.tensor([[-2.0, -0.25, 0.0, 0.5, 3.0]], dtype=torch.float64)
-    monitor = LogRatioMonitor(torch.device("cpu"), exact_quantiles=True, eps_clip_low=0.1, eps_clip_high=0.3)
+    monitor = LogRatioMonitor(torch.device("cpu"))
     monitor.add(values, torch.zeros_like(values), torch.ones_like(values))
-    actual = monitor.metrics()
-    oracle = ratio_statistics(values, eps_clip_low=0.1, eps_clip_high=0.3)
-    for key, published in (
-        ("log_ratio_abs_p50", "log_ratio_exact_abs_p50"),
-        ("log_ratio_abs_p95", "log_ratio_exact_abs_p95"),
-        ("finite_fraction", "log_ratio_exact_finite_fraction"),
-        ("lower_clip_pressure", "log_ratio_exact_lower_clip_pressure"),
-        ("upper_clip_pressure", "log_ratio_exact_upper_clip_pressure"),
-    ):
-        assert actual[published] == pytest.approx(oracle[key], abs=1e-12)
-    assert actual["log_ratio_exact_valid"] == 1
-    assert actual["log_ratio_exact_overflow_ranks"] == 0
+    assert monitor.metrics()["log_ratio_statistics_valid"] == 1
     monitor.add(torch.tensor([[float("nan"), 1.0]]), torch.zeros(1, 2), torch.ones(1, 2))
-    actual = monitor.metrics()
-    assert actual["log_ratio_exact_selected_tokens"] == 7
-    assert actual["log_ratio_exact_finite_tokens"] == 6
-    assert actual["log_ratio_exact_finite_fraction"] == 6 / 7
-    assert actual["log_ratio_statistics_valid"] == 0
-    assert actual["log_ratio_exact_valid"] == 0
-    assert actual["log_ratio_exact_abs_p50"] == 0
+    assert monitor.metrics()["log_ratio_statistics_valid"] == 0
 
 
 def test_quantiles_stay_exact_above_the_size_torch_refuses():
@@ -222,36 +201,13 @@ def test_quantiles_stay_exact_above_the_size_torch_refuses():
     assert absolute_quantiles(small, probabilities) == torch.quantile(small, small.new_tensor(probabilities)).tolist()
 
 
-def test_exact_quantiles_gate_decides_whether_tokens_are_retained():
-    values = torch.tensor([[-2.0, -0.25, 0.5, 3.0]], dtype=torch.float64)
-
-    def observe(exact_quantiles):
-        monitor = LogRatioMonitor(torch.device("cpu"), exact_quantiles=exact_quantiles)
-        monitor.add(values, torch.zeros_like(values), torch.ones_like(values))
-        return monitor.metrics()
-
-    off = observe(False)
-    on = observe(True)
-    # The key contract is identical either way; only the gated family reports values.
-    assert set(off) == set(on)
-    # Nothing was retained with the gate off, so the family reports no population.
-    assert off["log_ratio_exact_finite_tokens"] == 0 and on["log_ratio_exact_finite_tokens"] == 4
-    assert off["log_ratio_exact_valid"] == 0 and on["log_ratio_exact_valid"] == 1
-    assert off["log_ratio_exact_abs_p50"] == 0
-    assert on["log_ratio_exact_abs_p50"] == pytest.approx(ratio_statistics(values)["log_ratio_abs_p50"])
-    assert off["log_ratio_exact_upper_clip_pressure"] == 0
-    assert on["log_ratio_exact_upper_clip_pressure"] == pytest.approx(0.5)
-    # The ungated accumulator is unaffected by the gate.
-    assert off["log_ratio_abs_mean"] == on["log_ratio_abs_mean"]
-
-
 def test_shipped_ratio_diagnostics_pool_on_megatron_and_cost_nothing_elsewhere():
     config = OmegaConf.load(Path(__file__).parents[3] / "skyrl_train/config/ppo_base_config.yaml")
     assert config.trainer.algorithm.ratio_diagnostics.pooled is None
     with pytest.raises(ValueError, match="pooled is null"):
         ratio_diagnostics_settings(config.trainer.algorithm)
     absent = ratio_diagnostics_settings(OmegaConf.create({}))
-    assert not absent.pooled and not absent.exact_quantiles and absent.position_window == 256
+    assert not absent.pooled and absent.position_window == 256
 
     fsdp = OmegaConf.merge(config, {"trainer": {"strategy": "fsdp2"}})
     messages = []
