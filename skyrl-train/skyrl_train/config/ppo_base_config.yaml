@@ -239,9 +239,10 @@ trainer:
     ratio_diagnostics:
       # Absolute position buckets the dashboard reads as pos_first256/pos_last256.
       position_window: 256
-      # Pool the mismatch statistics across data-parallel ranks with one gather per optimizer
-      # minibatch. null resolves on for Megatron and off elsewhere, since only Megatron has a
-      # pooling path; true on another strategy fails validation.
+      # Pool the within-update log-ratio statistics (policy/log_ratio_*) across data-parallel
+      # ranks with one gather per optimizer minibatch. null resolves on for Megatron and off
+      # elsewhere, since only Megatron has a pooling path; true on another strategy fails
+      # validation.
       pooled: null
     grad_cosine:
       # Cosine between consecutive gradient directions. Off by default: it holds a copy of
