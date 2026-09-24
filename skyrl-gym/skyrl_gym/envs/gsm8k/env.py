@@ -15,9 +15,10 @@ class GSM8kEnv(BaseTextEnv):
         assert "reward_spec" in extras, "reward_spec field is required"
         assert "ground_truth" in extras["reward_spec"], "ground_truth is required in reward_spec field"
         self.ground_truth = extras["reward_spec"]["ground_truth"]
+        self.reward_method = env_config.get("reward_method", "strict")
 
     def _get_reward(self, action: str) -> float:
-        return utils.compute_score(action, self.ground_truth)
+        return utils.compute_score(action, self.ground_truth, method=self.reward_method)
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         done = True  # always done after one step

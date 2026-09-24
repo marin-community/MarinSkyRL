@@ -1,6 +1,11 @@
 # @package environment.skyrl_gym
 max_env_workers: 32
 
+gsm8k:
+  # Tasks that require the #### number on the last response line can select
+  # strict_final_line. The default strict scorer uses the first #### match.
+  reward_method: strict
+
 text2sql:
   db_path: "/home/ray/default/sql_data"
 

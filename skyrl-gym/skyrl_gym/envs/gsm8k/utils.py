@@ -16,7 +16,7 @@ import re
 
 
 def extract_solution(solution_str, method="strict"):
-    assert method in ["strict", "flexible"]
+    assert method in ["strict", "strict_final_line", "flexible"]
 
     if method == "strict":
         # this also tests the formatting of the model
@@ -26,6 +26,11 @@ def extract_solution(solution_str, method="strict"):
         else:
             final_answer = solution.group(0)
             final_answer = final_answer.split("#### ")[1].replace(",", "").replace("$", "")
+    elif method == "strict_final_line":
+        lines = solution_str.rstrip().splitlines()
+        final_line = lines[-1].strip() if lines else ""
+        match = re.fullmatch(r"#### (-?(?:[0-9]+|[1-9][0-9]{0,2}(?:,[0-9]{3})+)(?:\.[0-9]+)?)", final_line)
+        final_answer = match.group(1).replace(",", "") if match else None
     elif method == "flexible":
         answer = re.findall("(\\-?[0-9\\.\\,]+)", solution_str)
         final_answer = None
@@ -49,7 +54,7 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
     Args:
         solution_str: the solution text
         ground_truth: the ground truth
-        method: the method to extract the solution, choices are 'strict' and 'flexible'
+        method: the method to extract the solution, choices are 'strict', 'strict_final_line', and 'flexible'
         format_score: the score for the format
         score: the score for the correct answer
     """

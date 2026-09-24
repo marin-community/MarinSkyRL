@@ -155,6 +155,7 @@ ADDITIVE_DATA_FIELDS = {
     "terminal_bench_data": [],
 }
 ADDITIVE_SKYRL_GYM_FIELDS = {
+    "gsm8k",
     "nemotron_ultra",
 }
 
