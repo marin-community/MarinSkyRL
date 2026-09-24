@@ -26,7 +26,7 @@ def grug_engine_client(
     inference_engine_enable_sleep: bool = False,
     moe_backend: str | None = None,
 ) -> InferenceEngineClient:
-    """Start eager vLLM engines for a tiny Grug checkpoint."""
+    """Start vLLM engines for a tiny Grug checkpoint."""
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     engine_init_kwargs = {"max_model_len": MAX_MODEL_LEN}
     if moe_backend is not None:
@@ -41,7 +41,7 @@ def grug_engine_client(
         seed=23,
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=False,
-        enforce_eager=True,
+        enforce_eager=False,
         engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
         shared_pg=shared_pg,
         gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
@@ -110,9 +110,14 @@ def assert_engine_weights(
             per_rank = [per_rank]
         for rank_values in per_rank:
             serving_ep_rank = int(rank_values["__ranks__"]["ep_rank"])
+            # A pipeline stage does not hold the weights of other stages' layers. The check at the
+            # end still requires every name to be found on some stage.
+            staged = int(rank_values["__ranks__"]["pp_size"]) > 1
             for name in names:
                 entry = rank_values[name]
                 if entry.get("skip"):
+                    continue
+                if staged and not entry["found"] and "error" not in entry:
                     continue
                 assert entry["found"], (name, entry)
                 found[name] = True

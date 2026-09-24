@@ -11,7 +11,7 @@ from omegaconf import DictConfig
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.distillation_adapters import build_teacher_scoring_work
 
-from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
+from skyrl_train.trajectory_runners.skyrl_gym import ExactChatTransportError, SkyRLGymTrajectoryRunner
 from skyrl_train.trajectory_runners.base import ConversationType, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
@@ -187,6 +187,21 @@ async def test_whole_trajectory_collector_masks_one_agent_loop_failure(generator
     assert batch["exclude_from_baseline"] == [False, True]
     assert batch["exception_types"] == [None, "TimeoutError"]
     assert batch["error_treatments"] == [None, "mask"]
+
+
+@pytest.mark.asyncio
+async def test_whole_trajectory_collector_propagates_exact_chat_contract_failure(generator_cfg, mock_tokenizer):
+    generator_cfg.batched = False
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg,
+        DictConfig({"max_env_workers": 0}),
+        MagicMock(),
+        mock_tokenizer,
+    )
+    runner.agent_loop = _masking_agent_loop(ExactChatTransportError("served prefix changed"))
+
+    with pytest.raises(ExactChatTransportError, match="served prefix changed"):
+        await runner._run(_two_row_request("train"), disable_tqdm=True)
 
 
 @pytest.mark.asyncio
@@ -539,7 +554,8 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
     mock_make, mock_tokenizer, mock_env, generator_cfg, mock_env_cfg
 ):
     generator_cfg.batched = False
-    generator_cfg.use_conversation_multi_turn = False
+    generator_cfg.use_conversation_multi_turn = True
+    generator_cfg.require_exact_chat_transport = True
     generator_cfg.sampling_params.logprobs = 0
     tools = [{"type": "function", "name": "search", "parameters": {"type": "object"}}]
     mock_env.init.return_value = (
@@ -561,6 +577,7 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
         "prompt_ids": [[11, 12, 13]],
         "stop_reasons": ["tool_calls"],
         "response_logprobs": [[-0.1, -0.2]],
+        "routed_experts": [[[[1, 2]], [[3, 4]]]],
         "prompt_logprobs": None,
         "assistant_messages": [assistant_message],
         "token_provenance": "engine",
@@ -587,7 +604,83 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
     evidence = mock_env.set_rollout_evidence.call_args.args[0]
     assert evidence.metadata["assistant_message"] == assistant_message
     assert output.evidence.prompt_token_ids == (11, 12, 13)
-    assert output.evidence.response_token_ids == (21, 22, mock_tokenizer.eos_token_id)
+    assert output.evidence.response_token_ids == (21, 22)
+    assert output.evidence.routed_experts == (((1, 2),), ((3, 4),))
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_agent_loop_required_exact_chat_rejects_environment_without_chat_options(
+    mock_make, mock_tokenizer, mock_env, generator_cfg, mock_env_cfg
+):
+    generator_cfg.batched = False
+    generator_cfg.require_exact_chat_transport = True
+    mock_env.init.return_value = ([{"role": "user", "content": "look it up"}], {})
+    mock_make.return_value = mock_env
+    runner = SkyRLGymTrajectoryRunner(
+        trajectory_runner_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=AsyncMock(),
+        tokenizer=mock_tokenizer,
+        model_client=AsyncMock(),
+    )
+
+    with pytest.raises(RuntimeError, match="did not provide chat_completion_params"):
+        await runner.agent_loop(
+            [{"role": "user", "content": "look it up"}],
+            mock_env_cfg.env_class,
+            {},
+            max_tokens=8,
+            max_input_length=512,
+        )
+
+
+def _structured_tool_turn_runner(mock_make, mock_tokenizer, mock_env, generator_cfg, mock_env_cfg, rendered_tool_ids):
+    tools = [{"type": "function", "name": "python", "parameters": {"type": "object"}}]
+    mock_env.init.return_value = (
+        [{"role": "user", "content": "calculate"}],
+        {"chat_completion_params": {"tools": tools}},
+    )
+    observation = {"role": "tool", "tool_call_id": "call-1", "content": "4"}
+    mock_env.step.side_effect = [
+        BaseTextEnvStepOutput(observations=[observation], reward=0.25, done=False, metadata={}),
+        BaseTextEnvStepOutput(observations=[], reward=0.75, done=True, metadata={}),
+    ]
+    mock_make.return_value = mock_env
+    tool_call = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "python", "arguments": "{}"}}],
+    }
+    model_client = AsyncMock()
+    model_client.generate.side_effect = [
+        {
+            "responses": ["<tool>"],
+            "response_ids": [[21, 22]],
+            "prompt_ids": [[11, 12]],
+            "stop_reasons": ["tool_calls"],
+            "response_logprobs": [[-0.1, -0.2]],
+            "assistant_messages": [tool_call],
+            "token_provenance": "engine",
+        },
+        {
+            "responses": ["four"],
+            "response_ids": [[41]],
+            "prompt_ids": [[11, 12, *rendered_tool_ids, 31, 32]],
+            "stop_reasons": ["stop"],
+            "response_logprobs": [[-0.3]],
+            "assistant_messages": [{"role": "assistant", "content": "four", "tool_calls": []}],
+            "token_provenance": "engine",
+        },
+    ]
+    runner = SkyRLGymTrajectoryRunner(
+        trajectory_runner_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=AsyncMock(),
+        tokenizer=mock_tokenizer,
+        model_client=model_client,
+    )
+    return runner
 
 
 @pytest.mark.asyncio
@@ -637,51 +730,16 @@ async def test_agent_loop_handles_backend_rendered_prefix_across_structured_tool
     generator_cfg.batched = False
     generator_cfg.use_conversation_multi_turn = False
     generator_cfg.sampling_params.logprobs = 0
-    tools = [{"type": "function", "name": "python", "parameters": {"type": "object"}}]
-    mock_env.init.return_value = (
-        [{"role": "user", "content": "calculate"}],
-        {"chat_completion_params": {"tools": tools}},
+    runner = _structured_tool_turn_runner(
+        mock_make, mock_tokenizer, mock_env, generator_cfg, mock_env_cfg, rendered_tool_ids
     )
-    observation = {"role": "tool", "tool_call_id": "call-1", "content": "4"}
-    mock_env.step.side_effect = [
-        BaseTextEnvStepOutput(observations=[observation], reward=0.25, done=False, metadata={}),
-        BaseTextEnvStepOutput(observations=[], reward=0.75, done=True, metadata={}),
-    ]
-    mock_make.return_value = mock_env
+    model_client = runner.model_client
     tool_call = {
         "role": "assistant",
         "content": None,
         "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "python", "arguments": "{}"}}],
     }
-    final_message = {"role": "assistant", "content": "four", "tool_calls": []}
-    model_client = AsyncMock()
-    model_client.generate.side_effect = [
-        {
-            "responses": ["<tool>"],
-            "response_ids": [[21, 22]],
-            "prompt_ids": [[11, 12]],
-            "stop_reasons": ["tool_calls"],
-            "response_logprobs": [[-0.1, -0.2]],
-            "assistant_messages": [tool_call],
-            "token_provenance": "engine",
-        },
-        {
-            "responses": ["four"],
-            "response_ids": [[41]],
-            "prompt_ids": [[11, 12, *rendered_tool_ids, 31, 32]],
-            "stop_reasons": ["stop"],
-            "response_logprobs": [[-0.3]],
-            "assistant_messages": [final_message],
-            "token_provenance": "engine",
-        },
-    ]
-    runner = SkyRLGymTrajectoryRunner(
-        trajectory_runner_cfg=generator_cfg,
-        skyrl_gym_cfg=mock_env_cfg,
-        inference_engine_client=AsyncMock(),
-        tokenizer=mock_tokenizer,
-        model_client=model_client,
-    )
+    observation = {"role": "tool", "tool_call_id": "call-1", "content": "4"}
 
     output = await runner.agent_loop(
         [{"role": "user", "content": "calculate"}],
@@ -709,6 +767,27 @@ async def test_agent_loop_handles_backend_rendered_prefix_across_structured_tool
     assert output.reward.token_rewards == pytest.approx(expected_token_rewards)
     assert output.token_provenance == expected_provenance
     assert output.reward.optimization_reward == 1.0
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_agent_loop_required_exact_chat_rejects_canonicalized_prefix(
+    mock_make, mock_tokenizer, mock_env, generator_cfg, mock_env_cfg
+):
+    generator_cfg.batched = False
+    generator_cfg.use_conversation_multi_turn = False
+    generator_cfg.require_exact_chat_transport = True
+    generator_cfg.sampling_params.logprobs = 0
+    runner = _structured_tool_turn_runner(mock_make, mock_tokenizer, mock_env, generator_cfg, mock_env_cfg, [23, 24])
+
+    with pytest.raises(ExactChatTransportError, match="did not preserve the served token prefix"):
+        await runner.agent_loop(
+            [{"role": "user", "content": "calculate"}],
+            mock_env_cfg.env_class,
+            {},
+            max_tokens=8,
+            max_input_length=512,
+        )
 
 
 @pytest.mark.asyncio
@@ -839,6 +918,7 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
             "stop_reasons": ["stop"],
             "response_ids": [[10, 4]],
             "response_logprobs": [[-0.1, -0.2]],
+            "routed_experts": [[[[1, 2]], [[3, 4]]]],
             "student_topk_indices": [[[11, 12], [13, 14]]],
             "behavior_topk_logprobs": [[[-0.1, -2.0], [-0.2, -1.9]]],
         },
@@ -847,6 +927,7 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
             "stop_reasons": ["stop"],
             "response_ids": [[20, 4]],
             "response_logprobs": [[-0.3, -0.4]],
+            "routed_experts": [[[[5, 6]], [[7, 8]]]],
             "student_topk_indices": [[[21, 22], [23, 24]]],
             "behavior_topk_logprobs": [[[-0.3, -1.8], [-0.4, -1.7]]],
         },
@@ -870,6 +951,9 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
     assert output["response_ids"] == [[10, 4, *MOCK_TOKENIZER_ENCODED_IDS, 20, 4]]
     assert output["loss_masks"] == [[1, 1, 0, 0, 0, 0, 1, 1]]
     assert output["rollout_logprobs"] == [[-0.1, -0.2, 0.0, 0.0, 0.0, 0.0, -0.3, -0.4]]
+    assert output["rollout_routed_experts"] == [
+        [[[1, 2]], [[3, 4]], [[0, 0]], [[0, 0]], [[0, 0]], [[0, 0]], [[5, 6]], [[7, 8]]]
+    ]
     assert output["student_topk_indices"] == [
         [[11, 12], [13, 14], [-1, -1], [-1, -1], [-1, -1], [-1, -1], [21, 22], [23, 24]]
     ]

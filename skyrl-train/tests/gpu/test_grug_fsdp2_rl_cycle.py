@@ -400,7 +400,6 @@ def test_grug_one_gpu_vllm_generation(tmp_path):
     engine = LLM(
         model=str(model_path),
         dtype="bfloat16",
-        enforce_eager=True,
         gpu_memory_utilization=0.35,
         max_model_len=128,
         max_num_batched_tokens=128,

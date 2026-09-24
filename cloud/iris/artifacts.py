@@ -7,18 +7,18 @@ import os
 import posixpath
 import shutil
 import tempfile
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Iterator
 
-import fsspec
 from fsspec.spec import AbstractFileSystem
-from marinskyrl.resource_locator import join_resource_path
+from marinskyrl.remote_io import filesystem_and_path, open_output_stream
+from marinskyrl.resource_locator import join_resource_path, relative_resource_path
 
 CHECKPOINT_MARKER_FILENAME = "latest_ckpt_global_step.txt"
 SOURCE_MANIFEST_FILENAME = ".marinskyrl-source.json"
-S3_ADDRESSING_STYLE_ENV = "OT_AGENT_S3_ADDRESSING_STYLE"
 FILE_COPY_WORKERS = 16
 
 
@@ -42,13 +42,8 @@ class MaterializedArtifact:
 
 
 def fs_and_path(uri: str) -> tuple[AbstractFileSystem, str]:
-    """Resolve a URI, using virtual-hosted addressing for Marin's S3 store."""
-    storage_options = None
-    if uri.startswith(("s3://", "s3a://")):
-        style = os.environ.get(S3_ADDRESSING_STYLE_ENV, "virtual")
-        storage_options = {"config_kwargs": {"s3": {"addressing_style": style}}}
-    filesystem, _, paths = fsspec.get_fs_token_paths(uri, storage_options=storage_options)
-    return filesystem, paths[0]
+    """Resolve a URI through the shared guarded remote-I/O factory."""
+    return filesystem_and_path(uri)
 
 
 def write_json(uri: str, value: dict[str, Any], *, overwrite: bool = True) -> None:
@@ -59,9 +54,9 @@ def write_json(uri: str, value: dict[str, Any], *, overwrite: bool = True) -> No
     parent = posixpath.dirname(path)
     if parent:
         filesystem.makedirs(parent, exist_ok=True)
-    with filesystem.open(path, "w") as destination:
-        json.dump(value, destination, indent=2, sort_keys=True)
-        destination.write("\n")
+    payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+    with open_output_stream(filesystem, path) as destination:
+        destination.write(payload)
 
 
 def read_json(uri: str) -> dict[str, Any] | None:
@@ -83,16 +78,6 @@ def terminal_checkpoint_step(checkpoint_root: str) -> int:
         return int(source.read().strip())
 
 
-def relative_object_key(root: str, path: str) -> str:
-    """Return ``path`` below ``root`` or reject a non-descendant object key."""
-    normalized_root = posixpath.normpath(root)
-    normalized_path = posixpath.normpath(path)
-    relative = posixpath.relpath(normalized_path, normalized_root)
-    if relative == ".." or relative.startswith("../") or posixpath.isabs(relative):
-        raise ValueError(f"Object key {path!r} is not below source root {root!r}")
-    return relative
-
-
 def file_inventory(filesystem: AbstractFileSystem, root: str) -> tuple[tuple[str, FileEntry], ...]:
     """List files below a storage root using metadata returned by the listing."""
     files = filesystem.find(root, detail=True)
@@ -100,7 +85,7 @@ def file_inventory(filesystem: AbstractFileSystem, root: str) -> tuple[tuple[str
         sorted(
             (
                 path,
-                FileEntry(path=relative_object_key(root, path), size=int(info["size"])),
+                FileEntry(path=relative_resource_path(root, path), size=int(info["size"])),
             )
             for path, info in files.items()
             if info["type"] == "file"
@@ -150,6 +135,31 @@ def copy_tree(source_uri: str, destination: Path) -> tuple[FileEntry, ...]:
     return copy_file_inventory(filesystem, inventory, destination)
 
 
+@contextmanager
+def atomic_directory_update(target: Path, *, staging_prefix: str) -> Iterator[Path]:
+    """Build and atomically install a replacement directory, restoring failures."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=staging_prefix, dir=target.parent))
+    staging.rmdir()
+    backup: Path | None = None
+    try:
+        yield staging
+        if target.exists():
+            backup = Path(tempfile.mkdtemp(prefix=f".{target.name}.old-", dir=target.parent))
+            backup.rmdir()
+            os.replace(target, backup)
+        os.replace(staging, target)
+    except BaseException:
+        if backup is not None and backup.exists() and not target.exists():
+            os.replace(backup, target)
+        raise
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+        if backup is not None and backup.exists():
+            shutil.rmtree(backup)
+
+
 def _materialization_matches(target: Path, source: ArtifactSource, inventory: tuple[FileEntry, ...]) -> bool:
     manifest_path = target / SOURCE_MANIFEST_FILENAME
     if not manifest_path.is_file():
@@ -176,46 +186,31 @@ def _materialization_matches(target: Path, source: ArtifactSource, inventory: tu
     )
 
 
-def materialize(
-    source: ArtifactSource,
-    *,
-    validate: Callable[[set[str], str], None] | None = None,
-) -> MaterializedArtifact:
+def materialize(source: ArtifactSource) -> MaterializedArtifact:
     """Materialize one immutable artifact into its declared node-local path."""
-    _, remote_inventory = _source_inventory(source.uri)
+    filesystem, remote_inventory = _source_inventory(source.uri)
+    return materialize_inventory(source, filesystem, remote_inventory)
+
+
+def materialize_inventory(
+    source: ArtifactSource,
+    filesystem: AbstractFileSystem,
+    remote_inventory: tuple[tuple[str, FileEntry], ...],
+) -> MaterializedArtifact:
+    """Materialize a selected remote inventory into its declared node-local path."""
     inventory = tuple(entry for _, entry in remote_inventory)
     target = Path(source.local_path).resolve()
     if _materialization_matches(target, source, inventory):
         return MaterializedArtifact(source=source, files=inventory)
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.staging-", dir=target.parent))
-    backup: Path | None = None
-    try:
-        staging.rmdir()
-        copied_inventory = copy_tree(source.uri, staging)
+    with atomic_directory_update(target, staging_prefix=f".{target.name}.staging-") as staging:
+        copied_inventory = copy_file_inventory(filesystem, remote_inventory, staging)
         if copied_inventory != inventory:
             raise ValueError(f"Artifact source changed while it was being staged: {source.uri}")
-        if validate is not None:
-            validate({entry.path for entry in inventory}, source.uri)
         manifest = {
             "source_uri": source.uri,
             "source_identity": source.identity,
             "files": [asdict(entry) for entry in inventory],
         }
         (staging / SOURCE_MANIFEST_FILENAME).write_text(json.dumps(manifest, sort_keys=True))
-        if target.exists():
-            backup = Path(tempfile.mkdtemp(prefix=f".{target.name}.old-", dir=target.parent))
-            backup.rmdir()
-            os.replace(target, backup)
-        os.replace(staging, target)
-    except BaseException:
-        if backup is not None and backup.exists() and not target.exists():
-            os.replace(backup, target)
-        raise
-    finally:
-        if staging.exists():
-            shutil.rmtree(staging)
-        if backup is not None and backup.exists():
-            shutil.rmtree(backup)
     return MaterializedArtifact(source=source, files=inventory)

@@ -11,3 +11,7 @@ trace_upload:
   repo_org: DCAgent
   episodes: last
   dataset_type: SFT
+
+# Filled inside the Iris task after ingress and literal capture are available.
+agent_api_base: null
+literal_log_path: null

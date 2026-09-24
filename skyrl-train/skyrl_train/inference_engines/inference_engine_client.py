@@ -16,6 +16,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
     ErrorInfo,
     is_engine_error_response,
 )
+from skyrl_train.inference_engines.chat_template import template_error_from_exception
 from transformers import PreTrainedTokenizerBase
 import asyncio
 from typing import List, Any, Optional, Dict, Union, Hashable
@@ -236,6 +237,10 @@ class InferenceEngineClient(InferenceEngineInterface):
                 f"generator.weight_sync_pause_timeout_seconds={self.weight_sync_pause_timeout}; "
                 f"requests in flight per engine: {self._engine_inflight}"
             ) from None
+
+    async def expert_block_rpc(self, method: str, *args) -> list:
+        """Call one expert-block sync method on every engine. Returns the replies in engine order."""
+        return await self._run_on_all_engines("expert_block_rpc", method, *args)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         # 0. Extract input
@@ -754,7 +759,13 @@ class InferenceEngineClient(InferenceEngineInterface):
             ).model_dump()
 
         engine_idx = self._resolve_engine_idx(random.randint(0, len(self.engines) - 1))
-        response, _ = await self._call_engine_with_fallback(engine_idx, "tokenize", request_payload)
+        try:
+            response, _ = await self._call_engine_with_fallback(engine_idx, "tokenize", request_payload)
+        except Exception as error:
+            template_error = template_error_from_exception(error)
+            if template_error is not None:
+                raise template_error from error
+            raise
         return response
 
     async def chat_completion_stream(self, request_payload: Dict[str, Any]):

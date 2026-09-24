@@ -63,10 +63,10 @@ was an error connecting to Redis." Observed on 2026-09-10 between two single-GPU
 seconds apart.
 
 This is not specific to this lane and it is not new. `gsm8k-h100` starts Ray through
-`task_runtime.py`; `grug-megatron-h100` starts it through `initialize_ray` in
+the standalone SkyRL Hydra entrypoint; `grug-megatron-h100` starts it through `initialize_ray` in
 `tests/gpu/test_grug_megatron.py`; both target `cw-rno2a` and both are launched by the same 09:00
-cron. Before this lane moved to `task_runtime.py` it still started Ray, through the trainer's own
-`ray.init()` -- what changed is that the ports are now pinned as well.
+cron. Marin-managed launches instead enter through the config-native task runtime, which pins the
+ports before starting the same training entrypoint.
 
 No collision has been observed between the scheduled lanes, and Iris placement may well keep them
 apart, but nothing here guarantees it. If one of them fails at `ray start` with that message, this
@@ -111,11 +111,12 @@ sandboxes; its 40-minute hard allowance is a hang backstop, not the expected cos
 To reproduce only this lane from an authenticated checkout:
 
 ```bash
-JOB_NAME="marinskyrl-opencode-manual-$(date +%s)" \
+LAUNCH_CONFIG=/path/to/resolved-opencode-launch.yaml \
   bash skyrl-train/ci/marin_nightly/run_opencode.sh
 ```
 
-The script always cancels its Iris job on exit. Its log must contain one finite training
+The launch document is the complete Hydra YAML emitted by the Marin artifact. The script submits
+that document synchronously and gates its combined launcher and task log. Its log must contain one finite training
 step, eight correlated trials, at least 16 correlated turns, 100% exact TIS/full-TITO,
 and no fallback, decline, skipped batch, or failed trajectory. A failure before those
 metrics should be triaged from the uploaded job log in this order: Iris allocation and
@@ -128,12 +129,12 @@ costs another H100x8 allocation and some cases deliberately fail or time out.
 
 ```bash
 OPENCODE_MODE=compaction-stress \
-  JOB_NAME="marinskyrl-opencode-compaction-$(date +%s)" \
+  LAUNCH_CONFIG=/path/to/resolved-compaction-launch.yaml \
   LOG_PATH=opencode-compaction.log \
   bash skyrl-train/ci/marin_nightly/run_opencode.sh
 
 OPENCODE_MODE=overflow-stress \
-  JOB_NAME="marinskyrl-opencode-overflow-$(date +%s)" \
+  LAUNCH_CONFIG=/path/to/resolved-overflow-launch.yaml \
   LOG_PATH=opencode-overflow.log \
   bash skyrl-train/ci/marin_nightly/run_opencode.sh
 ```

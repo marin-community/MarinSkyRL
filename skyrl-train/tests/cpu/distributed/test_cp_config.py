@@ -60,6 +60,8 @@ DEBUG_MODE_TRAINER_FIELDS = {
 RUNTIME_CONFIG_TRAINER_FIELDS = {
     "collective_phase_diagnostics": None,
     "distillation_token_budget": None,
+    "eval_num_prompts": None,
+    "export_hf_artifact": False,
     "offload_optimizer_during_rollouts": False,
     "reset_distillation_token_count_on_resume": False,
     "reset_global_step_on_resume": False,
@@ -105,6 +107,7 @@ ADDITIVE_OVERLONG_FIELDS = {
 # fields, they are stripped before comparison with the pre-CP golden.
 ADDITIVE_GENERATOR_FIELDS = {
     "speculative_decoding": None,
+    "require_exact_chat_transport": False,
     "inference_engine_decode_context_parallel_size": 1,
     "vllm_attention_backend": None,
     "engine_init_timeout_seconds": 1800,
@@ -112,11 +115,15 @@ ADDITIVE_GENERATOR_FIELDS = {
     "r3_dispatch_put_timeout_seconds": 600,
     "gdn_backend": "torch",
     "weight_sync_pause_timeout_seconds": 30.0,
+    "weight_sync_transport": "broadcast",
+    "expert_block_sync": {"timeout_seconds": 600, "verify": False},
 }
 ADDITIVE_MODEL_FIELDS = {
     "source_uri": None,
     "source_identity": None,
     "revision": None,
+    "tokenizer_path": None,
+    "tokenizer_revision": None,
 }
 ADDITIVE_POLICY_LORA_FIELDS = {
     "adapter_path": None,

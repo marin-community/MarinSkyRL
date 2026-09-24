@@ -1,9 +1,22 @@
+import asyncio
+import base64
+import io
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
 from aiohttp import web
+from jinja2 import TemplateError
 
+from skyrl_train.inference_engines.chat_template import SINGLE_TOOL_CALL_TEMPLATE_ERROR
+from skyrl_train.trajectory_runners import model_clients
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, OpenAIHTTPModelClient
+
+
+def _encoded_routes(rows):
+    buffer = io.BytesIO()
+    np.save(buffer, np.asarray(rows, dtype=np.uint16), allow_pickle=False)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
 @pytest.mark.asyncio
@@ -113,6 +126,113 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
 
 
 @pytest.mark.asyncio
+async def test_direct_model_client_recovers_strict_template_by_sequentializing_tool_calls():
+    class WrappedValidationError(RuntimeError):
+        def as_instanceof_cause(self):
+            return TemplateError(SINGLE_TOOL_CALL_TEMPLATE_ERROR)
+
+    engine = AsyncMock()
+    engine.model_name = "strict-tool-model"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "answer"
+    engine.tokenize.side_effect = [WrappedValidationError(), {"tokens": [11, 12, 13]}]
+    engine.chat_completion.return_value = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "answer"},
+                "finish_reason": "stop",
+                "token_ids": [21],
+            }
+        ]
+    }
+    first_call = {"id": "call-1", "type": "function", "function": {"name": "python", "arguments": "one"}}
+    second_call = {"id": "call-2", "type": "function", "function": {"name": "python", "arguments": "two"}}
+    messages = [
+        {"role": "user", "content": "calculate"},
+        {"role": "assistant", "content": None, "tool_calls": [first_call, second_call]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "1"},
+        {"role": "tool", "tool_call_id": "call-2", "content": "2"},
+    ]
+
+    output = await DirectModelClient(engine).generate(
+        {
+            "prompts": [messages],
+            "chat_completion_params": [{}],
+        }
+    )
+
+    served_messages = engine.chat_completion.await_args.args[0]["json"]["messages"]
+    assert served_messages == [
+        {"role": "user", "content": "calculate"},
+        {"role": "assistant", "content": None, "tool_calls": [first_call]},
+        {"role": "assistant", "content": None, "tool_calls": [second_call]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "1"},
+        {"role": "tool", "tool_call_id": "call-2", "content": "2"},
+    ]
+    assert output["prompt_ids"] == [[11, 12, 13]]
+
+
+@pytest.mark.asyncio
+async def test_strict_template_recovery_preserves_exact_prefix_and_tool_results():
+    class WrappedValidationError(RuntimeError):
+        def as_instanceof_cause(self):
+            return TemplateError(SINGLE_TOOL_CALL_TEMPLATE_ERROR)
+
+    async def tokenize(request):
+        messages = request["json"]["messages"]
+        if any(len(message.get("tool_calls") or []) > 1 for message in messages):
+            raise WrappedValidationError()
+        if len(messages) == 5:
+            return {"tokens": [10, 20, 30, 40, 50]}
+        if len(messages) == 3 and messages[-1].get("tool_calls"):
+            return {"tokens": [10, 20, 30]}
+        if len(messages) == 2:
+            return {"tokens": [10, 20]}
+        return {"tokens": [10, 20, 99]}
+
+    engine = AsyncMock()
+    engine.model_name = "strict-tool-model"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "answer"
+    engine.tokenize.side_effect = tokenize
+    engine.chat_completion.return_value = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "answer"},
+                "finish_reason": "stop",
+                "token_ids": [21],
+            }
+        ]
+    }
+    calls = [
+        {"id": "call-1", "type": "function", "function": {"name": "python", "arguments": "one"}},
+        {"id": "call-2", "type": "function", "function": {"name": "python", "arguments": "two"}},
+    ]
+    messages = [
+        {"role": "user", "content": "calculate"},
+        {"role": "assistant", "content": None, "tool_calls": calls},
+        {"role": "tool", "tool_call_id": "call-1", "content": "1"},
+        {"role": "tool", "tool_call_id": "call-2", "content": "2"},
+    ]
+
+    output = await DirectModelClient(engine).generate(
+        {
+            "prompts": [messages],
+            "chat_completion_params": [{}],
+            "chat_continuations": [{"served_prefix_token_ids": [7, 8], "assistant_message_index": 1}],
+        }
+    )
+
+    served = engine.chat_completion.await_args.args[0]["json"]
+    assert served["_skyrl_exact_prompt_token_ids"] == [7, 8, 99, 40, 50]
+    assert [message.get("tool_call_id") for message in served["messages"] if message["role"] == "tool"] == [
+        "call-1",
+        "call-2",
+    ]
+    assert output["prompt_ids"] == [[7, 8, 99, 40, 50]]
+
+
+@pytest.mark.asyncio
 async def test_direct_chat_continuation_preserves_sampled_tool_call_tokens():
     engine = AsyncMock()
     engine.model_name = "snowball"
@@ -194,7 +314,8 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
             {
                 "message": {"role": "assistant", "content": "answer"},
                 "finish_reason": "stop",
-                "token_ids": [9],
+                "token_ids": [9, 10],
+                "provider_specific_fields": {"routed_experts": _encoded_routes([[[1, 2]], [[3, 4]], [[4, 7]]])},
                 "logprobs": {
                     "content": [
                         {
@@ -204,7 +325,14 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
                                 {"token": "token_id:3", "logprob": -0.2},
                                 {"token": "token_id:2", "logprob": -0.1},
                             ],
-                        }
+                        },
+                        {
+                            "logprob": -0.1,
+                            "top_logprobs": [
+                                {"token": "token_id:10", "logprob": -0.1},
+                                {"token": "token_id:11", "logprob": -0.2},
+                            ],
+                        },
                     ]
                 },
             }
@@ -223,8 +351,9 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
     body = engine.chat_completion.await_args.args[0]["json"]
     assert body["top_logprobs"] == 3
     assert body["return_tokens_as_token_ids"] is True
-    assert output["student_topk_indices"] == [[[2, 3]]]
-    assert output["behavior_topk_logprobs"] == [[[-0.1, -0.2]]]
+    assert output["student_topk_indices"] == [[[2, 3], [10, 11]]]
+    assert output["behavior_topk_logprobs"] == [[[-0.1, -0.2], [-0.1, -0.2]]]
+    assert output["routed_experts"] == [[[[4, 7]], [[0, 0]]]]
 
 
 @pytest.mark.asyncio
@@ -250,7 +379,12 @@ async def test_http_model_client_normalizes_chat_completion():
             return [7, 8]
 
     try:
-        client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=Tokenizer())
+        client = OpenAIHTTPModelClient(
+            base_url=f"http://127.0.0.1:{port}",
+            model_name="policy",
+            tokenizer=Tokenizer(),
+            max_concurrent_requests=8,
+        )
         output = await client.generate(
             {
                 "prompts": [[{"role": "user", "content": "question"}]],
@@ -278,6 +412,67 @@ async def test_http_model_client_normalizes_chat_completion():
         "prompt_logprobs": None,
         "token_provenance": "reconstructed",
     }
+
+
+@pytest.mark.asyncio
+async def test_http_model_client_limits_requests_across_concurrent_generation_calls(monkeypatch):
+    saturated = asyncio.Event()
+    release = asyncio.Event()
+    active_requests = 0
+    peak_requests = 0
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            nonlocal active_requests, peak_requests
+            active_requests += 1
+            peak_requests = max(peak_requests, active_requests)
+            if active_requests == 2:
+                saturated.set()
+            await release.wait()
+            return self
+
+        async def __aexit__(self, *_args):
+            nonlocal active_requests
+            active_requests -= 1
+
+        async def json(self):
+            return {"choices": [{"message": {"content": "answer"}, "finish_reason": "stop"}]}
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(model_clients.aiohttp, "ClientSession", FakeSession)
+    tokenizer = MagicMock()
+    tokenizer.encode.return_value = [1]
+    client = OpenAIHTTPModelClient(
+        base_url="http://inference.test",
+        model_name="policy",
+        tokenizer=tokenizer,
+        max_concurrent_requests=2,
+    )
+    generations = [
+        asyncio.create_task(client.generate({"prompts": [[{"role": "user", "content": str(index)}]]}))
+        for index in range(6)
+    ]
+
+    await saturated.wait()
+    assert peak_requests == 2
+    release.set()
+    outputs = await asyncio.gather(*generations)
+
+    assert [output["responses"] for output in outputs] == [["answer"]] * 6
 
 
 @pytest.mark.asyncio
@@ -336,7 +531,12 @@ async def test_http_structured_chat_continues_from_sampled_tool_call_tokens():
     port = site._server.sockets[0].getsockname()[1]
     tokenizer = MagicMock()
     tokenizer.decode.side_effect = lambda ids, **_: "tool call" if ids == [21, 22] else "done"
-    client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=tokenizer)
+    client = OpenAIHTTPModelClient(
+        base_url=f"http://127.0.0.1:{port}",
+        model_name="policy",
+        tokenizer=tokenizer,
+        max_concurrent_requests=8,
+    )
 
     try:
         first = await client.generate(
@@ -378,6 +578,76 @@ async def test_http_structured_chat_continues_from_sampled_tool_call_tokens():
 
 
 @pytest.mark.asyncio
+async def test_http_structured_chat_recovers_strict_single_tool_call_template():
+    served_requests = []
+
+    async def tokenize(request):
+        messages = (await request.json())["messages"]
+        if any(len(message.get("tool_calls") or []) > 1 for message in messages):
+            return web.json_response({"error": {"message": SINGLE_TOOL_CALL_TEMPLATE_ERROR}}, status=500)
+        return web.json_response({"tokens": [11, 12]})
+
+    async def complete(request):
+        body = await request.json()
+        served_requests.append(body)
+        return web.json_response(
+            {
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                        "token_ids": [21],
+                    }
+                ]
+            }
+        )
+
+    app = web.Application()
+    app.router.add_post("/tokenize", tokenize)
+    app.router.add_post("/v1/chat/completions", complete)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    tokenizer = MagicMock()
+    tokenizer.decode.return_value = "done"
+    client = OpenAIHTTPModelClient(
+        base_url=f"http://127.0.0.1:{port}",
+        model_name="strict-tool-model",
+        tokenizer=tokenizer,
+        max_concurrent_requests=4,
+    )
+    calls = [
+        {"id": "call-1", "type": "function", "function": {"name": "python", "arguments": "one"}},
+        {"id": "call-2", "type": "function", "function": {"name": "python", "arguments": "two"}},
+    ]
+
+    try:
+        output = await client.generate(
+            {
+                "prompts": [
+                    [
+                        {"role": "user", "content": "calculate"},
+                        {"role": "assistant", "content": None, "tool_calls": calls},
+                        {"role": "tool", "tool_call_id": "call-1", "content": "1"},
+                        {"role": "tool", "tool_call_id": "call-2", "content": "2"},
+                    ]
+                ],
+                "chat_completion_params": [{}],
+            }
+        )
+    finally:
+        await runner.cleanup()
+
+    assert [message["tool_calls"] for message in served_requests[0]["messages"] if message["role"] == "assistant"] == [
+        [calls[0]],
+        [calls[1]],
+    ]
+    assert output["response_ids"] == [[21]]
+
+
+@pytest.mark.asyncio
 async def test_http_model_client_preserves_server_error_details():
     async def reject(_request):
         return web.json_response({"error": {"message": "unsupported field"}}, status=400)
@@ -391,7 +661,12 @@ async def test_http_model_client_preserves_server_error_details():
     port = site._server.sockets[0].getsockname()[1]
 
     try:
-        client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=MagicMock())
+        client = OpenAIHTTPModelClient(
+            base_url=f"http://127.0.0.1:{port}",
+            model_name="policy",
+            tokenizer=MagicMock(),
+            max_concurrent_requests=8,
+        )
         with pytest.raises(RuntimeError, match="HTTP 400.*unsupported field"):
             await client.generate({"prompts": [[{"role": "user", "content": "question"}]]})
     finally:

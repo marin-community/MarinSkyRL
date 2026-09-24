@@ -185,6 +185,38 @@ def trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRunnerMode) 
             full_context_continuation=EvidenceFidelity.UNAVAILABLE,
             action_tokens=ActionTokenHandling.RETOKENIZED,
         )
+    custom_template = bool(cfg.generator.chat_template.get("name_or_path"))
+    sampling_params = cfg.generator.get("sampling_params") or {}
+    exact_chat_requested = bool(cfg.generator.get("require_exact_chat_transport", False))
+    exact_chat_requirements = (
+        CapabilityRequirement(
+            config_path="generator.chat_template.name_or_path",
+            expected_value="a custom template",
+            satisfied=custom_template,
+        ),
+        CapabilityRequirement(
+            config_path="generator.sampling_params.logprobs",
+            expected_value="an integer",
+            satisfied=isinstance(sampling_params.get("logprobs"), int),
+        ),
+        CapabilityRequirement(
+            config_path="generator.batched",
+            expected_value="false",
+            satisfied=not bool(cfg.generator.get("batched", False)),
+        ),
+    )
+
+    def exact_chat_capabilities(runner: str) -> TrajectoryRunnerCapabilities:
+        return TrajectoryRunnerCapabilities(
+            runner=runner,
+            sampled_completion=EvidenceFidelity.EXACT,
+            full_context_continuation=EvidenceFidelity.EXACT,
+            action_tokens=ActionTokenHandling.RUNTIME_VALIDATED,
+            requirements=exact_chat_requirements,
+        )
+
+    if mode is TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM and exact_chat_requested:
+        return exact_chat_capabilities("fully-async SkyRL Gym exact chat")
     if mode is TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM:
         return TrajectoryRunnerCapabilities(
             runner="fully-async SkyRL Gym",
@@ -193,7 +225,8 @@ def trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRunnerMode) 
             action_tokens=ActionTokenHandling.RETOKENIZED,
         )
 
-    custom_template = bool(cfg.generator.chat_template.get("name_or_path"))
+    if exact_chat_requested:
+        return exact_chat_capabilities("SkyRL Gym exact chat")
     if cfg.generator.use_conversation_multi_turn and custom_template:
         return TrajectoryRunnerCapabilities(
             runner="SkyRL Gym custom-template multi-turn",
@@ -261,6 +294,8 @@ def validate_trajectory_runner_capabilities(
 
     distillation_plan = compile_distillation_plan_from_config(cfg)
     capabilities = trajectory_runner_capabilities(cfg, mode)
+    if cfg.generator.get("require_exact_chat_transport", False):
+        _validate_capability_requirements(capabilities, consumer="exact structured-chat transport")
     if distillation_plan is not None:
         if operation is not EntrypointOperation.TRAIN:
             raise ValueError("teacher-scored distillation is training-only and cannot be configured for generation")

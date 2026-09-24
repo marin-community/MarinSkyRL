@@ -9,6 +9,11 @@ class R3Transport(StrEnum):
     DECENTRAL = "decentral"
 
 
+class WeightSyncTransport(StrEnum):
+    BROADCAST = "broadcast"
+    EXPERT_BLOCK = "expert_block"
+
+
 class GDNBackend(StrEnum):
     TORCH = "torch"
     FLASHQLA = "flashqla"

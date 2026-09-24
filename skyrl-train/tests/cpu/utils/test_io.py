@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from unittest.mock import patch, Mock
 import torch
+from safetensors.torch import save_file
 
 from skyrl_train.hf_model_io import local_hf_model_dir
 from skyrl_train.io.io import (
@@ -481,8 +482,9 @@ def test_cloud_hf_model_publication_writes_index_after_weight_shards(monkeypatch
 
     with local_hf_model_dir("s3://bucket/export/policy") as work_dir:
         Path(work_dir, "config.json").write_text("{}")
-        Path(work_dir, "model-00002-of-00002.safetensors").write_bytes(b"second")
-        Path(work_dir, "model-00001-of-00002.safetensors").write_bytes(b"first")
+        Path(work_dir, "tokenizer.json").write_text("{}")
+        save_file({"layer.1.weight": torch.ones(1)}, Path(work_dir, "model-00002-of-00002.safetensors"))
+        save_file({"layer.0.weight": torch.zeros(1)}, Path(work_dir, "model-00001-of-00002.safetensors"))
         Path(work_dir, "model.safetensors.index.json").write_text(
             json.dumps(
                 {
@@ -498,7 +500,9 @@ def test_cloud_hf_model_publication_writes_index_after_weight_shards(monkeypatch
         "bucket/export/policy/model-00001-of-00002.safetensors",
         "bucket/export/policy/model-00002-of-00002.safetensors",
         "bucket/export/policy/config.json",
+        "bucket/export/policy/tokenizer.json",
         "bucket/export/policy/model.safetensors.index.json",
+        "bucket/export/policy/.marinskyrl-model-manifest.json",
     ]
 
 
@@ -507,16 +511,25 @@ def test_non_s3_hf_model_publication_preserves_destination_scheme(monkeypatch):
     monkeypatch.setattr("skyrl_train.io.io._get_filesystem", lambda path: filesystem)
 
     with local_hf_model_dir("gs://bucket/export/policy") as work_dir:
-        Path(work_dir, "model.safetensors").write_bytes(b"weights")
+        Path(work_dir, "config.json").write_text("{}")
+        Path(work_dir, "tokenizer.json").write_text("{}")
+        save_file({"weight": torch.ones(1)}, Path(work_dir, "model.safetensors"))
 
-    assert filesystem.uploads == ["gs://bucket/export/policy/model.safetensors"]
+    assert filesystem.uploads == [
+        "gs://bucket/export/policy/model.safetensors",
+        "gs://bucket/export/policy/config.json",
+        "gs://bucket/export/policy/tokenizer.json",
+        "gs://bucket/export/policy/model.safetensors.index.json",
+        "gs://bucket/export/policy/.marinskyrl-model-manifest.json",
+    ]
 
 
 def test_local_hf_model_dir_exports_portable_fast_tokenizer_metadata(tmp_path):
     export_path = tmp_path / "policy"
 
     with local_hf_model_dir(str(export_path)) as work_dir:
-        Path(work_dir, "model.safetensors").write_bytes(b"weights")
+        Path(work_dir, "config.json").write_text("{}")
+        save_file({"weight": torch.ones(1)}, Path(work_dir, "model.safetensors"))
         Path(work_dir, "tokenizer.json").write_text("{}")
         Path(work_dir, "tokenizer_config.json").write_text(
             json.dumps({"tokenizer_class": "TokenizersBackend", "eos_token": "</s>"})
@@ -538,7 +551,9 @@ def test_interrupted_cloud_hf_model_publication_removes_stale_index(monkeypatch)
 
     with pytest.raises(OSError, match="interrupted upload"):
         with local_hf_model_dir("s3://bucket/export/policy") as work_dir:
-            Path(work_dir, "model.safetensors").write_bytes(b"weights")
+            Path(work_dir, "config.json").write_text("{}")
+            Path(work_dir, "tokenizer.json").write_text("{}")
+            save_file({"x": torch.ones(1)}, Path(work_dir, "model.safetensors"))
             Path(work_dir, "model.safetensors.index.json").write_text('{"weight_map": {"x": "model.safetensors"}}')
 
     assert index_key not in filesystem.objects

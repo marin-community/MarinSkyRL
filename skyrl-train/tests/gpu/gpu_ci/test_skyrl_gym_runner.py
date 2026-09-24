@@ -93,7 +93,7 @@ async def run_trajectory_runner_end_to_end(
         seed=42,
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=True,
-        enforce_eager=True,
+        enforce_eager=False,
         engine_init_timeout_seconds=default_cfg.generator.engine_init_timeout_seconds,
         shared_pg=None,
         gpu_memory_utilization=0.8,

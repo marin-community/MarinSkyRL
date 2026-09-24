@@ -13,6 +13,9 @@ def test_trajectory_runner_uses_resolved_served_model_name(monkeypatch):
                 "use_conversation_multi_turn": True,
                 "http_endpoint_host": "127.0.0.1",
                 "http_endpoint_port": 8000,
+                "num_inference_engines": 3,
+                "inference_engine_data_parallel_size": 2,
+                "max_num_seqs": 16,
             },
             "environment": {"skyrl_gym": {}},
         }
@@ -33,5 +36,6 @@ def test_trajectory_runner_uses_resolved_served_model_name(monkeypatch):
         base_url="http://127.0.0.1:8000",
         model_name="served-policy",
         tokenizer=tokenizer,
+        max_concurrent_requests=96,
     )
     assert create_runner.call_args.kwargs["model_client"] is model_client

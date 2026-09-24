@@ -62,7 +62,6 @@ python -m skyrl_train.entrypoints.main_base \
   trainer.micro_train_batch_size_per_gpu=2 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=2048 \
-  generator.enforce_eager=true \
   generator.sampling_params.max_generate_length=8192 \
   generator.sampling_params.temperature=$TEMPERATURE \
   generator.sampling_params.top_p=$TOP_P \

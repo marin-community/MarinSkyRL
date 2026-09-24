@@ -37,6 +37,7 @@ dependencies = [
     "openapi-schema-validator",
     "pandas",
     "polars",
+    "pydantic>=2.12,<3",
     "pyarrow>=18",
     "pycosat==0.6.6",
     "pyyaml>=6.0",
@@ -144,7 +145,7 @@ telemetry = [
 ]
 
 [project.scripts]
-marinskyrl = "cloud.iris.job:main"
+marinskyrl = "cloud.iris.launch:main"
 
 [dependency-groups]
 analysis = [
@@ -164,7 +165,7 @@ dev = [
     { include-group = "analysis" },
     "litellm",
     "marin-rigging[prometheus]>=0.2.123.dev35633925924",
-    "marin-style @ git+https://github.com/marin-community/marin-style@5094279da60b47b9a8fa8effaf7f73cd13f1e96f",
+    "marin-style @ git+https://github.com/marin-community/marin-style@727f180cd423246ca1a6164163a5883cda5bf52b",
     "prometheus-client",
     "pytest>=8.4",
     "pytest-asyncio",

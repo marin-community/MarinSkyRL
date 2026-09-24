@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import threading
 from typing import List, Any, Dict, Optional, Tuple, Iterator, AsyncGenerator
-from dataclasses import dataclass, fields as _dataclass_fields, replace
+from dataclasses import asdict, dataclass, fields as _dataclass_fields, replace
 from loguru import logger
 from http import HTTPStatus
 import ray
@@ -15,6 +15,7 @@ from zmq.error import ZMQError
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
+from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_pp_group
 from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
 from vllm.renderers.online_renderer import OnlineRenderer
 
@@ -61,7 +62,10 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.inference_engines.response_topk import select_response_topk
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
+from marinskyrl.inference_placement import InferenceWorkerPlacement
+from skyrl_train.inference_engines.placement import inference_worker_placement
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
+from skyrl_train.weight_sync.expert_block.receiver import ExpertBlockReceiver
 from skyrl_train.weight_sync.weight_loader import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
 from skyrl_train.weight_sync.weight_extractor import is_weight_sync_dtype_compatible
@@ -106,6 +110,34 @@ def _create_async_engine(engine_args, stat_loggers, data_parallel_master_ports):
         enable_log_requests=False,
         disable_log_stats=True,
     )
+
+
+def _create_async_engine_with_port_collision_retries(engine_args, stat_loggers):
+    """Start one independent engine, retrying opportunistically selected ports."""
+    import random
+
+    max_attempts = 5
+    backoff_base_seconds = 15.0
+    for attempt in range(max_attempts):
+        stagger = random.uniform(1.5, 3.0)
+        logger.info(
+            f"Engine startup stagger: sleeping {stagger:.2f}s "
+            f"(attempt {attempt + 1}/{max_attempts}) to avoid port collisions"
+        )
+        time.sleep(stagger)
+        try:
+            return _create_async_engine(engine_args, stat_loggers, data_parallel_master_ports=None)
+        except (DistNetworkError, RuntimeError, ZMQError) as error:
+            if not is_port_collision(error) or attempt == max_attempts - 1:
+                raise
+            backoff = backoff_base_seconds * (2**attempt)
+            logger.warning(
+                f"Engine init hit a port collision (EADDRINUSE) on attempt "
+                f"{attempt + 1}/{max_attempts}; retrying in {backoff:.0f}s: {str(error).splitlines()[0]}"
+            )
+            time.sleep(backoff)
+
+    raise AssertionError("engine startup loop returned without an engine or exception")
 
 
 class SkyRLOpenAIServingChat(OpenAIServingChat):
@@ -820,6 +852,10 @@ class WorkerWrap:
             ep_size = _ps.get_ep_group().world_size
         except Exception:
             ep_rank, ep_size = 0, 1
+        try:
+            pp_rank, pp_size = _ps.get_pp_group().rank_in_group, _ps.get_pp_group().world_size
+        except Exception:
+            pp_rank, pp_size = 0, 1
 
         def _cpu(t):
             return t.detach().to("cpu", dtype=_torch.float32).contiguous()
@@ -827,7 +863,14 @@ class WorkerWrap:
         out = {}
         if dump_inventory:
             out["__inventory__"] = {n: list(p.shape) for n, p in all_params.items()}
-        out["__ranks__"] = {"tp_rank": tp_rank, "tp_size": tp_size, "ep_rank": ep_rank, "ep_size": ep_size}
+        out["__ranks__"] = {
+            "tp_rank": tp_rank,
+            "tp_size": tp_size,
+            "ep_rank": ep_rank,
+            "ep_size": ep_size,
+            "pp_rank": pp_rank,
+            "pp_size": pp_size,
+        }
 
         expert_re = re.compile(r"^(model\.layers\.\d+\.mlp)\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$")
 
@@ -997,14 +1040,45 @@ class WorkerWrap:
 
         return socket.gethostname()
 
+    def report_device_placement(self) -> dict[str, str | int]:
+        """This worker's host, GPU and ranks, as a plain dict."""
+        return asdict(self._device_placement())
+
+    def _device_placement(self) -> InferenceWorkerPlacement:
+        dp, pp = get_dp_group(), get_pp_group()
+        ep = get_ep_group() if self.model_config.is_moe else None
+        return inference_worker_placement(
+            dp_rank=dp.rank_in_group,
+            dp_world_size=dp.world_size,
+            ep_rank=ep.rank_in_group if ep is not None else 0,
+            ep_world_size=ep.world_size if ep is not None else 1,
+            pp_rank=pp.rank_in_group,
+            pp_world_size=pp.world_size,
+        )
+
+    def expert_block_rpc(self, method: str, *args):
+        """Call a method of this worker's expert-block receiver, creating the receiver on first use."""
+        receiver = getattr(self, "_expert_block_receiver", None)
+        if receiver is None:
+            placement = self._device_placement()
+            receiver = self._expert_block_receiver = ExpertBlockReceiver(
+                self.vllm_config,
+                self.device,
+                self.model_runner.model,
+                ep_rank=placement.ep_rank,
+                ep_size=placement.ep_world_size,
+                pp_rank=placement.pp_rank,
+                pp_size=placement.pp_world_size,
+                gpu_uuid=placement.gpu_uuid,
+            )
+        return getattr(receiver, method)(*args)
+
 
 class BaseVLLMInferenceEngine(InferenceEngineInterface):
     """Base class containing shared logic between sync and async VLLM engines."""
 
     def __init__(self, *args, bundle_indices: list = None, **kwargs):
-        rendezvous_port_reservation = kwargs.pop("rendezvous_port_reservation", None)
-        if rendezvous_port_reservation is not None:
-            ray.get(rendezvous_port_reservation.release.remote())
+        self._rendezvous_port_reservation = kwargs.pop("rendezvous_port_reservation", None)
         setup_envvars_for_vllm(kwargs, bundle_indices)
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
         logger.info(
@@ -1043,6 +1117,12 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
     def _create_engine(self, *args, **kwargs):
         """Abstract method for subclasses to implement engine creation."""
         raise NotImplementedError("Subclasses must implement _create_engine")
+
+    def _release_rendezvous_port_reservation(self) -> None:
+        if self._rendezvous_port_reservation is None:
+            return
+        ray.get(self._rendezvous_port_reservation.release.remote())
+        self._rendezvous_port_reservation = None
 
     def _preprocess_prompts(self, input_batch: InferenceEngineInput):
         """Common prompt preprocessing logic."""
@@ -1199,6 +1279,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         wrapper_kwargs = pop_vllm_wrapper_kwargs(kwargs)
         self._openai_sampling_params = wrapper_kwargs.pop("openai_sampling_params", {})
         self._validate_rollout_logprob_sampling = wrapper_kwargs.pop(ROLLOUT_LOGPROB_VALIDATION_KEY, False)
+        self._release_rendezvous_port_reservation()
         return vllm.LLM(*args, **kwargs)
 
     async def initialize_worker_numa_affinity(self):
@@ -1656,57 +1737,17 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         else:
             engine_args = vllm.AsyncEngineArgs(**kwargs)
 
-        # Stagger engine startup to avoid TOCTOU port collisions (EADDRINUSE).
-        # vLLM's get_open_port() queries a free port then releases the socket;
-        # if multiple engines on the same node call it simultaneously, they can
-        # get the same port. A random pre-startup delay desynchronises the
-        # within-job case.
-        #
-        # The retry loop below additionally addresses the *cross-job* race
-        # we hit on Jupiter A3 RL chain restarts (job 485102, 2026-05-23):
-        # Slurm reaps the prior chain leader on TIMEOUT, allocates the same
-        # nodes to the next-in-chain immediately, but kernel socket TIME_WAIT
-        # can hold the prior holder's bound port for up to ~60 s. A 1.5-3 s
-        # stagger doesn't bridge that gap, so without a retry the new chain
-        # head exits 1 in ~20 min with EADDRINUSE and the chain visibly
-        # "loses" a restart slot until the next dependency-satisfied slot
-        # finally gets a fresh port.
-        #
-        # Non-DP engines use 5 attempts with exponential backoff
-        # (15→30→60→120→240 s) to bridge the TIME_WAIT window while
-        # staying below the outer startup deadline.
-        import random
-        import time
-
-        # A data-parallel pool must restart all ranks together. Retrying one
-        # actor leaves its peers attached to the failed coordinator generation.
-        coordinated_data_parallel = kwargs.get("data_parallel_size", 1) > 1
-        _MAX_INIT_ATTEMPTS = 1 if coordinated_data_parallel else 5
-        _BACKOFF_BASE_SEC = 15.0
-        engine = None
-        for _attempt in range(_MAX_INIT_ATTEMPTS):
-            _stagger = random.uniform(1.5, 3.0)
-            logger.info(
-                f"Engine startup stagger: sleeping {_stagger:.2f}s "
-                f"(attempt {_attempt + 1}/{_MAX_INIT_ATTEMPTS}) to avoid port collisions"
-            )
-            time.sleep(_stagger)
-            try:
-                engine = _create_async_engine(engine_args, stat_loggers, data_parallel_master_ports)
-                break
-            except (DistNetworkError, RuntimeError, ZMQError) as e:
-                if not is_port_collision(e):
-                    raise
-                if _attempt == _MAX_INIT_ATTEMPTS - 1:
-                    logger.error(f"Engine init still hit EADDRINUSE after {_MAX_INIT_ATTEMPTS} attempts; giving up")
-                    raise
-                _backoff = _BACKOFF_BASE_SEC * (2**_attempt)
-                logger.warning(
-                    f"Engine init hit a port collision (EADDRINUSE) on attempt "
-                    f"{_attempt + 1}/{_MAX_INIT_ATTEMPTS}; retrying in {_backoff:.0f}s: {str(e).splitlines()[0]}"
-                )
-                time.sleep(_backoff)
-        assert engine is not None  # loop either breaks with engine set or raises
+        if data_parallel_master_ports is not None:
+            # Explicit rendezvous ports identify a coordinated DP launch. Rank
+            # 0 transfers the reservation immediately before vLLM binds; every
+            # rank then joins that generation exactly once. The driver retries
+            # the whole actor gang if any rank fails.
+            self._release_rendezvous_port_reservation()
+            engine = _create_async_engine(engine_args, stat_loggers, data_parallel_master_ports)
+        else:
+            # Independent engines still use opportunistically selected vLLM
+            # ports, so a rank-local retry cannot strand any peers.
+            engine = _create_async_engine_with_port_collision_retries(engine_args, stat_loggers)
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
         model_config = engine.model_config
@@ -1961,6 +2002,20 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """TEST-ONLY (disaggregation proof): hostname of every engine TP/EP worker."""
         engine = self._get_engine()
         return await engine.collective_rpc("report_host")
+
+    async def report_engine_placement(self):
+        """Host, GPU and ranks of every worker of this engine."""
+        return await self._get_engine().collective_rpc("report_device_placement")
+
+    async def expert_block_rpc(self, method: str, *args) -> list:
+        """Call one expert-block sync method on every worker of this engine.
+
+        Weights are installed only while the engine is paused. Returns one reply per worker.
+        """
+        engine = self._get_engine()
+        if method == "receive_weights" and not await engine.is_paused():
+            raise RuntimeError("Expert-block sync installs weights only while generation is paused")
+        return list(await engine.collective_rpc("expert_block_rpc", args=(method, *args)))
 
     async def begin_weight_reload(self):
         """#1685 fix: open the layerwise-reload bracket on every engine worker so the

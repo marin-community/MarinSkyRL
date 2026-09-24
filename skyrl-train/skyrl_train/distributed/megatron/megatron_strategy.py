@@ -1,6 +1,7 @@
 import os
 import random
 import tempfile
+from contextlib import nullcontext
 from datetime import timedelta
 from typing import List, Union, Optional
 from jaxtyping import Float
@@ -24,9 +25,14 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     load_megatron_optimizer,
     offload_megatron_grads_to_cpu,
     load_megatron_grads_to_gpu,
+    materialize_megatron_params,
 )
-from skyrl_train.distributed.megatron.direct_checkpoint import DirectS3TorchDistSaveShardedStrategy
-from skyrl_train.io.s3fs import abort_multipart_uploads
+from skyrl_train.distributed.megatron.direct_checkpoint import (
+    DirectS3TorchDistLoadShardedStrategy,
+    DirectS3TorchDistSaveShardedStrategy,
+)
+from skyrl_train.distributed.megatron.checkpoint_metadata import remote_checkpoint_metadata
+from marinskyrl.remote_io import abort_multipart_uploads
 
 from megatron.core.dist_checkpointing.strategies import base as ckpt_base
 from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
@@ -186,6 +192,7 @@ class MegatronStrategy(DistributedStrategy):
     ):
         # Extract base model.
         model: List[nn.Module] = model.actor_module
+        materialize_megatron_params(model)
         assert len(model) == 1, "Megatron virtual pipeline parallel is not yet supported"
         model = model[0]
         if hasattr(model, "module"):
@@ -277,6 +284,7 @@ class MegatronStrategy(DistributedStrategy):
 
         # Extract base model.
         model: List[nn.Module] = model.actor_module
+        materialize_megatron_params(model)
         assert len(model) == 1, "Megatron virtual pipeline parallel is not yet supported"
         unwrapped_model = model[0]
         if hasattr(unwrapped_model, "module"):
@@ -289,7 +297,12 @@ class MegatronStrategy(DistributedStrategy):
         if scheduler and load_training_state:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
-        with io.node_cached_read_dir(ckpt_dir, _NODE_LOCAL_CHECKPOINT_CACHE) as read_dir:
+        read_context = (
+            remote_checkpoint_metadata(ckpt_dir)
+            if ckpt_dir.startswith("s3://")
+            else io.node_cached_read_dir(ckpt_dir, _NODE_LOCAL_CHECKPOINT_CACHE)
+        )
+        with read_context as read_dir:
             if optimizer and load_training_state:
                 common_state = dist_checkpointing.load_common_state_dict(read_dir)
                 saved_type = _saved_optimizer_sharding_type(common_state)
@@ -305,7 +318,11 @@ class MegatronStrategy(DistributedStrategy):
                     metadata=_optimizer_checkpoint_metadata(saved_type),
                 )
             # Load the checkpoint in parallel.
-            load_strategy = get_default_load_sharded_strategy(read_dir)
+            load_strategy = (
+                DirectS3TorchDistLoadShardedStrategy(ckpt_dir)
+                if ckpt_dir.startswith("s3://")
+                else get_default_load_sharded_strategy(read_dir)
+            )
             load_strategy = FullyParallelLoadStrategyWrapper(
                 load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
             )
@@ -352,20 +369,27 @@ class MegatronStrategy(DistributedStrategy):
         return ckpt_dir, states
 
     def save_hf_model(self, bridge, model: MegatronModelWrapper, output_dir: str, tokenizer=None, **kwargs) -> None:
+        materialize_megatron_params(model.actor_module)
         # Create checkpoint directory if it doesn't exist.
-        if self.is_rank_0():
+        rank_zero = self.is_rank_0()
+        if rank_zero:
             io.makedirs(output_dir, exist_ok=True)
         dist.barrier()
 
-        # Every rank exhausts Bridge's collective conversion; only cloud non-writers discard their local files.
-        rank_writes_output = self.is_rank_0() or not io.is_cloud_path(output_dir)
-        model_dir = hf_model_io.local_hf_model_dir(output_dir) if rank_writes_output else tempfile.TemporaryDirectory()
+        # Every rank exhausts Bridge's collective conversion. Rank zero owns artifact finalization and cloud
+        # publication; local nonzero ranks write directly to the shared directory without publishing a manifest.
+        if rank_zero:
+            model_dir = hf_model_io.local_hf_model_dir(output_dir)
+        elif io.is_cloud_path(output_dir):
+            model_dir = tempfile.TemporaryDirectory()
+        else:
+            model_dir = nullcontext(output_dir)
         with model_dir as work_dir:
             bridge.save_hf_weights(model.actor_module, work_dir)
             self.log(f"Successfully saved HF safetensors model to {output_dir}")
 
             # Only rank 0 saves the Huggingface config and tokenizer.
-            if self.is_rank_0():
+            if rank_zero:
                 self.save_hf_configs(self.hf_config, work_dir, tokenizer)
                 self.log(f"Successfully saved HF config and tokenizer to {output_dir}")
 

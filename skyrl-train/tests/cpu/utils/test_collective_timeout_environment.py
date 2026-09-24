@@ -5,6 +5,12 @@ from skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     _NCCL_FR_ENV_PASSTHROUGH,
     _build_inference_engine_runtime_env,
 )
+from skyrl_train.env_vars import (
+    DEFAULT_RUNAI_STREAMER_LOG_TO_STDERR,
+    DEFAULT_RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS,
+    RUNAI_STREAMER_LOG_TO_STDERR_ENV,
+    RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV,
+)
 from skyrl_train.utils.utils import prepare_runtime_environment
 
 
@@ -67,3 +73,27 @@ def test_selected_id_teacher_forces_v1_runner_without_changing_default(monkeypat
     assert default_env is None or "VLLM_USE_V2_MODEL_RUNNER" not in default_env["env_vars"]
     assert selected_env is not None
     assert selected_env["env_vars"]["VLLM_USE_V2_MODEL_RUNNER"] == "0"
+
+
+def test_runai_streamer_gets_s3_stall_tolerance_and_diagnostics(monkeypatch):
+    monkeypatch.delenv(RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV, raising=False)
+    monkeypatch.delenv(RUNAI_STREAMER_LOG_TO_STDERR_ENV, raising=False)
+
+    runtime_env = _build_inference_engine_runtime_env(runai_streamer_enabled=True)
+
+    assert runtime_env is not None
+    assert runtime_env["env_vars"][RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV] == (
+        DEFAULT_RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS
+    )
+    assert runtime_env["env_vars"][RUNAI_STREAMER_LOG_TO_STDERR_ENV] == DEFAULT_RUNAI_STREAMER_LOG_TO_STDERR
+
+
+def test_runai_streamer_preserves_explicit_s3_tuning(monkeypatch):
+    monkeypatch.setenv(RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV, "30000")
+    monkeypatch.setenv(RUNAI_STREAMER_LOG_TO_STDERR_ENV, "0")
+
+    runtime_env = _build_inference_engine_runtime_env(runai_streamer_enabled=True)
+
+    assert runtime_env is not None
+    assert runtime_env["env_vars"][RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV] == "30000"
+    assert runtime_env["env_vars"][RUNAI_STREAMER_LOG_TO_STDERR_ENV] == "0"

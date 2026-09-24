@@ -139,6 +139,38 @@ def test_behavior_logprobs_reject_multiturn_custom_template_retokenization():
         validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
 
 
+@pytest.mark.parametrize("mode", [TrajectoryRunnerMode.SKYRL_GYM, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM])
+def test_full_tito_accepts_exact_structured_chat_transport(mode):
+    cfg = _skyrl_config(use_tis=True)
+    cfg.trainer.algorithm.tito_full = True
+    cfg.generator.chat_template.name_or_path = "qwen2_5_with_generation_tag_simplified"
+    cfg.generator.sampling_params = {"logprobs": 0}
+    cfg.generator.require_exact_chat_transport = True
+
+    validate_trajectory_runner_capabilities(cfg, mode)
+
+
+def test_exact_structured_chat_transport_requires_logprobs():
+    cfg = _skyrl_config(use_tis=False)
+    cfg.generator.chat_template.name_or_path = "qwen2_5_with_generation_tag_simplified"
+    cfg.generator.sampling_params = {"logprobs": None}
+    cfg.generator.require_exact_chat_transport = True
+
+    with pytest.raises(ValueError, match="generator.sampling_params.logprobs=an integer"):
+        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM)
+
+
+def test_exact_structured_chat_transport_requires_unbatched_runner():
+    cfg = _skyrl_config(use_tis=False)
+    cfg.generator.batched = True
+    cfg.generator.chat_template.name_or_path = "qwen2_5_with_generation_tag_simplified"
+    cfg.generator.sampling_params = {"logprobs": 0}
+    cfg.generator.require_exact_chat_transport = True
+
+    with pytest.raises(ValueError, match="generator.batched=false"):
+        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
+
+
 def test_distillation_accepts_reconstructed_fully_async_learner_tokens(local_distillation_config):
     cfg = local_distillation_config(_skyrl_config(use_tis=False))
 

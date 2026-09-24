@@ -10,6 +10,20 @@ stub_megatron_modules()
 from skyrl_train.distributed.megatron import megatron_utils  # noqa: E402
 
 
+def test_materialize_megatron_params_completes_deferred_gathers() -> None:
+    deferred = megatron_utils.DDP()
+    deferred.ddp_config = SimpleNamespace(overlap_param_gather=True)
+    calls = []
+    deferred.start_param_sync = lambda *, force_sync: calls.append(force_sync)
+    synchronous = megatron_utils.DDP()
+    synchronous.ddp_config = SimpleNamespace(overlap_param_gather=False)
+    synchronous.start_param_sync = lambda *, force_sync: calls.append(force_sync)
+
+    megatron_utils.materialize_megatron_params([deferred, synchronous, torch.nn.Linear(1, 1)])
+
+    assert calls == [True]
+
+
 @pytest.mark.parametrize(
     ("cp_rank", "expected_tokens"),
     [
