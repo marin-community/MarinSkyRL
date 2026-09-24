@@ -1478,6 +1478,8 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
             env_vars[_net_env] = os.environ[_net_env]
 
     if env_vars.get(VLLM_BATCH_INVARIANT_ENV) == "1" or os.environ.get(VLLM_BATCH_INVARIANT_ENV) == "1":
+        # The inference actor also forwards this launcher variable directly,
+        # including task-owned runs whose trainer config leaves it unset.
         # vLLM sets these inside its GPU worker during batch-invariant startup.
         # Megatron's separate Ray rank shares a NCCL weight-update group with
         # that worker. Different per-rank NCCL settings made the first broadcast
