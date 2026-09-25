@@ -7,6 +7,8 @@ import json
 import random
 import shutil
 from collections import defaultdict
+from collections.abc import Mapping
+from contextlib import ExitStack
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -45,43 +47,43 @@ def prepare_smoke_sample(
     output_dir.mkdir(parents=True, exist_ok=True)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, revision=tokenizer_revision)
     template_kwargs = chat_template_kwargs or {}
-    dataset = (
-        (json.loads(line) for line in source_path.open())
-        if source_path is not None
-        else load_dataset(DATASET_ID, revision=DATASET_REVISION, split="train", streaming=True)
-    )
     eligible: list[tuple[int, dict[str, Any]]] = []
     trajectory_ids: set[int] = set()
     instance_ids: set[str] = set()
 
-    for index, raw in enumerate(dataset):
-        if index >= max_source_rows:
-            break
-        trajectory_id = raw["trajectory_id"]
-        instance_id = raw["metadata"]["instance_id"]
-        if trajectory_id in trajectory_ids or instance_id in instance_ids:
-            continue
-        if not 0.0 < raw["pass_rate"] < 1.0:
-            continue
-        request = {**raw["responses_create_params"], "chat_template_kwargs": template_kwargs}
-        prepared = prepare_pivot_row({**raw, "responses_create_params": request}, index, dataset="swe")
-        prompt_tokens = tokenizer.apply_chat_template(
-            prepared["prompt"],
-            tools=request.get("tools"),
-            add_generation_prompt=True,
-            tokenize=True,
-            **template_kwargs,
+    with ExitStack() as stack:
+        dataset = (
+            (json.loads(line) for line in stack.enter_context(source_path.open()))
+            if source_path is not None
+            else load_dataset(DATASET_ID, revision=DATASET_REVISION, split="train", streaming=True)
         )
-        if hasattr(prompt_tokens, "keys"):
-            prompt_tokens = prompt_tokens["input_ids"]
-        if len(prompt_tokens) > MAX_PROMPT_TOKENS:
-            continue
-        trajectory_ids.add(trajectory_id)
-        instance_ids.add(instance_id)
-        eligible.append((trajectory_id, prepared))
-        if stop_when_ready and len(eligible) >= candidate_prefixes + PROBE_PREFIXES:
-            break
-
+        for index, raw in enumerate(dataset):
+            if index >= max_source_rows:
+                break
+            trajectory_id = raw["trajectory_id"]
+            instance_id = raw["metadata"]["instance_id"]
+            if trajectory_id in trajectory_ids or instance_id in instance_ids:
+                continue
+            if not 0.0 < raw["pass_rate"] < 1.0:
+                continue
+            request = {**raw["responses_create_params"], "chat_template_kwargs": template_kwargs}
+            prepared = prepare_pivot_row({**raw, "responses_create_params": request}, index, dataset="swe")
+            prompt_tokens = tokenizer.apply_chat_template(
+                prepared["prompt"],
+                tools=request.get("tools"),
+                add_generation_prompt=True,
+                tokenize=True,
+                **template_kwargs,
+            )
+            if isinstance(prompt_tokens, Mapping):
+                prompt_tokens = prompt_tokens["input_ids"]
+            if len(prompt_tokens) > MAX_PROMPT_TOKENS:
+                continue
+            trajectory_ids.add(trajectory_id)
+            instance_ids.add(instance_id)
+            eligible.append((trajectory_id, prepared))
+            if stop_when_ready and len(eligible) >= candidate_prefixes + PROBE_PREFIXES:
+                break
     if len(eligible) < candidate_prefixes + PROBE_PREFIXES:
         raise RuntimeError(f"Only found {len(eligible)} eligible SWE pivots")
     sorted_ids = sorted(trajectory_id for trajectory_id, _ in eligible)
