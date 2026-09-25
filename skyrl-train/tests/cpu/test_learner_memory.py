@@ -157,8 +157,8 @@ def test_overlapping_collectors_and_snapshots_do_not_destroy_enclosing_peak(obse
 
 def test_overlap_holds_reset_ownership_until_the_last_concurrent_scope_exits(observations):
     cuda, events = observations
-    outer = learner_memory.LearnerCudaMetrics(enabled=True, rank=3, backend="fsdp2")
-    inner = learner_memory.LearnerCudaMetrics(enabled=True, rank=3, backend="fsdp2")
+    outer = learner_memory.LearnerCudaMetrics(enabled=True, rank=3)
+    inner = learner_memory.LearnerCudaMetrics(enabled=True, rank=3)
     entered, release = Event(), Event()
 
     def concurrent_forward():
@@ -188,7 +188,7 @@ def test_overlap_holds_reset_ownership_until_the_last_concurrent_scope_exits(obs
         cuda.use_memory(300, 350)
     assert events[-1]["body"]["peak_allocated_bytes"] == 300
     assert "scope_overlap" not in events[-1]["attributes"]
-    assert all(row["attributes"]["backend"] == "fsdp2" for row in events)
+    assert all(row["attributes"]["backend"] == "megatron" for row in events)
 
 
 @pytest.mark.parametrize(

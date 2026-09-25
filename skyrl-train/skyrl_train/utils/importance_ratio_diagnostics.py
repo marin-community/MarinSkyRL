@@ -12,9 +12,8 @@ from loguru import logger
 
 from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_delta
 
-# Absolute-position bucket width. The async RL dashboard reads pos_first256 and
-# pos_last256 by name, so changing this silently empties those series.
-DEFAULT_POSITION_WINDOW = 256
+# Absolute-position bucket width; the async RL dashboard reads pos_first256 and pos_last256 by name.
+POSITION_WINDOW = 256
 
 
 LOG_RATIO_TAIL_CAPACITY = 8192
@@ -45,32 +44,6 @@ LOG_RATIO_BASE_METRIC_KEYS = (
     "log_ratio_abs_p99",
     "log_ratio_diagnostics_failed",
 )
-
-
-@dataclass(frozen=True)
-class RatioDiagnosticsSettings:
-    """Resolved trainer.algorithm.ratio_diagnostics knobs."""
-
-    position_window: int
-    pooled: bool
-
-
-def ratio_diagnostics_settings(algorithm_cfg) -> RatioDiagnosticsSettings:
-    """Read the ratio-diagnostics section; an absent key takes its default.
-
-    ``pooled`` is null in the base config until validate_cfg resolves it from the strategy, and
-    reading it unresolved raises.
-    """
-    section = algorithm_cfg.get("ratio_diagnostics") or {}
-    pooled = section.get("pooled", False)
-    if pooled is None:
-        raise ValueError(
-            "trainer.algorithm.ratio_diagnostics.pooled is null; validate_cfg resolves it from the strategy first"
-        )
-    return RatioDiagnosticsSettings(
-        position_window=int(section.get("position_window", DEFAULT_POSITION_WINDOW)),
-        pooled=bool(pooled),
-    )
 
 
 def absolute_quantiles(values: torch.Tensor, probabilities: tuple[float, ...]) -> list[float]:
@@ -185,7 +158,6 @@ def mismatch_ratio_metrics(
     loss_mask: torch.Tensor,
     rollout_staleness: torch.Tensor | None,
     *,
-    position_window: int = DEFAULT_POSITION_WINDOW,
     eps_clip_low: float = 0.2,
     eps_clip_high: float = 0.2,
 ) -> dict[str, float]:
@@ -197,8 +169,6 @@ def mismatch_ratio_metrics(
     buckets and every position bucket report token counts, finite_fraction,
     log_ratio_mean, log_ratio_abs_mean and frac_outside_0_5_2.
     """
-    if type(position_window) is not int or position_window <= 0:
-        raise ValueError("position_window must be a positive integer")
     mask = loss_mask.detach().cpu() > 0
     staleness = (
         torch.zeros(mask.shape[0], dtype=torch.int32) if rollout_staleness is None else rollout_staleness.detach().cpu()
@@ -214,8 +184,8 @@ def mismatch_ratio_metrics(
     # 1 in the first window, 2 in the last window, 3 in both and 0 in neither.
     groups = torch.masked_select(
         4 * row_bucket.unsqueeze(1)
-        + (positions < position_window).to(torch.uint8)
-        + 2 * (positions >= lengths - position_window).to(torch.uint8),
+        + (positions < POSITION_WINDOW).to(torch.uint8)
+        + 2 * (positions >= lengths - POSITION_WINDOW).to(torch.uint8),
         mask,
     ).long()
     values = None
@@ -229,7 +199,7 @@ def mismatch_ratio_metrics(
         key: total.view(len(MISMATCH_STALENESS_BUCKETS), 4)
         for key, total in _grouped_moments(values, groups, 4 * len(MISMATCH_STALENESS_BUCKETS)).items()
     }
-    position_classes = {f"first{position_window}": [1, 3], f"last{position_window}": [2, 3], "middle": [0]}
+    position_classes = {f"first{POSITION_WINDOW}": [1, 3], f"last{POSITION_WINDOW}": [2, 3], "middle": [0]}
     # The async RL dashboard reads quantile, KL and ESS statistics only for these two
     # buckets; the rest take their moments from the grid and need no sort.
     full_statistics = {}
@@ -265,7 +235,7 @@ def mismatch_ratio_metrics(
     return result
 
 
-def _ratio_extra_keys(window: int = DEFAULT_POSITION_WINDOW) -> tuple[str, ...]:
+def _ratio_extra_keys() -> tuple[str, ...]:
     keys = (
         "log_ratio_mean",
         "log_ratio_mean_squared",
@@ -282,7 +252,7 @@ def _ratio_extra_keys(window: int = DEFAULT_POSITION_WINDOW) -> tuple[str, ...]:
     )
     return keys + tuple(
         f"log_ratio_pos_{position}/{key}"
-        for position in (f"first{window}", f"last{window}", "middle")
+        for position in (f"first{POSITION_WINDOW}", f"last{POSITION_WINDOW}", "middle")
         for key in ("selected_tokens", "log_ratio_abs_mean", "frac_outside_0_5_2")
     )
 
@@ -317,15 +287,7 @@ class LogRatioAccumulator:
 class LogRatioMonitor:
     """Accumulate a fixed-key log-ratio metric contract across microbatches."""
 
-    def __init__(
-        self,
-        device: torch.device,
-        *,
-        position_window: int = DEFAULT_POSITION_WINDOW,
-    ):
-        if type(position_window) is not int or position_window <= 0:
-            raise ValueError("position_window must be a positive integer")
-        self.position_window = position_window
+    def __init__(self, device: torch.device):
         self._accumulator = _empty_log_ratio_accumulator(device)
         self._failed = False
 
@@ -333,9 +295,7 @@ class LogRatioMonitor:
         if self._failed:
             return
         try:
-            partial = compute_log_ratio_partial(
-                log_probs, old_log_probs, loss_mask, position_window=self.position_window
-            )
+            partial = compute_log_ratio_partial(log_probs, old_log_probs, loss_mask)
             merge_log_ratio_partial(self._accumulator, partial)
         except Exception as error:
             logger.warning(f"Log-ratio diagnostics skipped after accumulation failed: {error!r}")
@@ -356,12 +316,12 @@ class LogRatioMonitor:
             headers, tails = gather_fn(header), gather_fn(tail)
             accumulator, failed = pool_log_ratio_accumulators(headers, tails)
         if failed:
-            return _failed_log_ratio_metrics(self.position_window)
+            return _failed_log_ratio_metrics()
         try:
-            return finalize_log_ratio_metrics(accumulator, position_window=self.position_window)
+            return finalize_log_ratio_metrics(accumulator)
         except Exception as error:
             logger.warning(f"Log-ratio diagnostics marked failed after finalization failed: {error!r}")
-            return _failed_log_ratio_metrics(self.position_window)
+            return _failed_log_ratio_metrics()
 
 
 def gather_ratio_tensor(tensor: torch.Tensor, *, group=None) -> list[torch.Tensor]:
@@ -411,8 +371,8 @@ def pool_log_ratio_accumulators(headers, tails):
     return pooled, failed
 
 
-def _failed_log_ratio_metrics(position_window: int = DEFAULT_POSITION_WINDOW) -> dict[str, float]:
-    metrics = _log_ratio_diag_zero_metrics(position_window=position_window)
+def _failed_log_ratio_metrics() -> dict[str, float]:
+    metrics = _log_ratio_diag_zero_metrics()
     metrics["log_ratio_diagnostics_failed"] = 1.0
     return metrics
 
@@ -452,9 +412,7 @@ def compute_tis_diagnostics(
         return dict(zip(TIS_DIAG_KEYS, values, strict=True))
 
 
-def _log_ratio_diag_zero_metrics(
-    n_position_buckets: int = 10, *, position_window: int = DEFAULT_POSITION_WINDOW
-) -> dict:
+def _log_ratio_diag_zero_metrics(n_position_buckets: int = 10) -> dict:
     """The full key set the diagnostic emits, with all values zero.
 
     Used as a fallback so every rank contributes identical keys to
@@ -462,11 +420,7 @@ def _log_ratio_diag_zero_metrics(
     or the helper raises. Mismatched keysets across ranks would deadlock the
     per-key NCCL all-reduce.
     """
-    keys = (
-        LOG_RATIO_BASE_METRIC_KEYS
-        + _log_ratio_position_metric_keys(n_position_buckets)
-        + _ratio_extra_keys(position_window)
-    )
+    keys = LOG_RATIO_BASE_METRIC_KEYS + _log_ratio_position_metric_keys(n_position_buckets) + _ratio_extra_keys()
     metrics = dict.fromkeys(keys, 0.0)
     return metrics
 
@@ -503,8 +457,6 @@ def compute_log_ratio_partial(
     old_log_probs: torch.Tensor,
     loss_mask: torch.Tensor,
     n_position_buckets: int = 10,
-    *,
-    position_window: int = DEFAULT_POSITION_WINDOW,
 ) -> LogRatioAccumulator:
     """Compute mergeable log-ratio statistics for one policy micro-batch.
 
@@ -552,8 +504,8 @@ def compute_log_ratio_partial(
     maximum = values.max()
     weights = (values - maximum).exp()
     positions = torch.arange(T, device=device).unsqueeze(0)
-    first = (positions < position_window).expand(B, T)
-    last = positions >= mask_f.sum(-1, keepdim=True) - position_window
+    first = (positions < POSITION_WINDOW).expand(B, T)
+    last = positions >= mask_f.sum(-1, keepdim=True) - POSITION_WINDOW
     absolute_masks = torch.stack([first, last, ~first & ~last]) & selected.unsqueeze(0)
     outside = delta.abs() > LOG_RATIO_DOUBLING
     moments = torch.stack(
@@ -616,9 +568,7 @@ def merge_log_ratio_partial(acc: LogRatioAccumulator, partial: LogRatioAccumulat
     acc.position_outside = acc.position_outside + partial.position_outside
 
 
-def finalize_log_ratio_metrics(
-    acc: LogRatioAccumulator, n_position_buckets: int = 10, *, position_window: int = DEFAULT_POSITION_WINDOW
-) -> dict:
+def finalize_log_ratio_metrics(acc: LogRatioAccumulator, n_position_buckets: int = 10) -> dict:
     """Reduce the accumulator to the public scalar metric dictionary.
 
     Returns the full keyset always (zeros where input was empty), so downstream
@@ -694,5 +644,5 @@ def finalize_log_ratio_metrics(
         [acc.position_counts, acc.position_sums / position_counts, acc.position_outside / position_counts], dim=1
     ).reshape(-1)
     values = torch.cat([extra, positions]).cpu().tolist()
-    metrics.update(dict(zip(_ratio_extra_keys(position_window), values, strict=True)))
+    metrics.update(dict(zip(_ratio_extra_keys(), values, strict=True)))
     return metrics

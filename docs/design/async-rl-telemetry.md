@@ -107,11 +107,6 @@ Iris task runtime sets. Within that, each family has its own switch.
 | Async rollout spans and waits | `trainer.async_spans` | on | several records per rollout call; the largest record volume | 7, 10, 12, 15, 16, 18 to 20, 42, 53 |
 | Sync rollout spans | `trainer.generate_spans` | on | several records per rollout call | sync board drill-downs |
 | Learner memory and Megatron phase walls | `trainer.policy_train_spans` | on | a few records per phase per rank; no CUDA synchronization | 16, 26, 27, 41 |
-| Pooled within-update log-ratio statistics (`policy/log_ratio_*`) | `trainer.algorithm.ratio_diagnostics.pooled` | null: on for Megatron, off elsewhere | gathers each rank's statistics on every optimizer minibatch; off, each rank summarizes its own tokens | 56, 57 (`policy/log_ratio_pos_*`) |
 
 The light families are on by default because a run without them cannot be diagnosed from the
 dashboards, and they add records without adding GPU work.
-
-Pooled log-ratio statistics measure only on Megatron. Config validation resolves the switch against
-`trainer.strategy`: null turns on where the strategy supports pooling and off elsewhere, with one info log
-naming what was left off, and an explicit true on an unsupported strategy fails validation.

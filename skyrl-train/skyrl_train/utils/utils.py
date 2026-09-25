@@ -550,7 +550,6 @@ def validate_cfg(cfg: DictConfig):
     if cfg.generator.gdn_backend not in set(GDNBackend):
         raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
     validate_generator_cfg(cfg)
-    resolve_ratio_diagnostics_pooling(cfg)
     validate_batch_invariant_config(cfg)
     validate_hf_export_config(cfg)
     try:
@@ -698,27 +697,6 @@ def validate_cfg(cfg: DictConfig):
 
     if cfg.generator.engine_init_timeout_seconds <= 0:
         raise ValueError("generator.engine_init_timeout_seconds must be greater than zero")
-
-
-def resolve_ratio_diagnostics_pooling(cfg: DictConfig) -> None:
-    """Enable pooled ratio diagnostics on Megatron unless explicitly disabled."""
-    section = OmegaConf.select(cfg, "trainer.algorithm.ratio_diagnostics")
-    if section is None or "pooled" not in section:
-        return
-    strategy = cfg.trainer.strategy
-    supported = strategy == "megatron"
-    value = section.pooled
-    if value is None:
-        section.pooled = supported
-        if not supported:
-            logger.info(
-                "trainer.strategy={} does not support trainer.algorithm.ratio_diagnostics.pooled; leaving it off",
-                strategy,
-            )
-    elif value and not supported:
-        raise ValueError(
-            f"trainer.algorithm.ratio_diagnostics.pooled=true needs trainer.strategy=megatron; got {strategy!r}"
-        )
 
 
 def validate_batch_invariant_config(cfg: DictConfig) -> None:

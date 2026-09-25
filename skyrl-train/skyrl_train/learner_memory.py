@@ -35,10 +35,9 @@ _peak_scope_lock = Lock()
 class LearnerCudaMetrics:
     """Record CUDA allocator samples and interval peaks around worker phases."""
 
-    def __init__(self, *, enabled: bool, rank: int, backend: str = "megatron") -> None:
+    def __init__(self, *, enabled: bool, rank: int) -> None:
         self.enabled = enabled
         self._rank = rank
-        self._backend = backend
         self._device: int | None = None
         self._identity: dict[str, str] = {}
         self._warned_overlap = False
@@ -51,7 +50,7 @@ class LearnerCudaMetrics:
             if allocator_backend != "native":
                 raise RuntimeError(f"learner allocator peaks require native CUDA allocator, got {allocator_backend}")
             self._identity = {
-                "backend": self._backend,
+                "backend": "megatron",
                 "role": WORKER_ROLE,
                 "worker_role": "policy",
                 "rank": str(self._rank),
@@ -159,4 +158,4 @@ class LearnerCudaMetrics:
 
 # A disabled recorder does nothing and holds no per-worker state, so one shared
 # instance serves as the class-level default for workers built without a config.
-INERT_LEARNER_CUDA_METRICS = LearnerCudaMetrics(enabled=False, rank=0, backend="unknown")
+INERT_LEARNER_CUDA_METRICS = LearnerCudaMetrics(enabled=False, rank=0)

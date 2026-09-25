@@ -24,11 +24,7 @@ from skyrl_train.megatron_timing import (
     PIPELINE_METRIC_BROADCAST,
     MegatronTrainTimings,
 )
-from skyrl_train.utils.importance_ratio_diagnostics import (
-    ratio_diagnostics_settings,
-    LogRatioMonitor,
-    gather_ratio_tensor,
-)
+from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor, gather_ratio_tensor
 
 from skyrl_train.distributed.megatron.megatron_utils import (
     compact_left_padded_tokens,
@@ -439,7 +435,6 @@ class MegatronModelWrapper:
             List[dict]: one metrics dict per micro-batch in order.
         """
         forward_backward_func = get_forward_backward_func()
-        ratio_settings = ratio_diagnostics_settings(self.cfg.trainer.algorithm)
         log_ratio_monitor = None
         completed_microbatches = 0
 
@@ -486,10 +481,7 @@ class MegatronModelWrapper:
                 student_topk_logprobs=sparse_student_logprobs,
             )
             if log_ratio_monitor is None:
-                log_ratio_monitor = LogRatioMonitor(
-                    action_log_probs.device,
-                    position_window=ratio_settings.position_window,
-                )
+                log_ratio_monitor = LogRatioMonitor(action_log_probs.device)
             log_ratio_monitor.add(action_log_probs, old_action_log_probs, loss_mask)
             completed_microbatches += 1
 
@@ -501,21 +493,13 @@ class MegatronModelWrapper:
             }
             metrics.update(objective.metrics)
             if completed_microbatches == len(micro_batches):
-                if ratio_settings.pooled:
-                    # Token logprobs are already reconstructed across TP/CP. Pool distinct DP
-                    # inputs only; pipeline metrics are broadcast below.
-                    group = (
-                        mpu.get_data_parallel_group(with_context_parallel=False)
-                        if torch.distributed.is_initialized()
-                        else None
-                    )
-                    metrics.update(
-                        log_ratio_monitor.metrics(
-                            gather_fn=partial(gather_ratio_tensor, group=group),
-                        )
-                    )
-                else:
-                    metrics.update(log_ratio_monitor.metrics())
+                # Token logprobs are already reconstructed across TP/CP, so pool across data-parallel ranks only.
+                group = (
+                    mpu.get_data_parallel_group(with_context_parallel=False)
+                    if torch.distributed.is_initialized()
+                    else None
+                )
+                metrics.update(log_ratio_monitor.metrics(gather_fn=partial(gather_ratio_tensor, group=group)))
             return objective.optimization_loss, metrics
 
         def forward_step(batch_iter, model):

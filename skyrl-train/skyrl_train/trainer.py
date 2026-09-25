@@ -129,10 +129,7 @@ from skyrl_train.telemetry import (
     record_training_metrics,
 )
 from skyrl_train.rollout_observability import observe_rollout_call
-from skyrl_train.utils.importance_ratio_diagnostics import (
-    ratio_diagnostics_settings,
-    mismatch_ratio_metrics,
-)
+from skyrl_train.utils.importance_ratio_diagnostics import mismatch_ratio_metrics
 from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
@@ -2449,7 +2446,6 @@ class RayPPOTrainer:
                     training_input.get("rollout_staleness"),
                     eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
                     eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
-                    position_window=ratio_diagnostics_settings(self.cfg.trainer.algorithm).position_window,
                 )
             )
 

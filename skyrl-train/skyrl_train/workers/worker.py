@@ -41,7 +41,6 @@ from skyrl_train.distributed.utils import init_custom_process_group, init_worker
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.policy_math import ppo_critic_loss
 from skyrl_train.utils.importance_ratio_diagnostics import (
-    ratio_diagnostics_settings,
     LogRatioMonitor,
 )
 from skyrl_train.learner_memory import INERT_LEARNER_CUDA_METRICS, LearnerCudaMetrics
@@ -861,7 +860,6 @@ class PolicyWorkerBase(Worker):
         self._memory = LearnerCudaMetrics(
             enabled=bool(self.cfg.trainer.get("policy_train_spans", False)),
             rank=self._rank,
-            backend=str(self.cfg.trainer.get("strategy", "unknown")),
         )
 
     async def _begin_vllm_layerwise_weight_reload(self, inference_engine_client, *, enabled: bool) -> None:
@@ -1213,11 +1211,7 @@ class PolicyWorkerBase(Worker):
         # dict has the same wandb keys as v4 so the downstream per-key
         # all_reduce(status) stays keyset-compatible.
         if local_step % accumulation_steps == 0 or getattr(self, "_log_ratio_monitor", None) is None:
-            ratio_settings = ratio_diagnostics_settings(self.cfg.trainer.algorithm)
-            self._log_ratio_monitor = LogRatioMonitor(
-                action_log_probs.device,
-                position_window=ratio_settings.position_window,
-            )
+            self._log_ratio_monitor = LogRatioMonitor(action_log_probs.device)
         self._log_ratio_monitor.add(action_log_probs, old_action_log_probs, loss_mask)
 
         grad_norm = None

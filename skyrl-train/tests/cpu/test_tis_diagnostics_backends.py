@@ -216,6 +216,9 @@ def _megatron_mini_batch_metrics(
     monkeypatch.setattr(
         mmw.mpu, "get_pipeline_model_parallel_group", lambda: torch.distributed.group.WORLD, raising=False
     )
+    monkeypatch.setattr(
+        mmw.mpu, "get_data_parallel_group", lambda **kwargs: torch.distributed.group.WORLD, raising=False
+    )
 
     def micro_batch(offset: float) -> mmw.MegatronPolicyMicroBatch:
         sequences = torch.zeros(BATCH_SIZE, SEQ_LEN)

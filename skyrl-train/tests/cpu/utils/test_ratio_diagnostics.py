@@ -7,17 +7,11 @@ from threading import Barrier
 import numpy
 import pytest
 import torch
-from loguru import logger
-
-from omegaconf import OmegaConf
-
-from skyrl_train.utils.utils import resolve_ratio_diagnostics_pooling
 
 from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
     absolute_quantiles,
     mismatch_ratio_metrics,
-    ratio_diagnostics_settings,
     ratio_statistics,
     gather_ratio_tensor,
 )
@@ -249,43 +243,3 @@ def test_quantiles_stay_exact_above_the_size_torch_refuses():
     ties = torch.tensor([0.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0], dtype=torch.float64)
     tied = torch.quantile(ties, ties.new_tensor(probabilities)).tolist()
     assert absolute_quantiles(ties, probabilities) == pytest.approx(tied, rel=1e-12)
-
-
-def test_shipped_ratio_diagnostics_pool_on_megatron_and_cost_nothing_elsewhere():
-    config = OmegaConf.load(Path(__file__).parents[3] / "skyrl_train/config/ppo_base_config.yaml")
-    assert config.trainer.algorithm.ratio_diagnostics.pooled is None
-    with pytest.raises(ValueError, match="pooled is null"):
-        ratio_diagnostics_settings(config.trainer.algorithm)
-    absent = ratio_diagnostics_settings(OmegaConf.create({}))
-    assert not absent.pooled and absent.position_window == 256
-
-    fsdp = OmegaConf.merge(config, {"trainer": {"strategy": "fsdp2"}})
-    messages = []
-    sink = logger.add(messages.append, level="INFO")
-    try:
-        resolve_ratio_diagnostics_pooling(fsdp)
-    finally:
-        logger.remove(sink)
-    assert fsdp.trainer.algorithm.ratio_diagnostics.pooled is False
-    assert ["trainer.algorithm.ratio_diagnostics.pooled" in message for message in messages] == [True]
-    megatron = OmegaConf.merge(config, {"trainer": {"strategy": "megatron"}})
-    resolve_ratio_diagnostics_pooling(megatron)
-    assert megatron.trainer.algorithm.ratio_diagnostics.pooled is True
-
-
-def test_an_explicit_strategy_limited_setting_is_rejected_where_its_family_cannot_measure():
-    config = OmegaConf.load(Path(__file__).parents[3] / "skyrl_train/config/ppo_base_config.yaml")
-    requested = OmegaConf.merge(
-        config, {"trainer": {"strategy": "fsdp2", "algorithm": {"ratio_diagnostics": {"pooled": True}}}}
-    )
-    with pytest.raises(ValueError, match="ratio_diagnostics.pooled=true"):
-        resolve_ratio_diagnostics_pooling(requested)
-
-
-def test_an_explicit_off_is_kept_where_the_family_could_measure():
-    config = OmegaConf.load(Path(__file__).parents[3] / "skyrl_train/config/ppo_base_config.yaml")
-    off_on_megatron = OmegaConf.merge(
-        config, {"trainer": {"strategy": "megatron", "algorithm": {"ratio_diagnostics": {"pooled": False}}}}
-    )
-    resolve_ratio_diagnostics_pooling(off_on_megatron)
-    assert off_on_megatron.trainer.algorithm.ratio_diagnostics.pooled is False
