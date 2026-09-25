@@ -7,6 +7,7 @@ import torch
 from skyrl_train.async_rollout_state import GenerationBufferState
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+from .async_rollout_fixtures import reader_for
 from skyrl_train.rollout_buffer import MemoryRolloutBuffer
 from skyrl_train.fully_async_trainer import (
     FullyAsyncRayPPOTrainer,
@@ -308,7 +309,7 @@ async def test_batch_assembly_retries_stale_groups_from_entire_buffer():
     ]:
         queues.rollout_buffer.requeue(group)
 
-    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+    batch = await reader_for(trainer, queues).next_batch()
 
     assert [group.uid for group in batch] == ["fresh-1", "fresh-2"]
     assert queues.rollout_buffer.empty()
@@ -322,11 +323,26 @@ async def test_batch_assembly_retries_stale_groups_from_entire_buffer():
 
 
 @pytest.mark.asyncio
+async def test_admission_metrics_follow_each_training_step():
+    trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=2)
+    reader = reader_for(trainer, queues)
+    queues.rollout_buffer.requeue(_generated_group("first", earliest_model_step=10))
+    assert [group.uid for group in await reader.next_batch()] == ["first"]
+
+    queues.clear_admitted()
+    trainer.all_metrics = {}
+    trainer.global_step = 11
+    queues.rollout_buffer.requeue(_generated_group("second", earliest_model_step=11))
+    assert [group.uid for group in await reader.next_batch()] == ["second"]
+    assert trainer.all_metrics["async/rejected_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_batch_assembly_waits_for_fresh_replacement():
     trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1)
     queues.rollout_buffer.requeue(_generated_group("retry-me", earliest_model_step=7))
 
-    pending_batch = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
+    pending_batch = asyncio.create_task(reader_for(trainer, queues).next_batch())
     done, _ = await asyncio.wait({pending_batch}, timeout=0)
     assert pending_batch not in done
     assert queues.retries.get_nowait()[0]["uid"] == "retry-me"
@@ -346,7 +362,7 @@ async def test_batch_assembly_submits_each_admitted_group_before_the_batch_is_co
     trainer._async_distillation_runtime = runtime
     queues.rollout_buffer.requeue(_generated_group("first", earliest_model_step=10))
 
-    pending_batch = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
+    pending_batch = asyncio.create_task(reader_for(trainer, queues).next_batch())
     first = await asyncio.wait_for(runtime.submitted.get(), timeout=1)
 
     assert first["trajectory_ids"][0].instance_id == "first"
@@ -370,7 +386,7 @@ async def test_batch_assembly_scores_only_learner_selected_rows():
     trainer.trajectory_selector = BestOfNTrajectorySelector(2)
     queues.rollout_buffer.requeue(_generated_group("best", earliest_model_step=10, rewards=[0.25, 0.75]))
 
-    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+    batch = await reader_for(trainer, queues).next_batch()
     submitted = await runtime.submitted.get()
 
     assert [group.uid for group in batch] == ["best"]
@@ -383,7 +399,7 @@ async def test_batch_assembly_skips_fully_masked_group_and_waits_for_fresh_promp
     trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1)
     queues.rollout_buffer.requeue(_generated_group("retry-me", earliest_model_step=10, fully_masked=True))
 
-    pending_batch = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
+    pending_batch = asyncio.create_task(reader_for(trainer, queues).next_batch())
     done, _ = await asyncio.wait({pending_batch}, timeout=0)
     assert pending_batch not in done
     assert queues.retries.empty()
@@ -408,7 +424,7 @@ async def test_batch_assembly_fails_fast_on_structural_group_corruption():
     queues.rollout_buffer.requeue(_generated_group("wrong-size", earliest_model_step=10))
 
     with pytest.raises(TrainingGroupInvariantError, match="physical_group_size"):
-        await trainer._get_admitted_generation_group_mini_batch(queues)
+        await reader_for(trainer, queues).next_batch()
 
 
 @pytest.mark.asyncio
@@ -425,7 +441,7 @@ async def test_batch_assembly_discards_insufficient_reward_spread_and_waits_for_
         )
     )
 
-    pending_batch = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
+    pending_batch = asyncio.create_task(reader_for(trainer, queues).next_batch())
     done, _ = await asyncio.wait({pending_batch}, timeout=0)
     assert pending_batch not in done
     assert queues.retries.empty()
@@ -458,7 +474,7 @@ async def test_batch_assembly_routes_stale_and_uniform_groups_differently():
     queues.rollout_buffer.requeue(_generated_group("stale", earliest_model_step=7))
     queues.rollout_buffer.requeue(_generated_group("uniform", earliest_model_step=10, unshaped_rewards=[1.0, 1.0]))
 
-    pending_batch = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
+    pending_batch = asyncio.create_task(reader_for(trainer, queues).next_batch())
     done, _ = await asyncio.wait({pending_batch}, timeout=0)
     assert pending_batch not in done
     assert queues.retries.get_nowait()[0]["uid"] == "stale"
@@ -485,7 +501,7 @@ async def test_batch_assembly_fails_when_dynamic_sampling_exhausts_candidate_bud
     queues.rollout_buffer.requeue(_generated_group("uniform-2", earliest_model_step=10, unshaped_rewards=[1.0, 1.0]))
 
     with pytest.raises(RuntimeError, match="dynamic sampling limit"):
-        await trainer._get_admitted_generation_group_mini_batch(queues)
+        await reader_for(trainer, queues).next_batch()
 
 
 @pytest.mark.asyncio
@@ -510,7 +526,7 @@ async def test_dapo_replacement_sampling_remains_bounded_by_candidate_budget():
     queues.rollout_buffer.requeue(
         _generated_group(first_prompts[0]["uid"], earliest_model_step=10, unshaped_rewards=[0.0, 0.0])
     )
-    pending_batch = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
+    pending_batch = asyncio.create_task(reader_for(trainer, queues).next_batch())
     done, _ = await asyncio.wait({pending_batch}, timeout=0)
     assert pending_batch not in done
 
@@ -537,7 +553,7 @@ async def test_batch_assembly_scans_rejections_and_preserves_accepted_surplus():
     ]:
         queues.rollout_buffer.requeue(group)
 
-    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+    batch = await reader_for(trainer, queues).next_batch()
 
     assert [group.uid for group in batch] == ["accepted-1", "accepted-2"]
     assert queues.retries.empty()
@@ -551,7 +567,7 @@ async def test_batch_assembly_discards_duplicate_uid_and_fills_the_batch():
     queues.rollout_buffer.requeue(_generated_group("duplicate", earliest_model_step=10))
     queues.rollout_buffer.requeue(_generated_group("unique", earliest_model_step=10))
 
-    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+    batch = await reader_for(trainer, queues).next_batch()
 
     assert [group.uid for group in batch] == ["duplicate", "unique"]
     assert queues.retries.empty()
@@ -564,7 +580,7 @@ async def test_batch_assembly_discards_duplicate_uid_received_in_a_later_scan():
     trainer, queues = _batch_assembly_state(mini_batch_size=2, accepted=3)
     queues.rollout_buffer.requeue(_generated_group("first", earliest_model_step=10))
 
-    pending_batch = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
+    pending_batch = asyncio.create_task(reader_for(trainer, queues).next_batch())
     done, _ = await asyncio.wait({pending_batch}, timeout=0)
     assert pending_batch not in done
 
@@ -586,7 +602,7 @@ async def test_batch_assembly_does_not_readmit_a_uid_consumed_by_an_earlier_step
     queues.rollout_buffer.requeue(_generated_group("trained", earliest_model_step=10))
     queues.rollout_buffer.requeue(_generated_group("fresh", earliest_model_step=10))
 
-    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+    batch = await reader_for(trainer, queues).next_batch()
 
     assert [group.uid for group in batch] == ["fresh"]
     assert trainer.all_metrics["async/rejected_count/duplicate_uid"] == 1
@@ -598,7 +614,7 @@ async def test_batch_assembly_prefers_eligible_duplicate_without_scheduling_a_re
     queues.rollout_buffer.requeue(_generated_group("same", earliest_model_step=10, fully_masked=True))
     queues.rollout_buffer.requeue(_generated_group("same", earliest_model_step=10))
 
-    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+    batch = await reader_for(trainer, queues).next_batch()
 
     assert [group.uid for group in batch] == ["same"]
     assert queues.retries.empty()
@@ -612,7 +628,7 @@ async def test_batch_assembly_skips_masked_duplicates_without_retrying_the_promp
     queues.rollout_buffer.requeue(_generated_group("masked", earliest_model_step=10, fully_masked=True))
     queues.rollout_buffer.requeue(_generated_group("replacement", earliest_model_step=10))
 
-    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+    batch = await reader_for(trainer, queues).next_batch()
 
     assert [group.uid for group in batch] == ["replacement"]
     assert queues.retries.empty()
@@ -674,7 +690,7 @@ async def test_restore_continues_a_partially_admitted_batch(tmp_path):
     assert pending_uids.reserved == {"banked"}
     queues.rollout_buffer.requeue(_generated_group("replacement", earliest_model_step=10))
 
-    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+    batch = await reader_for(trainer, queues).next_batch()
     assert [group.uid for group in batch] == ["banked", "replacement"]
 
 
@@ -685,4 +701,4 @@ async def test_batch_assembly_rejected_only_progress_terminates_instead_of_livel
     queues.rollout_buffer.requeue(_generated_group("always-masked", earliest_model_step=10, fully_masked=True))
 
     with pytest.raises(GroupAdmissionStalledError):
-        await trainer._get_admitted_generation_group_mini_batch(queues)
+        await reader_for(trainer, queues).next_batch()

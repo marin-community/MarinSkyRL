@@ -7,6 +7,7 @@ import io
 import uuid
 from collections import deque
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 import pyarrow as pa
@@ -15,7 +16,6 @@ from finestore.reader import ReadView
 from finestore.store import DataStore
 
 from marinskyrl.resource_locator import join_resource_path
-from skyrl_train.async_rollout_state import RolloutBufferBackend, RolloutBufferSnapshot
 from skyrl_train.trajectory_runners.types import TrajectoryBatch, TrajectoryRequestBatch
 
 
@@ -29,6 +29,20 @@ ROLLOUT_SCHEMA = pa.schema(
         pa.field("payload", pa.binary()),
     ]
 )
+
+
+class RolloutBufferBackend(StrEnum):
+    MEMORY = "memory"
+    FINESTORE = "finestore"
+
+
+@dataclass(frozen=True)
+class RolloutBufferSnapshot:
+    """Backend-owned state for pending work at a checkpoint boundary."""
+
+    backend: RolloutBufferBackend
+    pending_uids: tuple[str, ...]
+    state: object
 
 
 @dataclass
@@ -62,6 +76,12 @@ class RolloutRequest:
     kind: Literal["group", "batch"]
 
 
+class RolloutDataLoader(Protocol):
+    """Assign a rollout only after the producer obtains buffer capacity."""
+
+    async def next_assignment(self) -> RolloutRequest | None: ...
+
+
 @runtime_checkable
 class Rollout(Protocol):
     trajectory_batch: TrajectoryBatch
@@ -79,7 +99,7 @@ RolloutT = TypeVar("RolloutT", bound=Rollout)
 
 
 class RolloutWriter(Protocol[RolloutT]):
-    async def stage_rollout(self, rollout: RolloutT) -> RolloutReceipt: ...
+    async def write_rollout(self, rollout: RolloutT) -> RolloutReceipt: ...
 
 
 @dataclass(frozen=True)
@@ -169,7 +189,7 @@ class _MemoryWriter(Generic[RolloutT]):
     def __init__(self, buffer: MemoryRolloutBuffer[RolloutT]):
         self.buffer = buffer
 
-    async def stage_rollout(self, rollout: RolloutT) -> RolloutReceipt:
+    async def write_rollout(self, rollout: RolloutT) -> RolloutReceipt:
         rollout_id = rollout.rollout_id or uuid.uuid4().hex
         rollout.rollout_id = rollout_id
         self.buffer._staged[rollout_id] = rollout
@@ -256,7 +276,7 @@ class _FineStoreWriter(Generic[RolloutT]):
     def __init__(self, path: str):
         self.path = path
 
-    async def stage_rollout(self, rollout: RolloutT) -> RolloutReceipt:
+    async def write_rollout(self, rollout: RolloutT) -> RolloutReceipt:
         write = asyncio.create_task(asyncio.to_thread(self._commit, rollout))
         try:
             receipt = await asyncio.shield(write)

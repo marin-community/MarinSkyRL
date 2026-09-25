@@ -27,11 +27,11 @@ from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.rollout_buffer import RolloutBuffer, RolloutRequest, RolloutSlotPolicy, create_rollout_buffer
+from skyrl_train.rollout_pipeline import SynchronousCurriculum, SynchronousRolloutBuffer, SynchronousRolloutPipeline
 from skyrl_train.rollout_worker import bind_rollout_worker
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.trajectory_selection import trajectory_selector_from_config
 from skyrl_train.trajectory_runners.base import (
-    TrajectoryRequestBatch,
     TrajectoryBatch,
     TrajectoryRunner,
 )
@@ -39,7 +39,6 @@ import copy
 from skyrl_train.trajectory_runners.trajectory_processing import (
     combine_trajectory_batches_in_request_order,
     get_metrics_from_trajectory_batch,
-    prepare_trajectory_request,
     scalar_reward_token_credit,
     validate_trajectory_batch,
 )
@@ -79,7 +78,6 @@ from skyrl_train.draft_trainer import (
     create_draft_trainer,
     read_latest_draft_checkpoint,
 )
-from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.group_admission import (
     AdmissionProgressWatchdog,
     AdmissionRejection,
@@ -237,6 +235,7 @@ class RayPPOTrainer:
         self._checkpoint_save_failures = 0.0
         self._shutdown_complete = False
         self._rollout_buffer: RolloutBuffer | None = None
+        self._sync_rollout_pipeline: SynchronousRolloutPipeline | None = None
         self.global_step = 0
         self._last_saved_step: int | None = None
         self._pending_checkpoint_upload: tuple[asyncio.Task[tuple[float, float]], TrainerState] | None = None
@@ -558,6 +557,8 @@ class RayPPOTrainer:
             await self._train_loop()
         finally:
             try:
+                if self._sync_rollout_pipeline is not None:
+                    await self._sync_rollout_pipeline.stop()
                 await self.shutdown()
             finally:
                 await self._close_rollout_buffer()
@@ -578,30 +579,27 @@ class RayPPOTrainer:
             self._rollout_buffer = None
 
     @torch.no_grad()
-    async def generate_to_buffer(
-        self, trajectory_request: TrajectoryRequestBatch, uids: List[str], source_prompts: List[dict]
-    ) -> TrajectoryBatch:
-        """Schedule producers and read their completed work through the buffer."""
-        rollout_buffer = await self._open_rollout_buffer()
-        request = RolloutRequest(trajectory_request, source_prompts, uids, self.global_step, "batch")
-        worker = bind_rollout_worker(self.trajectory_runner, rollout_buffer)
-        completed = await worker.produce(request)
-        restored = await rollout_buffer.next_batch(completed)
-        for item in restored:
-            await worker.retain(item)
-        batches = [item.trajectory_batch for item in restored]
+    async def read_synchronous_rollout_batch(
+        self, buffer: SynchronousRolloutBuffer
+    ) -> tuple[TrajectoryBatch, RolloutRequest] | None:
+        """Wait for a complete curriculum batch and read only its buffered records."""
+        buffered = await buffer.next_batch()
+        if buffered is None:
+            return None
+        request = buffered.request
+        batches = [item.trajectory_batch for item in buffered.rollouts]
         trajectory_batch = combine_trajectory_batches_in_request_order(
             batches,
-            trajectory_request.get("trajectory_ids"),
+            request.trajectory_request.get("trajectory_ids"),
             require_rollout_logprobs=rollout_logprobs_enabled(self.cfg.trainer.algorithm),
             tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
         )
         if trajectory_batch.get("rollout_metrics") is not None:
             self.all_metrics.update(trajectory_batch["rollout_metrics"])
         if not self.cfg.trainer.step_wise_training:
-            validate_trajectory_batch(len(trajectory_request["prompts"]), trajectory_batch)
+            validate_trajectory_batch(len(request.trajectory_request["prompts"]), trajectory_batch)
         record_generated_work(trajectory_batch["response_ids"], trajectory_batch.get("is_last_step"), self.global_step)
-        return trajectory_batch
+        return trajectory_batch, request
 
     async def _startup_trajectory_runner(self) -> None:
         """Initialize trajectory-runner resources before any rollout can begin."""
@@ -1192,31 +1190,38 @@ class RayPPOTrainer:
         start_epoch = self.global_step // len(self.train_dataloader)
         last_completed_step = self.global_step
         self.global_step += 1  # start training at global_step 1
+        rollout_buffer = await self._open_rollout_buffer()
+        worker = bind_rollout_worker(self.trajectory_runner, rollout_buffer)
+        sync_buffer = SynchronousRolloutBuffer(rollout_buffer, worker.retain)
+        curriculum = SynchronousCurriculum(
+            self.train_dataloader,
+            epochs=self.cfg.trainer.epochs,
+            start_epoch=start_epoch,
+            select_prompts=self._prepare_sync_rollout_prompts,
+            samples_per_prompt=self.cfg.generator.n_samples_per_prompt,
+            backend=self.cfg.generator.backend,
+            sampling_params=self.cfg.generator.sampling_params,
+            environment_class=self.cfg.environment.env_class,
+            current_step=lambda: self.global_step,
+        )
+        self._sync_rollout_pipeline = SynchronousRolloutPipeline(curriculum, sync_buffer, worker)
+        self._sync_rollout_pipeline.start()
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
-            for iter, rand_prompts in enumerate(self.train_dataloader):
+            while True:
                 with Timer("step", self.all_timings) as step_timer:
                     # for colocate_all=true, inference engine is always on GPU when starting the training step
-
-                    # 0. select ordered prompts and truncate complete batches to even shards
-                    rand_prompts = self._select_sync_generation_prompts(rand_prompts)
-                    if self.group_admission_state is None:
-                        rand_prompts = self._remove_tail_data(rand_prompts)
-                    trajectory_request, uids = prepare_trajectory_request(
-                        rand_prompts,
-                        self.cfg.generator.n_samples_per_prompt,
-                        get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
-                        self.cfg.environment.env_class,
-                        "train",
-                        self.global_step,
-                    )
-
-                    # 1.1 generation phase
                     await self._begin_speculator_capture()
+                    sync_buffer.open_slot()
                     with (
                         Timer("generate", self.all_timings),
                         critical_phase("rollout_or_inference_wait", self.global_step),
                     ):
-                        trajectory_batch = await self.generate_to_buffer(trajectory_request, uids, rand_prompts)
+                        rollout_result = await self.read_synchronous_rollout_batch(sync_buffer)
+                    if rollout_result is None:
+                        break
+                    trajectory_batch, rollout_request = rollout_result
+                    trajectory_request = rollout_request.trajectory_request
+                    uids = rollout_request.uids
 
                     if self.cfg.trainer.step_wise_training:
                         # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
@@ -1230,6 +1235,7 @@ class RayPPOTrainer:
                     uids = admission.uids
                     if admission.keep_sampling:
                         pbar.update(1)
+                        sync_buffer.acknowledge()
                         continue
 
                     # dynamic sampling
@@ -1240,6 +1246,7 @@ class RayPPOTrainer:
                         if dynamic_sampling.keep_sampling:
                             # update progress bar for current batch (but not global step)
                             pbar.update(1)
+                            sync_buffer.acknowledge()
                             continue
 
                     await self._seal_speculator_capture()
@@ -1380,6 +1387,8 @@ class RayPPOTrainer:
                     logger.info("Training stopped early by callback")
                     break
 
+                sync_buffer.acknowledge()
+
             # Call on_epoch_end callbacks
             epoch_state = self._create_trainer_state(epoch=epoch)
             self._control.reset()
@@ -1393,6 +1402,9 @@ class RayPPOTrainer:
             if self._control.should_training_stop:
                 logger.info("Training stopped early by callback at epoch end")
                 break
+
+            if epoch + 1 < self.cfg.trainer.epochs:
+                sync_buffer.acknowledge_epoch()
 
         # End of training
         pbar.close()
@@ -1423,6 +1435,12 @@ class RayPPOTrainer:
         selected = available[:request_count]
         self._pending_sync_prompts = available[request_count:]
         return selected
+
+    def _prepare_sync_rollout_prompts(self, entries: List[dict]) -> List[dict]:
+        prompts = self._select_sync_generation_prompts(entries)
+        if self.group_admission_state is None:
+            prompts = self._remove_tail_data(prompts)
+        return prompts
 
     def build_models(self, PolicyWorker, CriticWorker, RefWorker, policy_pg: Optional[PlacementGroup] = None):
         """

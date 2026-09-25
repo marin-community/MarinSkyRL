@@ -12,7 +12,6 @@ High-level notes:
 """
 
 import asyncio
-import collections
 import os
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from loguru import logger
@@ -25,112 +24,39 @@ from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader
 from skyrl_train.utils.logging_utils import log_exception_as_text
-from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches, get_outcome_rewards
-from skyrl_train.trajectory_runners.trajectory_reward_shaping import NormalizedReward
-from dataclasses import dataclass, field
+from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
+from dataclasses import dataclass
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpointCallback
 from torchdata.stateful_dataloader import StatefulDataLoader
-from typing import List, Literal, Tuple, TypeVar
+from typing import List, Literal, Tuple
 from skyrl_train.telemetry import (
     critical_phase,
-    record_generated_work,
     record_policy_step,
     record_rollout_staleness,
 )
 from skyrl_train.timing_observability import publish_step_timings
-from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
-from skyrl_train.rollout_buffer import RolloutBuffer
+from skyrl_train.async_rollout_state import GeneratedOutputGroup
+from skyrl_train.async_rollout_buffer import AsynchronousRolloutBuffer, _GenerationQueues
 from skyrl_train.rollout_worker import (
     AsyncRolloutTaskSource,
     AsyncRolloutWorkerPool,
-    GenerationStalledError,
     bind_rollout_worker,
 )
 from skyrl_train.io import io
 from skyrl_train.dynamic_sampling import (
     DynamicSamplingType,
     GroupSelectionPolicy,
-    GroupSelectionResult,
     resolve_dynamic_sampling_criteria,
 )
 from skyrl_train.distillation_adapters import AsyncRoutedTeacherScoreTicket, RoutedScoredDistillationBatch
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC
 from skyrl_train.distillation_runtime import AsyncDistillationRuntime
 from skyrl_train.group_admission import (
-    AdmissionAction,
-    AdmissionDecision,
     AdmissionProgressWatchdog,
-    AdmissionRejection,
     GroupAdmissionPolicy,
-    GroupAdmissionStalledError,
-    TrainingGroupInvariantError,
 )
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
-
-
-_QueueItem = TypeVar("_QueueItem")
-
-
-def _drain_queue(queue: asyncio.Queue[_QueueItem]) -> List[_QueueItem]:
-    """Remove available items without yielding."""
-    items = []
-    while True:
-        try:
-            items.append(queue.get_nowait())
-        except asyncio.QueueEmpty:
-            return items
-    return items
-
-
-@dataclass
-class _GenerationQueues:
-    rollout_buffer: RolloutBuffer[GeneratedOutputGroup]
-    retries: asyncio.Queue[List[dict]]
-    condition: asyncio.Condition
-    active_producers: int = 0
-    admitted_groups: List[GeneratedOutputGroup] = field(default_factory=list)
-    admitted_groups_consumed: bool = False
-
-    async def mark_producer_finished(self) -> None:
-        """Wake admission when a generation worker permanently exits."""
-        async with self.condition:
-            if self.active_producers <= 0:
-                raise RuntimeError("generation producer accounting underflow")
-            self.active_producers -= 1
-            self.condition.notify_all()
-
-    def record_admitted(self, groups: List[GeneratedOutputGroup]) -> None:
-        """Retain newly admitted groups until the step crosses its checkpoint boundary."""
-        if self.admitted_groups_consumed:
-            raise RuntimeError("cannot admit another group before clearing the consumed batch")
-        self.admitted_groups.extend(groups)
-
-    def mark_admitted_consumed(self) -> None:
-        """Keep the trained batch available only to a final previous-checkpoint flush."""
-        if not self.admitted_groups:
-            raise RuntimeError("cannot consume an empty admitted batch")
-        self.admitted_groups_consumed = True
-
-    def clear_admitted(self) -> None:
-        """Release the prior step's admitted groups before assembling the next step."""
-        self.admitted_groups.clear()
-        self.admitted_groups_consumed = False
-
-    def snapshot(self) -> GenerationBufferState:
-        """Copy queued and admitted work without yielding to another event-loop task."""
-        admitted = [] if self.admitted_groups_consumed else list(self.admitted_groups)
-        return self._snapshot(admitted)
-
-    def shutdown_snapshot(self) -> GenerationBufferState:
-        """Copy all work needed to recover from shutdown before the next checkpoint."""
-        return self._snapshot(list(self.admitted_groups))
-
-    def _snapshot(self, admitted_groups: List[GeneratedOutputGroup]) -> GenerationBufferState:
-        retries = _drain_queue(self.retries)
-        for prompts in retries:
-            self.retries.put_nowait(prompts)
-        return GenerationBufferState(self.rollout_buffer.snapshot(), retries, admitted_groups)
 
 
 @dataclass
@@ -153,63 +79,6 @@ class _RolloutStat:
     submitted: int = 0
     accepted: int = 0
     running: int = 0
-
-
-@dataclass
-class _AdmissionPartition:
-    accepted_groups: List[GeneratedOutputGroup]
-    rejected_groups: List[tuple[GeneratedOutputGroup, AdmissionDecision]]
-    discarded_groups: List[tuple[GeneratedOutputGroup, AdmissionDecision]]
-
-
-@dataclass
-class _DynamicSamplingCandidateMetrics:
-    group_count: int = 0
-    trajectory_count: int = 0
-    optimization_reward_sum: float = 0.0
-    outcome_reward_sum: float = 0.0
-    passed_group_count: int = 0
-    samples_per_group: int | None = None
-
-    def observe(self, batch: TrajectoryBatch) -> None:
-        rewards = batch["rewards"]
-        outcomes = get_outcome_rewards(batch)
-        group_size = len(outcomes)
-        if self.samples_per_group is None:
-            self.samples_per_group = group_size
-        elif self.samples_per_group != group_size:
-            raise ValueError(
-                "dynamic sampling candidates must have a consistent physical group size: "
-                f"got {self.samples_per_group} and {group_size}"
-            )
-        self.group_count += 1
-        self.trajectory_count += group_size
-        self.optimization_reward_sum += sum(NormalizedReward.from_output(reward).total for reward in rewards)
-        self.outcome_reward_sum += sum(outcomes)
-        self.passed_group_count += int(any(reward > 0.0 for reward in outcomes))
-
-    def merge(self, other: "_DynamicSamplingCandidateMetrics") -> None:
-        if other.samples_per_group is not None:
-            if self.samples_per_group is None:
-                self.samples_per_group = other.samples_per_group
-            elif self.samples_per_group != other.samples_per_group:
-                raise ValueError(
-                    "dynamic sampling candidates changed physical group size within a training step: "
-                    f"got {self.samples_per_group} and {other.samples_per_group}"
-                )
-        self.group_count += other.group_count
-        self.trajectory_count += other.trajectory_count
-        self.optimization_reward_sum += other.optimization_reward_sum
-        self.outcome_reward_sum += other.outcome_reward_sum
-        self.passed_group_count += other.passed_group_count
-
-
-@dataclass
-class _CandidateSelection:
-    admitted_groups: List[GeneratedOutputGroup]
-    surplus_groups: List[GeneratedOutputGroup]
-    discarded_reasons: collections.Counter[str]
-    candidate_metrics: _DynamicSamplingCandidateMetrics
 
 
 class _AsyncStalenessManager:
@@ -508,9 +377,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Tracked at instance level so the finally block in train() can cancel
         # them even when an exception skips the per-epoch epilogue.
         self._active_trajectory_tasks: List[asyncio.Task] = []
-        self._groups_rejected_since_step = 0
-        self._rejection_reasons_since_step: collections.Counter[str] = collections.Counter()
-        self._groups_inspected_since_step = 0
         self._async_distillation_runtime: AsyncDistillationRuntime | None = None
         self._async_distillation_tickets: dict[str, AsyncRoutedTeacherScoreTicket] = {}
 
@@ -792,6 +658,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 worker, source, self.num_parallel_generation_workers, generation_queues.mark_producer_finished
             ).start()
             trajectory_tasks = self._active_trajectory_tasks
+            admission_buffer = AsynchronousRolloutBuffer(
+                generation_queues,
+                mini_batch_size=self.mini_batch_size,
+                admission_policy=self._group_admission_policy,
+                selection_policy=self._group_selection_policy,
+                max_candidate_groups=self._dynamic_sampling_max_candidate_groups,
+                max_sample_batches=self._dynamic_sampling_max_sample_batches,
+                current_step=lambda: self.global_step,
+                consumed_uids=self.data_tracker.get_consumed_uids_in_epoch,
+                step_time_history=self._step_time_history,
+                stall_timeout=self.group_admission_stall_timeout,
+                on_admitted=self._submit_admitted_groups_for_teacher_scoring,
+                on_discarded=self._staleness_manager.on_rollouts_discarded,
+                retain=worker.retain,
+                metrics=lambda: self.all_metrics,
+            )
 
             for _ in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 with Timer("step", self.all_timings) as step_timer:
@@ -805,9 +687,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         Timer("wait_for_generation_buffer", self.all_timings) as rollout_wait_timer,
                         critical_phase("rollout_or_inference_wait", self.global_step),
                     ):
-                        cur_generation_group_mini_batch = await self._get_admitted_generation_group_mini_batch(
-                            generation_queues,
-                        )
+                        cur_generation_group_mini_batch = await admission_buffer.next_batch()
 
                     scored_distillation = None
                     if self._async_distillation_runtime is not None:
@@ -1161,105 +1041,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         refs = self.policy_model.async_run_ray_method("pass_through", "barrier_all")
         await asyncio.gather(*refs)
 
-    def _record_admission_scan(
-        self,
-        rejected_groups: List[tuple[GeneratedOutputGroup, AdmissionDecision]],
-        *,
-        inspected_count: int,
-    ) -> None:
-        self._groups_rejected_since_step += len(rejected_groups)
-        for _, decision in rejected_groups:
-            assert decision.primary_rejection is not None
-            self._rejection_reasons_since_step[decision.primary_rejection.value] += 1
-        self._groups_inspected_since_step += inspected_count
-
-    def _partition_completed_groups(
-        self, completed_groups: List[GeneratedOutputGroup], occupied_uids: set[str]
-    ) -> _AdmissionPartition:
-        """Evaluate completed work and select at most one representative per UID."""
-        decisions = [
-            self._group_admission_policy.evaluate(group, global_step=self.global_step) for group in completed_groups
-        ]
-        selected_index_by_uid: dict[str, int] = {}
-        for index, (group, decision) in enumerate(zip(completed_groups, decisions, strict=True)):
-            if group.uid in occupied_uids:
-                continue
-            selected_index = selected_index_by_uid.get(group.uid)
-            if selected_index is None or (decision.accepted and not decisions[selected_index].accepted):
-                selected_index_by_uid[group.uid] = index
-
-        duplicate_decision = AdmissionDecision((AdmissionRejection.DUPLICATE_UID,))
-        accepted_groups = []
-        rejected_groups = []
-        discarded_groups = []
-        for index, (group, decision) in enumerate(zip(completed_groups, decisions, strict=True)):
-            if group.uid in occupied_uids or selected_index_by_uid[group.uid] != index:
-                discarded_groups.append((group, duplicate_decision))
-            elif decision.accepted:
-                accepted_groups.append(group)
-            else:
-                rejected_groups.append((group, decision))
-        return _AdmissionPartition(
-            accepted_groups=accepted_groups,
-            rejected_groups=rejected_groups,
-            discarded_groups=discarded_groups,
-        )
-
-    def _publish_admission_metrics(
-        self,
-        *,
-        dynamic_candidate_metrics: _DynamicSamplingCandidateMetrics,
-        dynamic_discarded_count: int,
-    ) -> None:
-        rejected = self._groups_rejected_since_step
-        inspected = self._groups_inspected_since_step
-        assert inspected > 0, "An admitted training batch requires at least one inspected completed group"
-        reason_counts = self._rejection_reasons_since_step
-        self._groups_rejected_since_step = 0
-        self._rejection_reasons_since_step = collections.Counter()
-        self._groups_inspected_since_step = 0
-        metrics = {
-            "async/rejected_count": rejected,
-            "async/rejected_rate": rejected / inspected,
-        }
-        if self._dynamic_sampling_type is DynamicSamplingType.FILTER:
-            candidate_count = dynamic_candidate_metrics.group_count
-            trajectory_count = dynamic_candidate_metrics.trajectory_count
-            assert candidate_count > 0 and trajectory_count > 0
-            metrics.update(
-                {
-                    "async/dynamic_sampling/candidate_count": candidate_count,
-                    "async/dynamic_sampling/discarded_count": dynamic_discarded_count,
-                    "async/dynamic_sampling/discarded_rate": (dynamic_discarded_count / candidate_count),
-                    "async/dynamic_sampling/candidate_trajectory_count": trajectory_count,
-                    "async/dynamic_sampling/candidate_optimization_reward_mean": (
-                        dynamic_candidate_metrics.optimization_reward_sum / trajectory_count
-                    ),
-                    "async/dynamic_sampling/candidate_outcome_reward_mean": (
-                        dynamic_candidate_metrics.outcome_reward_sum / trajectory_count
-                    ),
-                }
-            )
-            assert dynamic_candidate_metrics.samples_per_group is not None
-            metrics[f"async/dynamic_sampling/candidate_pass_at_{dynamic_candidate_metrics.samples_per_group}"] = (
-                dynamic_candidate_metrics.passed_group_count / candidate_count
-            )
-        metrics.update(
-            {f"async/rejected_count/{reason.value}": reason_counts[reason.value] for reason in AdmissionRejection}
-        )
-        self.all_metrics.update(metrics)
-        if rejected:
-            logger.warning(
-                f"Rejected {rejected} completed groups before step {self.global_step}; "
-                f"reasons={dict(reason_counts)}. Waiting produced a full "
-                f"{self.mini_batch_size}-group replacement batch."
-            )
-        if dynamic_discarded_count:
-            logger.info(
-                f"Dynamic sampling discarded {dynamic_discarded_count} of {candidate_count} "
-                f"candidate groups before step {self.global_step}."
-            )
-
     def _generation_stall_timeout(self) -> float:
         """Adaptive deadline for receiving new groups during a generation wait.
 
@@ -1272,184 +1053,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             recent_step_times=self._step_time_history,
             timeout_override=self.group_admission_stall_timeout,
         ).timeout
-
-    def _raise_admission_stall(
-        self,
-        elapsed: float,
-        rejection_counts: collections.Counter[str],
-        *,
-        active_producers: int,
-    ) -> None:
-        """Bound a step that has admitted no new groups, even if producer tasks remain alive."""
-        raise GroupAdmissionStalledError(
-            f"Generation stalled: no groups admitted for {elapsed:.0f}s; "
-            f"active_producers={active_producers}, "
-            f"rejected_completions={dict(rejection_counts)}"
-        )
-
-    def _select_dynamic_sampling_candidates(
-        self,
-        candidates: List[GeneratedOutputGroup],
-        *,
-        available_slots: int,
-    ) -> _CandidateSelection:
-        admitted_groups = []
-        discarded_reasons: collections.Counter[str] = collections.Counter()
-        candidate_metrics = _DynamicSamplingCandidateMetrics()
-
-        for candidate_index, group in enumerate(candidates):
-            if len(admitted_groups) >= available_slots:
-                return _CandidateSelection(
-                    admitted_groups=admitted_groups,
-                    surplus_groups=candidates[candidate_index:],
-                    discarded_reasons=discarded_reasons,
-                    candidate_metrics=candidate_metrics,
-                )
-
-            selection_result = self._group_selection_policy.evaluate(group)
-            if self._dynamic_sampling_type is DynamicSamplingType.FILTER:
-                candidate_metrics.observe(group.trajectory_batch)
-            if selection_result is GroupSelectionResult.KEEP:
-                admitted_groups.append(group)
-            else:
-                discarded_reasons[selection_result.value] += 1
-
-        return _CandidateSelection(
-            admitted_groups=admitted_groups,
-            surplus_groups=[],
-            discarded_reasons=discarded_reasons,
-            candidate_metrics=candidate_metrics,
-        )
-
-    async def _get_admitted_generation_group_mini_batch(self, queues: _GenerationQueues) -> List[GeneratedOutputGroup]:
-        """Discard or retry rejected groups and wait for a full admitted mini-batch.
-
-        Raises:
-            GroupAdmissionStalledError: Live producers make no admission progress before the shared deadline.
-            GenerationStalledError: The finite source is exhausted before a complete batch is assembled.
-            RuntimeError: Dynamic sampling exhausts its per-step candidate budget.
-        """
-        if queues.admitted_groups_consumed:
-            raise RuntimeError("cannot assemble a new batch before clearing the previously consumed batch")
-        accepted_groups = queues.admitted_groups
-        loop = asyncio.get_event_loop()
-        last_admitted_progress = loop.time()
-        watchdog = AdmissionProgressWatchdog.start(
-            now=last_admitted_progress,
-            recent_step_times=self._step_time_history,
-            timeout_override=self.group_admission_stall_timeout,
-        )
-        rejection_counts_since_admission: collections.Counter[str] = collections.Counter()
-        dynamic_candidate_metrics = _DynamicSamplingCandidateMetrics()
-        dynamic_discarded_count = 0
-        await self._submit_admitted_groups_for_teacher_scoring(accepted_groups)
-
-        while True:
-            async with queues.condition:
-                while len(accepted_groups) < self.mini_batch_size and queues.rollout_buffer.empty():
-                    if queues.active_producers == 0:
-                        raise GenerationStalledError(
-                            "Generation exhausted its dataset before assembling a complete training batch: "
-                            f"admitted={len(accepted_groups)}/{self.mini_batch_size}, "
-                            f"dynamic_candidates={dynamic_candidate_metrics.group_count}, "
-                            f"dynamic_discarded={dynamic_discarded_count}, "
-                            f"rejections={dict(rejection_counts_since_admission)}"
-                        )
-                    now = loop.time()
-                    elapsed = watchdog.elapsed(now=now)
-                    remaining = watchdog.remaining(now=now)
-                    if remaining <= 0:
-                        self._raise_admission_stall(
-                            elapsed,
-                            rejection_counts_since_admission,
-                            active_producers=queues.active_producers,
-                        )
-                    try:
-                        await asyncio.wait_for(queues.condition.wait(), timeout=remaining)
-                    except asyncio.TimeoutError:
-                        self._raise_admission_stall(
-                            watchdog.elapsed(now=loop.time()),
-                            rejection_counts_since_admission,
-                            active_producers=queues.active_producers,
-                        )
-
-                completed_groups = await queues.rollout_buffer.next_batch(self.mini_batch_size)
-                for group in completed_groups:
-                    await bind_rollout_worker(self.trajectory_runner, queues.rollout_buffer).retain(group)
-                    batch = group.trajectory_batch
-                    record_generated_work(batch["response_ids"], batch.get("is_last_step"), group.earliest_model_step)
-                partition = self._partition_completed_groups(
-                    completed_groups,
-                    occupied_uids={group.uid for group in accepted_groups}
-                    | self.data_tracker.get_consumed_uids_in_epoch(),
-                )
-                for group, decision in partition.rejected_groups:
-                    if decision.action is AdmissionAction.RETRY_PROMPT:
-                        queues.retries.put_nowait(group.source_prompts)
-                    elif decision.action is AdmissionAction.FAIL:
-                        raise TrainingGroupInvariantError.from_generated_group(
-                            uid=group.uid,
-                            group=group,
-                            decision=decision,
-                            invariant=self._group_admission_policy.invariant,
-                        )
-                    assert decision.primary_rejection is not None
-                    rejection_counts_since_admission[decision.primary_rejection.value] += 1
-
-                selection = self._select_dynamic_sampling_candidates(
-                    partition.accepted_groups,
-                    available_slots=self.mini_batch_size - len(accepted_groups),
-                )
-                queues.record_admitted(selection.admitted_groups)
-                dynamic_candidate_metrics.merge(selection.candidate_metrics)
-                dynamic_discarded_this_scan = sum(selection.discarded_reasons.values())
-                dynamic_discarded_count += dynamic_discarded_this_scan
-                rejection_counts_since_admission.update(selection.discarded_reasons)
-
-                for group in selection.surplus_groups:
-                    queues.rollout_buffer.requeue(group)
-
-                if selection.admitted_groups:
-                    watchdog.observe(now=loop.time(), progressed=True)
-                    rejection_counts_since_admission.clear()
-
-                if len(accepted_groups) >= self.mini_batch_size:
-                    batch = accepted_groups[: self.mini_batch_size]
-                else:
-                    batch = None
-                queues.condition.notify_all()
-
-            await self._submit_admitted_groups_for_teacher_scoring(selection.admitted_groups)
-
-            self._record_admission_scan(
-                partition.rejected_groups + partition.discarded_groups,
-                inspected_count=len(completed_groups),
-            )
-            discarded_count = (
-                len(partition.rejected_groups) + len(partition.discarded_groups) + dynamic_discarded_this_scan
-            )
-            if discarded_count:
-                await self._staleness_manager.on_rollouts_discarded(discarded_count)
-
-            if (
-                batch is None
-                and self._dynamic_sampling_max_candidate_groups is not None
-                and dynamic_candidate_metrics.group_count >= self._dynamic_sampling_max_candidate_groups
-            ):
-                raise RuntimeError(
-                    "Exiting training loop due to hitting dynamic sampling limit for filter strategy with "
-                    f"{self._dynamic_sampling_max_sample_batches} max sample batches. "
-                    f"Collected {len(accepted_groups)} of {self.mini_batch_size} required groups."
-                )
-
-            if batch is not None:
-                break
-
-        self._publish_admission_metrics(
-            dynamic_candidate_metrics=dynamic_candidate_metrics,
-            dynamic_discarded_count=dynamic_discarded_count,
-        )
-        return batch
 
     def _group_for_teacher_scoring(self, group: GeneratedOutputGroup) -> TrajectoryBatch:
         """Apply the learner's row selector without duplicating its metric side effects."""

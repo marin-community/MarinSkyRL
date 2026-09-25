@@ -32,7 +32,7 @@ class _RemoteMethod:
 @ray.remote
 def _stage_in_process_isolated_worker(writer):
     rollout = SynchronousRollout(_output([TrajectoryID("remote", 0)]), ["remote"], [{"uid": "remote"}], 3)
-    return asyncio.run(writer.stage_rollout(rollout))
+    return asyncio.run(writer.write_rollout(rollout))
 
 
 class _Coordinator:
@@ -168,7 +168,7 @@ async def test_dispatcher_partitions_complete_groups_and_restores_request_order(
 async def test_dispatcher_returns_only_buffer_receipts_for_training(tmp_path, harbor_runner_spec):
     async def produce(request, writer):
         assert request.kind == "batch"
-        return await writer.stage_rollout(
+        return await writer.write_rollout(
             SynchronousRollout(
                 _output(request.trajectory_request["trajectory_ids"]),
                 request.uids,

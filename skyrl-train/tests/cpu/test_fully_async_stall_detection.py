@@ -12,12 +12,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from .async_rollout_fixtures import reader_for
 from skyrl_train.rollout_buffer import MemoryRolloutBuffer
 from skyrl_train.fully_async_trainer import (
     FullyAsyncRayPPOTrainer,
-    GenerationStalledError,
     _GenerationQueues,
 )
+from skyrl_train.rollout_worker import GenerationStalledError
 from skyrl_train.async_rollout_state import GeneratedOutputGroup
 from skyrl_train.dynamic_sampling import GroupSelectionPolicy
 from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdmissionStalledError, GroupAdvantageInvariant
@@ -88,7 +89,7 @@ async def test_admission_stall_timeout_stops_live_but_unproductive_generators(hi
     trainer = _bare_trainer(step_times=history, tasks=[alive_task], admission_stall_timeout=21_600)
     try:
         with pytest.raises(GroupAdmissionStalledError, match="active_producers=1"):
-            trainer._raise_admission_stall(
+            reader_for(trainer, _make_queues())._raise_admission_stall(
                 elapsed=21_600.0,
                 rejection_counts=collections.Counter(),
                 active_producers=1,
@@ -109,7 +110,7 @@ async def test_get_admitted_batch_raises_when_generators_dead():
     queues = _make_queues()
 
     with pytest.raises(GenerationStalledError, match="admitted=0/2"):
-        await trainer._get_admitted_generation_group_mini_batch(queues)
+        await reader_for(trainer, queues).next_batch()
 
 
 @pytest.mark.asyncio
@@ -118,7 +119,7 @@ async def test_get_admitted_batch_stops_when_last_producer_exhausts_dataset():
     trainer.group_admission_stall_timeout = 21_600
     queues = _make_queues(active_producers=1)
 
-    admission = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
+    admission = asyncio.create_task(reader_for(trainer, queues).next_batch())
     await queues.mark_producer_finished()
 
     with pytest.raises(GenerationStalledError, match="admitted=0/2"):
@@ -147,5 +148,5 @@ async def test_get_admitted_batch_returns_complete_group_set():
             )
         )
 
-    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+    batch = await reader_for(trainer, queues).next_batch()
     assert len(batch) == 2

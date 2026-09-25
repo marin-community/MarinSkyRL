@@ -10,7 +10,14 @@ from skyrl_train.async_rollout_state import GeneratedOutputGroup
 from skyrl_train.callbacks.builtin import BufferCheckpointCallback
 from skyrl_train.fully_async_trainer import _AsyncStalenessManager, _GenerationQueues
 from skyrl_train.rollout_buffer import FineStoreRolloutBuffer, MemoryRolloutBuffer, RolloutRequest
-from skyrl_train.rollout_worker import AsyncRolloutWorkerPool, GenerationStalledError, LocalRolloutWorker, RolloutWorker
+from skyrl_train.rollout_pipeline import SynchronousRolloutBuffer, SynchronousRolloutPipeline
+from skyrl_train.rollout_worker import (
+    AsyncRolloutWorkerPool,
+    GenerationStalledError,
+    LocalRolloutWorker,
+    RolloutWorker,
+    bind_rollout_worker,
+)
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
 
@@ -39,7 +46,7 @@ def test_detached_writer_returns_receipt_without_trajectory_payload(tmp_path):
         buffer = FineStoreRolloutBuffer(str(tmp_path / "remote"))
         try:
             writer = pickle.loads(pickle.dumps(buffer.remote_writer()))
-            receipt = await writer.stage_rollout(_group("remote"))
+            receipt = await writer.write_rollout(_group("remote"))
             assert receipt.uids == ("remote",)
             assert buffer.empty()
             buffer.publish(receipt)
@@ -56,7 +63,7 @@ def test_detached_writers_commit_concurrently(tmp_path):
         try:
             writers = [pickle.loads(pickle.dumps(buffer.remote_writer())) for _ in range(8)]
             receipts = await asyncio.gather(
-                *(writer.stage_rollout(_group(str(index))) for index, writer in enumerate(writers))
+                *(writer.write_rollout(_group(str(index))) for index, writer in enumerate(writers))
             )
             for receipt in receipts:
                 buffer.publish(receipt)
@@ -107,14 +114,15 @@ def test_continuous_workers_publish_fast_group_before_straggler_finishes():
                     published.set()
 
         buffer = Buffer()
-        requests = iter(RolloutRequest({}, [], [uid], 1, "group") for uid in ("slow", "fast"))
+        prompts = iter(([{"uid": uid}] for uid in ("slow", "fast")))
 
         class Source:
-            async def next_request(self):
+            async def next_assignment(self):
                 try:
-                    return next(requests)
+                    group = next(prompts)
                 except StopIteration as error:
                     raise GenerationStalledError("source exhausted") from error
+                return RolloutRequest({}, group, [group[0]["uid"]], 1, "group")
 
         class Executor:
             async def produce(self, request, disable_tqdm=False):
@@ -122,7 +130,7 @@ def test_continuous_workers_publish_fast_group_before_straggler_finishes():
                 if uid == "slow":
                     slow_started.set()
                     await release_slow.wait()
-                return [await buffer.writer().stage_rollout(_group(uid))]
+                return [await buffer.writer().write_rollout(_group(uid))]
 
             async def retain(self, rollout):
                 pass
@@ -151,7 +159,7 @@ def test_buffer_contract_preserves_order_and_evidence_across_snapshot(tmp_path, 
     async def exercise():
         buffer = open_buffer(tmp_path / "original")
         for uid in ("fast", "slow", "later"):
-            buffer.publish(await buffer.writer().stage_rollout(_group(uid)))
+            buffer.publish(await buffer.writer().write_rollout(_group(uid)))
         snapshot = buffer.snapshot()
         assert snapshot.pending_uids == ("fast", "slow", "later")
         buffer.close()
@@ -183,7 +191,7 @@ def test_checkpoint_roundtrip_uses_opaque_buffer_snapshot(tmp_path, backend):
         callback.bind_queues(queues)
         checkpoint = tmp_path / "global_step_1"
         checkpoint.mkdir()
-        queues.rollout_buffer.publish(await queues.rollout_buffer.writer().stage_rollout(_group("pending")))
+        queues.rollout_buffer.publish(await queues.rollout_buffer.writer().write_rollout(_group("pending")))
         trainer = SimpleNamespace(cfg=SimpleNamespace(trainer=SimpleNamespace(ckpt_path=str(tmp_path))))
         await callback.on_save_async(SimpleNamespace(global_step=1), SimpleNamespace(), trainer=trainer)
         buffer.close()
@@ -213,7 +221,7 @@ def test_off_policy_workers_can_keep_producing_while_trainer_step_waits(tmp_path
         )
         for index in range(3):
             async with asyncio.timeout(1), buffer.request_slot() as slot:
-                await slot.publish(await buffer.writer().stage_rollout(_group(str(index))))
+                await slot.publish(await buffer.writer().write_rollout(_group(str(index))))
         pending = list(buffer.snapshot().pending_uids)
         buffer.close()
         return pending
@@ -231,14 +239,14 @@ def test_on_policy_slot_waits_for_next_training_step(tmp_path, backend):
             else FineStoreRolloutBuffer(str(tmp_path / "rollouts"), capacity=1, slot_policy=policy)
         )
         async with buffer.request_slot() as slot:
-            await slot.publish(await buffer.writer().stage_rollout(_group("first")))
+            await slot.publish(await buffer.writer().write_rollout(_group("first")))
         with pytest.raises(asyncio.TimeoutError):
             async with asyncio.timeout(0.01), buffer.request_slot():
                 pass
         assert [group.uid for group in await buffer.next_batch(1)] == ["first"]
         await policy.notify_capacity_change(2)
         async with asyncio.timeout(1), buffer.request_slot() as slot:
-            await slot.publish(await buffer.writer().stage_rollout(_group("second")))
+            await slot.publish(await buffer.writer().write_rollout(_group("second")))
         buffer.close()
 
     asyncio.run(exercise())
@@ -266,14 +274,35 @@ def test_synchronous_trainer_uses_buffer_contract(tmp_path, backend):
         trainer._rollout_buffer = None
         trainer.all_metrics = {}
         trainer.trajectory_runner = Producer()
+        request = RolloutRequest(
+            {"prompts": ["example"], "trajectory_ids": None}, [{"uid": "example"}], ["example"], 7, "batch"
+        )
+
+        class Curriculum:
+            def __init__(self):
+                self.sent = False
+
+            async def next_assignment(self):
+                if self.sent:
+                    return None
+                self.sent = True
+                return request
+
         try:
-            batch = await trainer.generate_to_buffer(
-                {"prompts": ["example"], "trajectory_ids": None}, ["example"], [{"uid": "example"}]
-            )
+            storage = await trainer._open_rollout_buffer()
+            worker = bind_rollout_worker(trainer.trajectory_runner, storage)
+            buffer = SynchronousRolloutBuffer(storage, worker.retain)
+            pipeline = SynchronousRolloutPipeline(Curriculum(), buffer, worker)
+            pipeline.start()
+            buffer.open_slot()
+            result = await trainer.read_synchronous_rollout_batch(buffer)
+            assert result is not None
+            batch, _ = result
             assert batch == original
             if backend == "finestore":
                 assert batch is not original
         finally:
+            await pipeline.stop()
             if trainer._rollout_buffer is not None:
                 trainer._rollout_buffer.close()
 

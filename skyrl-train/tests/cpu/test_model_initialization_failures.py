@@ -47,6 +47,7 @@ async def test_startup_failure_still_runs_trainer_shutdown():
     trainer = object.__new__(RayPPOTrainer)
     trainer._shutdown_complete = False
     trainer._rollout_buffer = None
+    trainer._sync_rollout_pipeline = None
 
     async def fail_startup():
         events.append("startup")

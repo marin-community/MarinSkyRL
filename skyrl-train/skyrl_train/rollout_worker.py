@@ -14,6 +14,7 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.rollout_buffer import (
     Rollout,
     RolloutBuffer,
+    RolloutDataLoader,
     RolloutReceipt,
     RolloutRequest,
     RolloutSlot,
@@ -32,10 +33,6 @@ class GenerationStalledError(RuntimeError):
 
 class RolloutTaskDataLoader(Protocol):
     async def get_next_non_consumed_data(self) -> list[dict] | None: ...
-
-
-class RolloutRequestSource(Protocol):
-    async def next_request(self) -> RolloutRequest: ...
 
 
 class AsyncRolloutTaskSource:
@@ -62,18 +59,22 @@ class AsyncRolloutTaskSource:
         self.current_step = current_step
         self.stall_timeout = stall_timeout
 
-    async def next_request(self) -> RolloutRequest:
+    async def next_prompts(self) -> list[dict]:
         try:
-            prompts = self.retries.get_nowait()
+            return self.retries.get_nowait()
         except asyncio.QueueEmpty:
             prompts = await self.dataloader.get_next_non_consumed_data()
-            if prompts is None:
-                try:
-                    prompts = await asyncio.wait_for(self.retries.get(), timeout=self.stall_timeout())
-                except asyncio.TimeoutError as error:
-                    raise GenerationStalledError(
-                        "Dataset exhausted and no retries arrived within the stall deadline"
-                    ) from error
+            if prompts is not None:
+                return prompts
+        try:
+            return await asyncio.wait_for(self.retries.get(), timeout=self.stall_timeout())
+        except asyncio.TimeoutError as error:
+            raise GenerationStalledError(
+                "Dataset exhausted and no retries arrived within the stall deadline"
+            ) from error
+
+    async def next_assignment(self) -> RolloutRequest:
+        prompts = await self.next_prompts()
         step = self.current_step()
         trajectory_request, uids = prepare_trajectory_request(
             prompts,
@@ -95,7 +96,7 @@ class RolloutExecutor(Protocol):
 
 
 class RolloutWorker:
-    """Own the lease and publish a producer's committed work to the buffer."""
+    """Reserve buffer capacity and publish committed rollout records."""
 
     def __init__(
         self,
@@ -110,6 +111,13 @@ class RolloutWorker:
     async def produce(self, request: RolloutRequest, disable_tqdm: bool = False) -> int:
         async with self.buffer.request_slot() as slot:
             return await self._produce(slot, request, disable_tqdm)
+
+    async def produce_next(self, source: RolloutDataLoader) -> int:
+        async with self.buffer.request_slot() as slot:
+            request = await source.next_assignment()
+            if request is None:
+                raise GenerationStalledError("rollout source is exhausted")
+            return await self._produce(slot, request, disable_tqdm=True)
 
     async def _produce(self, slot: RolloutSlot, request: RolloutRequest, disable_tqdm: bool) -> int:
         receipts = await self.executor.produce(request, disable_tqdm=disable_tqdm)
@@ -137,7 +145,7 @@ class AsyncRolloutWorkerPool:
     def __init__(
         self,
         worker: RolloutWorker,
-        source: RolloutRequestSource,
+        source: RolloutDataLoader,
         count: int,
         on_worker_finished: Callable[[], Awaitable[None]],
     ):
@@ -152,8 +160,7 @@ class AsyncRolloutWorkerPool:
     async def _serve(self) -> None:
         try:
             while True:
-                request = await self.source.next_request()
-                await self.worker.produce(request, disable_tqdm=True)
+                await self.worker.produce_next(self.source)
                 record_rollout_buffer(self.worker.buffer.pending_count(), self.worker.buffer.capacity())
         except asyncio.CancelledError:
             return
@@ -188,7 +195,7 @@ class LocalRolloutWorker:
             rollout = SynchronousRollout(
                 output, request.uids, request.source_prompts, sampled_step, request_batch=request.trajectory_request
             )
-        return [await self.writer.stage_rollout(rollout)]
+        return [await self.writer.write_rollout(rollout)]
 
     async def retain(self, rollout: Rollout) -> None:
         # Local runners retain during output finalization, before committing.
