@@ -1,6 +1,7 @@
 import asyncio
 import collections
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import torch
@@ -117,6 +118,7 @@ def _batch_assembly_state(
 ):
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.global_step = 10
+    trainer.trajectory_runner = SimpleNamespace(retain_buffered=AsyncMock())
     trainer.max_staleness_steps = 2
     trainer.mini_batch_size = mini_batch_size
     trainer.all_metrics = {}

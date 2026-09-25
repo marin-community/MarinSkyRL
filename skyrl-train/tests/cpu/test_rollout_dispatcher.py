@@ -1,5 +1,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import ray
@@ -15,6 +17,7 @@ from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import (
     RolloutDispatcher,
 )
 from skyrl_train.trajectory_runners.types import BatchMetadata, TrainingPhase, TrajectoryID
+from skyrl_train.rollout_buffer import FineStoreRolloutBuffer, RolloutRequest, SynchronousRollout
 
 
 class _RemoteMethod:
@@ -23,6 +26,12 @@ class _RemoteMethod:
 
     def remote(self, *args, **kwargs):
         return self._call(*args, **kwargs)
+
+
+@ray.remote
+def _stage_in_process_isolated_worker(writer):
+    rollout = SynchronousRollout(_output([TrajectoryID("remote", 0)]), ["remote"], [{"uid": "remote"}], 3)
+    return asyncio.run(writer.stage_rollout(rollout))
 
 
 class _Coordinator:
@@ -152,6 +161,55 @@ async def test_dispatcher_partitions_complete_groups_and_restores_request_order(
     assert calls == [["a_0", "a_1"], ["b_0", "b_1"]]
     assert result["trajectory_ids"] == ids
     assert result["response_ids"] == [[0], [100], [1], [101]]
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_returns_only_buffer_receipts_for_training(tmp_path, harbor_runner_spec):
+    async def produce(request, writer):
+        assert request.kind == "batch"
+        return await writer.stage_rollout(
+            SynchronousRollout(
+                _output(request.trajectory_request["trajectory_ids"]),
+                request.uids,
+                request.source_prompts,
+                request.model_step,
+            )
+        )
+
+    actors = []
+    for _ in range(2):
+        actors.append(SimpleNamespace(run_shard_to_buffer=_RemoteMethod(produce)))
+    dispatcher = _dispatcher(actors, harbor_runner_spec, timeout=30)
+    ids = [TrajectoryID("a", 0), TrajectoryID("b", 0), TrajectoryID("a", 1), TrajectoryID("b", 1)]
+    request = _request(ids, "train")
+    prompts = [{"uid": "a"}, {"uid": "b"}]
+    buffer = FineStoreRolloutBuffer(str(tmp_path / "rollouts"))
+    try:
+        receipts = await dispatcher.run_to_buffer(
+            RolloutRequest(request, prompts, [id.instance_id for id in ids], 7, "batch"), buffer.remote_writer()
+        )
+        assert buffer.empty()
+        for receipt in receipts:
+            buffer.publish(receipt)
+        groups = await buffer.next_batch(2)
+        assert [group.uids[0] for group in groups] == ["a", "b"]
+        assert [group.trajectory_batch["response_ids"] for group in groups] == [[[0], [1]], [[100], [101]]]
+    finally:
+        buffer.close()
+
+
+@pytest.mark.asyncio
+async def test_process_isolated_writer_commits_without_returning_payload(tmp_path, ray_init):
+    buffer = FineStoreRolloutBuffer(str(tmp_path / "remote"))
+    try:
+        source_root = Path(__file__).resolve().parents[2]
+        worker = _stage_in_process_isolated_worker.options(runtime_env={"env_vars": {"PYTHONPATH": str(source_root)}})
+        receipt = await worker.remote(buffer.remote_writer())
+        assert receipt.uids == ("remote",)
+        buffer.publish(receipt)
+        assert (await buffer.next_batch(1))[0].trajectory_batch["response_ids"] == [[0]]
+    finally:
+        buffer.close()
 
 
 @pytest.mark.asyncio

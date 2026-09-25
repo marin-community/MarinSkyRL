@@ -1011,6 +1011,37 @@ def concatenate_trajectory_batches(
     return result
 
 
+def combine_trajectory_batches_in_request_order(
+    batches: List[TrajectoryBatch],
+    requested_ids: List[TrajectoryID] | None,
+    *,
+    require_rollout_logprobs: bool,
+    tis_lcs_alert_threshold: float,
+) -> TrajectoryBatch:
+    """Combine independently produced reward groups into the original request order."""
+    if len(batches) == 1:
+        return batches[0]
+    result = concatenate_trajectory_batches(
+        batches,
+        require_rollout_logprobs=require_rollout_logprobs,
+        tis_lcs_alert_threshold=tis_lcs_alert_threshold,
+    )
+    observed_steps = [step for batch in batches if (step := batch.get("actual_global_step")) is not None]
+    if observed_steps:
+        result["actual_global_step"] = min(observed_steps)
+    if requested_ids is None:
+        return result
+    returned_ids = result.get("trajectory_ids")
+    if returned_ids is None:
+        raise ValueError("buffered rollout omitted trajectory IDs")
+    positions = {row.to_string(): index for index, row in enumerate(returned_ids)}
+    order = [positions[row.to_string()] for row in requested_ids]
+    for key, values in list(result.items()):
+        if isinstance(values, list) and len(values) == len(order):
+            result[key] = [values[index] for index in order]
+    return result
+
+
 def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatch) -> None:
     """Validate the shape and value categories of a trajectory batch."""
     if not trajectory_batch["response_ids"]:

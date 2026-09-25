@@ -11,19 +11,19 @@ import asyncio
 import itertools
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 import ray
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.trajectory_runners.base import (
     TrajectoryBatch,
-    TrajectoryID,
     TrajectoryRequestBatch,
     propagate_teacher_routes,
 )
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec, ProcessPoolResources
-from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
+from skyrl_train.trajectory_runners.trajectory_processing import combine_trajectory_batches_in_request_order
+from skyrl_train.rollout_buffer import RolloutRequest
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
 from skyrl_train.tokenizer import create_tokenizer
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
@@ -125,9 +125,9 @@ class RolloutCoordinator:
     """One rollout-orchestration worker process (own event loop, own Harbor).
 
     Holds its own ``HarborTrajectoryRunner`` scoped to ``n_concurrent_trials // K``
-    and ``connection_pool_maxsize // K``. ``run_shard`` runs the full
-    ``run()`` — submit/gather/post-process — locally, returning only the
-    compact ``TrajectoryBatch`` over Ray.
+    and ``connection_pool_maxsize // K``. Training shards commit their own
+    output to the rollout buffer and return receipts over Ray. Evaluation
+    shards still return their trajectories to the evaluator.
 
     NOTE: the actor is created with ``num_cpus`` set at ``.options(...)`` time by
     the dispatcher (so the PlacementGroup bundle sizing is explicit and visible
@@ -216,6 +216,14 @@ class RolloutCoordinator:
 
         return await self._runner.run(sub_batch)
 
+    async def run_shard_to_buffer(
+        self,
+        request: RolloutRequest,
+        writer,
+    ):
+        self._runner.global_step_fn = lambda: request.model_step
+        return await self._runner.run_to_buffer(request, writer)
+
     # ---- Eval session passthrough (single-coordinator delegation) ----
     async def start_eval_session(
         self,
@@ -248,6 +256,8 @@ class RolloutDispatcher:
     by the trainer; we forward its current value into each ``run_shard`` so the
     actor's staleness hint is accurate.
     """
+
+    remote_writes = True
 
     def __init__(
         self,
@@ -393,21 +403,14 @@ class RolloutDispatcher:
         for sub_batch, output in zip(sub_batches, outputs, strict=True):
             self._validate_group_identity(sub_batch, output)
 
-        if len(outputs) == 1:
-            result = outputs[0]
-        else:
-            result = concatenate_trajectory_batches(
-                outputs,
-                require_rollout_logprobs=(
-                    training_phase == "train" and rollout_logprobs_enabled(self._spec.config.trainer.algorithm)
-                ),
-                tis_lcs_alert_threshold=float(self._spec.config.trainer.algorithm.tis_lcs_alert_threshold),
-            )
-            actual_steps = [output.get("actual_global_step") for output in outputs]
-            observed_steps = [step for step in actual_steps if step is not None]
-            if observed_steps:
-                result["actual_global_step"] = min(observed_steps)
-            self._restore_request_order(result, trajectory_ids)
+        result = combine_trajectory_batches_in_request_order(
+            outputs,
+            trajectory_ids,
+            require_rollout_logprobs=(
+                training_phase == "train" and rollout_logprobs_enabled(self._spec.config.trainer.algorithm)
+            ),
+            tis_lcs_alert_threshold=float(self._spec.config.trainer.algorithm.tis_lcs_alert_threshold),
+        )
 
         propagate_teacher_routes(input_batch, result)
         # Outside the deadline: a slow sink write is not an unresponsive coordinator.
@@ -415,7 +418,49 @@ class RolloutDispatcher:
             await retain_trajectories(self._trajectory_sink, input_batch, result)
         return result
 
+    async def run_to_buffer(
+        self,
+        request: RolloutRequest,
+        writer,
+        disable_tqdm: bool = False,
+    ):
+        """Route reward groups to producers; return receipts, never trajectory payloads."""
+        del disable_tqdm
+        input_batch = request.trajectory_request
+        trajectory_ids = input_batch.get("trajectory_ids")
+        if not trajectory_ids or len(trajectory_ids) != len(input_batch["prompts"]):
+            raise ValueError("buffered Harbor execution requires one trajectory ID per request row")
+        if len(request.uids) != len(trajectory_ids):
+            raise ValueError("buffered Harbor execution requires one UID per request row")
+        groups: dict[str, list[int]] = defaultdict(list)
+        for index, trajectory_id in enumerate(trajectory_ids):
+            groups[trajectory_id.instance_id].append(index)
+        prompt_by_uid = {prompt["uid"]: prompt for prompt in request.source_prompts}
+        jobs = []
+        for indices in groups.values():
+            sub_batch = self._select_request_rows(input_batch, indices)
+            group_uids = [request.uids[index] for index in indices]
+            group_prompts = [prompt_by_uid[uid] for uid in dict.fromkeys(group_uids)]
+            shard_request = RolloutRequest(sub_batch, group_prompts, group_uids, request.model_step, request.kind)
+            jobs.append(self._run_group_to_buffer(shard_request, writer))
+        return await asyncio.gather(*jobs)
+
+    async def retain_buffered(self, rollout) -> None:
+        if self._trajectory_sink is not None:
+            if rollout.request_batch is None:
+                raise ValueError("buffered Harbor rollout omitted its request batch")
+            await retain_trajectories(self._trajectory_sink, rollout.request_batch, rollout.trajectory_batch)
+
     async def _run_group(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
+        step = self._current_global_step()
+        return await self._dispatch_group(input_batch, lambda actor: actor.run_shard.remote(input_batch, step))
+
+    async def _run_group_to_buffer(self, request: RolloutRequest, writer):
+        return await self._dispatch_group(
+            request.trajectory_request, lambda actor: actor.run_shard_to_buffer.remote(request, writer)
+        )
+
+    async def _dispatch_group(self, input_batch: TrajectoryRequestBatch, submit_rpc: Callable[[Any], Any]):
         metadata = input_batch.get("batch_metadata")
         training_phase = metadata.training_phase if metadata is not None else "train"
         async with self._routing_condition:
@@ -434,9 +479,8 @@ class RolloutDispatcher:
             if self._actor_pending_rpcs[coordinator_index] == 0:
                 self._actor_last_progress[coordinator_index] = loop.time()
             self._actor_pending_rpcs[coordinator_index] += 1
-        global_step = self._current_global_step()
         try:
-            rpc = actor.run_shard.remote(input_batch, global_step)
+            rpc = submit_rpc(actor)
             rpc_future = asyncio.ensure_future(rpc)
             while True:
                 observed_progress = self._actor_last_progress[coordinator_index]
@@ -492,17 +536,6 @@ class RolloutDispatcher:
         returned = [trajectory_id.to_string() for trajectory_id in returned_ids]
         if len(returned) != len(set(returned)) or set(returned) != set(expected):
             raise ValueError(f"trajectory runner output identity mismatch: expected {expected}, got {returned}")
-
-    @staticmethod
-    def _restore_request_order(output: TrajectoryBatch, requested_ids: list[TrajectoryID]) -> None:
-        returned_ids = output.get("trajectory_ids")
-        assert returned_ids is not None
-        returned_positions = {trajectory_id.to_string(): index for index, trajectory_id in enumerate(returned_ids)}
-        order = [returned_positions[trajectory_id.to_string()] for trajectory_id in requested_ids]
-        row_count = len(returned_ids)
-        for key, values in list(output.items()):
-            if isinstance(values, list) and len(values) == row_count:
-                output[key] = [values[index] for index in order]  # type: ignore[literal-required]
 
     async def shutdown(self) -> None:
         if self._actors:

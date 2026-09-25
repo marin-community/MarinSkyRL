@@ -7,7 +7,7 @@ import io
 import uuid
 from collections import deque
 from dataclasses import dataclass
-from typing import Generic, Protocol, TypeVar, cast, runtime_checkable
+from typing import Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 import pyarrow as pa
 import torch
@@ -16,7 +16,7 @@ from finestore.store import DataStore
 
 from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.async_rollout_state import RolloutBufferBackend, RolloutBufferSnapshot
-from skyrl_train.trajectory_runners.base import TrajectoryBatch
+from skyrl_train.trajectory_runners.types import TrajectoryBatch, TrajectoryRequestBatch
 
 
 ROLLOUT_TABLE = "rollouts"
@@ -40,6 +40,7 @@ class SynchronousRollout:
     source_prompts: list[dict]
     model_step: int
     rollout_id: str | None = None
+    request_batch: TrajectoryRequestBatch | None = None
 
     @property
     def rollout_uids(self) -> tuple[str, ...]:
@@ -50,10 +51,22 @@ class SynchronousRollout:
         return self.model_step
 
 
+@dataclass(frozen=True)
+class RolloutRequest:
+    """One producer assignment and the record shape expected by its reader."""
+
+    trajectory_request: TrajectoryRequestBatch
+    source_prompts: list[dict]
+    uids: list[str]
+    model_step: int
+    kind: Literal["group", "batch"]
+
+
 @runtime_checkable
 class Rollout(Protocol):
     trajectory_batch: TrajectoryBatch
     rollout_id: str | None
+    request_batch: TrajectoryRequestBatch | None
 
     @property
     def rollout_uids(self) -> tuple[str, ...]: ...
@@ -66,7 +79,17 @@ RolloutT = TypeVar("RolloutT", bound=Rollout)
 
 
 class RolloutWriter(Protocol[RolloutT]):
-    async def write_rollout(self, rollout: RolloutT) -> None: ...
+    async def stage_rollout(self, rollout: RolloutT) -> RolloutReceipt: ...
+
+
+@dataclass(frozen=True)
+class RolloutReceipt:
+    """Small completion token returned by a producer after its payload is stored."""
+
+    rollout_id: str
+    uids: tuple[str, ...]
+    model_step: int
+    store_path: str | None = None
 
 
 class RolloutSlotPolicy(Protocol):
@@ -80,8 +103,8 @@ class RolloutSlotPolicy(Protocol):
 class RolloutSlot(Generic[RolloutT]):
     """Reserve capacity before generation and release it on failure or rejection."""
 
-    def __init__(self, writer: RolloutWriter[RolloutT], policy: RolloutSlotPolicy | None):
-        self._writer = writer
+    def __init__(self, buffer: RolloutBuffer[RolloutT], policy: RolloutSlotPolicy | None):
+        self._buffer = buffer
         self._policy = policy
         self._reserved = False
 
@@ -91,8 +114,11 @@ class RolloutSlot(Generic[RolloutT]):
         self._reserved = True
         return self
 
-    async def write_rollout(self, rollout: RolloutT) -> None:
-        await self._writer.write_rollout(rollout)
+    async def publish(self, receipt: RolloutReceipt) -> None:
+        self._buffer.publish(receipt)
+        await self._accept()
+
+    async def _accept(self) -> None:
         if self._policy is not None:
             accepted = asyncio.create_task(self._policy.on_rollout_accepted())
             try:
@@ -113,6 +139,10 @@ class RolloutBuffer(Protocol[RolloutT]):
     """A queue of committed rollout records; backend state stays behind this interface."""
 
     def writer(self) -> RolloutWriter[RolloutT]: ...
+
+    def remote_writer(self) -> RolloutWriter[RolloutT]: ...
+
+    def publish(self, receipt: RolloutReceipt) -> None: ...
 
     def request_slot(self) -> RolloutSlot[RolloutT]: ...
 
@@ -139,8 +169,11 @@ class _MemoryWriter(Generic[RolloutT]):
     def __init__(self, buffer: MemoryRolloutBuffer[RolloutT]):
         self.buffer = buffer
 
-    async def write_rollout(self, rollout: RolloutT) -> None:
-        self.buffer.requeue(rollout)
+    async def stage_rollout(self, rollout: RolloutT) -> RolloutReceipt:
+        rollout_id = rollout.rollout_id or uuid.uuid4().hex
+        rollout.rollout_id = rollout_id
+        self.buffer._staged[rollout_id] = rollout
+        return RolloutReceipt(rollout_id, rollout.rollout_uids, rollout.rollout_model_step)
 
 
 class MemoryRolloutBuffer(Generic[RolloutT]):
@@ -148,14 +181,23 @@ class MemoryRolloutBuffer(Generic[RolloutT]):
 
     def __init__(self, capacity: int = 0, slot_policy: RolloutSlotPolicy | None = None):
         self._pending: deque[RolloutT] = deque()
+        self._staged: dict[str, RolloutT] = {}
         self._capacity = capacity
         self._slot_policy = slot_policy
 
     def writer(self) -> RolloutWriter[RolloutT]:
         return _MemoryWriter(self)
 
+    def remote_writer(self) -> RolloutWriter[RolloutT]:
+        raise ValueError("memory rollout buffer cannot be written from a remote producer")
+
+    def publish(self, receipt: RolloutReceipt) -> None:
+        if self.full():
+            raise asyncio.QueueFull
+        self.requeue(self._staged.pop(receipt.rollout_id))
+
     def request_slot(self) -> RolloutSlot[RolloutT]:
-        return RolloutSlot(self.writer(), self._slot_policy)
+        return RolloutSlot(self, self._slot_policy)
 
     async def next_batch(self, max_items: int) -> list[RolloutT]:
         # Scan all ready groups so admission can reject stale work and retain surplus.
@@ -211,19 +253,39 @@ class _FineStorePointer:
 
 
 class _FineStoreWriter(Generic[RolloutT]):
-    def __init__(self, buffer: FineStoreRolloutBuffer[RolloutT]):
-        self.buffer = buffer
+    def __init__(self, path: str):
+        self.path = path
 
-    async def write_rollout(self, rollout: RolloutT) -> None:
-        write = asyncio.create_task(asyncio.to_thread(self.buffer._commit, rollout))
+    async def stage_rollout(self, rollout: RolloutT) -> RolloutReceipt:
+        write = asyncio.create_task(asyncio.to_thread(self._commit, rollout))
         try:
-            pointer = await asyncio.shield(write)
+            receipt = await asyncio.shield(write)
         except asyncio.CancelledError:
             # A storage commit cannot be cancelled; wait before closing the store.
             await write
             raise
-        rollout.rollout_id = pointer.rollout_id
-        self.buffer._append(pointer)
+        rollout.rollout_id = receipt.rollout_id
+        return receipt
+
+    def _commit(self, rollout: RolloutT) -> RolloutReceipt:
+        rollout_id = rollout.rollout_id or uuid.uuid4().hex
+        payload = io.BytesIO()
+        torch.save(rollout, payload)
+        store = DataStore.open(self.path)
+        try:
+            store.table(ROLLOUT_TABLE, primary_key=("rollout_id",), schema=ROLLOUT_SCHEMA)
+            with store.unbounded_transaction() as transaction:
+                transaction.table(ROLLOUT_TABLE).add(
+                    {
+                        "rollout_id": rollout_id,
+                        "uid": rollout.rollout_uids[0],
+                        "model_step": rollout.rollout_model_step,
+                        "payload": payload.getvalue(),
+                    }
+                )
+        finally:
+            store.close()
+        return RolloutReceipt(rollout_id, rollout.rollout_uids, rollout.rollout_model_step, self.path)
 
 
 class FineStoreRolloutBuffer(Generic[RolloutT]):
@@ -233,31 +295,29 @@ class FineStoreRolloutBuffer(Generic[RolloutT]):
         self.path = path
         self.store = DataStore.open(path)
         self.store.table(ROLLOUT_TABLE, primary_key=("rollout_id",), schema=ROLLOUT_SCHEMA)
+        # Local FineStore creates HEAD before taking its file lock. Establish it
+        # once here, before independent producers can open the archive.
+        if self.store.read_view().token is None:
+            self.store.write_object("__rollout_buffer_initialized__", b"")
+            self.store.flush()
         self._pending: deque[_FineStorePointer] = deque()
         self._scanned: dict[str, _FineStorePointer] = {}
         self._capacity = capacity
         self._slot_policy = slot_policy
 
     def writer(self) -> RolloutWriter[RolloutT]:
-        return _FineStoreWriter(self)
+        return _FineStoreWriter(self.path)
+
+    def remote_writer(self) -> RolloutWriter[RolloutT]:
+        return self.writer()
+
+    def publish(self, receipt: RolloutReceipt) -> None:
+        if receipt.store_path != self.path:
+            raise ValueError("rollout receipt belongs to a different FineStore buffer")
+        self._append(_FineStorePointer(receipt.rollout_id, receipt.uids, self.path))
 
     def request_slot(self) -> RolloutSlot[RolloutT]:
-        return RolloutSlot(self.writer(), self._slot_policy)
-
-    def _commit(self, rollout: RolloutT) -> _FineStorePointer:
-        rollout_id = rollout.rollout_id or uuid.uuid4().hex
-        payload = io.BytesIO()
-        torch.save(rollout, payload)
-        with self.store.unbounded_transaction() as transaction:
-            transaction.table(ROLLOUT_TABLE).add(
-                {
-                    "rollout_id": rollout_id,
-                    "uid": rollout.rollout_uids[0],
-                    "model_step": rollout.rollout_model_step,
-                    "payload": payload.getvalue(),
-                }
-            )
-        return _FineStorePointer(rollout_id, rollout.rollout_uids, self.path)
+        return RolloutSlot(self, self._slot_policy)
 
     def _append(self, pointer: _FineStorePointer) -> None:
         if self.full():

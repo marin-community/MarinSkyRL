@@ -38,7 +38,6 @@ from skyrl_train.utils.data_tracker import DataConsumptionTracker
 from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpointCallback
 from torchdata.stateful_dataloader import StatefulDataLoader
 from typing import List, Literal, Tuple, TypeVar
-from enum import Enum, auto
 from skyrl_train.telemetry import (
     critical_phase,
     record_generated_work,
@@ -48,7 +47,7 @@ from skyrl_train.telemetry import (
 )
 from skyrl_train.timing_observability import publish_step_timings
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
-from skyrl_train.rollout_buffer import RolloutBuffer, RolloutSlot
+from skyrl_train.rollout_buffer import RolloutBuffer, RolloutReceipt, RolloutRequest, RolloutSlot
 from skyrl_train.io import io
 from skyrl_train.dynamic_sampling import (
     DynamicSamplingType,
@@ -161,11 +160,6 @@ class _RolloutStat:
     running: int = 0
 
 
-class _GroupFreshness(Enum):
-    FRESH = auto()
-    STALE = auto()
-
-
 @dataclass
 class _AdmissionPartition:
     accepted_groups: List[GeneratedOutputGroup]
@@ -234,12 +228,8 @@ class _AsyncStalenessManager:
     A long-running group can exceed `max_staleness_steps` even when it was
     started within the budget. Admission discards and retries those attempts.
 
-    The key capacity formula is implemented in `_compute_capacity_unlocked`. For details and caveats,
-    see https://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html#async-staleness-manager.
-
-    Reference:
-    - Modeled after AReal's StalenessManager: https://github.com/inclusionAI/AReaL/blob/b755c4447c2fff97889d8828293ee85f17a806f9/areal/core/staleness_manager.py
-    - The idea of this controller is from section 5.1 of AReal's paper: https://arxiv.org/pdf/2505.24298v3
+    Positive staleness permits continuous production up to the worker limit;
+    zero staleness caps submitted work at one training batch.
     """
 
     def __init__(
@@ -1107,6 +1097,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     async def _run_generate_for_a_group_loop(self, queues: _GenerationQueues):
         """Generate dataset rows or retries and write fresh groups to the rollout buffer."""
+        writer = (
+            queues.rollout_buffer.remote_writer()
+            if self.trajectory_runner.remote_writes
+            else queues.rollout_buffer.writer()
+        )
         try:
             while True:
                 rand_prompts = await self._next_generation_prompts(queues)
@@ -1122,35 +1117,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     )
                     assert all(uid == uids[0] for uid in uids), "Expect all uids to be the same"
 
-                    # Capture a fallback global step before collection. Runners that
-                    # record sampled-token steps replace it with actual_global_step below.
-                    global_step_at_start = self.global_step
-
                     # Disable each runner's progress bar so concurrent workers do not flood the console.
-                    cur_trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(
-                        trajectory_request, disable_tqdm=True
-                    )
-                    actual_step = cur_trajectory_batch.get("actual_global_step")
-                    staleness_step = actual_step if actual_step is not None else global_step_at_start
-
-                    record_generated_work(
-                        cur_trajectory_batch["response_ids"],
-                        cur_trajectory_batch.get("is_last_step"),
-                        staleness_step,
-                    )
-                    completed_group = GeneratedOutputGroup(
-                        trajectory_batch=cur_trajectory_batch,
-                        uid=uids[0],
-                        earliest_model_step=staleness_step,
-                        source_prompts=rand_prompts,
-                    )
-                    freshness = await self._enqueue_if_fresh(queues, completed_group, slot)
-                    if freshness is _GroupFreshness.STALE:
-                        self._record_admission_scan(
-                            [(completed_group, AdmissionDecision((AdmissionRejection.STALE,)))],
-                            inspected_count=1,
-                        )
-                        continue
+                    request = RolloutRequest(trajectory_request, rand_prompts, uids, self.global_step, "group")
+                    receipt = await self.trajectory_runner.run_to_buffer(request, writer, disable_tqdm=True)
+                    if isinstance(receipt, list):
+                        if len(receipt) != 1:
+                            raise ValueError("one async prompt must produce one buffered reward group")
+                        receipt = receipt[0]
+                    await self._publish_completed_receipt(queues, receipt, slot)
                     record_rollout_buffer(queues.rollout_buffer.pending_count(), queues.rollout_buffer.capacity())
         except asyncio.CancelledError:
             return
@@ -1188,19 +1162,18 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         except asyncio.TimeoutError:
             raise GenerationStalledError("Dataset exhausted and no retries arrived within the stall deadline")
 
-    async def _enqueue_if_fresh(
-        self, queues: _GenerationQueues, group: GeneratedOutputGroup, slot: RolloutSlot[GeneratedOutputGroup]
-    ) -> _GroupFreshness:
-        """Enqueue a fresh group or route a stale group to retry."""
+    async def _publish_completed_receipt(
+        self,
+        queues: _GenerationQueues,
+        receipt: RolloutReceipt,
+        slot: RolloutSlot[GeneratedOutputGroup],
+    ) -> None:
+        """Publish a producer's receipt; admission decides whether to use it."""
         async with queues.condition:
             while queues.rollout_buffer.full():
                 await queues.condition.wait()
-            freshness = self._classify_and_route_group(queues, group)
-            if freshness is _GroupFreshness.STALE:
-                return freshness
-            await slot.write_rollout(group)
+            await slot.publish(receipt)
             queues.condition.notify_all()
-            return freshness
 
     async def async_sync_policy_weights_to_inference_engines(self):
         # Pre-broadcast drain: hard-sync every policy shard rank's event loop BEFORE the
@@ -1262,12 +1235,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """
         refs = self.policy_model.async_run_ray_method("pass_through", "barrier_all")
         await asyncio.gather(*refs)
-
-    def _classify_and_route_group(self, queues: _GenerationQueues, group: GeneratedOutputGroup) -> _GroupFreshness:
-        if self._group_admission_policy.is_stale(group, global_step=self.global_step):
-            queues.retries.put_nowait(group.source_prompts)
-            return _GroupFreshness.STALE
-        return _GroupFreshness.FRESH
 
     def _record_admission_scan(
         self,
@@ -1482,6 +1449,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         )
 
                 completed_groups = await queues.rollout_buffer.next_batch(self.mini_batch_size)
+                for group in completed_groups:
+                    await self.trajectory_runner.retain_buffered(group)
+                    batch = group.trajectory_batch
+                    record_generated_work(batch["response_ids"], batch.get("is_last_step"), group.earliest_model_step)
                 partition = self._partition_completed_groups(
                     completed_groups,
                     occupied_uids={group.uid for group in accepted_groups}

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import List, Protocol
 
-from skyrl_train.trajectory_runners.base import TrajectoryBatch
+from skyrl_train.trajectory_runners.types import TrajectoryBatch, TrajectoryRequestBatch
 
 
 @dataclass
@@ -16,6 +16,7 @@ class GeneratedOutputGroup:
     earliest_model_step: int
     source_prompts: List[dict]
     rollout_id: str | None = None
+    request_batch: TrajectoryRequestBatch | None = None
 
     @property
     def rollout_uids(self) -> tuple[str, ...]:

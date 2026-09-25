@@ -26,7 +26,8 @@ from skyrl_train.curriculum import CurriculumSampler
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.rollout_buffer import RolloutBuffer, RolloutSlotPolicy, SynchronousRollout, create_rollout_buffer
+from skyrl_train.rollout_buffer import RolloutBuffer, RolloutRequest, RolloutSlotPolicy, create_rollout_buffer
+from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.trajectory_selection import trajectory_selector_from_config
 from skyrl_train.trajectory_runners.base import (
     TrajectoryRequestBatch,
@@ -35,6 +36,7 @@ from skyrl_train.trajectory_runners.base import (
 )
 import copy
 from skyrl_train.trajectory_runners.trajectory_processing import (
+    combine_trajectory_batches_in_request_order,
     get_metrics_from_trajectory_batch,
     prepare_trajectory_request,
     scalar_reward_token_credit,
@@ -574,20 +576,38 @@ class RayPPOTrainer:
             await asyncio.to_thread(self._rollout_buffer.close)
             self._rollout_buffer = None
 
-    async def _handoff_generated_batch(
-        self, trajectory_batch: TrajectoryBatch, uids: List[str], source_prompts: List[dict]
-    ) -> tuple[TrajectoryBatch, List[str]]:
-        """Commit the raw generation result before trainer admission consumes it."""
+    @torch.no_grad()
+    async def generate_to_buffer(
+        self, trajectory_request: TrajectoryRequestBatch, uids: List[str], source_prompts: List[dict]
+    ) -> TrajectoryBatch:
+        """Schedule producers and read their completed work through the buffer."""
         rollout_buffer = await self._open_rollout_buffer()
-        rollout = SynchronousRollout(
-            trajectory_batch=trajectory_batch,
-            uids=uids,
-            source_prompts=source_prompts,
-            model_step=self.global_step,
+        request = RolloutRequest(trajectory_request, source_prompts, uids, self.global_step, "batch")
+        writer = rollout_buffer.remote_writer() if self.trajectory_runner.remote_writes else rollout_buffer.writer()
+        receipts = await self.trajectory_runner.run_to_buffer(
+            request,
+            writer,
         )
-        await rollout_buffer.writer().write_rollout(rollout)
-        restored = (await rollout_buffer.next_batch(1))[0]
-        return restored.trajectory_batch, restored.uids
+        if not isinstance(receipts, list):
+            receipts = [receipts]
+        for receipt in receipts:
+            rollout_buffer.publish(receipt)
+        restored = await rollout_buffer.next_batch(len(receipts))
+        for item in restored:
+            await self.trajectory_runner.retain_buffered(item)
+        batches = [item.trajectory_batch for item in restored]
+        trajectory_batch = combine_trajectory_batches_in_request_order(
+            batches,
+            trajectory_request.get("trajectory_ids"),
+            require_rollout_logprobs=rollout_logprobs_enabled(self.cfg.trainer.algorithm),
+            tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
+        )
+        if trajectory_batch.get("rollout_metrics") is not None:
+            self.all_metrics.update(trajectory_batch["rollout_metrics"])
+        if not self.cfg.trainer.step_wise_training:
+            validate_trajectory_batch(len(trajectory_request["prompts"]), trajectory_batch)
+        record_generated_work(trajectory_batch["response_ids"], trajectory_batch.get("is_last_step"), self.global_step)
+        return trajectory_batch
 
     async def _startup_trajectory_runner(self) -> None:
         """Initialize trajectory-runner resources before any rollout can begin."""
@@ -1202,12 +1222,7 @@ class RayPPOTrainer:
                         Timer("generate", self.all_timings),
                         critical_phase("rollout_or_inference_wait", self.global_step),
                     ):
-                        trajectory_batch: TrajectoryBatch = await self.generate(trajectory_request)
-
-                    with Timer("rollout_buffer_handoff", self.all_timings):
-                        trajectory_batch, uids = await self._handoff_generated_batch(
-                            trajectory_batch, uids, rand_prompts
-                        )
+                        trajectory_batch = await self.generate_to_buffer(trajectory_request, uids, rand_prompts)
 
                     if self.cfg.trainer.step_wise_training:
                         # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
@@ -1912,47 +1927,6 @@ class RayPPOTrainer:
         logger.info(f"Number of sequences after padding: {len(training_input['sequences'])}")
 
         return training_input
-
-    @torch.no_grad()
-    async def generate(
-        self,
-        input_batch: TrajectoryRequestBatch,
-    ) -> TrajectoryBatch:
-        """
-        Generate rollouts.
-
-        If colocate_all is enabled:
-        - before calling this method, the policy model should be on CPU and inference engine should
-            be awake (i.e. on GPU).
-        - after calling this method, the same model placement still holds.
-        """
-        # Runners preserve the input sample order.
-        started_at = time.monotonic()
-        logger.info(
-            "Rollout batch started: step={} mode=synchronous prompts={}",
-            self.global_step,
-            len(input_batch["prompts"]),
-        )
-        trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch)
-        # add rollout metrics to self.all_metrics
-        if trajectory_batch["rollout_metrics"] is not None:
-            self.all_metrics.update(trajectory_batch["rollout_metrics"])
-
-        if not self.cfg.trainer.step_wise_training:
-            validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
-        record_generated_work(trajectory_batch["response_ids"], trajectory_batch.get("is_last_step"), self.global_step)
-        response_tokens = sum(len(response_ids) for response_ids in trajectory_batch["response_ids"])
-        logger.info(
-            "Rollout batch completed: step={} mode=synchronous prompts={} trajectories={} "
-            "response_tokens={} duration_seconds={:.3f}",
-            self.global_step,
-            len(input_batch["prompts"]),
-            len(trajectory_batch["response_ids"]),
-            response_tokens,
-            time.monotonic() - started_at,
-        )
-
-        return trajectory_batch
 
     @torch.no_grad()
     def postprocess_trajectory_batch(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrajectoryBatch:
