@@ -316,8 +316,6 @@ trainer:
   flash_attn: false
   attn_backend: "auto"
   disable_fast_tokenizer: false
-  target_modules: null
-  exclude_modules: null
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"

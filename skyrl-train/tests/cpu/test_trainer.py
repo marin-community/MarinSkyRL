@@ -1547,7 +1547,6 @@ def test_normalize_mini_batch_size():
     # Test Case 2: Basic valid configuration for CriticWorker
     critic_worker = create_critic_worker_with_config(
         train_batch_size=128,
-        critic_mini_batch_size=8,
         micro_train_batch_size_per_gpu=2,
         n_samples_per_prompt=2,
         dp_size=4,
@@ -1603,90 +1602,56 @@ def test_validate_batch_sizes():
     def create_test_config(
         train_batch_size=128,
         policy_mini_batch_size=16,
-        critic_mini_batch_size=8,
         micro_train_batch_size_per_gpu=2,
         micro_forward_batch_size_per_gpu=4,
         n_samples_per_prompt=2,
         policy_num_nodes=1,
         policy_num_gpus_per_node=4,
-        critic_num_nodes=1,
-        critic_num_gpus_per_node=4,
-        policy_sequence_parallel_size=1,
-        critic_sequence_parallel_size=1,
-        critic_model_path=None,
     ):
         """Helper to create config for validation testing."""
         cfg = get_default_config()
         cfg.trainer.train_batch_size = train_batch_size
         cfg.trainer.policy_mini_batch_size = policy_mini_batch_size
-        cfg.trainer.critic_mini_batch_size = critic_mini_batch_size
         cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
         cfg.trainer.micro_forward_batch_size_per_gpu = micro_forward_batch_size_per_gpu
         cfg.trainer.placement.policy_num_nodes = policy_num_nodes
         cfg.trainer.placement.policy_num_gpus_per_node = policy_num_gpus_per_node
-        cfg.trainer.placement.critic_num_nodes = critic_num_nodes
-        cfg.trainer.placement.critic_num_gpus_per_node = critic_num_gpus_per_node
-        cfg.trainer.policy.sequence_parallel_size = policy_sequence_parallel_size
-        cfg.trainer.critic.model.path = critic_model_path
-        cfg.trainer.critic.sequence_parallel_size = critic_sequence_parallel_size
         cfg.trainer.algorithm.use_kl_loss = False
         cfg.trainer.algorithm.use_kl_in_reward = False
         cfg.generator.n_samples_per_prompt = n_samples_per_prompt
         return cfg
 
-    # Test Case 1: Valid configuration
+    # Valid configuration
     cfg = create_test_config()
     validate_batch_sizes(cfg)  # Should not raise any exceptions
 
-    # Test Case 2: Error case - train_batch_size < policy_mini_batch_size
+    # train_batch_size < policy_mini_batch_size
     cfg = create_test_config(train_batch_size=8, policy_mini_batch_size=16)
     with pytest.raises(AssertionError):
         validate_batch_sizes(cfg)
 
-    # Test Case 3: Error case - train_batch_size < critic_mini_batch_size
-    cfg = create_test_config(train_batch_size=4, critic_mini_batch_size=8)
-    with pytest.raises(AssertionError):
-        validate_batch_sizes(cfg)
-
-    # Test Case 4: Error case - policy_mini_batch_size = 0
+    # policy_mini_batch_size = 0
     cfg = create_test_config(policy_mini_batch_size=0)
     with pytest.raises(AssertionError, match="policy_mini_batch_size must be greater than 0"):
         validate_batch_sizes(cfg)
 
-    # Test Case 5: Error case - critic_mini_batch_size = 0
-    cfg = create_test_config(critic_mini_batch_size=0, critic_model_path="test")
-    with pytest.raises(AssertionError, match="critic_mini_batch_size must be greater than 0"):
-        validate_batch_sizes(cfg)
-
-    # Test Case 6: Error case - micro_train_batch_size_per_gpu = 0
+    # micro_train_batch_size_per_gpu = 0
     cfg = create_test_config(micro_train_batch_size_per_gpu=0)
     with pytest.raises(AssertionError, match="micro_train_batch_size_per_gpu must be greater than 0"):
         validate_batch_sizes(cfg)
 
-    # Test Case 7: Error case - micro_forward_batch_size_per_gpu = 0
+    # micro_forward_batch_size_per_gpu = 0
     cfg = create_test_config(micro_forward_batch_size_per_gpu=0)
     with pytest.raises(AssertionError, match="micro_forward_batch_size_per_gpu must be greater than 0"):
         validate_batch_sizes(cfg)
 
-    # Test Case 8: Error case - train_batch_size not divisible by (policy_mini_batch_size * policy_dp_size)
+    # train_batch_size not divisible by policy_mini_batch_size
     cfg = create_test_config(train_batch_size=100, policy_mini_batch_size=16, policy_num_gpus_per_node=4)
     # Should fail because train_batch_size is not evenly divisible by policy batch requirements
     with pytest.raises(AssertionError, match="train_batch_size .* should be divisible by policy_mini_batch_size"):
         validate_batch_sizes(cfg)
 
-    # Test Case 9: Error case - train_batch_size not divisible by (critic_mini_batch_size * critic_dp_size)
-    cfg = create_test_config(
-        train_batch_size=100,
-        policy_mini_batch_size=5,
-        critic_mini_batch_size=16,
-        critic_num_gpus_per_node=4,
-        critic_model_path="test",
-    )
-    # Should fail because train_batch_size is not evenly divisible by critic batch requirements
-    with pytest.raises(AssertionError, match="train_batch_size .* should be divisible by critic_mini_batch_size"):
-        validate_batch_sizes(cfg)
-
-    # Test Case 10: Error case - policy_mini_batch_size_per_gpu not divisible by micro_train_batch_size_per_gpu
+    # policy_mini_batch_size_per_gpu not divisible by micro_train_batch_size_per_gpu
     cfg = create_test_config(
         policy_mini_batch_size=8, n_samples_per_prompt=1, policy_num_gpus_per_node=1, micro_train_batch_size_per_gpu=3
     )
@@ -1697,47 +1662,7 @@ def test_validate_batch_sizes():
     ):
         validate_batch_sizes(cfg)
 
-    # Test Case 11: Error case - critic_mini_batch_size_per_gpu not divisible by micro_train_batch_size_per_gpu
-    cfg = create_test_config(
-        train_batch_size=144,
-        policy_mini_batch_size=12,  # Policy validation passes
-        critic_mini_batch_size=8,  # Critic micro batch divisibility fails
-        n_samples_per_prompt=1,
-        critic_num_gpus_per_node=1,
-        micro_train_batch_size_per_gpu=3,
-        critic_model_path="test",
-    )
-    # Should fail because critic mini batch per GPU is not evenly divisible by micro batch size
-    with pytest.raises(
-        AssertionError,
-        match="normalized critic_mini_batch_size_per_gpu .* should be divisible by micro_train_batch_size_per_gpu",
-    ):
-        validate_batch_sizes(cfg)
-
-    # Test Case 12: Valid configuration with sequence parallelism
-    cfg = create_test_config(
-        policy_sequence_parallel_size=2,
-        critic_sequence_parallel_size=2,
-        policy_num_gpus_per_node=8,
-        critic_num_gpus_per_node=8,
-    )
-    validate_batch_sizes(cfg)  # Should not raise any exceptions
-
-    # Test Case 13: Valid configuration - train_batch_size not divisible by (critic_mini_batch_size * critic_dp_size), but critic model path is None
-    cfg = create_test_config(
-        train_batch_size=100,
-        policy_mini_batch_size=5,
-        critic_mini_batch_size=16,
-        critic_num_gpus_per_node=4,
-        critic_model_path=None,
-    )
-    validate_batch_sizes(cfg)
-
-    # Test Case 14: Valid configuration - critic_mini_batch_size is invalid but critic model is not specified
-    cfg = create_test_config(critic_mini_batch_size=0, critic_model_path=None)
-    validate_batch_sizes(cfg)
-
-    # Test Case 15: Error case - train_batch_size_per_gpu not divisible by policy_mini_batch_size_per_gpu
+    # train_batch_size_per_gpu not divisible by policy_mini_batch_size_per_gpu
     cfg = create_test_config(
         train_batch_size=10,
         policy_mini_batch_size=5,
@@ -1747,22 +1672,6 @@ def test_validate_batch_sizes():
     )
     with pytest.raises(
         AssertionError, match="policy_train_batch_size_per_gpu .* should be divisible by policy_mini_batch_size_per_gpu"
-    ):
-        validate_batch_sizes(cfg)
-
-    # Test Case 16: Error case - train_batch_size_per_gpu not divisible by critic_mini_batch_size_per_gpu
-    cfg = create_test_config(
-        train_batch_size=10,
-        policy_mini_batch_size=10,
-        policy_num_gpus_per_node=1,
-        critic_mini_batch_size=5,
-        critic_num_gpus_per_node=2,
-        micro_train_batch_size_per_gpu=1,
-        n_samples_per_prompt=1,
-        critic_model_path="test",
-    )
-    with pytest.raises(
-        AssertionError, match="critic_train_batch_size_per_gpu .* should be divisible by critic_mini_batch_size_per_gpu"
     ):
         validate_batch_sizes(cfg)
 

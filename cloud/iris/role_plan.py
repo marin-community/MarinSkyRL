@@ -16,6 +16,7 @@ from marinskyrl.distillation import (
     TeacherPlacement,
     compile_distillation_plan,
 )
+from cloud.iris.runtime_environment import RuntimeProfile
 
 
 class ModelRoleKind(StrEnum):
@@ -220,7 +221,7 @@ def _core_model_claims(config: dict[str, Any], values: _RolePlanValues) -> list[
         _optional_at(config, "trainer.algorithm.use_kl_in_reward", False)
     )
     use_critic = bool(_optional_at(config, "trainer.critic.model.path"))
-    strategy = derive_strategy(config) or "megatron"
+    strategy = derive_strategy(config) or RuntimeProfile.MEGATRON.value
     ref_num_nodes = int(placement.get("ref_num_nodes") or values.policy_num_nodes)
     ref_num_gpus_per_node = int(placement.get("ref_num_gpus_per_node") or values.policy_num_gpus_per_node)
 

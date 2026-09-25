@@ -61,10 +61,6 @@ def moe_router_replay_requested(cfg: DictConfig, role: str = "policy") -> bool:
     return bool(cfg.trainer[role].megatron_config.get("moe_router_replay", False))
 
 
-def moe_router_replay_enabled(cfg: DictConfig) -> bool:
-    return moe_router_replay_requested(cfg)
-
-
 def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
     """Whether a dedicated STRICT_SPREAD policy placement group should be used.
 
@@ -342,9 +338,6 @@ def validate_batch_sizes(cfg: DictConfig):
     """
     assert cfg.trainer.train_batch_size >= cfg.trainer.policy_mini_batch_size
     assert cfg.trainer.policy_mini_batch_size > 0, "policy_mini_batch_size must be greater than 0"
-    if cfg.trainer.critic.model.path is not None:
-        assert cfg.trainer.train_batch_size >= cfg.trainer.critic_mini_batch_size
-        assert cfg.trainer.critic_mini_batch_size > 0, "critic_mini_batch_size must be greater than 0"
     assert cfg.trainer.micro_train_batch_size_per_gpu > 0, "micro_train_batch_size_per_gpu must be greater than 0"
     assert cfg.trainer.micro_forward_batch_size_per_gpu > 0, "micro_forward_batch_size_per_gpu must be greater than 0"
 
@@ -384,49 +377,20 @@ def validate_batch_sizes(cfg: DictConfig):
         f"normalized policy_train_batch_size_per_gpu (train_batch_size * optimization_samples_per_prompt // policy_dp_size) {policy_train_batch_size_per_gpu} should be divisible by policy_mini_batch_size_per_gpu (policy_mini_batch_size * optimization_samples_per_prompt // policy_dp_size) {policy_mini_batch_size_per_gpu}"
     )
 
-    # Validate critic mini batch size
-    critic_world_size = cfg.trainer.placement.critic_num_nodes * cfg.trainer.placement.critic_num_gpus_per_node
-    critic_dp_size = critic_world_size // cfg.trainer.critic.sequence_parallel_size
-
-    if cfg.trainer.critic.model.path is not None:
-        assert cfg.trainer.train_batch_size % cfg.trainer.critic_mini_batch_size == 0, (
-            f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by critic_mini_batch_size {cfg.trainer.critic_mini_batch_size}"
-        )
-        critic_mini_batch_size_per_gpu = cfg.trainer.critic_mini_batch_size * optimization_group_size // critic_dp_size
-        assert critic_mini_batch_size_per_gpu > 0, (
-            f"Invalid critic_mini_batch_size_per_gpu: {critic_mini_batch_size_per_gpu}. "
-            f"mini_batch_size={cfg.trainer.critic_mini_batch_size}, "
-            f"optimization_samples_per_prompt={optimization_group_size}, "
-            f"dp_size={critic_dp_size}"
-        )
-        assert critic_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
-            f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be divisible by micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-        )
-        assert critic_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
-            f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be larger than micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-        )
-        critic_train_batch_size_per_gpu = cfg.trainer.train_batch_size * optimization_group_size // critic_dp_size
-        assert critic_train_batch_size_per_gpu % critic_mini_batch_size_per_gpu == 0, (
-            f"normalized critic_train_batch_size_per_gpu (train_batch_size * optimization_samples_per_prompt // critic_dp_size) {critic_train_batch_size_per_gpu} should be divisible by critic_mini_batch_size_per_gpu (critic_mini_batch_size * optimization_samples_per_prompt // critic_dp_size) {critic_mini_batch_size_per_gpu}"
-        )
-
     # Validate training batch size is larger than the least common multiple of the DP sizes of policy (and ref if used).
     lcm_dp_size = policy_dp_size
 
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
     if use_ref_model:
         ref_world_size = cfg.trainer.placement.ref_num_nodes * cfg.trainer.placement.ref_num_gpus_per_node
-        if cfg.trainer.strategy == "megatron":
-            pp = cfg.trainer.ref.megatron_config.pipeline_model_parallel_size
-            cp = cfg.trainer.ref.megatron_config.context_parallel_size
-            tp = cfg.trainer.ref.megatron_config.tensor_model_parallel_size
-            assert ref_world_size % (pp * cp * tp) == 0, (
-                f"ref_world_size {ref_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
-                "This ensures that the data parallel size is an integer."
-            )
-            ref_dp_size = ref_world_size // (pp * cp * tp)
-        else:
-            ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
+        pp = cfg.trainer.ref.megatron_config.pipeline_model_parallel_size
+        cp = cfg.trainer.ref.megatron_config.context_parallel_size
+        tp = cfg.trainer.ref.megatron_config.tensor_model_parallel_size
+        assert ref_world_size % (pp * cp * tp) == 0, (
+            f"ref_world_size {ref_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+            "This ensures that the data parallel size is an integer."
+        )
+        ref_dp_size = ref_world_size // (pp * cp * tp)
         lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
 
     assert cfg.trainer.train_batch_size >= lcm_dp_size, (
@@ -689,10 +653,7 @@ def validate_cfg(cfg: DictConfig):
     if cfg.trainer.policy.model.lora.rank > 0:
         raise ValueError("Megatron training does not support LoRA")
 
-    if (
-        cfg.trainer.strategy == "megatron"
-        and cfg.trainer.micro_forward_batch_size_per_gpu != cfg.trainer.micro_train_batch_size_per_gpu
-    ):
+    if cfg.trainer.micro_forward_batch_size_per_gpu != cfg.trainer.micro_train_batch_size_per_gpu:
         raise ValueError(
             "Megatron recomputes old log-probs with micro_forward_batch_size_per_gpu="
             f"{cfg.trainer.micro_forward_batch_size_per_gpu} but trains with micro_train_batch_size_per_gpu="
@@ -825,8 +786,7 @@ def validate_generator_cfg(cfg: DictConfig):
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
 
-    if cfg.trainer.strategy == "megatron":
-        validate_megatron_cfg(cfg)
+    validate_megatron_cfg(cfg)
     if cfg.generator.backend == "sglang":
         # Some sampling parameters are not supported in SGLang when `skip_tokenizer_init` is True.
         if cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None:
@@ -1075,7 +1035,7 @@ def _validate_dcp_cfg(cfg: DictConfig):
     r3_capture = (
         bool(gen.get("enable_return_routed_experts", False))
         or bool(gen.get("engine_init_kwargs", {}).get("enable_return_routed_experts", False))
-        or moe_router_replay_enabled(cfg)
+        or moe_router_replay_requested(cfg)
     )
     allow_routed_experts_dcp = os.environ.get("VLLM_ALLOW_ROUTED_EXPERTS_DCP", "0") == "1"
     if r3_capture and allow_routed_experts_dcp:
@@ -1220,14 +1180,12 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     if cfg.generator.weight_sync_backend == "nccl":
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
-    if cfg.trainer.strategy == "megatron":
-        # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
-        # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
-        env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-        if cfg.trainer.flash_attn:
-            # disable fused attention for megatron with flash_attn (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
-            # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
-            env_vars["NVTE_FUSED_ATTN"] = "0"
+    # Useful when TP > 1 (and thus Megatron sequence parallel is enabled).
+    # See https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
+    env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+    if cfg.trainer.flash_attn:
+        # TransformerEngine otherwise overrides the FlashAttention choice on Hopper+.
+        env_vars["NVTE_FUSED_ATTN"] = "0"
 
     if cfg.generator.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"

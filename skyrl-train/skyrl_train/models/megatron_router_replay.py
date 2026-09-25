@@ -47,7 +47,7 @@ __all__ = [
     "validate_replay_geometry",
 ]
 
-# Sentinel expert id written by the Stage-1 capture rail for unmatched /
+# Sentinel expert id written during rollout capture for unmatched /
 # non-generated token rows (trajectory_runners/trajectory_processing.py). Rows whose captured
 # targets are all this value fall through to native routing.
 SENTINEL_EXPERT_ID = 0
@@ -85,9 +85,7 @@ def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_action
     response_pos = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
     response_pos[:, seq_len - response_len : seq_len] = True
     # non-sentinel per [B, seq_len, L]; collapse over L: a position is valid
-    # for replay only where every layer carries real data. Use layer 0 as the
-    # representative (the capture rail writes the same sentinel pattern across
-    # layers for a given token), then AND with response_pos.
+    # for replay only where every layer carries real data, then AND with response_pos.
     non_sentinel = (full != SENTINEL_EXPERT_ID).any(dim=-1).all(dim=-1)  # [B, seq_len]
     return full, response_pos & non_sentinel
 
