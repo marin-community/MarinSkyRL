@@ -26,6 +26,7 @@ def main(cfg: DictConfig) -> None:
         manifest = prepare_smoke_sample(
             sample_dir,
             tokenizer_name=str(cfg.trainer.policy.model.path),
+            tokenizer_revision=str(cfg.trainer.policy.model.revision),
             chat_template_kwargs=dict(cfg.generator.chat_template_kwargs),
             candidate_prefixes=INITIAL_POLICY_CANDIDATES,
             max_source_rows=30000,

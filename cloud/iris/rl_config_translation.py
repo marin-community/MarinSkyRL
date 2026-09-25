@@ -648,6 +648,7 @@ _OPTIONAL_HYDRA_PATTERNS = {
     ".distillation",
     ".domain_weights",
     ".engine_init_kwargs",
+    ".chat_template_kwargs",
     ".speculative_decoding",
     ".hf_hub_",
     ".enable_db_registration",

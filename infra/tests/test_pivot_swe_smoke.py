@@ -56,7 +56,10 @@ def test_smoke_sample_splits_trajectory_ids_and_writes_parquet(tmp_path, monkeyp
 
     monkeypatch.setattr(pivot_swe, "load_dataset", lambda *args, **kwargs: rows)
     monkeypatch.setattr(pivot_swe.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: Tokenizer())
-    manifest = pivot_swe.prepare_smoke_sample(tmp_path, chat_template_kwargs={"enable_thinking": False})
+    manifest = pivot_swe.prepare_smoke_sample(
+        tmp_path, tokenizer_name="Qwen/Qwen3-0.6B", tokenizer_revision="c1899de",
+        chat_template_kwargs={"enable_thinking": False},
+    )
 
     probe_ids = manifest["probe_trajectory_ids"]
     assert len(set(manifest["train_trajectory_ids"] + probe_ids)) == 192
