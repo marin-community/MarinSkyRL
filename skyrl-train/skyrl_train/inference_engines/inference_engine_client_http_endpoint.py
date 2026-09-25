@@ -17,6 +17,7 @@ import time
 import requests
 import traceback
 from contextlib import asynccontextmanager
+from enum import StrEnum
 from http import HTTPStatus
 from typing import Any, Coroutine, Dict, Optional, TypeVar
 
@@ -37,6 +38,9 @@ logger = logging.getLogger(__name__)
 _ResponseT = TypeVar("_ResponseT")
 TOKENIZE_ENDPOINT = "/tokenize"
 MODELS_ENDPOINT = "/v1/models"
+CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions"
+COMPLETIONS_ENDPOINT = "/v1/completions"
+_INFERENCE_ENDPOINTS = frozenset({TOKENIZE_ENDPOINT, CHAT_COMPLETIONS_ENDPOINT, COMPLETIONS_ENDPOINT})
 _SERVER_CREATED_TIME = int(time.time())
 
 
@@ -68,6 +72,64 @@ class ModelCard(BaseModel):
 class ModelList(BaseModel):
     object: str = "list"
     data: list[ModelCard]
+
+
+class _RequestOutcome(StrEnum):
+    INCOMPLETE = "incomplete"
+    COMPLETED = "completed"
+    CLIENT_DISCONNECT = "client_disconnect"
+    SEND_FAILURE = "send_failure"
+    SERVER_CANCELLED = "server_cancelled"
+    APPLICATION_ERROR = "application_error"
+
+
+class _RequestOutcomeMiddleware:
+    """Record the close outcome visible at the ASGI boundary for inference requests."""
+
+    def __init__(self, app, bridge_stats: HTTPBridgeStatsAccumulator):
+        self.app = app
+        self.bridge_stats = bridge_stats
+
+    async def __call__(self, scope, receive, send):
+        endpoint = scope.get("path")
+        if scope["type"] != "http" or endpoint not in _INFERENCE_ENDPOINTS:
+            return await self.app(scope, receive, send)
+
+        reason = _RequestOutcome.INCOMPLETE
+
+        async def observed_receive():
+            nonlocal reason
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                reason = _RequestOutcome.CLIENT_DISCONNECT
+            return message
+
+        async def observed_send(message):
+            nonlocal reason
+            try:
+                await send(message)
+            except OSError:
+                reason = _RequestOutcome.SEND_FAILURE
+                raise
+            if (
+                reason is _RequestOutcome.INCOMPLETE
+                and message["type"] == "http.response.body"
+                and not message.get("more_body", False)
+            ):
+                reason = _RequestOutcome.COMPLETED
+
+        try:
+            await self.app(scope, observed_receive, observed_send)
+        except asyncio.CancelledError:
+            if reason is _RequestOutcome.INCOMPLETE:
+                reason = _RequestOutcome.SERVER_CANCELLED
+            raise
+        except Exception:
+            if reason is _RequestOutcome.INCOMPLETE:
+                reason = _RequestOutcome.APPLICATION_ERROR
+            raise
+        finally:
+            self.bridge_stats.record_request_outcome(endpoint, reason.value)
 
 
 def is_engine_error_response(response: Dict[str, Any]) -> bool:
@@ -490,8 +552,9 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(_RequestOutcomeMiddleware, bridge_stats=bridge_stats)
 
-    @app.post("/v1/chat/completions")
+    @app.post(CHAT_COMPLETIONS_ENDPOINT)
     async def chat_completion(raw_request: Request):
         """
         Takes in OpenAI's `ChatCompletionRequest` and returns OpenAI's `ChatCompletionResponse`.
@@ -517,7 +580,7 @@ def create_app(
             continuation_manager=continuation_manager,
         )
 
-    @app.post("/v1/completions")
+    @app.post(COMPLETIONS_ENDPOINT)
     async def completions(raw_request: Request):
         """
         Takes in OpenAI's `CompletionRequest` and returns OpenAI's `CompletionResponse`.
