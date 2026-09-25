@@ -14,15 +14,9 @@
 set -euo pipefail
 
 REPOSITORY_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-# The two backends resolve different dependency closures, so each gets its own environment path
-# and its own spec: thresholds cut from one backend say nothing about the other.
-STRATEGY="${STRATEGY:-fsdp2}"
-case "$STRATEGY" in
-  fsdp2) RUNTIME_PROFILE=fsdp ;;
-  megatron) RUNTIME_PROFILE=megatron ;;
-  *) echo "unsupported STRATEGY: $STRATEGY (expected fsdp2 or megatron)" >&2; exit 2 ;;
-esac
-NIGHTLY_RL_ENV="${NIGHTLY_RL_ENV:-$REPOSITORY_ROOT/.iris-nightly-env-$STRATEGY}"
+RUNTIME_PROFILE=megatron
+STRATEGY=megatron
+NIGHTLY_RL_ENV="${NIGHTLY_RL_ENV:-$REPOSITORY_ROOT/.iris-nightly-env-megatron}"
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 MAX_STEPS="${MAX_STEPS:-30}"
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k_nightly}"
@@ -92,22 +86,13 @@ echo "::: shape: batch=${TRAIN_BATCH_SIZE} samples=${N_SAMPLES} gen_len=${MAX_GE
 # in this environment, so the warmup hard-fails at engine start. This is a bf16 model that never
 # uses FP8, so disable DeepGEMM outright. Exported so the Ray-spawned vLLM workers inherit it.
 export VLLM_USE_DEEP_GEMM=0
-# fsdp2 asks for flash attention and sample packing; bootstrap_runtime.sh asserts the import for
-# that profile, so the assertion that makes packing unusable cannot fire. Megatron needs neither.
-case "$STRATEGY" in
-  fsdp2) STRATEGY_ARGS=(
-    trainer.strategy=fsdp2
-    trainer.flash_attn=true
-    trainer.use_sample_packing=true
-  ) ;;
-  megatron) STRATEGY_ARGS=(
-    trainer.strategy=megatron
-    trainer.policy.megatron_config.tensor_model_parallel_size=1
-    trainer.policy.megatron_config.pipeline_model_parallel_size=1
-    trainer.ref.megatron_config.tensor_model_parallel_size=1
-    trainer.ref.megatron_config.pipeline_model_parallel_size=1
-  ) ;;
-esac
+STRATEGY_ARGS=(
+  trainer.strategy=megatron
+  trainer.policy.megatron_config.tensor_model_parallel_size=1
+  trainer.policy.megatron_config.pipeline_model_parallel_size=1
+  trainer.ref.megatron_config.tensor_model_parallel_size=1
+  trainer.ref.megatron_config.pipeline_model_parallel_size=1
+)
 START=$(date +%s)
 # This lane runs the standalone Hydra entrypoint inside its already-allocated one-GPU Iris task.
 # Marin-launched jobs exercise the config-native task runtime in their own smoke workflows.

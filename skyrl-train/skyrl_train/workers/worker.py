@@ -36,10 +36,7 @@ from skyrl_train.tensor_math import masked_mean
 from skyrl_train.distributed.dispatch import ActorInfo, Dispatch, DispatchRegistry, DispatchSettings, MeshRank
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
 from skyrl_train.distributed.strategy import DistributedStrategy
-from transformers import PreTrainedModel
 from loguru import logger
-from skyrl_train.distributed.ulysses.utils import set_ulysses_sequence_parallel_group
-from skyrl_train.distributed.ulysses.monkey_patch import apply_monkey_patch
 from skyrl_train.distributed.utils import init_custom_process_group, init_worker_process_group_with_device
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.policy_math import ppo_critic_loss
@@ -160,10 +157,10 @@ class DistributedTorchRayActor:
         # Deterministic forced-CVD-mask pin (opt-in via policy_force_cvd_mask).
         # When engaged, mask this actor to its single Ray-assigned PHYSICAL GPU
         # and force PCI_BUS_ID ordering BEFORE any CUDA / EP-device-mesh init,
-        # so set_device(0)/init_device_mesh/FSDP device_id can only resolve that
+        # so set_device(0) and init_device_mesh can only resolve that
         # one physical GPU. This is independent of positional/LOCAL_RANK ordering
-        # and of whether the SIF Ray masked CVD — closing the GH200 EP×FSDP
-        # GPU-0-stacking init-OOM that set_device(LOCAL_RANK) alone could not
+        # and of whether Ray masked CVD — closing the GH200
+        # GPU-0-stacking init OOM that set_device(LOCAL_RANK) alone could not
         # deterministically prevent. IMPORTANT: this must run before
         # torch.cuda.device_count() below touches CUDA (which would latch the
         # unmasked device set). force_cvd_mask only engages with the per-GPU
@@ -236,7 +233,7 @@ class DistributedTorchRayActor:
         )
 
         # setup device mesh
-        # TODO: Support TP / PP for DeepSpeed
+        # Tensor and pipeline parallelism are configured by the Megatron worker.
         # NOTE (sumanthrh): Device mesh and mesh rank are rank specific attributes. For the current way the strategy is defined, it is only meant to interact with worker state; not hold worker state. Thus, this should live outside the strategy object.
         # This device mesh can be common across all the strategies we use
         dp_size = self._world_size // self.sequence_parallel_size
@@ -245,54 +242,9 @@ class DistributedTorchRayActor:
         )
         self.device_mesh = device_mesh
 
-        # --- EP/CP-aware DATA-parallel width for MeshDispatch -------------------------
-        # The MoE EP all-to-all deadlock at SeqNum=145 (CP=2+EP8 131k prod run, 2026-06-22)
-        # and the underlying silent MoE-math corruption both trace to MeshDispatch keying
-        # data shards on (mesh_rank.dp, mesh_rank.dp_size) where dp_size was computed as
-        # world_size // sequence_parallel_size ALONE -- EP/CP-UNAWARE. The FSDP2 device
-        # mesh (fsdp_utils.create_device_mesh) is ["ddp","fsdp","cp","ep"]: only ddp x fsdp
-        # are TRUE data-parallel (distinct-shard) dims. Data MUST be REPLICATED across cp
-        # (CP splits the sequence inside the forward), ep (all EP ranks process the SAME
-        # tokens), and sp (Ulysses likewise). With SP=1 the old formula gave dp_size=32 on
-        # the ep8xfsdp2xcp2 (1,2,2,8) mesh, so all 32 ranks got DISTINCT shards -> EP-group
-        # ranks combined mismatched tokens -> per-expert counts diverged -> the ragged
-        # token all-to-all desynced and hung. CONFIRMED by the EPPROBE run (job 946890):
-        # at gs=1 all 32 ranks reported DISTINCT fp_sum fingerprints (dp=0..31, dp_size=32).
-        #
-        # Fix: dp_size = world_size // (sp * cp * ep) = ddp_size * fsdp_size (= 2 here), and
-        # dp = the rank's position WITHIN its (ddp,fsdp) data-parallel subgroup, derived from
-        # the FSDP2 row-major rank decomposition so that ranks differing ONLY in (sp,cp,ep)
-        # get the SAME dp -> the same shard. The `sp` field is repurposed as the rank's
-        # REPLICATION index within its dp group (0 for exactly one rank per group); it is
-        # consumed only by MeshRank.is_collection_dp_rank (dispatch.py:37, `sp==0`), so this
-        # keeps collection picking exactly one shard per dp group while leaving the dispatch
-        # split logic untouched.
-        #
-        # INVARIANT (verified): when cp==ep==1 this reduces to the ORIGINAL formula
-        # dp_size = world_size // sp, dp = rank // sp, sp = rank % sp -- byte-identical to the
-        # pre-EP/CP path (the non-EP/non-CP a3 production runs are unaffected). We keep the
-        # original mesh-derived computation for that case and only branch when cp/ep are on.
-        cp_size, ep_size = self._resolve_cp_ep_sizes()
-        if cp_size <= 1 and ep_size <= 1:
-            mesh_dp = self.device_mesh.get_local_rank(mesh_dim="dp")
-            mesh_sp = self.device_mesh.get_local_rank(mesh_dim="sp")
-            mesh_dp_size = self.device_mesh.size(0)
-        else:
-            sp_size = self.sequence_parallel_size
-            # FSDP2 mesh is ["ddp","fsdp","cp","ep"] (row-major; ep varies fastest).
-            # SP is NOT a dim of that mesh; in the cp/ep config SP=1. Treat the global rank
-            # as a flat index over (ddp, fsdp, sp, cp, ep) replication block of width
-            # sp*cp*ep, with the data-parallel index = position in the (ddp,fsdp) outer dims.
-            inner = sp_size * cp_size * ep_size
-            assert self._world_size % inner == 0, (
-                f"world_size={self._world_size} not divisible by sp*cp*ep="
-                f"{inner} (sp={sp_size}, cp={cp_size}, ep={ep_size})"
-            )
-            mesh_dp_size = self._world_size // inner
-            # dp = which (ddp,fsdp) data-parallel group this rank belongs to; rep = its
-            # index within that group's replicated (sp,cp,ep) ranks (rep==0 -> collector).
-            mesh_dp = self._rank // inner
-            mesh_sp = self._rank % inner
+        mesh_dp = self.device_mesh.get_local_rank(mesh_dim="dp")
+        mesh_sp = self.device_mesh.get_local_rank(mesh_dim="sp")
+        mesh_dp_size = self.device_mesh.size(0)
         self.mesh_rank = MeshRank(
             dp=mesh_dp,
             sp=mesh_sp,
@@ -302,46 +254,6 @@ class DistributedTorchRayActor:
             dp_size=mesh_dp_size,
             pp_size=1,
         )
-
-    def _resolve_cp_ep_sizes(self):
-        """Resolve the (context_parallel_size, expert_model_parallel_size) for this run.
-
-        EP/CP are configured per training role under ``cfg.trainer.<role>.fsdp_config``
-        (DeepSpeed/Megatron paths leave them at 1; Megatron overrides this method entirely).
-        ``init_worker_process_group`` is shared across policy/critic/ref, so we take the MAX
-        across the present FSDP2 roles -- for a coherent colocated MoE run they agree, and
-        max is the conservative value that reproduces the actual mesh geometry. Returns
-        ``(1, 1)`` (the byte-identical flag-off path) when no fsdp_config advertises EP/CP.
-        """
-        cfg = getattr(self, "cfg", None)
-        if cfg is None:
-            return 1, 1
-        cp_size, ep_size = 1, 1
-        try:
-            trainer = cfg.trainer
-            for role in ("policy", "critic", "ref"):
-                role_cfg = trainer.get(role) if hasattr(trainer, "get") else getattr(trainer, role, None)
-                if role_cfg is None:
-                    continue
-                fc = role_cfg.get("fsdp_config") if hasattr(role_cfg, "get") else getattr(role_cfg, "fsdp_config", None)
-                if fc is None:
-                    continue
-                cp_size = max(cp_size, int(fc.get("context_parallel_size", 1)))
-                ep_size = max(ep_size, int(fc.get("expert_model_parallel_size", 1)))
-        except Exception as _e:
-            logging.warning("[ep-dispatch] _resolve_cp_ep_sizes fell back to (1,1): %r", _e)
-            return 1, 1
-        return cp_size, ep_size
-
-    def _seq_parallel_monkey_patch(self, model: PreTrainedModel, use_parent_class: bool = False):
-        # NOTE (sumanthrh): This sets a global variable that is used during the forward pass for sequence parallelism
-        # This works because each worker is it's own process and thus different worker types are isolated
-        # TODO (sumanthrh): We should re-visit this and see if we should adopt a context-manager pattern for sequence parallelism
-        if self.sequence_parallel_size > 1:
-            set_ulysses_sequence_parallel_group(self.device_mesh["sp"].get_group())
-            apply_monkey_patch(
-                model=model, ulysses_sp_size=self.sequence_parallel_size, use_parent_class=use_parent_class
-            )
 
     def get_mesh_rank(self):
         return self.mesh_rank
@@ -422,44 +334,6 @@ class Worker(DistributedTorchRayActor):
     def empty_cache(self) -> None:
         """Empty GPU memory cache on Worker's CUDA device"""
         torch.cuda.empty_cache()
-
-    def get_device_placement_diag(self) -> dict:
-        """Diagnostic: report the PHYSICAL device this rank actually landed on,
-        plus its EP/FSDP device-mesh coordinate. Used by the EP-reproducing
-        placement smoke to assert every EP×FSDP rank is on a distinct physical
-        GPU. Read-only; safe to call after init_model.
-        """
-        import socket as _socket
-
-        idx = torch.cuda.current_device()
-        try:
-            uuid = str(torch.cuda.get_device_properties(idx).uuid)
-        except Exception:
-            uuid = None
-        diag = {
-            "rank": int(os.environ.get("RANK", "-1")),
-            "host": _socket.gethostname(),
-            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
-            "CUDA_DEVICE_ORDER": os.environ.get("CUDA_DEVICE_ORDER"),
-            "LOCAL_RANK": os.environ.get("LOCAL_RANK"),
-            "ray_gpu_ids": [str(g) for g in ray.get_gpu_ids()],
-            "device_count": torch.cuda.device_count(),
-            "current_device": idx,
-            "phys_uuid": uuid,
-        }
-        # EP/FSDP mesh coordinate, when the strategy built a device mesh.
-        strat = getattr(self, "strategy", None)
-        mesh = getattr(strat, "device_mesh", None) if strat is not None else None
-        if mesh is not None:
-            try:
-                diag["mesh_shape"] = tuple(mesh.mesh.shape)
-                diag["mesh_dim_names"] = tuple(mesh.mesh_dim_names)
-                diag["mesh_coord"] = tuple(int(c) for c in mesh.get_coordinate())
-                diag["ep_size"] = strat.ep_size
-                diag["cp_size"] = int(getattr(strat, "cp_size", 1))
-            except Exception as e:
-                diag["mesh_error"] = repr(e)
-        return diag
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True):
         """Offload all worker state to CPU.
@@ -600,12 +474,7 @@ class Worker(DistributedTorchRayActor):
 
         This is a wrapper around `_forward_micro_batch` that runs in micro batches of `cfg.trainer.micro_forward_batch_size_per_gpu`.
         """
-        # WORKER_FORWARD_ENTER instrument (diagnosis-confirmation for the async-dispatch
-        # drain fix). The MoE-RL wedge stranded every NON-rank-0 policy shard's `forward`
-        # task behind the prior weight-sync coroutine on the async actor's single event
-        # loop (FR-proven 2026-06-29): pre-fix ONLY rank 0 reached worker.forward at step 1
-        # (peers' tasks never scheduled). With the drain working, ALL FSDP shard ranks
-        # (e.g. 0/8/16/24) must print this. Cheap one-line INFO; keep it.
+        # Record which ranks enter the synchronous forward after weight sync.
         logger.info(f"WORKER_FORWARD_ENTER rank={self._rank}")
         # R3 RESIDENT-SET per-rank marker: lets us SEE the resident routed-experts
         # chunk land on EVERY rank (ungated; no-op when the batch carries no routes).
@@ -623,44 +492,13 @@ class Worker(DistributedTorchRayActor):
         return output
 
     async def barrier_all(self) -> None:
-        """ASYNC pass-through drain barrier (the MoE-RL async-dispatch wedge fix).
+        """Drain each actor event loop before the next synchronous forward.
 
-        FR-proven root cause (2026-06-29, gs-1 MoE wedge on EP8xFSDP2xCP2): the FSDP
-        policy worker is a Ray ASYNC actor (it defines `async def` methods like
-        `broadcast_to_inference_engines`), so EVERY actor method — sync or async — runs
-        on ONE asyncio event-loop thread. `worker.forward` is a plain SYNC `def`: once it
-        starts it runs to completion on the loop thread WITHOUT yielding. After the
-        disaggregated per-step weight-sync, the peer ranks' loops were still occupied by
-        the `broadcast_to_inference_engines` coroutine task (suspended post-:864 barrier,
-        not yet unwound), so the queued sync `forward` task was NEVER scheduled — only
-        rank 0 (whose loop was free) entered the forward, hit the lonely mesh_fsdp unshard
-        `_all_gather_base` alone, and the 1800s NCCL watchdog SIGABRTed the run.
-
-        WHY THIS METHOD MUST BE `async`, NOT `sync` (the prior fix's flaw): the previous
-        `barrier_all` was a plain SYNC `def`. A sync drain method has the IDENTICAL
-        head-of-line-blocking problem as `forward` — if a peer loop is still occupied by
-        the broadcast coroutine (M2) the sync `barrier_all` task is queued-not-scheduled
-        just like `forward`, so it cannot drain the very loop it is blocked behind, and it
-        adds no yield point (M1). That is why the prior post-weight-sync + per-step sync
-        drains relocated but did NOT fix the wedge.
-
-        As an `async def`, this method is itself a coroutine task on the actor loop: Ray
-        cannot resolve its ObjectRef until the loop became free enough to SCHEDULE and RUN
-        it to completion. The `await asyncio.sleep(0)` forces at least one full loop turn
-        so any lingering weight-sync coroutine task is fully retired and the loop reaches
-        idle BEFORE the collective. The barrier itself runs via `asyncio.to_thread` so the
-        blocking NCCL collective does not re-occupy the single event-loop thread. The
-        driver `await`s this drain's refs (gather) before dispatching `forward.remote()`,
-        so EVERY peer's loop is provably drained-to-idle before the sync forward arrives —
-        robust to BOTH M1 (loop busy) and M2 (coroutine not unwound).
-
-        Symmetric on every rank (cannot itself strand), changes no tensor values
-        (correctness/R3-replay neutral), and is a strict no-op for single-rank or
-        uninitialized runs.
+        The weight-sync coroutine can still occupy some rank loops when the
+        driver dispatches a synchronous forward. Yielding once lets those
+        coroutines finish, then the world barrier aligns all ranks before
+        model collectives begin.
         """
-        # UNGATED per-rank marker so we can SEE the drain fire on every rank (mirrors
-        # WORKER_FORWARD_ENTER). Pre-fix only rank 0 reached the forward; post-fix all
-        # FSDP shard ranks (0/8/16/24 ...) must log this immediately before that step.
         logger.info(f"WORKER_DRAIN_BARRIER rank={self._rank}")
         if self._world_size > 1 and torch.distributed.is_initialized():
             # Yield to the event loop so any lingering weight-sync coroutine task is
@@ -722,7 +560,7 @@ class PPORayActorGroup:
         self._pin_to_ray_gpu_id = pin_to_ray_gpu_id
         # When True (and pin_to_ray_gpu_id), each actor additionally MASKS
         # CUDA_VISIBLE_DEVICES to its single physical GPU + forces PCI_BUS_ID
-        # ordering before any CUDA init — the deterministic EP×FSDP pin.
+        # ordering before any CUDA init — the deterministic EP×DP pin.
         self._force_cvd_mask = force_cvd_mask
 
         # custom resources, see https://docs.ray.io/en/latest/ray-core/scheduling/resources.html
@@ -1264,15 +1102,9 @@ class PolicyWorkerBase(Worker):
         token_ids = experience.distillation.student_token_ids()
         if token_ids is None:
             return None
-        fsdp_config = self.cfg.trainer.policy.get("fsdp_config", {})
-        if (
-            self.cfg.trainer.use_sample_packing
-            or self.sequence_parallel_size != 1
-            or int(fsdp_config.get("context_parallel_size", 1)) != 1
-        ):
+        if self.cfg.trainer.use_sample_packing or self.sequence_parallel_size != 1:
             raise ValueError(
-                "selected-ID distillation on FSDP2/DeepSpeed does not yet support sample packing, "
-                "sequence parallelism, or context parallelism"
+                "selected-ID distillation does not support sample packing, sequence parallelism, or context parallelism"
             )
         response_logits = output["logits"][:, -num_actions - 1 : -1]
         if response_logits.shape[:2] != experience.distillation.valid_mask.shape:
@@ -1320,7 +1152,7 @@ class PolicyWorkerBase(Worker):
             )
         )
 
-        # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
+        # The model wrapper controls its own internal precision where needed.
         _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # actor loss
@@ -1361,18 +1193,8 @@ class PolicyWorkerBase(Worker):
         policy_loss = objective.policy_loss
         entropy = objective.entropy
         kl_loss = objective.kl_loss
-        # FIX-6 (#232): wrap backward in the CP ring-SDPA dispatcher span so a CP
-        # training step's gradient-checkpoint recompute dispatches to ring attention
-        # (matching the saved full-length q/k/v) instead of plain SDPA on the
-        # CP-sharded q/k/v -> avoids the "Recomputed values have different metadata"
-        # CheckpointError. Returns a literal nullcontext for CP1 / non-CP / no-grad
-        # backward (byte-identical). Falls back to nullcontext if the model has no
-        # such method (non-HF wrappers).
-        _cp_backward_span = getattr(self.model, "cp_backward_dispatcher_span", None)
-        _cp_span_cm = _cp_backward_span() if _cp_backward_span is not None else contextlib.nullcontext()
         _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.BACKWARD_ENTER)
-        with _cp_span_cm:
-            self.strategy.backward(loss, self.model, self.optimizer)
+        self.strategy.backward(loss, self.model, self.optimizer)
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.BACKWARD_EXIT)
 
         # Stage-7 P3 recompute-safety: the training forward DEFERS the router-replay
@@ -1388,7 +1210,7 @@ class PolicyWorkerBase(Worker):
         # the end. v4 ran only on the LAST micro-batch, which with
         # `update_epochs_per_batch=1` gave a noisy single-sample view (action_log_probs
         # is always computed BEFORE optimizer_step within a step, so the per-batch
-        # ratio reflects only vLLM↔FSDP precision noise — averaging across all
+        # ratio reflects only vLLM-to-trainer precision noise — averaging across all
         # micro-batches makes that signal more representative). The final scalar
         # dict has the same wandb keys as v4 so the downstream per-key
         # all_reduce(status) stays keyset-compatible.

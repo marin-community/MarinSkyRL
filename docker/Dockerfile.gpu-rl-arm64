@@ -20,21 +20,12 @@
 # The cost is duplication. Both files carry a pointer to the other; a change to
 # one is a change to both.
 #
-# HOW MEGATRON IS INSTALLED HERE
-# ------------------------------
-# The root `megatron` extra resolves the backend on aarch64 and pins the
-# architecture-specific native wheels. Selecting it can no longer succeed while
-# installing no backend. Every piece exists (verified against PyPI and the
-# upstream GitHub releases on 2026-07-28):
-#   transformer_engine        2.11.0  py3-none-any                  (PyPI)
-#   transformer_engine_cu12   2.11.0  py3-none-manylinux_2_28_aarch64 (PyPI)
-#   transformer_engine_torch  2.11.0  cp312-linux_aarch64  (erictang000 release)
-#   megatron_core             0.18.0  cp312-manylinux_2_28_aarch64  (PyPI)
-#   megatron_bridge           0.5.0   py3-none-any                  (PyPI)
-#   mamba_ssm / causal_conv1d         cp312-linux_aarch64  (erictang000 releases)
-# No TransformerEngine source build is required. The whole Megatron subtree has
-# aarch64 wheels, and the root lock records the architecture-specific native
-# artifacts for both supported Linux platforms.
+# ARM MEGATRON STATUS
+# -------------------
+# This build path predates the CUDA 13.2 root lock. The current `megatron`
+# extra declares its native dependencies only on x86_64, so an ARM build cannot
+# pass the native import checks below. New aarch64 wheels compatible with the
+# frozen Torch/CUDA versions are required before this image can be released.
 #
 # The image installs the root project's dependency closure directly from
 # `uv.lock`; the architecture-specific native artifacts are part of that frozen
@@ -58,29 +49,8 @@
 # artifact holds linux_x86_64 wheels and cannot satisfy an aarch64 build, so this
 # image always compiles. Build the two architectures used by the aarch64 fleet:
 # Hopper (9.0) for GH200 systems such as JSC Jupiter and Blackwell (10.0) for GB200.
-# NATIVE CACHE KEY = { VLLM_FORK_COMMIT, FLASH_ATTN_VERSION, torch
-#   2.11.0, CUDA 12.9, cp312, aarch64, TORCH_CUDA_ARCH_LIST "9.0;10.0" }.
-#
-# =============================================================================
-# Version pins (ground truth = root pyproject.toml + uv.lock):
-#   - torch 2.11.0+cu129 : the root project pins torch to the cu129 index, matching
-#       the 12.9 toolkit below. The two move together on purpose. An earlier
-#       attempt raised only the toolkit and left torch on cu128; a split
-#       toolchain builds but leaves a native extension linked against one CUDA
-#       minor and loaded against another, which fails at runtime rather than at
-#       build time. Keep this index and BASE_IMAGE in step.
-#   - vLLM fork          : Python source and metadata come from
-#       marin-community/vllm @ VLLM_FORK_COMMIT. The lock uses stock vLLM 0.23.0
-#       as its dependency anchor; native files come from the validated donor.
-#   - flash-attn 2.8.3   : compiled from source vs torch 2.11.0+cu129 / cp312 so
-#       flash_attn_2_cuda EXISTS (the root lock pins flash-attn 2.8.3; a
-#       `--no-deps` wheel swap here is the version that actually runs).
-#   - transformers 5.8.1 : root package pin (>=5.8.1,<5.9), required by the
-#       megatron backend (megatron-bridge 0.5.0). vLLM 0.23.0 accepts it.
-#   - python 3.12 / CUDA 12.9 (devel base, for nvcc). 12.9 is a FLOOR, not a
-#       preference: the vLLM fork's Blackwell MXFP4 experts kernel static-asserts
-#       "MXFP4 experts quant requires PACK16 mode (CUDA >= 12.9)". Enabling sm_100
-#       turns that kernel on, so 12.8 cannot build an image that targets GB200.
+# These build pins are from the previous CUDA 12.9 runtime and must be updated
+# with the ARM Megatron lock closure before the image is released again.
 # Build is GPU-count-agnostic and needs no live GPU (only nvcc). Target = linux/arm64.
 # BASE_IMAGE is a multi-arch manifest and resolves its aarch64 child on an aarch64
 # builder, so it is the same reference as the amd64 file on purpose.
@@ -102,9 +72,7 @@ ARG TORCH_CUDA_ARCH_LIST="9.0;10.0"
 # than cores is what bounds this.
 ARG MAX_JOBS=24
 ARG NVCC_THREADS=2
-# Opt-in Megatron training backend. Off by default so the default image is
-# fsdp2-only; set INSTALL_MEGATRON=1 to select the root `megatron` extra.
-ARG INSTALL_MEGATRON=0
+# Megatron is the sole training backend.
 # Harbor (agentic rollout) is installed after the trainer lock. Change this pin in source rather
 # than overriding it at build time.
 ARG HARBOR_COMMIT=ad6e612d385379d3168638f6bfb2cf4a56cedbf9
@@ -216,7 +184,6 @@ ARG FLASH_ATTN_VERSION
 ARG VLLM_FORK_REPO
 ARG VLLM_FORK_COMMIT
 ARG TORCH_CUDA_ARCH_LIST
-ARG INSTALL_MEGATRON
 ARG HARBOR_COMMIT
 ARG FASTAPI_VERSION
 ARG OTEL_EXPORTER_VERSION
@@ -285,8 +252,7 @@ RUN cd ${SKYRL_HOME} && \
 
 # =============================================================================
 # RL environment — installed directly from the root lock. `vllm` implies the
-# CUDA hardware closure; `fsdp` and `megatron` select policy dependencies. When
-# INSTALL_MEGATRON=1, `megatron` adds the aarch64 policy backend from the same
+# CUDA hardware closure; `megatron` selects policy dependencies from the
 # frozen resolution.
 # No UV_CONSTRAINT / rl_env_constraints: the lock IS the constraint.
 # =============================================================================
@@ -389,7 +355,7 @@ RUN cd ${SKYRL_HOME} && \
 # excluded because the compiled wheel below supplies the locked version.
 RUN cd ${SKYRL_HOME} && \
     ${RL_SYNC} && \
-    echo "uv sync FINAL (vllm, cufft, triton, nvshmem, nvrtc + closure verify) done (megatron=${INSTALL_MEGATRON})"
+    echo "uv sync FINAL (vllm, cufft, triton, nvshmem, nvrtc + closure verify) done"
 
 # Validate the wheels against the pins that produced them, then record provenance.
 # There is no native donor on this image — the wheels are compiled in-tree from
@@ -440,9 +406,6 @@ RUN uv pip install --python ${RL_ENV_DIR}/bin/python --no-deps \
       /tmp/vllm-precompiled-install.log && \
     uv pip uninstall --python ${RL_ENV_DIR}/bin/python \
       setuptools-scm setuptools-rust wheel && \
-    if [ "${INSTALL_MEGATRON}" != "1" ]; then \
-      uv pip uninstall --python ${RL_ENV_DIR}/bin/python semantic-version; \
-    fi && \
     rm /tmp/vllm-precompiled-install.log
 
 # Primary assert: exact vLLM source + skyrl_train under the locked environment.
@@ -451,22 +414,14 @@ RUN ${RL_ENV_DIR}/bin/python -c "import torch, transformers, vllm, skyrl_train, 
 # Verify the source metadata accepts the CUDA 12 runtime selected by the lock.
 RUN ${RL_ENV_DIR}/bin/python -c "from importlib.metadata import distribution, version; from packaging.requirements import Requirement; requirements = [Requirement(value) for value in distribution('vllm').requires or []]; cutlass = next(value for value in requirements if value.name == 'nvidia-cutlass-dsl'); humming = next(value for value in requirements if value.name == 'humming-kernels'); assert cutlass.specifier.contains(version(cutlass.name)); assert humming.extras == {'cu12'}; assert humming.specifier.contains(version(humming.name)); print('vLLM CUDA 12 dependency metadata OK:', cutlass, humming)"
 
-# Megatron backend asserts (only when built with INSTALL_MEGATRON=1).
+# Megatron backend asserts.
 # The second assert is stricter than the amd64 file's and is the point of this
 # image: it proves the aarch64 TransformerEngine torch extension actually links,
 # which is the one piece with no wheel on PyPI. torch is imported first because
 # transformer_engine.common dlopens its core library at import time and finds
 # libcudart only once torch has loaded the CUDA runtime.
-RUN if [ "${INSTALL_MEGATRON}" = "1" ]; then \
-        ${RL_ENV_DIR}/bin/python -c "import causal_conv1d, mamba_ssm, megatron.core, megatron.bridge, transformer_engine; print('Megatron native imports OK')" && \
-        ${RL_ENV_DIR}/bin/python -c "import torch, transformer_engine.pytorch; from megatron.bridge.models.conversion.auto_bridge import AutoBridge; print('transformer_engine.pytorch + megatron.bridge AutoBridge import OK')"; \
-    else echo "megatron backend not installed (INSTALL_MEGATRON=0)"; fi
-
-# FSDP expert-parallel assert. Megatron selects a different policy dependency
-# axis and is validated by the native imports above.
-RUN if [ "${INSTALL_MEGATRON}" = "0" ]; then \
-      ${RL_ENV_DIR}/bin/python -c "from torchtitan.distributed.expert_parallel import ExpertParallel; print('torchtitan ExpertParallel import OK (apply_ep EP>1 unblocked)')"; \
-    else echo "FSDP torchtitan backend not installed (INSTALL_MEGATRON=1)"; fi
+RUN ${RL_ENV_DIR}/bin/python -c "import causal_conv1d, mamba_ssm, megatron.core, megatron.bridge, transformer_engine; print('Megatron native imports OK')" && \
+    ${RL_ENV_DIR}/bin/python -c "import torch, transformer_engine.pytorch; from megatron.bridge.models.conversion.auto_bridge import AutoBridge; print('transformer_engine.pytorch + megatron.bridge AutoBridge import OK')"
 
 # The S3 client stack for the cloud.iris controller (Ray S3 object-spilling +
 # the S3 rendezvous/checkpoint boto3 path) comes ENTIRELY through the frozen lock:
@@ -506,7 +461,7 @@ RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
       exit 1; \
     fi && \
     cat /tmp/rl-pip-check && \
-    validate-gpu-rl-pip-check /tmp/rl-pip-check linux_aarch64 "${INSTALL_MEGATRON}" && \
+    validate-gpu-rl-pip-check /tmp/rl-pip-check linux_aarch64 && \
     rm /tmp/rl-pip-check && \
     echo "baked harbor commit: ${HARBOR_COMMIT}"
 

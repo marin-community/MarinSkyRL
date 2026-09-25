@@ -28,7 +28,7 @@ def _raw_config() -> dict[str, Any]:
         },
         "runtime": {
             "launcher_commit": "a" * 40,
-            "profile": "fsdp",
+            "profile": "megatron",
             "entrypoint": "skyrl_train.entrypoints.fully_async",
         },
         "iris": {
@@ -81,7 +81,7 @@ def _raw_config() -> dict[str, Any]:
             "model_num_attention_heads": 8,
             "trainer": {
                 "seed": 42,
-                "strategy": "fsdp2",
+                "strategy": "megatron",
                 "algorithm": {"use_kl_loss": False},
                 "placement": {
                     "colocate_all": True,
@@ -144,6 +144,27 @@ def test_composed_launch_records_the_trainer_its_entrypoint_runs(
         resolved = tmp_path / "resolved-launch.yaml"
         OmegaConf.save(config, resolved)
         assert load_launch_config(resolved).runtime.training_type == expected
+def test_qwen_smoke_accepts_hugging_face_model_input(tmp_path: Path) -> None:
+    config = _raw_config()
+    config["skyrl"] = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "configs/qwen_megatron_smoke.yaml").read_text()
+    )
+    config["inputs"]["model"] = {
+        "uri": "Qwen/Qwen3-0.6B",
+        "identity": "main",
+        "local_path": "Qwen/Qwen3-0.6B",
+        "tokenizer_uri": "Qwen/Qwen3-0.6B",
+        "tokenizer_revision": "main",
+    }
+    config["inputs"]["data_kind"] = "parquet"
+    path = tmp_path / "qwen-launch.yaml"
+    path.write_text(yaml.safe_dump(config, sort_keys=False))
+
+    resolved = load_launch_config(path)
+
+    assert resolved.skyrl.trainer.policy.model.path == "Qwen/Qwen3-0.6B"
+    assert resolved.skyrl.trainer.policy.model.source_uri is None
+    assert resolved.runtime.entrypoint == "skyrl_train.entrypoints.main_base"
 
 
 def test_launch_config_rejects_allocation_smaller_than_role_plan() -> None:

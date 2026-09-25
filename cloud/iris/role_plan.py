@@ -16,6 +16,7 @@ from marinskyrl.distillation import (
     TeacherPlacement,
     compile_distillation_plan,
 )
+from cloud.iris.runtime_environment import RuntimeProfile
 
 
 class ModelRoleKind(StrEnum):
@@ -220,7 +221,7 @@ def _core_model_claims(config: dict[str, Any], values: _RolePlanValues) -> list[
         _optional_at(config, "trainer.algorithm.use_kl_in_reward", False)
     )
     use_critic = bool(_optional_at(config, "trainer.critic.model.path"))
-    strategy = derive_strategy(config) or "fsdp2"
+    strategy = derive_strategy(config) or RuntimeProfile.MEGATRON.value
     ref_num_nodes = int(placement.get("ref_num_nodes") or values.policy_num_nodes)
     ref_num_gpus_per_node = int(placement.get("ref_num_gpus_per_node") or values.policy_num_gpus_per_node)
 
@@ -380,7 +381,7 @@ def derive_role_plan(config: dict[str, Any]) -> SkyRLRolePlan:
 
     Required geometry raises before submission, while omitted reference dimensions
     deliberately inherit the resolved policy dimensions. A missing trainer strategy
-    uses the launcher's existing FSDP2 default. Only active roles receive claims,
+    uses the launcher's Megatron default. Only active roles receive claims,
     remote roles receive no Iris bundle, and each local colocation group becomes one
     physical whole-node footprint.
     """

@@ -52,7 +52,6 @@ from cloud.iris.hf_model_cache import (
     download_hugging_face_snapshot,
     ensure_hugging_face_model_cache,
     load_model_manifest,
-    stage_artifact_model,
     stage_artifact_model_metadata,
     stage_model_metadata,
 )
@@ -306,11 +305,6 @@ TOKENIZER_METADATA_PATTERNS = (
 )
 
 
-def _requires_local_model_weights(runtime_profile: str) -> bool:
-    profile = RuntimeProfile(runtime_profile)
-    return profile not in {RuntimeProfile.MEGATRON, RuntimeProfile.MEGATRON_EXPORT}
-
-
 def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None:
     """Resolve one immutable policy source and stage what its runtime needs."""
     source_uri = args.model_source_uri
@@ -331,15 +325,7 @@ def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None
         return None
 
     assert source_uri and source_identity
-    if _requires_local_model_weights(args.runtime_profile):
-        local_path = args.model_local_path
-        materialized_bytes = stage_artifact_model(source_uri, source_identity, local_path)
-        _log(
-            f"Policy model ready on rank {_rank()}/{_num_tasks()}: {source_uri} -> {local_path} "
-            f"(identity={source_identity}; local_disk_high_water_bytes={materialized_bytes})"
-        )
-        return PreparedPolicyModel(source_uri, source_identity, local_path)
-
+    RuntimeProfile(args.runtime_profile)
     local_path = _metadata_path(source_uri, source_identity)
     if manifest is None:
         metadata_bytes = stage_artifact_model_metadata(source_uri, source_identity, local_path)
@@ -1013,12 +999,9 @@ def _ray_port_flags() -> list[str]:
 # --- Ray cgroup-aware memory ----------------------------------------------------
 # In a memory-cgroup-limited pod, Ray can read the HOST's physical RAM (~2 TB via
 # /proc/meminfo) instead of the --memory cgroup limit, and size its plasma object
-# store at the default ~30% of that (~600 GB). On top of FSDP `cpu_offload`'s
-# params+optimizer (also host RAM, OUTSIDE Ray's accounting) + the first training
-# step's activations, that overran the container limit -> the OOM killer SIGKILLed
-# an FSDP worker. Fix: read the container's cgroup limit and pass it to `ray start`
-# as --memory, and BOUND the plasma store so it can't balloon off a misread host
-# figure — leaving the bulk of host RAM for cpu_offload.
+# store at the default ~30% of that (~600 GB). That can overrun the container
+# limit once training also allocates memory. Read the cgroup limit and pass it
+# to `ray start` as --memory, and bound the plasma store.
 RAY_OBJECT_STORE_CAP_GIB = 96  # bounded plasma; default can be ~30% of *detected* RAM (huge if host is misread)
 # Per-job override (env) for the plasma cap, in GiB. Default = RAY_OBJECT_STORE_CAP_GIB
 # (96). The min(., cgroup//8) OOM guard below still applies as the HARD ceiling.
@@ -1243,7 +1226,7 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
 
 # --- Ray session-log -> object-store sync -----------------------------------------
 # The per-actor Ray WORKER logs (/tmp/ray/session_*/logs/worker-*.{out,err},
-# raylet.out, ...) are the only place the FSDP policy / rollout actor stdout+tracebacks
+# raylet.out, ...) are the only place the policy / rollout actor stdout+tracebacks
 # land — the iris finelog aggregates only what reaches the head, and a pod GC / eviction
 # DELETES these node-local logs with the pod. This periodically (+ on SIGTERM) uploads
 # THIS node's session logs to the job's durable Ray-log root, keyed by node id, reusing
@@ -1939,7 +1922,7 @@ def run_worker(args: argparse.Namespace) -> int:
     wait_for_nodes(ray_address, num_tasks, args.cluster_join_timeout)
     _log(f"Worker rank {rank} joined Ray cluster at {ray_address}; parking until the head finishes.")
 
-    # Periodic Ray session-log -> object-store sync for THIS worker node (the FSDP/rollout
+    # Periodic Ray session-log -> object-store sync for THIS worker node (the policy/rollout
     # actors on this node log to its local /tmp/ray session, deleted with the pod on GC).
     ray_log_sync_stop = ray_log_sync.start_periodic(args.rendezvous_dir)
 
@@ -2096,12 +2079,17 @@ def _write_final_config(
             original_model_path.rstrip("/").rsplit("/", 1)[-1],
             force_add=True,
         )
-    if policy_tokenizer is not None:
+    tokenizer_path = (
+        policy_tokenizer.local_path
+        if policy_tokenizer is not None
+        else (policy_model.local_path if policy_model is not None else None)
+    )
+    if tokenizer_path is not None:
         for role in ("policy", "ref"):
             OmegaConf.update(
                 skyrl,
                 f"trainer.{role}.model.tokenizer_path",
-                policy_tokenizer.local_path,
+                tokenizer_path,
                 force_add=True,
             )
             OmegaConf.update(skyrl, f"trainer.{role}.model.tokenizer_revision", None, force_add=True)

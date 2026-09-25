@@ -80,7 +80,7 @@ terminal_bench:
     cleanup: true
 
 trainer:
-  strategy: fsdp2
+  strategy: megatron
   algorithm:
     # This is an infrastructure gate, not a quality run. One rollout for each of
     # eight distinct tasks gives the eight-way policy mesh useful work without
@@ -102,7 +102,7 @@ trainer:
   policy_mini_batch_size: 8
   eval_batch_size: 8
 
-  micro_forward_batch_size_per_gpu: 4
+  micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
 
 
@@ -134,14 +134,6 @@ trainer:
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
       max_grad_norm: 0.9
-    fsdp_config:
-      cpu_offload: false
-      reshard_after_forward: true
-  ref:
-    fsdp_config:
-      cpu_offload: false
-      reshard_after_forward: true
-
   placement:
     colocate_all: true
     policy_num_nodes: null

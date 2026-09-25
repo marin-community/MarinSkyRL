@@ -2,7 +2,7 @@
 Tests for ppo_train method in worker classes.
 
 Run with:
-uv run --isolated --group dev --extra deepspeed pytest tests/gpu/gpu_ci/test_ppo_train.py
+uv run --isolated --group dev --extra megatron pytest tests/gpu/gpu_ci/test_ppo_train.py
 """
 
 import pytest
@@ -40,7 +40,6 @@ def test_ppo_train_basic_execution(ray_init_fixture, cfg, use_entropy_loss, use_
     - Contains expected training metrics
     """
     try:
-        cfg.trainer.strategy = "deepspeed"  # Strategy logic is not tested here.
         if use_entropy_loss:
             cfg.trainer.algorithm.use_entropy_loss = True
             cfg.trainer.algorithm.entropy_loss_coef = 0.01
@@ -91,48 +90,6 @@ def test_ppo_train_basic_execution(ray_init_fixture, cfg, use_entropy_loss, use_
         ray.shutdown()
 
 
-def test_ppo_train_critic_worker(ray_init_fixture, cfg):
-    """
-    Test that ppo_train works for critic worker as well.
-    """
-    try:
-        cfg.trainer.strategy = "deepspeed"  # Strategy logic is not tested here.
-
-        actor_group = init_worker_with_type(
-            "critic",
-            shared_pg=None,
-            colocate_all=False,
-            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
-            cfg=cfg,
-        )
-
-        # Create training batch directly
-        train_data = make_dummy_training_batch(batch_size=2, seq_len=10, num_actions=4)
-        train_data.metadata["global_step"] = 0
-
-        # Run ppo_train
-        results = ray.get(actor_group.async_run_ray_method("pass_through", "ppo_train", train_data))
-
-        result = results[0]
-        assert hasattr(result, "metadata"), "Result should have metadata attribute"
-        assert "train_status" in result.metadata, "Should have train_status in metadata"
-
-        train_status = result.metadata["train_status"]
-
-        # Validate critic-specific metrics
-        expected_critic_metrics = ["critic_loss", "critic_update_steps", "values_mean", "critic_lr"]
-
-        for metric in expected_critic_metrics:
-            assert metric in train_status, f"Should have {metric} in critic train_status"
-            assert isinstance(train_status[metric], (int, float)), f"{metric} should be numeric"
-
-        assert train_status["critic_update_steps"] > 0, "Should have completed at least one critic update step"
-
-        print(f"Critic ppo_train completed successfully with metrics: {train_status}")
-    finally:
-        ray.shutdown()
-
-
 @pytest.mark.parametrize(
     "test_id, micro_train_batch_size_per_gpu, policy_mini_batch_size, n_samples_per_prompt, update_epochs_per_batch, batch_size, expected_optimizer_steps",
     [
@@ -162,7 +119,6 @@ def test_gradient_accumulation_scenarios(
     """
     try:
         cfg = get_test_actor_config()
-        cfg.trainer.strategy = "deepspeed"  # Strategy logic is not tested here.
         cfg.trainer.placement.policy_num_gpus_per_node = 2
 
         # Set scenario-specific config

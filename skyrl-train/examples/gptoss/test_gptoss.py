@@ -8,7 +8,7 @@ def run_task(with_padding: bool = True):
     from skyrl_train.patches.gptoss.patch_transformers import custom_attention_mask, custom_attention
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    from skyrl_train.model_wrapper import logprobs_from_logits
+    from skyrl_train.utils.torch_utils import logprobs_from_logits
 
     from transformers import AttentionInterface, AttentionMaskInterface
 

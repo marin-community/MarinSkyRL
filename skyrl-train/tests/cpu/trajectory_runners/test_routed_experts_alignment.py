@@ -1,6 +1,6 @@
 """CPU tests for the Stage 1 MoE router-replay capture rail (`routed_experts`).
 
-These cover the SkyRL-side seams added in Stage 1 of the FSDP2 EP/router-replay
+These cover the SkyRL-side seams for the Megatron router-replay
 port (see notes/skyrl/stage1_capture_rail_scope.md). NO MoE math / replay logic
 here — pure data-plane alignment + collation.
 

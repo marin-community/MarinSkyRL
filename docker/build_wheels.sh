@@ -21,7 +21,7 @@
 #   { VLLM_FORK_COMMIT, FLASH_ATTN_VERSION, torch 2.11.0, CUDA 12.8, cp312,
 #     x86_64, TORCH_CUDA_ARCH_LIST "8.0;9.0" }
 # Re-run this script ONLY when one of those pins changes (it overwrites the
-# wheelhouse + MANIFEST). torchtitan is pure-python and is NOT wheel-cached.
+# wheelhouse + MANIFEST). Megatron dependencies are installed from the root lock.
 #
 # WHERE TO RUN
 #   On an x86_64 (linux/amd64) host with Docker + nvcc-capable buildkit and

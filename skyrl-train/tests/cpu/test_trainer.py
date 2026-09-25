@@ -2,19 +2,16 @@
 uv  run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer.py
 """
 
-import contextlib
 import asyncio
 import threading
 from pathlib import Path
 import collections
-import gc
-import weakref
 from types import SimpleNamespace
 
 import torch
 import pytest
 from jaxtyping import Float, Integer
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 from pytest import approx
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,9 +24,7 @@ from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.utils.policy_losses import ppo_policy_loss
 from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
-from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.models.grug_query_bias import (
-    GrugLossFreeBiasAccumulator,
     GrugLossFreeBiasUpdater,
     GrugQuantileBiasUpdater,
     GrugQueryBiasCapturePlan,
@@ -45,10 +40,9 @@ import numpy as np
 from skyrl_train.distillation import SampledReverseKLInput, SparseForwardKLInput, TopKTeacherEvidence
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
-from skyrl_train.utils.utils import validate_batch_sizes, resolve_ratio_diagnostics_pooling
+from skyrl_train.utils.utils import validate_batch_sizes
 from skyrl_train.config.utils import get_default_config
 from tests.cpu.util import example_dummy_config
-from tests.grug_training_parity import ORACLE_FIXTURE_DIR
 
 
 _DRAFT_REVISION = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
@@ -891,85 +885,6 @@ def _window_with_grug_loss_free_accumulator(accumulator, *, update_rate=0.001):
     return window, causal_lm
 
 
-def _grug_ppo_worker_and_batch(
-    cfg: DictConfig,
-    causal_lm: GrugMoeForCausalLM,
-    sequences: torch.Tensor,
-) -> tuple[PolicyWorkerBase, TrainingInputBatch]:
-    batch_size = sequences.shape[0]
-    batch = TrainingInputBatch(
-        {
-            "sequences": sequences,
-            "attention_mask": torch.ones_like(sequences),
-            "action_log_probs": torch.zeros(batch_size, 2),
-            "base_action_log_probs": torch.zeros(batch_size, 2),
-            "values": torch.zeros(batch_size, 2),
-            "returns": torch.zeros(batch_size, 2),
-            "advantages": torch.ones(batch_size, 2),
-            "loss_mask": torch.ones(batch_size, 2),
-            "response_mask": torch.ones(batch_size, 2),
-            "rollout_logprobs": None,
-        }
-    )
-    batch.metadata = {"global_step": 0, "response_length": 2}
-
-    worker = PolicyWorkerBase(
-        cfg=cfg,
-        world_size=1,
-        rank=0,
-        local_rank=0,
-        master_addr="localhost",
-        master_port=12345,
-        sequence_parallel_size=1,
-    )
-    worker.strategy = MagicMock(fsdp_strategy="fsdp2")
-    worker.strategy.is_rank_0.return_value = False
-    worker.strategy.all_reduce.side_effect = lambda status: status
-    worker.model = SimpleNamespace(model=causal_lm)
-    return worker, batch
-
-
-def _run_grug_ppo_train(worker: PolicyWorkerBase, batch: TrainingInputBatch) -> None:
-    with (
-        patch("torch.cuda.empty_cache"),
-        patch("torch.cuda.current_device", return_value="cpu"),
-        patch("torch.autocast", side_effect=lambda *args, **kwargs: contextlib.nullcontext()),
-        patch("torch.distributed.barrier"),
-        patch("tqdm.tqdm", side_effect=lambda iterator, **kwargs: iterator),
-    ):
-        worker.ppo_train(batch)
-
-
-class _CpuPolicyStrategy:
-    """Exercise the policy worker while replacing only its distributed/CUDA adapter."""
-
-    device_mesh = None
-    ep_size = 1
-    last_optimizer_step_succeeded = True
-
-    def is_rank_0(self):
-        return False
-
-    def all_reduce(self, value, op="mean"):
-        return value
-
-    def backward(self, loss, model, optimizer):
-        loss.backward()
-
-    def optimizer_step(self, optimizer, model, scheduler, **kwargs):
-        optimizer.step()
-        scheduler.step()
-        optimizer.zero_grad(set_to_none=True)
-        return torch.tensor(0.0)
-
-
-def _enable_cpu_policy_training(worker: PolicyWorkerBase, causal_lm: GrugMoeForCausalLM) -> None:
-    worker.model = HFModelWrapper(causal_lm, bf16=False, training_strategy="fsdp2")
-    worker.strategy = _CpuPolicyStrategy()
-    worker.optimizer = torch.optim.AdamW(worker.model.parameters(), lr=1e-4)
-    worker.scheduler = torch.optim.lr_scheduler.LambdaLR(worker.optimizer, lambda _: 1.0)
-
-
 def test_failed_optimizer_step_discards_grug_query_bias_window():
     accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
     window, causal_lm = _window_with_grug_query_bias_accumulator(accumulator)
@@ -1688,90 +1603,56 @@ def test_validate_batch_sizes():
     def create_test_config(
         train_batch_size=128,
         policy_mini_batch_size=16,
-        critic_mini_batch_size=8,
         micro_train_batch_size_per_gpu=2,
         micro_forward_batch_size_per_gpu=4,
         n_samples_per_prompt=2,
         policy_num_nodes=1,
         policy_num_gpus_per_node=4,
-        critic_num_nodes=1,
-        critic_num_gpus_per_node=4,
-        policy_sequence_parallel_size=1,
-        critic_sequence_parallel_size=1,
-        critic_model_path=None,
     ):
         """Helper to create config for validation testing."""
         cfg = get_default_config()
         cfg.trainer.train_batch_size = train_batch_size
         cfg.trainer.policy_mini_batch_size = policy_mini_batch_size
-        cfg.trainer.critic_mini_batch_size = critic_mini_batch_size
         cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
         cfg.trainer.micro_forward_batch_size_per_gpu = micro_forward_batch_size_per_gpu
         cfg.trainer.placement.policy_num_nodes = policy_num_nodes
         cfg.trainer.placement.policy_num_gpus_per_node = policy_num_gpus_per_node
-        cfg.trainer.placement.critic_num_nodes = critic_num_nodes
-        cfg.trainer.placement.critic_num_gpus_per_node = critic_num_gpus_per_node
-        cfg.trainer.policy.sequence_parallel_size = policy_sequence_parallel_size
-        cfg.trainer.critic.model.path = critic_model_path
-        cfg.trainer.critic.sequence_parallel_size = critic_sequence_parallel_size
         cfg.trainer.algorithm.use_kl_loss = False
         cfg.trainer.algorithm.use_kl_in_reward = False
         cfg.generator.n_samples_per_prompt = n_samples_per_prompt
         return cfg
 
-    # Test Case 1: Valid configuration
+    # Valid configuration
     cfg = create_test_config()
     validate_batch_sizes(cfg)  # Should not raise any exceptions
 
-    # Test Case 2: Error case - train_batch_size < policy_mini_batch_size
+    # train_batch_size < policy_mini_batch_size
     cfg = create_test_config(train_batch_size=8, policy_mini_batch_size=16)
     with pytest.raises(AssertionError):
         validate_batch_sizes(cfg)
 
-    # Test Case 3: Error case - train_batch_size < critic_mini_batch_size
-    cfg = create_test_config(train_batch_size=4, critic_mini_batch_size=8)
-    with pytest.raises(AssertionError):
-        validate_batch_sizes(cfg)
-
-    # Test Case 4: Error case - policy_mini_batch_size = 0
+    # policy_mini_batch_size = 0
     cfg = create_test_config(policy_mini_batch_size=0)
     with pytest.raises(AssertionError, match="policy_mini_batch_size must be greater than 0"):
         validate_batch_sizes(cfg)
 
-    # Test Case 5: Error case - critic_mini_batch_size = 0
-    cfg = create_test_config(critic_mini_batch_size=0, critic_model_path="test")
-    with pytest.raises(AssertionError, match="critic_mini_batch_size must be greater than 0"):
-        validate_batch_sizes(cfg)
-
-    # Test Case 6: Error case - micro_train_batch_size_per_gpu = 0
+    # micro_train_batch_size_per_gpu = 0
     cfg = create_test_config(micro_train_batch_size_per_gpu=0)
     with pytest.raises(AssertionError, match="micro_train_batch_size_per_gpu must be greater than 0"):
         validate_batch_sizes(cfg)
 
-    # Test Case 7: Error case - micro_forward_batch_size_per_gpu = 0
+    # micro_forward_batch_size_per_gpu = 0
     cfg = create_test_config(micro_forward_batch_size_per_gpu=0)
     with pytest.raises(AssertionError, match="micro_forward_batch_size_per_gpu must be greater than 0"):
         validate_batch_sizes(cfg)
 
-    # Test Case 8: Error case - train_batch_size not divisible by (policy_mini_batch_size * policy_dp_size)
+    # train_batch_size not divisible by policy_mini_batch_size
     cfg = create_test_config(train_batch_size=100, policy_mini_batch_size=16, policy_num_gpus_per_node=4)
     # Should fail because train_batch_size is not evenly divisible by policy batch requirements
     with pytest.raises(AssertionError, match="train_batch_size .* should be divisible by policy_mini_batch_size"):
         validate_batch_sizes(cfg)
 
-    # Test Case 9: Error case - train_batch_size not divisible by (critic_mini_batch_size * critic_dp_size)
-    cfg = create_test_config(
-        train_batch_size=100,
-        policy_mini_batch_size=5,
-        critic_mini_batch_size=16,
-        critic_num_gpus_per_node=4,
-        critic_model_path="test",
-    )
-    # Should fail because train_batch_size is not evenly divisible by critic batch requirements
-    with pytest.raises(AssertionError, match="train_batch_size .* should be divisible by critic_mini_batch_size"):
-        validate_batch_sizes(cfg)
-
-    # Test Case 10: Error case - policy_mini_batch_size_per_gpu not divisible by micro_train_batch_size_per_gpu
+    # policy_mini_batch_size_per_gpu not divisible by micro_train_batch_size_per_gpu
     cfg = create_test_config(
         policy_mini_batch_size=8, n_samples_per_prompt=1, policy_num_gpus_per_node=1, micro_train_batch_size_per_gpu=3
     )
@@ -1782,47 +1663,7 @@ def test_validate_batch_sizes():
     ):
         validate_batch_sizes(cfg)
 
-    # Test Case 11: Error case - critic_mini_batch_size_per_gpu not divisible by micro_train_batch_size_per_gpu
-    cfg = create_test_config(
-        train_batch_size=144,
-        policy_mini_batch_size=12,  # Policy validation passes
-        critic_mini_batch_size=8,  # Critic micro batch divisibility fails
-        n_samples_per_prompt=1,
-        critic_num_gpus_per_node=1,
-        micro_train_batch_size_per_gpu=3,
-        critic_model_path="test",
-    )
-    # Should fail because critic mini batch per GPU is not evenly divisible by micro batch size
-    with pytest.raises(
-        AssertionError,
-        match="normalized critic_mini_batch_size_per_gpu .* should be divisible by micro_train_batch_size_per_gpu",
-    ):
-        validate_batch_sizes(cfg)
-
-    # Test Case 12: Valid configuration with sequence parallelism
-    cfg = create_test_config(
-        policy_sequence_parallel_size=2,
-        critic_sequence_parallel_size=2,
-        policy_num_gpus_per_node=8,
-        critic_num_gpus_per_node=8,
-    )
-    validate_batch_sizes(cfg)  # Should not raise any exceptions
-
-    # Test Case 13: Valid configuration - train_batch_size not divisible by (critic_mini_batch_size * critic_dp_size), but critic model path is None
-    cfg = create_test_config(
-        train_batch_size=100,
-        policy_mini_batch_size=5,
-        critic_mini_batch_size=16,
-        critic_num_gpus_per_node=4,
-        critic_model_path=None,
-    )
-    validate_batch_sizes(cfg)
-
-    # Test Case 14: Valid configuration - critic_mini_batch_size is invalid but critic model is not specified
-    cfg = create_test_config(critic_mini_batch_size=0, critic_model_path=None)
-    validate_batch_sizes(cfg)
-
-    # Test Case 15: Error case - train_batch_size_per_gpu not divisible by policy_mini_batch_size_per_gpu
+    # train_batch_size_per_gpu not divisible by policy_mini_batch_size_per_gpu
     cfg = create_test_config(
         train_batch_size=10,
         policy_mini_batch_size=5,
@@ -1832,22 +1673,6 @@ def test_validate_batch_sizes():
     )
     with pytest.raises(
         AssertionError, match="policy_train_batch_size_per_gpu .* should be divisible by policy_mini_batch_size_per_gpu"
-    ):
-        validate_batch_sizes(cfg)
-
-    # Test Case 16: Error case - train_batch_size_per_gpu not divisible by critic_mini_batch_size_per_gpu
-    cfg = create_test_config(
-        train_batch_size=10,
-        policy_mini_batch_size=10,
-        policy_num_gpus_per_node=1,
-        critic_mini_batch_size=5,
-        critic_num_gpus_per_node=2,
-        micro_train_batch_size_per_gpu=1,
-        n_samples_per_prompt=1,
-        critic_model_path="test",
-    )
-    with pytest.raises(
-        AssertionError, match="critic_train_batch_size_per_gpu .* should be divisible by critic_mini_batch_size_per_gpu"
     ):
         validate_batch_sizes(cfg)
 
@@ -2028,163 +1853,6 @@ def test_ppo_train_batch_calculations():
     train_status = result.metadata["train_status"]
     assert "critic_update_steps" in train_status
     assert train_status["critic_update_steps"] == len(critic_training_calls) / expected_accumulation_steps
-
-
-def test_grug_ppo_train_does_not_retain_consumed_microbatches():
-    """The policy releases each consumed Experience before loading the next one."""
-
-    cfg = OmegaConf.create(
-        {
-            "trainer": {
-                "progress": _TEST_PROGRESS_CONFIG,
-                "micro_train_batch_size_per_gpu": 1,
-                "update_epochs_per_batch": 1,
-                "policy": {
-                    "grug_query_bias_update_mode": "frozen",
-                    "optimizer_config": {"max_grad_norm": 1.0},
-                },
-                "algorithm": {
-                    "batch_invariant": False,
-                    "policy_loss_type": "regular",
-                    "loss_reduction": "token_mean",
-                },
-            },
-            "generator": {"r3_transport": "decentral", "sampling_params": {"temperature": 1.0}},
-        }
-    )
-    worker, batch = _grug_ppo_worker_and_batch(
-        cfg,
-        _ObservableGrugCausalLM(),
-        torch.ones(4, 4, dtype=torch.long),
-    )
-    worker.policy_mini_batch_size_per_gpu = 2
-    worker.strategy.ep_size = 1
-    previous_experience = None
-    prior_microbatch_was_released = []
-
-    def training_step(experience, _global_step, _local_step, _accumulation_steps):
-        nonlocal previous_experience
-        if previous_experience is not None:
-            gc.collect()
-            prior_microbatch_was_released.append(previous_experience() is None)
-        previous_experience = weakref.ref(experience)
-        return {"policy_loss": 0.5, "policy_lr": 1e-4, "policy_entropy": 0.1, "response_length": 2}
-
-    worker.training_step = training_step
-    _run_grug_ppo_train(worker, batch)
-
-    assert prior_microbatch_was_released == [True, True, True]
-
-
-def test_default_grug_ppo_train_keeps_query_bias_exact_across_optimizer_steps():
-    causal_lm = GrugMoeForCausalLM.from_pretrained(
-        ORACLE_FIXTURE_DIR,
-        local_files_only=True,
-        attn_implementation="eager",
-        dtype=torch.float32,
-    )
-    causal_lm.train()
-    frozen_bias = torch.linspace(
-        -0.3,
-        0.3,
-        steps=causal_lm.config.num_hidden_layers * causal_lm.config.num_local_experts,
-    ).reshape(causal_lm.config.num_hidden_layers, causal_lm.config.num_local_experts)
-    frozen_bias -= frozen_bias.mean(dim=-1, keepdim=True)
-    causal_lm.set_query_bias(frozen_bias)
-
-    cfg = get_default_config()
-    resolve_ratio_diagnostics_pooling(cfg)  # validate_cfg does this in the driver; the worker reads the resolved value
-    cfg.trainer.micro_train_batch_size_per_gpu = 1
-    cfg.trainer.update_epochs_per_batch = 1
-    cfg.trainer.algorithm.loss_reduction = "token_mean"
-    OmegaConf.update(cfg, "trainer.algorithm.max_seq_len", 6, force_add=True)
-    batch_size = 5
-    sequences = torch.arange(batch_size * 6).reshape(batch_size, 6) % causal_lm.config.vocab_size
-    worker, batch = _grug_ppo_worker_and_batch(
-        cfg,
-        causal_lm,
-        sequences,
-    )
-    worker.policy_mini_batch_size_per_gpu = 1
-    _enable_cpu_policy_training(worker, causal_lm)
-    initial_bias = torch.stack([layer.mlp.router.bias for layer in causal_lm.model.layers]).clone()
-    initial_lm_head = causal_lm.lm_head.weight.detach().clone()
-    _run_grug_ppo_train(worker, batch)
-
-    actual_bias = torch.stack([layer.mlp.router.bias for layer in causal_lm.model.layers])
-    torch.testing.assert_close(actual_bias, initial_bias, rtol=0, atol=0)
-    assert not torch.equal(causal_lm.lm_head.weight, initial_lm_head)
-
-
-def _grug_query_bias_after_policy_training(mode, interpolation_weight=None, update_rate=None):
-    torch.manual_seed(1234)
-    causal_lm = GrugMoeForCausalLM.from_pretrained(
-        ORACLE_FIXTURE_DIR,
-        local_files_only=True,
-        attn_implementation="eager",
-        dtype=torch.float32,
-    )
-    causal_lm.train()
-    initial_bias = torch.stack([layer.mlp.router.bias for layer in causal_lm.model.layers]).clone()
-
-    cfg = get_default_config()
-    resolve_ratio_diagnostics_pooling(cfg)  # validate_cfg does this in the driver; the worker reads the resolved value
-    cfg.trainer.policy.grug_query_bias_update_mode = mode
-    cfg.trainer.policy.grug_query_bias_interpolation_weight = interpolation_weight
-    cfg.trainer.policy.grug_query_bias_update_rate = update_rate
-    cfg.trainer.micro_train_batch_size_per_gpu = 1
-    cfg.trainer.update_epochs_per_batch = 1
-    cfg.trainer.algorithm.loss_reduction = "token_mean"
-    OmegaConf.update(cfg, "trainer.algorithm.max_seq_len", 6, force_add=True)
-    sequences = torch.arange(6).reshape(1, 6) % causal_lm.config.vocab_size
-    expected_loss_free_bias = None
-    if mode == "loss_free":
-        attention_mask = torch.ones_like(sequences)
-        causal_lm.begin_loss_free_bias_capture(attention_mask)
-        with torch.no_grad():
-            causal_lm(sequences, attention_mask=attention_mask)
-        observation = causal_lm.take_loss_free_bias_observation()
-        accumulator = GrugLossFreeBiasAccumulator(
-            num_layers=causal_lm.config.num_hidden_layers,
-            num_experts=causal_lm.config.num_local_experts,
-        )
-        accumulator.observe(observation)
-        assert update_rate is not None
-        expected_loss_free_bias = next_loss_free_query_bias(
-            initial_bias,
-            accumulator.finalize_loads(),
-            update_rate=update_rate,
-        )
-    worker, batch = _grug_ppo_worker_and_batch(cfg, causal_lm, sequences)
-    worker.policy_mini_batch_size_per_gpu = 1
-    _enable_cpu_policy_training(worker, causal_lm)
-
-    _run_grug_ppo_train(worker, batch)
-
-    actual_bias = torch.stack([layer.mlp.router.bias for layer in causal_lm.model.layers])
-    return initial_bias, actual_bias, expected_loss_free_bias
-
-
-def test_replace_mode_updates_grug_query_bias_through_policy_training():
-    initial_bias, actual_bias, _ = _grug_query_bias_after_policy_training("replace")
-
-    assert not torch.equal(actual_bias, initial_bias)
-
-
-def test_interpolate_mode_applies_configured_fraction_through_policy_training():
-    replace_initial, replace_bias, _ = _grug_query_bias_after_policy_training("replace")
-    interpolate_initial, interpolate_bias, _ = _grug_query_bias_after_policy_training("interpolate", 0.25)
-
-    torch.testing.assert_close(interpolate_initial, replace_initial, rtol=0, atol=0)
-    torch.testing.assert_close(interpolate_bias, torch.lerp(replace_initial, replace_bias, 0.25), rtol=1e-6, atol=1e-7)
-
-
-def test_loss_free_mode_updates_grug_query_bias_through_policy_training():
-    initial_bias, actual_bias, expected_bias = _grug_query_bias_after_policy_training("loss_free", update_rate=0.001)
-
-    assert not torch.equal(actual_bias, initial_bias)
-    assert expected_bias is not None
-    torch.testing.assert_close(actual_bias, expected_bias, rtol=0, atol=0)
 
 
 def test_validate_batch_sizes_lcm_dp_requirement():
