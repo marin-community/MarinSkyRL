@@ -8,7 +8,7 @@ from skyrl_train.trajectory_runners.base import TrajectoryBatch
 
 @dataclass
 class GeneratedOutputGroup:
-    """One prompt's rollout samples and the metadata needed to retry them."""
+    """Samples and metadata for one rollout batch."""
 
     trajectory_batch: TrajectoryBatch
     uid: str
