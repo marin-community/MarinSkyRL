@@ -30,8 +30,6 @@ Both processes must exit zero; an expected injected exception is caught inside
 the first test. The S3 root is not deleted by the test and should expire under
 the bucket's TTL policy.
 
-## NCCL collective contracts
-
 ## Megatron checkpoint-to-next-step parity
 
 `checkpoint_step_parity.py` is an opt-in, four-H100 Qwen3-0.6B TP2/PP2
@@ -65,6 +63,38 @@ failure, not an invitation to relax tolerance without understanding it. The
 saved local snapshots are trusted pickle inputs; do not reuse an untrusted
 artifact directory. Inspect both pytest exit statuses and the manifest before
 claiming success.
+
+## Snowball 32-rank checkpoint parity
+
+`skyrl_train.entrypoints.checkpoint_snowball_parity` is a registered, opt-in Iris RL entrypoint named
+`checkpoint_parity`. It runs on four H100x8 policy nodes with the Snowball TP1/PP2/CP2/EP8 Megatron geometry and
+`dp_reshardable` optimizer checkpoint. It starts no rollout engine, critic, or reference model. It uses one
+deterministic 32-example, 128-token training batch, so this is a numerical recovery test, **not** the
+matched 512-example Snowball save-performance workload.
+
+Use the same pinned Snowball model source and trainer YAML in two fresh task-runtime processes. Start from
+`cloud/iris/configs/snowball_megatron_checkpoint_benchmark.yaml`; set `entrypoint: checkpoint_parity` and
+`generator.run_engines_locally: false` in both launch documents. Supply the same unique east-region TTL prefix
+as `extra_env.CHECKPOINT_PARITY_S3_ROOT` and select `extra_env.CHECKPOINT_PARITY_PHASE: reference` for the first
+job, `resume` for the second. The first job must succeed before the second starts. Keep the complete model
+source identity, policy config, and 32-GPU geometry identical; the entrypoint verifies the resolved trainer
+config and synthetic batch against the reference record. Use the typed `cloud.iris.task_runtime --config`
+launcher path, the frozen Megatron GPU profile, four H100x8 nodes with Snowball-sized host RAM and scratch,
+and a unique Ray rendezvous for each job. Do not reuse a root with an existing latest checkpoint or reference
+record. Retain both job logs and the small `<root>/checkpoint-parity-reference.json` record.
+
+The reference process trains one step, saves a complete committed S3 checkpoint, checks save did not advance
+worker RNG, then takes an uninterrupted second step. Each policy rank hashes exact tensor bytes, dtype, shape,
+and structure for model parameters/buffers, MCore sharded optimizer, scheduler, and worker RNG. Driver
+Python/NumPy/Torch CPU RNG is compared at both boundaries too. The driver writes only compact per-rank digests
+to S3. The resume process creates fresh policy actors, loads that same
+committed generation, and requires all 32 digests to match before and after replaying the identical batch.
+It also requires the uninterrupted step to change at least one model shard. A success requires both Iris jobs
+to exit zero and the final `SNOWBALL_CHECKPOINT_PARITY_RESUME_OK ranks=32` marker. Any mismatch is a
+correctness finding; do not relax the exact comparison to make it pass. This gate does not validate
+cross-geometry recovery or future S3 rollout weight synchronization.
+
+## NCCL collective contracts
 
 This opt-in suite validates healthy expert-parallel communication and the failure bound for real
 ProcessGroupNCCL collectives. It is intentionally outside `tests/gpu/gpu_ci/`, and its Python filename does not
