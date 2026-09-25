@@ -57,6 +57,7 @@ def _load_with_fakes(monkeypatch, tmp_path):
         megatron_strategy.mpu, "get_data_parallel_group", lambda with_context_parallel: None, raising=False
     )
     strategy = megatron_strategy.MegatronStrategy.__new__(megatron_strategy.MegatronStrategy)
+    strategy.optimizer_config = None
     monkeypatch.setattr(strategy, "log", lambda *msg: None)
     module = SimpleNamespace(sharded_state_dict=lambda: {}, load_state_dict=lambda state, strict: None)
     model = SimpleNamespace(actor_module=[module])
