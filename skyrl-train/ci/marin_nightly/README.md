@@ -1,30 +1,20 @@
 # Nightly end-to-end gates
 
-The nightly runs dense Qwen GRPO on one H100, a teacher-sensitive synchronous OPD step on four H100s,
-a tiny Grug RL cycle on four GB200s,
-the Grug Megatron gates on four H100s, and an OpenCode agentic RL step on eight H100s,
-all from the frozen root environment. The
-GSM8K run is scored against a checked-in spec; the GB200 run proves the locked Marin
-vLLM wheel can load Grug, generate rollouts, train the eager FSDP2 policy, synchronize
-mixed-dtype weights, and generate again; the Megatron run checks that the Megatron
-port of Grug matches the HF reference, keeps the training forward bit-identical to
-the recomputed old log-probs, and completes a rollout/train/broadcast/rollout cycle.
-The OpenCode lane runs eight concurrent, three-turn Daytona tasks through the controller
-RecordProxy and requires exact full-TITO/TIS coverage before an FSDP2 policy update.
-These are integration gates, not model-quality experiments.
+The nightly runs GSM8K GRPO on one H100, synchronous OPD on four H100s,
+Grug Megatron training on four H100s, and an OpenCode agentic RL step on eight H100s.
+All policy updates use Megatron and the frozen root environment. The GSM8K run is
+scored against a checked-in spec; the other lanes exercise teacher scoring, Grug
+training and weight sync, and agentic rollout coverage.
 
 | file | role |
 | --- | --- |
-| `run_h100.sh` | sync the frozen root environment, slice GSM8K, train, and gate on H100 |
-| `run_opd_h100.sh` | run one sync OPD step with separate Qwen policy, rollout, and teacher roles |
-| `run_grug_vllm.sh` | run a tiny Grug rollout/train/broadcast/rollout cycle on four GB200s |
-| `run_grug_megatron.sh` | run the Grug Megatron parity, training, and serving gates on four H100s |
-| `run_opencode.sh` | submit, wait for, and gate the federated RNO2A OpenCode RL canary |
-| `gate.py` | reads a run's log and decides whether it was healthy (`python -m ci.marin_nightly.gate`) |
-| `specs/gsm8k-qwen3-0.6b-<strategy>.json` | the GSM8K thresholds per training backend, with provenance for why each one is what it is |
-| `specs/opencode-qwen3-8b.json` | exact continuation, literal bridge, TIS, and optimizer thresholds |
-| `dashboard_readiness.py` | reports whether the finished run reached the RL runs dashboard; never fails the lane |
-| `../../../.github/workflows/marin-nightly.yaml` | provisions the GPU gates through Iris and tears them down |
+| `run_h100.sh` | train GSM8K and gate metrics on H100 |
+| `run_opd_h100.sh` | run synchronous OPD with separate policy, rollout, and teacher roles |
+| `run_grug_megatron.sh` | run Grug parity, training, and serving gates on four H100s |
+| `run_opencode.sh` | submit and gate the federated OpenCode RL canary |
+| `gate.py` | score the GSM8K run against its spec |
+| `specs/gsm8k-qwen3-0.6b-megatron.json` | GSM8K gate thresholds and provenance |
+| `specs/opencode-qwen3-8b.json` | OpenCode continuation and policy update thresholds |
 
 ## How the gate sees the run
 
@@ -40,20 +30,6 @@ step and then degrade into NaN), and checks it against the spec: the step count 
 reached, the required metrics are present and finite, the bounded ones are inside their
 range, and the run finished inside its wall-clock budget. It exits non-zero with one line
 per violation. `tests/cpu/test_marin_nightly_gate.py` covers it.
-
-## Which training backend
-
-`STRATEGY` selects `fsdp2` (the default) or `megatron`. Both were run over the same 30-step recipe
-on one H100 on 2026-09-10:
-
-| backend | end to end | median `train_step` | max |
-| --- | --- | --- | --- |
-| fsdp2 | 667s | 6.94s | 7.38s |
-| megatron | 883s | 7.92s | 10.8s |
-
-fsdp2 is the default on that evidence. Megatron at tensor and pipeline size 1 adds coordination and
-buys no parallelism, which is what a single GPU gives it; the numbers say nothing about either
-backend at a topology where Megatron has something to do.
 
 ## Two Ray instances cannot share a node
 
@@ -79,7 +55,7 @@ The gate is pure stdlib and runs anywhere, against any run log:
 ```bash
 uv run --frozen python -m ci.marin_nightly.gate \
     --log nightly-run.log \
-    --spec ci/marin_nightly/specs/gsm8k-qwen3-0.6b-fsdp2.json \
+    --spec ci/marin_nightly/specs/gsm8k-qwen3-0.6b-megatron.json \
     --wall-clock-seconds 900
 ```
 
@@ -90,11 +66,6 @@ environment (`MODEL`, `MAX_STEPS`, `DATA_DIR`). Inside an Iris GPU task:
 ```bash
 MAX_STEPS=2 bash ci/marin_nightly/run_h100.sh
 ```
-
-The GB200 lane additionally imports `vllm._C_stable_libtorch` and the cuMem allocator, verifies the
-Grug model registry entry, then runs a real rollout, eager FSDP2 policy update,
-mixed-dtype weight broadcast, and second rollout. The eager policy path keeps this
-gate independent of the optional compiled FlashAttention package.
 
 The Megatron lane runs `tests/gpu/test_grug_megatron.py` and the two-GPU CP2
 FlashAttention forward/backward smoke with the frozen Megatron runtime closure;
@@ -155,8 +126,7 @@ To exercise the whole path — provision, train, gate, tear down — trigger the
 ```bash
 gh workflow run marin-nightly.yaml \
   -f max_steps=2 \
-  -f target_cluster=cw-rno2a \
-  -f grug_target_cluster=cw-us-east-08a
+  -f target_cluster=cw-rno2a
 ```
 
 ## Tightening the spec

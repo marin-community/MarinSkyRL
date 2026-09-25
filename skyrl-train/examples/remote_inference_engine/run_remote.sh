@@ -14,7 +14,7 @@ INF_ENGINE_TP=4
 
 NUM_TRAINING_GPUS=4
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra megatron --extra vllm -m skyrl_train.entrypoints.main_base \
     data.train_data="['$DATA_DIR/train.parquet']" \
     data.val_data="['$DATA_DIR/validation.parquet']" \
     trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
@@ -28,7 +28,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
     trainer.placement.colocate_all=False \
     trainer.placement.policy_num_gpus_per_node="$NUM_TRAINING_GPUS" \
     trainer.placement.ref_num_gpus_per_node="$NUM_TRAINING_GPUS" \
-    trainer.strategy=fsdp2 \
+    trainer.strategy=megatron \
     trainer.train_batch_size=64 \
     trainer.policy_mini_batch_size=64 \
     trainer.micro_forward_batch_size_per_gpu=20 \

@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
 # Build the GPU-RL image inside a disposable Iris Ubuntu task.
 #
-# kaniko builds for the architecture it runs on, so the image architecture is
-# decided by where the Iris job lands, not by a flag. An amd64 build host on
-# cw-us-east-02a with docker/Dockerfile.gpu-rl produces the linux/amd64 image; an
-# aarch64 GB200 host on cw-us-east-08a with docker/Dockerfile.gpu-rl-arm64
-# produces the linux/arm64 one. Everything below that depends on the host
-# architecture — the crane release asset, the platform crane selects out of the
-# multi-arch kaniko manifest, and the wheel MANIFEST platform tag — is derived
-# from `uname -m` rather than hardcoded.
+# Kaniko builds for the architecture it runs on. An amd64 build host uses
+# Dockerfile.gpu-rl; an aarch64 GB200 host uses Dockerfile.gpu-rl-arm64.
+# The wheel platform and image tag follow the build host.
 # SHELLOPTS can carry xtrace across Bash processes, so disable it before reading
 # registry credentials from the environment.
 set +x
@@ -20,17 +15,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "${SCRIPT_DIR}/kaniko_executor_setup.sh"
 
-# ARCH_TAG_SUFFIX keeps the two architectures apart in the registry. Every tag is
-# derived from the git sha and the same commit builds both images, so without a
-# suffix an arm64 build overwrites the amd64 tag of the identical sha — including
-# the wheels tag, whose wheels are not interchangeable. The kaniko cache repo is
-# split for the same reason. Both follow the build host rather than an operator
-# env var, because a forgotten suffix is silent and destroys a shipped tag.
-#
-# The published prebuilt wheelhouse artifact holds linux_x86_64 wheels, so aarch64
-# has no wheel source but the wheel-builder stage. The Dockerfile follows the host
-# too: an aarch64 job that built Dockerfile.gpu-rl would bake a linux_x86_64 wheel
-# MANIFEST and push it under the -arm64 tag.
+# The published prebuilt wheelhouse holds linux_x86_64 wheels. ARM builds
+# compile native wheels in the wheel-builder stage.
 BUILD_ARCH=$(uname -m)
 case "$BUILD_ARCH" in
   x86_64)
@@ -38,12 +24,17 @@ case "$BUILD_ARCH" in
     ARCH_TAG_SUFFIX=""; DEFAULT_WHEEL_SOURCE=prebuilt-wheelhouse
     DEFAULT_DOCKERFILE=docker/Dockerfile.gpu-rl ;;
   aarch64)
-    CRANE_ASSET_ARCH=arm64;  KANIKO_PLATFORM=linux/arm64; WHEEL_PLATFORM_TAG=linux_aarch64
+    CRANE_ASSET_ARCH=arm64; KANIKO_PLATFORM=linux/arm64; WHEEL_PLATFORM_TAG=linux_aarch64
     ARCH_TAG_SUFFIX="-arm64"; DEFAULT_WHEEL_SOURCE=wheel-builder
     DEFAULT_DOCKERFILE=docker/Dockerfile.gpu-rl-arm64 ;;
   *) echo "unsupported build host architecture: $BUILD_ARCH" >&2; exit 2 ;;
 esac
 echo "[arch] build host=$BUILD_ARCH kaniko=$KANIKO_PLATFORM wheels=$WHEEL_PLATFORM_TAG tag-suffix=${ARCH_TAG_SUFFIX:-none}"
+if [[ "$BUILD_ARCH" == aarch64 ]]; then
+  echo "ARM Megatron image builds need native wheels for the current frozen Torch/CUDA runtime" >&2
+  echo "The root megatron extra currently selects native dependencies only on x86_64" >&2
+  exit 2
+fi
 
 # Registry home is this repo's org, marin-community/MarinSkyRL. Declared here so a
 # build pushes where it says it pushes without an ad-hoc env var at every call site.
@@ -56,7 +47,6 @@ fi
 
 WHEEL_SOURCE="${WHEEL_SOURCE:-$DEFAULT_WHEEL_SOURCE}"
 HF_WHEEL_REPOSITORY="${HF_WHEEL_REPOSITORY:-}"
-INSTALL_MEGATRON="${INSTALL_MEGATRON:-0}"
 TAG_PREFIX="${TAG_PREFIX:-gpu-rl}"
 DOCKERFILE="${DOCKERFILE:-$DEFAULT_DOCKERFILE}"
 DOCKER_CONTEXT=/app
@@ -261,7 +251,6 @@ if [ "$WHEEL_SOURCE" = "wheel-builder" ]; then
     --dockerfile "$DOCKERFILE" \
     --target wheel-artifact \
     --build-arg WHEEL_SOURCE="$WHEEL_SOURCE" \
-    --build-arg INSTALL_MEGATRON="$INSTALL_MEGATRON" \
     --build-arg GITSHA="$GITSHA" \
     --build-arg HARBOR_COMMIT="$HARBOR_COMMIT" \
     --build-arg VLLM_NATIVE_DONOR_ARCHIVE_SHA256="$NATIVE_ARCHIVE_SHA256" \
@@ -310,7 +299,6 @@ exec /kaniko/executor \
   --context "dir://${DOCKER_CONTEXT}" \
   --dockerfile "$DOCKERFILE" \
   --build-arg WHEEL_SOURCE="$WHEEL_SOURCE" \
-  --build-arg INSTALL_MEGATRON="$INSTALL_MEGATRON" \
   --build-arg GITSHA="$GITSHA" \
   --build-arg HARBOR_COMMIT="$HARBOR_COMMIT" \
   --build-arg VLLM_NATIVE_DONOR_ARCHIVE_SHA256="$NATIVE_ARCHIVE_SHA256" \

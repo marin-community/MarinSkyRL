@@ -1,7 +1,5 @@
 defaults:
   - _self_
-  - deepspeed_config@deepspeed_config.train: train
-  - deepspeed_config@deepspeed_config.eval: eval
   - megatron_config@trainer.policy.megatron_config: policy
   - megatron_config@trainer.ref.megatron_config: ref
   - skyrl_gym_config: default
@@ -50,19 +48,11 @@ trainer:
   debug_mode: "light"
   # null follows debug_mode (on for light/distributed); true/false explicitly overrides it.
   collective_phase_diagnostics: null
-  # Telemetry families published to Finelog when the task resolved a telemetry endpoint.
-  # Each is on by default.
-  # The trainer's scalar metrics and lifecycle events, one record per scalar per step, plus
-  # the trainer-minus-sampler log-ratio statistics computed on the driver for each batch.
-  training_metrics: true
-  # Per-rank policy-update walls and CUDA allocator peaks. The Megatron phase breakdown
-  # emits only on Megatron.
-  policy_train_spans: true
-  # The synchronous trainer's span around each rollout call. The async loop's rollout
-  # phases follow async_spans.
-  generate_spans: true
-  # Async-loop windows and producer waits; the highest-volume family here.
-  async_spans: true
+  # Telemetry families exported when the task has a telemetry endpoint.
+  training_metrics: true # trainer scalars, loop events and trainer-minus-vLLM log-ratio statistics
+  policy_train_spans: true # per-rank policy-update phase walls and CUDA memory
+  generate_spans: true # the synchronous trainer's rollout-call phases and waits
+  async_spans: true # async-loop windows, rollout calls, waits and group dispositions
   distributed:
     placement_group_timeout_seconds: 180
     worker_collective_timeout_seconds: 1800
@@ -106,8 +96,7 @@ trainer:
     # compatible per-GPU placement plan. It is not an independent device-selection convenience flag.
     policy_force_cvd_mask: false
     enable_numa_affinity: false
-  sequence_parallel_backend: "ulysses"
-  strategy: fsdp2
+  strategy: megatron
   policy:
     host_memory_monitor:
       enabled: true
@@ -135,10 +124,8 @@ trainer:
           lora_sync_path: "/tmp/skyrl_lora_sync"
           target_modules: "all-linear"
           exclude_modules: null
-    deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       optimizer: "AdamW"
-      fsdp_parameter_storage_dtype: null
       lr: 1.0e-6
       adam_betas: [0.9, 0.999]
       weight_decay: 1e-2
@@ -147,23 +134,6 @@ trainer:
       num_warmup_steps: 0
       scheduler: "constant_with_warmup"
       optimizer_kwargs: {}
-    fsdp_config:
-      cpu_offload: false
-      reshard_after_forward: true
-      fsdp_size: -1
-      expert_model_parallel_size: 1
-      expert_tensor_parallel_size: 1
-      moe_token_dispatcher_type: "alltoall"
-      moe_router_replay: false  # replay rollout-captured expert choices; strategies: fsdp, fsdp2, megatron
-      moe_grouped_gemm: false
-      use_grouped_mm: false
-      ep_comm_backend: "torch"
-      deepep_num_sms: 20
-      deepep_token_chunk_size: null
-      context_parallel_size: 1
-      expert_loader_chunk_rows: 8
-      cp_style: "ring_sdpa"
-      cp_rotate_method: "allgather"
     sequence_parallel_size: 1
     use_torch_compile: false
     record_memory: false
@@ -176,24 +146,6 @@ trainer:
       source_uri: ${trainer.policy.model.source_uri}
       source_identity: ${trainer.policy.model.source_identity}
     sequence_parallel_size: 1
-    deepspeed_config: ${deepspeed_config.eval}
-    fsdp_config:
-      cpu_offload: false
-      reshard_after_forward: true
-      fsdp_size: -1
-      expert_model_parallel_size: 1
-      expert_tensor_parallel_size: 1
-      moe_token_dispatcher_type: "alltoall"
-      moe_router_replay: false  # replay rollout-captured expert choices; strategies: fsdp, fsdp2, megatron
-      moe_grouped_gemm: false
-      use_grouped_mm: false
-      ep_comm_backend: "torch"
-      deepep_num_sms: 20
-      deepep_token_chunk_size: null
-      context_parallel_size: 1
-      expert_loader_chunk_rows: ${trainer.policy.fsdp_config.expert_loader_chunk_rows}
-      cp_style: "ring_sdpa"
-      cp_rotate_method: "allgather"
   critic:
     model:
       # ROLE-ACTIVATING: a non-null path creates a local critic role. The launcher then claims critic_num_nodes and
@@ -205,10 +157,8 @@ trainer:
         dropout: 0
         target_modules: "all-linear"
         exclude_modules: null
-    deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       optimizer: "AdamW"
-      fsdp_parameter_storage_dtype: null
       lr: 5.0e-6
       adam_betas: [0.9, 0.999]
       weight_decay: 1e-2
@@ -217,33 +167,8 @@ trainer:
       num_warmup_steps: 0
       scheduler: "constant_with_warmup"
       optimizer_kwargs: {}
-    fsdp_config:
-      cpu_offload: false
-      reshard_after_forward: true
-      fsdp_size: -1
-      expert_model_parallel_size: 1
-      expert_tensor_parallel_size: 1
-      moe_token_dispatcher_type: "alltoall"
-      moe_router_replay: false
-      moe_grouped_gemm: false
-      use_grouped_mm: false
-      ep_comm_backend: "torch"
-      deepep_num_sms: 20
-      deepep_token_chunk_size: null
-      context_parallel_size: 1
-      expert_loader_chunk_rows: ${trainer.policy.fsdp_config.expert_loader_chunk_rows}
-      cp_style: "ring_sdpa"
-      cp_rotate_method: "allgather"
     sequence_parallel_size: 1
   algorithm:
-    ratio_diagnostics:
-      # Absolute position buckets the dashboard reads as pos_first256/pos_last256.
-      position_window: 256
-      # Pool the within-update log-ratio statistics (policy/log_ratio_*) across data-parallel
-      # ranks with one gather per optimizer minibatch. null resolves on for Megatron and off
-      # elsewhere, since only Megatron has a pooling path; true on another strategy fails
-      # validation.
-      pooled: null
     batch_invariant: false
     advantage_estimator: "grpo"
     group_advantage_min_size: null
@@ -418,8 +343,6 @@ trainer:
   flash_attn: false
   attn_backend: "auto"
   disable_fast_tokenizer: false
-  target_modules: null
-  exclude_modules: null
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"

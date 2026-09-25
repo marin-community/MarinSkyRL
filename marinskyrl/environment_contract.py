@@ -102,11 +102,7 @@ EXECUTION_UID_ENV = "SKYRL_EXECUTION_UID"
 
 
 class TrainingType(StrEnum):
-    """The trainer a run uses, stamped on every telemetry record.
-
-    It answers which trainer the launched module runs: terminal_bench runs either one, and a generate
-    entrypoint runs none.
-    """
+    """The trainer's execution mode; async rollouts proceed independently of updates."""
 
     SYNC = "sync"
     ASYNC = "async"

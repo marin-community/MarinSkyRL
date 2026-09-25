@@ -2,7 +2,7 @@
 
 Covers the layer mapping, the sequence-major flatten, the TP sequence-parallel
 slice, the per-layer controller state machine (forward / recompute FIFO), the
-geometry validation, and the dense-target builder shared with the FSDP path.
+geometry validation, and the dense-target builder used by the Megatron path.
 """
 
 import pytest
@@ -18,7 +18,7 @@ from skyrl_train.models.megatron_router_replay import (
     slice_sequence_parallel,
     validate_replay_geometry,
 )
-from skyrl_train.models.router_replay import SENTINEL_EXPERT_ID, dense_replay_targets
+from skyrl_train.models.megatron_router_replay import SENTINEL_EXPERT_ID, dense_replay_targets
 
 
 def _fake_compute_topk(scores, topk, num_groups=None, group_topk=None):

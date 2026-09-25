@@ -138,43 +138,22 @@ trainer:
       adam_betas: [0.9, 0.999]
       max_grad_norm: 0.9
     megatron_config:
+      moe_router_replay: true
       tensor_model_parallel_size: 4
       pipeline_model_parallel_size: 2
       context_parallel_size: 1
       expert_model_parallel_size: 4
       expert_tensor_parallel_size: 1
-    fsdp_config:
-      cpu_offload: true
-      reshard_after_forward: true
-      wrap_policy:
-        transformer_layer_cls_to_wrap: ["Qwen3_5MoeDecoderLayer"]
-      fsdp_size: 8
-      expert_model_parallel_size: 4
-      moe_router_replay: true
-      moe_grouped_gemm: true
-      use_grouped_mm: true
-      ep_comm_backend: torch
   ref:
     model:
       path: Qwen/Qwen3.6-35B-A3B
     megatron_config:
+      moe_router_replay: true
       tensor_model_parallel_size: 4
       pipeline_model_parallel_size: 2
       context_parallel_size: 1
       expert_model_parallel_size: 4
       expert_tensor_parallel_size: 1
-    fsdp_config:
-      cpu_offload: true
-      reshard_after_forward: true
-      wrap_policy:
-        transformer_layer_cls_to_wrap: ["Qwen3_5MoeDecoderLayer"]
-      fsdp_size: 8
-      expert_model_parallel_size: 4
-      moe_router_replay: true
-      moe_grouped_gemm: true
-      use_grouped_mm: true
-      ep_comm_backend: torch
-
   placement:
     colocate_all: false
     policy_num_nodes: 4

@@ -7,7 +7,7 @@ import os
 import shutil
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
@@ -108,7 +108,7 @@ from skyrl_train.utils.trainer_utils import (
 )
 from skyrl_train.utils.utils import (
     configure_ray_worker_logging,
-    moe_router_replay_enabled,
+    moe_router_replay_requested,
     policy_per_gpu_bundles_enabled,
     policy_force_cvd_mask_enabled,
 )
@@ -129,10 +129,7 @@ from skyrl_train.telemetry import (
     record_training_metrics,
 )
 from skyrl_train.rollout_observability import observe_rollout_call
-from skyrl_train.utils.importance_ratio_diagnostics import (
-    ratio_diagnostics_settings,
-    mismatch_ratio_metrics,
-)
+from skyrl_train.utils.importance_ratio_diagnostics import mismatch_ratio_metrics
 from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
@@ -181,20 +178,6 @@ class _ClosableDistillationRuntime(Protocol):
     async def close(self) -> None: ...
 
 
-@dataclass
-class _ConsumedGroupStaleness:
-    """One consumed group's admitted staleness and the work it contributed.
-
-    Field names and declaration order are the emitted `consumed_staleness` body
-    byte-for-byte; renaming or reordering one breaks the dashboards keyed to it.
-    """
-
-    staleness: int
-    groups: int
-    sequences: int
-    response_tokens: int
-
-
 def _validated_distillation_tensors(
     trajectory_batch: TrajectoryBatch,
     response_mask: torch.Tensor,
@@ -229,8 +212,6 @@ def consumed_work(training_input: TrainingInputBatch) -> ConsumedWork:
 
 
 class RayPPOTrainer:
-    # Off unless the config enables it. The class default gives a trainer built without a
-    # config the attribute.
     _training_metrics_enabled: bool = False
 
     def __init__(
@@ -246,7 +227,7 @@ class RayPPOTrainer:
         callbacks: Optional[List[TrainerCallback]] = None,
     ):
         self.cfg = cfg
-        self._training_metrics_enabled = bool(cfg.trainer.get("training_metrics", False))
+        self._training_metrics_enabled: bool = cfg.trainer.training_metrics
         self.group_advantage_invariant = GroupAdvantageInvariant.from_config(
             cfg.trainer.algorithm.resolved_group_advantage
         )
@@ -1115,8 +1096,8 @@ class RayPPOTrainer:
         training_input: TrainingInputBatch,
         duration_seconds: float,
     ) -> None:
+        self.all_metrics.update(training_input.metadata["consumed_stop_metrics"])
         if self._training_metrics_enabled:
-            self.all_metrics.update(training_input.metadata.get("consumed_stop_metrics", {}))
             record_consumed_work(consumed_work(training_input), step=self.global_step)
         logger.info(
             "Optimizer step completed: step={} epoch={} sequences={} duration_seconds={:.3f}",
@@ -1776,11 +1757,6 @@ class RayPPOTrainer:
         assert_training_groups_eligible(trajectory_batch, uids, self.group_advantage_invariant)
         prompt_ids: List[List[int]] = trajectory_batch["prompt_token_ids"]
         response_ids: List[List[int]] = trajectory_batch["response_ids"]
-        if rollout_staleness is not None and (
-            len(rollout_staleness) != len(response_ids)
-            or any(type(step) is not int or step < 0 for step in rollout_staleness)
-        ):
-            raise ValueError("rollout_staleness must contain one nonnegative integer per response row")
         rewards: List[List[float]] = trajectory_batch["rewards"]
         loss_masks: List[List[int]] = trajectory_batch["loss_masks"]
 
@@ -1789,7 +1765,7 @@ class RayPPOTrainer:
         # MoE router-replay capture rail (Stage 1): only pull routed_experts when
         # the flag is on. Gated so the flag-off TrainingInputBatch is byte-identical
         # (the field is never even passed to the collator nor set on the batch).
-        moe_router_replay = moe_router_replay_enabled(self.cfg)
+        moe_router_replay = moe_router_replay_requested(self.cfg)
         routed_experts = trajectory_batch.get("rollout_routed_experts", None) if moe_router_replay else None
         # Deterministic dtype for the rollout_routed_experts transport tensor:
         # resolve the model's expert count once (memoized) and pass it to the
@@ -1916,29 +1892,11 @@ class RayPPOTrainer:
             training_input.metadata["exclude_from_baseline"] = np.array(
                 trajectory_batch["exclude_from_baseline"], dtype=bool
             )
-        if self._training_metrics_enabled:
-            training_input.metadata["consumed_stop_metrics"] = consumed_stop_metrics(
-                trajectory_batch.get("stop_reasons"), len(response_ids)
-            )
+        training_input.metadata["consumed_stop_metrics"] = consumed_stop_metrics(
+            trajectory_batch.get("stop_reasons"), len(response_ids)
+        )
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
-        if self._training_metrics_enabled and rollout_staleness is not None:
-            # One event per consumed group: its admitted staleness and the tokens it contributed.
-            counts: dict[str, _ConsumedGroupStaleness] = {}
-            for uid, steps, mask in zip(uids, rollout_staleness, response_masks_tensor, strict=True):
-                group = counts.setdefault(
-                    uid, _ConsumedGroupStaleness(staleness=steps, groups=1, sequences=0, response_tokens=0)
-                )
-                if group.staleness != steps:
-                    raise ValueError("Consumed group rows must share the admitted staleness")
-                group.sequences += 1
-                group.response_tokens += int(mask.sum().item())
-            for group in counts.values():
-                record_event(
-                    "consumed_staleness",
-                    asdict(group),
-                    attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
-                )
         if self.cfg.trainer.step_wise_training:
             assert "trajectory_ids" in trajectory_batch, (
                 "Expected `trajectory_ids` in trajectory batch for step wise training"
@@ -1982,9 +1940,7 @@ class RayPPOTrainer:
             self.global_step,
             len(input_batch["prompts"]),
         )
-        with observe_rollout_call(
-            step=self.global_step, mode="sync", enabled=self.cfg.trainer.get("generate_spans", False)
-        ):
+        with observe_rollout_call(step=self.global_step, mode="sync", enabled=self.cfg.trainer.generate_spans):
             trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch)
         # add rollout metrics to self.all_metrics
         if trajectory_batch["rollout_metrics"] is not None:
@@ -2067,15 +2023,14 @@ class RayPPOTrainer:
             f"reward/avg_pass_at_{n_samples_per_prompt}": pass_at_n,
             "reward/avg_raw_reward": mean_reward,
         }
-        if self._training_metrics_enabled:
-            # A group whose rewards all tie carries no advantage signal.
-            grouped_rewards = defaultdict(list)
-            for uid, reward in zip(uids_for_metrics, step_rewards):
-                grouped_rewards[uid].append(float(np.sum(reward)))
-            if grouped_rewards:
-                reward_metrics["reward/informative_group_fraction"] = sum(
-                    max(values) > min(values) for values in grouped_rewards.values()
-                ) / len(grouped_rewards)
+        # A group whose rewards all tie carries no advantage signal.
+        grouped_rewards = defaultdict(list)
+        for uid, reward in zip(uids_for_metrics, step_rewards):
+            grouped_rewards[uid].append(float(np.sum(reward)))
+        if grouped_rewards:
+            reward_metrics["reward/informative_group_fraction"] = sum(
+                max(values) > min(values) for values in grouped_rewards.values()
+            ) / len(grouped_rewards)
         self.all_metrics.update(reward_metrics)
         logger.info(f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, reward/avg_raw_reward: {mean_reward}")
 
@@ -2442,10 +2397,9 @@ class RayPPOTrainer:
                     action_log_probs,
                     training_input["rollout_logprobs"],
                     training_input["loss_mask"],
-                    training_input.get("rollout_staleness"),
+                    training_input["rollout_staleness"],
                     eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
                     eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
-                    position_window=ratio_diagnostics_settings(self.cfg.trainer.algorithm).position_window,
                 )
             )
 

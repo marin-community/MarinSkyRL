@@ -19,7 +19,7 @@ from marinskyrl.environment_contract import (  # noqa: E402
     TRAINING_TYPE_ENV,
     TrainingType,
 )
-from skyrl_train.telemetry import TelemetryConfig, _resources  # noqa: E402
+from skyrl_train.telemetry import TelemetryConfig  # noqa: E402
 
 
 _ATTEMPT_UID = "01JABCDEF0123456789"
@@ -104,9 +104,3 @@ def test_telemetry_environment_omits_an_unset_training_type(monkeypatch) -> None
     _in_cluster(monkeypatch)
     monkeypatch.delenv(TRAINING_TYPE_ENV, raising=False)
     assert TRAINING_TYPE_ENV not in telemetry_env.telemetry_environment()
-
-
-def test_training_type_lands_in_every_record_resource() -> None:
-    stamped = _resources(TelemetryConfig(run_id="run", execution_uid="x", training_type=TrainingType.ASYNC), "trainer")
-    assert stamped["training_type"] == "async"
-    assert "training_type" not in _resources(TelemetryConfig(run_id="run", execution_uid="x"), "trainer")

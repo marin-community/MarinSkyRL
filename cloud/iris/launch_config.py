@@ -20,12 +20,12 @@ from cloud.iris.rl_config_translation import (
     inert_fully_async_settings,
     parse_rl_config,
     registered_rl_entrypoint_module,
-    training_type_for_skyrl_config,
+    training_type_for_entrypoint,
     validate_tp_divides_heads,
     warn_inert_fully_async_settings,
 )
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
-from marinskyrl.resource_locator import join_resource_path
+from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.task_sources import data_source
 
 
@@ -194,6 +194,9 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
     raw_skyrl = OmegaConf.to_container(config.skyrl, resolve=False)
     if not isinstance(raw_skyrl, dict):
         raise TypeError("skyrl must be a mapping")
+    model_uri = str(config.inputs.model.uri)
+    model_identity = str(config.inputs.model.identity)
+    model_is_cloud = is_cloud_uri(model_uri)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", encoding="utf-8") as source_file:
         OmegaConf.save(OmegaConf.create(raw_skyrl), source_file.name, resolve=False)
         parsed = parse_rl_config(source_file.name)
@@ -205,9 +208,9 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
                 "num_nodes": int(config.iris.allocation.num_nodes),
                 "gpus_per_node": int(config.iris.allocation.gpus_per_node),
                 "model_path": str(config.inputs.model.local_path),
-                "model_source_uri": str(config.inputs.model.uri),
-                "model_source_identity": str(config.inputs.model.identity),
-                "model_revision": str(config.inputs.model.identity),
+                "model_source_uri": model_uri if model_is_cloud else None,
+                "model_source_identity": model_identity if model_is_cloud else None,
+                "model_revision": model_identity,
                 "train_data": list(config.inputs.train_data),
                 "val_data": list(config.inputs.validation_data),
                 "checkpoint_root": str(config.artifacts.checkpoint_root),
@@ -224,15 +227,13 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
     resolved = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
     OmegaConf.set_struct(resolved, False)
     resolved.runtime.entrypoint = compiled.entrypoint
-    resolved.runtime.training_type = _training_type(compiled.entrypoint, compiled.config)
+    # The terminal_bench entrypoint runs async only for an explicit false, so null means colocated.
+    colocate_all = compiled.config.trainer.placement.colocate_all is not False
+    training_type = training_type_for_entrypoint(compiled.entrypoint, colocate_all=colocate_all)
+    resolved.runtime.training_type = None if training_type is None else training_type.value
     resolved.inputs.data_kind = parsed.data_kind
     resolved.skyrl = compiled.config
     return compose_launch_config(resolved)
-
-
-def _training_type(entrypoint: str, skyrl: Mapping[str, Any]) -> str | None:
-    training_type = training_type_for_skyrl_config(entrypoint, skyrl)
-    return None if training_type is None else training_type.value
 
 
 def load_launch_config(path: Path) -> DictConfig:
@@ -344,13 +345,6 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
     if runtime["profile"] != expected_profile.value:
         raise ValueError(
             f"runtime.profile={runtime['profile']!r} does not match SkyRL trainer strategy ({expected_profile.value!r})"
-        )
-    # An unset value is accepted so resolved documents that lack the field still load for export.
-    expected_training_type = _training_type(entrypoint, skyrl)
-    if runtime["training_type"] is not None and runtime["training_type"] != expected_training_type:
-        raise ValueError(
-            f"runtime.training_type={runtime['training_type']!r} does not match the entrypoint and "
-            f"trainer.placement.colocate_all ({expected_training_type!r})"
         )
     generator = skyrl.get("generator", {})
     validate_tp_divides_heads(

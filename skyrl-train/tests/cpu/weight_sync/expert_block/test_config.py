@@ -169,7 +169,7 @@ def test_explicit_transports_are_left_as_written(tmp_path, explicit):
 @pytest.mark.parametrize(
     "path,value,message",
     [
-        ("trainer.strategy", "fsdp2", "megatron strategy"),
+        ("trainer.strategy", "unknown", "megatron strategy"),
         ("trainer.policy.megatron_config.tensor_model_parallel_size", 2, "tensor_model_parallel_size 1"),
         ("trainer.policy.megatron_config.expert_tensor_parallel_size", 2, "expert_tensor_parallel_size 1"),
         ("trainer.policy.megatron_config.expert_model_parallel_size", 0, "must be positive"),

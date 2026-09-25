@@ -19,16 +19,8 @@ from skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl_train.distillation import DistillationInput, student_topk_logprobs
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
-from skyrl_train.megatron_timing import (
-    FORWARD_BACKWARD_SCHEDULER,
-    PIPELINE_METRIC_BROADCAST,
-    MegatronTrainTimings,
-)
-from skyrl_train.utils.importance_ratio_diagnostics import (
-    ratio_diagnostics_settings,
-    LogRatioMonitor,
-    gather_ratio_tensor,
-)
+from skyrl_train.timing_observability import PhaseBreakdown
+from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor, gather_ratio_tensor
 
 from skyrl_train.distributed.megatron.megatron_utils import (
     compact_left_padded_tokens,
@@ -44,7 +36,7 @@ from skyrl_train.models.megatron_router_replay import (
     slice_sequence_parallel,
     validate_replay_geometry,
 )
-from skyrl_train.models.router_replay import dense_replay_targets
+from skyrl_train.models.megatron_router_replay import dense_replay_targets
 
 
 # Sentinel: distinguishes "caller did not pass logprob_chunk_size" (=> fall back to
@@ -421,7 +413,7 @@ class MegatronModelWrapper:
         seq_len: int,
         micro_batch_size: int,
         temperature: float = 1.0,
-        timings: MegatronTrainTimings | None = None,
+        timings: PhaseBreakdown | None = None,
     ) -> List[dict]:
         """
         Run forward-backward over a full mini-batch consisting of multiple micro-batches.
@@ -433,14 +425,12 @@ class MegatronModelWrapper:
             seq_len: Sequence length (tokens) per sample (assumed same across micros after padding).
             micro_batch_size: Micro-batch size per forward pass.
             temperature: Optional temperature for logits scaling.
-            timings: Optional recorder for the forward-backward scheduler span.
-                None measures nothing, like a disabled recorder.
+            timings: Optional recorder for the forward-backward scheduler and pipeline metric broadcast.
 
         Returns:
             List[dict]: one metrics dict per micro-batch in order.
         """
         forward_backward_func = get_forward_backward_func()
-        ratio_settings = ratio_diagnostics_settings(self.cfg.trainer.algorithm)
         log_ratio_monitor = None
         completed_microbatches = 0
 
@@ -487,10 +477,7 @@ class MegatronModelWrapper:
                 student_topk_logprobs=sparse_student_logprobs,
             )
             if log_ratio_monitor is None:
-                log_ratio_monitor = LogRatioMonitor(
-                    action_log_probs.device,
-                    position_window=ratio_settings.position_window,
-                )
+                log_ratio_monitor = LogRatioMonitor(action_log_probs.device)
             log_ratio_monitor.add(action_log_probs, old_action_log_probs, loss_mask)
             completed_microbatches += 1
 
@@ -502,21 +489,13 @@ class MegatronModelWrapper:
             }
             metrics.update(objective.metrics)
             if completed_microbatches == len(micro_batches):
-                if ratio_settings.pooled:
-                    # Token logprobs are already reconstructed across TP/CP. Pool distinct DP
-                    # inputs only; pipeline metrics are broadcast below.
-                    group = (
-                        mpu.get_data_parallel_group(with_context_parallel=False)
-                        if torch.distributed.is_initialized()
-                        else None
-                    )
-                    metrics.update(
-                        log_ratio_monitor.metrics(
-                            gather_fn=partial(gather_ratio_tensor, group=group),
-                        )
-                    )
-                else:
-                    metrics.update(log_ratio_monitor.metrics())
+                # Token logprobs are already reconstructed across TP/CP, so pool across data-parallel ranks only.
+                group = (
+                    mpu.get_data_parallel_group(with_context_parallel=False)
+                    if torch.distributed.is_initialized()
+                    else None
+                )
+                metrics.update(log_ratio_monitor.metrics(gather_fn=partial(gather_ratio_tensor, group=group)))
             return objective.optimization_loss, metrics
 
         def forward_step(batch_iter, model):
@@ -536,8 +515,8 @@ class MegatronModelWrapper:
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
-        timing = timings or MegatronTrainTimings(enabled=False)
-        with timing.span(FORWARD_BACKWARD_SCHEDULER):
+        timing = timings or PhaseBreakdown("ppo_train", enabled=False)
+        with timing.span("megatron_forward_backward_scheduler"):
             metrics_list = forward_backward_func(
                 forward_step_func=forward_step,
                 data_iterator=batch_generator,
@@ -565,7 +544,7 @@ class MegatronModelWrapper:
         # broadcast metrics to all pp ranks
         if not mpu.is_pipeline_last_stage(ignore_virtual=True):
             metrics_list = [None] * len(micro_batches)
-        with timing.span(PIPELINE_METRIC_BROADCAST), torch.no_grad():
+        with timing.span("megatron_pipeline_metric_broadcast"), torch.no_grad():
             torch.distributed.broadcast_object_list(
                 metrics_list,
                 src=mpu.get_pipeline_model_parallel_last_rank(),

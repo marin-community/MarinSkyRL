@@ -1,23 +1,15 @@
 import math
 import json
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
 
 import numpy
 import pytest
 import torch
-from loguru import logger
-
-from omegaconf import OmegaConf
-
-from skyrl_train.utils.utils import resolve_strategy_limited_telemetry
 
 from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
-    absolute_quantiles,
+    linear_quantiles,
     mismatch_ratio_metrics,
-    ratio_diagnostics_settings,
     ratio_statistics,
     gather_ratio_tensor,
 )
@@ -115,7 +107,7 @@ def test_worker_accumulator_matches_pooled_ess_and_tail_under_unequal_microbatch
     actual, expected = monitor.metrics(), ratio_statistics(values)
     assert actual["log_ratio_ess_fraction"] == pytest.approx(expected["ess_fraction"], abs=1e-10)
     assert actual["log_ratio_abs_p999"] == pytest.approx(expected["log_ratio_abs_p999"], abs=1e-5)
-    assert actual["log_ratio_kl_k1"] == pytest.approx(expected["kl_k1"], abs=1e-10)
+    assert actual["log_ratio_mean"] == pytest.approx(expected["log_ratio_mean"], abs=1e-10)
     assert actual["log_ratio_kl_k3"] == pytest.approx(expected["kl_k3"], rel=1e-10)
     assert actual["log_ratio_p999_valid"] == 1
     empty = LogRatioMonitor(torch.device("cpu")).metrics()
@@ -146,55 +138,8 @@ def test_worker_masks_padding_before_subtraction_and_keeps_unclipped_absolute_de
     monitor.add(torch.tensor([[1000.0, math.nan]]), torch.tensor([[0.0, math.nan]]), torch.tensor([[1, 0]]))
     actual = monitor.metrics()
     assert actual["log_ratio_abs_mean"] == 1000
-    assert actual["log_ratio_mean_squared"] == 1e6
+    assert actual["log_ratio_chi2"] == pytest.approx(math.exp(2 * 20) - 1)
     assert actual["log_ratio_statistics_valid"] == 1
-
-
-def test_rank_reduction_pools_unequal_token_counts_and_excludes_replicas():
-    shards = [torch.arange(1, 101, dtype=torch.float64) / 10, torch.zeros(19_900, dtype=torch.float64)]
-    monitors = []
-    for values in shards:
-        monitor = LogRatioMonitor(torch.device("cpu"))
-        values = values.unsqueeze(0)
-        monitor.add(values, torch.zeros_like(values), torch.ones_like(values))
-        monitors.append(monitor)
-    expected = ratio_statistics(torch.cat(shards))
-    rank_mean_ess = sum(monitor.metrics()["log_ratio_ess_fraction"] for monitor in monitors[:2]) / 2
-    assert abs(rank_mean_ess - expected["ess_fraction"]) > 0.1
-
-    def pooled_monitors():
-        barrier = Barrier(len(monitors))
-        inputs = [None] * len(monitors)
-
-        def run(rank):
-            def gather(tensor):
-                inputs[rank] = tensor.clone()
-                barrier.wait(timeout=20)
-                results = [value.clone() for value in inputs]
-                barrier.wait(timeout=20)
-                return results
-
-            return monitors[rank].metrics(gather_fn=gather)
-
-        with ThreadPoolExecutor(max_workers=len(monitors)) as executor:
-            results = list(executor.map(run, range(len(monitors))))
-        assert all(result == results[0] for result in results)
-        return results[0]
-
-    actual = pooled_monitors()
-    assert actual["log_ratio_selected_tokens"] == 20_000
-    assert actual["log_ratio_ess_fraction"] == pytest.approx(expected["ess_fraction"], rel=1e-10)
-    assert actual["log_ratio_mean"] == pytest.approx(expected["log_ratio_mean"], abs=1e-10)
-    assert actual["log_ratio_abs_p999"] == pytest.approx(expected["log_ratio_abs_p999"], abs=1e-5)
-    assert actual["log_ratio_p999_valid"] == 1
-
-    # One failing rank invalidates the family on every rank; the WORLD status mean must not
-    # average it into a fractional validity flag.
-    monitors[1]._failed = True
-    failed = pooled_monitors()
-    assert failed["log_ratio_diagnostics_failed"] == 1
-    assert failed["log_ratio_p999_valid"] == 0
-    assert set(failed) == set(actual)
 
 
 def _distributed_ratio_worker(rank, directory):
@@ -218,7 +163,7 @@ def test_two_actual_gloo_ranks_emit_identical_token_pooled_statistics(tmp_path):
     left, right = [json.loads((tmp_path / f"rank{rank}.json").read_text()) for rank in range(2)]
     assert left == right
     expected = ratio_statistics(torch.cat([torch.arange(1, 101, dtype=torch.float64) / 10, torch.zeros(19_900)]))
-    assert left["pooled"]["log_ratio_selected_tokens"] == 20_000
+    assert left["pooled"]["log_ratio_mean"] == pytest.approx(expected["log_ratio_mean"], abs=1e-10)
     assert left["pooled"]["log_ratio_ess_fraction"] == pytest.approx(expected["ess_fraction"], rel=1e-10)
     assert left["pooled"]["log_ratio_abs_p999"] == pytest.approx(expected["log_ratio_abs_p999"], abs=1e-5)
     assert left["pooled"]["log_ratio_p999_valid"] == 1
@@ -242,50 +187,10 @@ def test_quantiles_stay_exact_above_the_size_torch_refuses():
     with pytest.raises(RuntimeError):
         torch.quantile(values, values.new_tensor(probabilities))
     expected = numpy.quantile(values.numpy(), probabilities, method="linear")
-    assert absolute_quantiles(values, probabilities) == pytest.approx(expected, abs=1e-6)
+    assert linear_quantiles(values, probabilities) == pytest.approx(expected, abs=1e-6)
     small = torch.rand(1000, dtype=torch.float64)
     expected = torch.quantile(small, small.new_tensor(probabilities)).tolist()
-    assert absolute_quantiles(small, probabilities) == pytest.approx(expected, rel=1e-12)
+    assert linear_quantiles(small, probabilities) == pytest.approx(expected, rel=1e-12)
     ties = torch.tensor([0.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0], dtype=torch.float64)
     tied = torch.quantile(ties, ties.new_tensor(probabilities)).tolist()
-    assert absolute_quantiles(ties, probabilities) == pytest.approx(tied, rel=1e-12)
-
-
-def test_shipped_ratio_diagnostics_pool_on_megatron_and_cost_nothing_elsewhere():
-    config = OmegaConf.load(Path(__file__).parents[3] / "skyrl_train/config/ppo_base_config.yaml")
-    assert config.trainer.algorithm.ratio_diagnostics.pooled is None
-    with pytest.raises(ValueError, match="pooled is null"):
-        ratio_diagnostics_settings(config.trainer.algorithm)
-    absent = ratio_diagnostics_settings(OmegaConf.create({}))
-    assert not absent.pooled and absent.position_window == 256
-
-    fsdp = OmegaConf.merge(config, {"trainer": {"strategy": "fsdp2"}})
-    messages = []
-    sink = logger.add(messages.append, level="INFO")
-    try:
-        resolve_strategy_limited_telemetry(fsdp)
-    finally:
-        logger.remove(sink)
-    assert fsdp.trainer.algorithm.ratio_diagnostics.pooled is False
-    assert ["trainer.algorithm.ratio_diagnostics.pooled" in message for message in messages] == [True]
-    megatron = OmegaConf.merge(config, {"trainer": {"strategy": "megatron"}})
-    resolve_strategy_limited_telemetry(megatron)
-    assert megatron.trainer.algorithm.ratio_diagnostics.pooled is True
-
-
-def test_an_explicit_strategy_limited_setting_is_rejected_where_its_family_cannot_measure():
-    config = OmegaConf.load(Path(__file__).parents[3] / "skyrl_train/config/ppo_base_config.yaml")
-    requested = OmegaConf.merge(
-        config, {"trainer": {"strategy": "fsdp2", "algorithm": {"ratio_diagnostics": {"pooled": True}}}}
-    )
-    with pytest.raises(ValueError, match="ratio_diagnostics.pooled=true"):
-        resolve_strategy_limited_telemetry(requested)
-
-
-def test_an_explicit_off_is_kept_where_the_family_could_measure():
-    config = OmegaConf.load(Path(__file__).parents[3] / "skyrl_train/config/ppo_base_config.yaml")
-    off_on_megatron = OmegaConf.merge(
-        config, {"trainer": {"strategy": "megatron", "algorithm": {"ratio_diagnostics": {"pooled": False}}}}
-    )
-    resolve_strategy_limited_telemetry(off_on_megatron)
-    assert off_on_megatron.trainer.algorithm.ratio_diagnostics.pooled is False
+    assert linear_quantiles(ties, probabilities) == pytest.approx(tied, rel=1e-12)

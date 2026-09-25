@@ -1,16 +1,14 @@
 # Watching an RL run on Grafana
 
-The trainer is instrumented. `skyrl_train/telemetry.py` publishes what each step measured, each
-rollout engine publishes its own vLLM metrics, and the Ray head publishes the raylet's. All of it
-goes to the cluster's finelog, which forwards to the `marin` hub, which is what Grafana queries.
-Nothing is scraped from your logs and nothing is written to disk.
+`skyrl_train/telemetry.py` exports trainer metrics, the rollout engines export vLLM metrics and the
+Ray head exports raylet metrics. The cluster's finelog forwards them to the `marin` hub, which Grafana
+queries. Nothing is scraped from logs or written to disk.
 
-Both trainers use that contract, and every record carries `training_type`, `sync` or `async`.
-**RL Post-training (sync)** at <https://grafana.oa.dev/d/marin-rl-runs> lists synchronous runs, and
-**RL Post-training (async)** at <https://grafana.oa.dev/d/marin-async-rl> lists fully asynchronous
-ones.
-[`docs/design/async-rl-telemetry.md`](design/async-rl-telemetry.md) explains what each panel's metrics
-measure, which switch gates them and what they cost.
+Every record carries a `training_type` of `sync` or `async`. **RL Post-training (sync)**, at
+<https://grafana.oa.dev/d/marin-rl-runs>, lists the synchronous runs and **RL Post-training (async)**,
+at <https://grafana.oa.dev/d/marin-async-rl>, the fully asynchronous ones.
+[Async RL telemetry](design/async-rl-telemetry.md) describes what each panel measures, its switch and
+its cost.
 
 ## Finding it
 
@@ -34,7 +32,7 @@ uv run python -m experiments.post_training.iceball_micro --version 2026.09.10 --
 
 Your run id is the step's own `<step_name>-<version>`, so a run is findable from either side.
 
-**From MarinSkyRL.** Launch one launch document through the packaged launcher. Its pod entrypoint,
+**From MarinSkyRL.** Launch through the packaged launcher. Its pod entrypoint,
 `cloud/iris/task_runtime.py`, resolves the same variables from the task's Iris context and starts
 Ray with the metrics port the collector scrapes:
 
@@ -54,9 +52,8 @@ iris ... job run -- python -m skyrl_train.entrypoints.main_base ...   # publishe
 
 That skips the resolver, so the variables stay unset and the run trains normally while reporting
 nothing. If you cannot use the launcher, the resolver alone covers everything except the two Ray
-panels, with the training type given as `SKYRL_TRAINING_TYPE`:
+panels; set the training type yourself, or the records carry none:
 `SKYRL_TRAINING_TYPE=sync python -m cloud.iris.telemetry_env -- python -m skyrl_train.entrypoints.main_base …`.
-A hand launch that leaves it unset stamps no training type.
 
 Confirm it took by grepping your job's log:
 

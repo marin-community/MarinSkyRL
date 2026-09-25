@@ -37,10 +37,7 @@ RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
 
 
 class RLEntrypoint(StrEnum):
-    """Execution modes supported by Iris RL configurations.
-
-    It answers which module a recipe launches; TrainingType answers which trainer that module runs.
-    """
+    """Execution modes supported by Iris RL configurations."""
 
     FULLY_ASYNC = "fully_async"
     GENERATE = "generate"
@@ -714,6 +711,7 @@ def extract_terminal_bench_agent_env(parsed: ParsedRLConfig) -> tuple:
 
 _OPTIONAL_HYDRA_PATTERNS = {
     ".distillation",
+    ".domain_weights",
     ".engine_init_kwargs",
     ".speculative_decoding",
     ".hf_hub_",
