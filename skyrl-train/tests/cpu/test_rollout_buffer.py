@@ -115,7 +115,6 @@ def test_off_policy_workers_can_keep_producing_while_trainer_step_waits():
             max_concurrent_generation_groups=2,
             mini_batch_size=1,
             max_staleness_steps=1,
-            continuous_production=True,
         )
         completed = []
         for index in range(3):
@@ -149,7 +148,7 @@ def test_synchronous_trainer_consumes_committed_batch_with_complete_evidence(tmp
         trainer = RayPPOTrainer.__new__(RayPPOTrainer)
         trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(ckpt_path=str(tmp_path)))
         trainer.global_step = 7
-        trainer._sync_rollout_buffer = None
+        trainer._rollout_buffer = None
         original = _group("example").trajectory_batch
         try:
             batch, uids = await trainer._handoff_generated_batch(
@@ -159,8 +158,8 @@ def test_synchronous_trainer_consumes_committed_batch_with_complete_evidence(tmp
             assert uids == ["example"]
             assert batch is not original
         finally:
-            if trainer._sync_rollout_buffer is not None:
-                trainer._sync_rollout_buffer.close()
+            if trainer._rollout_buffer is not None:
+                trainer._rollout_buffer.close()
 
     asyncio.run(exercise())
 

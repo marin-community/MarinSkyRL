@@ -26,7 +26,7 @@ from skyrl_train.curriculum import CurriculumSampler
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.rollout_buffer import FineStoreRolloutBuffer, SynchronousRollout
+from skyrl_train.rollout_buffer import ROLLOUT_BUFFER_SUBDIR, FineStoreRolloutBuffer, SynchronousRollout
 from skyrl_train.trajectory_selection import trajectory_selector_from_config
 from skyrl_train.trajectory_runners.base import (
     TrajectoryRequestBatch,
@@ -233,7 +233,7 @@ class RayPPOTrainer:
         self.all_startup_timings = {}
         self._checkpoint_save_failures = 0.0
         self._shutdown_complete = False
-        self._sync_rollout_buffer: FineStoreRolloutBuffer | None = None
+        self._rollout_buffer: FineStoreRolloutBuffer | None = None
         self.global_step = 0
         self._last_saved_step: int | None = None
         self._pending_checkpoint_upload: tuple[asyncio.Task[tuple[float, float]], TrainerState] | None = None
@@ -557,25 +557,32 @@ class RayPPOTrainer:
             try:
                 await self.shutdown()
             finally:
-                if self._sync_rollout_buffer is not None:
-                    await asyncio.to_thread(self._sync_rollout_buffer.close)
+                await self._close_rollout_buffer()
+
+    async def _open_rollout_buffer(self) -> FineStoreRolloutBuffer:
+        if self._rollout_buffer is None:
+            path = join_resource_path(self.cfg.trainer.ckpt_path, ROLLOUT_BUFFER_SUBDIR)
+            self._rollout_buffer = await asyncio.to_thread(FineStoreRolloutBuffer, path)
+        return self._rollout_buffer
+
+    async def _close_rollout_buffer(self) -> None:
+        if self._rollout_buffer is not None:
+            await asyncio.to_thread(self._rollout_buffer.close)
+            self._rollout_buffer = None
 
     async def _handoff_generated_batch(
         self, trajectory_batch: TrajectoryBatch, uids: List[str], source_prompts: List[dict]
     ) -> tuple[TrajectoryBatch, List[str]]:
         """Commit the raw generation result before trainer admission consumes it."""
-        if self._sync_rollout_buffer is None:
-            self._sync_rollout_buffer = await asyncio.to_thread(
-                FineStoreRolloutBuffer, join_resource_path(self.cfg.trainer.ckpt_path, "rollout_buffer")
-            )
+        rollout_buffer = await self._open_rollout_buffer()
         rollout = SynchronousRollout(
             trajectory_batch=trajectory_batch,
             uids=uids,
             source_prompts=source_prompts,
             model_step=self.global_step,
         )
-        rollout_id = await asyncio.to_thread(self._sync_rollout_buffer.writer().write_rollout, rollout)
-        restored = await asyncio.to_thread(self._sync_rollout_buffer.read_rollout, rollout_id)
+        rollout_id = await asyncio.to_thread(rollout_buffer.writer().write_rollout, rollout)
+        restored = await asyncio.to_thread(rollout_buffer.read_rollout, rollout_id)
         if not isinstance(restored, SynchronousRollout):
             raise ValueError(f"rollout {rollout_id} is not a synchronous generation result")
         return restored.trajectory_batch, restored.uids

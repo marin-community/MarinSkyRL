@@ -78,14 +78,15 @@ class GenerationStalledError(RuntimeError):
     """Raised when generation cannot make progress (no active producers, or dataset exhausted)."""
 
 
-def _drain_queue(queue: asyncio.Queue[_QueueItem]) -> List[_QueueItem]:
-    """Remove and return every item currently available without yielding."""
+def _drain_queue(queue: asyncio.Queue[_QueueItem], max_items: int | None = None) -> List[_QueueItem]:
+    """Remove available items without yielding, up to an optional limit."""
     items = []
-    while True:
+    while max_items is None or len(items) < max_items:
         try:
             items.append(queue.get_nowait())
         except asyncio.QueueEmpty:
             return items
+    return items
 
 
 @dataclass
@@ -150,28 +151,16 @@ class _GenerationQueues:
             completed_rollouts=references,
         )
 
-    def _read_completed(self, item: GeneratedOutputGroup | RolloutReference) -> GeneratedOutputGroup:
-        if isinstance(item, GeneratedOutputGroup):
-            return item
-        if self.rollout_buffer is None:
-            raise RuntimeError("rollout ID has no backing buffer")
-        rollout = self.rollout_buffer.read_rollout(item.rollout_id, store_path=item.store_path)
-        if not isinstance(rollout, GeneratedOutputGroup):
-            raise ValueError(f"rollout {item.rollout_id} is not a generated output group")
-        return rollout
-
     async def drain_completed(self, max_items: int) -> List[GeneratedOutputGroup]:
-        """Load at most one batch of committed groups without blocking the event loop."""
-        if self.rollout_buffer is None:
-            return [self._read_completed(item) for item in _drain_queue(self.completed)]
-        pending = []
-        while len(pending) < max_items:
-            try:
-                pending.append(self.completed.get_nowait())
-            except asyncio.QueueEmpty:
-                break
+        """Load bounded FineStore batches; preserve legacy in-memory scan semantics."""
+        pending = _drain_queue(self.completed, max_items if self.rollout_buffer is not None else None)
         if not pending:
             return []
+        if self.rollout_buffer is None:
+            groups = [item for item in pending if isinstance(item, GeneratedOutputGroup)]
+            if len(groups) != len(pending):
+                raise RuntimeError("rollout ID has no backing buffer")
+            return groups
         try:
             rollout_buffer = self.rollout_buffer
             assert rollout_buffer is not None
@@ -326,12 +315,10 @@ class _AsyncStalenessManager:
         max_concurrent_generation_groups: int,
         mini_batch_size: int,
         max_staleness_steps: int,
-        continuous_production: bool = False,
     ):
         self.max_concurrent_generation_groups = max_concurrent_generation_groups
         self.mini_batch_size = mini_batch_size
         self.max_staleness_steps = max_staleness_steps
-        self.continuous_production = continuous_production
 
         # Control logics.
         self._stat = _RolloutStat()
@@ -376,7 +363,7 @@ class _AsyncStalenessManager:
 
     def _compute_capacity_unlocked(self) -> int:
         producer_concurrency_capacity = self.max_concurrent_generation_groups - self._stat.running
-        if self.continuous_production:
+        if self.max_staleness_steps > 0:
             return producer_concurrency_capacity
         # NOTE(Charlie): do not need a self._current_global_step + 1 here unlike AReal because our
         # `_current_global_step` is "the version being worked on", not already finished steps.
@@ -596,12 +583,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._buffer_checkpoint_callback = BufferCheckpointCallback()
         self.callback_handler.add_callback(self._buffer_checkpoint_callback)
         self._pending_buffer_restore_path = None
-        self._rollout_buffer: FineStoreRolloutBuffer | None = None
         self._staleness_manager = _AsyncStalenessManager(
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
             mini_batch_size=self.mini_batch_size,
             max_staleness_steps=self.max_staleness_steps,
-            continuous_production=self.max_staleness_steps > 0,
         )
         # Tracked at instance level so the finally block in train() can cancel
         # them even when an exception skips the per-epoch epilogue.
@@ -757,8 +742,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             try:
                 await self.shutdown()
             finally:
-                if self._rollout_buffer is not None:
-                    await asyncio.to_thread(self._rollout_buffer.close)
+                await self._close_rollout_buffer()
 
     async def _train_loop(self):
         """
@@ -860,16 +844,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             # The queue carries FineStore IDs; only on-policy requests need a
             # batch-sized queue bound for backpressure.
-            if self._rollout_buffer is None:
-                self._rollout_buffer = await asyncio.to_thread(
-                    FineStoreRolloutBuffer,
-                    os.path.join(self.cfg.trainer.ckpt_path, "rollout_buffer"),
-                )
+            rollout_buffer = await self._open_rollout_buffer()
             generation_queues = _GenerationQueues(
                 completed=asyncio.Queue(maxsize=0 if self.max_staleness_steps > 0 else self.mini_batch_size),
                 retries=asyncio.Queue(),
                 condition=asyncio.Condition(),
-                rollout_buffer=self._rollout_buffer,
+                rollout_buffer=rollout_buffer,
                 active_producers=self.num_parallel_generation_workers,
             )
 

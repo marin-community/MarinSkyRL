@@ -23,6 +23,7 @@ from skyrl_train.trajectory_runners.base import TrajectoryBatch
 
 
 ROLLOUT_TABLE = "rollouts"
+ROLLOUT_BUFFER_SUBDIR = "rollout_buffer"
 ROLLOUT_SCHEMA = pa.schema(
     [
         pa.field("rollout_id", pa.string()),
@@ -94,7 +95,7 @@ class FineStoreRolloutBuffer:
         return self._decode_rollout(row, store_path or self.path)
 
     def read_rollouts(self, references: Sequence[RolloutReference]) -> list[GeneratedOutputGroup]:
-        """Read one bounded admission scan from a snapshot per archive."""
+        """Return groups in reference order, raising if a committed ID is missing."""
         by_path: dict[str, list[str]] = defaultdict(list)
         for reference in references:
             by_path[reference.store_path].append(reference.rollout_id)
