@@ -14,6 +14,7 @@ from skyrl_train.config.utils import get_default_config
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy, resolve_fsdp_parameter_storage_dtype
 from skyrl_train.distributed.grug_muonh import GrugMuonH
 from skyrl_train.distributed.grug_muonh import build_grug_muonh, grug_muonh_route
+from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH, megatron_grug_route
 
 
 FIXTURE = Path(__file__).with_name("fixtures") / "grug_muonh_jax_golden.npz"
@@ -186,6 +187,124 @@ def test_muonh_routes_default_to_master_learning_rate():
         )
 
     assert {group["lr"] for group in optimizer.param_groups} == {master_learning_rate}
+
+
+def test_megatron_muonh_matches_independent_jax_steps_after_own_state_resume():
+    with np.load(FIXTURE, allow_pickle=False) as fixture:
+        model = _TinyGrug(fixture)
+        parameters = dict(model.named_parameters())
+        routes = dict(zip(fixture["metadata_names"].tolist(), fixture["metadata_routes"].tolist()))
+        route_names = {"muonh": "grug_muonh", "adamh": "grug_adamh"}
+
+        def optimizers(current_model):
+            current = dict(current_model.named_parameters())
+            groups = [
+                {"params": [current[PARAMETER_NAMES[key]]], "optimizer": route_names[routes[key]]}
+                for key in PARAMETER_NAMES
+                if routes[key] != "adam"
+            ]
+            adam_parameters = [current[PARAMETER_NAMES[key]] for key in PARAMETER_NAMES if routes[key] == "adam"]
+            hero_optimizer = MegatronGrugMuonH(
+                groups,
+                lr=float(fixture["metadata_shared_lr"]),
+                betas=(0.9, 0.95),
+                momentum=0.95,
+                nesterov=True,
+                ns_steps=5,
+                eps=1e-8,
+                muon_eps=1e-8,
+                qkv_split_shapes=(4, 2, 2),
+            )
+            adam_optimizer = torch.optim.Adam(
+                adam_parameters, lr=float(fixture["metadata_adam_lr"]), betas=(0.9, 0.95), eps=1e-8
+            )
+            return hero_optimizer, adam_optimizer
+
+        hero_optimizer, adam_optimizer = optimizers(model)
+        assert not hero_optimizer.state
+        for step in range(1, int(fixture["metadata_steps"]) + 1):
+            for key, name in PARAMETER_NAMES.items():
+                parameters[name].grad = _tensor(fixture[f"gradient_{step}__{key}"])
+            hero_optimizer.step()
+            adam_optimizer.step()
+
+            for key, name in PARAMETER_NAMES.items():
+                _assert_close(parameters[name], fixture[f"parameter_{step}__{key}"], muon_bf16=routes[key] == "muonh")
+
+            if step == 1:
+                saved_model = copy.deepcopy(model.state_dict())
+                saved_hero = copy.deepcopy(hero_optimizer.state_dict())
+                saved_adam = copy.deepcopy(adam_optimizer.state_dict())
+                model = _TinyGrug(fixture)
+                model.load_state_dict(saved_model)
+                parameters = dict(model.named_parameters())
+                hero_optimizer, adam_optimizer = optimizers(model)
+                hero_optimizer.initialize_state()
+                hero_optimizer.load_state_dict(saved_hero)
+                adam_optimizer.load_state_dict(saved_adam)
+
+
+def test_megatron_muonh_splits_fused_qkv_and_gate_up_before_hyperball_update():
+    torch.manual_seed(31)
+    q, k, v = (torch.randn(rows, 5) for rows in (8, 4, 4))
+    q_grad, k_grad, v_grad = (torch.randn_like(weight) for weight in (q, k, v))
+    fused = torch.cat((q.view(2, 4, 5), k.view(2, 2, 5), v.view(2, 2, 5)), dim=1).reshape(16, 5)
+    fused_grad = torch.cat((q_grad.view(2, 4, 5), k_grad.view(2, 2, 5), v_grad.view(2, 2, 5)), dim=1).reshape(16, 5)
+    gate, up = torch.randn(6, 5), torch.randn(6, 5)
+    gate_grad, up_grad = torch.randn_like(gate), torch.randn_like(up)
+    fused_gate_up = torch.cat((gate, up), dim=0)
+
+    reference = [torch.nn.Parameter(value.clone()) for value in (q, k, v, gate, up)]
+    for parameter, gradient in zip(reference, (q_grad, k_grad, v_grad, gate_grad, up_grad)):
+        parameter.grad = gradient.clone()
+    reference_optimizer = GrugMuonH(reference, [torch.nn.Parameter(torch.ones(2, 2))], [], lr=0.03)
+
+    actual_qkv = torch.nn.Parameter(fused.clone())
+    actual_gate_up = torch.nn.Parameter(fused_gate_up.clone())
+    actual_qkv.grad = fused_grad.clone()
+    actual_gate_up.grad = torch.cat((gate_grad, up_grad), dim=0)
+    optimizer = MegatronGrugMuonH(
+        [
+            {"params": [actual_qkv], "optimizer": "grug_muonh_qkv"},
+            {"params": [actual_gate_up], "optimizer": "grug_muonh_gate_up"},
+        ],
+        lr=0.03,
+        betas=(0.9, 0.95),
+        momentum=0.95,
+        nesterov=True,
+        ns_steps=5,
+        eps=1e-8,
+        muon_eps=1e-8,
+        qkv_split_shapes=(4, 2, 2),
+    )
+    reference_optimizer.step()
+    optimizer.step()
+
+    expected_qkv = torch.cat(
+        (reference[0].view(2, 4, 5), reference[1].view(2, 2, 5), reference[2].view(2, 2, 5)), dim=1
+    ).reshape(16, 5)
+    torch.testing.assert_close(actual_qkv, expected_qkv, rtol=0, atol=0)
+    torch.testing.assert_close(actual_gate_up, torch.cat((reference[3], reference[4]), dim=0), rtol=0, atol=0)
+
+
+def test_megatron_muonh_routes_hero_parameter_families():
+    matrix = torch.empty(8, 8)
+    vector = torch.empty(8)
+    assert megatron_grug_route("decoder.layers.0.self_attention.linear_qkv.weight", matrix) == "grug_muonh_qkv"
+    assert megatron_grug_route("decoder.layers.0.mlp.experts.linear_fc1.weight3", matrix) == "grug_muonh_gate_up"
+    assert (
+        megatron_grug_route("decoder.layers.0.mlp.shared_experts.experts.1.linear_fc1.weight", matrix)
+        == "grug_muonh_gate_up"
+    )
+    assert megatron_grug_route("decoder.layers.0.attn_gated_norm.down_proj.weight", matrix) == "grug_muonh"
+    assert megatron_grug_route("embed_norm.down_proj.weight", matrix) == "grug_muonh"
+    assert megatron_grug_route("decoder.layers.0.input_layernorm.down_proj.weight", matrix) == "grug_muonh"
+    assert megatron_grug_route("decoder.layers.0.pre_mlp_layernorm.up_proj.weight", matrix) == "grug_muonh"
+    assert megatron_grug_route("decoder.final_layernorm.up_proj.weight", matrix) == "grug_muonh"
+    assert megatron_grug_route("output_layer.weight", matrix) == "grug_adamh"
+    assert megatron_grug_route("decoder.layers.0.self_attention.sconv_k.weight", matrix) == "adam"
+    assert megatron_grug_route("decoder.layers.0.mlp.router.weight", matrix) == "adam"
+    assert megatron_grug_route("decoder.layers.0.input_layernorm.weight", vector) == "adam"
 
 
 def test_fsdp_parameter_storage_dtype_defaults_and_overrides_optimizer():

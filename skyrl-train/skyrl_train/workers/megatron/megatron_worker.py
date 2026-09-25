@@ -17,7 +17,7 @@ from omegaconf import OmegaConf
 
 from megatron.bridge import AutoBridge
 import megatron.core.parallel_state as mpu
-from megatron.core.optimizer import DistributedOptimizer
+from megatron.core.optimizer import ChainedOptimizer, DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
 from skyrl_train.distributed.megatron.optimizer import (
@@ -25,6 +25,7 @@ from skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer,
     get_megatron_optimizer_param_scheduler,
 )
+from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
@@ -411,9 +412,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             tokenizer_revision=self.cfg.trainer.policy.model.get("tokenizer_revision"),
         )
 
+        ddp_config = self.cfg.trainer.policy.megatron_config.ddp_config if for_training else None
+        if for_training and str(self.cfg.trainer.policy.optimizer_config.optimizer).lower() == "muonh":
+            ddp_config = dict(ddp_config)
+            if ddp_config.get("use_distributed_optimizer", False):
+                raise ValueError("Hero MuonH needs unsharded Megatron DDP gradient buffers")
+            ddp_config["use_distributed_optimizer"] = False
+            ddp_config["overlap_param_gather"] = False
+
         self.actor_module = self.make_megatron_module(
             wrap_with_ddp=for_training,
-            ddp_config=self.cfg.trainer.policy.megatron_config.ddp_config if for_training else None,
+            ddp_config=ddp_config,
             bf16=self.cfg.trainer.bf16,
         )
 
@@ -442,7 +451,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         optim_config = init_megatron_optim_config(
             self.cfg.trainer.policy.optimizer_config, self.cfg.trainer.policy.megatron_config.optimizer_config_kwargs
         )
-        self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
+        self.optimizer = get_megatron_optimizer(
+            self.actor_module,
+            optim_config,
+            grug_optimizer_config=self.cfg.trainer.policy.optimizer_config,
+        )
 
         self._normalize_mini_batch_size()
 
@@ -753,6 +766,23 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             await cache_reset_task
         torch.cuda.empty_cache()
         torch.distributed.barrier()
+
+    def grug_optimizer_route_snapshot(self):
+        """Expose actual MuonH parameter groups to small validation jobs."""
+        if str(self.cfg.trainer.policy.optimizer_config.optimizer).lower() != "muonh":
+            raise ValueError("Optimizer route snapshot requires Hero MuonH")
+        names = {id(parameter): name for chunk in self.actor_module for name, parameter in chunk.named_parameters()}
+        optimizers = (
+            self.optimizer.chained_optimizers if isinstance(self.optimizer, ChainedOptimizer) else [self.optimizer]
+        )
+        routes = {}
+        for wrapped in optimizers:
+            default_route = "grug_muonh" if isinstance(wrapped.optimizer, MegatronGrugMuonH) else "adam"
+            for index, group in enumerate(wrapped.optimizer.param_groups):
+                route = group.get("optimizer", default_route)
+                for parameter in (*wrapped.float16_groups[index], *wrapped.fp32_from_fp32_groups[index]):
+                    routes[names[id(parameter)]] = route
+        return {"rank": torch.distributed.get_rank(), "routes": routes}
 
     def grug_validation_snapshot(self, names=()):
         """Return the calling rank and requested Grug weights in HF layout, gathered on rank 0.

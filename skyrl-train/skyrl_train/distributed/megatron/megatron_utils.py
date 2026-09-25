@@ -239,6 +239,8 @@ def offload_megatron_copy_params(optimizers):
     for _opt in _iter_opts(optimizers):
         if hasattr(_opt, "shard_fp32_from_float16_groups"):
             offload_group_to_cpu(_opt.shard_fp32_from_float16_groups)
+        if hasattr(_opt, "fp32_from_float16_groups"):
+            offload_group_to_cpu(_opt.fp32_from_float16_groups)
 
 
 @torch.no_grad()
@@ -280,6 +282,8 @@ def load_megatron_copy_params(optimizers):
     for _opt in _iter_opts(optimizers):
         if hasattr(_opt, "shard_fp32_from_float16_groups"):
             load_group_to_gpu(_opt.shard_fp32_from_float16_groups)
+        if hasattr(_opt, "fp32_from_float16_groups"):
+            load_group_to_gpu(_opt.fp32_from_float16_groups)
 
 
 @torch.no_grad()
@@ -291,12 +295,10 @@ def offload_megatron_optimizer(optimizers):
 
     for _opt in _iter_opts(optimizers):
         offload_megatron_copy_params(_opt)
-        opt_state_dict_values = _opt.optimizer.state.values()
-        for v in opt_state_dict_values:
-            if "exp_avg" in v:
-                v["exp_avg"] = v["exp_avg"].to("cpu", non_blocking=True)
-            if "exp_avg_sq" in v:
-                v["exp_avg_sq"] = v["exp_avg_sq"].to("cpu", non_blocking=True)
+        for state in _opt.optimizer.state.values():
+            for name in ("exp_avg", "exp_avg_sq", "momentum_buffer"):
+                if name in state:
+                    state[name] = state[name].to("cpu", non_blocking=True)
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -314,12 +316,10 @@ def load_megatron_optimizer(optimizers):
         if hasattr(_opt.optimizer, "_move_new_state_to_right_device"):
             _opt.optimizer._move_new_state_to_right_device()
         else:
-            opt_state_dict_values = _opt.optimizer.state.values()
-            for v in opt_state_dict_values:
-                if "exp_avg" in v:
-                    v["exp_avg"] = v["exp_avg"].to(torch.cuda.current_device(), non_blocking=True)
-                if "exp_avg_sq" in v:
-                    v["exp_avg_sq"] = v["exp_avg_sq"].to(torch.cuda.current_device(), non_blocking=True)
+            for state in _opt.optimizer.state.values():
+                for name in ("exp_avg", "exp_avg_sq", "momentum_buffer"):
+                    if name in state:
+                        state[name] = state[name].to(torch.cuda.current_device(), non_blocking=True)
         gc.collect()
         torch.cuda.empty_cache()
 
