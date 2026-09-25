@@ -178,15 +178,11 @@ def mismatch_ratio_metrics(
     row_bucket = torch.zeros(mask.shape[0], dtype=torch.uint8)
     for index, (_, lower) in enumerate(MISMATCH_STALENESS_BUCKETS):
         row_bucket[staleness >= lower] = index
-    positions = torch.arange(mask.shape[1]).unsqueeze(0)
-    lengths = mask.sum(-1, keepdim=True)
+    first, last = _position_masks(mask)
     # A token's group is its staleness bucket times four plus its position class:
     # 1 in the first window, 2 in the last window, 3 in both and 0 in neither.
     groups = torch.masked_select(
-        4 * row_bucket.unsqueeze(1)
-        + (positions < POSITION_WINDOW).to(torch.uint8)
-        + 2 * (positions >= lengths - POSITION_WINDOW).to(torch.uint8),
-        mask,
+        4 * row_bucket.unsqueeze(1) + first.to(torch.uint8) + 2 * last.to(torch.uint8), mask
     ).long()
     values = None
     if rollout_logprobs is not None:
@@ -235,26 +231,26 @@ def mismatch_ratio_metrics(
     return result
 
 
-def _ratio_extra_keys() -> tuple[str, ...]:
-    keys = (
-        "log_ratio_mean",
-        "log_ratio_mean_squared",
-        "log_ratio_abs_p999",
-        "log_ratio_frac_outside_0_5_2",
-        "log_ratio_frac_below_1e_5",
-        "log_ratio_ess_fraction",
-        "log_ratio_kl_k1",
-        "log_ratio_kl_k3",
-        "log_ratio_chi2",
-        "log_ratio_statistics_valid",
-        "log_ratio_selected_tokens",
-        "log_ratio_p999_valid",
-    )
-    return keys + tuple(
-        f"log_ratio_pos_{position}/{key}"
+def _position_masks(mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Masks of the first and last POSITION_WINDOW response positions; they overlap on short responses."""
+    positions = torch.arange(mask.shape[1], device=mask.device).unsqueeze(0)
+    return (positions < POSITION_WINDOW).expand_as(mask), positions >= mask.sum(-1, keepdim=True) - POSITION_WINDOW
+
+
+_RATIO_EXTRA_KEYS = (
+    "log_ratio_mean",
+    "log_ratio_abs_p999",
+    "log_ratio_frac_outside_0_5_2",
+    "log_ratio_ess_fraction",
+    "log_ratio_kl_k3",
+    "log_ratio_chi2",
+    "log_ratio_statistics_valid",
+    "log_ratio_p999_valid",
+    *(
+        f"log_ratio_pos_{position}/log_ratio_abs_mean"
         for position in (f"first{POSITION_WINDOW}", f"last{POSITION_WINDOW}", "middle")
-        for key in ("selected_tokens", "log_ratio_abs_mean", "frac_outside_0_5_2")
-    )
+    ),
+)
 
 
 def _log_ratio_position_metric_keys(n_position_buckets: int) -> tuple[str, ...]:
@@ -274,14 +270,13 @@ class LogRatioAccumulator:
     topk_abs: torch.Tensor
     bucket_sums: torch.Tensor
     bucket_counts: torch.Tensor
-    moments: torch.Tensor  # delta, delta², clipped exp(delta), clipped exp(2delta), outside2x, below1e-5
+    moments: torch.Tensor  # delta, clipped exp(delta), clipped exp(2delta), outside2x
     maximum_delta: torch.Tensor
     shifted_weight_sum: torch.Tensor
     shifted_weight_square_sum: torch.Tensor
     top_per_mille: torch.Tensor
     position_sums: torch.Tensor
     position_counts: torch.Tensor
-    position_outside: torch.Tensor
 
 
 class LogRatioMonitor:
@@ -420,7 +415,7 @@ def _log_ratio_diag_zero_metrics(n_position_buckets: int = 10) -> dict:
     or the helper raises. Mismatched keysets across ranks would deadlock the
     per-key NCCL all-reduce.
     """
-    keys = LOG_RATIO_BASE_METRIC_KEYS + _log_ratio_position_metric_keys(n_position_buckets) + _ratio_extra_keys()
+    keys = LOG_RATIO_BASE_METRIC_KEYS + _log_ratio_position_metric_keys(n_position_buckets) + _RATIO_EXTRA_KEYS
     metrics = dict.fromkeys(keys, 0.0)
     return metrics
 
@@ -441,14 +436,13 @@ def _empty_log_ratio_accumulator(device, n_position_buckets: int = 10) -> LogRat
         topk_abs=torch.zeros((0,), device=device, dtype=torch.float32),
         bucket_sums=torch.zeros(n_position_buckets, device=device, dtype=torch.float32),
         bucket_counts=torch.zeros(n_position_buckets, device=device, dtype=torch.float32),
-        moments=torch.zeros(6, device=device, dtype=torch.float64),
+        moments=torch.zeros(4, device=device, dtype=torch.float64),
         maximum_delta=torch.tensor(-math.inf, device=device, dtype=torch.float64),
         shifted_weight_sum=torch.zeros((), device=device, dtype=torch.float64),
         shifted_weight_square_sum=torch.zeros((), device=device, dtype=torch.float64),
         top_per_mille=torch.zeros((0,), device=device, dtype=torch.float32),
         position_sums=torch.zeros(3, device=device, dtype=torch.float64),
         position_counts=torch.zeros(3, device=device, dtype=torch.float64),
-        position_outside=torch.zeros(3, device=device, dtype=torch.float64),
     )
 
 
@@ -503,19 +497,15 @@ def compute_log_ratio_partial(
     values = delta[selected]
     maximum = values.max()
     weights = (values - maximum).exp()
-    positions = torch.arange(T, device=device).unsqueeze(0)
-    first = (positions < POSITION_WINDOW).expand(B, T)
-    last = positions >= mask_f.sum(-1, keepdim=True) - POSITION_WINDOW
+    first, last = _position_masks(selected)
     absolute_masks = torch.stack([first, last, ~first & ~last]) & selected.unsqueeze(0)
-    outside = delta.abs() > LOG_RATIO_DOUBLING
+    clipped = values.clamp(-LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP)
     moments = torch.stack(
         [
             values.sum(),
-            values.square().sum(),
-            values.clamp(-LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP).exp().sum(),
-            (2 * values.clamp(-LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP)).exp().sum(),
-            outside[selected].sum().double(),
-            (values < LOG_RATIO_COLLAPSE).sum().double(),
+            clipped.exp().sum(),
+            (2 * clipped).exp().sum(),
+            (values.abs() > LOG_RATIO_DOUBLING).sum().double(),
         ]
     )
     return LogRatioAccumulator(
@@ -535,7 +525,6 @@ def compute_log_ratio_partial(
         top_per_mille=torch.topk(values.abs(), k=min(LOG_RATIO_TAIL_CAPACITY, n_valid_int)).values.float(),
         position_sums=(absolute_masks * delta.abs()).sum((1, 2)),
         position_counts=absolute_masks.sum((1, 2)).double(),
-        position_outside=(absolute_masks & outside).sum((1, 2)).double(),
     )
 
 
@@ -565,7 +554,6 @@ def merge_log_ratio_partial(acc: LogRatioAccumulator, partial: LogRatioAccumulat
     acc.top_per_mille = torch.topk(tail, k=min(LOG_RATIO_TAIL_CAPACITY, tail.numel())).values
     acc.position_sums = acc.position_sums + partial.position_sums
     acc.position_counts = acc.position_counts + partial.position_counts
-    acc.position_outside = acc.position_outside + partial.position_outside
 
 
 def finalize_log_ratio_metrics(acc: LogRatioAccumulator, n_position_buckets: int = 10) -> dict:
@@ -626,23 +614,16 @@ def finalize_log_ratio_metrics(acc: LogRatioAccumulator, n_position_buckets: int
     extra = torch.stack(
         [
             means[0],
-            means[1],
             p999,
-            means[4],
-            means[5],
+            means[3],
             ess,
-            -means[0],
-            (means[2] - means[0] - 1) * valid,
-            (means[3] - 1) * valid,
+            (means[1] - means[0] - 1) * valid,
+            (means[2] - 1) * valid,
             valid,
-            acc.n_valid,
             valid.new_tensor(float(p999_valid)),
         ]
     )
-    position_counts = acc.position_counts.clamp(min=1)
-    positions = torch.stack(
-        [acc.position_counts, acc.position_sums / position_counts, acc.position_outside / position_counts], dim=1
-    ).reshape(-1)
+    positions = acc.position_sums / acc.position_counts.clamp(min=1)
     values = torch.cat([extra, positions]).cpu().tolist()
-    metrics.update(dict(zip(_ratio_extra_keys(), values, strict=True)))
+    metrics.update(dict(zip(_RATIO_EXTRA_KEYS, values, strict=True)))
     return metrics
