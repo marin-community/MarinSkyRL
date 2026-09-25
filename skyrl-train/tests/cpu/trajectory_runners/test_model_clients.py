@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
@@ -476,7 +477,7 @@ async def test_http_model_client_limits_requests_across_concurrent_generation_ca
 
 
 @pytest.mark.asyncio
-async def test_http_structured_chat_continues_from_sampled_tool_call_tokens():
+async def test_structured_chat_transport_parity_across_tool_continuation():
     served_requests = []
 
     async def tokenize(request):
@@ -537,38 +538,51 @@ async def test_http_structured_chat_continues_from_sampled_tool_call_tokens():
         tokenizer=tokenizer,
         max_concurrent_requests=8,
     )
+    first_request = {
+        "prompts": [[{"role": "user", "content": "run this"}]],
+        "session_ids": ["trajectory-1"],
+        "chat_completion_params": [{"tools": []}],
+        "sampling_params": {"logprobs": 0},
+    }
 
     try:
-        first = await client.generate(
-            {
-                "prompts": [[{"role": "user", "content": "run this"}]],
-                "session_ids": ["trajectory-1"],
-                "chat_completion_params": [{"tools": []}],
-                "sampling_params": {"logprobs": 0},
-            }
-        )
-        second = await client.generate(
-            {
-                "prompts": [
-                    [
-                        {"role": "user", "content": "run this"},
-                        first["assistant_messages"][0],
-                        {"role": "tool", "tool_call_id": "call-1", "content": "1"},
-                    ]
-                ],
-                "session_ids": ["trajectory-1"],
-                "chat_completion_params": [{"tools": []}],
-                "chat_continuations": [
-                    {
-                        "served_prefix_token_ids": first["prompt_ids"][0] + first["response_ids"][0],
-                        "assistant_message_index": 1,
-                    }
-                ],
-                "sampling_params": {"logprobs": 0},
-            }
-        )
+        first = await client.generate(first_request)
+        second_request = {
+            "prompts": [
+                [
+                    first_request["prompts"][0][0],
+                    first["assistant_messages"][0],
+                    {"role": "tool", "tool_call_id": "call-1", "content": "1"},
+                ]
+            ],
+            "session_ids": ["trajectory-1"],
+            "chat_completion_params": [{"tools": []}],
+            "chat_continuations": [
+                {
+                    "served_prefix_token_ids": first["prompt_ids"][0] + first["response_ids"][0],
+                    "assistant_message_index": 1,
+                }
+            ],
+            "sampling_params": {"logprobs": 0},
+        }
+        second = await client.generate(second_request)
     finally:
         await runner.cleanup()
+
+    async def direct_tokenize(payload):
+        response = await tokenize(MagicMock(json=AsyncMock(return_value=payload["json"])))
+        return json.loads(response.body)
+
+    async def direct_complete(payload):
+        response = await complete(MagicMock(json=AsyncMock(return_value=payload["json"])))
+        return json.loads(response.body)
+
+    backend = MagicMock(model_name="policy", tokenizer=tokenizer)
+    backend.tokenize = direct_tokenize
+    backend.chat_completion = direct_complete
+    direct = DirectModelClient(backend)
+    assert await direct.generate(first_request) == first
+    assert await direct.generate(second_request) == second
 
     assert first["prompt_ids"] == [[11, 12]]
     assert first["response_ids"] == [[21, 22]]

@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 _ResponseT = TypeVar("_ResponseT")
 TOKENIZE_ENDPOINT = "/tokenize"
 MODELS_ENDPOINT = "/v1/models"
+_INFERENCE_ENDPOINTS = frozenset({TOKENIZE_ENDPOINT, "/v1/chat/completions", "/v1/completions"})
 _SERVER_CREATED_TIME = int(time.time())
 
 
@@ -68,6 +69,55 @@ class ModelCard(BaseModel):
 class ModelList(BaseModel):
     object: str = "list"
     data: list[ModelCard]
+
+
+class _RequestOutcomeMiddleware:
+    """Record the close outcome visible at the ASGI boundary for inference requests."""
+
+    def __init__(self, app, bridge_stats: HTTPBridgeStatsAccumulator):
+        self.app = app
+        self.bridge_stats = bridge_stats
+
+    async def __call__(self, scope, receive, send):
+        endpoint = scope.get("path")
+        if scope["type"] != "http" or endpoint not in _INFERENCE_ENDPOINTS:
+            return await self.app(scope, receive, send)
+
+        reason = "incomplete"
+
+        async def observed_receive():
+            nonlocal reason
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                reason = "client_disconnect"
+            return message
+
+        async def observed_send(message):
+            nonlocal reason
+            try:
+                await send(message)
+            except OSError:
+                reason = "send_failure"
+                raise
+            if (
+                reason == "incomplete"
+                and message["type"] == "http.response.body"
+                and not message.get("more_body", False)
+            ):
+                reason = "completed"
+
+        try:
+            await self.app(scope, observed_receive, observed_send)
+        except asyncio.CancelledError:
+            if reason == "incomplete":
+                reason = "server_cancelled"
+            raise
+        except Exception:
+            if reason == "incomplete":
+                reason = "application_error"
+            raise
+        finally:
+            self.bridge_stats.record_request_outcome(endpoint, reason)
 
 
 def is_engine_error_response(response: Dict[str, Any]) -> bool:
@@ -490,6 +540,7 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(_RequestOutcomeMiddleware, bridge_stats=bridge_stats)
 
     @app.post("/v1/chat/completions")
     async def chat_completion(raw_request: Request):

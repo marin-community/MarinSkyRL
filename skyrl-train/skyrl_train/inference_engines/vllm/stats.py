@@ -14,8 +14,9 @@ HTTP_BRIDGE_HISTOGRAM_BOUNDS = {
     "event_loop_lag_seconds": (0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0),
     "response_bytes": (1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576),
     "json_serialization_seconds": (0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1),
+    "request_outcome": (1.0,),
 }
-HTTP_BRIDGE_METRIC_NAMES = tuple(HTTP_BRIDGE_HISTOGRAM_BOUNDS)
+HTTP_BRIDGE_METRIC_NAMES = ("event_loop_lag_seconds", "response_bytes", "json_serialization_seconds")
 VLLM_NUM_ENGINES_METRIC = "vllm/num_engines"
 VLLM_FINISH_REASONS = ("stop", "length", "abort", "error", "repetition")
 VLLM_HISTOGRAM_UNITS = {
@@ -172,7 +173,7 @@ class HTTPBridgeStatsAccumulator:
         self._histograms: dict[tuple[str, tuple[tuple[str, str], ...]], HistogramAccumulator] = {}
 
     def observe(self, name: str, value: float, *, attributes: Mapping[str, str] | None = None) -> None:
-        if name not in HTTP_BRIDGE_HISTOGRAM_BOUNDS:
+        if name not in HTTP_BRIDGE_METRIC_NAMES:
             raise ValueError(f"unknown HTTP bridge metric: {name}")
         labels = tuple(sorted((attributes or {}).items()))
         with self._lock:
@@ -182,11 +183,24 @@ class HTTPBridgeStatsAccumulator:
             )
             histogram.observe(value)
 
+    def record_request_outcome(self, endpoint: str, reason: str) -> None:
+        """Count an ASGI request outcome with its endpoint and observed close reason."""
+        labels = (("endpoint", endpoint), ("reason", reason))
+        with self._lock:
+            histogram = self._histograms.setdefault(
+                ("request_outcome", labels), HistogramAccumulator(HTTP_BRIDGE_HISTOGRAM_BOUNDS["request_outcome"])
+            )
+            histogram.observe(1.0)
+
     def snapshot(self, read_mode: IntervalReadMode) -> HTTPBridgeStatsSnapshot:
         with self._lock:
             summaries = {name: accumulator.snapshot() for name, accumulator in self._interval.items()}
             histograms = tuple(
-                histogram.snapshot(name, "By" if name == "response_bytes" else "s", dict(labels))
+                histogram.snapshot(
+                    name,
+                    "By" if name == "response_bytes" else "count" if name == "request_outcome" else "s",
+                    dict(labels),
+                )
                 for (name, labels), histogram in self._histograms.items()
             )
             if read_mode is IntervalReadMode.RESET:

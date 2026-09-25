@@ -5,7 +5,7 @@ set -x
 # - running skyrl_train.entrypoints.fully_async
 # - setting the generator.batched=false.
 # - colocate_all=false
-# - the various generator configs at the end (http, chat template, etc.)
+# - the chat template configuration at the end.
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
@@ -72,7 +72,4 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.fully_as
   trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" \
   generator.chat_template.source=name \
   generator.chat_template.name_or_path="qwen2_5_with_generation_tag_simplified" \
-  generator.enable_http_endpoint=true \
-  generator.http_endpoint_host="127.0.0.1" \
-  generator.http_endpoint_port=8000 \
   $@
