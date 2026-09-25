@@ -116,6 +116,8 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
 
     if _optim_name == _GRUG_MUONH_NAME:
         extra = _grug_muonh_extra(optim_config)
+        if optim_args["clip_grad"] is None or float(optim_args["clip_grad"]) != 0.0:
+            raise ValueError("Hero MuonH requires max_grad_norm=0.0 (unclipped gradients)")
         if optimizer_config_kwargs.get("use_distributed_optimizer", False):
             raise ValueError("Hero MuonH uses Megatron's full-matrix optimizer path")
         if optim_args.get("optimizer_cpu_offload", False) or optim_args.get("optimizer_offload_fraction", 0.0):
