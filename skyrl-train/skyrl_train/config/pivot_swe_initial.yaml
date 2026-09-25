@@ -1,0 +1,17 @@
+defaults:
+  - pivot_swe_smoke
+  - _self_
+
+data:
+  val_data: ["${oc.env:PIVOT_CANDIDATES_URI}"]
+
+trainer:
+  export_path: ${oc.env:PIVOT_RUN_ROOT}/initial_policy/exports
+  eval_num_prompts: null
+
+generator:
+  eval_n_samples_per_prompt: 8
+  eval_sampling_params:
+    max_generate_length: 512
+    temperature: 1.0
+    top_p: 1.0

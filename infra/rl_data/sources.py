@@ -254,6 +254,8 @@ def prepare_pivot_swe_row(example: Mapping[str, Any], index: int) -> PreparedRow
                         "expected_action": dict(expected_action),
                         "trajectory_id": trajectory_id,
                         "profile_pass_rate": example.get("pass_rate"),
+                        "profile_pass_rate_total": example.get("pass_rate_total"),
+                        "profile_pass_rate_passed": example.get("pass_rate_passed"),
                     },
                     ensure_ascii=False,
                     sort_keys=True,

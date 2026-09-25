@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -21,11 +22,25 @@ from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_dr
 def skyrl_entrypoint(cfg: DictConfig) -> None:
     with tempfile.TemporaryDirectory(prefix="pivot-swe-smoke-") as directory:
         sample_dir = Path(directory)
-        manifest = prepare_smoke_sample(
-            sample_dir,
-            tokenizer_name=str(cfg.trainer.policy.model.path),
-            chat_template_kwargs=dict(cfg.generator.chat_template_kwargs),
-        )
+        if cfg.data.train_data and cfg.data.val_data:
+            train_uri = str(cfg.data.train_data[0])
+            probe_uri = str(cfg.data.val_data[0])
+            for uri, name in ((train_uri, "train.parquet"), (probe_uri, "probe.parquet")):
+                with fsspec.open(uri, "rb") as source, (sample_dir / name).open("wb") as destination:
+                    shutil.copyfileobj(source, destination)
+            with fsspec.open(f"{probe_uri.rsplit('/', 1)[0]}/sample-manifest.json", "r") as source:
+                manifest = json.load(source)
+            with fsspec.open(f"{train_uri.rsplit('/', 1)[0]}/initial_policy_pivots.jsonl", "r") as source:
+                manifest["train_trajectory_ids"] = [
+                    row["trajectory_id"] for line in source if (row := json.loads(line))["selected_for_training"]
+                ]
+            manifest["train_prefixes"] = len(manifest["train_trajectory_ids"])
+        else:
+            manifest = prepare_smoke_sample(
+                sample_dir,
+                tokenizer_name=str(cfg.trainer.policy.model.path),
+                chat_template_kwargs=dict(cfg.generator.chat_template_kwargs),
+            )
         cfg.data.train_data = [str(sample_dir / "train.parquet")]
         cfg.data.val_data = [str(sample_dir / "probe.parquet")]
         diagnostics_root = f"{str(cfg.trainer.export_path).rsplit('/', 1)[0]}/diagnostics"
