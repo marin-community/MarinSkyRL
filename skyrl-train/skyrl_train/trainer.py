@@ -2993,11 +2993,18 @@ class RayPPOTrainer:
         optimizer_step_finished_at: float | None = None,
     ) -> None:
         """Publish one fully durable generation before advertising it as latest."""
+        latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
+        previous_latest = int(io.read_bytes(latest_checkpoint_file)) if io.exists(latest_checkpoint_file) else None
+        if previous_latest is not None and previous_latest > step:
+            raise RuntimeError(f"Refusing to replace latest checkpoint step {previous_latest} with older step {step}")
         with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "generation_commit", rank=-1, step=step):
             commit_attempt(step_path, attempt_path, required_files=required_files)
-        latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
-        with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "latest_pointer", rank=-1, step=step):
-            io.write_bytes_atomic(latest_checkpoint_file, str(step).encode())
+        # A same-step replacement is published by its step-level commit record.
+        # Rewriting an unchanged latest pointer could fail after that publication
+        # and incorrectly report the complete replacement as a failed save.
+        if previous_latest != step:
+            with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "latest_pointer", rank=-1, step=step):
+                io.write_bytes_atomic(latest_checkpoint_file, str(step).encode())
         if optimizer_step_finished_at is None:
             last_optimizer_step = getattr(self, "_last_optimizer_step_finished_at", None)
             if last_optimizer_step is not None and last_optimizer_step[0] == step:

@@ -23,7 +23,7 @@ from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.group_admission import GroupAdmissionStalledError, GroupAdvantageInvariant
 import skyrl_train.trainer as trainer_module
 from skyrl_train.trainer import CheckpointSnapshot, RayPPOTrainer
-from skyrl_train.checkpoint_generation import COMMIT_FILENAME, resolve_checkpoint_payload
+from skyrl_train.checkpoint_generation import COMMIT_FILENAME, commit_attempt, resolve_checkpoint_payload
 from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.utils.policy_losses import ppo_policy_loss
 from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch, TrainingOutputBatch
@@ -969,6 +969,72 @@ def test_retention_failure_does_not_undo_published_checkpoint(tmp_path):
 
     assert (tmp_path / trainer_module.LATEST_CHECKPOINT_FILE).read_text() == "2"
     assert trainer._last_saved_step == 2
+
+
+def test_same_step_replacement_commits_without_rewriting_latest(tmp_path, monkeypatch):
+    step_path = tmp_path / "global_step_2"
+    previous_attempt = Path(trainer_module.new_attempt_path(str(step_path)))
+    previous_attempt.mkdir(parents=True)
+    (previous_attempt / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"previous")
+    commit_attempt(str(step_path), str(previous_attempt), required_files={trainer_module.TRAINER_STATE_FILENAME})
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("2")
+
+    replacement = Path(trainer_module.new_attempt_path(str(step_path)))
+    replacement.mkdir(parents=True)
+    (replacement / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"replacement")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron", "ckpt_path": str(tmp_path)}})
+    trainer.global_step = 2
+    trainer.all_timings = {}
+    trainer._last_optimizer_step_finished_at = None
+    trainer._last_saved_step = None
+    trainer._cleanup_old_checkpoints = lambda: None
+    trainer._active_checkpoint_payload_path = str(replacement)
+    trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
+
+    original_write = trainer_module.io.write_bytes_atomic
+
+    def fail_redundant_pointer_write(path, payload):
+        if path == str(latest):
+            raise OSError("redundant latest pointer write failed")
+        original_write(path, payload)
+
+    monkeypatch.setattr(trainer_module.io, "write_bytes_atomic", fail_redundant_pointer_write)
+    trainer._publish_checkpoint()
+
+    assert latest.read_text() == "2"
+    assert resolve_checkpoint_payload(str(step_path), verify_files=True) == str(replacement)
+    assert (previous_attempt / trainer_module.TRAINER_STATE_FILENAME).read_bytes() == b"previous"
+
+
+def test_stale_checkpoint_writer_cannot_replace_newer_latest(tmp_path):
+    step_path = tmp_path / "global_step_2"
+    previous_attempt = Path(trainer_module.new_attempt_path(str(step_path)))
+    previous_attempt.mkdir(parents=True)
+    (previous_attempt / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"previous")
+    commit_attempt(str(step_path), str(previous_attempt), required_files={trainer_module.TRAINER_STATE_FILENAME})
+    previous_commit = (step_path / COMMIT_FILENAME).read_bytes()
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("3")
+
+    replacement = Path(trainer_module.new_attempt_path(str(step_path)))
+    replacement.mkdir(parents=True)
+    (replacement / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"replacement")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron", "ckpt_path": str(tmp_path)}})
+    trainer.global_step = 2
+    trainer.all_timings = {}
+    trainer._last_optimizer_step_finished_at = None
+    trainer._active_checkpoint_payload_path = str(replacement)
+    trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
+
+    with pytest.raises(RuntimeError, match="older step"):
+        trainer._publish_checkpoint()
+
+    assert latest.read_text() == "3"
+    assert (step_path / COMMIT_FILENAME).read_bytes() == previous_commit
+    assert resolve_checkpoint_payload(str(step_path), verify_files=True) == str(previous_attempt)
 
 
 def _pending_fsdp_snapshot(tmp_path, step, *, optimizer_step_finished_at=None):
