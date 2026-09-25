@@ -1,4 +1,4 @@
-"""Cases for the opt-in EP/FSDP collective schedule matrix."""
+"""Cases for the opt-in expert-parallel collective schedule matrix."""
 
 from __future__ import annotations
 

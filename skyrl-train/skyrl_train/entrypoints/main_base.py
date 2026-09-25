@@ -565,15 +565,7 @@ class BasePPOExp:
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
-        if self.cfg.trainer.strategy == "deepspeed":
-            from skyrl_train.workers.deepspeed.deepspeed_worker import (
-                PolicyWorker,
-                CriticWorker,
-                RefWorker,
-            )
-        elif self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
-            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker
-        elif self.cfg.trainer.strategy == "megatron":
+        if self.cfg.trainer.strategy == "megatron":
             from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RefWorker
         else:
             raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")

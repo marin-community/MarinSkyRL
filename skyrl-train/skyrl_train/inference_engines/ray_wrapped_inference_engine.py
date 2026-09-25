@@ -190,9 +190,8 @@ def _qwen3_5_vlm_engine_kwargs(pretrain: str, *, revision: str | None = None) ->
     guard (``get_limit_per_prompt(m) == 0`` -> ``no_init_weights``), STUBS the
     vision tower so it is neither built nor expected at ``load_weights`` (no
     ``visual.*`` keys required), while the text ``language_model`` tower is built
-    normally. Combined with the sender-side ``model.X`` ->
-    ``model.language_model.X`` name remap (``qwen3_5_vlm.map_text_name_to_vlm_engine``),
-    the policy's text weights land exactly where the shell reads them.
+    normally. The Megatron weight-sync path maps policy weights into the
+    language-model tower expected by the engine.
 
     Returns ``{"language_model_only": True}`` when ``pretrain`` is a qwen3_5 VLM
     shell, else ``{}`` (byte-identical engine construction for every other model).
@@ -913,7 +912,6 @@ def create_ray_wrapped_inference_engines(
 
             # NOTE(Charlie): We need `torch.cuda.is_available()` to be True to import SGLang. Otherwise, it requires
             # importing vllm. See https://github.com/sgl-project/sglang/blob/v0.4.8.post1/python/sglang/srt/layers/quantization/utils.py#L11-L17
-            # Similar comment: https://github.com/volcengine/verl/blob/9cc307767b0c787e8f5ef581dac929f7bde044ef/verl/workers/fsdp_workers.py#L520-L527
             @ray.remote
             def get_sglang_engine():
                 # A workaround to avoid importing vllm is to give this task a GPU.

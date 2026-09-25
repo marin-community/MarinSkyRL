@@ -116,13 +116,13 @@ def test_dcp_rejects_r3_capture():
         _validate_dcp_cfg(cfg)
 
 
-def test_dcp_rejects_r3_capture_via_fsdp_replay():
+def test_dcp_rejects_r3_capture_via_megatron_replay():
     """dcp=2 + training-side R3 replay (moe_router_replay) => mutual-exclusion assert."""
     pytest.importorskip("hydra")
     from skyrl_train.utils.utils import _validate_dcp_cfg
 
     cfg = _dcp_enabled_config(dcp=2, tp=8)
-    cfg.trainer.policy.fsdp_config.moe_router_replay = True
+    cfg.trainer.policy.megatron_config.moe_router_replay = True
     with pytest.raises(AssertionError, match="R3 router capture"):
         _validate_dcp_cfg(cfg)
 

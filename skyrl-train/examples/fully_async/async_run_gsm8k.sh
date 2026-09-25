@@ -28,7 +28,7 @@ set -x
 : "${MAX_STALENESS_STEPS:=4}"
 : "${NUM_PARALLEL_GENERATION_WORKERS:=$(( MINI_BATCH_SIZE * (MAX_STALENESS_STEPS + 1) ))}"
 
-uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.fully_async \
+uv run --isolated --extra megatron --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.fully_async \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
@@ -37,7 +37,7 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.fully_as
   trainer.algorithm.policy_loss_type="behavior_clip" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=false \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_gpus_per_node=$NUM_POLICY_GPUS \
   trainer.placement.critic_num_gpus_per_node=$NUM_POLICY_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_POLICY_GPUS \

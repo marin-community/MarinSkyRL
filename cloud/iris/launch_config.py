@@ -21,7 +21,7 @@ from cloud.iris.rl_config_translation import (
     validate_tp_divides_heads,
 )
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
-from marinskyrl.resource_locator import join_resource_path
+from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.task_sources import data_source
 
 
@@ -189,6 +189,9 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
     raw_skyrl = OmegaConf.to_container(config.skyrl, resolve=False)
     if not isinstance(raw_skyrl, dict):
         raise TypeError("skyrl must be a mapping")
+    model_uri = str(config.inputs.model.uri)
+    model_identity = str(config.inputs.model.identity)
+    model_is_cloud = is_cloud_uri(model_uri)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", encoding="utf-8") as source_file:
         OmegaConf.save(OmegaConf.create(raw_skyrl), source_file.name, resolve=False)
         parsed = parse_rl_config(source_file.name)
@@ -200,9 +203,9 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
                 "num_nodes": int(config.iris.allocation.num_nodes),
                 "gpus_per_node": int(config.iris.allocation.gpus_per_node),
                 "model_path": str(config.inputs.model.local_path),
-                "model_source_uri": str(config.inputs.model.uri),
-                "model_source_identity": str(config.inputs.model.identity),
-                "model_revision": str(config.inputs.model.identity),
+                "model_source_uri": model_uri if model_is_cloud else None,
+                "model_source_identity": model_identity if model_is_cloud else None,
+                "model_revision": model_identity,
                 "train_data": list(config.inputs.train_data),
                 "val_data": list(config.inputs.validation_data),
                 "checkpoint_root": str(config.artifacts.checkpoint_root),

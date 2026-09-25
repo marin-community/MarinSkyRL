@@ -175,13 +175,12 @@ def _run_bootstrap(
     )
 
 
-@pytest.mark.parametrize("profile", ["fsdp", "megatron"])
-def test_policy_bootstrap_rejects_runtime_without_flash_attention_extension(tmp_path: Path, profile: str) -> None:
+def test_policy_bootstrap_rejects_runtime_without_flash_attention_extension(tmp_path: Path) -> None:
     environment, process_environment = _fake_frozen_runtime(tmp_path)
     site_packages = next((environment / "lib").glob("python*/site-packages"))
     (site_packages / "flash_attn_2_cuda.py").unlink()
 
-    result = _run_bootstrap(environment, process_environment, profile)
+    result = _run_bootstrap(environment, process_environment, "megatron")
 
     assert result.returncode != 0
     assert "No module named 'flash_attn_2_cuda'" in result.stderr
@@ -197,25 +196,7 @@ def test_export_bootstrap_does_not_require_rollout_or_telemetry_packages(tmp_pat
     (site_packages / "memray.py").unlink()
     (site_packages / "harbor" / "utils" / "traces_utils.py").unlink()
 
-    result = _run_bootstrap(environment, process_environment, "fsdp-export")
-
-    assert result.returncode == 0, result.stderr
-
-
-def test_arm_fsdp_bootstrap_does_not_require_flash_attention_extension(tmp_path: Path) -> None:
-    environment, process_environment = _fake_frozen_runtime(tmp_path)
-    site_packages = next((environment / "lib").glob("python*/site-packages"))
-    (site_packages / "flash_attn_2_cuda.py").unlink()
-    architecture_override = tmp_path / "architecture-override"
-    architecture_override.mkdir()
-    _write_module(
-        architecture_override,
-        "sitecustomize.py",
-        "import platform\nplatform.machine = lambda: 'aarch64'\n",
-    )
-    process_environment["PYTHONPATH"] = str(architecture_override)
-
-    result = _run_bootstrap(environment, process_environment, "fsdp")
+    result = _run_bootstrap(environment, process_environment, "megatron-export")
 
     assert result.returncode == 0, result.stderr
 
@@ -234,7 +215,7 @@ def test_bootstrap_activation_exposes_runtime_commands(tmp_path: Path) -> None:
     ninja.write_text("#!/bin/sh\nexit 0\n")
     ninja.chmod(0o755)
 
-    result = _run_bootstrap(environment, process_environment, "fsdp")
+    result = _run_bootstrap(environment, process_environment, "megatron")
     activation = subprocess.run(
         ["bash", "-c", 'source "$1"; command -v ninja', "bash", environment / "runtime.sh"],
         env=process_environment,
