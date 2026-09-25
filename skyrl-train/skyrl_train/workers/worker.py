@@ -47,7 +47,7 @@ from skyrl_train.utils.importance_ratio_diagnostics import (
     ratio_diagnostics_settings,
     LogRatioMonitor,
 )
-from skyrl_train.learner_memory import INERT_LEARNER_MEMORY, LearnerMemory
+from skyrl_train.learner_memory import INERT_LEARNER_CUDA_METRICS, LearnerCudaMetrics
 from skyrl_train.telemetry import WORKER_ROLE, ProcessTelemetry, StepKind, TelemetryConfig
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
 from skyrl_train.distillation import student_topk_logprobs
@@ -1005,7 +1005,7 @@ class PPORayActorGroup:
 class PolicyWorkerBase(Worker):
     # Defaults on the class, so a worker constructed without a config still answers
     # these: telemetry is off and the memory recorder is inert until __init__ replaces it.
-    _memory: LearnerMemory = INERT_LEARNER_MEMORY
+    _memory: LearnerCudaMetrics = INERT_LEARNER_CUDA_METRICS
     # A class default only: a restored worker has no weight-sync version until an update
     # with explicit metadata completes on it.
     _model_version_step: int | None = None
@@ -1020,7 +1020,7 @@ class PolicyWorkerBase(Worker):
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
         self._grug_query_bias_window: GrugQueryBiasWindow | None = None
-        self._memory = LearnerMemory(
+        self._memory = LearnerCudaMetrics(
             enabled=bool(self.cfg.trainer.get("policy_train_spans", False)),
             rank=self._rank,
             backend=str(self.cfg.trainer.get("strategy", "unknown")),

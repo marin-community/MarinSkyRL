@@ -1,9 +1,8 @@
 # Watching an RL run on Grafana
 
-The trainer is instrumented. `skyrl_train/telemetry.py` publishes what each step measured, each
-rollout engine publishes its own vLLM metrics, and the Ray head publishes the raylet's. All of it
-goes to the cluster's finelog, which forwards to the `marin` hub, which is what Grafana queries.
-Nothing is scraped from your logs and nothing is written to disk.
+`skyrl_train/telemetry.py` exports trainer step metrics. The rollout engines export vLLM metrics,
+and the Ray head exports raylet metrics. The cluster's finelog forwards these records to the
+`marin` hub for Grafana. The exporter does not scrape logs or write metrics to disk.
 
 Both trainers use that contract, and every record carries `training_type`, `sync` or `async`.
 **RL Post-training (sync)** at <https://grafana.oa.dev/d/marin-rl-runs> lists synchronous runs, and

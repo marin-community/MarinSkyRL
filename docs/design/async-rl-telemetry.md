@@ -1,11 +1,9 @@
-# Async RL telemetry: what we record and why
+# Async RL telemetry
 
-This note explains the telemetry MarinSkyRL exports for reinforcement-learning runs, starting from the
-questions a person watching a run asks. Each section names the question, the metrics that answer it,
-the code that records them, and the Grafana panels that show them. The panels are on
-**RL Post-training (async)** (`marin-async-rl`) and **RL Post-training (sync)** (`marin-rl-runs`);
-`docs/grafana-rl-runs.md` explains how a run gets onto them, and `skyrl-train/docs/telemetry.md` explains
-the export path.
+MarinSkyRL exports run progress, throughput, timing, memory and off-policy metrics to Finelog.
+**RL Post-training (async)** (`marin-async-rl`) and **RL Post-training (sync)** (`marin-rl-runs`)
+display them. See [Watching an RL run on Grafana](../grafana-rl-runs.md) for run selection and
+[Telemetry](../../skyrl-train/docs/telemetry.md) for the export path.
 
 Every record carries the run id, the execution uid, the process role and `training_type` (`sync` or
 `async`), so each dashboard lists only the runs of its own training type. Composing the launch document
@@ -17,9 +15,6 @@ panel ids on the async dashboard unless marked "sync".
 
 ## 1. Is the run alive and reporting?
 
-A run can hang, lose a process, or stop exporting while its job still shows as running. These records
-are on whenever the run has a telemetry endpoint, except the two that need `trainer.training_metrics`.
-
 | Question | Metric | Recorded by | Panel |
 |---|---|---|---|
 | Did every process start, and did any exit? | `lifecycle` and `terminal` events | every process under its role: `driver`, `trainer`, `worker`, and `controller` for the Ray-metrics forwarder on the Iris head node (`telemetry.ProcessTelemetry`) | 4 Process lifecycle |
@@ -29,9 +24,6 @@ are on whenever the run has a telemetry endpoint, except the two that need `trai
 | Did a metric go NaN or infinite? | `training_nonfinite_values`; needs `trainer.training_metrics` | trainer driver | 28 |
 
 ## 2. Is the loop keeping the trainer fed?
-
-The fully async loop is healthy when generation produces one update's groups in less time than the
-trainer takes to consume them, and when the groups it trains on are fresh.
 
 | Question | Metric | Recorded by | Panel |
 |---|---|---|---|
@@ -44,8 +36,6 @@ trainer takes to consume them, and when the groups it trains on are fresh.
 | Does generation overlap training? | `rollout_call` finish times joined to `async_phase_window` training intervals | trainer driver | 18 Rollouts completing during policy training |
 
 ## 3. Where does each component spend its time and memory?
-
-Once the loop is known to be starved or backed up, these records show which component is responsible.
 
 **Generation.** `observe_rollout_call` times each trajectory-runner call and splits it into collect,
 assemble, finalize, tokenize and retain phases; `rollout_wait` records the waits inside it (model call,
@@ -97,7 +87,7 @@ The driver computes every statistic above for all loss tokens (the `pooled` buck
 tokens. The other staleness buckets, and every bucket's first, middle and last token positions, carry the
 token counts, finite fraction, mean and mean absolute delta, and the fraction outside [0.5x, 2x].
 
-Split by staleness, these separate two causes. At staleness 0 the trainer and vLLM hold the same weights,
+Staleness buckets separate two causes. At staleness 0 the trainer and vLLM hold the same weights,
 so any mismatch comes from numerics: kernels, precision and sampling processors (panel 54). Growth across
 staleness buckets is the policy drift that stale data adds (panel 55). Panels 30 to 32 and 44 show the
 pooled values, 57 the dependence on token position, and 47 and 48 batches of uniform staleness. Panel 56

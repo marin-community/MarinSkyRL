@@ -456,9 +456,7 @@ class _AsyncDataloader:
 
 
 class FullyAsyncRayPPOTrainer(RayPPOTrainer):
-    # Per-call rollout observations have their own gate. The class default keeps it off for a
-    # trainer built without a config.
-    _async_observations_enabled: bool = False
+    _async_telemetry_enabled: bool = False
     # Set at startup when generator.weight_sync_transport is expert_block.
     _expert_block_sync: ExpertBlockSync | None = None
 
@@ -471,7 +469,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.num_parallel_generation_workers = cfg.trainer.fully_async.num_parallel_generation_workers
         self.mini_batch_size = cfg.trainer.policy_mini_batch_size
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
-        self._async_observations_enabled = bool(cfg.trainer.get("async_spans", False))
+        self._async_telemetry_enabled = bool(cfg.trainer.get("async_spans", False))
         self.group_admission_stall_timeout = cfg.trainer.algorithm.group_admission.stall_timeout
         self._group_selection_policy = GroupSelectionPolicy.for_fully_async(
             cfg.trainer.algorithm.dynamic_sampling.type,
@@ -698,7 +696,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.global_step = 0
         loop_monitor = (
             asyncio.create_task(monitor_event_loop_lag(step_fn=lambda: self.global_step))
-            if self._async_observations_enabled
+            if self._async_telemetry_enabled
             else None
         )
 
@@ -885,7 +883,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         Timer("wait_for_generation_buffer", self.all_timings) as rollout_wait_timer,
                         critical_phase("rollout_or_inference_wait", self.global_step),
                         async_phase_window(
-                            "rollout_wait", step=self.global_step, enabled=self._async_observations_enabled
+                            "rollout_wait", step=self.global_step, enabled=self._async_telemetry_enabled
                         ),
                     ):
                         cur_generation_group_mini_batch = await self._get_admitted_generation_group_mini_batch(
@@ -899,7 +897,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 cur_generation_group_mini_batch
                             )
 
-                    if self._async_observations_enabled:
+                    if self._async_telemetry_enabled:
                         for group in cur_generation_group_mini_batch:
                             group.admitted_at = time.perf_counter()
 
@@ -963,7 +961,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # 3. Run training and record consumed UIDs in the tracker.
                     with (
                         Timer("run_training", self.all_timings),
-                        async_phase_window("training", step=self.global_step, enabled=self._async_observations_enabled),
+                        async_phase_window("training", step=self.global_step, enabled=self._async_telemetry_enabled),
                     ):
                         status = await self._run_training(training_input)
                     train_duration = self.all_timings["train_critic_and_policy"]
@@ -994,9 +992,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     #    block is now byte-identical for fan-out ON and OFF.
                     with (
                         Timer("sync_weights", self.all_timings) as weight_update_timer,
-                        async_phase_window(
-                            "weight_sync", step=self.global_step, enabled=self._async_observations_enabled
-                        ),
+                        async_phase_window("weight_sync", step=self.global_step, enabled=self._async_telemetry_enabled),
                     ):
                         await self._sync_policy_weights_and_offload_optimizer(sync_phase="training_step")
                     self._log_weight_update_completed(
@@ -1007,7 +1003,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # The core wall ends here. Checkpointing and evaluation run in the callbacks
                     # below, inside the step timer.
                     core_seconds = time.perf_counter() - core_started
-                    if self._async_observations_enabled:
+                    if self._async_telemetry_enabled:
                         record_event(
                             "async_step_window",
                             {
@@ -1244,9 +1240,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         try:
             while True:
                 slot_acquired = False
-                with async_wait("prompt", step=self.global_step, enabled=self._async_observations_enabled):
+                with async_wait("prompt", step=self.global_step, enabled=self._async_telemetry_enabled):
                     rand_prompts = await self._next_generation_prompts(queues)
-                with async_wait("slot", step=self.global_step, enabled=self._async_observations_enabled):
+                with async_wait("slot", step=self.global_step, enabled=self._async_telemetry_enabled):
                     await self._staleness_manager.acquire_submission_slot()
                 slot_acquired = True
                 assert len(rand_prompts) == 1
@@ -1268,7 +1264,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 with observe_rollout_call(
                     step=global_step_at_start,
                     mode="async",
-                    enabled=self._async_observations_enabled,
+                    enabled=self._async_telemetry_enabled,
                 ) as observation:
                     cur_trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(
                         trajectory_request, disable_tqdm=True
@@ -1291,9 +1287,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     earliest_model_step=staleness_step,
                     source_prompts=rand_prompts,
                     completed_at=time.perf_counter() if observation is not None else None,
-                    telemetry_call_id=observation.call_id if observation is not None else None,
+                    rollout_call_id=observation.call_id if observation is not None else None,
                 )
-                with async_wait("enqueue", step=self.global_step, enabled=self._async_observations_enabled):
+                with async_wait("enqueue", step=self.global_step, enabled=self._async_telemetry_enabled):
                     freshness = await self._enqueue_if_fresh(queues, completed_group)
                 if freshness is _GroupFreshness.STALE:
                     self._record_group_terminal(completed_group, "stale_enqueue")
@@ -1404,7 +1400,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         A group still buffered at shutdown gets none; a resumed run that restores it records its end.
         """
-        if not self._async_observations_enabled or group.telemetry_finished:
+        if not self._async_telemetry_enabled or group.disposition_recorded:
             return
         record_group_disposition(
             disposition=disposition,
@@ -1412,9 +1408,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             step=self.global_step,
             completed_at=group.completed_at,
             admitted_at=group.admitted_at,
-            call_id=group.telemetry_call_id,
+            call_id=group.rollout_call_id,
         )
-        group.telemetry_finished = True
+        group.disposition_recorded = True
 
     async def _drain_policy_event_loops(self):
         """Drain barrier before each forward (the MoE-RL async-dispatch wedge fix, 2026-06-29).

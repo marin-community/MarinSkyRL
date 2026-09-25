@@ -147,7 +147,7 @@ def _batch_assembly_state(
         rollout_logprobs_required=False,
     )
     trainer.data_tracker = DataConsumptionTracker(mini_batch_size=mini_batch_size, num_steps_per_epoch=1)
-    trainer._async_observations_enabled = False
+    trainer._async_telemetry_enabled = False
     queues = _GenerationQueues(
         completed=asyncio.Queue(),
         retries=asyncio.Queue(),
@@ -482,7 +482,7 @@ async def test_batch_assembly_records_the_disposition_of_every_discarded_group(m
     trainer, queues = _batch_assembly_state(
         mini_batch_size=1, accepted=5, dynamic_sampling_type="filter", informative_on="unshaped"
     )
-    trainer._async_observations_enabled = True
+    trainer._async_telemetry_enabled = True
     for group in [
         _generated_group("stale", earliest_model_step=7),
         _generated_group("masked", earliest_model_step=10, fully_masked=True),

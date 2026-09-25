@@ -88,7 +88,7 @@ def observations(monkeypatch):
 
 def test_phase_peaks_reset_between_intervals_and_preserve_current_device_semantics(observations):
     cuda, events = observations
-    memory = learner_memory.LearnerMemory(enabled=True, rank=11)
+    memory = learner_memory.LearnerCudaMetrics(enabled=True, rank=11)
     memory.snapshot("model_ready")
     with memory.span("forward", step=7, step_kind=StepKind.GLOBAL_STEP):
         cuda.use_memory(500, 600)
@@ -138,7 +138,7 @@ def test_phase_peaks_reset_between_intervals_and_preserve_current_device_semanti
 @pytest.mark.parametrize("error", [RuntimeError("training failed"), asyncio.CancelledError()])
 def test_failed_training_preserves_exception_and_releases_peak_scope(observations, error):
     cuda, events = observations
-    memory = learner_memory.LearnerMemory(enabled=True, rank=3)
+    memory = learner_memory.LearnerCudaMetrics(enabled=True, rank=3)
     with pytest.raises(type(error)) as caught:
         with memory.span("ppo_train", step=4, step_kind=StepKind.GLOBAL_STEP):
             cuda.use_memory(600, 700)
@@ -155,8 +155,8 @@ def test_failed_training_preserves_exception_and_releases_peak_scope(observation
 
 def test_overlapping_collectors_and_snapshots_do_not_destroy_enclosing_peak(observations):
     cuda, events = observations
-    outer = learner_memory.LearnerMemory(enabled=True, rank=3)
-    inner = learner_memory.LearnerMemory(enabled=True, rank=3)
+    outer = learner_memory.LearnerCudaMetrics(enabled=True, rank=3)
+    inner = learner_memory.LearnerCudaMetrics(enabled=True, rank=3)
     with outer.span("ppo_train", step=4, step_kind=StepKind.GLOBAL_STEP):
         cuda.use_memory(800, 850)
         cuda.use_memory(100, 160)
@@ -174,8 +174,8 @@ def test_overlapping_collectors_and_snapshots_do_not_destroy_enclosing_peak(obse
 
 def test_overlap_holds_reset_ownership_until_the_last_concurrent_scope_exits(observations):
     cuda, events = observations
-    outer = learner_memory.LearnerMemory(enabled=True, rank=3, backend="fsdp2")
-    inner = learner_memory.LearnerMemory(enabled=True, rank=3, backend="fsdp2")
+    outer = learner_memory.LearnerCudaMetrics(enabled=True, rank=3, backend="fsdp2")
+    inner = learner_memory.LearnerCudaMetrics(enabled=True, rank=3, backend="fsdp2")
     entered, release = Event(), Event()
 
     def concurrent_forward():
@@ -214,7 +214,7 @@ def test_overlap_holds_reset_ownership_until_the_last_concurrent_scope_exits(obs
 )
 def test_optional_observation_failure_does_not_replace_training_exception(observations, monkeypatch, failure, at_exit):
     cuda, events = observations
-    memory = learner_memory.LearnerMemory(enabled=True, rank=3)
+    memory = learner_memory.LearnerCudaMetrics(enabled=True, rank=3)
     training_error = RuntimeError("optimizer failed")
     event_emitter = training_telemetry.telemetry.event
 
@@ -239,7 +239,7 @@ def test_optional_observation_failure_does_not_replace_training_exception(observ
     # A separate observer can claim the device even after setup or exit fails.
     cuda.failure = None
     monkeypatch.setattr(training_telemetry.telemetry, "event", event_emitter)
-    with learner_memory.LearnerMemory(enabled=True, rank=3).span(
+    with learner_memory.LearnerCudaMetrics(enabled=True, rank=3).span(
         "broadcast_to_inference_engines", step=4, step_kind=StepKind.MODEL_VERSION_STEP
     ):
         cuda.use_memory(400, 500)
@@ -249,7 +249,7 @@ def test_optional_observation_failure_does_not_replace_training_exception(observ
 @pytest.mark.parametrize("at_exit", [False, True])
 def test_observation_failure_keeps_successful_training_and_disables_further_collection(observations, at_exit):
     cuda, events = observations
-    memory = learner_memory.LearnerMemory(enabled=True, rank=3)
+    memory = learner_memory.LearnerCudaMetrics(enabled=True, rank=3)
     trained = []
     if not at_exit:
         cuda.failure = "sample"
@@ -265,7 +265,7 @@ def test_observation_failure_keeps_successful_training_and_disables_further_coll
 def test_disabled_observations_do_not_access_cuda_or_emit(observations):
     cuda, events = observations
     cuda.failure = "identity"
-    memory = learner_memory.LearnerMemory(enabled=False, rank=3)
+    memory = learner_memory.LearnerCudaMetrics(enabled=False, rank=3)
     body = []
     memory.snapshot("model_ready")
     with memory.span("ppo_train", step=4, step_kind=StepKind.GLOBAL_STEP):
@@ -277,7 +277,7 @@ def test_disabled_observations_do_not_access_cuda_or_emit(observations):
 def test_unsupported_allocator_omits_misleading_peak_statistics(observations):
     cuda, events = observations
     cuda.backend = "cudaMallocAsync"
-    memory = learner_memory.LearnerMemory(enabled=True, rank=3)
+    memory = learner_memory.LearnerCudaMetrics(enabled=True, rank=3)
     trained = []
     with memory.span("ppo_train", step=4, step_kind=StepKind.GLOBAL_STEP):
         trained.append(True)
@@ -324,7 +324,7 @@ def test_fsdp_ppo_and_publication_measure_extraction_peak_and_keep_update_identi
     worker._rank = 0
     worker._is_lora = False
     worker._model_version_step = None
-    worker._memory = learner_memory.LearnerMemory(enabled=True, rank=0, backend="fsdp2")
+    worker._memory = learner_memory.LearnerCudaMetrics(enabled=True, rank=0, backend="fsdp2")
     worker.policy_mini_batch_size_per_gpu = 2
     worker.model = SimpleNamespace(model=torch.ones(3))
     worker.strategy = SimpleNamespace(is_rank_0=lambda: False, all_reduce=lambda status: status)

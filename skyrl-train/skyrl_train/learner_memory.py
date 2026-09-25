@@ -32,13 +32,8 @@ _peak_scopes: dict[int, _PeakScope] = {}
 _peak_scope_lock = Lock()
 
 
-class LearnerMemory:
-    """Emit entry/exit events and native allocator interval peaks for one worker.
-
-    Observation errors disable subsequent collection and warn once, without
-    replacing training exceptions. Overlapping scopes are skipped with a warning;
-    the enclosing exit omits peaks and marks scope_overlap=true.
-    """
+class LearnerCudaMetrics:
+    """Record CUDA allocator samples and interval peaks around worker phases."""
 
     def __init__(self, *, enabled: bool, rank: int, backend: str = "megatron") -> None:
         self.enabled = enabled
@@ -123,7 +118,6 @@ class LearnerMemory:
 
     @contextmanager
     def span(self, phase: str, *, step: int | None, step_kind: StepKind) -> Iterator[None]:
-        """Measure one phase; exceptions retain their identity and a failure exit."""
         if not self.enabled:
             yield
             return
@@ -181,4 +175,4 @@ class LearnerMemory:
 
 # A disabled recorder does nothing and holds no per-worker state, so one shared
 # instance serves as the class-level default for workers built without a config.
-INERT_LEARNER_MEMORY = LearnerMemory(enabled=False, rank=0, backend="unknown")
+INERT_LEARNER_CUDA_METRICS = LearnerCudaMetrics(enabled=False, rank=0, backend="unknown")

@@ -116,7 +116,8 @@ class RolloutObservation:
     step: int
     mode: str
     clock: Callable[[], float] = time.perf_counter
-    started: float = 0.0
+    # Monotonic time gives durations; Unix time places calls beside other processes' events.
+    started_monotonic: float = 0.0
     started_unix_ms: int = 0
     call_id: str = field(default_factory=lambda: uuid4().hex)
     durations: dict[str, float] = field(default_factory=dict)
@@ -129,7 +130,7 @@ class RolloutObservation:
         self.waits.setdefault(name, WaitObservation()).add(duration)
 
     def publish(self, finished: float, outcome: str) -> None:
-        total = finished - self.started
+        total = finished - self.started_monotonic
         residual = total - sum(self.durations.get(name, 0.0) for name in _EXCLUSIVE_PHASES)
         attributes = {"role": TRAINER_ROLE, "step": str(self.step), "mode": self.mode, "outcome": outcome}
         calls.add(1, attributes=attributes)
@@ -177,7 +178,7 @@ def observe_rollout_call(
         yield None
         return
     observation = RolloutObservation(
-        step=step, mode=mode, clock=clock, started=clock(), started_unix_ms=time.time_ns() // 1_000_000
+        step=step, mode=mode, clock=clock, started_monotonic=clock(), started_unix_ms=time.time_ns() // 1_000_000
     )
     token = _CURRENT.set(observation)
     outcome = "success"
@@ -223,7 +224,9 @@ def rollout_wait(name: str) -> Iterator[None]:
         if name == "model_client_await":
             observation.model_await_count += 1
             if len(observation.model_awaits) < _MAX_MODEL_INTERVALS:
-                observation.model_awaits.append((started - observation.started, finished - observation.started))
+                observation.model_awaits.append(
+                    (started - observation.started_monotonic, finished - observation.started_monotonic)
+                )
 
 
 def time_tokenization(func: Callable, *args, **kwargs):

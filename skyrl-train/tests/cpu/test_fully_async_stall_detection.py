@@ -57,7 +57,7 @@ def _bare_trainer(
         rollout_logprobs_required=False,
     )
     trainer.data_tracker = DataConsumptionTracker(mini_batch_size=mini_batch_size, num_steps_per_epoch=1)
-    trainer._async_observations_enabled = False
+    trainer._async_telemetry_enabled = False
     return trainer
 
 
