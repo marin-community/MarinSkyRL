@@ -19,9 +19,9 @@ export SKYRL_HOME="$REPOSITORY_ROOT"
 export VLLM_USE_DEEP_GEMM=0
 
 LOG_PATH="${IRIS_OUTPUT_DIR:-/tmp}/pivot-swe-smoke.log"
-ENTRYPOINT=pivot_swe_smoke
-if [[ "$CONFIG_NAME" == pivot_swe_initial ]]; then
-  ENTRYPOINT=pivot_swe_initial
+if [[ "$CONFIG_NAME" == pivot_swe_32 ]]; then
+  "$PYTHON" -m skyrl_train.entrypoints.pivot_swe_initial --config-name pivot_swe_initial \
+    2>&1 | tee "$LOG_PATH"
 fi
-"$PYTHON" -m "skyrl_train.entrypoints.$ENTRYPOINT" --config-name "$CONFIG_NAME" \
-  2>&1 | tee "$LOG_PATH"
+"$PYTHON" -m skyrl_train.entrypoints.pivot_swe_smoke --config-name "$CONFIG_NAME" \
+  2>&1 | tee -a "$LOG_PATH"
