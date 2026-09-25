@@ -227,8 +227,14 @@ def _reference(trainer: RayPPOTrainer, root: str, fingerprint: str) -> None:
     batch = _batch()
     batch_digest = digest_value({"data": dict(batch), "metadata": batch.metadata})
     batch.metadata["global_step"] = 0
+    # The normal disaggregated trainer offloads the optimizer before each
+    # rollout, then train_critic_and_policy backloads it. This no-rollout
+    # harness must establish the same residency before its first update.
+    trainer._offload_policy_optimizer(trainer.all_timings, timer_label="offload_policy_optimizer_before_parity_step")
     _train_step(trainer, batch)
     trainer.global_step = 1
+    # The normal post-step policy publication offloads again before on_save.
+    trainer._offload_policy_optimizer(trainer.all_timings, timer_label="offload_policy_optimizer_before_parity_save")
     before_save_rng = _rank_digests(trainer, "parity_digest_rng")
     driver_before_save = _driver_rng_digest()
     trainer.save_checkpoints()
