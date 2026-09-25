@@ -106,6 +106,7 @@ def test_harbor_behavior_logprobs_require_supported_pi_thinking_format(thinking_
     [
         (TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM, "fully-async SkyRL Gym"),
         (TrajectoryRunnerMode.MINI_SWE, "mini-swe"),
+        (TrajectoryRunnerMode.TASKCOMPENDIUM, "TaskCompendium native/Harbor router"),
     ],
 )
 @pytest.mark.parametrize(

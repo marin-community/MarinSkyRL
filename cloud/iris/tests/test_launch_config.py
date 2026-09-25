@@ -9,10 +9,9 @@ from typing import Any
 
 import pytest
 import yaml
-from omegaconf.errors import ConfigKeyError
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
-from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
+from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config, parse_rl_config
 
 
 def _raw_config() -> dict[str, Any]:
@@ -111,6 +110,21 @@ def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) ->
 
     assert config.skyrl.trainer.train_batch_size == 8
     assert validate_launch_config(config).num_nodes == 1
+
+
+def test_taskcompendium_source_recipe_selects_its_entrypoint(tmp_path: Path) -> None:
+    path = tmp_path / "taskcompendium.yaml"
+    path.write_text(
+        "entrypoint: taskcompendium\n"
+        "context_budget:\n"
+        "  request_window_tokens: 2\n"
+        "  max_new_tokens_per_turn: 1\n"
+        "  max_turns: 1\n"
+    )
+
+    parsed = parse_rl_config(str(path))
+
+    assert parsed.entrypoint == "skyrl_train.entrypoints.taskcompendium"
 
 
 def test_launch_config_rejects_allocation_smaller_than_role_plan() -> None:

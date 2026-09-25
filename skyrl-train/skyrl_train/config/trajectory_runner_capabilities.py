@@ -23,6 +23,7 @@ class TrajectoryRunnerMode(StrEnum):
     FULLY_ASYNC_SKYRL_GYM = "fully_async_skyrl_gym"
     MINI_SWE = "mini_swe"
     HARBOR = "harbor"
+    TASKCOMPENDIUM = "taskcompendium"
 
 
 class EntrypointOperation(StrEnum):
@@ -170,6 +171,13 @@ def trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRunnerMode) 
     """Resolve the evidence contract for the selected runner and configuration."""
     if mode is TrajectoryRunnerMode.HARBOR:
         return _harbor_capabilities(cfg)
+    if mode is TrajectoryRunnerMode.TASKCOMPENDIUM:
+        return TrajectoryRunnerCapabilities(
+            runner="TaskCompendium native/Harbor router",
+            sampled_completion=EvidenceFidelity.RETOKENIZED,
+            full_context_continuation=EvidenceFidelity.UNAVAILABLE,
+            action_tokens=ActionTokenHandling.RETOKENIZED,
+        )
     if mode is TrajectoryRunnerMode.MINI_SWE:
         return TrajectoryRunnerCapabilities(
             runner="mini-swe",
