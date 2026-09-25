@@ -86,9 +86,9 @@ row is direct evidence that a producer never started -- most often the Ray one, 
 launch did not go through `task_runtime.py`.
 
 Four panels can be legitimately empty, for two unrelated reasons, and their titles say which.
-Rollout buffer occupancy and off-policy staleness are asynchronous-only: a synchronous run is
-on-policy by construction and has no buffer. The two Ray panels need a launch that starts Ray
-itself, which is a launch-path question rather than a synchronous-versus-asynchronous one.
+Rollout buffer occupancy and off-policy staleness are asynchronous-only: a synchronous run writes
+completed batches to FineStore but does not maintain an asynchronous queue. The two Ray panels need a
+launch that starts Ray itself, which is a launch-path question rather than a trainer-mode question.
 
 Two properties of the data mislead people. Work counters are deltas, so they sum; gauges such as
 `policy_step` are snapshots, so they do not. And the engine's metrics arrive under the same service

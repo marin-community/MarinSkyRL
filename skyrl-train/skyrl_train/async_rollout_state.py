@@ -14,15 +14,27 @@ class GeneratedOutputGroup:
     uid: str
     earliest_model_step: int
     source_prompts: List[dict]
+    rollout_id: str | None = None
+    rollout_store_path: str | None = None
+
+
+@dataclass(frozen=True)
+class RolloutReference:
+    """A committed group whose payload lives in a FineStore archive."""
+
+    rollout_id: str
+    uid: str
+    store_path: str
 
 
 @dataclass
 class GenerationBufferState:
-    """Completed, admitted, and retryable rollout work stored with a checkpoint."""
+    """Completed references, admitted groups, and retries stored with a checkpoint."""
 
     completed_groups: List[GeneratedOutputGroup]
     retry_prompts: List[List[dict]]
     admitted_groups: List[GeneratedOutputGroup] = field(default_factory=list)
+    completed_rollouts: List[RolloutReference] = field(default_factory=list)
 
     def pending_uids(self) -> set[str]:
         """Return dataset UIDs whose work survives in this checkpoint."""
@@ -31,6 +43,10 @@ class GenerationBufferState:
             if not isinstance(group.uid, str):
                 raise ValueError("completed generation group uid must be a string")
             uids.add(group.uid)
+        for reference in self.completed_rollouts:
+            if not isinstance(reference.uid, str):
+                raise ValueError("completed rollout reference uid must be a string")
+            uids.add(reference.uid)
         for group in self.admitted_groups:
             if not isinstance(group.uid, str):
                 raise ValueError("admitted generation group uid must be a string")

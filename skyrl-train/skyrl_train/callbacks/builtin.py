@@ -30,7 +30,12 @@ import torch
 
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC
-from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState, GenerationQueuesProvider
+from skyrl_train.async_rollout_state import (
+    GeneratedOutputGroup,
+    GenerationBufferState,
+    GenerationQueuesProvider,
+    RolloutReference,
+)
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.utils.data_tracker import DataConsumptionState, DataConsumptionTracker
@@ -1113,8 +1118,8 @@ class DataTrackingCallback(TrainerCallback):
 class BufferCheckpointCallback(TrainerCallback):
     """Persist async rollout work with each checkpoint and during shutdown.
 
-    Saves completed and admitted output groups plus stale-group retry prompts so
-    resume preserves every dataset row still needed by the current epoch.
+    Saves FineStore references for completed work, admitted output groups, and
+    stale-group retry prompts so resume preserves pending epoch work.
     """
 
     ARTIFACT_NAME = "generation_buffer_state.pt"
@@ -1136,7 +1141,7 @@ class BufferCheckpointCallback(TrainerCallback):
         if self._queues is None:
             return False
         state = self._queues.shutdown_snapshot()
-        return bool(state.completed_groups or state.admitted_groups or state.retry_prompts)
+        return bool(state.completed_groups or state.completed_rollouts or state.admitted_groups or state.retry_prompts)
 
     @staticmethod
     def _serialize_groups(groups: List[GeneratedOutputGroup]) -> List[dict]:
@@ -1146,6 +1151,8 @@ class BufferCheckpointCallback(TrainerCallback):
                 "uid": item.uid,
                 "earliest_model_step": item.earliest_model_step,
                 "source_prompts": item.source_prompts,
+                "rollout_id": item.rollout_id,
+                "rollout_store_path": item.rollout_store_path,
             }
             for item in groups
         ]
@@ -1156,6 +1163,10 @@ class BufferCheckpointCallback(TrainerCallback):
         buffer_state: GenerationBufferState,
     ) -> None:
         completed = self._serialize_groups(buffer_state.completed_groups)
+        completed_rollouts = [
+            {"rollout_id": item.rollout_id, "uid": item.uid, "store_path": item.store_path}
+            for item in buffer_state.completed_rollouts
+        ]
         admitted = self._serialize_groups(buffer_state.admitted_groups)
         retry_prompts = buffer_state.retry_prompts
 
@@ -1166,6 +1177,7 @@ class BufferCheckpointCallback(TrainerCallback):
                 torch.save(
                     {
                         "completed_groups": completed,
+                        "completed_rollouts": completed_rollouts,
                         "admitted_groups": admitted,
                         "retry_prompts": retry_prompts,
                     },
@@ -1175,7 +1187,7 @@ class BufferCheckpointCallback(TrainerCallback):
         await asyncio.to_thread(save_state)
         logger.info(
             "Saved {} completed, {} admitted generation groups, and {} pending retries to {}",
-            len(completed),
+            len(completed) + len(completed_rollouts),
             len(admitted),
             len(retry_prompts),
             artifact_path,
@@ -1200,7 +1212,12 @@ class BufferCheckpointCallback(TrainerCallback):
             raise RuntimeError("BufferCheckpointCallback queues were not bound before checkpoint save")
 
         buffer_state = self._queues.snapshot()
-        if not (buffer_state.completed_groups or buffer_state.admitted_groups or buffer_state.retry_prompts):
+        if not (
+            buffer_state.completed_groups
+            or buffer_state.completed_rollouts
+            or buffer_state.admitted_groups
+            or buffer_state.retry_prompts
+        ):
             return control
 
         ckpt_path = os.path.join(
@@ -1232,6 +1249,8 @@ class BufferCheckpointCallback(TrainerCallback):
                         uid=entry["uid"],
                         earliest_model_step=entry["earliest_model_step"],
                         source_prompts=entry["source_prompts"],
+                        rollout_id=entry.get("rollout_id"),
+                        rollout_store_path=entry.get("rollout_store_path"),
                     )
                 )
             return groups
@@ -1242,4 +1261,5 @@ class BufferCheckpointCallback(TrainerCallback):
             completed_groups=items,
             retry_prompts=state["retry_prompts"],
             admitted_groups=admitted,
+            completed_rollouts=[RolloutReference(**entry) for entry in state.get("completed_rollouts", [])],
         )

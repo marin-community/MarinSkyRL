@@ -39,7 +39,6 @@ from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpoint
 from torchdata.stateful_dataloader import StatefulDataLoader
 from typing import List, Literal, Tuple, TypeVar
 from enum import Enum, auto
-from omegaconf import OmegaConf
 from skyrl_train.telemetry import (
     critical_phase,
     record_generated_work,
@@ -48,7 +47,8 @@ from skyrl_train.telemetry import (
     record_rollout_staleness,
 )
 from skyrl_train.timing_observability import publish_step_timings
-from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
+from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState, RolloutReference
+from skyrl_train.rollout_buffer import FineStoreRolloutBuffer
 from skyrl_train.io import io
 from skyrl_train.dynamic_sampling import (
     DynamicSamplingType,
@@ -90,9 +90,10 @@ def _drain_queue(queue: asyncio.Queue[_QueueItem]) -> List[_QueueItem]:
 
 @dataclass
 class _GenerationQueues:
-    completed: asyncio.Queue[GeneratedOutputGroup]
+    completed: asyncio.Queue[GeneratedOutputGroup | RolloutReference]
     retries: asyncio.Queue[List[dict]]
     condition: asyncio.Condition
+    rollout_buffer: FineStoreRolloutBuffer | None = None
     active_producers: int = 0
     admitted_groups: List[GeneratedOutputGroup] = field(default_factory=list)
     admitted_groups_consumed: bool = False
@@ -132,17 +133,89 @@ class _GenerationQueues:
         return self._snapshot(list(self.admitted_groups))
 
     def _snapshot(self, admitted_groups: List[GeneratedOutputGroup]) -> GenerationBufferState:
-        completed = _drain_queue(self.completed)
-        retries = _drain_queue(self.retries)
-        for group in completed:
-            self.completed.put_nowait(group)
+        pending = _drain_queue(self.completed)
+        try:
+            completed = [item for item in pending if isinstance(item, GeneratedOutputGroup)]
+            references = [item for item in pending if isinstance(item, RolloutReference)]
+            retries = _drain_queue(self.retries)
+        finally:
+            for item in pending:
+                self.completed.put_nowait(item)
         for prompts in retries:
             self.retries.put_nowait(prompts)
         return GenerationBufferState(
             completed_groups=completed,
             retry_prompts=retries,
             admitted_groups=admitted_groups,
+            completed_rollouts=references,
         )
+
+    def _read_completed(self, item: GeneratedOutputGroup | RolloutReference) -> GeneratedOutputGroup:
+        if isinstance(item, GeneratedOutputGroup):
+            return item
+        if self.rollout_buffer is None:
+            raise RuntimeError("rollout ID has no backing buffer")
+        rollout = self.rollout_buffer.read_rollout(item.rollout_id, store_path=item.store_path)
+        if not isinstance(rollout, GeneratedOutputGroup):
+            raise ValueError(f"rollout {item.rollout_id} is not a generated output group")
+        return rollout
+
+    async def drain_completed(self, max_items: int) -> List[GeneratedOutputGroup]:
+        """Load at most one batch of committed groups without blocking the event loop."""
+        if self.rollout_buffer is None:
+            return [self._read_completed(item) for item in _drain_queue(self.completed)]
+        pending = []
+        while len(pending) < max_items:
+            try:
+                pending.append(self.completed.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        if not pending:
+            return []
+        try:
+            rollout_buffer = self.rollout_buffer
+            assert rollout_buffer is not None
+
+            def read_pending() -> List[GeneratedOutputGroup]:
+                references = [item for item in pending if isinstance(item, RolloutReference)]
+                loaded = iter(rollout_buffer.read_rollouts(references))
+                return [item if isinstance(item, GeneratedOutputGroup) else next(loaded) for item in pending]
+
+            read = asyncio.create_task(asyncio.to_thread(read_pending))
+            try:
+                return await asyncio.shield(read)
+            except asyncio.CancelledError:
+                await read
+                raise
+        except BaseException:
+            for item in pending:
+                self.completed.put_nowait(item)
+            raise
+
+    async def enqueue_completed(self, group: GeneratedOutputGroup) -> None:
+        """Publish a completed group only after its payload is committed."""
+        if self.rollout_buffer is None:
+            self.completed.put_nowait(group)
+            return
+        write = asyncio.create_task(asyncio.to_thread(self.rollout_buffer.writer().write_rollout, group))
+        try:
+            rollout_id = await asyncio.shield(write)
+        except asyncio.CancelledError:
+            # A thread cannot be cancelled mid-commit. Finish it before the
+            # trainer closes the store; the unqueued row remains auditable.
+            await write
+            raise
+        group.rollout_id = rollout_id
+        group.rollout_store_path = self.rollout_buffer.path
+        self.completed.put_nowait(RolloutReference(rollout_id, group.uid, self.rollout_buffer.path))
+
+    def requeue_completed(self, group: GeneratedOutputGroup) -> None:
+        if self.rollout_buffer is not None and group.rollout_id is not None:
+            self.completed.put_nowait(
+                RolloutReference(group.rollout_id, group.uid, group.rollout_store_path or self.rollout_buffer.path)
+            )
+        else:
+            self.completed.put_nowait(group)
 
 
 @dataclass
@@ -231,17 +304,14 @@ class _CandidateSelection:
 
 class _AsyncStalenessManager:
     """
-    A controller that manages the capacity of the generation workers based on staleness control.
+    A controller that manages generation concurrency and on-policy capacity.
 
-    The goal is to never submit more trajectories to the generation workers than the training worker
-    can consume, so that the trajectories are not too stale (relative to max_staleness_steps).
-    This is enforced via a capacity rule, not a hard **per-group** staleness guarantee: we bound
-    the **aggregate** number of groups that can be ahead of training so that, in **steady state**,
-    staleness remains within the configured budget of `max_staleness_steps`.
+    With continuous production, only the number of in-flight groups is bounded;
+    the buffer and admission policy decide which completed groups can be trained.
+    On-policy mode reserves at most one batch before the next weight update.
 
-    In pathological cases (e.g., very long-running trajectories), an individual group may take
-    more than `max_staleness_steps` of training steps to finish. Such attempts are discarded and
-    regenerated from the same source prompt before training proceeds.
+    A long-running group can exceed `max_staleness_steps` even when it was
+    started within the budget. Admission discards and retries those attempts.
 
     The key capacity formula is implemented in `_compute_capacity_unlocked`. For details and caveats,
     see https://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html#async-staleness-manager.
@@ -251,10 +321,17 @@ class _AsyncStalenessManager:
     - The idea of this controller is from section 5.1 of AReal's paper: https://arxiv.org/pdf/2505.24298v3
     """
 
-    def __init__(self, max_concurrent_generation_groups: int, mini_batch_size: int, max_staleness_steps: int):
+    def __init__(
+        self,
+        max_concurrent_generation_groups: int,
+        mini_batch_size: int,
+        max_staleness_steps: int,
+        continuous_production: bool = False,
+    ):
         self.max_concurrent_generation_groups = max_concurrent_generation_groups
         self.mini_batch_size = mini_batch_size
         self.max_staleness_steps = max_staleness_steps
+        self.continuous_production = continuous_production
 
         # Control logics.
         self._stat = _RolloutStat()
@@ -298,11 +375,13 @@ class _AsyncStalenessManager:
             )
 
     def _compute_capacity_unlocked(self) -> int:
+        producer_concurrency_capacity = self.max_concurrent_generation_groups - self._stat.running
+        if self.continuous_production:
+            return producer_concurrency_capacity
         # NOTE(Charlie): do not need a self._current_global_step + 1 here unlike AReal because our
         # `_current_global_step` is "the version being worked on", not already finished steps.
         consumer_capacity = (self.max_staleness_steps + self._current_global_step) * self.mini_batch_size
         producer_staleness_capacity = consumer_capacity - (self._stat.accepted + self._stat.running)
-        producer_concurrency_capacity = self.max_concurrent_generation_groups - self._stat.running
         return min(producer_concurrency_capacity, producer_staleness_capacity)
 
     async def acquire_submission_slot(self) -> None:
@@ -473,36 +552,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             max_sample_batches * int(cfg.trainer.train_batch_size) if max_sample_batches > 0 else None
         )
 
-        # Completed-but-unconsumed generation-buffer cap (head-node memory bound).
-        #
-        # WHY THIS KNOB (2026-07-10, 80B head-plasma/RAM overflow root-cause): the
-        # per-epoch buffer below is `asyncio.Queue(maxsize=num_parallel_generation_workers)`.
-        # Each buffered `GeneratedOutputGroup` holds a full `TrajectoryBatch` whose
-        # `rollout_routed_experts` (R3) capture is O(response_len · num_moe_layers ·
-        # top_k) per token — for Qwen3-Next-80B (L=48, K=10) that is ~15 MiB/sequence,
-        # ~126 MiB per 8-sample group. With `num_parallel_generation_workers=900` the
-        # buffer alone can pin ~113 GiB of head-node memory (the pre-existing occupancy
-        # that starves the gs1 forward-chunk `ray.put`s — see
-        # agent_logs/2026-07-09_80b_v5_98k_nccl_wedge_kill.md and 48593f42). The buffer
-        # depth is NOT a throughput lever here: generation concurrency is capped by the
-        # inference engines' working set (num_inference_engines · max_num_seqs /
-        # n_samples_per_prompt), NOT by the worker count, so a deep buffer only lets a
-        # rollout backlog accumulate. This knob bounds the completed-output backlog
-        # without reducing the number of worker loops available for generation.
-        #
-        # Default None => maxsize == num_parallel_generation_workers, i.e. BYTE-IDENTICAL
-        # to today's behavior (no config change => no behavior change). Set it to a small
-        # multiple of the mini-batch (e.g. mini_batch_size · (max_staleness_steps + 1), or
-        # a fixed 128) to cap the footprint to O(1) in async depth. NOTE: when this is set
-        # below num_parallel_generation_workers, up to (num_parallel_generation_workers -
-        # cap) workers may wait on the shared queue condition while each still holds ONE
-        # completed group, so to fully bound the head-node footprint you should ALSO lower
-        # num_parallel_generation_workers toward the engine working set.
-        self.max_buffered_groups = (
-            OmegaConf.select(cfg, "trainer.fully_async.max_buffered_groups", default=None)
-            or self.num_parallel_generation_workers
-        )
-
         assert (
             # otherwise wasted throughput
             self.mini_batch_size <= self.num_parallel_generation_workers
@@ -547,10 +596,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._buffer_checkpoint_callback = BufferCheckpointCallback()
         self.callback_handler.add_callback(self._buffer_checkpoint_callback)
         self._pending_buffer_restore_path = None
+        self._rollout_buffer: FineStoreRolloutBuffer | None = None
         self._staleness_manager = _AsyncStalenessManager(
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
             mini_batch_size=self.mini_batch_size,
             max_staleness_steps=self.max_staleness_steps,
+            continuous_production=self.max_staleness_steps > 0,
         )
         # Tracked at instance level so the finally block in train() can cancel
         # them even when an exception skips the per-epoch epilogue.
@@ -607,9 +658,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     def _restore_buffer_from_checkpoint(self, queues: _GenerationQueues, checkpoint_path: str) -> None:
         """Restore completed, admitted, and retryable rollout work from a checkpoint."""
         buffer_state = BufferCheckpointCallback.load_buffer_state(checkpoint_path)
-        if len(buffer_state.completed_groups) > queues.completed.maxsize:
+        completed_count = len(buffer_state.completed_groups) + len(buffer_state.completed_rollouts)
+        if queues.completed.maxsize > 0 and completed_count > queues.completed.maxsize:
             raise ValueError(
-                f"Checkpoint contains {len(buffer_state.completed_groups)} completed groups, exceeding buffer capacity "
+                f"Checkpoint contains {completed_count} completed groups, exceeding buffer capacity "
                 f"{queues.completed.maxsize}"
             )
         if len(buffer_state.admitted_groups) > self.mini_batch_size:
@@ -620,14 +672,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.async_train_dataloader.reserve_pending_uids(buffer_state.pending_uids())
         for item in buffer_state.completed_groups:
             queues.completed.put_nowait(item)
+        for reference in buffer_state.completed_rollouts:
+            queues.completed.put_nowait(reference)
         for prompts in buffer_state.retry_prompts:
             queues.retries.put_nowait(prompts)
         queues.record_admitted(buffer_state.admitted_groups)
-        restored_group_count = len(buffer_state.completed_groups) + len(buffer_state.admitted_groups)
+        restored_group_count = completed_count + len(buffer_state.admitted_groups)
         self._staleness_manager._stat.accepted += restored_group_count
         self._staleness_manager._stat.submitted += restored_group_count
         logger.info(
-            f"Restored {len(buffer_state.completed_groups)} completed, "
+            f"Restored {completed_count} completed, "
             f"{len(buffer_state.admitted_groups)} admitted generation groups, and "
             f"{len(buffer_state.retry_prompts)} pending retries "
             "from checkpoint"
@@ -695,9 +749,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         finally:
             # Cancel any orphaned generation tasks that survived an early exit
             # (the per-epoch epilogue only runs on normal loop completion).
+            active_tasks = self._active_trajectory_tasks
             self._cancel_trajectory_tasks()
+            if active_tasks:
+                await asyncio.gather(*active_tasks, return_exceptions=True)
 
-            await self.shutdown()
+            try:
+                await self.shutdown()
+            finally:
+                if self._rollout_buffer is not None:
+                    await asyncio.to_thread(self._rollout_buffer.close)
 
     async def _train_loop(self):
         """
@@ -797,14 +858,18 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
             # 0. Per-epoch prologue. Note that we do not do any cross-epoch asynchrony here.
 
-            # Buffer of completed generation. Cap defaults to num_parallel_generation_workers
-            # (byte-identical to prior behavior) but can be bounded independently via
-            # trainer.fully_async.max_buffered_groups to cap head-node memory — see
-            # self.max_buffered_groups in __init__.
+            # The queue carries FineStore IDs; only on-policy requests need a
+            # batch-sized queue bound for backpressure.
+            if self._rollout_buffer is None:
+                self._rollout_buffer = await asyncio.to_thread(
+                    FineStoreRolloutBuffer,
+                    os.path.join(self.cfg.trainer.ckpt_path, "rollout_buffer"),
+                )
             generation_queues = _GenerationQueues(
-                completed=asyncio.Queue(maxsize=self.max_buffered_groups),
+                completed=asyncio.Queue(maxsize=0 if self.max_staleness_steps > 0 else self.mini_batch_size),
                 retries=asyncio.Queue(),
                 condition=asyncio.Condition(),
+                rollout_buffer=self._rollout_buffer,
                 active_producers=self.num_parallel_generation_workers,
             )
 
@@ -1244,7 +1309,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             freshness = self._classify_and_route_group(queues, group)
             if freshness is _GroupFreshness.STALE:
                 return freshness
-            queues.completed.put_nowait(group)
+            await queues.enqueue_completed(group)
             queues.condition.notify_all()
             return freshness
 
@@ -1527,7 +1592,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             active_producers=queues.active_producers,
                         )
 
-                completed_groups = _drain_queue(queues.completed)
+                completed_groups = await queues.drain_completed(self.mini_batch_size)
                 partition = self._partition_completed_groups(
                     completed_groups,
                     occupied_uids={group.uid for group in accepted_groups}
@@ -1557,7 +1622,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 rejection_counts_since_admission.update(selection.discarded_reasons)
 
                 for group in selection.surplus_groups:
-                    queues.completed.put_nowait(group)
+                    queues.requeue_completed(group)
 
                 if selection.admitted_groups:
                     watchdog.observe(now=loop.time(), progressed=True)

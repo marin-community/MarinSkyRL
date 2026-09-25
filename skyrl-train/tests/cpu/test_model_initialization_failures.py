@@ -46,6 +46,7 @@ async def test_startup_failure_still_runs_trainer_shutdown():
     events = []
     trainer = object.__new__(RayPPOTrainer)
     trainer._shutdown_complete = False
+    trainer._sync_rollout_buffer = None
 
     async def fail_startup():
         events.append("startup")
@@ -84,6 +85,9 @@ async def test_trainer_shutdown_is_idempotent():
 async def test_training_failure_log_record_does_not_contain_exception_object():
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.global_step = 12
+    trainer._active_trajectory_tasks = set()
+    trainer._rollout_buffer = None
+    trainer._expert_block_sync = None
     trainer.trajectory_runner = SimpleNamespace(startup=AsyncMock())
     trainer._train_loop = AsyncMock(side_effect=_UnpickleableError("GPU worker ran out of memory"))
     trainer._cancel_trajectory_tasks = Mock()
