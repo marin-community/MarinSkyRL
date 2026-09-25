@@ -48,19 +48,11 @@ trainer:
   debug_mode: "light"
   # null follows debug_mode (on for light/distributed); true/false explicitly overrides it.
   collective_phase_diagnostics: null
-  # Telemetry families published to Finelog when the task resolved a telemetry endpoint.
-  # Each is on by default.
-  # The trainer's scalar metrics and lifecycle events, one record per scalar per step, plus
-  # the trainer-minus-sampler log-ratio statistics computed on the driver for each batch.
-  training_metrics: true
-  # Per-rank policy-update walls and CUDA allocator peaks. The Megatron phase breakdown
-  # emits only on Megatron.
-  policy_train_spans: true
-  # The synchronous trainer's span around each rollout call. The async loop's rollout
-  # phases follow async_spans.
-  generate_spans: true
-  # Async-loop windows and producer waits; the highest-volume family here.
-  async_spans: true
+  # Telemetry families exported when the task has a telemetry endpoint.
+  training_metrics: true # trainer scalars, loop events and trainer-minus-vLLM log-ratio statistics
+  policy_train_spans: true # per-rank policy-update phase walls and CUDA memory
+  generate_spans: true # the synchronous trainer's rollout-call phases and waits
+  async_spans: true # async-loop windows, rollout calls, waits and group dispositions
   distributed:
     placement_group_timeout_seconds: 180
     worker_collective_timeout_seconds: 1800

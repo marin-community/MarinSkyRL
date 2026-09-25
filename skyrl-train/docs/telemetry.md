@@ -18,13 +18,11 @@ uses its node-local `IRIS_ATTEMPT_UID`. The service is fixed to `marinskyrl`;
 `SKYRL_SERVING_JOB_ID` optionally joins a centralized serving job.
 
 Each row's resource carries `run_id`, which Finelog promotes to the column of the
-same name; the launch document's `run.id` sets it. Rows also carry
-`training_type`, `sync` or `async`, from the launch document's
+same name; the launch document's `run.id` sets it. Rows also carry the
+`training_type` (`sync` or `async`) of the launch document's
 `runtime.training_type`, which the task runtime exports as `SKYRL_TRAINING_TYPE`.
-
-`docs/design/async-rl-telemetry.md` at the repository root lists every metric
-family, the question it answers, its switch, default and cost, and the panels
-that read it.
+`docs/design/async-rl-telemetry.md` at the repository root describes each metric
+family, its switch, its cost and the panels that read it.
 
 Export and shutdown failures do not change training results or W&B ownership.
 The Ray allowlist discards worker, address and task-name labels and never forwards

@@ -315,8 +315,7 @@ class Worker(DistributedTorchRayActor):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         configure_progress(cfg.trainer.progress)
-        # An actor inherits only the environment; rigging drops every record until this process
-        # configures it. The actor group drains it through close_telemetry before the kill.
+        # Rigging drops records from a process that never configured it.
         self._telemetry = contextlib.ExitStack()
         telemetry_config = TelemetryConfig.from_environment()
         if telemetry_config.endpoint is not None:
@@ -829,8 +828,7 @@ class PPORayActorGroup:
         Args:
             no_restart: If True, prevents Ray from restarting the actors.
         """
-        # ray.kill runs no atexit handler in the actor, so the telemetry drain has to be asked for.
-        # A dead or wedged actor only costs the timeout; ray.wait raises for neither.
+        # ray.kill skips the actor's atexit handlers; a dead actor only costs the timeout.
         drains = [actor.close_telemetry.remote() for actor in self._actor_handlers]
         ray.wait(drains, num_returns=len(drains), timeout=TELEMETRY_DRAIN_TIMEOUT_SECONDS)
         for actor in self._actor_handlers:

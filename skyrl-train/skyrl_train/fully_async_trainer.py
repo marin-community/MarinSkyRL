@@ -1030,8 +1030,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         duration_seconds=weight_update_timer.duration,
                     )
 
-                    # The core wall ends here. Checkpointing and evaluation run in the callbacks
-                    # below, inside the step timer.
+                    # The core wall excludes the step-end callbacks below.
                     core_seconds = time.perf_counter() - core_started
 
                     # 5. Run callback-requested work before closing the inclusive step timer.
@@ -1362,10 +1361,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
 
     def _record_group_terminal(self, group: GeneratedOutputGroup, disposition: str) -> None:
-        """Record a group's first terminal disposition: consumed, or the reason it was discarded.
-
-        A group still buffered at shutdown gets none; a resumed run that restores it records its end.
-        """
+        """Record the group's first disposition; a group still buffered at shutdown records none."""
         if not self._async_telemetry_enabled or group.disposition_recorded:
             return
         record_group_disposition(

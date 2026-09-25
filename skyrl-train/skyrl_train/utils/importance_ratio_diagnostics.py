@@ -18,13 +18,11 @@ POSITION_WINDOW = 256
 
 LOG_RATIO_TAIL_CAPACITY = 8192
 
-# A token whose probability changed by more than 2x, and one that collapsed below
-# 1e-5 of its behaviour probability. Each threshold selects tokens; neither clips.
+# Thresholds for a token whose probability halved or doubled, and one that fell below 1e-5.
 LOG_RATIO_DOUBLING = math.log(2)
 LOG_RATIO_COLLAPSE = math.log(1e-5)
 
-# Staleness buckets for the consume-time mismatch, with the inclusive lower bound
-# of each; the last bucket is open-ended.
+# Mismatch staleness buckets and each one's inclusive lower bound.
 MISMATCH_STALENESS_BUCKETS = (
     ("staleness0", 0),
     ("staleness1", 1),
@@ -47,12 +45,7 @@ LOG_RATIO_BASE_METRIC_KEYS = (
 
 
 def absolute_quantiles(values: torch.Tensor, probabilities: tuple[float, ...]) -> list[float]:
-    """Linear-interpolated quantiles of a finite 1-D tensor of any size, as torch.quantile computes them.
-
-    One selection finds the lowest requested order statistic and only the values
-    above it are sorted, so upper-tail quantiles cost far less than a full sort.
-    torch.quantile also refuses inputs above 2**24 elements, which a policy batch reaches.
-    """
+    """Linear-interpolated quantiles of a finite 1-D tensor; torch.quantile refuses more than 2**24 values."""
     count = values.numel()
     positions = torch.tensor(probabilities, dtype=torch.float64) * (count - 1)
     lowest = int(positions.min().floor())
@@ -66,13 +59,7 @@ def absolute_quantiles(values: torch.Tensor, probabilities: tuple[float, ...]) -
 
 
 def ratio_statistics(delta: torch.Tensor, *, eps_clip_low: float = 0.2, eps_clip_high: float = 0.2) -> dict[str, float]:
-    """Summarize per-token log-ratios, trainer minus sampler, over the finite tokens.
-
-    Returns |log-ratio| quantiles, PPO clip pressure, the fractions outside
-    [0.5x, 2x] and below 1e-5, the importance-weight ESS fraction, the k1 and k3
-    KL estimators and chi-squared, clipping the exponent inside k3 and
-    chi-squared. An empty population reports only its coverage.
-    """
+    """Summarize per-token trainer-minus-sampler log-ratios over the finite tokens."""
     delta = delta.detach().double().reshape(-1)
     selected = delta.numel()
     finite = torch.isfinite(delta)
@@ -161,14 +148,7 @@ def mismatch_ratio_metrics(
     eps_clip_low: float = 0.2,
     eps_clip_high: float = 0.2,
 ) -> dict[str, float]:
-    """Condition consume-time trainer/vLLM ratios on staleness and token position.
-
-    Only staleness0 isolates engine mismatch. Other buckets and the pooled values
-    measure its product with policy drift. Position buckets overlap on short responses.
-    The pooled and staleness0 buckets report every ratio_statistics value. The other
-    buckets and every position bucket report token counts, finite_fraction,
-    log_ratio_mean, log_ratio_abs_mean and frac_outside_0_5_2.
-    """
+    """Trainer-minus-vLLM log-ratio statistics by staleness bucket and response position."""
     mask = loss_mask.detach().cpu() > 0
     staleness = (
         torch.zeros(mask.shape[0], dtype=torch.int32) if rollout_staleness is None else rollout_staleness.detach().cpu()
@@ -194,8 +174,7 @@ def mismatch_ratio_metrics(
         for key, total in _grouped_moments(values, groups, 4 * len(MISMATCH_STALENESS_BUCKETS)).items()
     }
     position_classes = {f"first{POSITION_WINDOW}": [1, 3], f"last{POSITION_WINDOW}": [2, 3], "middle": [0]}
-    # The async RL dashboard reads quantile, KL and ESS statistics only for these two
-    # buckets; the rest take their moments from the grid and need no sort.
+    # Only these two buckets get the sorted statistics; the others take moments from the grid.
     full_statistics = {}
     if values is not None:
         full_statistics["pooled"] = ratio_statistics(values, eps_clip_low=eps_clip_low, eps_clip_high=eps_clip_high)
@@ -302,9 +281,7 @@ class LogRatioMonitor:
         accumulator = self._accumulator
         failed = self._failed
         if gather_fn is not None:
-            # Every rank participates even after local failure. Reducing fixed
-            # sufficient statistics before finalization keeps ESS, token means,
-            # tail quantiles and validity meaningful for uneven rank populations.
+            # Every rank gathers, even after a local failure, so the collective stays matched.
             header, tail = pack_log_ratio_accumulator(accumulator, failed=failed)
             headers, tails = gather_fn(header), gather_fn(tail)
             accumulator, failed = pool_log_ratio_accumulators(headers, tails)
@@ -598,8 +575,7 @@ def finalize_log_ratio_metrics(acc: LogRatioAccumulator, n_position_buckets: int
     count = acc.n_valid.double().clamp(min=1)
     means = acc.moments / count
     ess = acc.shifted_weight_sum.square() / (count * acc.shifted_weight_square_sum).clamp(min=1e-300)
-    # Keep a bounded global top tail: a micro-batch that holds every outlier must
-    # retain enough values for the pooled quantile.
+    # The p99.9 interpolates within the bounded top tail kept across micro-batches.
     rank_from_top = (int(acc.n_valid.item()) - 1) * 0.001
     upper = math.ceil(rank_from_top)
     p999_valid = 0 <= upper < acc.top_per_mille.numel()

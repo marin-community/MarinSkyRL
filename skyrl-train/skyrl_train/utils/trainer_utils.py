@@ -180,11 +180,7 @@ def sanitize_data_source(data_source: str) -> str:
 
 
 def consumed_stop_metrics(stop_reasons: Sequence[str | None] | None, sequence_count: int) -> dict[str, float]:
-    """Count length stops on admitted sequences, before padding or worker sharding.
-
-    A length stop can come from engine or runner budget exhaustion; it does not
-    establish answer incompleteness. Omit the fraction without complete coverage.
-    """
+    """Count length stops on admitted sequences; the fraction needs every stop reason."""
     reasons = [None] * sequence_count if stop_reasons is None else stop_reasons
     known = sum(reason is not None and reason != "" for reason in reasons)
     length_stops = sum(reason == "length" for reason in reasons)
@@ -213,12 +209,7 @@ def async_step_metrics(
     policy_gpus: int,
     inference_gpus: int,
 ) -> dict[str, float]:
-    """Summarize driver walls and useful work; GPU denominators are configured roles.
-
-    Core excludes callbacks, checkpoint and evaluation. Cycle includes them up to
-    metric publication; neither includes startup, inter-epoch cleanup or final
-    export. These rates are not whole-job billed efficiency or GPU utilization.
-    """
+    """Core and cycle walls, their fractions and useful tokens per second and per configured GPU."""
     metrics = {
         "core_seconds": core_seconds,
         "cycle_seconds": cycle_seconds,
@@ -247,13 +238,7 @@ def async_step_metrics(
 
 
 def evaluation_response_metrics(trajectory_batch: TrajectoryBatch) -> Dict[str, float]:
-    """Describe evaluation work and score contributions without changing its reward.
-
-    Contributions divide by every evaluated response.
-    A completed stop does not certify final-answer structure or correctness.
-    Finalized response lengths may include runner-added tokens. Missing stop
-    reasons suppress fractions and contributions.
-    """
+    """Evaluation response lengths, stop reasons and score contributions per evaluated response."""
     lengths = [len(tokens) for tokens in trajectory_batch["response_ids"]]
     count = len(lengths)
     if not count:
