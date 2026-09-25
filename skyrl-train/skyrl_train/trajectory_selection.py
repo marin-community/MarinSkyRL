@@ -8,12 +8,10 @@ from statistics import fmean
 
 from omegaconf import DictConfig, OmegaConf
 
+from marinskyrl.runtime_options import TRAJECTORY_SELECTOR_TYPE_PATH
 from skyrl_train.batch_sampling import filter_trajectory_batch
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import NormalizedReward
 from skyrl_train.trajectory_runners.types import TrajectoryBatch
-
-
-TRAJECTORY_SELECTOR_TYPE_PATH = "trainer.trajectory_selector.type"
 
 
 class TrajectorySelectorKind(StrEnum):

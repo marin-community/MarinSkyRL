@@ -15,8 +15,8 @@ import torch
 from jaxtyping import Float
 from omegaconf import DictConfig
 
+from marinskyrl.runtime_options import AdvantageEstimator
 from skyrl_train.utils.algorithm_registry import (
-    AdvantageEstimator,
     AdvantageEstimatorRegistry,
     ExactPhysicalGroup,
     MinimumBaselineEligibleGroup,

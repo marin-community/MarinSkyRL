@@ -31,6 +31,7 @@ from skyrl_gym.envs.nemotron_ultra.ns_tools import execute_python_calls
 from skyrl_gym.envs.nemotron_ultra.rdkit_chemistry import grade_rdkit_chemistry
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
 from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
+from skyrl_gym.verification import RolloutEvidence
 
 
 def test_genrm_agent_constructs_and_returns_pending_reward():
@@ -53,6 +54,66 @@ def test_genrm_agent_constructs_and_returns_pending_reward():
     assert result["done"]
     assert result["reward"] == 3.5
     assert result["metadata"]["cohort_reward_pending"] is True
+
+
+def _ultra_env(agent: str, env_config: dict, record: dict | None = None) -> NemotronUltraEnv:
+    return NemotronUltraEnv(
+        OmegaConf.create(env_config),
+        extras={
+            "extra_info": {
+                "nemotron_ultra": {
+                    "route": "skyrl_gym",
+                    "agent": agent,
+                    "record_json": json.dumps(record or {}),
+                    "request_json": "{}",
+                }
+            }
+        },
+    )
+
+
+def test_judge_backed_row_requires_a_judge_unless_grading_is_skipped():
+    with pytest.raises(RuntimeError, match="requires the general judge"):
+        _ultra_env("multichallenge_simple_agent", {}).step("final answer")
+
+    result = _ultra_env("multichallenge_simple_agent", {"grading": "skip"}).step("final answer")
+
+    assert result["done"]
+    assert result["reward"] == 0.0
+    assert result["verification"].score is None
+    assert result["verification"].reason == "grading is skipped"
+    assert result["metadata"]["graded"] == 0.0
+
+
+def test_skipped_grading_still_executes_ns_tools_turns():
+    env = _ultra_env("ns_tools_simple_agent", {"grading": "skip"}, {"question": "q", "expected_answer": "4"})
+    env.sandbox = _Sandbox({"process_status": "completed", "stdout": "4\n", "stderr": ""})
+    env.evidence = RolloutEvidence(
+        response="",
+        metadata={
+            "assistant_message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "stateful_python_code_exec", "arguments": '{"code":"2 + 2"}'},
+                    }
+                ],
+            }
+        },
+    )
+
+    tool_turn = env.step("")
+
+    assert not tool_turn["done"]
+    assert tool_turn["observations"] == [{"role": "tool", "tool_call_id": "call-1", "content": "4"}]
+
+    env.evidence = None
+    final = env.step("The answer is 4.")
+
+    assert final["done"]
+    assert final["verification"].reason == "grading is skipped"
 
 
 def test_genrm_utilities_match_nvidia_circular_tiebreaker():
