@@ -94,7 +94,7 @@ committed generation, and requires all 32 digests to match before and after repl
 It also requires the uninterrupted step to change at least one model shard. A success requires both Iris jobs
 to exit zero and the final `SNOWBALL_CHECKPOINT_PARITY_RESUME_OK ranks=32` marker. The resume job emits a
 `SNOWBALL_CHECKPOINT_PARITY_VERDICT` line with separate rank-state and driver-RNG verdicts before failing,
-so a known driver-RNG gap does not hide rank-state evidence. Any mismatch is a correctness finding; do not
+so a driver-RNG mismatch does not hide rank-state evidence. Any mismatch is a correctness finding; do not
 relax the exact comparison to make it pass. This gate does not validate
 cross-geometry recovery or future S3 rollout weight synchronization.
 

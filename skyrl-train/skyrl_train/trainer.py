@@ -713,7 +713,7 @@ class RayPPOTrainer:
     async def _save_checkpoints_with_residency(
         self, *, defer_continuation_state: bool = False
     ) -> CheckpointSnapshot | None:
-        """Save a checkpoint, swapping colocated training and inference residency when needed."""
+        """Save with required residency; return a snapshot only for background FSDP upload."""
         if self._uses_background_checkpoint_upload():
             save_payloads = self._snapshot_checkpoint
         elif defer_continuation_state:
@@ -995,7 +995,7 @@ class RayPPOTrainer:
         if self._control.should_save_hf_model:
             # HF export reads the committed checkpoint. When checkpoint and HF
             # export share a cadence, wait for the background shard uploads and
-            # marker publication before asking the exporter to consume it.
+            # generation commit before asking the exporter to consume it.
             if getattr(self, "_pending_megatron_checkpoint_commit", None) is not None:
                 self._pending_megatron_hf_export = True
             elif await self._drain_checkpoint_upload():
@@ -1648,8 +1648,8 @@ class RayPPOTrainer:
                 ):
                     await self._publish_pending_megatron_checkpoint(resume_epoch=epoch, at_epoch_boundary=False)
 
-                # 9. Check for max_steps
-                if self.global_step > self.total_training_steps:
+                # 9. Stop at the configured horizon or a callback request.
+                if self.global_step > self.total_training_steps or self._control.should_training_stop:
                     if batch_index + 1 == len(self.train_dataloader):
                         # StatefulDataLoader marks the epoch finished only on
                         # terminal next(), not when its final batch is yielded.
@@ -1662,21 +1662,10 @@ class RayPPOTrainer:
                             raise RuntimeError("Dataloader yielded beyond its reported epoch length")
                     else:
                         epoch_exhausted = False
-                    logger.info(f"Reached max training steps ({self.total_training_steps})")
-                    break
-
-                # 12. Check for early stopping
-                if self._control.should_training_stop:
-                    if batch_index + 1 == len(self.train_dataloader):
-                        try:
-                            next(dataloader_iterator)
-                        except StopIteration:
-                            pass
-                        else:
-                            raise RuntimeError("Dataloader yielded beyond its reported epoch length")
+                    if self.global_step > self.total_training_steps:
+                        logger.info(f"Reached max training steps ({self.total_training_steps})")
                     else:
-                        epoch_exhausted = False
-                    logger.info("Training stopped early by callback")
+                        logger.info("Training stopped early by callback")
                     break
 
             # Call on_epoch_end callbacks

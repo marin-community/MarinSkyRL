@@ -28,6 +28,7 @@ from loguru import logger
 from omegaconf import DictConfig
 import torch
 
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.checkpoint_generation import (
     commit_shutdown_overlay,
@@ -1041,7 +1042,7 @@ class DataTrackingCallback(TrainerCallback):
             return control
 
         ckpt_path = getattr(trainer, "_active_checkpoint_payload_path", None) or os.path.join(
-            trainer.cfg.trainer.ckpt_path, f"global_step_{state.global_step}"
+            trainer.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{state.global_step}"
         )
         data_state = self._tracker.get_state()
         data_state.global_step = state.global_step
@@ -1208,7 +1209,7 @@ class BufferCheckpointCallback(TrainerCallback):
 
         buffer_state = self._queues.snapshot()
         ckpt_path = getattr(trainer, "_active_checkpoint_payload_path", None) or os.path.join(
-            trainer.cfg.trainer.ckpt_path, f"global_step_{state.global_step}"
+            trainer.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{state.global_step}"
         )
         await self._save_bound_state(ckpt_path, buffer_state)
 
