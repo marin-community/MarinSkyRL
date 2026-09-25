@@ -16,7 +16,7 @@ import fsspec
 from datasets import Dataset, load_dataset
 from transformers import AutoTokenizer
 
-from infra.rl_data.sources import prepare_pivot_swe_row
+from infra.rl_data.sources import prepare_pivot_row
 from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
 
 DATASET_ID = "nvidia/Nemotron-RL-Agentic-SWE-Pivot-v1"
@@ -64,7 +64,7 @@ def prepare_smoke_sample(
         if not 0.0 < raw["pass_rate"] < 1.0:
             continue
         request = {**raw["responses_create_params"], "chat_template_kwargs": template_kwargs}
-        prepared = prepare_pivot_swe_row({**raw, "responses_create_params": request}, index)
+        prepared = prepare_pivot_row({**raw, "responses_create_params": request}, index, dataset="swe")
         prompt_tokens = tokenizer.apply_chat_template(
             prepared["prompt"],
             tools=request.get("tools"),

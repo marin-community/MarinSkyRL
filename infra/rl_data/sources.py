@@ -18,6 +18,7 @@ import numpy as np
 import reasoning_gym
 import requests
 from skyrl_gym.envs.aime.utils import last_boxed_only_string, remove_boxed
+from skyrl_gym.envs.nemotron_ultra.pivot import PIVOT_PROFILES
 from skyrl_gym.envs.text_to_sql import scoring as text_to_sql_scoring
 
 from infra.rl_data.contracts import VerifierDataContract
@@ -123,8 +124,6 @@ NEMOTRON_ULTRA_SWE_AGENT = "swe_pivot_single_step_tool_use_with_argument_compari
 # The MOPD blend adds one generator whose verifier has not been ported; rows using it are
 # accepted by the source and rejected by the environment, so subsets must exclude it.
 NEMOTRON_ULTRA_MOPD_AGENTS = NEMOTRON_ULTRA_RLVR2_AGENTS | {"indirect_prompt_injection_simple_agent"}
-NEMOTRON_PIVOT_SWE_SOURCE_AGENT = "single_step_tool_use_with_argument_comparison_swe"
-NEMOTRON_PIVOT_SWE_DATA_SOURCE = "nemotron_swe_pivot"
 _NEMOTRON_PLACEHOLDER_KEY = "_hf_question_placeholder"
 _NEMOTRON_DAPO_PREFIX = (
     "Solve the following math problem step by step. The last line of your response "
@@ -217,49 +216,42 @@ def _nemotron_ultra_messages(raw_input: Any) -> list[dict[str, Any]]:
     return messages
 
 
-def prepare_pivot_swe_row(example: Mapping[str, Any], index: int) -> PreparedRow:
-    """Convert one released SWE pivot into a single-action local-verifier row."""
-    request = example.get("responses_create_params")
-    agent_ref = example.get("agent_ref")
-    expected_action = example.get("expected_action")
-    if not isinstance(request, Mapping):
-        raise TypeError("SWE pivot responses_create_params must be a mapping")
-    if not isinstance(agent_ref, Mapping) or agent_ref.get("name") != NEMOTRON_PIVOT_SWE_SOURCE_AGENT:
-        raise ValueError("SWE pivot has an unsupported agent_ref.name")
-    if not isinstance(expected_action, Mapping):
-        raise TypeError("SWE pivot expected_action must be a mapping")
-    trajectory_id = example.get("trajectory_id")
-    if not isinstance(trajectory_id, int):
-        raise TypeError("SWE pivot trajectory_id must be an integer")
+def prepare_pivot_row(example: Mapping[str, Any], index: int, *, dataset: str) -> PreparedRow:
+    """Convert a released Pivot row to a one-step Gym row, retaining verifier inputs."""
+    profile = PIVOT_PROFILES[dataset]
+    request = example["responses_create_params"]
+    if example["agent_ref"]["name"] != profile.source_agent:
+        raise ValueError(f"Pivot {dataset!r} row has an unexpected agent_ref.name")
+    if profile.word_threshold is not None and not isinstance(example["expected_action"], Mapping):
+        raise TypeError("Pivot expected_action must be a mapping")
+    if dataset == "terminal":
+        trajectory_id = example["metadata"]["source_trajectory_uid"]
+    else:
+        trajectory_id = example["trajectory_id"]
+    record = {key: value for key, value in example.items() if key != "responses_create_params"}
+    record.update(
+        profile_pass_rate=example.get("pass_rate"),
+        profile_pass_rate_total=example.get("pass_rate_total"),
+        profile_pass_rate_passed=example.get("pass_rate_passed"),
+    )
     return {
-        "data_source": NEMOTRON_PIVOT_SWE_DATA_SOURCE,
-        "prompt": _nemotron_ultra_messages(request.get("input")),
+        "data_source": f"nemotron_{dataset}_pivot",
+        "prompt": _nemotron_ultra_messages(request["input"]),
         "env_class": "nemotron_ultra",
-        "reward_model": {"ground_truth": NEMOTRON_ULTRA_SWE_AGENT},
+        "reward_model": {"ground_truth": profile.agent},
         "extra_info": {
             "split": "train",
             "index": index,
+            "trajectory_id": str(trajectory_id),
             "nemotron_ultra": {
-                "uuid": f"{trajectory_id}:{index}",
-                "blend": "swe_pivot",
-                "agent": NEMOTRON_ULTRA_SWE_AGENT,
+                "uuid": str(example.get("uuid", f"{trajectory_id}:{index}")),
+                "blend": f"{dataset}_pivot",
+                "agent": profile.agent,
                 "route": "skyrl_gym",
                 "request_json": json.dumps(
-                    {key: value for key, value in request.items() if key != "input"},
-                    ensure_ascii=False,
-                    sort_keys=True,
+                    {key: value for key, value in request.items() if key != "input"}, ensure_ascii=False, sort_keys=True
                 ),
-                "record_json": json.dumps(
-                    {
-                        "expected_action": dict(expected_action),
-                        "trajectory_id": trajectory_id,
-                        "profile_pass_rate": example.get("pass_rate"),
-                        "profile_pass_rate_total": example.get("pass_rate_total"),
-                        "profile_pass_rate_passed": example.get("pass_rate_passed"),
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
+                "record_json": json.dumps(record, ensure_ascii=False, sort_keys=True),
             },
         },
     }

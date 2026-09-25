@@ -30,6 +30,8 @@ from skyrl_gym.envs.nemotron_ultra.nvarc import grade_nvarc, parse_grid
 from skyrl_gym.envs.nemotron_ultra.ns_tools import execute_python_calls
 from skyrl_gym.envs.nemotron_ultra.rdkit_chemistry import grade_rdkit_chemistry
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
+from skyrl_gym.envs.nemotron_ultra.pivot import pivot_assistant_message
+from skyrl_gym.envs.nemotron_ultra.terminal_pivot import grade_terminal_pivot
 from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
 
 
@@ -597,3 +599,134 @@ def test_nemotron_ultra_environment_is_registered():
         },
     )
     assert env.step("No calendar changes are needed.")["reward"] == 1.0
+
+
+def _pivot_call(query):
+    return {"type": "function_call", "name": "search", "arguments": json.dumps({"query": query})}
+
+
+def test_pivot_batches_use_distinct_matches_and_allow_extra_calls():
+    # The first reference can match either candidate, but the second only the first.
+    expected = {"type": "function_call_batch", "calls": [_pivot_call("red blue"), _pivot_call("red green")]}
+    response = pivot_assistant_message({"output": [_pivot_call("red green"), _pivot_call("blue yellow")]})
+    assert grade_expected_action(expected, response)[0] == 1.0
+    response["tool_calls"].pop()
+    assert grade_expected_action(expected, response)[0] == 0.0
+    response["tool_calls"].append({"function": _pivot_call("blue yellow")})
+    response["tool_calls"].append({"function": {"name": "unrelated", "arguments": "{"}})
+    assert grade_expected_action(expected, response)[0] == 1.0
+    assert grade_expected_action(_pivot_call("blue yellow"), response)[0] == 1.0
+
+
+def test_pivot_calls_take_precedence_over_text_and_reasoning():
+    response = {
+        "output": [
+            {"type": "reasoning", "summary": [{"text": "hidden reasoning"}]},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done"}]},
+            _pivot_call("red blue"),
+        ]
+    }
+    message = pivot_assistant_message(response)
+    assert grade_expected_action({"type": "message", "content": "anything"}, message)[0] == 0.0
+    assert grade_expected_action(_pivot_call("red blue"), message)[0] == 1.0
+    assert grade_expected_action({"type": "message", "content": "anything"}, {"content": ""})[0] == 1.0
+
+
+@pytest.mark.parametrize(
+    "reference,candidate,threshold,reward",
+    [
+        ("Red", "red", 0.0, 0.0),
+        ("red blue", "green yellow", 0.0, 1.0),
+        ("red blue", "green yellow", 0.1, 0.0),
+        ("a a a b", "a b b b", 0.25, 1.0),
+        ("a a a b", "a b b b", 0.250001, 0.0),
+        ("a b", "a b", 0.500001, 0.0),
+    ],
+)
+def test_pivot_word_similarity_preserves_published_thresholds(reference, candidate, threshold, reward):
+    message = pivot_assistant_message({"output": [_pivot_call(candidate)]})
+    assert (
+        grade_expected_action(_pivot_call(reference), message, word_count_similarity_threshold=threshold)[0] == reward
+    )
+
+
+def test_pivot_invalid_reference_arguments_are_data_errors():
+    expected = {**_pivot_call("red blue"), "arguments": "{"}
+    response = pivot_assistant_message({"output": [_pivot_call("red blue")]})
+    with pytest.raises(json.JSONDecodeError):
+        grade_expected_action(expected, response)
+    response["tool_calls"][0]["function"]["arguments"] = "{"
+    assert grade_expected_action(_pivot_call("red blue"), response)[0] == 0.0
+
+
+def _terminal_record(**answer):
+    return {
+        "metadata": {"harness": "terminus_2"},
+        "expected_answer": json.dumps(
+            {"analysis": "current state", "plan": "next step", "commands": [{"keystrokes": "abcdefghij"}], **answer}
+        ),
+    }
+
+
+def test_terminal_similarity_boundary_and_completion_gate():
+    record = _terminal_record(task_complete=True)
+    candidate = json.loads(record["expected_answer"])
+    candidate.update(analysis="different explanation", plan="different plan")
+    candidate["commands"] = [{"keystrokes": "abcdefghiX", "duration": 9}]
+    reward, details = grade_terminal_pivot("<think>reasoning</think>" + json.dumps(candidate), record)
+    assert reward == 1.0
+    assert details["similarity_score"] == pytest.approx(0.9)
+    assert grade_terminal_pivot(json.dumps(candidate), {**record, "threshold": 0.91})[0] == 0.0
+    candidate["task_complete"] = False
+    assert grade_terminal_pivot(json.dumps(candidate), record)[1]["failure_reason"] == "task_complete_check_failed"
+    candidate["task_complete"] = True
+    assert grade_terminal_pivot(json.dumps(candidate), _terminal_record(task_complete=False))[0] == 1.0
+
+
+def test_terminal_concatenates_commands_but_preserves_order_and_validates_schema():
+    record = _terminal_record()
+    candidate = json.loads(record["expected_answer"])
+    candidate["commands"] = [{"keystrokes": "abcde"}, {"keystrokes": "fghij"}]
+    assert grade_terminal_pivot(json.dumps(candidate), record)[0] == 1.0
+    candidate["commands"].reverse()
+    assert grade_terminal_pivot(json.dumps(candidate), record)[0] == 0.0
+    candidate["commands"] = [{"keystrokes": "abcdefghij", "extra": 1}]
+    assert grade_terminal_pivot(json.dumps(candidate), record)[1]["failure_reason"] == "schema_check_failed"
+    candidate["commands"] = []
+    assert grade_terminal_pivot(json.dumps(candidate), _terminal_record(commands=[]))[0] == 1.0
+    assert grade_terminal_pivot(json.dumps(candidate), _terminal_record(commands=[{"keystrokes": ""}]))[0] == 0.0
+    assert grade_terminal_pivot("```json\n" + json.dumps(candidate) + "\n```", record)[0] == 0.0
+
+
+def test_terminal_supports_terminus_one_and_reports_invalid_reference():
+    answer = {
+        "state_analysis": "state",
+        "explanation": "plan",
+        "is_task_complete": True,
+        "commands": [{"keystrokes": "pwd\n", "is_blocking": True, "timeout_sec": 1}],
+    }
+    record = {"metadata": {"harness": "terminus_1"}, "expected_answer": json.dumps(answer)}
+    assert grade_terminal_pivot(json.dumps(answer), record)[0] == 1.0
+    del answer["commands"][0]["is_blocking"]
+    assert grade_terminal_pivot(json.dumps(answer), record)[1]["failure_reason"] == "schema_check_failed"
+    record["expected_answer"] = json.dumps(answer)
+    assert grade_terminal_pivot("{}", record)[1]["failure_reason"] == "expected_answer_invalid"
+
+
+@pytest.mark.parametrize(
+    "reference,candidate,reward",
+    [
+        ({"x": [1, 2]}, {"x": [2, 1]}, 0.0),
+        ({"x": [1, 2]}, {"x": [1]}, 0.0),
+        ({"x": 1}, {"x": 1, "y": 2}, 0.0),
+        ({"x": 1.0}, {"x": 1}, 0.0),
+        ({"x": 0.0}, {"x": 0.000001}, 0.0),
+        ({"x": 0.0}, {"x": 0.0000009}, 1.0),
+        ({"x": 1}, {"x": True}, 1.0),
+        ({"x": True}, {"x": 1}, 0.0),
+    ],
+)
+def test_pivot_recursive_argument_boundaries(reference, candidate, reward):
+    expected = {"type": "function_call", "name": "tool", "arguments": json.dumps(reference)}
+    response = {"tool_calls": [{"function": {"name": "tool", "arguments": json.dumps(candidate)}}]}
+    assert grade_expected_action(expected, response)[0] == reward
