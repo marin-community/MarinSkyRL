@@ -96,6 +96,7 @@ def test_megatron_failed_save_preserves_latest_and_retry_commits(ray_init_fixtur
     try:
         trainer.build_models(FaultWorker, import_worker("megatron", "critic"), import_worker("megatron", "ref"))
         batch = get_test_training_batch(batch_size=4)
+        batch.metadata["global_step"] = trainer.global_step
         ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
         trainer.global_step = 1
         trainer.save_checkpoints()
@@ -106,6 +107,7 @@ def test_megatron_failed_save_preserves_latest_and_retry_commits(ray_init_fixtur
         assert previous_pointer == b"1"
         assert resolve_checkpoint_payload(step_one, verify_files=True)
 
+        batch.metadata["global_step"] = trainer.global_step
         ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
         trainer.global_step = 2
         armed = ray.get(trainer.policy_model.async_run_ray_method("pass_through", "fail_after_next_distributed_save"))
@@ -166,6 +168,7 @@ def test_megatron_fresh_process_resumes_retry_and_saves_next_step(ray_init_fixtu
         assert evidence["failed_attempt"] not in loaded_payload
 
         batch = get_test_training_batch(batch_size=4)
+        batch.metadata["global_step"] = loaded_step
         ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
         trainer.global_step = 3
         trainer.save_checkpoints()

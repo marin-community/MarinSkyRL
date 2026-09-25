@@ -151,6 +151,7 @@ def test_megatron_checkpoint_reference_records_uninterrupted_step(ray_init_fixtu
     try:
         trainer.build_models(*_model_workers())
         batch = get_test_training_batch(batch_size=WORLD_SIZE)
+        batch.metadata["global_step"] = trainer.global_step
         batch_path = local / "fixed-batch.pt"
         torch.save(batch, batch_path)
         ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
@@ -168,6 +169,7 @@ def test_megatron_checkpoint_reference_records_uninterrupted_step(ray_init_fixtu
         assert all(parameters > 0 and optimizer_tensors > 0 for _, parameters, optimizer_tensors in pre)
 
         replay_batch = torch.load(batch_path, map_location="cpu", weights_only=False)
+        replay_batch.metadata["global_step"] = trainer.global_step
         ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", replay_batch))
         changed = _rank_results(trainer, "parity_model_changed_since", str(local / "pre-step"))
         assert any(count > 0 for _, count in changed), "The reference optimizer step did not change model weights"
@@ -207,6 +209,7 @@ def test_megatron_checkpoint_fresh_actors_match_next_step(ray_init_fixture):
         assert loaded_step == manifest["source_step"]
         assert manifest["replay_step"] == loaded_step + 1
         assert loaded_path == resolve_checkpoint_payload(checkpoint, verify_files=True)
+        batch.metadata["global_step"] = loaded_step
         pre = _rank_results(trainer, "parity_compare_snapshot", str(local / "pre-step"))
         assert all(parameters > 0 and optimizer_tensors > 0 for _, parameters, optimizer_tensors in pre)
 
