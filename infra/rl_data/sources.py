@@ -120,6 +120,9 @@ NEMOTRON_ULTRA_RLVR2_AGENTS = NEMOTRON_ULTRA_RLVR1_AGENTS | {
     "structured_outputs_v3_simple_agent",
 }
 NEMOTRON_ULTRA_SWE_AGENT = "swe_pivot_single_step_tool_use_with_argument_comparison_agent"
+# The MOPD blend adds one generator whose verifier has not been ported; rows using it are
+# accepted by the source and rejected by the environment, so subsets must exclude it.
+NEMOTRON_ULTRA_MOPD_AGENTS = NEMOTRON_ULTRA_RLVR2_AGENTS | {"indirect_prompt_injection_simple_agent"}
 _NEMOTRON_PLACEHOLDER_KEY = "_hf_question_placeholder"
 _NEMOTRON_DAPO_PREFIX = (
     "Solve the following math problem step by step. The last line of your response "
@@ -1100,6 +1103,10 @@ def nemotron_ultra_rlvr2_source() -> Source:
     return _nemotron_ultra_source(name="nemotron_ultra_rlvr2", agents=NEMOTRON_ULTRA_RLVR2_AGENTS, blend="rlvr2")
 
 
+def nemotron_ultra_mopd_source() -> Source:
+    return _nemotron_ultra_source(name="nemotron_ultra_mopd", agents=NEMOTRON_ULTRA_MOPD_AGENTS, blend="mopd")
+
+
 def generate_reasoning_gym_rows(*, tasks: tuple[str, ...], rows_per_task: int, seed: int, start_index: int = 0):
     """Generate a deterministic, index-disjoint slice for each Reasoning Gym task."""
     if not tasks:
@@ -1349,6 +1356,7 @@ SOURCES = {
         gretel_text_to_sql_source(),
         nemotron_ultra_rlvr1_source(),
         nemotron_ultra_rlvr2_source(),
+        nemotron_ultra_mopd_source(),
     )
 }
 
