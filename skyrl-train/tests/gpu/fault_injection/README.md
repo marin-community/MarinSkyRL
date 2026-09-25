@@ -69,7 +69,7 @@ claiming success.
 `skyrl_train.entrypoints.checkpoint_snowball_parity` is a registered, opt-in Iris RL entrypoint named
 `checkpoint_parity`. It runs on four H100x8 policy nodes with the measured Snowball TP1/PP2/CP1/EP8 Megatron geometry and
 `dp_reshardable` optimizer checkpoint. It starts no rollout engine, critic, or reference model. It uses one
-deterministic 32-example, 128-token training batch, so this is a numerical recovery test, **not** the
+deterministic 32-prompt × 4-sample (128-sequence), 128-token training batch, so this is a numerical recovery test, **not** the
 matched 512-example Snowball save-performance workload.
 
 Use the same pinned Snowball model source and trainer YAML in two fresh task-runtime processes. Start from

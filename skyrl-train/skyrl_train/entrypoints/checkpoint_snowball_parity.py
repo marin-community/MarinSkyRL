@@ -32,6 +32,8 @@ from skyrl_train.workers.megatron.megatron_worker import CriticWorker, MegatronP
 
 
 WORLD_SIZE = 32
+SAMPLES_PER_PROMPT = 4
+OPTIMIZATION_BATCH_SIZE = WORLD_SIZE * SAMPLES_PER_PROMPT
 SEQUENCE_LENGTH = 128
 RESPONSE_LENGTH = 16
 EXPECTED_GEOMETRY = (1, 2, 1, 8)
@@ -117,6 +119,8 @@ def _prepare_config(cfg: DictConfig, root: str) -> tuple[DictConfig, str]:
         raise ValueError("Snowball parity starts policy workers only; critic and reference must be disabled")
     cfg.trainer.train_batch_size = WORLD_SIZE
     cfg.trainer.policy_mini_batch_size = WORLD_SIZE
+    if cfg.generator.n_samples_per_prompt != SAMPLES_PER_PROMPT:
+        raise ValueError(f"Snowball parity requires {SAMPLES_PER_PROMPT} samples per prompt")
     OmegaConf.update(cfg, "trainer.algorithm.max_seq_len", SEQUENCE_LENGTH, force_add=True)
     cfg.trainer.ckpt_path = f"{root}/checkpoints"
     cfg.trainer.export_path = f"{root}/exports"
@@ -144,8 +148,8 @@ def _prepare_config(cfg: DictConfig, root: str) -> tuple[DictConfig, str]:
 
 def _batch() -> TrainingInputBatch:
     positions = torch.arange(SEQUENCE_LENGTH, dtype=torch.long)
-    sequences = (positions[None, :] + torch.arange(WORLD_SIZE)[:, None]) % 1000 + 100
-    action_shape = (WORLD_SIZE, RESPONSE_LENGTH)
+    sequences = (positions[None, :] + torch.arange(OPTIMIZATION_BATCH_SIZE)[:, None]) % 1000 + 100
+    action_shape = (OPTIMIZATION_BATCH_SIZE, RESPONSE_LENGTH)
     batch = TrainingInputBatch(
         {
             "sequences": sequences,
