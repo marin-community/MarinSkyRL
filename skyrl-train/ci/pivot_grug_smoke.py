@@ -121,6 +121,10 @@ def main() -> None:
             print(OmegaConf.to_yaml(resolved))
             return
 
+        for output in (args.output_root, args.temporary_root):
+            if StoragePath(output).exists():
+                raise FileExistsError(f"Smoke output already exists; choose a fresh run: {output}")
+
         sample_dir = workdir / "data"
         manifest = prepare_smoke_sample(
             sample_dir,
@@ -148,13 +152,19 @@ def main() -> None:
             f"{args.output_root}/diagnostics",
             f"{args.temporary_root}/attempts/trajectories",
             manifest,
-            final_step=2,
+            final_step=int(resolved.skyrl.trainer.max_steps),
             training_completed=True,
         )
         logger.info("Smoke report: {}", json.dumps(summary, sort_keys=True))
-        if summary["training_response_count"] != 2048 or summary["mixed_reward_groups"] == 0:
-            raise RuntimeError("Smoke did not retain 2048 responses with mixed-reward groups")
-        if (summary["before_probe_count"], summary["after_probe_count"]) != (128, 128):
+        final_step = int(resolved.skyrl.trainer.max_steps)
+        responses_per_step = int(resolved.skyrl.trainer.train_batch_size) * int(
+            resolved.skyrl.generator.n_samples_per_prompt
+        )
+        expected_counts = {step: responses_per_step for step in range(1, final_step + 1)}
+        if summary["training_responses_per_step"] != expected_counts or summary["mixed_reward_groups"] == 0:
+            raise RuntimeError("Smoke did not retain every training response with mixed-reward groups")
+        expected_probes = manifest["probe_prefixes"]
+        if (summary["before_probe_count"], summary["after_probe_count"]) != (expected_probes, expected_probes):
             raise RuntimeError("Smoke did not retain all held-out probes before and after training")
 
 

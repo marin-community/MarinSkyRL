@@ -8,9 +8,10 @@ data:
   shuffle: false
 
 trainer:
-  strategy: fsdp2
+  strategy: megatron
   seed: 17
-  flash_attn: true
+  flash_attn: false
+  gradient_checkpointing: true
   use_sample_packing: false
   max_prompt_length: 15872
   epochs: 1
@@ -34,9 +35,13 @@ trainer:
     optimizer_config:
       lr: 2.0e-6
       weight_decay: 0.0
-    fsdp_config:
-      cpu_offload: false
-      reshard_after_forward: true
+    megatron_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 1
+      expert_tensor_parallel_size: 1
+      optimizer_checkpoint_sharding_type: dp_reshardable
   placement:
     colocate_all: true
     policy_num_nodes: 1
