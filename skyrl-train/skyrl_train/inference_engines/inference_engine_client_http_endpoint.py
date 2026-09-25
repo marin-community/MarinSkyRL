@@ -37,7 +37,9 @@ logger = logging.getLogger(__name__)
 _ResponseT = TypeVar("_ResponseT")
 TOKENIZE_ENDPOINT = "/tokenize"
 MODELS_ENDPOINT = "/v1/models"
-_INFERENCE_ENDPOINTS = frozenset({TOKENIZE_ENDPOINT, "/v1/chat/completions", "/v1/completions"})
+CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions"
+COMPLETIONS_ENDPOINT = "/v1/completions"
+_INFERENCE_ENDPOINTS = frozenset({TOKENIZE_ENDPOINT, CHAT_COMPLETIONS_ENDPOINT, COMPLETIONS_ENDPOINT})
 _SERVER_CREATED_TIME = int(time.time())
 
 
@@ -542,7 +544,7 @@ def create_app(
     )
     app.add_middleware(_RequestOutcomeMiddleware, bridge_stats=bridge_stats)
 
-    @app.post("/v1/chat/completions")
+    @app.post(CHAT_COMPLETIONS_ENDPOINT)
     async def chat_completion(raw_request: Request):
         """
         Takes in OpenAI's `ChatCompletionRequest` and returns OpenAI's `ChatCompletionResponse`.
@@ -568,7 +570,7 @@ def create_app(
             continuation_manager=continuation_manager,
         )
 
-    @app.post("/v1/completions")
+    @app.post(COMPLETIONS_ENDPOINT)
     async def completions(raw_request: Request):
         """
         Takes in OpenAI's `CompletionRequest` and returns OpenAI's `CompletionResponse`.

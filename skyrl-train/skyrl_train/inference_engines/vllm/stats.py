@@ -10,11 +10,12 @@ from enum import StrEnum
 from typing import Any
 
 
+HTTP_BRIDGE_OUTCOME_METRIC = "request_outcome"
 HTTP_BRIDGE_HISTOGRAM_BOUNDS = {
     "event_loop_lag_seconds": (0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0),
     "response_bytes": (1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576),
     "json_serialization_seconds": (0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1),
-    "request_outcome": (1.0,),
+    HTTP_BRIDGE_OUTCOME_METRIC: (),  # The exported _count is the outcome counter.
 }
 HTTP_BRIDGE_METRIC_NAMES = ("event_loop_lag_seconds", "response_bytes", "json_serialization_seconds")
 VLLM_NUM_ENGINES_METRIC = "vllm/num_engines"
@@ -188,7 +189,8 @@ class HTTPBridgeStatsAccumulator:
         labels = (("endpoint", endpoint), ("reason", reason))
         with self._lock:
             histogram = self._histograms.setdefault(
-                ("request_outcome", labels), HistogramAccumulator(HTTP_BRIDGE_HISTOGRAM_BOUNDS["request_outcome"])
+                (HTTP_BRIDGE_OUTCOME_METRIC, labels),
+                HistogramAccumulator(HTTP_BRIDGE_HISTOGRAM_BOUNDS[HTTP_BRIDGE_OUTCOME_METRIC]),
             )
             histogram.observe(1.0)
 
@@ -198,7 +200,7 @@ class HTTPBridgeStatsAccumulator:
             histograms = tuple(
                 histogram.snapshot(
                     name,
-                    "By" if name == "response_bytes" else "count" if name == "request_outcome" else "s",
+                    "By" if name == "response_bytes" else "count" if name == HTTP_BRIDGE_OUTCOME_METRIC else "s",
                     dict(labels),
                 )
                 for (name, labels), histogram in self._histograms.items()
