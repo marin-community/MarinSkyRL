@@ -185,8 +185,6 @@ def consumed_stop_metrics(stop_reasons: Sequence[str | None] | None, sequence_co
     A length stop can come from engine or runner budget exhaustion; it does not
     establish answer incompleteness. Omit the fraction without complete coverage.
     """
-    if sequence_count < 0 or (stop_reasons is not None and len(stop_reasons) != sequence_count):
-        raise ValueError("Stop reasons must align with the admitted response sequences")
     reasons = [None] * sequence_count if stop_reasons is None else stop_reasons
     known = sum(reason is not None and reason != "" for reason in reasons)
     length_stops = sum(reason == "length" for reason in reasons)

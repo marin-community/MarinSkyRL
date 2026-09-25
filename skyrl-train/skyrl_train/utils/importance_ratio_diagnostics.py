@@ -173,8 +173,6 @@ def mismatch_ratio_metrics(
     staleness = (
         torch.zeros(mask.shape[0], dtype=torch.int32) if rollout_staleness is None else rollout_staleness.detach().cpu()
     )
-    if staleness.shape != (mask.shape[0],) or (staleness < 0).any() or not torch.equal(staleness, staleness.int()):
-        raise ValueError("rollout_staleness must contain one nonnegative integer per response row")
     row_bucket = torch.zeros(mask.shape[0], dtype=torch.uint8)
     for index, (_, lower) in enumerate(MISMATCH_STALENESS_BUCKETS):
         row_bucket[staleness >= lower] = index

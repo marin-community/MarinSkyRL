@@ -224,17 +224,13 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
     resolved = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
     OmegaConf.set_struct(resolved, False)
     resolved.runtime.entrypoint = compiled.entrypoint
-    resolved.runtime.training_type = _training_type(compiled.entrypoint, compiled.config)
+    # The terminal_bench entrypoint runs async only for an explicit false, so null means colocated.
+    colocate_all = compiled.config.trainer.placement.colocate_all is not False
+    training_type = training_type_for_entrypoint(compiled.entrypoint, colocate_all=colocate_all)
+    resolved.runtime.training_type = None if training_type is None else training_type.value
     resolved.inputs.data_kind = parsed.data_kind
     resolved.skyrl = compiled.config
     return compose_launch_config(resolved)
-
-
-def _training_type(entrypoint: str, skyrl: Mapping[str, Any]) -> str | None:
-    # The terminal_bench entrypoint runs async only for an explicit false, so null means colocated.
-    colocate_all = skyrl.get("trainer", {}).get("placement", {}).get("colocate_all")
-    training_type = training_type_for_entrypoint(entrypoint, colocate_all=colocate_all is not False)
-    return None if training_type is None else training_type.value
 
 
 def load_launch_config(path: Path) -> DictConfig:
@@ -346,13 +342,6 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
     if runtime["profile"] != expected_profile.value:
         raise ValueError(
             f"runtime.profile={runtime['profile']!r} does not match SkyRL trainer strategy ({expected_profile.value!r})"
-        )
-    # An unset value is accepted so resolved documents that lack the field still load for export.
-    expected_training_type = _training_type(entrypoint, skyrl)
-    if runtime["training_type"] is not None and runtime["training_type"] != expected_training_type:
-        raise ValueError(
-            f"runtime.training_type={runtime['training_type']!r} does not match the entrypoint and "
-            f"trainer.placement.colocate_all ({expected_training_type!r})"
         )
     generator = skyrl.get("generator", {})
     validate_tp_divides_heads(

@@ -34,10 +34,7 @@ RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
 
 
 class RLEntrypoint(StrEnum):
-    """Execution modes supported by Iris RL configurations.
-
-    It answers which module a recipe launches; TrainingType answers which trainer that module runs.
-    """
+    """Execution modes supported by Iris RL configurations."""
 
     FULLY_ASYNC = "fully_async"
     GENERATE = "generate"

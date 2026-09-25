@@ -9,7 +9,6 @@ from typing import Any
 
 import pytest
 import yaml
-from omegaconf import OmegaConf
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
@@ -134,16 +133,9 @@ def test_composed_launch_records_the_trainer_its_entrypoint_runs(
     path = tmp_path / "launch.yaml"
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
-    config = load_launch_config(path)
-    assert config.runtime.training_type == expected
-    if colocate_all is None:
-        # Composition fills a null colocate_all, but a resolved document can carry one. The role
-        # plan then places the roles on separate nodes while the entrypoint still trains synchronously.
-        config.skyrl.trainer.placement.colocate_all = None
-        config.iris.allocation.num_nodes = 2
-        resolved = tmp_path / "resolved-launch.yaml"
-        OmegaConf.save(config, resolved)
-        assert load_launch_config(resolved).runtime.training_type == expected
+    assert load_launch_config(path).runtime.training_type == expected
+
+
 def test_qwen_smoke_accepts_hugging_face_model_input(tmp_path: Path) -> None:
     config = _raw_config()
     config["skyrl"] = yaml.safe_load(

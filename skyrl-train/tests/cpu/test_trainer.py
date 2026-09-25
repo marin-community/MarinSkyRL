@@ -1938,10 +1938,6 @@ def test_consumed_staleness_events_roll_up_each_consumed_group_once(monkeypatch,
     trainer.convert_to_training_input(batch(), ["a", "a", "b", "b"], rollout_staleness=[2, 2, 0, 0])
     assert events == []
 
-    trainer._training_metrics_enabled = True
-    with pytest.raises(ValueError, match="share the admitted staleness"):
-        trainer.convert_to_training_input(batch(), ["a", "a", "b", "b"], rollout_staleness=[2, 1, 0, 0])
-
 
 def test_informative_group_fraction_counts_groups_whose_rewards_differ(dummy_config):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)

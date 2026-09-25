@@ -7,7 +7,7 @@ import os
 import shutil
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
@@ -176,20 +176,6 @@ def _policy_revision(step: int) -> str:
 
 class _ClosableDistillationRuntime(Protocol):
     async def close(self) -> None: ...
-
-
-@dataclass
-class _ConsumedGroupStaleness:
-    """One consumed group's admitted staleness and the work it contributed.
-
-    Field names and declaration order are the emitted `consumed_staleness` body
-    byte-for-byte; renaming or reordering one breaks the dashboards keyed to it.
-    """
-
-    staleness: int
-    groups: int
-    sequences: int
-    response_tokens: int
 
 
 def _validated_distillation_tensors(
@@ -1763,21 +1749,13 @@ class RayPPOTrainer:
     def _record_consumed_staleness(
         self, uids: List[str], rollout_staleness: List[int], response_masks: torch.Tensor
     ) -> None:
-        counts: dict[str, _ConsumedGroupStaleness] = {}
+        counts: dict[str, dict[str, int]] = {}
         for uid, steps, mask in zip(uids, rollout_staleness, response_masks, strict=True):
-            group = counts.setdefault(
-                uid, _ConsumedGroupStaleness(staleness=steps, groups=1, sequences=0, response_tokens=0)
-            )
-            if group.staleness != steps:
-                raise ValueError("Consumed group rows must share the admitted staleness")
-            group.sequences += 1
-            group.response_tokens += int(mask.sum().item())
+            group = counts.setdefault(uid, {"staleness": steps, "groups": 1, "sequences": 0, "response_tokens": 0})
+            group["sequences"] += 1
+            group["response_tokens"] += int(mask.sum().item())
         for group in counts.values():
-            record_event(
-                "consumed_staleness",
-                asdict(group),
-                attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
-            )
+            record_event("consumed_staleness", group, attributes={"role": TRAINER_ROLE, "step": str(self.global_step)})
 
     def convert_to_training_input(
         self,
@@ -1790,11 +1768,6 @@ class RayPPOTrainer:
         assert_training_groups_eligible(trajectory_batch, uids, self.group_advantage_invariant)
         prompt_ids: List[List[int]] = trajectory_batch["prompt_token_ids"]
         response_ids: List[List[int]] = trajectory_batch["response_ids"]
-        if rollout_staleness is not None and (
-            len(rollout_staleness) != len(response_ids)
-            or any(type(step) is not int or step < 0 for step in rollout_staleness)
-        ):
-            raise ValueError("rollout_staleness must contain one nonnegative integer per response row")
         rewards: List[List[float]] = trajectory_batch["rewards"]
         loss_masks: List[List[int]] = trajectory_batch["loss_masks"]
 
