@@ -70,7 +70,6 @@ class LearnerCudaMetrics:
 
     @contextmanager
     def span(self, phase: str, *, step: int | None) -> Iterator[None]:
-        """Sample memory around a phase; a span entered while another owns the device records nothing."""
         if not self.enabled:
             yield
             return

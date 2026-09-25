@@ -590,10 +590,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
                     with timing.span("megatron_optimizer_step"):
                         grad_norm = self.strategy.optimizer_step(
-                            self.optimizer,
-                            self.model,
-                            self.scheduler,
-                            name="actor",
+                            self.optimizer, self.model, self.scheduler, name="actor"
                         )
 
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
