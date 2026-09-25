@@ -49,6 +49,7 @@ class RunConfig:
     mode: str = RunMode.TRAIN.value
     submission: str = SubmissionMode.WAIT.value
     export_hf: bool = True
+    load_probe_paths: list[str] = field(default_factory=list)
 
 
 @dataclass

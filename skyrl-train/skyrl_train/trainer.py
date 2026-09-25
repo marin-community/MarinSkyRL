@@ -3407,7 +3407,14 @@ class RayPPOTrainer:
         if not io.exists(str(checkpoint_path)):
             raise FileNotFoundError(f"Checkpoint path not found: {checkpoint_path}")
 
-        checkpoint_path = resolve_checkpoint_payload(str(checkpoint_path), verify_files=True)
+        with checkpoint_phase(
+            str(self.cfg.trainer.strategy),
+            "resume",
+            "generation_resolve",
+            rank=-1,
+            step=extract_step_from_path(str(checkpoint_path)),
+        ):
+            checkpoint_path = resolve_checkpoint_payload(str(checkpoint_path), verify_files=True)
         logger.info(f"Loading checkpoint from: {checkpoint_path}")
 
         # Extract global step from checkpoint path
