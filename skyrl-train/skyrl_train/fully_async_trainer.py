@@ -469,7 +469,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.num_parallel_generation_workers = cfg.trainer.fully_async.num_parallel_generation_workers
         self.mini_batch_size = cfg.trainer.policy_mini_batch_size
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
-        self._async_telemetry_enabled = bool(cfg.trainer.get("async_spans", False))
+        self._async_telemetry_enabled: bool = cfg.trainer.async_spans
         self.group_admission_stall_timeout = cfg.trainer.algorithm.group_admission.stall_timeout
         self._group_selection_policy = GroupSelectionPolicy.for_fully_async(
             cfg.trainer.algorithm.dynamic_sampling.type,

@@ -50,7 +50,6 @@ from skyrl_train.training_batch import (
     TrainingOutputBatch,
     gradient_accumulation_steps,
 )
-from skyrl_train.telemetry import WORKER_ROLE
 from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
 from skyrl_train.workers.worker import (
@@ -512,27 +511,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ),
         )
 
-    def _ppo_train_impl(self, train_data) -> "TrainingOutputBatch":
+    def _ppo_train_impl(self, train_data, timing: PhaseBreakdown) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
-        timing = PhaseBreakdown("ppo_train", enabled=self.cfg.trainer.policy_train_spans)
-        outcome = "failure"
-        try:
-            output = self._ppo_train_with_timings(train_data, timing)
-            outcome = "success"
-            return output
-        finally:
-            timing.publish(
-                clock_domain="cpu_dispatch_wall",
-                attributes={
-                    "backend": "megatron",
-                    "outcome": outcome,
-                    "rank": str(torch.distributed.get_rank()),
-                    "role": WORKER_ROLE,
-                    "step": str(train_data.metadata["global_step"]),
-                },
-            )
-
-    def _ppo_train_with_timings(self, train_data, timing: PhaseBreakdown) -> "TrainingOutputBatch":
         self._drain_r3_decentral_stagger(train_data)
         if self.model.router_replay is not None and (
             "rollout_routed_experts" not in train_data.keys() or train_data["rollout_routed_experts"] is None

@@ -154,8 +154,3 @@ class LearnerCudaMetrics:
                         scope.participants -= 1
                         if scope.participants == 0:
                             del _peak_scopes[device]
-
-
-# A disabled recorder does nothing and holds no per-worker state, so one shared
-# instance serves as the class-level default for workers built without a config.
-INERT_LEARNER_CUDA_METRICS = LearnerCudaMetrics(enabled=False, rank=0)

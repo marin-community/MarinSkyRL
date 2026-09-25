@@ -226,8 +226,6 @@ def consumed_work(training_input: TrainingInputBatch) -> ConsumedWork:
 
 
 class RayPPOTrainer:
-    # Off unless the config enables it. The class default gives a trainer built without a
-    # config the attribute.
     _training_metrics_enabled: bool = False
 
     def __init__(
@@ -243,7 +241,7 @@ class RayPPOTrainer:
         callbacks: Optional[List[TrainerCallback]] = None,
     ):
         self.cfg = cfg
-        self._training_metrics_enabled = bool(cfg.trainer.get("training_metrics", False))
+        self._training_metrics_enabled: bool = cfg.trainer.training_metrics
         self.group_advantage_invariant = GroupAdvantageInvariant.from_config(
             cfg.trainer.algorithm.resolved_group_advantage
         )
@@ -1983,9 +1981,7 @@ class RayPPOTrainer:
             self.global_step,
             len(input_batch["prompts"]),
         )
-        with observe_rollout_call(
-            step=self.global_step, mode="sync", enabled=self.cfg.trainer.get("generate_spans", False)
-        ):
+        with observe_rollout_call(step=self.global_step, mode="sync", enabled=self.cfg.trainer.generate_spans):
             trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch)
         # add rollout metrics to self.all_metrics
         if trajectory_batch["rollout_metrics"] is not None:

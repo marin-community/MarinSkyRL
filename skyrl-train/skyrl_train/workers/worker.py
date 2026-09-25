@@ -43,7 +43,8 @@ from skyrl_train.utils.policy_math import ppo_critic_loss
 from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
 )
-from skyrl_train.learner_memory import INERT_LEARNER_CUDA_METRICS, LearnerCudaMetrics
+from skyrl_train.learner_memory import LearnerCudaMetrics
+from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.telemetry import WORKER_ROLE, ProcessTelemetry, TelemetryConfig
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
 from skyrl_train.distillation import student_topk_logprobs
@@ -840,13 +841,6 @@ class PPORayActorGroup:
 
 
 class PolicyWorkerBase(Worker):
-    # Defaults on the class, so a worker constructed without a config still answers
-    # these: telemetry is off and the memory recorder is inert until __init__ replaces it.
-    _memory: LearnerCudaMetrics = INERT_LEARNER_CUDA_METRICS
-    # A class default only: a restored worker has no weight-sync version until an update
-    # with explicit metadata completes on it.
-    _model_version_step: int | None = None
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: nn.Module = None
@@ -857,10 +851,9 @@ class PolicyWorkerBase(Worker):
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
         self._grug_query_bias_window: GrugQueryBiasWindow | None = None
-        self._memory = LearnerCudaMetrics(
-            enabled=bool(self.cfg.trainer.get("policy_train_spans", False)),
-            rank=self._rank,
-        )
+        self._policy_train_spans: bool = self.cfg.trainer.policy_train_spans
+        self._memory = LearnerCudaMetrics(enabled=self._policy_train_spans, rank=self._rank)
+        self._model_version_step: int | None = None
 
     async def _begin_vllm_layerwise_weight_reload(self, inference_engine_client, *, enabled: bool) -> None:
         """Open a rank-synchronized vLLM reload around a streamed weight update."""
@@ -925,20 +918,32 @@ class PolicyWorkerBase(Worker):
             torch.distributed.barrier()
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
-        # The implementation's co-arrival barrier runs before it reads the step, and a batch
-        # may reach it with no metadata; the span then records no step.
-        step = (train_data.metadata or {}).get("global_step")
+        step = int(train_data.metadata["global_step"])
         with self._memory.span("ppo_train", step=step):
-            output = self._ppo_train_impl(train_data)
-        if step is not None:
-            self._model_version_step = int(step)
+            timing = PhaseBreakdown("ppo_train", enabled=self._policy_train_spans)
+            outcome = "failure"
+            try:
+                output = self._ppo_train_impl(train_data, timing)
+                outcome = "success"
+            finally:
+                timing.publish(
+                    clock_domain="cpu_dispatch_wall",
+                    attributes={
+                        "backend": "megatron",
+                        "outcome": outcome,
+                        "rank": str(self._rank),
+                        "role": WORKER_ROLE,
+                        "step": str(step),
+                    },
+                )
+        self._model_version_step = step
         return output
 
     async def broadcast_to_inference_engines(self, inference_engine_client):
         with self._memory.span("broadcast_to_inference_engines", step=self._model_version_step):
             return await self._broadcast_to_inference_engines(inference_engine_client)
 
-    def _ppo_train_impl(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
+    def _ppo_train_impl(self, train_data: TrainingInputBatch, timing: PhaseBreakdown) -> TrainingOutputBatch:
         self._drain_r3_decentral_stagger(train_data)
 
         global_step = train_data.metadata["global_step"]

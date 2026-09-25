@@ -1468,6 +1468,7 @@ def test_normalize_mini_batch_size():
             {
                 "trainer": {
                     "progress": _TEST_PROGRESS_CONFIG,
+                    "policy_train_spans": False,
                     "train_batch_size": train_batch_size,
                     "policy_mini_batch_size": policy_mini_batch_size,
                     "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
@@ -1505,6 +1506,7 @@ def test_normalize_mini_batch_size():
             {
                 "trainer": {
                     "progress": _TEST_PROGRESS_CONFIG,
+                    "policy_train_spans": False,
                     "train_batch_size": train_batch_size,
                     "critic_mini_batch_size": critic_mini_batch_size,
                     "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
@@ -1685,6 +1687,7 @@ def test_ppo_train_batch_calculations():
         {
             "trainer": {
                 "progress": _TEST_PROGRESS_CONFIG,
+                "policy_train_spans": False,
                 "micro_train_batch_size_per_gpu": 2,
                 "update_epochs_per_batch": 1,
                 "policy": {
