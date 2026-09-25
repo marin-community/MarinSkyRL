@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import collections
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -43,7 +42,7 @@ def _bare_trainer(
     """Create a trainer shell with just enough state for stall-detection tests."""
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.mini_batch_size = mini_batch_size
-    trainer.trajectory_runner = SimpleNamespace(retain_buffered=AsyncMock())
+    trainer.trajectory_runner = SimpleNamespace()
     trainer._step_time_history = collections.deque(step_times or [], maxlen=5)
     trainer.group_admission_stall_timeout = admission_stall_timeout
     trainer._active_trajectory_tasks = tasks or []

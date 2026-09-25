@@ -23,7 +23,8 @@ from skyrl_train.trajectory_runners.base import (
 )
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec, ProcessPoolResources
 from skyrl_train.trajectory_runners.trajectory_processing import combine_trajectory_batches_in_request_order
-from skyrl_train.rollout_buffer import RolloutRequest
+from skyrl_train.rollout_buffer import Rollout, RolloutRequest, RolloutWriter
+from skyrl_train.rollout_worker import LocalRolloutWorker
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
 from skyrl_train.tokenizer import create_tokenizer
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
@@ -216,13 +217,14 @@ class RolloutCoordinator:
 
         return await self._runner.run(sub_batch)
 
-    async def run_shard_to_buffer(
+    async def produce(
         self,
         request: RolloutRequest,
-        writer,
+        writer: RolloutWriter,
     ):
         self._runner.global_step_fn = lambda: request.model_step
-        return await self._runner.run_to_buffer(request, writer)
+        receipts = await LocalRolloutWorker(self._runner, writer).produce(request)
+        return receipts[0]
 
     # ---- Eval session passthrough (single-coordinator delegation) ----
     async def start_eval_session(
@@ -256,8 +258,6 @@ class RolloutDispatcher:
     by the trainer; we forward its current value into each ``run_shard`` so the
     actor's staleness hint is accurate.
     """
-
-    remote_writes = True
 
     def __init__(
         self,
@@ -418,47 +418,9 @@ class RolloutDispatcher:
             await retain_trajectories(self._trajectory_sink, input_batch, result)
         return result
 
-    async def run_to_buffer(
-        self,
-        request: RolloutRequest,
-        writer,
-        disable_tqdm: bool = False,
-    ):
-        """Route reward groups to producers; return receipts, never trajectory payloads."""
-        del disable_tqdm
-        input_batch = request.trajectory_request
-        trajectory_ids = input_batch.get("trajectory_ids")
-        if not trajectory_ids or len(trajectory_ids) != len(input_batch["prompts"]):
-            raise ValueError("buffered Harbor execution requires one trajectory ID per request row")
-        if len(request.uids) != len(trajectory_ids):
-            raise ValueError("buffered Harbor execution requires one UID per request row")
-        groups: dict[str, list[int]] = defaultdict(list)
-        for index, trajectory_id in enumerate(trajectory_ids):
-            groups[trajectory_id.instance_id].append(index)
-        prompt_by_uid = {prompt["uid"]: prompt for prompt in request.source_prompts}
-        jobs = []
-        for indices in groups.values():
-            sub_batch = self._select_request_rows(input_batch, indices)
-            group_uids = [request.uids[index] for index in indices]
-            group_prompts = [prompt_by_uid[uid] for uid in dict.fromkeys(group_uids)]
-            shard_request = RolloutRequest(sub_batch, group_prompts, group_uids, request.model_step, request.kind)
-            jobs.append(self._run_group_to_buffer(shard_request, writer))
-        return await asyncio.gather(*jobs)
-
-    async def retain_buffered(self, rollout) -> None:
-        if self._trajectory_sink is not None:
-            if rollout.request_batch is None:
-                raise ValueError("buffered Harbor rollout omitted its request batch")
-            await retain_trajectories(self._trajectory_sink, rollout.request_batch, rollout.trajectory_batch)
-
     async def _run_group(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
         step = self._current_global_step()
         return await self._dispatch_group(input_batch, lambda actor: actor.run_shard.remote(input_batch, step))
-
-    async def _run_group_to_buffer(self, request: RolloutRequest, writer):
-        return await self._dispatch_group(
-            request.trajectory_request, lambda actor: actor.run_shard_to_buffer.remote(request, writer)
-        )
 
     async def _dispatch_group(self, input_batch: TrajectoryRequestBatch, submit_rpc: Callable[[Any], Any]):
         metadata = input_batch.get("batch_metadata")
@@ -598,3 +560,42 @@ class RolloutDispatcher:
             async with self._routing_condition:
                 self._eval_session_active = False
                 self._routing_condition.notify_all()
+
+
+class HarborRolloutWorker:
+    """Dispatch training groups to Harbor worker processes that own their writes."""
+
+    def __init__(self, dispatcher: RolloutDispatcher, writer: RolloutWriter):
+        self.dispatcher = dispatcher
+        self.writer = writer
+
+    async def produce(self, request: RolloutRequest, disable_tqdm: bool = False):
+        input_batch = request.trajectory_request
+        trajectory_ids = input_batch.get("trajectory_ids")
+        if not trajectory_ids or len(trajectory_ids) != len(input_batch["prompts"]):
+            raise ValueError("buffered Harbor execution requires one trajectory ID per request row")
+        if len(request.uids) != len(trajectory_ids):
+            raise ValueError("buffered Harbor execution requires one UID per request row")
+
+        groups: dict[str, list[int]] = defaultdict(list)
+        for index, trajectory_id in enumerate(trajectory_ids):
+            groups[trajectory_id.instance_id].append(index)
+        prompt_by_uid = {prompt["uid"]: prompt for prompt in request.source_prompts}
+        jobs = []
+        for indices in groups.values():
+            sub_batch = self.dispatcher._select_request_rows(input_batch, indices)
+            group_uids = [request.uids[index] for index in indices]
+            group_prompts = [prompt_by_uid[uid] for uid in dict.fromkeys(group_uids)]
+            shard_request = RolloutRequest(sub_batch, group_prompts, group_uids, request.model_step, request.kind)
+            jobs.append(
+                self.dispatcher._dispatch_group(
+                    sub_batch, lambda actor, task=shard_request: actor.produce.remote(task, self.writer)
+                )
+            )
+        return await asyncio.gather(*jobs)
+
+    async def retain(self, rollout: Rollout) -> None:
+        if self.dispatcher._trajectory_sink is not None:
+            if rollout.request_batch is None:
+                raise ValueError("buffered Harbor rollout omitted its request batch")
+            await retain_trajectories(self.dispatcher._trajectory_sink, rollout.request_batch, rollout.trajectory_batch)

@@ -14,7 +14,6 @@ High-level notes:
 import asyncio
 import collections
 import os
-import sys
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
@@ -26,13 +25,8 @@ from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader
 from skyrl_train.utils.logging_utils import log_exception_as_text
-from skyrl_train.trajectory_runners.trajectory_processing import (
-    prepare_trajectory_request,
-    concatenate_trajectory_batches,
-    get_outcome_rewards,
-)
+from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches, get_outcome_rewards
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import NormalizedReward
-from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from dataclasses import dataclass, field
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpointCallback
@@ -42,12 +36,17 @@ from skyrl_train.telemetry import (
     critical_phase,
     record_generated_work,
     record_policy_step,
-    record_rollout_buffer,
     record_rollout_staleness,
 )
 from skyrl_train.timing_observability import publish_step_timings
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
-from skyrl_train.rollout_buffer import RolloutBuffer, RolloutReceipt, RolloutRequest, RolloutSlot
+from skyrl_train.rollout_buffer import RolloutBuffer
+from skyrl_train.rollout_worker import (
+    AsyncRolloutTaskSource,
+    AsyncRolloutWorkerPool,
+    GenerationStalledError,
+    bind_rollout_worker,
+)
 from skyrl_train.io import io
 from skyrl_train.dynamic_sampling import (
     DynamicSamplingType,
@@ -71,10 +70,6 @@ from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_lo
 
 
 _QueueItem = TypeVar("_QueueItem")
-
-
-class GenerationStalledError(RuntimeError):
-    """Raised when generation cannot make progress (no active producers, or dataset exhausted)."""
 
 
 def _drain_queue(queue: asyncio.Queue[_QueueItem]) -> List[_QueueItem]:
@@ -782,10 +777,20 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             # Maintain self.num_parallel_generation_workers concurrent group-generation workers.
             # Stored on self so the finally block in train() can cancel them on abnormal exit.
-            self._active_trajectory_tasks = [
-                asyncio.create_task(self._run_generate_for_a_group_loop(generation_queues))
-                for _ in range(self.num_parallel_generation_workers)
-            ]
+            source = AsyncRolloutTaskSource(
+                self.async_train_dataloader,
+                generation_queues.retries,
+                samples_per_prompt=self.cfg.generator.n_samples_per_prompt,
+                backend=self.cfg.generator.backend,
+                sampling_params=self.cfg.generator.sampling_params,
+                environment_class=self.cfg.environment.env_class,
+                current_step=lambda: self.global_step,
+                stall_timeout=self._generation_stall_timeout,
+            )
+            worker = bind_rollout_worker(self.trajectory_runner, rollout_buffer, generation_queues.condition)
+            self._active_trajectory_tasks = AsyncRolloutWorkerPool(
+                worker, source, self.num_parallel_generation_workers, generation_queues.mark_producer_finished
+            ).start()
             trajectory_tasks = self._active_trajectory_tasks
 
             for _ in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
@@ -1095,86 +1100,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         return status
 
-    async def _run_generate_for_a_group_loop(self, queues: _GenerationQueues):
-        """Generate dataset rows or retries and write fresh groups to the rollout buffer."""
-        writer = (
-            queues.rollout_buffer.remote_writer()
-            if self.trajectory_runner.remote_writes
-            else queues.rollout_buffer.writer()
-        )
-        try:
-            while True:
-                rand_prompts = await self._next_generation_prompts(queues)
-                async with queues.rollout_buffer.request_slot() as slot:
-                    assert len(rand_prompts) == 1
-                    trajectory_request, uids = prepare_trajectory_request(
-                        rand_prompts,
-                        self.cfg.generator.n_samples_per_prompt,
-                        get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
-                        self.cfg.environment.env_class,
-                        "train",
-                        self.global_step,
-                    )
-                    assert all(uid == uids[0] for uid in uids), "Expect all uids to be the same"
-
-                    # Disable each runner's progress bar so concurrent workers do not flood the console.
-                    request = RolloutRequest(trajectory_request, rand_prompts, uids, self.global_step, "group")
-                    receipt = await self.trajectory_runner.run_to_buffer(request, writer, disable_tqdm=True)
-                    if isinstance(receipt, list):
-                        if len(receipt) != 1:
-                            raise ValueError("one async prompt must produce one buffered reward group")
-                        receipt = receipt[0]
-                    await self._publish_completed_receipt(queues, receipt, slot)
-                    record_rollout_buffer(queues.rollout_buffer.pending_count(), queues.rollout_buffer.capacity())
-        except asyncio.CancelledError:
-            return
-        except GenerationStalledError:
-            logger.info("Trajectory worker exiting: collection stalled (dataset exhausted, no retries)")
-            return
-        except Exception as e:
-            log_exception_as_text("Trajectory worker failed", e)
-            sys.exit(1)
-        finally:
-            await queues.mark_producer_finished()
-
-    async def _next_generation_prompts(
-        self,
-        queues: _GenerationQueues,
-    ) -> List[dict]:
-        """Prefer retries and wait for one after the epoch's dataset rows are scheduled.
-
-        Raises ``GenerationStalledError`` when the dataset is exhausted and no
-        retries arrive within the stall deadline, so the caller can end the
-        epoch instead of blocking forever.
-        """
-        try:
-            return queues.retries.get_nowait()
-        except asyncio.QueueEmpty:
-            prompts = await self.async_train_dataloader.get_next_non_consumed_data()
-            if prompts is not None:
-                return prompts
-
-        try:
-            return await asyncio.wait_for(
-                queues.retries.get(),
-                timeout=self._generation_stall_timeout(),
-            )
-        except asyncio.TimeoutError:
-            raise GenerationStalledError("Dataset exhausted and no retries arrived within the stall deadline")
-
-    async def _publish_completed_receipt(
-        self,
-        queues: _GenerationQueues,
-        receipt: RolloutReceipt,
-        slot: RolloutSlot[GeneratedOutputGroup],
-    ) -> None:
-        """Publish a producer's receipt; admission decides whether to use it."""
-        async with queues.condition:
-            while queues.rollout_buffer.full():
-                await queues.condition.wait()
-            await slot.publish(receipt)
-            queues.condition.notify_all()
-
     async def async_sync_policy_weights_to_inference_engines(self):
         # Pre-broadcast drain: hard-sync every policy shard rank's event loop BEFORE the
         # weight-extract gather that broadcast_to_inference_engines runs. extract_weights
@@ -1450,7 +1375,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 completed_groups = await queues.rollout_buffer.next_batch(self.mini_batch_size)
                 for group in completed_groups:
-                    await self.trajectory_runner.retain_buffered(group)
+                    await bind_rollout_worker(self.trajectory_runner, queues.rollout_buffer).retain(group)
                     batch = group.trajectory_batch
                     record_generated_work(batch["response_ids"], batch.get("is_last_step"), group.earliest_model_step)
                 partition = self._partition_completed_groups(

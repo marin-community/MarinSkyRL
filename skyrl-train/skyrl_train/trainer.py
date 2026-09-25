@@ -27,6 +27,7 @@ from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.rollout_buffer import RolloutBuffer, RolloutRequest, RolloutSlotPolicy, create_rollout_buffer
+from skyrl_train.rollout_worker import bind_rollout_worker
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.trajectory_selection import trajectory_selector_from_config
 from skyrl_train.trajectory_runners.base import (
@@ -583,18 +584,11 @@ class RayPPOTrainer:
         """Schedule producers and read their completed work through the buffer."""
         rollout_buffer = await self._open_rollout_buffer()
         request = RolloutRequest(trajectory_request, source_prompts, uids, self.global_step, "batch")
-        writer = rollout_buffer.remote_writer() if self.trajectory_runner.remote_writes else rollout_buffer.writer()
-        receipts = await self.trajectory_runner.run_to_buffer(
-            request,
-            writer,
-        )
-        if not isinstance(receipts, list):
-            receipts = [receipts]
-        for receipt in receipts:
-            rollout_buffer.publish(receipt)
-        restored = await rollout_buffer.next_batch(len(receipts))
+        worker = bind_rollout_worker(self.trajectory_runner, rollout_buffer)
+        completed = await worker.produce(request)
+        restored = await rollout_buffer.next_batch(completed)
         for item in restored:
-            await self.trajectory_runner.retain_buffered(item)
+            await worker.retain(item)
         batches = [item.trajectory_batch for item in restored]
         trajectory_batch = combine_trajectory_batches_in_request_order(
             batches,

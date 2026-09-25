@@ -11,26 +11,14 @@ from transformers import PreTrainedTokenizerBase
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryRequestBatch
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink
-from skyrl_train.rollout_buffer import Rollout, RolloutReceipt, RolloutRequest, RolloutWriter
 
 
 class HarborRunner(Protocol):
     """Lifecycle surface shared by in-process and process-isolated Harbor runners."""
 
-    remote_writes: bool
-
     async def startup(self) -> None: ...
 
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch: ...
-
-    async def run_to_buffer(
-        self,
-        request: RolloutRequest,
-        writer: RolloutWriter,
-        disable_tqdm: bool = False,
-    ) -> RolloutReceipt | list[RolloutReceipt]: ...
-
-    async def retain_buffered(self, rollout: Rollout) -> None: ...
 
     async def shutdown(self) -> None: ...
 

@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from skyrl_train.rollout_buffer import MemoryRolloutBuffer, RolloutRequest
+from skyrl_train.rollout_worker import bind_rollout_worker
 from skyrl_train.trajectory_runners.nemotron_ultra import NemotronUltraTrajectoryRouter, _task_index
 from skyrl_train.trajectory_runners.types import TrajectoryID
 
@@ -48,6 +50,41 @@ def _task(root: Path, name: str) -> None:
     directory = root / name
     directory.mkdir()
     (directory / "instruction.md").write_text("fix it")
+
+
+@pytest.mark.asyncio
+async def test_mixed_rollout_workers_commit_route_specific_records(tmp_path):
+    _task(tmp_path, "swe-1")
+    gym = StubRunner(1.0)
+    harbor = StubRunner(2.0)
+    router = NemotronUltraTrajectoryRouter(
+        gym_runner=gym,
+        harbor_runner=harbor,
+        terminal_bench_data=[str(tmp_path)],
+        require_rollout_logprobs=True,
+        tis_lcs_alert_threshold=0.005,
+    )
+    request = {
+        "prompts": ["math task", "swe task"],
+        "env_classes": ["nemotron_ultra", "nemotron_ultra"],
+        "env_extras": [
+            {"extra_info": {"nemotron_ultra": {"route": "gym"}}},
+            {"extra_info": {"nemotron_ultra": {"route": "terminal_bench", "terminal_bench_instance_id": "swe-1"}}},
+        ],
+        "trajectory_ids": [TrajectoryID("math", 0), TrajectoryID("swe", 0)],
+    }
+    buffer = MemoryRolloutBuffer()
+    worker = bind_rollout_worker(router, buffer)
+
+    completed = await worker.produce(
+        RolloutRequest(request, [{"uid": "math"}, {"uid": "swe"}], ["math", "swe"], 4, "batch")
+    )
+    records = await buffer.next_batch(completed)
+
+    assert [record.uids for record in records] == [["math"], ["swe"]]
+    assert [record.trajectory_batch["rewards"] for record in records] == [[1.0], [2.0]]
+    assert gym.requests[0]["prompts"] == ["math task"]
+    assert harbor.requests[0]["prompts"] == [str(tmp_path / "swe-1")]
 
 
 def test_task_index_uses_harbor_dataset_sequence_interface(tmp_path, monkeypatch):

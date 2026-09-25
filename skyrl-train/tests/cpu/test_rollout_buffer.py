@@ -10,9 +10,9 @@ from skyrl_train.async_rollout_state import GeneratedOutputGroup
 from skyrl_train.callbacks.builtin import BufferCheckpointCallback
 from skyrl_train.fully_async_trainer import _AsyncStalenessManager, _GenerationQueues
 from skyrl_train.rollout_buffer import FineStoreRolloutBuffer, MemoryRolloutBuffer, RolloutRequest
+from skyrl_train.rollout_worker import AsyncRolloutWorkerPool, GenerationStalledError, LocalRolloutWorker, RolloutWorker
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
-from skyrl_train.trajectory_runners.types import TrajectoryID
 
 
 def _group(uid: str) -> GeneratedOutputGroup:
@@ -75,9 +75,10 @@ def test_local_producer_writes_before_returning_receipt():
     async def exercise():
         buffer = MemoryRolloutBuffer()
         request = {"prompts": ["hello"], "env_extras": [{}]}
-        receipt = await Producer().run_to_buffer(
-            RolloutRequest(request, [{"uid": "local"}], ["local"], 3, "group"), buffer.writer()
+        receipts = await LocalRolloutWorker(Producer(), buffer.writer()).produce(
+            RolloutRequest(request, [{"uid": "local"}], ["local"], 3, "group")
         )
+        receipt = receipts[0]
         assert buffer.empty()
         buffer.publish(receipt)
         result = (await buffer.next_batch(1))[0]
@@ -91,6 +92,55 @@ def test_local_producer_writes_before_returning_receipt():
 def test_memory_backend_rejects_remote_writer():
     with pytest.raises(ValueError, match="remote producer"):
         MemoryRolloutBuffer().remote_writer()
+
+
+def test_continuous_workers_publish_fast_group_before_straggler_finishes():
+    async def exercise():
+        published = asyncio.Event()
+        release_slow = asyncio.Event()
+        slow_started = asyncio.Event()
+
+        class Buffer(MemoryRolloutBuffer):
+            def publish(self, receipt):
+                super().publish(receipt)
+                if receipt.uids == ("fast",):
+                    published.set()
+
+        buffer = Buffer()
+        requests = iter(RolloutRequest({}, [], [uid], 1, "group") for uid in ("slow", "fast"))
+
+        class Source:
+            async def next_request(self):
+                try:
+                    return next(requests)
+                except StopIteration as error:
+                    raise GenerationStalledError("source exhausted") from error
+
+        class Executor:
+            async def produce(self, request, disable_tqdm=False):
+                uid = request.uids[0]
+                if uid == "slow":
+                    slow_started.set()
+                    await release_slow.wait()
+                return [await buffer.writer().stage_rollout(_group(uid))]
+
+            async def retain(self, rollout):
+                pass
+
+        async def finished():
+            pass
+
+        pool = AsyncRolloutWorkerPool(RolloutWorker(Executor(), buffer), Source(), 2, finished)
+        tasks = pool.start()
+        async with asyncio.timeout(1):
+            await published.wait()
+        assert slow_started.is_set()
+        assert [group.uid for group in await buffer.next_batch(1)] == ["fast"]
+        release_slow.set()
+        await asyncio.gather(*tasks)
+        assert [group.uid for group in await buffer.next_batch(1)] == ["slow"]
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize("backend", ["memory", "finestore"])
@@ -200,18 +250,8 @@ def test_synchronous_trainer_uses_buffer_contract(tmp_path, backend):
         original = _group("example").trajectory_batch
 
         class Producer:
-            remote_writes = False
-
-            async def retain_buffered(self, _rollout):
-                pass
-
-            async def run_to_buffer(self, request, writer):
-                assert request.kind == "batch"
-                from skyrl_train.rollout_buffer import SynchronousRollout
-
-                return await writer.stage_rollout(
-                    SynchronousRollout(original, request.uids, request.source_prompts, request.model_step)
-                )
+            async def run(self, request, disable_tqdm=False):
+                return original
 
         trainer = RayPPOTrainer.__new__(RayPPOTrainer)
         trainer.cfg = SimpleNamespace(
@@ -233,68 +273,6 @@ def test_synchronous_trainer_uses_buffer_contract(tmp_path, backend):
             assert batch == original
             if backend == "finestore":
                 assert batch is not original
-        finally:
-            if trainer._rollout_buffer is not None:
-                trainer._rollout_buffer.close()
-
-    asyncio.run(exercise())
-
-
-def test_synchronous_trainer_restores_request_order_from_buffered_groups(tmp_path):
-    class Producer:
-        remote_writes = False
-
-        async def retain_buffered(self, _rollout):
-            pass
-
-        async def run_to_buffer(self, request, writer):
-            from skyrl_train.rollout_buffer import SynchronousRollout
-
-            assert request.kind == "batch"
-            receipts = []
-            for uid in ("a", "b"):
-                ids = [item for item in request.trajectory_request["trajectory_ids"] if item.instance_id == uid]
-                output = {
-                    "prompt_token_ids": [[1] for _ in ids],
-                    "response_ids": [[item.repetition_id + (100 if uid == "b" else 0)] for item in ids],
-                    "rewards": [1.0 for _ in ids],
-                    "loss_masks": [[1] for _ in ids],
-                    "rollout_logprobs": None,
-                    "rollout_metrics": {},
-                    "trajectory_ids": ids,
-                    "actual_global_step": 3 if uid == "a" else 4,
-                }
-                receipts.append(
-                    await writer.stage_rollout(
-                        SynchronousRollout(output, [uid] * len(ids), request.source_prompts, request.model_step)
-                    )
-                )
-            return receipts
-
-    async def exercise():
-        trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-        trainer.cfg = SimpleNamespace(
-            trainer=SimpleNamespace(
-                ckpt_path=str(tmp_path),
-                rollout_buffer=SimpleNamespace(backend="finestore"),
-                step_wise_training=False,
-                algorithm=SimpleNamespace(use_tis=False, policy_loss_type="grpo", tis_lcs_alert_threshold=0.5),
-            )
-        )
-        trainer.global_step = 7
-        trainer._rollout_buffer = None
-        trainer.all_metrics = {}
-        trainer.trajectory_runner = Producer()
-        ids = [TrajectoryID("a", 0), TrajectoryID("b", 0), TrajectoryID("a", 1), TrajectoryID("b", 1)]
-        try:
-            output = await trainer.generate_to_buffer(
-                {"prompts": ["a", "b", "a", "b"], "trajectory_ids": ids},
-                [item.instance_id for item in ids],
-                [{"uid": "a"}, {"uid": "b"}],
-            )
-            assert output["trajectory_ids"] == ids
-            assert output["response_ids"] == [[0], [100], [1], [101]]
-            assert output["actual_global_step"] == 3
         finally:
             if trainer._rollout_buffer is not None:
                 trainer._rollout_buffer.close()

@@ -13,6 +13,7 @@ from skyrl_train.trajectory_runners.harbor.execution import (
     build_harbor_trajectory_runner,
 )
 from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import (
+    HarborRolloutWorker,
     RolloutCoordinatorRPCTimeoutError,
     RolloutDispatcher,
 )
@@ -178,15 +179,15 @@ async def test_dispatcher_returns_only_buffer_receipts_for_training(tmp_path, ha
 
     actors = []
     for _ in range(2):
-        actors.append(SimpleNamespace(run_shard_to_buffer=_RemoteMethod(produce)))
+        actors.append(SimpleNamespace(produce=_RemoteMethod(produce)))
     dispatcher = _dispatcher(actors, harbor_runner_spec, timeout=30)
     ids = [TrajectoryID("a", 0), TrajectoryID("b", 0), TrajectoryID("a", 1), TrajectoryID("b", 1)]
     request = _request(ids, "train")
     prompts = [{"uid": "a"}, {"uid": "b"}]
     buffer = FineStoreRolloutBuffer(str(tmp_path / "rollouts"))
     try:
-        receipts = await dispatcher.run_to_buffer(
-            RolloutRequest(request, prompts, [id.instance_id for id in ids], 7, "batch"), buffer.remote_writer()
+        receipts = await HarborRolloutWorker(dispatcher, buffer.remote_writer()).produce(
+            RolloutRequest(request, prompts, [id.instance_id for id in ids], 7, "batch")
         )
         assert buffer.empty()
         for receipt in receipts:

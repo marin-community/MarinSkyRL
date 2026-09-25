@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from types import MappingProxyType
-from skyrl_train.async_rollout_state import GeneratedOutputGroup
-from skyrl_train.rollout_buffer import Rollout, RolloutReceipt, RolloutRequest, RolloutWriter, SynchronousRollout
 from skyrl_train.metric_names import (
     TIS_ALIGNED_TOKENS_METRIC,
     TIS_ALIGNMENT_ALERT_METRIC,
@@ -64,7 +62,6 @@ class TrajectoryRunner(ABC):
 
     trajectory_runner_cfg = MappingProxyType({})
     trajectory_sink: TrajectorySink | None = None
-    remote_writes = False
 
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """Acquire trajectories and apply runner-independent output finalization.
@@ -84,31 +81,6 @@ class TrajectoryRunner(ABC):
             output["trajectory_ids"] = list(trajectory_ids)
         propagate_teacher_routes(input_batch, output)
         return await self._finalize_output(input_batch, output)
-
-    async def run_to_buffer(
-        self,
-        request: RolloutRequest,
-        writer: RolloutWriter,
-        disable_tqdm: bool = False,
-    ) -> RolloutReceipt:
-        """Produce and commit training data; return only its completion receipt."""
-        output = await self.run(request.trajectory_request, disable_tqdm=disable_tqdm)
-        actual_step = output.get("actual_global_step")
-        sampled_step = actual_step if actual_step is not None else request.model_step
-        if request.kind == "group":
-            if len(set(request.uids)) != 1:
-                raise ValueError("one grouped rollout must contain exactly one UID")
-            rollout = GeneratedOutputGroup(
-                output, request.uids[0], sampled_step, request.source_prompts, request_batch=request.trajectory_request
-            )
-        else:
-            rollout = SynchronousRollout(
-                output, request.uids, request.source_prompts, sampled_step, request_batch=request.trajectory_request
-            )
-        return await writer.stage_rollout(rollout)
-
-    async def retain_buffered(self, rollout: Rollout) -> None:
-        """Finish any runner-specific retention after a buffer read."""
 
     async def _finalize_output(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> TrajectoryBatch:
         """Apply runner-independent shaping, metrics, and retention."""

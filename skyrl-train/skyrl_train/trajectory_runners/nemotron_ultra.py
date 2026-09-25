@@ -12,7 +12,8 @@ from skyrl_train.trajectory_runners.harbor.dataset import TerminalBenchTaskDatas
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunner
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
-from skyrl_train.rollout_buffer import RolloutRequest
+from skyrl_train.rollout_buffer import Rollout, RolloutBuffer, RolloutRequest
+from skyrl_train.rollout_worker import bind_rollout_executor
 
 
 def _select_rows(batch: TrajectoryRequestBatch, indices: list[int]) -> TrajectoryRequestBatch:
@@ -97,8 +98,6 @@ class NemotronUltraTrajectoryRouter:
     router partitions and restores row order. Batch concatenation promotes scalar
     rewards to token-level rewards when needed so Gym and Harbor outputs can mix.
     """
-
-    remote_writes = True
 
     def __init__(
         self,
@@ -221,13 +220,16 @@ class NemotronUltraTrajectoryRouter:
             await retain_trajectories(self.trajectory_sink, input_batch, result)
         return result
 
-    async def run_to_buffer(
-        self,
-        request: RolloutRequest,
-        writer,
-        disable_tqdm: bool = False,
-    ):
-        """Send each routed request to its producer and return only receipts."""
+
+class NemotronUltraRolloutWorker:
+    """Route training tasks to workers without buffer methods on the harness router."""
+
+    def __init__(self, router: NemotronUltraTrajectoryRouter, buffer: RolloutBuffer):
+        self.router = router
+        self.gym_worker = bind_rollout_executor(router.gym_runner, buffer)
+        self.harbor_worker = bind_rollout_executor(router.harbor_runner, buffer)
+
+    async def produce(self, request: RolloutRequest, disable_tqdm: bool = False):
         input_batch = request.trajectory_request
         env_extras = input_batch.get("env_extras")
         if env_extras is None or len(env_extras) != len(request.uids):
@@ -243,30 +245,29 @@ class NemotronUltraTrajectoryRouter:
             child_batch = _select_rows(input_batch, indices)
             child_uids = [request.uids[index] for index in indices]
             child_prompts = [prompt_by_uid[uid] for uid in dict.fromkeys(child_uids)]
-            runner = self.harbor_runner if use_harbor else self.gym_runner
+            worker = self.harbor_worker if use_harbor else self.gym_worker
             if use_harbor:
                 missing = [
                     _swe_instance_id(env_extras[index])
                     for index in indices
-                    if _swe_instance_id(env_extras[index]).casefold() not in self.task_paths
+                    if _swe_instance_id(env_extras[index]).casefold() not in self.router.task_paths
                 ]
                 if missing:
                     raise ValueError(f"terminal-bench task {missing[0]!r} is absent from the configured task data")
                 child_batch["prompts"] = [
-                    self.task_paths[_swe_instance_id(env_extras[index]).casefold()] for index in indices
+                    self.router.task_paths[_swe_instance_id(env_extras[index]).casefold()] for index in indices
                 ]
             jobs.append(
-                runner.run_to_buffer(
+                worker.produce(
                     RolloutRequest(child_batch, child_prompts, child_uids, request.model_step, request.kind),
-                    writer,
                     disable_tqdm=disable_tqdm,
                 )
             )
         outputs = await asyncio.gather(*jobs)
-        return [receipt for output in outputs for receipt in (output if isinstance(output, list) else [output])]
+        return [receipt for output in outputs for receipt in output]
 
-    async def retain_buffered(self, rollout) -> None:
-        if self.trajectory_sink is not None:
+    async def retain(self, rollout: Rollout) -> None:
+        if self.router.trajectory_sink is not None:
             if rollout.request_batch is None:
                 raise ValueError("buffered routed rollout omitted its request batch")
-            await retain_trajectories(self.trajectory_sink, rollout.request_batch, rollout.trajectory_batch)
+            await retain_trajectories(self.router.trajectory_sink, rollout.request_batch, rollout.trajectory_batch)
