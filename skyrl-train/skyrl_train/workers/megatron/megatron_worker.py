@@ -768,7 +768,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         torch.distributed.barrier()
 
     def grug_optimizer_route_snapshot(self):
-        """Expose actual MuonH parameter groups to small validation jobs."""
+        """Return this rank and the optimizer route for each named parameter."""
         if str(self.cfg.trainer.policy.optimizer_config.optimizer).lower() != "muonh":
             raise ValueError("Optimizer route snapshot requires Hero MuonH")
         names = {id(parameter): name for chunk in self.actor_module for name, parameter in chunk.named_parameters()}

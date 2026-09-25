@@ -311,8 +311,10 @@ def test_megatron_muonh_routes_hero_parameter_families():
 
 
 def test_megatron_muonh_rejects_gradient_clipping_in_mcore_config():
-    pytest.importorskip("megatron.core")
-    from skyrl_train.distributed.megatron.optimizer import init_megatron_optim_config
+    try:
+        from skyrl_train.distributed.megatron.optimizer import init_megatron_optim_config
+    except ImportError:
+        pytest.skip("Megatron Core optimizer is not in the CPU test profile")
 
     recipe = {"optimizer": "MuonH", "lr": 0.03, "weight_decay": 0.0, "max_grad_norm": 0.0}
     config = init_megatron_optim_config(recipe, {})
