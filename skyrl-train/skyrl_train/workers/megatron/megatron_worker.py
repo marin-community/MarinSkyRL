@@ -57,7 +57,6 @@ from skyrl_train.megatron_timing import (
     MegatronTrainTimings,
     publish_megatron_train_timings,
 )
-from skyrl_train.telemetry import StepKind
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
@@ -351,7 +350,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self._warned_exact_unit_policy_ratio = False
 
     def forward(self, data):
-        with self._memory.span("forward", step=data.metadata.get("global_step"), step_kind=StepKind.GLOBAL_STEP):
+        with self._memory.span("forward", step=data.metadata.get("global_step")):
             return super().forward(data)
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):

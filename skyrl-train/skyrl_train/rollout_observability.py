@@ -7,7 +7,6 @@ exceed it and are emitted separately. Publishing only enqueues records.
 
 import asyncio
 import contextlib
-import json
 import math
 import time
 from collections.abc import Awaitable, Callable, Iterator
@@ -22,7 +21,6 @@ from skyrl_train.telemetry import TRAINER_ROLE, phase_attributes, phase_duration
 
 
 RolloutPhase = Literal["collect", "assemble", "finalize", "tokenize", "retain"]
-MODEL_CLIENT_AWAIT = "model_client_await"
 _PARENTS = {
     "collect": "rollout_call",
     "assemble": "rollout_call",
@@ -31,13 +29,9 @@ _PARENTS = {
     "retain": "finalize",
 }
 _EXCLUSIVE_PHASES = ("collect", "assemble", "finalize")
-# At most 64 finite float pairs fit below the exporter's 4096-byte string limit. Each pair is
-# the start and end of one model await in seconds since the call started.
-_MAX_MODEL_INTERVALS = 64
 _CURRENT: ContextVar["RolloutObservation | None"] = ContextVar("rollout_observation", default=None)
 wait_seconds = telemetry.histogram("rollout_wait_seconds", unit="s")
 waits = telemetry.counter("rollout_waits", unit="{wait}")
-calls = telemetry.counter("rollout_calls", unit="{call}")
 buffer_dwell = telemetry.histogram("rollout_buffer_dwell_seconds", unit="s")
 groups = telemetry.counter("rollout_groups", unit="{group}")
 group_tokens = telemetry.counter("rollout_group_tokens", unit="{token}")
@@ -123,8 +117,6 @@ class RolloutObservation:
     call_id: str = field(default_factory=lambda: uuid4().hex)
     durations: dict[str, float] = field(default_factory=dict)
     waits: dict[str, WaitObservation] = field(default_factory=dict)
-    model_awaits: list[tuple[float, float]] = field(default_factory=list)
-    model_await_count: int = 0
     response_tokens: int = 0
 
     def record_wait(self, name: str, duration: float) -> None:
@@ -134,7 +126,6 @@ class RolloutObservation:
         total = finished - self.started_monotonic
         residual = total - sum(self.durations.get(name, 0.0) for name in _EXCLUSIVE_PHASES)
         attributes = {"role": TRAINER_ROLE, "step": str(self.step), "mode": self.mode, "outcome": outcome}
-        calls.add(1, attributes=attributes)
         phases = {"rollout_call": total, **self.durations, "rollout_call_residual": residual}
         for name, duration in phases.items():
             parent = _PARENTS.get(name, "rollout_call" if name == "rollout_call_residual" else None)
@@ -160,11 +151,6 @@ class RolloutObservation:
                 "call_id": self.call_id,
                 "started_unix_ms": self.started_unix_ms,
                 "finished_unix_ms": time.time_ns() // 1_000_000,
-                "duration_seconds": total,
-                **{f"duration_{name}": duration for name, duration in phases.items() if name != "rollout_call"},
-                "model_awaits_json": json.dumps(self.model_awaits, separators=(",", ":"), allow_nan=False),
-                "interval_count": self.model_await_count,
-                "truncated": self.model_await_count > len(self.model_awaits),
                 "response_tokens": self.response_tokens,
             },
             attributes=attributes,
@@ -220,14 +206,7 @@ def rollout_wait(name: str) -> Iterator[None]:
     try:
         yield
     finally:
-        finished = observation.clock()
-        observation.record_wait(name, finished - started)
-        if name == MODEL_CLIENT_AWAIT:
-            observation.model_await_count += 1
-            if len(observation.model_awaits) < _MAX_MODEL_INTERVALS:
-                observation.model_awaits.append(
-                    (started - observation.started_monotonic, finished - observation.started_monotonic)
-                )
+        observation.record_wait(name, observation.clock() - started)
 
 
 def time_tokenization(func: Callable, *args, **kwargs):
@@ -284,7 +263,6 @@ def record_group_disposition(
     tokens: int,
     step: int,
     completed_at: float | None = None,
-    call_id: str | None = None,
     admitted_at: float | None = None,
 ) -> None:
     attributes = {"role": TRAINER_ROLE, "step": str(step), "disposition": disposition}
@@ -293,5 +271,3 @@ def record_group_disposition(
     if completed_at is not None:
         finished = time.perf_counter() if admitted_at is None else admitted_at
         buffer_dwell.record(finished - completed_at, attributes=attributes)
-    if call_id is not None:
-        record_event("rollout_group_disposition", {"call_id": call_id, "tokens": tokens}, attributes=attributes)

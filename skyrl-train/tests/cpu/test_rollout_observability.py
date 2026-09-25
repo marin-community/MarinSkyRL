@@ -77,7 +77,6 @@ def records(monkeypatch):
         "phase_duration",
         "wait_seconds",
         "waits",
-        "calls",
         "buffer_dwell",
         "groups",
         "group_tokens",
@@ -134,7 +133,7 @@ def test_rollout_call_event_reports_tokens_and_an_independent_wall_clock(records
     assert event["name"] == "rollout_call"
     assert event["body"]["response_tokens"] == 512
     body = event["body"]
-    assert (body["started_unix_ms"], body["finished_unix_ms"], body["duration_seconds"]) == (1000, 900, 1)
+    assert (body["started_unix_ms"], body["finished_unix_ms"]) == (1000, 900)
 
 
 @pytest.mark.asyncio
@@ -166,18 +165,15 @@ async def test_overlapping_rollout_calls_keep_independent_walls_and_identity(rec
         await asyncio.gather(*tasks, return_exceptions=True)
 
     calls = {event["attributes"]["step"]: event for event in records.events}
-    assert {key: value for key, value in calls["0"]["body"].items() if key.startswith("duration_")} == {
-        "duration_seconds": 5.0,
-        "duration_collect": 4.0,
-        "duration_assemble": 1.0,
-        "duration_rollout_call_residual": 0.0,
-    }
-    assert {key: value for key, value in calls["1"]["body"].items() if key.startswith("duration_")} == {
-        "duration_seconds": 9.0,
-        "duration_collect": 7.0,
-        "duration_finalize": 2.0,
-        "duration_rollout_call_residual": 0.0,
-    }
+    for step, phases in (
+        ("0", {"rollout_call": 5.0, "rollout_collect": 4.0, "rollout_assemble": 1.0, "rollout_call_residual": 0.0}),
+        ("1", {"rollout_call": 9.0, "rollout_collect": 7.0, "rollout_finalize": 2.0, "rollout_call_residual": 0.0}),
+    ):
+        assert {
+            row["attributes"]["phase"]: row["value"]
+            for row in records.metrics
+            if row["name"] == "phase_duration" and row["attributes"]["step"] == step
+        } == phases
     assert calls["0"]["body"]["call_id"] != calls["1"]["body"]["call_id"]
     assert records.select("wait_seconds", wait="engine_await", stat="sum", step="0") == [4.0]
     assert records.select("wait_seconds", wait="engine_await", stat="sum", step="1") == [7.0]
@@ -245,7 +241,7 @@ def test_rollout_failure_propagates_with_optional_terminal_record(records, enabl
                 clock.advance(2)
                 raise ValueError("invalid rollout")
 
-    assert records.select("calls", outcome="failure") == ([1] if enabled else [])
+    assert records.select("phase_duration", phase="rollout_call", outcome="failure") == ([2.0] if enabled else [])
     assert len(records.events) == int(enabled)
 
 
@@ -267,7 +263,7 @@ async def test_cancelled_rollout_publishes_one_terminal_outcome_and_unwinds_wait
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=1)
 
-    assert records.select("calls", outcome="cancelled") == [1]
+    assert records.select("phase_duration", phase="rollout_call", outcome="cancelled") == [4.0]
     assert len(records.events) == 1
     assert records.events[0]["attributes"]["outcome"] == "cancelled"
     assert records.select("wait_seconds", wait="engine_await", stat="sum") == [4.0]
@@ -348,7 +344,7 @@ async def test_cancelled_environment_thread_does_not_mutate_published_call(recor
         await asyncio.to_thread(executor.shutdown, wait=True)
 
     assert records == published
-    assert records.select("calls", outcome="cancelled") == [1]
+    assert records.select("phase_duration", phase="rollout_call", outcome="cancelled") == [3.0]
     assert records.select("wait_seconds", wait="env_await", stat="sum") == [3.0]
     assert records.select("wait_seconds", wait="env_exec", stat="sum") == []
 
@@ -403,24 +399,6 @@ def test_consumed_work_records_distinct_native_deltas(records):
     assert records.select("work_completed", work_kind="consumed_response_token") == [100, 70]
     assert records.select("work_completed", work_kind="consumed_loss_token") == [80, 60]
     assert {row["attributes"]["step"] for row in records.metrics} == {"3", "4"}
-
-
-def test_model_interval_details_stay_bounded_without_truncating_wait_totals(records):
-    clock = ManualClock(123456789.1234567)
-    with rollout.observe_rollout_call(step=1, mode="async", enabled=True, clock=clock):
-        with rollout.rollout_phase("collect"):
-            for _ in range(200):
-                with rollout.rollout_wait("model_client_await"):
-                    clock.advance(0.125)
-
-    fields = records.events[0]["body"]
-    intervals = json.loads(fields["model_awaits_json"])
-    assert len(fields["model_awaits_json"].encode()) <= 4096
-    assert fields["interval_count"] == 200
-    assert fields["truncated"] is True
-    assert 0 < len(intervals) < 200
-    assert records.select("wait_seconds", wait="model_client_await", stat="sum") == [25.0]
-    assert records.select("waits", wait="model_client_await") == [200]
 
 
 @pytest.mark.asyncio
@@ -505,7 +483,7 @@ async def test_rollout_calls_progress_while_real_exporter_waits_for_http_ack(mon
 
         assert await asyncio.wait_for(produce_next(), timeout=1) == "next rollout completed"
         publish_step_timings({"step": 5.0, "policy_train": 2.0}, step=2)
-        rollout.record_group_disposition(disposition="consumed", tokens=20, step=2, call_id="group-1")
+        rollout.record_group_disposition(disposition="consumed", tokens=20, step=2)
         training_telemetry.record_training_metrics(
             {
                 **trainer_utils.consumed_stop_metrics(["length", "stop", "length", "stop"], 4),
@@ -534,7 +512,6 @@ async def test_rollout_calls_progress_while_real_exporter_waits_for_http_ack(mon
     ]
     assert len(root_spans) == 3
     assert all("parent" not in row["attributes"] for row in root_spans)
-    assert any(row["name"] == "rollout_group_disposition" and row["body"]["call_id"] == "group-1" for row in delivered)
     metrics = [row for row in delivered if row["name"] == "training_metric_value"]
     assert {row["attributes"]["metric"]: row["value"] for row in metrics} == {
         "consumed/sequences": 4,

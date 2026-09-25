@@ -139,7 +139,6 @@ def ratio_statistics(delta: torch.Tensor, *, eps_clip_low: float = 0.2, eps_clip
         kl_k3=clipped_ratio.mean().item() - mean - 1,
         chi2=clipped_ratio.square().mean().item() - 1,
         log_ratio_mean_squared=delta.square().mean().item(),
-        log_mean_ratio=(maximum + weight_sum.log()).item() - math.log(count),
     )
     return result
 

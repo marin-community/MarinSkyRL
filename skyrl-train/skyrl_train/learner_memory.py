@@ -16,7 +16,7 @@ from threading import Lock
 import torch
 from loguru import logger
 
-from skyrl_train.telemetry import WORKER_ROLE, StepKind, record_event
+from skyrl_train.telemetry import WORKER_ROLE, record_event
 
 
 @dataclass
@@ -69,7 +69,6 @@ class LearnerCudaMetrics:
         boundary: str,
         outcome: str,
         step: int | None,
-        step_kind: StepKind,
         overlapping: bool = False,
     ) -> None:
         device = self._identified_device()
@@ -91,9 +90,6 @@ class LearnerCudaMetrics:
             "phase": phase,
             "boundary": boundary,
             "outcome": outcome,
-            # str() keeps the exported value byte-identical to the literal the
-            # dashboards were built against, whatever a serializer does with enums.
-            "step_kind": str(step_kind if step is not None else StepKind.UNKNOWN),
         }
         if step is not None:
             attributes["step"] = str(step)
@@ -105,19 +101,8 @@ class LearnerCudaMetrics:
         self.enabled = False
         logger.warning("Disabling learner CUDA memory observations after phase {} failed: {}", phase, error)
 
-    def snapshot(
-        self, phase: str, *, step: int | None = None, step_kind: StepKind = StepKind.MODEL_VERSION_STEP
-    ) -> None:
-        """Sample current memory without resetting or publishing interval peaks."""
-        if not self.enabled:
-            return
-        try:
-            self._record(phase=phase, boundary="snapshot", outcome="success", step=step, step_kind=step_kind)
-        except Exception as error:
-            self._disable(phase, error)
-
     @contextmanager
-    def span(self, phase: str, *, step: int | None, step_kind: StepKind) -> Iterator[None]:
+    def span(self, phase: str, *, step: int | None) -> Iterator[None]:
         if not self.enabled:
             yield
             return
@@ -137,7 +122,7 @@ class LearnerCudaMetrics:
                     scope.overlapping = True
             if acquired:
                 torch.cuda.reset_peak_memory_stats(device)
-                self._record(phase=phase, boundary="enter", outcome="started", step=step, step_kind=step_kind)
+                self._record(phase=phase, boundary="enter", outcome="started", step=step)
             elif not self._warned_overlap:
                 self._warned_overlap = True
                 logger.warning("Skipping overlapping learner CUDA memory phase {} on device {}", phase, device)
@@ -162,7 +147,6 @@ class LearnerCudaMetrics:
                                 boundary="exit",
                                 outcome=outcome,
                                 step=step,
-                                step_kind=step_kind,
                                 overlapping=scope.overlapping,
                             )
                     except Exception as error:

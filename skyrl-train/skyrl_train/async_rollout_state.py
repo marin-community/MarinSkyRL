@@ -17,7 +17,6 @@ class GeneratedOutputGroup:
 
     admitted_at: float | None = None
     completed_at: float | None = None
-    rollout_call_id: str | None = None
     disposition_recorded: bool = False
 
 

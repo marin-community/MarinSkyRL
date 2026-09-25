@@ -45,7 +45,7 @@ from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
 )
 from skyrl_train.learner_memory import INERT_LEARNER_CUDA_METRICS, LearnerCudaMetrics
-from skyrl_train.telemetry import WORKER_ROLE, ProcessTelemetry, StepKind, TelemetryConfig
+from skyrl_train.telemetry import WORKER_ROLE, ProcessTelemetry, TelemetryConfig
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
 from skyrl_train.distillation import student_topk_logprobs
 from skyrl_train.dataset.replay_buffer import Experience
@@ -930,16 +930,14 @@ class PolicyWorkerBase(Worker):
         # The implementation's co-arrival barrier runs before it reads the step, and a batch
         # may reach it with no metadata; the span then records no step.
         step = (train_data.metadata or {}).get("global_step")
-        with self._memory.span("ppo_train", step=step, step_kind=StepKind.GLOBAL_STEP):
+        with self._memory.span("ppo_train", step=step):
             output = self._ppo_train_impl(train_data)
         if step is not None:
             self._model_version_step = int(step)
         return output
 
     async def broadcast_to_inference_engines(self, inference_engine_client):
-        with self._memory.span(
-            "broadcast_to_inference_engines", step=self._model_version_step, step_kind=StepKind.MODEL_VERSION_STEP
-        ):
+        with self._memory.span("broadcast_to_inference_engines", step=self._model_version_step):
             return await self._broadcast_to_inference_engines(inference_engine_client)
 
     def _ppo_train_impl(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:

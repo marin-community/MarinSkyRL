@@ -740,19 +740,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
         )
 
-    def _record_core_step_window(self, started_unix_ms: int, duration_seconds: float) -> None:
-        if not self._async_telemetry_enabled:
-            return
-        record_event(
-            "async_step_window",
-            {
-                "started_unix_ms": started_unix_ms,
-                "finished_unix_ms": time.time_ns() // 1_000_000,
-                "duration_seconds": duration_seconds,
-            },
-            attributes={"role": TRAINER_ROLE, "step": str(self.global_step), "window": "core"},
-        )
-
     def _update_async_step_metrics(
         self, training_input: TrainingInputBatch, *, core_seconds: float, cycle_started: float
     ) -> None:
@@ -915,7 +902,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             for _ in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 cycle_started = time.perf_counter()
                 with Timer("step", self.all_timings) as step_timer:
-                    core_started_unix_ms = time.time_ns() // 1_000_000
                     core_started = time.perf_counter()
                     # 1. Discard every completed stale attempt and wait for a full fresh batch.
                     logger.info(
@@ -1047,7 +1033,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # The core wall ends here. Checkpointing and evaluation run in the callbacks
                     # below, inside the step timer.
                     core_seconds = time.perf_counter() - core_started
-                    self._record_core_step_window(core_started_unix_ms, core_seconds)
 
                     # 5. Run callback-requested work before closing the inclusive step timer.
                     logger.info(status)
@@ -1278,7 +1263,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     earliest_model_step=staleness_step,
                     source_prompts=rand_prompts,
                     completed_at=time.perf_counter() if observation is not None else None,
-                    rollout_call_id=observation.call_id if observation is not None else None,
                 )
                 with async_wait("enqueue", step=self.global_step, enabled=self._async_telemetry_enabled):
                     freshness = await self._enqueue_if_fresh(queues, completed_group)
@@ -1390,7 +1374,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             step=self.global_step,
             completed_at=group.completed_at,
             admitted_at=group.admitted_at,
-            call_id=group.rollout_call_id,
         )
         group.disposition_recorded = True
 

@@ -5,7 +5,6 @@ import socket
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Literal, Protocol
 
 import ray
@@ -33,20 +32,6 @@ TRAINER_ROLE = "trainer"
 CONTROLLER_ROLE = "controller"
 WORKER_ROLE = "worker"
 SHUTDOWN_TIMEOUT_SECONDS = 2.0
-
-
-class StepKind(StrEnum):
-    """Which step counter a record's `step` attribute counts.
-
-    These members are exported verbatim as the `step_kind` attribute value, so the
-    strings are part of the published schema: dashboards filter on them and renaming
-    a member's value breaks every panel keyed to it.
-    """
-
-    GLOBAL_STEP = "global_step"
-    MODEL_VERSION_STEP = "model_version_step"
-    # No step was supplied, so neither counter describes the record.
-    UNKNOWN = "unknown"
 
 
 work_completed = telemetry.counter("work_completed", unit="{item}")
