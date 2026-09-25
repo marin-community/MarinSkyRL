@@ -241,7 +241,7 @@ def _reference(trainer: RayPPOTrainer, root: str, fingerprint: str) -> None:
     trainer._offload_policy_optimizer(trainer.all_timings, timer_label="offload_policy_optimizer_before_parity_save")
     before_save_rng = _rank_digests(trainer, "parity_digest_rng")
     driver_before_save = _driver_rng_digest()
-    trainer.save_checkpoints()
+    trainer.save_checkpoints(resume_epoch=0, at_epoch_boundary=False)
     after_save_rng = _rank_digests(trainer, "parity_digest_rng")
     if before_save_rng != after_save_rng:
         raise AssertionError("Checkpoint save changed worker RNG before the uninterrupted step")

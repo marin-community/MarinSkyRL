@@ -450,6 +450,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     # Set at startup when generator.weight_sync_transport is expert_block.
     _expert_block_sync: ExpertBlockSync | None = None
 
+    def _defers_megatron_checkpoint_commit(self) -> bool:
+        # This loop overlaps rollout producers with training. It cannot use the
+        # synchronous loop's late-step publication barrier without a separate
+        # producer-state quiescence protocol.
+        return False
+
     def __init__(self, *args, **kwargs):
         # Extract cfg before base init so we can initialize async-specific knobs used by our overrides.
         cfg = kwargs.get("cfg", args[0] if len(args) > 0 else None)

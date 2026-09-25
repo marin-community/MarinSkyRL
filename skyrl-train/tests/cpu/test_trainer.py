@@ -5,9 +5,11 @@ uv  run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer.py
 import contextlib
 import asyncio
 import threading
+import time
 from pathlib import Path
 import collections
 import gc
+import random
 import weakref
 from types import SimpleNamespace
 
@@ -676,7 +678,7 @@ def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
     trainer._checkpoint_save_failures = 0.0
     trainer._pending_checkpoint_upload = None
 
-    async def fail_save():
+    async def fail_save(**_kwargs):
         raise ValueError("invalid checkpoint state")
 
     trainer._save_checkpoints_with_residency = fail_save
@@ -945,6 +947,206 @@ def test_on_save_callback_failure_does_not_publish_partial_checkpoint(tmp_path):
     assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
     assert resolve_checkpoint_payload(str(previous)) == str(previous)
     assert not (step_dir / COMMIT_FILENAME).exists()
+
+
+def test_megatron_commit_captures_rng_after_late_step_callbacks(tmp_path):
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    torch_state = torch.get_rng_state()
+    try:
+        random.seed(37)
+        np.random.seed(37)
+        torch.manual_seed(37)
+        latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+        latest.write_text("1")
+        trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+        trainer.cfg = OmegaConf.create(
+            {"trainer": {"strategy": "megatron", "ckpt_path": str(tmp_path), "max_ckpts_to_keep": -1}}
+        )
+        trainer.global_step = 2
+        trainer.all_metrics = {}
+        trainer.all_timings = {}
+        trainer._checkpoint_save_failures = 0.0
+        trainer._pending_checkpoint_upload = None
+        trainer._last_optimizer_step_finished_at = None
+        trainer._last_saved_step = None
+        trainer.eval_dataset = object()
+        trainer._control = SimpleNamespace(
+            reset=lambda: None,
+            should_save=True,
+            should_save_hf_model=False,
+            should_evaluate=False,
+        )
+        exported_steps = []
+
+        def draw():
+            random.random()
+            np.random.random()
+            torch.rand(1)
+
+        async def save_payloads(**_kwargs):
+            attempt = Path(trainer_module.new_attempt_path(str(tmp_path / "global_step_2")))
+            attempt.mkdir(parents=True)
+            trainer._active_checkpoint_payload_path = str(attempt)
+            trainer._checkpoint_required_files = {
+                trainer_module.TRAINER_STATE_FILENAME,
+                trainer_module.DRIVER_RNG_STATE_FILENAME,
+                "data.pt",
+            }
+            torch.save({"global_step": 2}, attempt / trainer_module.TRAINER_STATE_FILENAME)
+            torch.save({"cursor": 2}, attempt / "data.pt")
+
+        async def callback(event, _state, control, **_kwargs):
+            if event == "on_save":
+                control.should_save_hf_model = True
+                control.should_evaluate = True
+                draw()
+            elif event == "on_evaluate":
+                draw()
+            return control
+
+        async def evaluate():
+            draw()
+            return {"eval/score": 1.0}
+
+        def export(step):
+            exported_steps.append(step)
+            draw()
+
+        trainer._save_checkpoints_with_residency = save_payloads
+        trainer._write_checkpoint_continuation_state = lambda step, **_kwargs: torch.save(
+            {"global_step": step}, Path(trainer._active_checkpoint_payload_path, trainer_module.TRAINER_STATE_FILENAME)
+        )
+        trainer.callback_handler = SimpleNamespace(call_event_async=callback)
+        trainer.eval = evaluate
+        trainer.handle_hf_export = export
+
+        asyncio.run(trainer._run_step_end_callbacks(SimpleNamespace(global_step=2)))
+        assert latest.read_text() == "1"
+        assert not (tmp_path / "global_step_2" / COMMIT_FILENAME).exists()
+        draw()  # on_log
+        draw()  # on_epoch_end
+        trainer.global_step = 3
+        asyncio.run(trainer._publish_pending_megatron_checkpoint())
+
+        assert latest.read_text() == "2"
+        assert exported_steps == [2]
+        payload = resolve_checkpoint_payload(str(tmp_path / "global_step_2"), verify_files=True)
+        with open(Path(payload, trainer_module.DRIVER_RNG_STATE_FILENAME), "rb") as source:
+            saved = torch.load(source, map_location="cpu", weights_only=False)
+        expected_next = (random.random(), np.random.random(), torch.rand(1).item())
+        trainer_module._restore_driver_rng_state(saved)
+        assert (random.random(), np.random.random(), torch.rand(1).item()) == expected_next
+
+        random.seed(100)
+        np.random.seed(100)
+        torch.manual_seed(100)
+        resumed = RayPPOTrainer.__new__(RayPPOTrainer)
+        resumed.cfg = OmegaConf.create(
+            {
+                "trainer": {
+                    "strategy": "megatron",
+                    "ckpt_path": str(tmp_path),
+                    "resume_path": str(tmp_path / "global_step_2"),
+                    "restore_dataloader_state": True,
+                }
+            }
+        )
+        resumed.resume_mode = ResumeMode.FROM_PATH
+        resumed.colocate_all = True
+        resumed.train_dataloader = SimpleNamespace(load_state_dict=lambda _state: None)
+        resumed.policy_model = SimpleNamespace(async_run_ray_method=lambda *_args, **_kwargs: [])
+        resumed.critic_model = None
+        resumed._domain_balancer = None
+        resumed._offload_policy_optimizer = lambda *_args, **_kwargs: None
+        with patch("skyrl_train.trainer.ray.get", return_value=None):
+            loaded_step, _ = resumed.load_checkpoints()
+        assert loaded_step == 2
+        assert (random.random(), np.random.random(), torch.rand(1).item()) == expected_next
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+        torch.set_rng_state(torch_state)
+
+
+def test_megatron_rng_write_failure_keeps_previous_checkpoint_published(tmp_path):
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("1")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {"trainer": {"strategy": "megatron", "ckpt_path": str(tmp_path), "max_ckpts_to_keep": -1}}
+    )
+    trainer.global_step = 3
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer._checkpoint_save_failures = 0.0
+    trainer._pending_megatron_checkpoint_commit = (
+        2,
+        SimpleNamespace(global_step=2),
+        time.perf_counter(),
+        time.time(),
+    )
+    attempt = Path(trainer_module.new_attempt_path(str(tmp_path / "global_step_2")))
+    attempt.mkdir(parents=True)
+    (attempt / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"trainer")
+    trainer._active_checkpoint_payload_path = str(attempt)
+    trainer._checkpoint_required_files = {
+        trainer_module.TRAINER_STATE_FILENAME,
+        trainer_module.DRIVER_RNG_STATE_FILENAME,
+    }
+
+    def fail_write(_state):
+        raise OSError("driver RNG upload failed")
+
+    trainer._write_driver_rng_state = fail_write
+    trainer._write_checkpoint_continuation_state = lambda _step, **_kwargs: None
+    trainer.callback_handler = SimpleNamespace(call_event_async=AsyncMock())
+    trainer._control = SimpleNamespace()
+    asyncio.run(trainer._publish_pending_megatron_checkpoint())
+
+    assert latest.read_text() == "1"
+    assert not (tmp_path / "global_step_2" / COMMIT_FILENAME).exists()
+    assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
+
+
+def test_megatron_late_callback_failure_does_not_publish_checkpoint(tmp_path):
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("1")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron", "ckpt_path": str(tmp_path)}})
+    trainer.global_step = 2
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer._pending_checkpoint_upload = None
+    trainer._control = SimpleNamespace(
+        reset=lambda: None,
+        should_save=True,
+        should_save_hf_model=False,
+        should_evaluate=True,
+    )
+    trainer.eval_dataset = object()
+
+    async def save_payloads(**_kwargs):
+        attempt = Path(trainer_module.new_attempt_path(str(tmp_path / "global_step_2")))
+        attempt.mkdir(parents=True)
+        trainer._active_checkpoint_payload_path = str(attempt)
+        trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
+        (attempt / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"trainer")
+
+    async def callback(event, _state, control, **_kwargs):
+        if event == "on_evaluate":
+            raise RuntimeError("evaluation callback failed")
+        return control
+
+    trainer._save_checkpoints_with_residency = save_payloads
+    trainer.callback_handler = SimpleNamespace(call_event_async=callback)
+    trainer.eval = AsyncMock(return_value={"eval/score": 1.0})
+
+    with pytest.raises(RuntimeError, match="evaluation callback failed"):
+        asyncio.run(trainer._run_step_end_callbacks(SimpleNamespace(global_step=2)))
+
+    assert latest.read_text() == "1"
+    assert not (tmp_path / "global_step_2" / COMMIT_FILENAME).exists()
 
 
 def test_retention_failure_does_not_undo_published_checkpoint(tmp_path):

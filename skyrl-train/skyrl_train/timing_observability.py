@@ -81,10 +81,12 @@ def checkpoint_phase(
     *,
     rank: int,
     step: int | None,
+    started_monotonic: float | None = None,
+    started_unix: float | None = None,
 ) -> Iterator[CheckpointPhaseSample]:
     """Publish a rank-local checkpoint wall span without synchronizing CUDA."""
-    started = time.perf_counter()
-    started_unix = time.time()
+    started = time.perf_counter() if started_monotonic is None else started_monotonic
+    started_unix = time.time() if started_unix is None else started_unix
     sample = CheckpointPhaseSample()
     outcome = "success"
     try:
