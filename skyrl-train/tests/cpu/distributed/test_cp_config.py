@@ -63,6 +63,7 @@ RUNTIME_CONFIG_TRAINER_FIELDS = {
     "eval_num_prompts": None,
     "export_hf_artifact": False,
     "offload_optimizer_during_rollouts": False,
+    "rollout_buffer": {"backend": "finestore"},
     "reset_distillation_token_count_on_resume": False,
     "reset_global_step_on_resume": False,
     "restore_dataloader_state": True,
