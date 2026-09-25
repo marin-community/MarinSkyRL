@@ -1096,8 +1096,8 @@ class RayPPOTrainer:
         training_input: TrainingInputBatch,
         duration_seconds: float,
     ) -> None:
+        self.all_metrics.update(training_input.metadata["consumed_stop_metrics"])
         if self._training_metrics_enabled:
-            self.all_metrics.update(training_input.metadata.get("consumed_stop_metrics", {}))
             record_consumed_work(consumed_work(training_input), step=self.global_step)
         logger.info(
             "Optimizer step completed: step={} epoch={} sequences={} duration_seconds={:.3f}",
@@ -1903,10 +1903,9 @@ class RayPPOTrainer:
             training_input.metadata["exclude_from_baseline"] = np.array(
                 trajectory_batch["exclude_from_baseline"], dtype=bool
             )
-        if self._training_metrics_enabled:
-            training_input.metadata["consumed_stop_metrics"] = consumed_stop_metrics(
-                trajectory_batch.get("stop_reasons"), len(response_ids)
-            )
+        training_input.metadata["consumed_stop_metrics"] = consumed_stop_metrics(
+            trajectory_batch.get("stop_reasons"), len(response_ids)
+        )
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         if self._training_metrics_enabled and rollout_staleness is not None:
@@ -2037,15 +2036,14 @@ class RayPPOTrainer:
             f"reward/avg_pass_at_{n_samples_per_prompt}": pass_at_n,
             "reward/avg_raw_reward": mean_reward,
         }
-        if self._training_metrics_enabled:
-            # A group whose rewards all tie carries no advantage signal.
-            grouped_rewards = defaultdict(list)
-            for uid, reward in zip(uids_for_metrics, step_rewards):
-                grouped_rewards[uid].append(float(np.sum(reward)))
-            if grouped_rewards:
-                reward_metrics["reward/informative_group_fraction"] = sum(
-                    max(values) > min(values) for values in grouped_rewards.values()
-                ) / len(grouped_rewards)
+        # A group whose rewards all tie carries no advantage signal.
+        grouped_rewards = defaultdict(list)
+        for uid, reward in zip(uids_for_metrics, step_rewards):
+            grouped_rewards[uid].append(float(np.sum(reward)))
+        if grouped_rewards:
+            reward_metrics["reward/informative_group_fraction"] = sum(
+                max(values) > min(values) for values in grouped_rewards.values()
+            ) / len(grouped_rewards)
         self.all_metrics.update(reward_metrics)
         logger.info(f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, reward/avg_raw_reward: {mean_reward}")
 
