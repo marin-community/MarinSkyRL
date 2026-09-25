@@ -104,10 +104,13 @@ def _raw_config() -> dict[str, Any]:
 
 def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) -> None:
     path = tmp_path / "resolved-launch.yaml"
-    path.write_text(yaml.safe_dump(_raw_config(), sort_keys=False))
+    raw = _raw_config()
+    raw["skyrl"]["generator"]["chat_template_kwargs"] = {"enable_thinking": False}
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
     config = load_launch_config(path)
 
+    assert config.skyrl.generator.chat_template_kwargs.enable_thinking is False
     assert config.skyrl.trainer.train_batch_size == 8
     assert validate_launch_config(config).num_nodes == 1
 

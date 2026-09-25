@@ -28,14 +28,14 @@ INITIAL_POLICY_CANDIDATES = 1024
 INITIAL_POLICY_ROLLOUTS = 8
 PIVOT_TRAIN_PREFIXES = 64
 MAX_PROMPT_TOKENS = 15_872
-TOKENIZER_REVISION = "c1899de"
 
 
 def prepare_smoke_sample(
     output_dir: Path,
-    tokenizer_name: str = "Qwen/Qwen3-0.6B",
-    chat_template_kwargs: dict[str, Any] | None = None,
     *,
+    tokenizer_name: str,
+    tokenizer_revision: str,
+    chat_template_kwargs: dict[str, Any] | None = None,
     candidate_prefixes: int = TRAIN_PREFIXES,
     source_path: Path | None = None,
     max_source_rows: int = MAX_CANDIDATES,
@@ -43,7 +43,7 @@ def prepare_smoke_sample(
 ) -> dict[str, Any]:
     """Write candidate pivots and trajectory-ID-stratified held-out probes."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, revision=TOKENIZER_REVISION)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, revision=tokenizer_revision)
     template_kwargs = chat_template_kwargs or {}
     dataset = (
         (json.loads(line) for line in source_path.open())
@@ -103,6 +103,9 @@ def prepare_smoke_sample(
     manifest = {
         "dataset": DATASET_ID,
         "revision": DATASET_REVISION,
+        "tokenizer": tokenizer_name,
+        "tokenizer_revision": tokenizer_revision,
+        "chat_template_kwargs": template_kwargs,
         "train_trajectory_ids": train_trajectory_ids,
         "probe_trajectory_ids": probe_trajectory_ids,
         "train_prefixes": len(train),
