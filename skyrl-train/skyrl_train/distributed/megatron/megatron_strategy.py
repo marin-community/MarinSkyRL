@@ -40,7 +40,7 @@ from marinskyrl.remote_io import abort_multipart_uploads
 
 from megatron.core.dist_checkpointing.strategies import base as ckpt_base
 from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
-from megatron.core import dist_checkpointing, tensor_parallel
+from megatron.core import dist_checkpointing
 from megatron.core.dist_checkpointing.serialization import (
     get_default_load_sharded_strategy,
     get_default_save_sharded_strategy,
@@ -274,6 +274,9 @@ class MegatronStrategy(DistributedStrategy):
         # Preserve the common-state contract and each rank's separate CUDA tracker.
         generic_rng_state = self.get_rng_state()
         sharded_state_dict["rng"] = generic_rng_state
+        # CPU import stubs do not expose the GPU-only tensor-parallel tracker.
+        from megatron.core import tensor_parallel
+
         local_rng_state = {
             "coordinates": _rng_parallel_coordinates(),
             "generic": generic_rng_state,
@@ -442,6 +445,8 @@ class MegatronStrategy(DistributedStrategy):
                 states = {"client_state": extra_state.get("client_state", {}) or {}}
                 self.log("Loaded client state (ZClip / StaleClip) from checkpoint.")
                 if "rank_rng_states" in extra_state:
+                    from megatron.core import tensor_parallel
+
                     rank_rng_state = _select_rank_rng_state(extra_state["rank_rng_states"], rank)
                     self.load_rng_state(rank_rng_state["generic"])
                     tensor_parallel.get_cuda_rng_tracker().set_states(rank_rng_state["cuda_tracker"])
