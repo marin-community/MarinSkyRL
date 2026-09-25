@@ -1682,6 +1682,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     def __init__(self, *args, **kwargs):
         # Generate unique engine ID before calling super().__init__() which calls _create_engine
         self._stats_engine_id = uuid4().hex
+        self._stats_sequence = 0
         self._stats_attributes: Dict[str, str] = {}
         super().__init__(*args, **kwargs)
         self._weight_loader = VLLMWeightLoader(self.llm, is_async=True)
@@ -2209,8 +2210,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Return the engine's complete typed snapshot without publishing it."""
         from vllm.v1.metrics.reader import get_metrics_snapshot  # noqa: PLC0415
 
+        metrics = get_metrics_snapshot()
+        collection_timestamp_ms = time.time_ns() // 1_000_000
+        self._stats_sequence += 1
         native = snapshot_vllm_prometheus_metrics(
-            get_metrics_snapshot(),
+            metrics,
             engine_index=self._stats_attributes.get("engine_index", "0"),
         )
         snapshot = V1LoggingStatLoggerFixed.get_stats_by_engine_id(
@@ -2232,6 +2236,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             current=native.current,
             cumulative=native.cumulative,
             histograms=native.histograms,
+            histogram_timestamp_ms=collection_timestamp_ms,
+            histogram_sequence=self._stats_sequence,
+            histogram_dropped_count=native.histogram_dropped_count,
         )
 
     async def pause_generation(self) -> None:
