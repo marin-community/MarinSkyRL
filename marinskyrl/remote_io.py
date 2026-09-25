@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Buffer, Generator
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 import logging
 from typing import Any, cast, Protocol, runtime_checkable
@@ -72,12 +72,21 @@ class S3MultipartWriteStream(CommittableStream):
         self,
         filesystem: MultipartS3FileSystem,
         path: str,
+        *,
+        concurrency: int | None = None,
+        complete_out_of_order: bool = False,
+        wait_before_abort: bool = False,
     ) -> None:
+        if concurrency is not None and concurrency <= 0:
+            raise ValueError("Multipart concurrency must be positive")
         bucket, key, _version_id = filesystem.split_path(path)
         self.filesystem = filesystem
         self.bucket = bucket
         self.key = key
         self.path = path
+        self.concurrency = self.concurrency if concurrency is None else concurrency
+        self.complete_out_of_order = complete_out_of_order
+        self.wait_before_abort = wait_before_abort
         self.closed = False
         self._position = 0
         self._buffer = bytearray()
@@ -136,7 +145,7 @@ class S3MultipartWriteStream(CommittableStream):
                 self._submit_part(bytes(self._buffer))
                 self._buffer.clear()
             while self._pending:
-                self._finish_oldest_part()
+                self._finish_part()
             self._executor.shutdown(wait=True)
             self.filesystem.call_s3(
                 "complete_multipart_upload",
@@ -157,6 +166,9 @@ class S3MultipartWriteStream(CommittableStream):
         for _part_number, future in self._pending:
             future.cancel()
         try:
+            if self.wait_before_abort:
+                # A running UploadPart may otherwise finish after the abort.
+                self._executor.shutdown(wait=True, cancel_futures=True)
             if self._upload_id is not None:
                 self.filesystem.call_s3(
                     "abort_multipart_upload",
@@ -183,7 +195,7 @@ class S3MultipartWriteStream(CommittableStream):
         future = self._executor.submit(self._upload_part, part_number, payload)
         self._pending.append((part_number, future))
         if len(self._pending) >= self.concurrency:
-            self._finish_oldest_part()
+            self._finish_part()
 
     def _upload_part(self, part_number: int, payload: bytes) -> dict[str, int | str]:
         try:
@@ -200,14 +212,23 @@ class S3MultipartWriteStream(CommittableStream):
             raise
         return {"PartNumber": part_number, "ETag": str(response["ETag"])}
 
-    def _finish_oldest_part(self) -> None:
-        _part_number, future = self._pending.popleft()
+    def _finish_part(self) -> None:
+        if self.complete_out_of_order:
+            done, _ = wait((future for _, future in self._pending), return_when=FIRST_COMPLETED)
+            future = done.pop()
+            self._pending = deque((number, pending) for number, pending in self._pending if pending is not future)
+        else:
+            _part_number, future = self._pending.popleft()
         self._completed_parts.append(future.result())
 
 
 def create_output_stream(
     filesystem: AbstractFileSystem,
     path: str,
+    *,
+    multipart_concurrency: int | None = None,
+    complete_out_of_order: bool = False,
+    wait_before_abort: bool = False,
 ) -> OutputStream:
     """Create a write stream, using bounded multipart transfer for S3."""
     protocol = getattr(filesystem, "protocol", ())
@@ -215,7 +236,13 @@ def create_output_stream(
     if "s3" in protocols or "s3a" in protocols:
         if not isinstance(filesystem, MultipartS3FileSystem):
             raise TypeError("S3 filesystem does not provide multipart operations")
-        return S3MultipartWriteStream(filesystem, path)
+        return S3MultipartWriteStream(
+            filesystem,
+            path,
+            concurrency=multipart_concurrency,
+            complete_out_of_order=complete_out_of_order,
+            wait_before_abort=wait_before_abort,
+        )
     return cast(OutputStream, filesystem.open(path, "wb"))
 
 

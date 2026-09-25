@@ -4,6 +4,7 @@ uv  run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer.py
 
 import asyncio
 import threading
+import time
 from pathlib import Path
 import collections
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.group_admission import GroupAdmissionStalledError, GroupAdvantageInvariant
 import skyrl_train.trainer as trainer_module
 from skyrl_train.trainer import CheckpointSnapshot, RayPPOTrainer
+from skyrl_train.checkpoint_generation import COMMIT_FILENAME, commit_attempt, resolve_checkpoint_payload
 from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.utils.policy_losses import ppo_policy_loss
 from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch, TrainingOutputBatch
@@ -577,6 +579,8 @@ class _ResidencyInferenceClient:
 @pytest.mark.parametrize("save_error", [None, RuntimeError("storage of size 0")])
 def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_residency(save_error, monkeypatch):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron"}})
+    trainer.global_step = 1
     trainer.colocate_all = True
     trainer.policy_model = _ResidencyPolicyGroup()
     trainer.inference_engine_client = _ResidencyInferenceClient()
@@ -585,7 +589,7 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
     monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
     save_observations = []
 
-    def snapshot_checkpoint():
+    def save_checkpoint_payloads():
         save_observations.append(
             (
                 trainer.policy_model.model_on_gpu,
@@ -596,7 +600,7 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
         if save_error is not None:
             raise save_error
 
-    trainer._snapshot_checkpoint = snapshot_checkpoint
+    trainer._save_checkpoint_payloads = save_checkpoint_payloads
 
     if save_error is None:
         asyncio.run(trainer._save_checkpoints_with_residency())
@@ -613,6 +617,8 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
 
 def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed():
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron"}})
+    trainer.global_step = 6
     trainer.all_metrics = {}
     trainer.all_timings = {}
     trainer._checkpoint_save_failures = 0.0
@@ -620,7 +626,7 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
     attempts = 0
     saved_steps = []
 
-    async def save_with_residency():
+    async def save_with_residency(**_kwargs):
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -632,7 +638,6 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
         return control
 
     trainer._save_checkpoints_with_residency = save_with_residency
-    trainer._finish_checkpoint_upload = AsyncMock(return_value=(0.0, 0.0))
     trainer.callback_handler = SimpleNamespace(call_event_async=call_event_async)
     trainer._control = SimpleNamespace()
     state = SimpleNamespace(global_step=6)
@@ -645,12 +650,14 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
 
 def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron"}})
+    trainer.global_step = 6
     trainer.all_metrics = {}
     trainer.all_timings = {}
     trainer._checkpoint_save_failures = 0.0
     trainer._pending_checkpoint_upload = None
 
-    async def fail_save():
+    async def fail_save(**_kwargs):
         raise ValueError("invalid checkpoint state")
 
     trainer._save_checkpoints_with_residency = fail_save
@@ -660,6 +667,231 @@ def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
         asyncio.run(trainer._save_intermediate_checkpoint(state))
 
     assert trainer.all_metrics == {}
+
+
+@pytest.mark.parametrize("missing_file", [None, "__1_0.distcp", "common.pt", "metadata.json"])
+def test_fully_versioned_megatron_save_requires_rank_and_common_state(tmp_path, monkeypatch, missing_file):
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    latest = checkpoint_root / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("0")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {"trainer": {"strategy": "megatron", "ckpt_path": str(checkpoint_root), "max_ckpts_to_keep": -1}}
+    )
+    trainer.global_step = 1
+    trainer.critic_model = None
+    trainer.tokenizer = None
+    trainer.train_dataloader = SimpleNamespace(state_dict=lambda: {"cursor": 1})
+    trainer._pending_sync_prompts = []
+    trainer.distillation_scored_tokens_total = 0
+    trainer._domain_balancer = None
+    trainer._last_optimizer_step_finished_at = None
+    trainer.all_timings = {}
+
+    def save_ranks(_dispatch, _method, *, ckpt_dir, tokenizer):
+        del tokenizer
+        policy_dir = Path(ckpt_dir)
+        policy_dir.mkdir(parents=True)
+        for name in (
+            ".metadata",
+            "__0_0.distcp",
+            "__1_0.distcp",
+            "common.pt",
+            "metadata.json",
+            "extra_state.pt",
+            "huggingface/config.json",
+        ):
+            if name != missing_file:
+                target = policy_dir / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"state")
+        return [0, 1]
+
+    trainer.policy_model = SimpleNamespace(async_run_ray_method=save_ranks)
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+    monkeypatch.setattr(trainer_module.ray, "wait", lambda refs, **_kwargs: (refs[:1], refs[1:]))
+
+    if missing_file is not None:
+        with pytest.raises(RuntimeError, match=missing_file):
+            trainer.save_checkpoints()
+        assert latest.read_text() == "0"
+        assert not (checkpoint_root / "global_step_1" / COMMIT_FILENAME).exists()
+    else:
+        trainer.save_checkpoints()
+        assert latest.read_text() == "1"
+        payload = resolve_checkpoint_payload(str(checkpoint_root / "global_step_1"), verify_files=True)
+        assert Path(payload, "policy", "__1_0.distcp").read_bytes() == b"state"
+
+
+def test_megatron_rng_write_failure_keeps_previous_checkpoint_published(tmp_path):
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("1")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {"trainer": {"strategy": "megatron", "ckpt_path": str(tmp_path), "max_ckpts_to_keep": -1}}
+    )
+    trainer.global_step = 3
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer._checkpoint_save_failures = 0.0
+    trainer._pending_megatron_checkpoint_commit = trainer_module.PendingMegatronCommit(
+        step=2,
+        state=SimpleNamespace(global_step=2),
+        requested_at=time.perf_counter(),
+        requested_unix=time.time(),
+    )
+    attempt = Path(trainer_module.new_attempt_path(str(tmp_path / "global_step_2")))
+    attempt.mkdir(parents=True)
+    (attempt / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"trainer")
+    trainer._active_checkpoint_payload_path = str(attempt)
+    trainer._checkpoint_required_files = {
+        trainer_module.TRAINER_STATE_FILENAME,
+        trainer_module.DRIVER_RNG_STATE_FILENAME,
+    }
+
+    def fail_write(_state):
+        raise OSError("driver RNG upload failed")
+
+    trainer._write_driver_rng_state = fail_write
+    trainer._write_checkpoint_continuation_state = lambda _step, **_kwargs: None
+    trainer.callback_handler = SimpleNamespace(call_event_async=AsyncMock())
+    trainer._control = SimpleNamespace()
+    asyncio.run(trainer._publish_pending_megatron_checkpoint())
+
+    assert latest.read_text() == "1"
+    assert not (tmp_path / "global_step_2" / COMMIT_FILENAME).exists()
+    assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
+
+
+def test_megatron_late_callback_failure_does_not_publish_checkpoint(tmp_path):
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("1")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron", "ckpt_path": str(tmp_path)}})
+    trainer.global_step = 2
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer._pending_checkpoint_upload = None
+    trainer._control = SimpleNamespace(
+        reset=lambda: None,
+        should_save=True,
+        should_save_hf_model=False,
+        should_evaluate=True,
+    )
+    trainer.eval_dataset = object()
+
+    async def save_payloads(**_kwargs):
+        attempt = Path(trainer_module.new_attempt_path(str(tmp_path / "global_step_2")))
+        attempt.mkdir(parents=True)
+        trainer._active_checkpoint_payload_path = str(attempt)
+        trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
+        (attempt / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"trainer")
+
+    async def callback(event, _state, control, **_kwargs):
+        if event == "on_evaluate":
+            raise RuntimeError("evaluation callback failed")
+        return control
+
+    trainer._save_checkpoints_with_residency = save_payloads
+    trainer.callback_handler = SimpleNamespace(call_event_async=callback)
+    trainer.eval = AsyncMock(return_value={"eval/score": 1.0})
+
+    with pytest.raises(RuntimeError, match="evaluation callback failed"):
+        asyncio.run(trainer._run_step_end_callbacks(SimpleNamespace(global_step=2)))
+
+    assert latest.read_text() == "1"
+    assert not (tmp_path / "global_step_2" / COMMIT_FILENAME).exists()
+
+
+def test_retention_failure_does_not_undo_published_checkpoint(tmp_path):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron", "ckpt_path": str(tmp_path)}})
+    trainer.global_step = 2
+    trainer.all_timings = {}
+    trainer._last_optimizer_step_finished_at = None
+    trainer._last_saved_step = None
+
+    def fail_cleanup():
+        raise OSError("retention unavailable")
+
+    trainer._cleanup_old_checkpoints = fail_cleanup
+    step_dir = tmp_path / "global_step_2"
+    attempt_dir = Path(trainer_module.new_attempt_path(str(step_dir)))
+    attempt_dir.mkdir(parents=True)
+    (attempt_dir / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"trainer")
+    trainer._active_checkpoint_payload_path = str(attempt_dir)
+    trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
+    trainer._publish_checkpoint()
+
+    assert (tmp_path / trainer_module.LATEST_CHECKPOINT_FILE).read_text() == "2"
+    assert trainer._last_saved_step == 2
+
+
+def test_same_step_replacement_commits_without_rewriting_latest(tmp_path, monkeypatch):
+    step_path = tmp_path / "global_step_2"
+    previous_attempt = Path(trainer_module.new_attempt_path(str(step_path)))
+    previous_attempt.mkdir(parents=True)
+    (previous_attempt / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"previous")
+    commit_attempt(str(step_path), str(previous_attempt), required_files={trainer_module.TRAINER_STATE_FILENAME})
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("2")
+
+    replacement = Path(trainer_module.new_attempt_path(str(step_path)))
+    replacement.mkdir(parents=True)
+    (replacement / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"replacement")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron", "ckpt_path": str(tmp_path)}})
+    trainer.global_step = 2
+    trainer.all_timings = {}
+    trainer._last_optimizer_step_finished_at = None
+    trainer._last_saved_step = None
+    trainer._cleanup_old_checkpoints = lambda: None
+    trainer._active_checkpoint_payload_path = str(replacement)
+    trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
+
+    original_write = trainer_module.io.write_bytes_atomic
+
+    def fail_redundant_pointer_write(path, payload):
+        if path == str(latest):
+            raise OSError("redundant latest pointer write failed")
+        original_write(path, payload)
+
+    monkeypatch.setattr(trainer_module.io, "write_bytes_atomic", fail_redundant_pointer_write)
+    trainer._publish_checkpoint()
+
+    assert latest.read_text() == "2"
+    assert resolve_checkpoint_payload(str(step_path), verify_files=True) == str(replacement)
+    assert (previous_attempt / trainer_module.TRAINER_STATE_FILENAME).read_bytes() == b"previous"
+
+
+def test_stale_checkpoint_writer_cannot_replace_newer_latest(tmp_path):
+    step_path = tmp_path / "global_step_2"
+    previous_attempt = Path(trainer_module.new_attempt_path(str(step_path)))
+    previous_attempt.mkdir(parents=True)
+    (previous_attempt / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"previous")
+    commit_attempt(str(step_path), str(previous_attempt), required_files={trainer_module.TRAINER_STATE_FILENAME})
+    previous_commit = (step_path / COMMIT_FILENAME).read_bytes()
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("3")
+
+    replacement = Path(trainer_module.new_attempt_path(str(step_path)))
+    replacement.mkdir(parents=True)
+    (replacement / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"replacement")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron", "ckpt_path": str(tmp_path)}})
+    trainer.global_step = 2
+    trainer.all_timings = {}
+    trainer._last_optimizer_step_finished_at = None
+    trainer._active_checkpoint_payload_path = str(replacement)
+    trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
+
+    with pytest.raises(RuntimeError, match="older step"):
+        trainer._publish_checkpoint()
+
+    assert latest.read_text() == "3"
+    assert (step_path / COMMIT_FILENAME).read_bytes() == previous_commit
+    assert resolve_checkpoint_payload(str(step_path), verify_files=True) == str(previous_attempt)
 
 
 def test_checkpoint_marker_waits_for_rank_uploads(monkeypatch, tmp_path):

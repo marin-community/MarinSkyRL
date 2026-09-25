@@ -4,10 +4,12 @@ import io as stdlib_io
 import json
 import math
 import os
+import random
 import shutil
 import threading
 import time
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
@@ -50,6 +52,7 @@ from skyrl_train.domain_gradient_balance import DomainGradientBalancer
 from skyrl_train.utils import trainer_utils
 from skyrl_train.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
+from skyrl_train.utils.constants import DEFAULT_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.tensor_math import masked_mean
 from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
@@ -92,10 +95,16 @@ from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.checkpoint_paths import (
     GLOBAL_STEP_PREFIX,
     LATEST_CHECKPOINT_FILE,
+    extract_step_from_path,
 )
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculativeDecodingConfig, runai_model_uri
-from skyrl_train.checkpoint_listing import extract_step_from_path
+from skyrl_train.checkpoint_generation import (
+    ATTEMPTS_DIRECTORY,
+    commit_attempt,
+    new_attempt_path,
+    resolve_checkpoint_payload,
+)
 from skyrl_train.utils.trainer_utils import (
     cleanup_old_checkpoints,
     run_on_each_node,
@@ -118,7 +127,7 @@ from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
-from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
+from skyrl_train.timing_observability import checkpoint_phase, publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
     read_hf_export_request,
@@ -146,7 +155,36 @@ class CheckpointSnapshot:
     marker_path: str
 
 
+@dataclass(frozen=True)
+class PendingMegatronCommit:
+    step: int
+    state: TrainerState
+    requested_at: float
+    requested_unix: float
+
+
+class CheckpointUploadNotDrainedError(RuntimeError):
+    """An upload may still be active, so another save must not start."""
+
+
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
+DATALOADER_STATE_FILENAME = "data.pt"
+WORKER_RECEIPTS_FILENAME = "worker_receipts.json"
+DRIVER_RNG_STATE_FILENAME = "driver_rng_state.pt"
+
+
+def _capture_driver_rng_state() -> dict[str, Any]:
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state(),
+    }
+
+
+def _restore_driver_rng_state(state: dict[str, Any]) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch_cpu"])
 
 
 def _active_online_eagle_results(results: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -234,7 +272,12 @@ class RayPPOTrainer:
         self._shutdown_complete = False
         self.global_step = 0
         self._last_saved_step: int | None = None
+        self._active_checkpoint_payload_path: str | None = None
+        self._checkpoint_required_files: set[str] | None = None
+        self._last_optimizer_step_finished_at: tuple[int, float] | None = None
         self._pending_checkpoint_upload: tuple[asyncio.Task[tuple[float, float]], TrainerState] | None = None
+        self._pending_megatron_checkpoint_commit: PendingMegatronCommit | None = None
+        self._pending_megatron_hf_export = False
         raw_speculative_decoding = cfg.generator.get("speculative_decoding")
         if raw_speculative_decoding is not None:
             raw_speculative_decoding = OmegaConf.to_container(raw_speculative_decoding, resolve=True)
@@ -610,28 +653,77 @@ class RayPPOTrainer:
 
             # The interval save may have just written this same step; do not write it twice.
             if self._control.should_save and self._last_saved_step != self.global_step:
-                with Timer("save_checkpoints", self.all_timings):
-                    snapshot = await asyncio.to_thread(self._snapshot_checkpoint)
-                try:
-                    await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
-                except BaseException:
-                    await self._await_checkpoint_upload(snapshot)
-                    raise
-                self._start_checkpoint_upload(snapshot, final_state)
-                if await self._drain_checkpoint_upload():
-                    logger.info("Saved final checkpoint.")
+                if self._uses_background_checkpoint_upload():
+                    with Timer("save_checkpoints", self.all_timings):
+                        snapshot = await asyncio.to_thread(self._snapshot_checkpoint)
+                    try:
+                        await self.callback_handler.call_event_async(
+                            "on_save", final_state, self._control, trainer=self
+                        )
+                    except BaseException:
+                        await self._await_checkpoint_upload(snapshot)
+                        raise
+                    self._start_checkpoint_upload(snapshot, final_state)
+                    if await self._drain_checkpoint_upload():
+                        logger.info("Saved final checkpoint.")
+                else:
+                    try:
+                        with Timer("save_checkpoints", self.all_timings):
+                            await asyncio.to_thread(self._save_checkpoint_payloads)
+                            await self.callback_handler.call_event_async(
+                                "on_save", final_state, self._control, trainer=self
+                            )
+                            if self._defers_megatron_checkpoint_commit():
+                                resume_epoch = getattr(self, "_current_resume_epoch", None)
+                                if resume_epoch is None:
+                                    resume_epoch = getattr(self, "_loaded_resume_epoch", None)
+                                await asyncio.to_thread(
+                                    self._write_checkpoint_continuation_state,
+                                    self.global_step,
+                                    resume_epoch=resume_epoch,
+                                    at_epoch_boundary=getattr(self, "_current_at_epoch_boundary", None),
+                                )
+                                if self._can_replay_driver_rng():
+                                    rng_state = _capture_driver_rng_state()
+                                    try:
+                                        await asyncio.to_thread(self._write_driver_rng_state, rng_state)
+                                        await asyncio.to_thread(self._publish_checkpoint)
+                                    finally:
+                                        _restore_driver_rng_state(rng_state)
+                                else:
+                                    await asyncio.to_thread(self._publish_checkpoint)
+                            else:
+                                await asyncio.to_thread(self._publish_checkpoint)
+                            logger.info("Saved final checkpoint.")
+                    finally:
+                        self._active_checkpoint_payload_path = None
+                        self._checkpoint_required_files = None
             if self._control.should_save_hf_model:
                 await asyncio.to_thread(self.handle_hf_export)
 
-    async def _save_checkpoints_with_residency(self) -> CheckpointSnapshot:
-        """Save a checkpoint, swapping colocated training and inference residency when needed."""
+    def _uses_background_checkpoint_upload(self) -> bool:
+        return str(self.cfg.trainer.strategy) != "megatron"
+
+    async def _save_checkpoints_with_residency(
+        self, *, defer_continuation_state: bool = False
+    ) -> CheckpointSnapshot | None:
+        """Save with required residency; return a snapshot only for legacy upload."""
+        if self._uses_background_checkpoint_upload():
+            save_payloads = self._snapshot_checkpoint
+        elif defer_continuation_state:
+            save_payloads = partial(self._save_checkpoint_payloads, include_continuation_state=False)
+        else:
+            save_payloads = self._save_checkpoint_payloads
         if not self.colocate_all:
-            return await asyncio.to_thread(self._snapshot_checkpoint)
+            return await asyncio.to_thread(save_payloads)
 
         await self.inference_engine_client.sleep()
         try:
-            self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
-            return await asyncio.to_thread(self._snapshot_checkpoint)
+            with checkpoint_phase(
+                str(self.cfg.trainer.strategy), "save", "policy_backload", rank=-1, step=self.global_step
+            ):
+                self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
+            return await asyncio.to_thread(save_payloads)
         finally:
             await self._sync_policy_for_rollouts(reason="checkpoint_restore")
 
@@ -642,8 +734,37 @@ class RayPPOTrainer:
             f"Checkpoint save failed at global step {state.global_step}; continuing from the last complete checkpoint"
         )
 
+    def _settle_checkpoint_refs(self, refs: list[ObjectRef], *, operation: str) -> list[Any]:
+        """Wait for every rank, including after one fails, before permitting a retry."""
+        if not refs:
+            return []
+        distributed = getattr(self.cfg.trainer, "distributed", None)
+        timeout = int(getattr(distributed, "worker_collective_timeout_seconds", DEFAULT_WORKER_NCCL_TIMEOUT_IN_S))
+        deadline = time.monotonic() + timeout
+        pending = list(refs)
+        results: dict[ObjectRef, Any] = {}
+        errors: list[Exception] = []
+        while pending:
+            ready, pending = ray.wait(pending, num_returns=1, timeout=max(0.0, deadline - time.monotonic()))
+            if not ready:
+                raise CheckpointUploadNotDrainedError(
+                    f"{operation} did not settle all {len(refs)} worker refs within {timeout}s; "
+                    f"{len(pending)} may still be active"
+                )
+            for ref in ready:
+                try:
+                    results[ref] = ray.get(ref)
+                except Exception as error:
+                    errors.append(error)
+        if errors:
+            raise errors[0]
+        return [results[ref] for ref in refs]
+
     async def _save_intermediate_checkpoint(self, state: TrainerState) -> None:
         """Save one requested step checkpoint without terminating training on storage failure."""
+        if not self._uses_background_checkpoint_upload():
+            await self._save_intermediate_megatron_checkpoint(state)
+            return
         await self._drain_checkpoint_upload()
         try:
             with Timer("save_checkpoints", self.all_timings):
@@ -663,6 +784,156 @@ class RayPPOTrainer:
             await self._await_checkpoint_upload(snapshot)
             raise
         self._start_checkpoint_upload(snapshot, state)
+
+    async def _save_intermediate_megatron_checkpoint(self, state: TrainerState) -> None:
+        """Keep the Megatron attempt unpublished through late step callbacks."""
+        if getattr(self, "_pending_megatron_checkpoint_commit", None) is not None:
+            raise RuntimeError("Cannot start another checkpoint before publishing the pending Megatron attempt")
+        await self._drain_checkpoint_upload()
+        snapshot: CheckpointSnapshot | None = None
+        started_upload = False
+        deferred_commit = False
+        requested_at = time.perf_counter()
+        requested_unix = time.time()
+        defer_megatron = self._defers_megatron_checkpoint_commit()
+        try:
+            with (
+                Timer("save_checkpoints", self.all_timings),
+                checkpoint_phase(
+                    str(self.cfg.trainer.strategy),
+                    "save",
+                    "checkpoint_prepare_pause" if defer_megatron else "checkpoint_foreground_pause",
+                    rank=-1,
+                    step=self.global_step,
+                ),
+            ):
+                snapshot = (
+                    await self._save_checkpoints_with_residency(defer_continuation_state=True)
+                    if defer_megatron
+                    else await self._save_checkpoints_with_residency()
+                )
+                with checkpoint_phase(
+                    str(self.cfg.trainer.strategy), "save", "on_save_callbacks", rank=-1, step=self.global_step
+                ):
+                    await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
+                if snapshot is None:
+                    if defer_megatron:
+                        if getattr(self, "_pending_megatron_checkpoint_commit", None) is not None:
+                            raise RuntimeError("A Megatron checkpoint is already awaiting step-end publication")
+                        self._pending_megatron_checkpoint_commit = PendingMegatronCommit(
+                            step=self.global_step,
+                            state=state,
+                            requested_at=requested_at,
+                            requested_unix=requested_unix,
+                        )
+                        deferred_commit = True
+                    else:
+                        await asyncio.to_thread(self._publish_checkpoint)
+                else:
+                    self._start_checkpoint_upload(snapshot, state)
+                    started_upload = True
+        except BaseException as error:
+            if snapshot is not None and not started_upload:
+                await self._await_checkpoint_upload(snapshot)
+            if isinstance(error, OSError):
+                self._record_checkpoint_save_failure(state)
+                return
+            if isinstance(error, ray.exceptions.RayTaskError) and isinstance(error.as_instanceof_cause(), OSError):
+                self._record_checkpoint_save_failure(state)
+                return
+            raise
+        finally:
+            if not deferred_commit:
+                self._active_checkpoint_payload_path = None
+                self._checkpoint_required_files = None
+
+    def _defers_megatron_checkpoint_commit(self) -> bool:
+        """Keep synchronous Megatron attempts unpublished through late step callbacks."""
+        return str(self.cfg.trainer.strategy) == "megatron"
+
+    def _can_replay_driver_rng(self) -> bool:
+        """Only restore process-global RNG when no concurrent HTTP producer runs."""
+        if not self._defers_megatron_checkpoint_commit():
+            return False
+        if isinstance(self.cfg, DictConfig):
+            return not bool(OmegaConf.select(self.cfg, "generator.enable_http_endpoint", default=False))
+        return not bool(getattr(getattr(self.cfg, "generator", None), "enable_http_endpoint", False))
+
+    async def _publish_pending_megatron_checkpoint(
+        self, *, resume_epoch: int | None = None, at_epoch_boundary: bool | None = None
+    ) -> None:
+        pending = getattr(self, "_pending_megatron_checkpoint_commit", None)
+        if pending is None:
+            return
+        step = pending.step
+        state = pending.state
+        requested_at = pending.requested_at
+        requested_unix = pending.requested_unix
+        committed = False
+        commit_finished_at: float | None = None
+        try:
+            with checkpoint_phase(
+                "megatron",
+                "save",
+                "checkpoint_request_to_commit",
+                rank=-1,
+                step=step,
+                started_monotonic=requested_at,
+                started_unix=requested_unix,
+            ):
+                with checkpoint_phase("megatron", "save", "late_step_seal", rank=-1, step=step):
+                    await asyncio.to_thread(
+                        self._write_checkpoint_continuation_state,
+                        step,
+                        resume_epoch=resume_epoch,
+                        at_epoch_boundary=at_epoch_boundary,
+                    )
+                    if self._can_replay_driver_rng():
+                        rng_state = _capture_driver_rng_state()
+                        try:
+                            await asyncio.to_thread(self._write_driver_rng_state, rng_state)
+                            await asyncio.to_thread(self._publish_checkpoint, step)
+                        finally:
+                            _restore_driver_rng_state(rng_state)
+                    else:
+                        await asyncio.to_thread(self._publish_checkpoint, step)
+                    commit_finished_at = time.perf_counter()
+                    committed = True
+        except OSError:
+            if committed:
+                raise
+            self._record_checkpoint_save_failure(state)
+        else:
+            if getattr(self, "_pending_megatron_hf_export", False):
+                # Export request bookkeeping is distinct from checkpoint
+                # durability and must not be attributed to the save span.
+                if self._can_replay_driver_rng():
+                    rng_state = _capture_driver_rng_state()
+                    try:
+                        await asyncio.to_thread(self.handle_hf_export, step)
+                    finally:
+                        _restore_driver_rng_state(rng_state)
+                else:
+                    await asyncio.to_thread(self.handle_hf_export, step)
+        finally:
+            step_started_at = getattr(self, "_active_step_started_at", None)
+            if step_started_at is not None:
+                logger.info(
+                    "step_to_checkpoint_commit_observation {}",
+                    json.dumps(
+                        {
+                            "schema": "step_to_checkpoint_commit_v1",
+                            "step": step,
+                            "duration_seconds": (commit_finished_at or time.perf_counter()) - step_started_at,
+                            "checkpoint_committed": committed,
+                        },
+                        sort_keys=True,
+                    ),
+                )
+            self._pending_megatron_checkpoint_commit = None
+            self._pending_megatron_hf_export = False
+            self._active_checkpoint_payload_path = None
+            self._checkpoint_required_files = None
 
     def _start_checkpoint_upload(self, snapshot: CheckpointSnapshot, state: TrainerState) -> None:
         assert getattr(self, "_pending_checkpoint_upload", None) is None
@@ -693,6 +964,8 @@ class RayPPOTrainer:
         await self._finish_checkpoint_upload(snapshot, commit=False)
 
     async def _drain_checkpoint_upload(self) -> bool:
+        # Shutdown can run after partial initialization, before checkpoint
+        # upload state has been installed on the trainer.
         pending = getattr(self, "_pending_checkpoint_upload", None)
         if pending is None:
             return True
@@ -726,8 +999,10 @@ class RayPPOTrainer:
         if self._control.should_save_hf_model:
             # HF export reads the committed checkpoint. When checkpoint and HF
             # export share a cadence, wait for the background shard uploads and
-            # marker publication before asking the exporter to consume it.
-            if await self._drain_checkpoint_upload():
+            # generation commit before asking the exporter to consume it.
+            if getattr(self, "_pending_megatron_checkpoint_commit", None) is not None:
+                self._pending_megatron_hf_export = True
+            elif await self._drain_checkpoint_upload():
                 await asyncio.to_thread(self.handle_hf_export)
             self._control.should_save_hf_model = False
 
@@ -1065,6 +1340,7 @@ class RayPPOTrainer:
         training_input: TrainingInputBatch,
         duration_seconds: float,
     ) -> None:
+        self._last_optimizer_step_finished_at = (self.global_step, time.monotonic())
         logger.info(
             "Optimizer step completed: step={} epoch={} sequences={} duration_seconds={:.3f}",
             self.global_step,
@@ -1072,6 +1348,21 @@ class RayPPOTrainer:
             len(training_input["sequences"]),
             duration_seconds,
         )
+        resume_started = getattr(self, "_checkpoint_resume_started", None)
+        if resume_started is not None and self.global_step == getattr(self, "_checkpoint_resumed_from_step", -2) + 1:
+            logger.info(
+                "checkpoint_resume_observation {}",
+                json.dumps(
+                    {
+                        "schema": "checkpoint_resume_v1",
+                        "loaded_step": self._checkpoint_resumed_from_step,
+                        "first_optimizer_step": self.global_step,
+                        "duration_to_first_optimizer_step_seconds": time.perf_counter() - resume_started,
+                    },
+                    sort_keys=True,
+                ),
+            )
+            self._checkpoint_resume_started = None
 
     def _log_training_step_completed(self, *, epoch: int, duration_seconds: float) -> None:
         logger.info(
@@ -1100,8 +1391,10 @@ class RayPPOTrainer:
 
         # Load checkpoint state if resumption is enabled.
         if self.resume_mode != ResumeMode.NONE:
+            self._checkpoint_resume_started = time.perf_counter()
             with Timer("load_checkpoints", self.all_startup_timings):
                 self.global_step, _ = self.load_checkpoints()
+            self._checkpoint_resumed_from_step = self.global_step
 
         await self._start_draft_trainer()
 
@@ -1111,6 +1404,9 @@ class RayPPOTrainer:
         # the checkpoint weights. The loaded global_step is the completed step count;
         # >= treats a resume exactly at max_steps as complete without running gs N+1.
         if self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps:
+            loaded_driver_rng = getattr(self, "_loaded_driver_rng_state", None)
+            if loaded_driver_rng is not None:
+                _restore_driver_rng_state(loaded_driver_rng)
             await self._handle_resume_at_max_steps()
             return
 
@@ -1121,7 +1417,9 @@ class RayPPOTrainer:
             self.reward_kl_controller = get_kl_controller(self.cfg.trainer.algorithm)
 
         # Create initial trainer state for on_train_begin callback
-        start_epoch = self.global_step // len(self.train_dataloader)
+        start_epoch = getattr(self, "_loaded_resume_epoch", None)
+        if start_epoch is None:
+            start_epoch = self.global_step // len(self.train_dataloader)
         initial_state = self._create_trainer_state(epoch=start_epoch)
 
         # Call on_train_begin callbacks (handles eval_before_train via EvaluationCallback)
@@ -1138,13 +1436,34 @@ class RayPPOTrainer:
                 self.tracker.log(eval_metrics, step=self.global_step, commit=True)
             self._control.should_evaluate = False
 
+        # Reapply the saved stream after startup work and after constructing
+        # the first resumed dataloader iterator. Iterator construction itself
+        # draws a Torch base seed, whereas an uninterrupted mid-epoch step
+        # reuses its existing iterator.
+        loaded_driver_rng = getattr(self, "_loaded_driver_rng_state", None)
+        loaded_at_epoch_boundary = bool(getattr(self, "_loaded_at_epoch_boundary", False))
+
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
-        start_epoch = self.global_step // len(self.train_dataloader)
+        start_epoch = getattr(self, "_loaded_resume_epoch", None)
+        if start_epoch is None:
+            start_epoch = self.global_step // len(self.train_dataloader)
         last_completed_step = self.global_step
         self.global_step += 1  # start training at global_step 1
+        if loaded_driver_rng is not None and loaded_at_epoch_boundary:
+            _restore_driver_rng_state(loaded_driver_rng)
+            loaded_driver_rng = None
+            self._loaded_driver_rng_state = None
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
-            for iter, rand_prompts in enumerate(self.train_dataloader):
+            epoch_exhausted = True
+            dataloader_iterator = iter(self.train_dataloader)
+            if loaded_driver_rng is not None:
+                _restore_driver_rng_state(loaded_driver_rng)
+                loaded_driver_rng = None
+                self._loaded_driver_rng_state = None
+            for batch_index, rand_prompts in enumerate(dataloader_iterator):
+                if getattr(self, "_pending_megatron_checkpoint_commit", None) is not None:
+                    raise RuntimeError("Cannot start the next step with an unpublished Megatron checkpoint")
                 with Timer("step", self.all_timings) as step_timer:
                     # for colocate_all=true, inference engine is always on GPU when starting the training step
 
@@ -1275,6 +1594,7 @@ class RayPPOTrainer:
                     logger.info(status)
                     self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
                     step_state = self._create_trainer_state(epoch, active_step_duration=step_timer.elapsed)
+                    self._active_step_started_at = step_timer.start_time
                     await self._run_step_end_callbacks(step_state)
 
                     # Handle ref model update at epoch end (via RefModelUpdateCallback).
@@ -1321,14 +1641,35 @@ class RayPPOTrainer:
 
                 del training_input, trajectory_batch
 
-                # 9. Check for max_steps
-                if self.global_step > self.total_training_steps:
-                    logger.info(f"Reached max training steps ({self.total_training_steps})")
-                    break
+                # The on_save attempt is still private. Capture the driver RNG
+                # after on_log and progress bookkeeping, before another batch can
+                # advance either the driver or the model. Epoch-end callbacks
+                # belong to this step and run below before its publication.
+                if not (
+                    batch_index + 1 == len(self.train_dataloader)
+                    or self.global_step > self.total_training_steps
+                    or self._control.should_training_stop
+                ):
+                    await self._publish_pending_megatron_checkpoint(resume_epoch=epoch, at_epoch_boundary=False)
 
-                # 12. Check for early stopping
-                if self._control.should_training_stop:
-                    logger.info("Training stopped early by callback")
+                # 9. Stop at the configured horizon or a callback request.
+                if self.global_step > self.total_training_steps or self._control.should_training_stop:
+                    if batch_index + 1 == len(self.train_dataloader):
+                        # StatefulDataLoader marks the epoch finished only on
+                        # terminal next(), not when its final batch is yielded.
+                        # The late checkpoint seal must observe that transition.
+                        try:
+                            next(dataloader_iterator)
+                        except StopIteration:
+                            pass
+                        else:
+                            raise RuntimeError("Dataloader yielded beyond its reported epoch length")
+                    else:
+                        epoch_exhausted = False
+                    if self.global_step > self.total_training_steps:
+                        logger.info(f"Reached max training steps ({self.total_training_steps})")
+                    else:
+                        logger.info("Training stopped early by callback")
                     break
 
             # Call on_epoch_end callbacks
@@ -1336,6 +1677,12 @@ class RayPPOTrainer:
             self._control.reset()
             self._control = await self.callback_handler.call_event_async(
                 "on_epoch_end", epoch_state, self._control, trainer=self
+            )
+            self._current_resume_epoch = epoch + 1 if epoch_exhausted else epoch
+            self._current_at_epoch_boundary = epoch_exhausted
+            await self._publish_pending_megatron_checkpoint(
+                resume_epoch=self._current_resume_epoch,
+                at_epoch_boundary=epoch_exhausted,
             )
 
             if self.global_step > self.total_training_steps:
@@ -2657,14 +3004,222 @@ class RayPPOTrainer:
         actor_info: ActorInfo = model.actor_infos[rank]
         return actor_info.rank
 
-    def save_checkpoints(self) -> None:
-        """Save and publish a complete checkpoint before returning."""
-        snapshot = self._snapshot_checkpoint()
-        upload_duration, cleanup_duration = self._finish_checkpoint_upload_blocking(snapshot, commit=True)
-        self.all_timings["checkpoint_upload"] = self.all_timings.get("checkpoint_upload", 0.0) + upload_duration
-        self.all_timings["cleanup_old_checkpoints"] = (
-            self.all_timings.get("cleanup_old_checkpoints", 0.0) + cleanup_duration
-        )
+    def _begin_checkpoint_attempt(self, step: int) -> tuple[str, set[str]]:
+        """Allocate a private generation and track files needed before publication."""
+        step_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
+        attempt_path = new_attempt_path(step_path)
+        self._active_checkpoint_payload_path = attempt_path
+        required_files = {
+            DATALOADER_STATE_FILENAME,
+            TRAINER_STATE_FILENAME,
+            f"{POLICY_CHECKPOINT_SUBDIRECTORY}/{WORKER_RECEIPTS_FILENAME}",
+        }
+        if self._can_replay_driver_rng():
+            required_files.add(DRIVER_RNG_STATE_FILENAME)
+        required_files.update(getattr(self, "_required_checkpoint_callback_files", set()))
+        self._checkpoint_required_files = required_files
+        io.makedirs(attempt_path, exist_ok=True)
+        return attempt_path, required_files
+
+    def _save_checkpoint_payloads(self, *, include_continuation_state: bool = True) -> None:
+        """
+        Save model shards and trainer state into a fresh, uncommitted attempt.
+
+        If colocate_all is True, assumes that the policy model is currently on GPU.
+        """
+        step = self.global_step
+        attempt_path, required_files = self._begin_checkpoint_attempt(step)
+
+        # Save policy checkpoint
+        backend = str(self.cfg.trainer.strategy)
+
+        def require_component_files(component: str, ranks: list[int]) -> None:
+            if backend != "megatron":
+                return
+            required_files.update(
+                {
+                    f"{component}/.metadata",
+                    f"{component}/common.pt",
+                    f"{component}/metadata.json",
+                    f"{component}/extra_state.pt",
+                    f"{component}/huggingface/config.json",
+                }
+            )
+            required_files.update(f"{component}/__{rank}_0.distcp" for rank in ranks)
+
+        def save_component(component: str, actors: PPORayActorGroup) -> None:
+            component_path = os.path.join(attempt_path, component)
+            with checkpoint_phase(backend, "save", f"{component}_workers", rank=-1, step=step):
+                refs = actors.async_run_ray_method(
+                    "pass_through", "save_checkpoint", ckpt_dir=component_path, tokenizer=self.tokenizer
+                )
+                ranks = self._settle_checkpoint_refs(refs, operation=f"{component} save")
+            if not refs or sorted(ranks) != list(range(len(refs))):
+                raise RuntimeError(f"{component.capitalize()} checkpoint worker receipts incomplete: {ranks}")
+            require_component_files(component, ranks)
+            io.write_bytes_atomic(
+                os.path.join(component_path, WORKER_RECEIPTS_FILENAME),
+                json.dumps({"component": component, "ranks": ranks}, sort_keys=True).encode(),
+            )
+
+        save_component(POLICY_CHECKPOINT_SUBDIRECTORY, self.policy_model)
+
+        # Save critic checkpoint (if it exists)
+        if self.critic_model is not None:
+            if self.colocate_all:
+                self.policy_model.offload_to_cpu()
+                self.critic_model.backload_to_gpu()
+
+            save_component("critic", self.critic_model)
+            required_files.add(f"critic/{WORKER_RECEIPTS_FILENAME}")
+
+            if self.colocate_all:
+                self.critic_model.offload_to_cpu()
+                self.policy_model.backload_to_gpu()
+
+        if include_continuation_state:
+            self._write_checkpoint_continuation_state(step)
+
+        logger.info(f"Prepared checkpoint for global_step_{step} at: {attempt_path}")
+
+    def _checkpoint_trainer_state(self, step: int) -> dict[str, Any]:
+        """Keep common continuation fields identical across checkpoint backends."""
+        return {
+            "global_step": step,
+            "config": self.cfg,
+            "pending_sync_prompts": self._pending_sync_prompts,
+            "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
+            "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
+        }
+
+    def _write_checkpoint_continuation_state(
+        self, step: int, *, resume_epoch: int | None = None, at_epoch_boundary: bool | None = None
+    ) -> None:
+        """Seal the small driver-side files in the active, uncommitted attempt."""
+        attempt_path = self._active_checkpoint_payload_path
+        if attempt_path is None:
+            raise RuntimeError("No prepared checkpoint attempt for continuation state")
+        dataloader_save_path = os.path.join(attempt_path, DATALOADER_STATE_FILENAME)
+        with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "dataloader_state", rank=-1, step=step):
+            dataloader_state_dict = self.train_dataloader.state_dict()
+            with io.open_file(dataloader_save_path, "wb") as f:
+                torch.save(dataloader_state_dict, f)
+            logger.info(f"Saved dataloader state to {dataloader_save_path}")
+
+        trainer_state = self._checkpoint_trainer_state(step)
+        trainer_state.update(resume_epoch=resume_epoch, at_epoch_boundary=at_epoch_boundary)
+        trainer_state_path = os.path.join(attempt_path, TRAINER_STATE_FILENAME)
+        with io.open_file(trainer_state_path, "wb") as f:
+            torch.save(trainer_state, f)
+        logger.info(f"Saved trainer state to {trainer_state_path}")
+
+    def _write_driver_rng_state(self, state: dict[str, Any]) -> None:
+        """Persist driver RNG in an unpublished Megatron checkpoint attempt."""
+        attempt_path = self._active_checkpoint_payload_path
+        if attempt_path is None:
+            raise RuntimeError("No prepared Megatron attempt for driver RNG state")
+        with io.open_file(os.path.join(attempt_path, DRIVER_RNG_STATE_FILENAME), "wb") as output:
+            torch.save(state, output)
+
+    def _publish_checkpoint(self, step: int | None = None) -> None:
+        """Advance latest only after payloads and on-save callback state are durable."""
+        step = self.global_step if step is None else step
+        global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
+        attempt_path = getattr(self, "_active_checkpoint_payload_path", None)
+        required_files = getattr(self, "_checkpoint_required_files", None)
+        if attempt_path is None or required_files is None:
+            raise RuntimeError("No prepared checkpoint attempt to publish")
+        self._commit_checkpoint_generation(step, global_step_folder, attempt_path, required_files)
+        with Timer("cleanup_old_checkpoints", self.all_timings):
+            self._cleanup_committed_checkpoint(step)
+
+    def _commit_checkpoint_generation(
+        self,
+        step: int,
+        step_path: str,
+        attempt_path: str,
+        required_files: set[str],
+        *,
+        optimizer_step_finished_at: float | None = None,
+    ) -> None:
+        """Publish one fully durable generation before advertising it as latest."""
+        latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
+        previous_latest = int(io.read_bytes(latest_checkpoint_file)) if io.exists(latest_checkpoint_file) else None
+        if previous_latest is not None and previous_latest > step:
+            raise RuntimeError(f"Refusing to replace latest checkpoint step {previous_latest} with older step {step}")
+        with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "generation_commit", rank=-1, step=step):
+            commit_attempt(step_path, attempt_path, required_files=required_files)
+        # A same-step replacement is published by its step-level commit record.
+        # Rewriting an unchanged latest pointer could fail after that publication
+        # and incorrectly report the complete replacement as a failed save.
+        if previous_latest != step:
+            with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "latest_pointer", rank=-1, step=step):
+                io.write_bytes_atomic(latest_checkpoint_file, str(step).encode())
+        if optimizer_step_finished_at is None:
+            last_optimizer_step = getattr(self, "_last_optimizer_step_finished_at", None)
+            if last_optimizer_step is not None and last_optimizer_step[0] == step:
+                optimizer_step_finished_at = last_optimizer_step[1]
+        if optimizer_step_finished_at is not None:
+            pointer_lag = time.monotonic() - optimizer_step_finished_at
+            self.all_timings["checkpoint_pointer_lag"] = pointer_lag
+            logger.info(
+                "checkpoint_durability_observation {}",
+                json.dumps({"schema": "checkpoint_durability_v1", "step": step, "pointer_lag_seconds": pointer_lag}),
+            )
+
+        logger.info(f"Successfully saved checkpoint for global_step_{step} to: {step_path}")
+        self._last_saved_step = step
+
+    def _cleanup_committed_checkpoint(self, step: int | None = None) -> None:
+        # Retention is best-effort after publication. A cleanup I/O failure must
+        # not make a committed checkpoint look like a failed save.
+        try:
+            with checkpoint_phase(
+                str(self.cfg.trainer.strategy),
+                "save",
+                "retention",
+                rank=-1,
+                step=self.global_step if step is None else step,
+            ):
+                self._cleanup_old_checkpoints()
+        except OSError as error:
+            logger.warning(f"Checkpoint retention failed after publication; continuing: {error}")
+
+    def save_checkpoints(self, *, resume_epoch: int | None = None, at_epoch_boundary: bool | None = None) -> None:
+        """Save without callbacks; pass cursor metadata for exact direct-save replay."""
+        if getattr(self, "_pending_megatron_checkpoint_commit", None) is not None:
+            raise RuntimeError("Cannot save synchronously while a Megatron attempt awaits publication")
+        if self._uses_background_checkpoint_upload():
+            snapshot = self._snapshot_checkpoint()
+            upload_duration, cleanup_duration = self._finish_checkpoint_upload_blocking(snapshot, commit=True)
+            self.all_timings["checkpoint_upload"] = self.all_timings.get("checkpoint_upload", 0.0) + upload_duration
+            self.all_timings["cleanup_old_checkpoints"] = (
+                self.all_timings.get("cleanup_old_checkpoints", 0.0) + cleanup_duration
+            )
+            return
+        try:
+            self._save_checkpoint_payloads()
+            if self._defers_megatron_checkpoint_commit():
+                if resume_epoch is not None or at_epoch_boundary is not None:
+                    self._write_checkpoint_continuation_state(
+                        self.global_step,
+                        resume_epoch=resume_epoch,
+                        at_epoch_boundary=at_epoch_boundary,
+                    )
+                if self._can_replay_driver_rng():
+                    rng_state = _capture_driver_rng_state()
+                    try:
+                        self._write_driver_rng_state(rng_state)
+                        self._publish_checkpoint()
+                    finally:
+                        _restore_driver_rng_state(rng_state)
+                else:
+                    self._publish_checkpoint()
+            else:
+                self._publish_checkpoint()
+        finally:
+            self._active_checkpoint_payload_path = None
+            self._checkpoint_required_files = None
 
     def _snapshot_checkpoint(self) -> CheckpointSnapshot:
         """
@@ -2750,26 +3305,31 @@ class RayPPOTrainer:
         # cluster for no benefit.
         if max_ckpts < 0:
             return
+        if max_ckpts == 0:
+            # Once latest points at a step, retention must not delete that
+            # step's only recoverable generation. Keep one even if the
+            # requested retention count is zero.
+            logger.warning("max_ckpts_to_keep=0 cannot retain a recoverable latest checkpoint; keeping one")
+            max_ckpts = 1
 
         protected_steps = protected_hf_export_steps(self.cfg.trainer.ckpt_path)
 
-        if not self._node_ids:
-            self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)
-        try:
-            run_on_each_node(
-                self._node_ids,
-                cleanup_old_checkpoints,
-                self.cfg.trainer.ckpt_path,
-                max_ckpts,
-                protected_steps,
-            )
-        except ray.exceptions.RayError as e:
-            # Best-effort: cleanup runs only after a successful checkpoint save,
-            # so any per-node dispatch failure -- worker lease failure, worker or
-            # node death, or a failure raised inside the remote task -- is logged
-            # rather than propagated. The checkpoint is already on disk; cleanup
-            # must not kill the run.
-            logger.warning(f"Per-node checkpoint cleanup failed, continuing: {e}")
+        # Cloud prefixes are shared by every node. Running the same listing and
+        # deletes on each node just multiplies object-store traffic and Ray leases.
+        if not io.is_cloud_path(self.cfg.trainer.ckpt_path):
+            if not self._node_ids:
+                self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)
+            try:
+                run_on_each_node(
+                    self._node_ids,
+                    cleanup_old_checkpoints,
+                    self.cfg.trainer.ckpt_path,
+                    max_ckpts,
+                    protected_steps,
+                )
+            except ray.exceptions.RayError as e:
+                # A node-local cleanup failure must not kill an already saved run.
+                logger.warning(f"Per-node checkpoint cleanup failed, continuing: {e}")
 
         # Driver-side cleanup. For a shared ckpt_path (GPFS, S3) this alone
         # suffices; the per-node fan-out above only matters for node-local dirs.
@@ -2828,6 +3388,7 @@ class RayPPOTrainer:
         if not io.exists(str(checkpoint_path)):
             raise FileNotFoundError(f"Checkpoint path not found: {checkpoint_path}")
 
+        checkpoint_path = resolve_checkpoint_payload(str(checkpoint_path), verify_files=True)
         logger.info(f"Loading checkpoint from: {checkpoint_path}")
 
         # Extract global step from checkpoint path
@@ -2840,7 +3401,7 @@ class RayPPOTrainer:
         policy_ckpt_dir = os.path.join(checkpoint_path, POLICY_CHECKPOINT_SUBDIRECTORY)
         critic_ckpt_dir = os.path.join(checkpoint_path, "critic")
         trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
-        dataloader_state_path = os.path.join(checkpoint_path, "data.pt")
+        dataloader_state_path = os.path.join(checkpoint_path, DATALOADER_STATE_FILENAME)
 
         # Validate that required checkpoint files exist
         if not io.exists(trainer_state_path):
@@ -2849,7 +3410,30 @@ class RayPPOTrainer:
         # 1. Load and validate trainer state
         with io.open_file(trainer_state_path, "rb") as f:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
+        driver_rng_path = os.path.join(checkpoint_path, DRIVER_RNG_STATE_FILENAME)
+        self._loaded_driver_rng_state = None
+        exact_continuation = self.cfg.trainer.restore_dataloader_state and not self.cfg.trainer.get(
+            "reset_global_step_on_resume", False
+        )
+        if exact_continuation and self._can_replay_driver_rng() and io.exists(driver_rng_path):
+            with io.open_file(driver_rng_path, "rb") as source:
+                self._loaded_driver_rng_state = torch.load(source, map_location="cpu", weights_only=False)
+        elif exact_continuation and self._can_replay_driver_rng():
+            logger.warning("Checkpoint has no driver RNG state; legacy resume cannot replay driver random draws")
+        elif io.exists(driver_rng_path):
+            logger.warning("Skipping driver RNG restore for a new data stage or active HTTP/fully-async producers")
+        elif exact_continuation and self._defers_megatron_checkpoint_commit():
+            logger.warning("HTTP-enabled Megatron resume does not replay process-global driver RNG")
         saved_global_step = trainer_state.get("global_step", global_step)
+        self._loaded_resume_epoch = trainer_state.get("resume_epoch")
+        self._loaded_at_epoch_boundary = trainer_state.get("at_epoch_boundary")
+        if self._loaded_driver_rng_state is not None and self._loaded_at_epoch_boundary is None:
+            logger.warning(
+                "Checkpoint lacks iterator-boundary metadata; exact direct-save driver replay is not guaranteed"
+            )
+        if not exact_continuation:
+            self._loaded_resume_epoch = None
+            self._loaded_at_epoch_boundary = None
         self._pending_sync_prompts = []
         if self.cfg.trainer.get("reset_distillation_token_count_on_resume", False):
             self.distillation_scored_tokens_total = 0
@@ -2875,8 +3459,15 @@ class RayPPOTrainer:
                 self._pending_sync_prompts = trainer_state.get("pending_sync_prompts", [])
                 logger.info("Successfully loaded dataloader state")
             except Exception as e:
+                if os.path.basename(os.path.dirname(checkpoint_path)) == ATTEMPTS_DIRECTORY:
+                    raise RuntimeError(f"Failed to restore required dataloader state: {dataloader_state_path}") from e
                 logger.warning(f"Failed to load dataloader state: {e}. Dataloader will start from beginning.")
         else:
+            if (
+                os.path.basename(os.path.dirname(checkpoint_path)) == ATTEMPTS_DIRECTORY
+                and self.cfg.trainer.restore_dataloader_state
+            ):
+                raise FileNotFoundError(f"Required dataloader state missing: {dataloader_state_path}")
             logger.warning(
                 f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
             )
@@ -2915,29 +3506,33 @@ class RayPPOTrainer:
             logger.info("Successfully loaded critic checkpoint")
 
         logger.info(f"Successfully loaded complete checkpoint state from global_step_{global_step}")
+        if self._loaded_driver_rng_state is not None:
+            _restore_driver_rng_state(self._loaded_driver_rng_state)
         if self.cfg.trainer.get("reset_global_step_on_resume", False):
             logger.info("Resetting the trainer step to 0 at the explicit stage boundary")
             global_step = 0
         return global_step, str(checkpoint_path)
 
-    def handle_hf_export(self) -> None:
+    def handle_hf_export(self, step: int | None = None) -> None:
         """Persist a request for out-of-band policy checkpoint conversion."""
         with Timer("queue_hf_export", self.all_timings):
-            self._handle_hf_export()
+            self._handle_hf_export(step)
 
-    def _handle_hf_export(self) -> None:
-        checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{self.global_step}")
-        trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
+    def _handle_hf_export(self, step: int | None = None) -> None:
+        step = self.global_step if step is None else step
+        checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
+        payload_path = resolve_checkpoint_payload(checkpoint_path)
+        trainer_state_path = os.path.join(payload_path, TRAINER_STATE_FILENAME)
         if not io.exists(trainer_state_path):
             raise RuntimeError(
-                f"Cannot request HF export for global_step_{self.global_step}: "
+                f"Cannot request HF export for global_step_{step}: "
                 f"completed checkpoint marker is missing at {trainer_state_path}"
             )
 
         placement = self.cfg.trainer.placement
         model = self.cfg.trainer.policy.model
         request = HFExportRequest(
-            step=self.global_step,
+            step=step,
             checkpoint_base_path=self.cfg.trainer.ckpt_path,
             checkpoint_path=checkpoint_path,
             export_path=self.cfg.trainer.export_path,
@@ -2954,10 +3549,10 @@ class RayPPOTrainer:
         existing = read_hf_export_request(checkpoint_path)
         if existing is not None:
             if existing.status is HFExportStatus.COMPLETE:
-                logger.info(f"HF export for global_step_{self.global_step} is already complete")
+                logger.info(f"HF export for global_step_{step} is already complete")
                 return
             if existing.status is HFExportStatus.IN_PROGRESS:
-                logger.info(f"HF export for global_step_{self.global_step} is already in progress")
+                logger.info(f"HF export for global_step_{step} is already in progress")
                 return
             request = replace(
                 request,
@@ -2965,9 +3560,9 @@ class RayPPOTrainer:
                 timeout=existing.timeout,
                 last_exit_code=existing.last_exit_code,
             )
-            logger.info(f"Refreshing pending HF export request for global_step_{self.global_step}")
+            logger.info(f"Refreshing pending HF export request for global_step_{step}")
         request_path = write_hf_export_request(request)
-        logger.info(f"Queued out-of-band HF export for global_step_{self.global_step}: {request_path}")
+        logger.info(f"Queued out-of-band HF export for global_step_{step}: {request_path}")
 
     def _log_startup_timings(self) -> None:
         publish_startup_timings(

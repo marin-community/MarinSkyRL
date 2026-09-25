@@ -29,9 +29,10 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
 )
 from transformers import AutoTokenizer
 from skyrl_train.io import io
+from skyrl_train.checkpoint_generation import COMMIT_FILENAME
 from marinskyrl.resource_locator import join_resource_path
-from skyrl_train.checkpoint_listing import extract_step_from_path, list_checkpoint_dirs
-from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
+from skyrl_train.checkpoint_listing import list_committed_checkpoint_dirs
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, extract_step_from_path
 from skyrl_train.curriculum import CurriculumConfig, CurriculumSampler, SamplingKind
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.domain_sampling import DomainWeightedSampler
@@ -115,7 +116,7 @@ def cleanup_old_checkpoints(
     if max_checkpoints < 0:
         return
 
-    checkpoint_dirs = list_checkpoint_dirs(checkpoint_base_path)
+    checkpoint_dirs = list_committed_checkpoint_dirs(checkpoint_base_path)
 
     if len(checkpoint_dirs) <= max_checkpoints:
         return
@@ -152,15 +153,23 @@ def validate_consistency_for_latest_checkpoint(
 ):
     """Validate that the checkpoint folder is consistent with the latest checkpoint file.
 
-    Asserts that the folder with the highest global step is the latest checkpoint tracked by `latest_checkpoint_file`.
-    Otherwise, the folder state is inconsistent and the user should delete other checkpoints.
+    Reject a newer legacy flat checkpoint that exceeds the allowed save interval.
+
+    Generation commits are safe to ignore until the latest pointer advertises them.
     """
     if io.exists(root_ckpt_folder):
-        checkpoint_dirs = list_checkpoint_dirs(root_ckpt_folder)
+        checkpoint_dirs = list_committed_checkpoint_dirs(root_ckpt_folder)
         if checkpoint_dirs:
-            global_step_values = [extract_step_from_path(d) for d in checkpoint_dirs]
-            max_global_step_in_folder = max(global_step_values)
-            # NOTE (sumanthrh): We allow a checkpoint folder to be `save_interval` steps ahead of the latest checkpoint in `latest_checkpoint_file`. This is because the last checkpoint can be an incomplete checkpoint.
+            # A generation commit precedes the latest-pointer write. If the
+            # latter fails, the complete but unadvertised generation is safe
+            # to ignore while resuming from the last advertised step. Keep
+            # the historical mismatch check for older flat checkpoints.
+            legacy_steps = [
+                extract_step_from_path(directory)
+                for directory in checkpoint_dirs
+                if not io.exists(os.path.join(root_ckpt_folder, directory, COMMIT_FILENAME))
+            ]
+            max_global_step_in_folder = max(legacy_steps, default=ckpt_iteration)
             if max_global_step_in_folder - ckpt_iteration > save_interval:
                 max_global_step_in_folder_path = os.path.join(
                     root_ckpt_folder, f"{GLOBAL_STEP_PREFIX}{max_global_step_in_folder}"

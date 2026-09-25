@@ -28,7 +28,13 @@ from loguru import logger
 from omegaconf import DictConfig
 import torch
 
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
+from skyrl_train.checkpoint_generation import (
+    commit_shutdown_overlay,
+    new_shutdown_overlay_path,
+    shutdown_buffer_artifact_path,
+)
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState, GenerationQueuesProvider
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
@@ -1035,9 +1041,8 @@ class DataTrackingCallback(TrainerCallback):
             logger.warning("DataTrackingCallback.on_save: no trainer in kwargs, skipping")
             return control
 
-        ckpt_path = os.path.join(
-            trainer.cfg.trainer.ckpt_path,
-            f"global_step_{state.global_step}",
+        ckpt_path = getattr(trainer, "_active_checkpoint_payload_path", None) or os.path.join(
+            trainer.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{state.global_step}"
         )
         data_state = self._tracker.get_state()
         data_state.global_step = state.global_step
@@ -1182,10 +1187,13 @@ class BufferCheckpointCallback(TrainerCallback):
         )
 
     async def flush_to_checkpoint(self, checkpoint_path: str) -> None:
-        """Persist all resumable work, including a trained but uncheckpointed batch."""
+        """Persist shutdown-only work without mutating the committed model payload."""
         if self._queues is None:
             raise RuntimeError("BufferCheckpointCallback queues were not bound before shutdown flush")
-        await self._save_bound_state(checkpoint_path, self._queues.shutdown_snapshot())
+        overlay_path = new_shutdown_overlay_path(checkpoint_path)
+        io.makedirs(overlay_path, exist_ok=True)
+        await self._save_bound_state(overlay_path, self._queues.shutdown_snapshot())
+        await asyncio.to_thread(commit_shutdown_overlay, checkpoint_path, overlay_path, self.ARTIFACT_NAME)
 
     async def on_save_async(
         self,
@@ -1200,12 +1208,8 @@ class BufferCheckpointCallback(TrainerCallback):
             raise RuntimeError("BufferCheckpointCallback queues were not bound before checkpoint save")
 
         buffer_state = self._queues.snapshot()
-        if not (buffer_state.completed_groups or buffer_state.admitted_groups or buffer_state.retry_prompts):
-            return control
-
-        ckpt_path = os.path.join(
-            trainer.cfg.trainer.ckpt_path,
-            f"global_step_{state.global_step}",
+        ckpt_path = getattr(trainer, "_active_checkpoint_payload_path", None) or os.path.join(
+            trainer.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{state.global_step}"
         )
         await self._save_bound_state(ckpt_path, buffer_state)
 
@@ -1215,7 +1219,7 @@ class BufferCheckpointCallback(TrainerCallback):
     def load_buffer_state(ckpt_path: str) -> GenerationBufferState:
         """Load completed, admitted, and retryable rollout work from a checkpoint."""
 
-        artifact_path = os.path.join(ckpt_path, BufferCheckpointCallback.ARTIFACT_NAME)
+        artifact_path = shutdown_buffer_artifact_path(ckpt_path, BufferCheckpointCallback.ARTIFACT_NAME)
         if not io.exists(artifact_path):
             return GenerationBufferState(completed_groups=[], retry_prompts=[])
 

@@ -98,7 +98,7 @@ def _make_shutdown_trainer(tmp_path, *, global_step: int, uid: str, consumed: bo
 
 @pytest.mark.asyncio
 async def test_roundtrip_empty_buffer():
-    """Empty buffer produces no artifact file."""
+    """Even an empty buffer has a required checkpoint artifact."""
     buf = asyncio.Queue(maxsize=4)
     with tempfile.TemporaryDirectory() as tmpdir:
         step_dir = os.path.join(tmpdir, "global_step_10")
@@ -107,7 +107,8 @@ async def test_roundtrip_empty_buffer():
         cb = BufferCheckpointCallback()
         cb.bind_queues(trainer._generation_queues)
         await cb.on_save_async(_FakeState(10), _FakeControl(), trainer=trainer)
-        assert not os.path.exists(os.path.join(step_dir, cb.ARTIFACT_NAME))
+        assert os.path.exists(os.path.join(step_dir, cb.ARTIFACT_NAME))
+        assert BufferCheckpointCallback.load_buffer_state(step_dir).completed_groups == []
 
 
 @pytest.mark.asyncio
@@ -183,6 +184,7 @@ def test_consumed_admitted_groups_are_only_included_by_final_flush_snapshot():
 async def test_shutdown_flush_banks_consumed_batch_in_immediately_preceding_checkpoint(tmp_path):
     step_dir = tmp_path / "global_step_5"
     step_dir.mkdir()
+    (step_dir / "trainer_state.pt").write_bytes(b"legacy checkpoint")
     (tmp_path / "latest_ckpt_global_step.txt").write_text("5")
     trainer = _make_shutdown_trainer(tmp_path, global_step=6, uid="trained", consumed=True)
 
@@ -190,6 +192,7 @@ async def test_shutdown_flush_banks_consumed_batch_in_immediately_preceding_chec
 
     restored = BufferCheckpointCallback.load_buffer_state(str(step_dir))
     assert [group.uid for group in restored.admitted_groups] == ["trained"]
+    assert not (step_dir / BufferCheckpointCallback.ARTIFACT_NAME).exists()
 
 
 @pytest.mark.asyncio
