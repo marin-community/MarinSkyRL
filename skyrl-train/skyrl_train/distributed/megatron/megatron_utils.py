@@ -31,6 +31,8 @@ from megatron.core import parallel_state as mpu
 from megatron.core.utils import get_attr_wrapped_model
 from megatron.core.packed_seq_params import PackedSeqParams
 
+from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH
+
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
 
@@ -316,9 +318,10 @@ def load_megatron_optimizer(optimizers):
         if hasattr(_opt.optimizer, "_move_new_state_to_right_device"):
             _opt.optimizer._move_new_state_to_right_device()
         else:
+            keep_cpu_momentum = isinstance(_opt.optimizer, MegatronGrugMuonH) and _opt.optimizer.offload_momentum
             for state in _opt.optimizer.state.values():
                 for name in ("exp_avg", "exp_avg_sq", "momentum_buffer"):
-                    if name in state:
+                    if name in state and not (keep_cpu_momentum and name == "momentum_buffer"):
                         state[name] = state[name].to(torch.cuda.current_device(), non_blocking=True)
         gc.collect()
         torch.cuda.empty_cache()
