@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 import ray
 from loguru import logger
 from packaging import version
-from ray.actor import ActorHandle
+from ray.actor import ActorHandle, ActorMethod
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group, remove_placement_group
 from rigging.timing import ExponentialBackoff, retry_with_backoff
 from transformers import AutoConfig, PretrainedConfig
@@ -258,6 +258,27 @@ async def _await_actor_task(actor_task: Any) -> Any:
         raise
 
 
+async def _submit_actor_task(
+    remote_method: ActorMethod, *args: Any, **kwargs: Any
+) -> ray.ObjectRef | ray.ObjectRefGenerator:
+    """Submit without blocking the HTTP event loop, including slow Ray submission."""
+    submission = asyncio.create_task(asyncio.to_thread(remote_method.remote, *args, **kwargs))
+    try:
+        return await asyncio.shield(submission)
+    except asyncio.CancelledError:
+
+        async def cancel_late_submission() -> None:
+            try:
+                actor_task = await submission
+            except Exception:
+                logger.exception("Ray submission failed after request cancellation")
+                return
+            await asyncio.to_thread(ray.cancel, actor_task)
+
+        asyncio.create_task(cancel_late_submission())
+        raise
+
+
 class RayWrappedInferenceEngine(InferenceEngineInterface):
     """
     A thin wrapper around a Ray ActorHandle to another InferenceEngineInterface.
@@ -295,7 +316,7 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         return ray.get(self.inference_engine_actor.dp_size.remote())
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        actor_task = self.inference_engine_actor.generate.remote(input_batch=input_batch)
+        actor_task = await _submit_actor_task(self.inference_engine_actor.generate, input_batch=input_batch)
         return await _await_actor_task(actor_task)
 
     async def wake_up(self, *args: Any, **kwargs: Any):
@@ -330,11 +351,11 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         return await self.inference_engine_actor.reset_prefix_cache.remote()
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        actor_task = self.inference_engine_actor.chat_completion.remote(request_payload)
+        actor_task = await _submit_actor_task(self.inference_engine_actor.chat_completion, request_payload)
         return await _await_actor_task(actor_task)
 
     async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        actor_task = self.inference_engine_actor.tokenize.remote(request_payload)
+        actor_task = await _submit_actor_task(self.inference_engine_actor.tokenize, request_payload)
         return await _await_actor_task(actor_task)
 
     async def chat_completion_stream(self, request_payload: Dict[str, Any]):
@@ -346,7 +367,7 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         ``ObjectRef`` objects reach ``StreamingResponse`` and the connection
         dies with ``RemoteProtocolError: incomplete chunked read``.
         """
-        gen = self.inference_engine_actor.chat_completion_stream.remote(request_payload)
+        gen = await _submit_actor_task(self.inference_engine_actor.chat_completion_stream, request_payload)
         try:
             async for ref in gen:
                 yield await ref
@@ -354,7 +375,7 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
             ray.cancel(gen)
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        actor_task = self.inference_engine_actor.completion.remote(request_payload)
+        actor_task = await _submit_actor_task(self.inference_engine_actor.completion, request_payload)
         return await _await_actor_task(actor_task)
 
     async def pause_generation(self) -> None:
