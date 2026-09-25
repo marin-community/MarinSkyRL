@@ -43,8 +43,17 @@ class ParityMegatronPolicyWorker(MegatronPolicyWorkerBase):
             }
         )
 
-    def parity_rng_snapshot(self):
-        return self._rank, self._rng_snapshot()
+    def parity_write_rng_snapshot(self, directory: str):
+        path = Path(directory) / f"rank-{self._rank}.pt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self._rng_snapshot(), path)
+        return (self._rank,)
+
+    def parity_compare_rng_snapshot(self, directory: str):
+        path = Path(directory) / f"rank-{self._rank}.pt"
+        expected = torch.load(path, map_location="cpu", weights_only=False)
+        assert_state_equal(expected, self._rng_snapshot(), f"rank[{self._rank}].save_rng")
+        return (self._rank,)
 
     def _state_snapshot(self):
         materialize_megatron_params(self.model.actor_module)
@@ -157,11 +166,10 @@ def test_megatron_checkpoint_reference_records_uninterrupted_step(ray_init_fixtu
         ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
         trainer.global_step = 1
 
-        before_save_rng = _rank_results(trainer, "parity_rng_snapshot")
+        rng_path = str(local / "before-save-rng")
+        _rank_results(trainer, "parity_write_rng_snapshot", rng_path)
         trainer.save_checkpoints()
-        after_save_rng = _rank_results(trainer, "parity_rng_snapshot")
-        for before, after in zip(sorted(before_save_rng), sorted(after_save_rng), strict=True):
-            assert_state_equal(before[1], after[1], f"rank[{before[0]}].save_rng")
+        _rank_results(trainer, "parity_compare_rng_snapshot", rng_path)
 
         checkpoint = f"{checkpoint_root}/checkpoints/global_step_1"
         assert resolve_checkpoint_payload(checkpoint, verify_files=True)
