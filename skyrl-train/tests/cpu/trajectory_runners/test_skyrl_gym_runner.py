@@ -1430,11 +1430,14 @@ async def test_generate_interface_compliance(
             [{"role": "user", "content": "What is 3 + 5?"}],
             [{"role": "user", "content": "Solve 10 - 7"}],
         ]
-        env_extras: List[Dict[str, Any]] = [{"answer": "8"}, {"answer": "3"}]
+        env_extras: List[Dict[str, Any]] = [
+            {"answer": "8", "data_source": "math"},
+            {"answer": "3", "data_source": "tools"},
+        ]
     else:
         # For non-batched mode, test with single prompt
         prompts: List[ConversationType] = [[{"role": "user", "content": "What is 2 * 3?"}]]
-        env_extras: List[Dict[str, Any]] = [{"answer": "6"}]
+        env_extras: List[Dict[str, Any]] = [{"answer": "6", "data_source": "math"}]
     env_classes = [mock_env_cfg.env_class for _ in prompts]
 
     input_batch: TrajectoryRequestBatch = {
@@ -1467,6 +1470,7 @@ async def test_generate_interface_compliance(
     assert len(trajectory_batch["loss_masks"]) == len(prompts), (
         f"Number of loss masks should match number of prompts (batched={batched})"
     )
+    assert trajectory_batch["data_sources"] == [extras["data_source"] for extras in env_extras]
 
     # Test with None env_extras to ensure Optional handling works (only test this once)
     if batched:

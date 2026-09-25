@@ -170,6 +170,15 @@ async def test_run_omits_teacher_routes_when_request_does_not_supply_them():
 
 
 @pytest.mark.asyncio
+async def test_non_gym_runner_does_not_propagate_task_uris_as_data_sources():
+    output = await _TwoRowRunner().run(
+        {"env_extras": [{"data_source": "tasktrove://set/task-a"}, {"data_source": "tasktrove://set/task-b"}]}
+    )
+
+    assert "data_sources" not in output
+
+
+@pytest.mark.asyncio
 async def test_teacher_routes_survive_batch_concatenation_and_filtering():
     math = await _AlignedRunner().run({"env_extras": [{"teacher_route": "math"}]})
     code = await _AlignedRunner().run({"env_extras": [{"teacher_route": "code"}]})

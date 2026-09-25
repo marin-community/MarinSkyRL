@@ -196,7 +196,7 @@ def test_domain_reward_metrics_aggregate_and_bound_metric_keys():
     metrics = _domain_reward_metrics(["alpha", "alpha", None, "zeta"], [0.0, 1.0, 0.5, 0.0])
     assert metrics == {
         "reward/domain/alpha/avg_raw_reward": 0.5,
-        "reward/domain/unknown/avg_raw_reward": 0.5,
+        "reward/domain/_missing/avg_raw_reward": 0.5,
         "reward/domain/zeta/avg_raw_reward": 0.0,
     }
 
@@ -204,6 +204,24 @@ def test_domain_reward_metrics_aggregate_and_bound_metric_keys():
     assert len(overflow_metrics) == 33
     assert overflow_metrics["reward/domain/__other__/avg_raw_reward"] == 0.0
     assert overflow_metrics["reward/domain_overflow/avg_raw_reward"] == 1.0
+
+
+def test_domain_reward_metric_names_do_not_merge_distinct_sources():
+    metrics = _domain_reward_metrics(
+        ["a/b", "a_b", None, "unknown", "_missing", "_source_a_2fb", "Math", "math"],
+        [0.0, 1.0, 0.25, 0.75, 0.5, 0.6, 0.3, 0.9],
+    )
+
+    assert metrics == {
+        "reward/domain/_source_a_2fb/avg_raw_reward": 0.0,
+        "reward/domain/a_b/avg_raw_reward": 1.0,
+        "reward/domain/_missing/avg_raw_reward": 0.25,
+        "reward/domain/unknown/avg_raw_reward": 0.75,
+        "reward/domain/_source__5fmissing/avg_raw_reward": 0.5,
+        "reward/domain/_source__5fsource_5fa_5f2fb/avg_raw_reward": 0.6,
+        "reward/domain/_source__4dath/avg_raw_reward": 0.3,
+        "reward/domain/math/avg_raw_reward": 0.9,
+    }
 
 
 def test_step_wise_rollout_rows_keep_request_data_sources():

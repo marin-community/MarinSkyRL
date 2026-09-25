@@ -108,7 +108,6 @@ class TrajectoryRunner(ABC):
                 raise ValueError("trajectory runner output rows must align with request trajectory IDs")
             output["trajectory_ids"] = list(trajectory_ids)
         propagate_teacher_routes(input_batch, output)
-        propagate_data_sources(input_batch, output)
         return await self._finalize_output(input_batch, output)
 
     async def _finalize_output(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> TrajectoryBatch:

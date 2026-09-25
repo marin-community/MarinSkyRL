@@ -17,7 +17,13 @@ from typing import Callable, Generic, List, Dict, Any, Optional, Sequence, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
 
-from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
+from skyrl_train.trajectory_runners.base import (
+    TrajectoryRunner,
+    TrajectoryRequestBatch,
+    TrajectoryBatch,
+    TrajectoryID,
+    propagate_data_sources,
+)
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
@@ -968,7 +974,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         outputs = await self.collector.collect(input_batch, disable_tqdm=disable_tqdm)
         if isinstance(outputs, list) and outputs and isinstance(outputs[0], AgentLoopOutput):
             await self._apply_genrm_cohort_rewards(outputs, input_batch)
-        return self.projection.project(outputs, input_batch)
+        batch = self.projection.project(outputs, input_batch)
+        propagate_data_sources(input_batch, batch)
+        return batch
 
     async def _apply_genrm_cohort_rewards(
         self,

@@ -154,11 +154,12 @@ SkyRL automatically computes the following metrics for logging purposes:
 - ``pass_at_n``: The ``n`` in ``pass_at_n`` is the number of trajectories we generate for each example. ``pass_at_n`` is 1 if any trajectory succeeded, and 0 otherwise. For each trajectory, we assume that the last turn's reward signifies the entire trajectory's reward, and any positive value is considered a "pass".
 - ``mean_raw_reward``: for each trajectory, we sum over all the turns' rewards. We then take the average over all the trajectories.
 
-When ``env_extras`` includes ``data_source``, training also logs ``reward/domain/<source>/avg_raw_reward``
+When a Gym environment's ``env_extras`` includes ``data_source``, training also logs ``reward/domain/<source>/avg_raw_reward``
 at each optimizer step using the same reward values as ``reward/avg_raw_reward``. Step-wise training uses each trajectory's final step.
-Source names replace ``/`` with ``_`` (as in evaluation metrics); missing names use ``unknown``.
-The first 32 names in sorted order get separate metrics, and any remaining names are grouped under
-``reward/domain_overflow/avg_raw_reward``.
+Lowercase ASCII source names stay readable. Other names use lowercase UTF-8 byte escapes under ``_source_``:
+``a/b`` becomes ``_source_a_2fb``, while ``a_b`` stays ``a_b``. Missing metadata uses ``_missing``.
+The first 32 encoded names in sorted order get separate metrics per batch; remaining names are grouped under
+``reward/domain_overflow/avg_raw_reward``. This is not a run-wide key limit.
 
 Whether you use turn-level rewards or outcome rewards, the rewards used to train the model will be translated to per-token rewards. For example, if there are 3 turns with 4 response tokens each and the turn-level rewards are ``[1.0, 2.0, 3.0]``, the resulting per-token rewards are:
 

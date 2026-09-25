@@ -4,6 +4,7 @@ import io as stdlib_io
 import json
 import math
 import os
+import re
 import shutil
 import threading
 import time
@@ -151,8 +152,25 @@ _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 MAX_DOMAIN_REWARD_METRICS = 32
 
 
+def _domain_metric_source_key(source: str | None) -> str:
+    """Encode one source as a distinct, tracker-safe metric path segment.
+
+    Lowercase ASCII names stay readable. ``_missing`` denotes absent metadata;
+    other names use fixed-width UTF-8 byte escapes under ``_source_``.
+    """
+    if source is None:
+        return "_missing"
+    if re.fullmatch(r"[a-z_][a-z0-9_]*", source) and source != "_missing" and not source.startswith("_source_"):
+        return source
+    encoded = "".join(
+        chr(byte) if byte in b"abcdefghijklmnopqrstuvwxyz0123456789" else f"_{byte:02x}"
+        for byte in source.encode("utf-8")
+    )
+    return f"_source_{encoded}"
+
+
 def _domain_reward_metrics(data_sources: List[str | None], rewards: List[float]) -> Dict[str, float]:
-    """Return bounded per-source means using the existing evaluation key normalization."""
+    """Return bounded per-source means with distinct, stable metric names."""
     if len(data_sources) != len(rewards):
         raise ValueError(
             f"Expected one data source per reward, got {len(data_sources)} sources and {len(rewards)} rewards"
@@ -160,7 +178,7 @@ def _domain_reward_metrics(data_sources: List[str | None], rewards: List[float])
 
     rewards_by_source: Dict[str, List[float]] = defaultdict(list)
     for source, reward in zip(data_sources, rewards, strict=True):
-        rewards_by_source[trainer_utils.sanitize_data_source(source)].append(reward)
+        rewards_by_source[_domain_metric_source_key(source)].append(reward)
 
     sources = sorted(rewards_by_source)
     metrics = {
