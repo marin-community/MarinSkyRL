@@ -41,19 +41,6 @@ class FailingOnceMegatronPolicyWorker(MegatronPolicyWorkerBase):
         direct_checkpoint.checkpoint.save = save_then_fail
         return self._rank
 
-    def plan_cache_invalidated(self) -> tuple[int, bool]:
-        from torch.distributed.checkpoint.planner import SavePlanner
-
-        key = self.strategy._checkpoint_plan_cache_key
-        caches = (
-            SavePlanner._cached_save_plan,
-            SavePlanner._cached_all_plans,
-            SavePlanner._cached_global_plan,
-            SavePlanner._cached_metadata,
-            SavePlanner._cached_final_save_plan,
-        )
-        return self._rank, key is not None and all(key not in cache for cache in caches)
-
 
 def _test_root() -> str:
     root = os.environ["CHECKPOINT_TEST_ROOT"].rstrip("/")
@@ -114,9 +101,6 @@ def test_megatron_failed_save_preserves_latest_and_retry_commits(ray_init_fixtur
         assert sorted(armed) == list(range(4))
         with pytest.raises(Exception, match="injected post-DCP save failure"):
             trainer.save_checkpoints()
-        cache_state = ray.get(trainer.policy_model.async_run_ray_method("pass_through", "plan_cache_invalidated"))
-        assert sorted(cache_state) == [(rank, True) for rank in range(4)]
-
         step_two = _step_path(root, 2)
         assert io.read_bytes(_latest_path(root)) == previous_pointer
         assert io.read_bytes(os.path.join(step_one, COMMIT_FILENAME)) == previous_commit

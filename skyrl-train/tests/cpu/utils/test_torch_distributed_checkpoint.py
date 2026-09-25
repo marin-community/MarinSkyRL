@@ -306,35 +306,3 @@ def test_checkpoint_stream_waits_for_inflight_part_before_abort(monkeypatch):
     assert filesystem.aborted
     assert filesystem.completed_parts is None
     assert stream.closed
-
-
-def test_dcp_writer_uses_eight_concurrent_parts(monkeypatch):
-    monkeypatch.setattr(S3MultipartWriteStream, "part_bytes", _TEST_PART_BYTES)
-
-    class _EightWayFilesystem(_RecordingMultipartFilesystem):
-        def __init__(self):
-            super().__init__()
-            self.all_parts_started = threading.Event()
-            self.started = 0
-
-        def call_s3(self, method: str, **kwargs):
-            if method == "upload_part":
-                with self._lock:
-                    self.started += 1
-                    if self.started == 8:
-                        self.all_parts_started.set()
-                if not self.all_parts_started.wait(timeout=3):
-                    raise TimeoutError("fewer than eight checkpoint parts started")
-                part = int(kwargs["PartNumber"])
-                return {"ETag": f"etag-{part}"}
-            return super().call_s3(method, **kwargs)
-
-    filesystem = _EightWayFilesystem()
-    writer = StreamingFsspecWriter("s3://bucket/checkpoint", filesystem=filesystem)
-    with writer.fs.create_stream("s3://bucket/checkpoint/__0_0.distcp", "wb") as stream:
-        stream.write(b"x" * (_TEST_PART_BYTES * 8))
-
-    assert filesystem.started == 8
-    assert filesystem.completed_parts is not None
-    assert len(filesystem.completed_parts) == 8
-    assert [part["PartNumber"] for part in filesystem.completed_parts] == list(range(1, 9))

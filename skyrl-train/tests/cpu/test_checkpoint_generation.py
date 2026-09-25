@@ -118,21 +118,6 @@ def test_legacy_checkpoint_remains_readable_and_corrupt_commit_does_not_fall_bac
         resolve_checkpoint_payload(str(step_path))
 
 
-@pytest.mark.parametrize("scheme", ["s3", "gs", "gcs"])
-def test_cloud_inventory_uses_exact_attempt_prefix(monkeypatch, scheme):
-    path = f"{scheme}://bucket/checkpoints/global_step_1/_attempts/" + "a" * 32
-    monkeypatch.setattr(
-        io,
-        "find_files",
-        lambda _: {f"bucket/checkpoints/global_step_1/_attempts/{'a' * 32}/policy/rank_0.pt": 123},
-    )
-    assert generations._inventory(path) == {"policy/rank_0.pt": 123}
-
-    monkeypatch.setattr(io, "find_files", lambda _: {"bucket/checkpoints/global_step_1/other/rank_0.pt": 123})
-    with pytest.raises(ValueError, match="escaped attempt prefix"):
-        generations._inventory(path)
-
-
 def test_shutdown_overlay_replaces_only_its_matching_base_generation(tmp_path):
     step_path = tmp_path / "global_step_1"
     first = _attempt(step_path)

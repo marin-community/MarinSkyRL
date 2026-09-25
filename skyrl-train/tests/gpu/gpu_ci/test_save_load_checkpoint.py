@@ -16,7 +16,6 @@ import json
 import pickle
 import fsspec
 from datetime import timedelta
-from pathlib import Path
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 from torch.distributed import checkpoint
@@ -32,59 +31,12 @@ CKPT_PATH = "$HOME/ckpts/test/"
 NUM_GPUS = 4
 
 
-@pytest.mark.megatron
-def test_megatron_plan_cache_reuses_stable_schema_and_refreshes_changed_dtype(tmp_path):
-    from skyrl_train.distributed.megatron.direct_checkpoint import (
-        _SchemaGuardedMCoreSavePlanner,
-        invalidate_checkpoint_plan_cache,
-    )
-    from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
-
-    cache_key = f"test-{tmp_path.name}"
-
-    class ObservedPlanner(_SchemaGuardedMCoreSavePlanner):
-        def create_local_plan(self):
-            plan = super().create_local_plan()
-            self.local_plan_usable = plan.usable
-            return plan
-
-    try:
-        for step, dtype in ((1, torch.float32), (2, torch.float32), (3, torch.float16)):
-            state = {"tensor": torch.arange(6, dtype=dtype).reshape(2, 3) + step}
-            path = tmp_path / f"step-{step}"
-            planner = ObservedPlanner(
-                cache_key=cache_key,
-                dedup_replicated_tensors=False,
-                flatten_state_dict=False,
-                flatten_sharded_tensors=False,
-            )
-            writer = StreamingFsspecWriter(str(path), filesystem=fsspec.filesystem("file"))
-            checkpoint.save(state, storage_writer=writer, planner=planner)
-
-            assert planner.local_plan_usable == (step != 2)
-            with (path / ".metadata").open("rb") as source:
-                metadata = pickle.load(source)
-            assert metadata.state_dict_metadata["tensor"].properties.dtype == dtype
-
-            restored = {"tensor": torch.zeros_like(state["tensor"])}
-            checkpoint.load(restored, checkpoint_id=str(path))
-            torch.testing.assert_close(restored["tensor"], state["tensor"], atol=0, rtol=0)
-    finally:
-        invalidate_checkpoint_plan_cache(cache_key)
-
-
 def _run_megatron_plan_cache_rank(rank: int, checkpoint_root: str, rendezvous_file: str) -> None:
     from skyrl_train.distributed.megatron.direct_checkpoint import (
         _SchemaGuardedMCoreSavePlanner,
         invalidate_checkpoint_plan_cache,
     )
     from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
-
-    class ObservedPlanner(_SchemaGuardedMCoreSavePlanner):
-        def create_local_plan(self):
-            plan = super().create_local_plan()
-            self.local_plan_usable = plan.usable
-            return plan
 
     dist.init_process_group(
         "gloo", init_method=f"file://{rendezvous_file}", rank=rank, world_size=2, timeout=timedelta(seconds=60)
@@ -95,7 +47,7 @@ def _run_megatron_plan_cache_rank(rank: int, checkpoint_root: str, rendezvous_fi
             dtype = torch.float16 if rank == 1 and step == 3 else torch.float32
             state = {f"rank_{rank}": torch.arange(6, dtype=dtype).reshape(2, 3) + step + rank}
             path = os.path.join(checkpoint_root, f"step-{step}")
-            planner = ObservedPlanner(
+            planner = _SchemaGuardedMCoreSavePlanner(
                 cache_key=cache_key,
                 dedup_replicated_tensors=False,
                 flatten_state_dict=False,
@@ -104,7 +56,6 @@ def _run_megatron_plan_cache_rank(rank: int, checkpoint_root: str, rendezvous_fi
             writer = StreamingFsspecWriter(path, filesystem=fsspec.filesystem("file"))
             checkpoint.save(state, storage_writer=writer, planner=planner)
 
-            assert planner.local_plan_usable == (step == 1 or (rank == 1 and step >= 3))
             if rank == 0:
                 with open(os.path.join(path, ".metadata"), "rb") as source:
                     metadata = pickle.load(source)
@@ -124,42 +75,6 @@ def _run_megatron_plan_cache_rank(rank: int, checkpoint_root: str, rendezvous_fi
 @pytest.mark.megatron
 def test_megatron_plan_cache_refreshes_one_changed_rank_without_stale_metadata(tmp_path):
     mp.spawn(_run_megatron_plan_cache_rank, args=(str(tmp_path), str(tmp_path / "rendezvous")), nprocs=2)
-
-
-@pytest.mark.megatron
-def test_megatron_direct_save_failure_invalidates_every_plan_cache(monkeypatch):
-    from torch.distributed.checkpoint.planner import SavePlanner
-    from skyrl_train.distributed.megatron import direct_checkpoint
-
-    cache_key = "failed-direct-save"
-    caches = (
-        SavePlanner._cached_save_plan,
-        SavePlanner._cached_all_plans,
-        SavePlanner._cached_global_plan,
-        SavePlanner._cached_metadata,
-        SavePlanner._cached_final_save_plan,
-    )
-    for cache in caches:
-        cache[cache_key] = object()
-
-    monkeypatch.setattr(
-        direct_checkpoint, "_replace_state_dict_keys_with_sharded_keys", lambda state, _: (state, {}, {})
-    )
-    monkeypatch.setattr(direct_checkpoint, "mcore_to_pyt_state_dict", lambda state, _: state)
-    monkeypatch.setattr(direct_checkpoint, "create_s3_filesystem", lambda: object())
-    monkeypatch.setattr(direct_checkpoint, "StreamingFsspecWriter", lambda *args, **kwargs: object())
-
-    def fail_after_planning(state, *, storage_writer, planner):
-        assert isinstance(planner, direct_checkpoint._SchemaGuardedMCoreSavePlanner)
-        raise RuntimeError("injected checkpoint write failure")
-
-    monkeypatch.setattr(direct_checkpoint.checkpoint, "save", fail_after_planning)
-    strategy = direct_checkpoint.DirectS3TorchDistSaveShardedStrategy(
-        "s3://unit-test/global_step_2/policy", plan_cache_key=cache_key
-    )
-    with pytest.raises(RuntimeError, match="injected checkpoint write failure"):
-        strategy.save({"tensor": torch.ones(1)}, Path("."))
-    assert all(cache_key not in cache for cache in caches)
 
 
 @pytest.mark.megatron

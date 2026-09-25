@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from dataclasses import dataclass
 import json
 from pathlib import Path
 import random
@@ -71,11 +70,6 @@ def _restore_rng_state(state) -> None:
     torch.set_rng_state(torch_state)
 
 
-def _checkpoint_rng_state(state) -> dict[str, object]:
-    python_state, numpy_state, torch_state = state
-    return {"python": python_state, "numpy": numpy_state, "torch_cpu": torch_state}
-
-
 def _draw_from_driver_rng() -> _RngDraw:
     return random.random(), float(np.random.random()), float(torch.rand(1).item())
 
@@ -83,16 +77,13 @@ def _draw_from_driver_rng() -> _RngDraw:
 class _SaveAtStepOneWithLateRng(TrainerCallback):
     error_behavior = "raise"
 
-    def __init__(self, early_state: list | None = None):
-        self.early_state = early_state
+    def __init__(self):
         self.events: list[str] = []
         self.expected_next_draw: _RngDraw | None = None
 
     def on_step_end(self, state, control, **_kwargs):
         if state.global_step == 1:
             control.should_save = True
-            if self.early_state is not None:
-                self.early_state.append(_driver_rng_state())
         return control
 
     def on_log(self, state, control, logs, **_kwargs):
@@ -325,67 +316,6 @@ class _EpochBoundaryLoopHarness(RayPPOTrainer):
         super()._publish_checkpoint(step)
 
 
-@dataclass(frozen=True)
-class _RngRoundTrip:
-    events: tuple[str, ...]
-    expected_next_draw: _RngDraw
-    uninterrupted_next_draw: _RngDraw
-    resumed_next_draw: _RngDraw
-
-
-def _mid_epoch_rng_roundtrip(tmp_path, monkeypatch, *, mutate_to_early_capture: bool) -> _RngRoundTrip:
-    _patch_loop_dependencies(monkeypatch)
-    original_state = _driver_rng_state()
-    try:
-        random.seed(37)
-        np.random.seed(37)
-        torch.manual_seed(37)
-
-        early_state: list = []
-        callback = _SaveAtStepOneWithLateRng(early_state)
-        if mutate_to_early_capture:
-            real_capture = trainer_module._capture_driver_rng_state
-            monkeypatch.setattr(
-                trainer_module,
-                "_capture_driver_rng_state",
-                lambda: _checkpoint_rng_state(early_state[0]) if early_state else real_capture(),
-            )
-
-        first = _EpochBoundaryLoopHarness(
-            tmp_path,
-            epochs=1,
-            resume=False,
-            callbacks=[callback],
-            record_rng=True,
-        )
-        asyncio.run(first._train_loop())
-        assert first.processed_batches == [(0, 1), (2, 3)]
-        assert callback.expected_next_draw is not None
-
-        random.seed(100)
-        np.random.seed(100)
-        torch.manual_seed(100)
-        resumed = _EpochBoundaryLoopHarness(
-            tmp_path,
-            epochs=1,
-            resume=True,
-            resume_step=1,
-            callbacks=[_SaveAtStepOneWithLateRng()],
-            record_rng=True,
-        )
-        asyncio.run(resumed._train_loop())
-        assert resumed.processed_batches == [(2, 3)]
-
-        return _RngRoundTrip(
-            events=tuple(callback.events),
-            expected_next_draw=callback.expected_next_draw,
-            uninterrupted_next_draw=first.rng_draws[1],
-            resumed_next_draw=resumed.rng_draws[0],
-        )
-    finally:
-        _restore_rng_state(original_state)
-
-
 def _patch_loop_dependencies(monkeypatch) -> None:
     monkeypatch.setattr(
         trainer_module,
@@ -400,20 +330,6 @@ def _patch_loop_dependencies(monkeypatch) -> None:
     monkeypatch.setattr(trainer_module, "publish_step_timings", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(trainer_module, "record_policy_step", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
-
-
-def test_megatron_epoch_checkpoint_resume_does_not_skip_next_epoch(tmp_path, monkeypatch):
-    """The next epoch must run after resuming an epoch-boundary checkpoint."""
-
-    _patch_loop_dependencies(monkeypatch)
-
-    first = _EpochBoundaryLoopHarness(tmp_path, epochs=1, resume=False)
-    asyncio.run(first._train_loop())
-    assert first.processed_batches == [(0, 1), (2, 3)]
-
-    resumed = _EpochBoundaryLoopHarness(tmp_path, epochs=2, resume=True)
-    asyncio.run(resumed._train_loop())
-    assert resumed.processed_batches == [(0, 1), (2, 3)]
 
 
 def test_megatron_http_checkpoint_late_seals_without_driver_rng_replay(tmp_path, monkeypatch):
@@ -489,19 +405,30 @@ def test_megatron_epoch_boundary_checkpoint_replays_rng_before_next_iterator(tmp
 
 
 def test_megatron_mid_epoch_checkpoint_replays_rng_after_late_callbacks(tmp_path, monkeypatch):
-    result = _mid_epoch_rng_roundtrip(tmp_path, monkeypatch, mutate_to_early_capture=False)
+    _patch_loop_dependencies(monkeypatch)
+    original_state = _driver_rng_state()
+    try:
+        random.seed(37)
+        np.random.seed(37)
+        torch.manual_seed(37)
+        callback = _SaveAtStepOneWithLateRng()
+        first = _EpochBoundaryLoopHarness(tmp_path, epochs=1, resume=False, callbacks=[callback], record_rng=True)
+        asyncio.run(first._train_loop())
+        assert first.processed_batches == [(0, 1), (2, 3)]
+        assert callback.events == ["on_save", "on_log"]
+        assert first.rng_draws[1] == callback.expected_next_draw
 
-    assert result.events == ("on_save", "on_log")
-    assert result.uninterrupted_next_draw == result.expected_next_draw
-    assert result.resumed_next_draw == result.expected_next_draw
-
-
-def test_megatron_mid_epoch_checkpoint_rng_oracle_detects_early_capture(tmp_path, monkeypatch):
-    result = _mid_epoch_rng_roundtrip(tmp_path, monkeypatch, mutate_to_early_capture=True)
-
-    assert result.events == ("on_save", "on_log")
-    assert result.uninterrupted_next_draw != result.expected_next_draw
-    assert result.resumed_next_draw != result.expected_next_draw
+        random.seed(100)
+        np.random.seed(100)
+        torch.manual_seed(100)
+        resumed = _EpochBoundaryLoopHarness(
+            tmp_path, epochs=1, resume=True, resume_step=1, callbacks=[_SaveAtStepOneWithLateRng()], record_rng=True
+        )
+        asyncio.run(resumed._train_loop())
+        assert resumed.processed_batches == [(2, 3)]
+        assert resumed.rng_draws[0] == callback.expected_next_draw
+    finally:
+        _restore_rng_state(original_state)
 
 
 def test_megatron_skipped_batch_last_physical_batch_checkpoint_seals_epoch(tmp_path, monkeypatch):

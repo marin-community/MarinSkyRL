@@ -39,7 +39,6 @@ class RLEntrypoint(StrEnum):
     GENERATE = "generate"
     MINI_SWE = "mini_swe"
     STANDARD = "standard"
-    CHECKPOINT_PARITY = "checkpoint_parity"
     TERMINAL_BENCH = "terminal_bench"
     TERMINAL_BENCH_GENERATE = "terminal_bench_generate"
 
@@ -50,7 +49,6 @@ RL_ENTRYPOINTS = MappingProxyType(
         RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
         RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
         RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
-        RLEntrypoint.CHECKPOINT_PARITY: "skyrl_train.entrypoints.checkpoint_snowball_parity",
         RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
         RLEntrypoint.TERMINAL_BENCH_GENERATE: "skyrl_train.entrypoints.terminal_bench_generate",
     }
