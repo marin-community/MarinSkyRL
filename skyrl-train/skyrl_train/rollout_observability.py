@@ -1,15 +1,9 @@
-"""Wall time and waits for each trajectory-runner call.
-
-A ContextVar follows child coroutines, and each runner call owns its accumulator.
-Collect, assemble and finalize partition the call's wall time. Wait totals can
-exceed it and are emitted separately. Publishing only enqueues records.
-"""
+"""Wall time and waits of each trajectory-runner call and of the async producer loop."""
 
 import asyncio
 import contextlib
-import math
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from concurrent.futures import Executor
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -17,18 +11,12 @@ from functools import partial
 from typing import Literal
 from uuid import uuid4
 
-from skyrl_train.telemetry import TRAINER_ROLE, phase_attributes, phase_duration, record_event, telemetry
+from skyrl_train.telemetry import TRAINER_ROLE, record_event, telemetry
+from skyrl_train.timing_observability import PhaseBreakdown
 
 
 RolloutPhase = Literal["collect", "assemble", "finalize", "tokenize", "retain"]
-_PARENTS = {
-    "collect": "rollout_call",
-    "assemble": "rollout_call",
-    "finalize": "rollout_call",
-    "tokenize": "collect",
-    "retain": "finalize",
-}
-_EXCLUSIVE_PHASES = ("collect", "assemble", "finalize")
+_PARENTS = {"rollout_tokenize": "rollout_collect", "rollout_retain": "rollout_finalize"}
 _CURRENT: ContextVar["RolloutObservation | None"] = ContextVar("rollout_observation", default=None)
 wait_seconds = telemetry.histogram("rollout_wait_seconds", unit="s")
 waits = telemetry.counter("rollout_waits", unit="{wait}")
@@ -38,17 +26,22 @@ group_tokens = telemetry.counter("rollout_group_tokens", unit="{token}")
 event_loop_lag = telemetry.histogram("event_loop_lag_seconds", unit="s")
 
 
+def _unix_ms() -> int:
+    return time.time_ns() // 1_000_000
+
+
+def _window(duration: float) -> dict[str, int]:
+    """Unix start and finish of an interval that just ended, spaced by its monotonic duration."""
+    finished = _unix_ms()
+    return {"started_unix_ms": finished - round(duration * 1000), "finished_unix_ms": finished}
+
+
 @contextlib.contextmanager
 def async_phase_window(phase: str, *, step: int, enabled: bool) -> Iterator[None]:
-    """Record a driver phase's wall-clock window for joins with sampled engine counters.
-
-    The Unix timestamps join with imported metric snapshots, and the monotonic
-    duration detects clock adjustments. The window does not measure GPU execution.
-    """
+    """Record a driver phase's window for joins with other processes' records."""
     if not enabled:
         yield
         return
-    started_unix_ms = time.time_ns() // 1_000_000
     started = time.perf_counter()
     outcome = "success"
     try:
@@ -57,13 +50,10 @@ def async_phase_window(phase: str, *, step: int, enabled: bool) -> Iterator[None
         outcome = "failure"
         raise
     finally:
+        duration = time.perf_counter() - started
         record_event(
             "async_phase_window",
-            {
-                "started_unix_ms": started_unix_ms,
-                "finished_unix_ms": time.time_ns() // 1_000_000,
-                "duration_seconds": time.perf_counter() - started,
-            },
+            {**_window(duration), "duration_seconds": duration},
             attributes={"phase": phase, "step": str(step), "role": TRAINER_ROLE, "outcome": outcome},
         )
 
@@ -76,8 +66,6 @@ async def monitor_event_loop_lag(
     wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Sample driver scheduling delay until cancelled, without replaying missed ticks."""
-    if not math.isfinite(interval) or interval <= 0:
-        raise ValueError("event-loop lag sampling interval must be finite and positive")
     while True:
         expected = clock() + interval
         await wait(interval)
@@ -87,74 +75,24 @@ async def monitor_event_loop_lag(
         )
 
 
-@dataclass
-class WaitObservation:
-    total: float = 0.0
-    count: int = 0
-    maximum: float = 0.0
-
-    def add(self, duration: float) -> None:
-        self.total += duration
-        self.count += 1
-        self.maximum = max(self.maximum, duration)
-
-
-def publish_wait(name: str, wait: WaitObservation, *, step: int, mode: str) -> None:
+def publish_wait(name: str, durations: Sequence[float], *, step: int, mode: str) -> None:
     attributes = {"wait": name, "role": TRAINER_ROLE, "step": str(step), "mode": mode}
-    wait_seconds.record(wait.total, attributes={**attributes, "stat": "sum"})
-    wait_seconds.record(wait.maximum, attributes={**attributes, "stat": "max"})
-    waits.add(wait.count, attributes=attributes)
+    wait_seconds.record(sum(durations), attributes={**attributes, "stat": "sum"})
+    wait_seconds.record(max(durations), attributes={**attributes, "stat": "max"})
+    waits.add(len(durations), attributes=attributes)
 
 
 @dataclass
 class RolloutObservation:
     step: int
     mode: str
-    clock: Callable[[], float] = time.perf_counter
-    # Monotonic time gives durations; Unix time places calls beside other processes' events.
-    started_monotonic: float = 0.0
-    started_unix_ms: int = 0
+    phases: PhaseBreakdown
     call_id: str = field(default_factory=lambda: uuid4().hex)
-    durations: dict[str, float] = field(default_factory=dict)
-    waits: dict[str, WaitObservation] = field(default_factory=dict)
+    waits: dict[str, list[float]] = field(default_factory=dict)
     response_tokens: int = 0
 
-    def record_wait(self, name: str, duration: float) -> None:
-        self.waits.setdefault(name, WaitObservation()).add(duration)
-
-    def publish(self, finished: float, outcome: str) -> None:
-        total = finished - self.started_monotonic
-        residual = total - sum(self.durations.get(name, 0.0) for name in _EXCLUSIVE_PHASES)
-        attributes = {"role": TRAINER_ROLE, "step": str(self.step), "mode": self.mode, "outcome": outcome}
-        phases = {"rollout_call": total, **self.durations, "rollout_call_residual": residual}
-        for name, duration in phases.items():
-            parent = _PARENTS.get(name, "rollout_call" if name == "rollout_call_residual" else None)
-            phase_duration.record(
-                duration,
-                attributes={
-                    **attributes,
-                    **phase_attributes(
-                        phase=f"rollout_{name}" if name in _PARENTS else name,
-                        root="rollout_call",
-                        parent=None if parent is None else (f"rollout_{parent}" if parent in _PARENTS else parent),
-                        clock_domain="driver_monotonic",
-                    ),
-                },
-            )
-        for name, wait in self.waits.items():
-            publish_wait(name, wait, step=self.step, mode=self.mode)
-        # The bounded metric attributes above do not contain per-call identities.
-        # A single event retains the complete accounting needed to audit one call.
-        record_event(
-            "rollout_call",
-            {
-                "call_id": self.call_id,
-                "started_unix_ms": self.started_unix_ms,
-                "finished_unix_ms": time.time_ns() // 1_000_000,
-                "response_tokens": self.response_tokens,
-            },
-            attributes=attributes,
-        )
+    def add_wait(self, name: str, seconds: float) -> None:
+        self.waits.setdefault(name, []).append(seconds)
 
 
 @contextlib.contextmanager
@@ -164,9 +102,7 @@ def observe_rollout_call(
     if not enabled:
         yield None
         return
-    observation = RolloutObservation(
-        step=step, mode=mode, clock=clock, started_monotonic=clock(), started_unix_ms=time.time_ns() // 1_000_000
-    )
+    observation = RolloutObservation(step, mode, PhaseBreakdown("rollout_call", _PARENTS, enabled=True, clock=clock))
     token = _CURRENT.set(observation)
     outcome = "success"
     try:
@@ -178,22 +114,23 @@ def observe_rollout_call(
         outcome = "failure"
         raise
     finally:
-        finished = clock()
         _CURRENT.reset(token)
-        observation.publish(finished, outcome)
+        attributes = {"role": TRAINER_ROLE, "step": str(step), "mode": mode, "outcome": outcome}
+        duration = observation.phases.publish(clock_domain="driver_monotonic", attributes=attributes)
+        for name, durations in observation.waits.items():
+            publish_wait(name, durations, step=step, mode=mode)
+        record_event(
+            "rollout_call",
+            {"call_id": observation.call_id, **_window(duration), "response_tokens": observation.response_tokens},
+            attributes=attributes,
+        )
 
 
 @contextlib.contextmanager
 def rollout_phase(name: RolloutPhase) -> Iterator[None]:
     observation = _CURRENT.get()
-    if observation is None:
+    with observation.phases.span(f"rollout_{name}") if observation is not None else contextlib.nullcontext():
         yield
-        return
-    started = observation.clock()
-    try:
-        yield
-    finally:
-        observation.durations[name] = observation.durations.get(name, 0.0) + observation.clock() - started
 
 
 @contextlib.contextmanager
@@ -202,11 +139,11 @@ def rollout_wait(name: str) -> Iterator[None]:
     if observation is None:
         yield
         return
-    started = observation.clock()
+    started = observation.phases.clock()
     try:
         yield
     finally:
-        observation.record_wait(name, observation.clock() - started)
+        observation.add_wait(name, observation.phases.clock() - started)
 
 
 def time_tokenization(func: Callable, *args, **kwargs):
@@ -224,17 +161,16 @@ def async_wait(name: str, *, step: int, enabled: bool) -> Iterator[None]:
     try:
         yield
     finally:
-        elapsed = time.perf_counter() - started
-        publish_wait(name, WaitObservation(elapsed, 1, elapsed), step=step, mode="async")
+        publish_wait(name, [time.perf_counter() - started], step=step, mode="async")
 
 
 async def run_environment(executor: Executor | None, func: Callable, *args, **kwargs):
-    """Run ``func`` on ``executor`` (inline when None) and return its result, recording queue, execution and driver-resume delays."""
+    """Run ``func`` on ``executor``, or inline without one, recording queue, execution and resume delays."""
     observation = _CURRENT.get()
     call = partial(func, *args, **kwargs)
     if observation is None:
         return call() if executor is None else await asyncio.get_running_loop().run_in_executor(executor, call)
-    clock = observation.clock
+    clock = observation.phases.clock
     submitted = clock()
     stamps: list[float] = []
 
@@ -249,21 +185,15 @@ async def run_environment(executor: Executor | None, func: Callable, *args, **kw
         with rollout_wait("env_await"):
             return invoke() if executor is None else await asyncio.get_running_loop().run_in_executor(executor, invoke)
     finally:
-        # Cancellation can leave the executor running. Do not invent an execution
-        # duration or mutate a published accumulator when that thread later exits.
+        # A cancelled call can leave its thread running; that thread must not add to a published call.
         if len(stamps) == 2:
-            observation.record_wait("env_queue", stamps[0] - submitted)
-            observation.record_wait("env_exec", stamps[1] - stamps[0])
-            observation.record_wait("env_resume", clock() - stamps[1])
+            observation.add_wait("env_queue", stamps[0] - submitted)
+            observation.add_wait("env_exec", stamps[1] - stamps[0])
+            observation.add_wait("env_resume", clock() - stamps[1])
 
 
 def record_group_disposition(
-    *,
-    disposition: str,
-    tokens: int,
-    step: int,
-    completed_at: float | None = None,
-    admitted_at: float | None = None,
+    *, disposition: str, tokens: int, step: int, completed_at: float | None, admitted_at: float | None
 ) -> None:
     attributes = {"role": TRAINER_ROLE, "step": str(step), "disposition": disposition}
     groups.add(1, attributes=attributes)

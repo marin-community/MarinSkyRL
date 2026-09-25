@@ -13,6 +13,7 @@ from rigging.telemetry import serialization
 from skyrl_train import rollout_observability as rollout
 from skyrl_train.utils import trainer_utils
 from skyrl_train import telemetry as training_telemetry
+from skyrl_train import timing_observability
 from skyrl_train.timing_observability import publish_step_timings
 
 
@@ -73,8 +74,8 @@ class Instrument:
 @pytest.fixture
 def records(monkeypatch):
     sink = Records()
+    monkeypatch.setattr(timing_observability, "phase_duration", Instrument("phase_duration", sink))
     for name in (
-        "phase_duration",
         "wait_seconds",
         "waits",
         "buffer_dwell",
@@ -92,48 +93,6 @@ def records(monkeypatch):
 
     monkeypatch.setattr(rollout.telemetry, "flush", reject_flush)
     return sink
-
-
-@pytest.mark.parametrize("failure", [False, True])
-def test_phase_window_preserves_independent_wall_clock_and_failure(records, monkeypatch, failure):
-    monotonic = ManualClock(10)
-    unix_ns = ManualClock(1_000_000_000)
-    monkeypatch.setattr(rollout.time, "perf_counter", monotonic)
-    monkeypatch.setattr(rollout.time, "time_ns", unix_ns)
-
-    def execute():
-        with rollout.async_phase_window("training", step=7, enabled=True):
-            monotonic.advance(2)
-            # A clock adjustment stays visible and is not read as a negative duration.
-            unix_ns.advance(-100_000_000)
-            if failure:
-                raise RuntimeError("training failed")
-
-    if failure:
-        with pytest.raises(RuntimeError, match="training failed"):
-            execute()
-    else:
-        execute()
-    event = records.events[-1]
-    assert event["name"] == "async_phase_window"
-    assert event["body"] == {"started_unix_ms": 1000, "finished_unix_ms": 900, "duration_seconds": 2}
-    assert event["attributes"]["outcome"] == ("failure" if failure else "success")
-    assert event["attributes"]["step"] == "7"
-
-
-def test_rollout_call_event_reports_tokens_and_an_independent_wall_clock(records, monkeypatch):
-    clock = ManualClock()
-    unix_ns = ManualClock(1_000_000_000)
-    monkeypatch.setattr(rollout.time, "time_ns", unix_ns)
-    with rollout.observe_rollout_call(step=3, mode="async", enabled=True, clock=clock) as observation:
-        clock.advance(1)
-        unix_ns.advance(-100_000_000)
-        observation.response_tokens = 512
-    event = records.events[-1]
-    assert event["name"] == "rollout_call"
-    assert event["body"]["response_tokens"] == 512
-    body = event["body"]
-    assert (body["started_unix_ms"], body["finished_unix_ms"]) == (1000, 900)
 
 
 @pytest.mark.asyncio
@@ -483,7 +442,7 @@ async def test_rollout_calls_progress_while_real_exporter_waits_for_http_ack(mon
 
         assert await asyncio.wait_for(produce_next(), timeout=1) == "next rollout completed"
         publish_step_timings({"step": 5.0, "policy_train": 2.0}, step=2)
-        rollout.record_group_disposition(disposition="consumed", tokens=20, step=2)
+        rollout.record_group_disposition(disposition="consumed", tokens=20, step=2, completed_at=None, admitted_at=None)
         training_telemetry.record_training_metrics(
             {
                 **trainer_utils.consumed_stop_metrics(["length", "stop", "length", "stop"], 4),

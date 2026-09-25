@@ -50,13 +50,8 @@ from skyrl_train.training_batch import (
     TrainingOutputBatch,
     gradient_accumulation_steps,
 )
-from skyrl_train.megatron_timing import (
-    FINAL_BARRIER,
-    OPTIMIZER_STEP,
-    WORLD_METRIC_REDUCTION,
-    MegatronTrainTimings,
-    publish_megatron_train_timings,
-)
+from skyrl_train.telemetry import WORKER_ROLE
+from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
@@ -519,28 +514,25 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
     def _ppo_train_impl(self, train_data) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
-        timing = MegatronTrainTimings(
-            enabled=bool(OmegaConf.select(self.cfg, "trainer.policy_train_spans", default=False))
-        )
+        timing = PhaseBreakdown("ppo_train", enabled=self.cfg.trainer.policy_train_spans)
         outcome = "failure"
         try:
             output = self._ppo_train_with_timings(train_data, timing)
             outcome = "success"
             return output
         finally:
-            try:
-                observations = timing.finish()
-                if observations:
-                    publish_megatron_train_timings(
-                        observations,
-                        step=int(train_data.metadata["global_step"]),
-                        rank=torch.distributed.get_rank(),
-                        outcome=outcome,
-                    )
-            except Exception:
-                logger.opt(exception=True).warning("Could not publish Megatron policy timings")
+            timing.publish(
+                clock_domain="cpu_dispatch_wall",
+                attributes={
+                    "backend": "megatron",
+                    "outcome": outcome,
+                    "rank": str(torch.distributed.get_rank()),
+                    "role": WORKER_ROLE,
+                    "step": str(train_data.metadata["global_step"]),
+                },
+            )
 
-    def _ppo_train_with_timings(self, train_data, timing: MegatronTrainTimings) -> "TrainingOutputBatch":
+    def _ppo_train_with_timings(self, train_data, timing: PhaseBreakdown) -> "TrainingOutputBatch":
         self._drain_r3_decentral_stagger(train_data)
         if self.model.router_replay is not None and (
             "rollout_routed_experts" not in train_data.keys() or train_data["rollout_routed_experts"] is None
@@ -616,7 +608,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     if self.empty_cuda_cache:
                         torch.cuda.empty_cache()
 
-                    with timing.span(OPTIMIZER_STEP):
+                    with timing.span("megatron_optimizer_step"):
                         grad_norm = self.strategy.optimizer_step(
                             self.optimizer,
                             self.model,
@@ -639,7 +631,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         # attach response_length
                         status["response_length"] = micro_buffer[i].num_actions
 
-                        with timing.span(WORLD_METRIC_REDUCTION):
+                        with timing.span("megatron_world_metric_reduction"):
                             status = self.strategy.all_reduce(status)
                         status_list.append(status)
                         for k, v in status.items():
@@ -653,7 +645,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # drop any trailing micros that don't fill a mini-batch (keep behavior consistent)
             micro_buffer = []
 
-        with timing.span(FINAL_BARRIER):
+        with timing.span("megatron_final_barrier"):
             torch.distributed.barrier()
         if self.profiler is not None:
             self.profiler.stop_and_save()
