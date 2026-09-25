@@ -87,7 +87,7 @@ Step 1: Select the fully asynchronous entrypoint
 The maintained entrypoint is ``skyrl_train.entrypoints.fully_async``. To customize it, subclass ``BasePPOExp``:
 
 - Override ``get_trainer()`` to use fully async trainer class ``FullyAsyncRayPPOTrainer``
-- Override ``get_trajectory_runner()`` to compose a runner with the required model client. The maintained entrypoint uses ``OpenAIHTTPModelClient`` for ``/chat/completions`` transport.
+- Override ``get_trajectory_runner()`` to compose a runner with the required model client. The maintained entrypoint uses ``DirectModelClient`` to call the colocated inference router.
 
 Step 2: Config knobs to tune for fully async training
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -196,7 +196,7 @@ It follows the following steps in a for-loop over the number of steps per epoch:
 2. Train on the generated groups.
 3. Mark the data that we used to train as "consumed" to the ``AsyncDataloader``, so that when we resume
    training from a checkpoint, we know what data has been trained on and hence can be skipped.
-4. Pause the model client (really the ``InferenceEngineClient`` in the back): pause generation, sync weights, resume generation. Note that this operation is agnostic to what the runner is doing. It can either be in the middle of a ``/chat/completions`` generation, or interacting with the environment.
+4. Pause the model client (really the ``InferenceEngineClient`` in the back): pause generation, sync weights, resume generation. Note that this operation is agnostic to what the runner is doing. It can either be in the middle of generation, or interacting with the environment.
 5. Update the global step and hence the capacity controlled by the ``AsyncStalenessManager``, potentially unblocking
    generation workers stuck on step 1 -- as they can now generate new data that will not be as stale as before.
 6. Repeat from step 1 until the epoch is done.

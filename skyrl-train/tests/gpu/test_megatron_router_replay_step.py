@@ -52,7 +52,7 @@ def _replay_config(tmp_path, *, packing: bool):
     _write_tiny_checkpoint(model_path, num_experts_per_tok=TOPK)
     cfg = _config(str(model_path), world_size=1, pp=1, ep=1)
     cfg.trainer.use_sample_packing = packing
-    cfg.trainer.policy.fsdp_config.moe_router_replay = True
+    cfg.trainer.policy.megatron_config.moe_router_replay = True
     return cfg, model_path
 
 
@@ -167,7 +167,7 @@ def test_malformed_routes_fail_with_named_quantity(tmp_path, routes: str, match:
 def test_flag_off_run_with_routes_present_is_byte_identical(tmp_path):
     """Routes in the batch must not change a flag-off training step (#355 regression)."""
     cfg, model_path = _replay_config(tmp_path, packing=False)
-    cfg.trainer.policy.fsdp_config.moe_router_replay = False
+    cfg.trainer.policy.megatron_config.moe_router_replay = False
     pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
     plain = _padded_batch(pad_token_id)
     routed = _routed_batch(pad_token_id, routes="random")

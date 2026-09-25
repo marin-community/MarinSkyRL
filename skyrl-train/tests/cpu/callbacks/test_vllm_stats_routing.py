@@ -38,6 +38,7 @@ def test_vllm_stats_reach_finelog():
     )
     bridge = vllm.HTTPBridgeStatsAccumulator()
     bridge.observe("response_bytes", 100, attributes={"status": "2xx"})
+    bridge.record_request_outcome("/tokenize", "client_disconnect")
     interval = vllm.VLLMIntervalStats(finished_requests=1)
     engine = vllm.VLLMEngineStatsSnapshot(
         "physical-a",
@@ -71,6 +72,10 @@ def test_vllm_stats_reach_finelog():
     assert values["request_time_per_output_token_seconds_sum"] == 0.07
     assert all(record.attributes["engine"] == "physical-a" for record in engine)
     assert all("engine" not in record.attributes for record in http)
+    outcomes = [record for record in http if record.name == "request_outcome_count"]
+    assert [(record.value, record.attributes) for record in outcomes] == [
+        (1, {"endpoint": "/tokenize", "reason": "client_disconnect"})
+    ]
     projected = trainer_metrics(snapshot)
     assert projected["vllm/total_finished_requests"] == 1
     assert projected["vllm/spec_decode_acceptance_rate"] == 0.4

@@ -29,7 +29,7 @@ build are amd64-only. So everything below targets `linux/amd64`.
 |---|---|
 | **Cache location** | `docker/wheelhouse/` on the build host (gitignored; only `.keep` is committed). Holds `vllm-*.whl`, `flash_attn-*.whl`, `MANIFEST`. |
 | **Cache key (what invalidates a wheel)** | the tuple `{ VLLM_FORK_COMMIT, FLASH_ATTN_VERSION, torch 2.11.0, CUDA 12.8, cp312, x86_64, TORCH_CUDA_ARCH_LIST "8.0;9.0" }` — all declared as `ARG`s at the top of `Dockerfile.gpu-rl`. Change any → rebuild the wheels. `MANIFEST` records the key the wheels were built at. |
-| **Not cached** | torchtitan (pure-python, trivial — installed fresh each build) and all pip-resolved deps. |
+| **Not cached** | Megatron and other pip-resolved dependencies. |
 
 ## Commands
 
@@ -84,6 +84,5 @@ The `rl` stage asserts at build time:
 
 - `import flash_attn, flash_attn_2_cuda` — the CUDA extension EXISTS (from the wheel).
 - `import torch, vllm, skyrl_train, flash_attn, flash_attn_2_cuda`.
-- `from torchtitan.distributed.expert_parallel import ExpertParallel` — the
-  **EP>1 MoE unblock**; if this line prints `... import OK`, `apply_ep` will
-  resolve `ExpertParallel` and the CoreWeave EP=8 RL jobs can launch.
+- `import megatron.core, megatron.bridge, transformer_engine` — the Megatron
+  training extensions import under the locked runtime.

@@ -126,9 +126,9 @@ def test_whole_node_bundle_sif_collision_reproduction():
 
 # --- resolve_actor_cuda_env: the DETERMINISTIC forced-CVD-mask pin ----------
 #
-# This is the EP×FSDP fix: rather than rely on set_device(LOCAL_RANK), mask each
+# This is the EP×DP fix: rather than rely on set_device(LOCAL_RANK), mask each
 # actor to its single physical GPU + force PCI_BUS_ID order BEFORE any CUDA /
-# device-mesh init, so init_device_mesh / FSDP device_id can only resolve that
+# device-mesh init, so init_device_mesh / worker device binding can only resolve that
 # one physical GPU and EP ranks cannot stack on a shared GPU.
 
 
@@ -162,7 +162,7 @@ def test_cvd_mask_multi_device_view_masks_to_physical_id():
 def test_cvd_mask_four_actors_get_distinct_single_device_masks():
     # The crux: four per-node policy actors, CVD unmasked, each masks to its OWN
     # physical GPU -> four distinct single-device masks -> set_device(0) lands on
-    # four distinct physical GPUs -> NO GPU-0 stacking under EP×FSDP.
+    # four distinct physical GPUs -> NO GPU-0 stacking under EP×DP.
     masks = [
         resolve_actor_cuda_env(noset_visible_devices=False, cuda_visible_devices=None, ray_gpu_ids=[g])[
             "CUDA_VISIBLE_DEVICES"

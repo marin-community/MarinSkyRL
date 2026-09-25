@@ -7,6 +7,7 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.distillation import (
+    DISTILLATION_TOPK_METRIC,
     ChosenTokenTeacherEvidence,
     SparseForwardKLInput,
     SampledReverseKLInput,
@@ -18,6 +19,7 @@ from skyrl_train.distillation import (
     prepare_sparse_forward_kl,
     sparse_forward_kl_loss,
     student_topk_logprobs,
+    student_topk_policy_surrogate_loss,
     validate_sampled_reverse_kl_attachment,
     validate_teacher_evidence,
 )
@@ -824,3 +826,69 @@ def test_sampled_reverse_kl_rejects_plausible_invalid_scores_at_learner_boundary
             scaling=LossScaling.CALLER,
             distillation=distillation,
         )
+
+
+def test_sampled_reverse_kl_all_masked_micro_batch_contributes_zero_with_gradient():
+    """A trajectory masked by the agent loop is a whole micro-batch at micro batch size one."""
+    actions = torch.tensor([[-1.0, -1.0, -1.0]], dtype=torch.float64, requires_grad=True)
+    objective = _objective(actions, torch.full((1, 3), torch.nan, dtype=torch.float64))
+    objective.optimization_loss.backward()
+
+    assert objective.optimization_loss.item() == 0.0
+    assert objective.metrics["distillation_loss"] == 0.0
+    torch.testing.assert_close(actions.grad, torch.zeros_like(actions))
+
+
+def test_sparse_forward_kl_all_masked_micro_batch_contributes_zero_with_gradient():
+    student_logits = torch.log(torch.tensor([[[0.5, 0.3, 0.2]]], dtype=torch.float64)).requires_grad_()
+    teacher_probs = torch.tensor([[[0.6, 0.3, 0.1]]], dtype=torch.float64)
+    teacher_topk_probs, teacher_indices = teacher_probs.topk(3, dim=-1)
+    distillation = SparseForwardKLInput(
+        teacher_topk_indices=teacher_indices,
+        teacher_topk_logprobs=teacher_topk_probs.log(),
+        retained_mass=teacher_topk_probs.sum(dim=-1),
+        valid_mask=torch.ones((1, 1), dtype=torch.bool),
+        loss_weights=torch.ones((1, 1), dtype=torch.float64),
+    )
+    selected = student_topk_logprobs(student_logits, teacher_indices)
+
+    loss, metrics = sparse_forward_kl_loss(selected, distillation, torch.zeros((1, 1)))
+    loss.backward()
+
+    assert loss.item() == 0.0
+    assert metrics[DISTILLATION_TOPK_METRIC] == 3.0
+    assert set(metrics) == {
+        DISTILLATION_TOPK_METRIC,
+        "distillation_retained_mass_mean",
+        "distillation_retained_mass_min",
+    }
+    torch.testing.assert_close(student_logits.grad, torch.zeros_like(student_logits))
+
+
+def test_student_topk_surrogate_all_masked_micro_batch_contributes_zero_with_gradient():
+    probs = torch.tensor([0.45, 0.35, 0.20], dtype=torch.float64)
+    logits = probs.log().reshape(1, 1, 3).detach().requires_grad_()
+    selected_ids = torch.tensor([[[0, 1]]])
+    distillation = StudentTopKPolicySurrogateInput(
+        student_topk_indices=selected_ids,
+        behavior_topk_logprobs=probs.log()[selected_ids],
+        teacher_on_student_logprobs=probs.log()[selected_ids],
+        valid_mask=torch.ones((1, 1), dtype=torch.bool),
+        loss_weights=torch.ones((1, 1), dtype=torch.float64),
+    )
+    selected = student_topk_logprobs(logits, selected_ids)
+
+    loss, metrics = student_topk_policy_surrogate_loss(
+        selected, distillation, torch.zeros((1, 1), dtype=torch.bool), _policy_config(reward_mode="replace")
+    )
+    loss.backward()
+
+    assert loss.item() == 0.0
+    assert metrics[DISTILLATION_TOPK_METRIC] == 2.0
+    assert set(metrics) == {
+        DISTILLATION_TOPK_METRIC,
+        "distillation_student_retained_mass_mean",
+        "distillation_clip_fraction",
+        "distillation_dual_clip_fraction",
+    }
+    torch.testing.assert_close(logits.grad, torch.zeros_like(logits))

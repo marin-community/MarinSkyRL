@@ -1,7 +1,6 @@
 """Backend-parity contracts for policy objectives and diagnostics.
 
-These tests pin the ordinary/FSDP training-step status and Megatron pipeline
-metrics for TIS, clipping, think-token weighting, global normalization, and
+These tests pin Megatron pipeline metrics for TIS, clipping, think-token weighting, global normalization, and
 cross-microbatch log-ratio diagnostics.
 
 `megatron_model_wrapper` imports `megatron.core` submodules at module load, but
@@ -24,10 +23,8 @@ from tests.cpu.util import stub_megatron_modules
 
 stub_megatron_modules()
 
-from skyrl_train.dataset.replay_buffer import Experience  # noqa: E402
 from skyrl_train.distillation import SparseForwardKLInput  # noqa: E402
 from skyrl_train.workers.megatron import megatron_model_wrapper as mmw  # noqa: E402
-from skyrl_train.workers.worker import PolicyWorkerBase  # noqa: E402
 
 BATCH_SIZE = 2
 SEQ_LEN = 6
@@ -106,172 +103,6 @@ def _globally_normalized_mask_sum(
 ):
     del log_probs, old_log_probs, advantages, config, rollout_logprobs
     return loss_mask.sum() / global_loss_denom, {}
-
-
-# ---------------------------------------------------------------------------
-# FSDP path: PolicyWorkerBase.training_step
-# ---------------------------------------------------------------------------
-
-
-class _FakeHFModel:
-    """Callable standing in for the HF actor: returns (action_log_probs, output)."""
-
-    def __init__(self, action_log_probs: torch.Tensor, logits: torch.Tensor | None = None):
-        self._action_log_probs = action_log_probs
-        self._logits = logits
-
-    def train(self):
-        pass
-
-    def __call__(self, sequences, num_actions, **kwargs):
-        entropy = torch.zeros(sequences.shape[0], sequences.shape[1])
-        output = {"entropy": entropy}
-        if self._logits is not None:
-            output["logits"] = self._logits
-        return self._action_log_probs, output
-
-
-class _FakeStrategy:
-    def backward(self, loss, model, optimizer):
-        pass
-
-
-class _FakeScheduler:
-    def get_last_lr(self):
-        return [1e-6]
-
-
-def _fsdp_training_step_status(use_tis: bool, monkeypatch, policy_loss_type: str = "regular") -> dict:
-    old_lp, rollout_lp, loss_mask = _tis_tensors()
-    worker = object.__new__(PolicyWorkerBase)
-    worker.cfg = _algorithm_cfg(use_tis, policy_loss_type)
-    worker.model = _FakeHFModel(action_log_probs=old_lp + 0.01)
-    worker.policy_loss_fn = _fake_policy_loss_fn
-    worker.strategy = _FakeStrategy()
-    worker.optimizer = None
-    worker.scheduler = _FakeScheduler()
-    worker.record_memory = False
-    worker._grug_query_bias_window = None
-
-    experience = Experience(
-        sequences=torch.randint(0, 100, (BATCH_SIZE, SEQ_LEN)),
-        action_log_probs=old_lp,
-        base_action_log_probs=None,
-        values=None,
-        returns=None,
-        advantages=torch.zeros(BATCH_SIZE, NUM_ACTIONS),
-        attention_mask=torch.ones(BATCH_SIZE, SEQ_LEN),
-        loss_mask=loss_mask,
-        action_mask=torch.ones(BATCH_SIZE, NUM_ACTIONS),
-        num_actions=NUM_ACTIONS,
-        rollout_logprobs=rollout_lp,
-        info={},
-    )
-
-    # CPU test: the step opens with experience.to_device(torch.cuda.current_device()).
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: "cpu")
-    # local_step + 1 < accumulation_steps => the optimizer-step branch is skipped.
-    return worker.training_step(experience, global_step=0, local_step=0, accumulation_steps=2)
-
-
-def test_fsdp_training_step_emits_tis_diagnostics(monkeypatch):
-    old_lp, rollout_lp, loss_mask = _tis_tensors()
-    expected = compute_tis_diagnostics(old_lp, rollout_lp, loss_mask, cap=CAP)
-    status = _fsdp_training_step_status(use_tis=True, monkeypatch=monkeypatch)
-    for key in TIS_DIAG_KEYS:
-        assert status[key] == pytest.approx(expected[key])
-
-
-def test_fsdp_training_step_no_tis_keys_when_disabled(monkeypatch):
-    status = _fsdp_training_step_status(use_tis=False, monkeypatch=monkeypatch)
-    assert not any(key.startswith("tis/") for key in status)
-
-
-def test_fsdp_behavior_clip_keeps_rollout_divergence_diagnostics(monkeypatch):
-    old_lp, rollout_lp, loss_mask = _tis_tensors()
-    expected = compute_tis_diagnostics(old_lp, rollout_lp, loss_mask, cap=CAP)
-    status = _fsdp_training_step_status(
-        use_tis=False,
-        policy_loss_type="behavior_clip",
-        monkeypatch=monkeypatch,
-    )
-
-    for key in TIS_DIAG_KEYS:
-        assert status[key] == pytest.approx(expected[key])
-
-
-def test_fsdp_training_step_completes_clip_metric_contract(monkeypatch):
-    status = _fsdp_training_step_status(use_tis=False, monkeypatch=monkeypatch)
-    assert {key: status[key] for key in POLICY_CLIP_METRIC_KEYS} == dict.fromkeys(POLICY_CLIP_METRIC_KEYS, 0.0)
-
-
-def test_fsdp_training_step_gathers_sparse_teacher_tokens_from_student_logits(monkeypatch):
-    teacher_probs = torch.tensor([[[0.7, 0.2]], [[0.6, 0.3]]])
-    teacher_indices = torch.tensor([[[1, 2]], [[2, 3]]])
-    retained_mass = teacher_probs.sum(dim=-1)
-    student_logits = torch.zeros(BATCH_SIZE, SEQ_LEN, 5)
-    student_logits[0, -NUM_ACTIONS - 1, 1] = 2.0
-    student_logits[0, -NUM_ACTIONS - 1, 2] = -1.0
-    student_logits[1, -NUM_ACTIONS - 1, 2] = -0.5
-    student_logits[1, -NUM_ACTIONS - 1, 3] = 1.0
-    student_logits.requires_grad_()
-    old_lp, rollout_lp, _ = _tis_tensors()
-    worker = object.__new__(PolicyWorkerBase)
-    worker.cfg = _algorithm_cfg(use_tis=False)
-    worker.cfg.trainer.algorithm.distillation = {"reward_mode": "add"}
-    worker.cfg.trainer.policy = {"fsdp_config": {"context_parallel_size": 1}}
-    worker.model = _FakeHFModel(action_log_probs=old_lp + 0.01, logits=student_logits)
-    worker.policy_loss_fn = _fake_policy_loss_fn
-    worker.strategy = _FakeStrategy()
-    worker.optimizer = None
-    worker.scheduler = _FakeScheduler()
-    worker.record_memory = False
-    worker.sequence_parallel_size = 1
-    worker._grug_query_bias_window = None
-    valid_mask = torch.tensor([[True, False, False, False], [True, False, False, False]])
-    padded_indices = torch.full((BATCH_SIZE, NUM_ACTIONS, 2), -1, dtype=torch.long)
-    padded_indices[:, :1] = teacher_indices
-    padded_logprobs = torch.full((BATCH_SIZE, NUM_ACTIONS, 2), torch.nan)
-    padded_logprobs[:, :1] = teacher_probs.log()
-    padded_mass = torch.full((BATCH_SIZE, NUM_ACTIONS), torch.nan)
-    padded_mass[:, :1] = retained_mass
-    experience = Experience(
-        sequences=torch.randint(0, 5, (BATCH_SIZE, SEQ_LEN)),
-        action_log_probs=old_lp,
-        base_action_log_probs=None,
-        values=None,
-        returns=None,
-        advantages=torch.zeros(BATCH_SIZE, NUM_ACTIONS),
-        attention_mask=torch.ones(BATCH_SIZE, SEQ_LEN),
-        loss_mask=valid_mask,
-        action_mask=valid_mask,
-        num_actions=NUM_ACTIONS,
-        rollout_logprobs=rollout_lp,
-        info={},
-        distillation=SparseForwardKLInput(
-            teacher_topk_indices=padded_indices,
-            teacher_topk_logprobs=padded_logprobs,
-            retained_mass=padded_mass,
-            valid_mask=valid_mask,
-            loss_weights=torch.ones(BATCH_SIZE, NUM_ACTIONS),
-        ),
-    )
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: "cpu")
-
-    status = worker.training_step(experience, global_step=0, local_step=0, accumulation_steps=2)
-
-    selected_student = student_logits[:, -NUM_ACTIONS - 1 : -1].log_softmax(dim=-1)[:, :1].gather(-1, teacher_indices)
-    conditional_teacher = teacher_probs / retained_mass.unsqueeze(-1)
-    expected_loss = torch.sum(conditional_teacher * (conditional_teacher.log() - selected_student), dim=-1).mean()
-    assert status["distillation_loss"] == pytest.approx(expected_loss.item())
-    assert status["final_loss"] == pytest.approx(0.25 + expected_loss.item())
-    assert status["distillation_topk"] == 2
-    assert status["distillation_retained_mass_mean"] == pytest.approx(0.9)
-
-
-# ---------------------------------------------------------------------------
-# Megatron path: MegatronModelWrapper.forward_backward_mini_batch
-# ---------------------------------------------------------------------------
 
 
 class _FakeMegatronModule:
