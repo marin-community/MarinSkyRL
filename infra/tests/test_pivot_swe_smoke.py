@@ -1,8 +1,10 @@
 import gzip
 import json
+from pathlib import Path
 from zipfile import ZipFile
 
 from datasets import Dataset, load_dataset
+from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from infra.rl_data import pivot_swe
@@ -212,3 +214,11 @@ def test_report_pairs_probe_results_and_persists_training_errors(tmp_path):
     assert after["profile_pass_rate"] == 0.375
     middle = next(row for row in action_rows if row["phase"] == "eval" and row["step"] == 4)
     assert middle["rendered_tool_json_valid"] is False
+
+
+def test_smoke_config_prepares_pivot_data_instead_of_inherited_gsm8k():
+    config_dir = Path(__file__).resolve().parents[2] / "skyrl-train" / "skyrl_train" / "config"
+    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
+        cfg = compose(config_name="pivot_swe_smoke")
+    assert list(cfg.data.train_data) == []
+    assert list(cfg.data.val_data) == []

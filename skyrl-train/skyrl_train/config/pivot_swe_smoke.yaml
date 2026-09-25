@@ -3,6 +3,8 @@ defaults:
   - _self_
 
 data:
+  train_data: []
+  val_data: []
   shuffle: false
 
 trainer:
