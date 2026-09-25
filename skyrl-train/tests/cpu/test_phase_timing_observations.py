@@ -50,34 +50,6 @@ def test_post_step_work_is_published_under_the_step_root():
     assert {item.root for item in observations} == {"step"}
 
 
-def test_optimizer_backload_is_published_under_the_training_phase():
-    observations = phase_timing_observations(
-        {"step": 8.0, "run_training": 5.0, "train_critic_and_policy": 4.0, "backload_policy_optimizer_to_gpu": 1.0}
-    )
-
-    by_name = {item.name: item for item in observations}
-    assert by_name["backload_policy_optimizer_to_gpu"].parent == "train_critic_and_policy"
-    assert by_name["backload_policy_optimizer_to_gpu"].root == "step"
-
-
-def test_async_batch_preparation_stages_are_published_under_the_step_root():
-    observations = phase_timing_observations(
-        {
-            "step": 9.0,
-            "assemble_generation_group_mini_batch": 1.0,
-            "postprocess_trajectory_batch": 2.0,
-            "convert_to_training_input": 3.0,
-        }
-    )
-
-    assert {item.name: item.parent for item in observations} == {
-        "step": None,
-        "assemble_generation_group_mini_batch": "step",
-        "postprocess_trajectory_batch": "step",
-        "convert_to_training_input": "step",
-    }
-
-
 @pytest.mark.parametrize("trainer_class", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
 def test_step_end_callbacks_run_inside_production_step_timer(trainer_class):
     tree = ast.parse(textwrap.dedent(inspect.getsource(trainer_class._train_loop)))

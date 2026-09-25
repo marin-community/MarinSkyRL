@@ -18,7 +18,6 @@ import torch  # noqa: E402
 import torch.distributed as dist  # noqa: E402
 import zstandard  # noqa: E402
 from marinskyrl.environment_contract import TrainingType  # noqa: E402
-from skyrl_train import learner_memory  # noqa: E402
 from skyrl_train import telemetry as training_telemetry  # noqa: E402
 from skyrl_train.distillation import ChosenTokenTeacherEvidence  # noqa: E402
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec  # noqa: E402
@@ -265,15 +264,17 @@ class FakeCuda:
     def mem_get_info(self, device):
         return 2000, 4096
 
-    def empty_cache(self):
-        pass
-
-    def synchronize(self):
-        pass
-
 
 @pytest.fixture
 def fake_cuda(monkeypatch) -> FakeCuda:
     cuda = FakeCuda()
-    monkeypatch.setattr(learner_memory.torch, "cuda", cuda)
+    for name in (
+        "current_device",
+        "get_allocator_backend",
+        "get_device_properties",
+        "reset_peak_memory_stats",
+        "memory_stats",
+        "mem_get_info",
+    ):
+        monkeypatch.setattr(torch.cuda, name, getattr(cuda, name))
     return cuda
