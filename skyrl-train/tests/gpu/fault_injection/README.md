@@ -9,6 +9,8 @@ order, on one otherwise idle four-H100 node. Run from the repository root with
 `pyproject.toml` to be inside the working directory. Set `CHECKPOINT_TEST_ROOT` to a
 fresh, unique east-region `s3://marin-us-east-02a/tmp/ttl=14d/skyrl/users/atqamar/…`
 prefix visible to both processes. Do not reuse a prior test root.
+The test directory is a Python package so Ray workers can import the test's
+worker subclass by its fully qualified module name.
 
 ```bash
 export PYTHONPATH="$PWD/skyrl-train${PYTHONPATH:+:$PYTHONPATH}"
