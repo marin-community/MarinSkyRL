@@ -1,24 +1,21 @@
-"""Persistent handoff for completed rollout groups.
-
-FineStore commits each group before its ID is made visible to a trainer. The
-payload is the normalized trajectory batch, including optional evidence that
-cannot be reconstructed from tokens after generation.
-"""
+"""Backend-neutral handoff of completed rollout records to a trainer."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import uuid
-from collections import defaultdict
+from collections import deque
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import Generic, Protocol, TypeVar
 
 import pyarrow as pa
 import torch
-from finestore.store import DataStore
 from finestore.reader import ReadView
+from finestore.store import DataStore
 
-from skyrl_train.async_rollout_state import GeneratedOutputGroup, RolloutReference
+from marinskyrl.resource_locator import join_resource_path
+from skyrl_train.async_rollout_state import GeneratedOutputGroup, RolloutBufferSnapshot
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 
 
@@ -34,90 +31,305 @@ ROLLOUT_SCHEMA = pa.schema(
 )
 
 
-class RolloutWriter(Protocol):
-    def write_rollout(self, rollout: GeneratedOutputGroup | SynchronousRollout) -> str: ...
-
-
 @dataclass
 class SynchronousRollout:
-    """One complete synchronous generation request before trainer admission."""
+    """One completed synchronous generation request and its replay evidence."""
 
     trajectory_batch: TrajectoryBatch
     uids: list[str]
     source_prompts: list[dict]
     model_step: int
     rollout_id: str | None = None
-    rollout_store_path: str | None = None
+
+
+Rollout = GeneratedOutputGroup | SynchronousRollout
+RolloutT = TypeVar("RolloutT", GeneratedOutputGroup, SynchronousRollout)
+
+
+def _uids(rollout: Rollout) -> tuple[str, ...]:
+    return (rollout.uid,) if isinstance(rollout, GeneratedOutputGroup) else tuple(rollout.uids)
+
+
+def _step(rollout: Rollout) -> int:
+    return rollout.earliest_model_step if isinstance(rollout, GeneratedOutputGroup) else rollout.model_step
+
+
+class RolloutWriter(Protocol[RolloutT]):
+    async def write_rollout(self, rollout: RolloutT) -> None: ...
+
+
+class RolloutSlotPolicy(Protocol):
+    async def acquire_submission_slot(self) -> None: ...
+
+    async def on_rollout_accepted(self) -> None: ...
+
+    async def cancel_submission_slot(self) -> None: ...
+
+
+class RolloutSlot(Generic[RolloutT]):
+    """Reserve capacity before generation and release it on failure or rejection."""
+
+    def __init__(self, writer: RolloutWriter[RolloutT], policy: RolloutSlotPolicy | None):
+        self._writer = writer
+        self._policy = policy
+        self._reserved = False
+
+    async def __aenter__(self) -> RolloutSlot[RolloutT]:
+        if self._policy is not None:
+            await self._policy.acquire_submission_slot()
+        self._reserved = True
+        return self
+
+    async def write_rollout(self, rollout: RolloutT) -> None:
+        await self._writer.write_rollout(rollout)
+        if self._policy is not None:
+            accepted = asyncio.create_task(self._policy.on_rollout_accepted())
+            try:
+                await asyncio.shield(accepted)
+            except asyncio.CancelledError:
+                await accepted
+                self._reserved = False
+                raise
+        self._reserved = False
+
+    async def __aexit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        if self._reserved and self._policy is not None:
+            await self._policy.cancel_submission_slot()
+        self._reserved = False
+
+
+class RolloutBuffer(Protocol[RolloutT]):
+    """A queue of committed rollout records; backend state stays behind this interface."""
+
+    def writer(self) -> RolloutWriter[RolloutT]: ...
+
+    def request_slot(self) -> RolloutSlot[RolloutT]: ...
+
+    async def next_batch(self, max_items: int) -> list[RolloutT]: ...
+
+    def requeue(self, rollout: RolloutT) -> None: ...
+
+    def snapshot(self) -> RolloutBufferSnapshot: ...
+
+    def restore(self, snapshot: RolloutBufferSnapshot) -> None: ...
+
+    def pending_count(self) -> int: ...
+
+    def capacity(self) -> int: ...
+
+    def close(self) -> None: ...
+
+    def empty(self) -> bool: ...
+
+    def full(self) -> bool: ...
+
+
+class _MemoryWriter(Generic[RolloutT]):
+    def __init__(self, buffer: MemoryRolloutBuffer[RolloutT]):
+        self.buffer = buffer
+
+    async def write_rollout(self, rollout: RolloutT) -> None:
+        self.buffer.requeue(rollout)
+
+
+class MemoryRolloutBuffer(Generic[RolloutT]):
+    """In-process FIFO implementation, including checkpointable pending records."""
+
+    def __init__(self, capacity: int = 0, slot_policy: RolloutSlotPolicy | None = None):
+        self._pending: deque[RolloutT] = deque()
+        self._capacity = capacity
+        self._slot_policy = slot_policy
+
+    def writer(self) -> RolloutWriter[RolloutT]:
+        return _MemoryWriter(self)
+
+    def request_slot(self) -> RolloutSlot[RolloutT]:
+        return RolloutSlot(self.writer(), self._slot_policy)
+
+    async def next_batch(self, max_items: int) -> list[RolloutT]:
+        # The previous async trainer scanned every available in-memory result.
+        result = list(self._pending)
+        self._pending.clear()
+        return result
+
+    def requeue(self, rollout: RolloutT) -> None:
+        if self.full():
+            raise asyncio.QueueFull
+        self._pending.append(rollout)
+
+    def snapshot(self) -> RolloutBufferSnapshot:
+        return RolloutBufferSnapshot(
+            "memory", tuple(uid for r in self._pending for uid in _uids(r)), list(self._pending)
+        )
+
+    def restore(self, snapshot: RolloutBufferSnapshot) -> None:
+        if snapshot.backend != "memory":
+            raise ValueError(f"cannot restore {snapshot.backend} snapshot into memory buffer")
+        records = snapshot.state
+        if not isinstance(records, list):
+            raise ValueError("memory buffer snapshot has invalid state")
+        if self._capacity and len(records) > self._capacity:
+            raise ValueError(
+                f"checkpoint contains {len(records)} completed groups, exceeding buffer capacity {self._capacity}"
+            )
+        self._pending = deque(records)
+
+    def pending_count(self) -> int:
+        return len(self._pending)
+
+    def capacity(self) -> int:
+        return self._capacity
+
+    def empty(self) -> bool:
+        return not self._pending
+
+    def full(self) -> bool:
+        return self._capacity > 0 and len(self._pending) >= self._capacity
+
+    def close(self) -> None:
+        pass
 
 
 @dataclass(frozen=True)
-class FineStoreRolloutWriter:
-    store: DataStore
+class _FineStorePointer:
+    rollout_id: str
+    uids: tuple[str, ...]
+    store_path: str
 
-    def write_rollout(self, rollout: GeneratedOutputGroup | SynchronousRollout) -> str:
-        """Commit one immutable generation result and return its stable ID."""
+
+class _FineStoreWriter(Generic[RolloutT]):
+    def __init__(self, buffer: FineStoreRolloutBuffer[RolloutT]):
+        self.buffer = buffer
+
+    async def write_rollout(self, rollout: RolloutT) -> None:
+        write = asyncio.create_task(asyncio.to_thread(self.buffer._commit, rollout))
+        try:
+            pointer = await asyncio.shield(write)
+        except asyncio.CancelledError:
+            # A storage commit cannot be cancelled; wait before closing the store.
+            await write
+            raise
+        rollout.rollout_id = pointer.rollout_id
+        self.buffer._append(pointer)
+
+
+class FineStoreRolloutBuffer(Generic[RolloutT]):
+    """Commit payloads to FineStore and queue only private storage pointers."""
+
+    def __init__(self, path: str, capacity: int = 0, slot_policy: RolloutSlotPolicy | None = None):
+        self.path = path
+        self.store = DataStore.open(path)
+        self.store.table(ROLLOUT_TABLE, primary_key=("rollout_id",), schema=ROLLOUT_SCHEMA)
+        self._pending: deque[_FineStorePointer] = deque()
+        self._scanned: dict[str, _FineStorePointer] = {}
+        self._capacity = capacity
+        self._slot_policy = slot_policy
+
+    def writer(self) -> RolloutWriter[RolloutT]:
+        return _FineStoreWriter(self)
+
+    def request_slot(self) -> RolloutSlot[RolloutT]:
+        return RolloutSlot(self.writer(), self._slot_policy)
+
+    def _commit(self, rollout: RolloutT) -> _FineStorePointer:
         rollout_id = rollout.rollout_id or uuid.uuid4().hex
-        uid = rollout.uid if isinstance(rollout, GeneratedOutputGroup) else rollout.uids[0]
-        model_step = rollout.earliest_model_step if isinstance(rollout, GeneratedOutputGroup) else rollout.model_step
         payload = io.BytesIO()
         torch.save(rollout, payload)
         with self.store.unbounded_transaction() as transaction:
             transaction.table(ROLLOUT_TABLE).add(
                 {
                     "rollout_id": rollout_id,
-                    "uid": uid,
-                    "model_step": model_step,
+                    "uid": _uids(rollout)[0],
+                    "model_step": _step(rollout),
                     "payload": payload.getvalue(),
                 }
             )
-        return rollout_id
+        return _FineStorePointer(rollout_id, _uids(rollout), self.path)
 
+    def _append(self, pointer: _FineStorePointer) -> None:
+        if self.full():
+            raise asyncio.QueueFull
+        self._pending.append(pointer)
 
-class FineStoreRolloutBuffer:
-    """Read and write completed groups in a run-scoped FineStore archive."""
+    def _read(self, pointers: list[_FineStorePointer]) -> list[RolloutT]:
+        views: dict[str, ReadView] = {}
+        result = []
+        for pointer in pointers:
+            view = views.get(pointer.store_path)
+            if view is None:
+                view = self.store.read_view() if pointer.store_path == self.path else ReadView(pointer.store_path)
+                views[pointer.store_path] = view
+            row = view.point(ROLLOUT_TABLE, rollout_id=pointer.rollout_id)
+            if row is None:
+                raise KeyError(f"rollout {pointer.rollout_id} was not committed")
+            rollout = torch.load(io.BytesIO(row["payload"]), map_location="cpu", weights_only=False)
+            if not isinstance(rollout, (GeneratedOutputGroup, SynchronousRollout)):
+                raise ValueError(f"rollout {pointer.rollout_id} has an unexpected payload type")
+            rollout.rollout_id = pointer.rollout_id
+            result.append(rollout)
+        return result
 
-    def __init__(self, path: str):
-        self.path = path
-        self.store = DataStore.open(path)
-        self.store.table(ROLLOUT_TABLE, primary_key=("rollout_id",), schema=ROLLOUT_SCHEMA)
+    async def next_batch(self, max_items: int) -> list[RolloutT]:
+        pointers = [self._pending.popleft() for _ in range(min(max_items, len(self._pending)))]
+        if not pointers:
+            return []
+        try:
+            read = asyncio.create_task(asyncio.to_thread(self._read, pointers))
+            try:
+                result = await asyncio.shield(read)
+            except asyncio.CancelledError:
+                await read
+                raise
+            self._scanned = {pointer.rollout_id: pointer for pointer in pointers}
+            return result
+        except BaseException:
+            self._pending.extendleft(reversed(pointers))
+            raise
 
-    def writer(self) -> RolloutWriter:
-        return FineStoreRolloutWriter(self.store)
+    def requeue(self, rollout: RolloutT) -> None:
+        if rollout.rollout_id is None:
+            raise ValueError("cannot requeue an uncommitted FineStore rollout")
+        self._append(self._scanned[rollout.rollout_id])
 
-    def read_rollout(
-        self, rollout_id: str, *, store_path: str | None = None
-    ) -> GeneratedOutputGroup | SynchronousRollout:
-        """Read a committed rollout by ID from a fresh FineStore snapshot."""
-        view = self.store.read_view() if store_path is None or store_path == self.path else ReadView(store_path)
-        row = view.point(ROLLOUT_TABLE, rollout_id=rollout_id)
-        if row is None:
-            raise KeyError(f"rollout {rollout_id} was not committed")
-        return self._decode_rollout(row, store_path or self.path)
+    def snapshot(self) -> RolloutBufferSnapshot:
+        return RolloutBufferSnapshot(
+            "finestore", tuple(uid for p in self._pending for uid in p.uids), list(self._pending)
+        )
 
-    def read_rollouts(self, references: Sequence[RolloutReference]) -> list[GeneratedOutputGroup]:
-        """Return groups in reference order, raising if a committed ID is missing."""
-        by_path: dict[str, list[str]] = defaultdict(list)
-        for reference in references:
-            by_path[reference.store_path].append(reference.rollout_id)
-        groups = {}
-        for path, rollout_ids in by_path.items():
-            view = self.store.read_view() if path == self.path else ReadView(path)
-            for row in view.iter_rows(ROLLOUT_TABLE, where=[("rollout_id", "in", rollout_ids)]):
-                rollout = self._decode_rollout(row, path)
-                if not isinstance(rollout, GeneratedOutputGroup):
-                    raise ValueError(f"rollout {row['rollout_id']} is not a generated output group")
-                groups[path, row["rollout_id"]] = rollout
-        return [groups[reference.store_path, reference.rollout_id] for reference in references]
+    def restore(self, snapshot: RolloutBufferSnapshot) -> None:
+        if snapshot.backend != "finestore":
+            raise ValueError(f"cannot restore {snapshot.backend} snapshot into FineStore buffer")
+        pointers = snapshot.state
+        if not isinstance(pointers, list) or not all(isinstance(p, _FineStorePointer) for p in pointers):
+            raise ValueError("FineStore buffer snapshot has invalid state")
+        if self._capacity and len(pointers) > self._capacity:
+            raise ValueError(
+                f"checkpoint contains {len(pointers)} completed groups, exceeding buffer capacity {self._capacity}"
+            )
+        self._pending = deque(pointers)
+        self._scanned.clear()
 
-    @staticmethod
-    def _decode_rollout(row: dict, store_path: str) -> GeneratedOutputGroup | SynchronousRollout:
-        rollout_id = row["rollout_id"]
-        rollout = torch.load(io.BytesIO(row["payload"]), map_location="cpu", weights_only=False)
-        if not isinstance(rollout, (GeneratedOutputGroup, SynchronousRollout)):
-            raise ValueError(f"rollout {rollout_id} has an unexpected payload type")
-        rollout.rollout_id = rollout_id
-        rollout.rollout_store_path = store_path
-        return rollout
+    def pending_count(self) -> int:
+        return len(self._pending)
+
+    def capacity(self) -> int:
+        return self._capacity
+
+    def empty(self) -> bool:
+        return not self._pending
+
+    def full(self) -> bool:
+        return self._capacity > 0 and len(self._pending) >= self._capacity
 
     def close(self) -> None:
         self.store.close()
+
+
+def create_rollout_buffer(
+    backend: str, checkpoint_root: str, capacity: int = 0, slot_policy: RolloutSlotPolicy | None = None
+) -> RolloutBuffer:
+    if backend == "memory":
+        return MemoryRolloutBuffer(capacity, slot_policy)
+    if backend == "finestore":
+        return FineStoreRolloutBuffer(join_resource_path(checkpoint_root, ROLLOUT_BUFFER_SUBDIR), capacity, slot_policy)
+    raise ValueError(f"unknown rollout buffer backend: {backend}")

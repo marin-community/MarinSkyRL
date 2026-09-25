@@ -47,8 +47,8 @@ from skyrl_train.telemetry import (
     record_rollout_staleness,
 )
 from skyrl_train.timing_observability import publish_step_timings
-from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState, RolloutReference
-from skyrl_train.rollout_buffer import FineStoreRolloutBuffer
+from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
+from skyrl_train.rollout_buffer import RolloutBuffer, RolloutSlot
 from skyrl_train.io import io
 from skyrl_train.dynamic_sampling import (
     DynamicSamplingType,
@@ -91,10 +91,9 @@ def _drain_queue(queue: asyncio.Queue[_QueueItem], max_items: int | None = None)
 
 @dataclass
 class _GenerationQueues:
-    completed: asyncio.Queue[GeneratedOutputGroup | RolloutReference]
+    rollout_buffer: RolloutBuffer[GeneratedOutputGroup]
     retries: asyncio.Queue[List[dict]]
     condition: asyncio.Condition
-    rollout_buffer: FineStoreRolloutBuffer | None = None
     active_producers: int = 0
     admitted_groups: List[GeneratedOutputGroup] = field(default_factory=list)
     admitted_groups_consumed: bool = False
@@ -134,77 +133,16 @@ class _GenerationQueues:
         return self._snapshot(list(self.admitted_groups))
 
     def _snapshot(self, admitted_groups: List[GeneratedOutputGroup]) -> GenerationBufferState:
-        pending = _drain_queue(self.completed)
-        try:
-            completed = [item for item in pending if isinstance(item, GeneratedOutputGroup)]
-            references = [item for item in pending if isinstance(item, RolloutReference)]
-            retries = _drain_queue(self.retries)
-        finally:
-            for item in pending:
-                self.completed.put_nowait(item)
+        retries = _drain_queue(self.retries)
         for prompts in retries:
             self.retries.put_nowait(prompts)
-        return GenerationBufferState(
-            completed_groups=completed,
-            retry_prompts=retries,
-            admitted_groups=admitted_groups,
-            completed_rollouts=references,
-        )
+        return GenerationBufferState(self.rollout_buffer.snapshot(), retries, admitted_groups)
 
     async def drain_completed(self, max_items: int) -> List[GeneratedOutputGroup]:
-        """Load bounded FineStore batches; preserve legacy in-memory scan semantics."""
-        pending = _drain_queue(self.completed, max_items if self.rollout_buffer is not None else None)
-        if not pending:
-            return []
-        if self.rollout_buffer is None:
-            groups = [item for item in pending if isinstance(item, GeneratedOutputGroup)]
-            if len(groups) != len(pending):
-                raise RuntimeError("rollout ID has no backing buffer")
-            return groups
-        try:
-            rollout_buffer = self.rollout_buffer
-            assert rollout_buffer is not None
-
-            def read_pending() -> List[GeneratedOutputGroup]:
-                references = [item for item in pending if isinstance(item, RolloutReference)]
-                loaded = iter(rollout_buffer.read_rollouts(references))
-                return [item if isinstance(item, GeneratedOutputGroup) else next(loaded) for item in pending]
-
-            read = asyncio.create_task(asyncio.to_thread(read_pending))
-            try:
-                return await asyncio.shield(read)
-            except asyncio.CancelledError:
-                await read
-                raise
-        except BaseException:
-            for item in pending:
-                self.completed.put_nowait(item)
-            raise
-
-    async def enqueue_completed(self, group: GeneratedOutputGroup) -> None:
-        """Publish a completed group only after its payload is committed."""
-        if self.rollout_buffer is None:
-            self.completed.put_nowait(group)
-            return
-        write = asyncio.create_task(asyncio.to_thread(self.rollout_buffer.writer().write_rollout, group))
-        try:
-            rollout_id = await asyncio.shield(write)
-        except asyncio.CancelledError:
-            # A thread cannot be cancelled mid-commit. Finish it before the
-            # trainer closes the store; the unqueued row remains auditable.
-            await write
-            raise
-        group.rollout_id = rollout_id
-        group.rollout_store_path = self.rollout_buffer.path
-        self.completed.put_nowait(RolloutReference(rollout_id, group.uid, self.rollout_buffer.path))
+        return await self.rollout_buffer.next_batch(max_items)
 
     def requeue_completed(self, group: GeneratedOutputGroup) -> None:
-        if self.rollout_buffer is not None and group.rollout_id is not None:
-            self.completed.put_nowait(
-                RolloutReference(group.rollout_id, group.uid, group.rollout_store_path or self.rollout_buffer.path)
-            )
-        else:
-            self.completed.put_nowait(group)
+        self.rollout_buffer.requeue(group)
 
 
 @dataclass
@@ -643,22 +581,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     def _restore_buffer_from_checkpoint(self, queues: _GenerationQueues, checkpoint_path: str) -> None:
         """Restore completed, admitted, and retryable rollout work from a checkpoint."""
         buffer_state = BufferCheckpointCallback.load_buffer_state(checkpoint_path)
-        completed_count = len(buffer_state.completed_groups) + len(buffer_state.completed_rollouts)
-        if queues.completed.maxsize > 0 and completed_count > queues.completed.maxsize:
-            raise ValueError(
-                f"Checkpoint contains {completed_count} completed groups, exceeding buffer capacity "
-                f"{queues.completed.maxsize}"
-            )
+        completed_count = len(buffer_state.buffer.pending_uids) if buffer_state.buffer is not None else 0
+        if buffer_state.buffer is not None:
+            queues.rollout_buffer.restore(buffer_state.buffer)
         if len(buffer_state.admitted_groups) > self.mini_batch_size:
             raise ValueError(
                 f"Checkpoint contains {len(buffer_state.admitted_groups)} admitted groups, exceeding mini-batch size "
                 f"{self.mini_batch_size}"
             )
         self.async_train_dataloader.reserve_pending_uids(buffer_state.pending_uids())
-        for item in buffer_state.completed_groups:
-            queues.completed.put_nowait(item)
-        for reference in buffer_state.completed_rollouts:
-            queues.completed.put_nowait(reference)
         for prompts in buffer_state.retry_prompts:
             queues.retries.put_nowait(prompts)
         queues.record_admitted(buffer_state.admitted_groups)
@@ -842,14 +773,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
             # 0. Per-epoch prologue. Note that we do not do any cross-epoch asynchrony here.
 
-            # The queue carries FineStore IDs; only on-policy requests need a
-            # batch-sized queue bound for backpressure.
-            rollout_buffer = await self._open_rollout_buffer()
+            capacity = 0 if self.max_staleness_steps > 0 else self.mini_batch_size
+            rollout_buffer = await self._open_rollout_buffer(capacity, self._staleness_manager)
             generation_queues = _GenerationQueues(
-                completed=asyncio.Queue(maxsize=0 if self.max_staleness_steps > 0 else self.mini_batch_size),
+                rollout_buffer=rollout_buffer,
                 retries=asyncio.Queue(),
                 condition=asyncio.Condition(),
-                rollout_buffer=rollout_buffer,
                 active_producers=self.num_parallel_generation_workers,
             )
 
@@ -1070,7 +999,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             )
             # Drain any generation outputs that arrived after the training loop
             # stopped consuming (race between producer enqueue and consumer exit).
-            n_drained = len(_drain_queue(generation_queues.completed))
+            n_drained = len(await generation_queues.drain_completed(generation_queues.rollout_buffer.pending_count()))
             assert generation_queues.retries.empty(), (
                 f"Epoch ended with {generation_queues.retries.qsize()} stale-group retries still pending"
             )
@@ -1184,74 +1113,56 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """Generate dataset rows or retries and route only fresh groups to the completed queue."""
         try:
             while True:
-                slot_acquired = False
                 rand_prompts = await self._next_generation_prompts(queues)
-                await self._staleness_manager.acquire_submission_slot()
-                slot_acquired = True
-                assert len(rand_prompts) == 1
-                trajectory_request, uids = prepare_trajectory_request(
-                    rand_prompts,
-                    self.cfg.generator.n_samples_per_prompt,
-                    get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
-                    self.cfg.environment.env_class,
-                    "train",
-                    self.global_step,
-                )
-                assert all(uid == uids[0] for uid in uids), "Expect all uids to be the same"
-
-                # Capture a fallback global step before collection. Runners that
-                # record sampled-token steps replace it with actual_global_step below.
-                global_step_at_start = self.global_step
-
-                # Disable each runner's progress bar so concurrent workers do not flood the console.
-                cur_trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(
-                    trajectory_request, disable_tqdm=True
-                )
-                actual_step = cur_trajectory_batch.get("actual_global_step")
-                staleness_step = actual_step if actual_step is not None else global_step_at_start
-
-                record_generated_work(
-                    cur_trajectory_batch["response_ids"],
-                    cur_trajectory_batch.get("is_last_step"),
-                    staleness_step,
-                )
-                completed_group = GeneratedOutputGroup(
-                    trajectory_batch=cur_trajectory_batch,
-                    uid=uids[0],
-                    earliest_model_step=staleness_step,
-                    source_prompts=rand_prompts,
-                )
-                freshness = await self._enqueue_if_fresh(queues, completed_group)
-                if freshness is _GroupFreshness.STALE:
-                    await self._staleness_manager.cancel_submission_slot()
-                    slot_acquired = False
-                    self._record_admission_scan(
-                        [(completed_group, AdmissionDecision((AdmissionRejection.STALE,)))],
-                        inspected_count=1,
+                async with queues.rollout_buffer.request_slot() as slot:
+                    assert len(rand_prompts) == 1
+                    trajectory_request, uids = prepare_trajectory_request(
+                        rand_prompts,
+                        self.cfg.generator.n_samples_per_prompt,
+                        get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
+                        self.cfg.environment.env_class,
+                        "train",
+                        self.global_step,
                     )
-                    continue
-                record_rollout_buffer(queues.completed.qsize(), queues.completed.maxsize)
-                await self._staleness_manager.on_rollout_accepted()
-                slot_acquired = False  # Slot properly released; safe for next iteration
+                    assert all(uid == uids[0] for uid in uids), "Expect all uids to be the same"
+
+                    # Capture a fallback global step before collection. Runners that
+                    # record sampled-token steps replace it with actual_global_step below.
+                    global_step_at_start = self.global_step
+
+                    # Disable each runner's progress bar so concurrent workers do not flood the console.
+                    cur_trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(
+                        trajectory_request, disable_tqdm=True
+                    )
+                    actual_step = cur_trajectory_batch.get("actual_global_step")
+                    staleness_step = actual_step if actual_step is not None else global_step_at_start
+
+                    record_generated_work(
+                        cur_trajectory_batch["response_ids"],
+                        cur_trajectory_batch.get("is_last_step"),
+                        staleness_step,
+                    )
+                    completed_group = GeneratedOutputGroup(
+                        trajectory_batch=cur_trajectory_batch,
+                        uid=uids[0],
+                        earliest_model_step=staleness_step,
+                        source_prompts=rand_prompts,
+                    )
+                    freshness = await self._enqueue_if_fresh(queues, completed_group, slot)
+                    if freshness is _GroupFreshness.STALE:
+                        self._record_admission_scan(
+                            [(completed_group, AdmissionDecision((AdmissionRejection.STALE,)))],
+                            inspected_count=1,
+                        )
+                        continue
+                    record_rollout_buffer(queues.rollout_buffer.pending_count(), queues.rollout_buffer.capacity())
         except asyncio.CancelledError:
-            # If a slot was acquired but generation was cancelled before
-            # on_rollout_accepted() ran, undo the slot acquisition so that
-            # validate_state_at_epoch_end() sees running == 0 and
-            # submitted == accepted.
-            if slot_acquired:
-                await self._staleness_manager.cancel_submission_slot()
             return
         except GenerationStalledError:
-            # The dataset is exhausted and no retries are arriving — this
-            # worker has no more work to do for the epoch. Exit gracefully.
-            if slot_acquired:
-                await self._staleness_manager.cancel_submission_slot()
             logger.info("Trajectory worker exiting: collection stalled (dataset exhausted, no retries)")
             return
         except Exception as e:
             log_exception_as_text("Trajectory worker failed", e)
-            if slot_acquired:
-                await self._staleness_manager.cancel_submission_slot()
             sys.exit(1)
         finally:
             await queues.mark_producer_finished()
@@ -1281,15 +1192,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         except asyncio.TimeoutError:
             raise GenerationStalledError("Dataset exhausted and no retries arrived within the stall deadline")
 
-    async def _enqueue_if_fresh(self, queues: _GenerationQueues, group: GeneratedOutputGroup) -> _GroupFreshness:
+    async def _enqueue_if_fresh(
+        self, queues: _GenerationQueues, group: GeneratedOutputGroup, slot: RolloutSlot[GeneratedOutputGroup]
+    ) -> _GroupFreshness:
         """Enqueue a fresh group or route a stale group to retry."""
         async with queues.condition:
-            while queues.completed.full():
+            while queues.rollout_buffer.full():
                 await queues.condition.wait()
             freshness = self._classify_and_route_group(queues, group)
             if freshness is _GroupFreshness.STALE:
                 return freshness
-            await queues.enqueue_completed(group)
+            await slot.write_rollout(group)
             queues.condition.notify_all()
             return freshness
 
@@ -1545,7 +1458,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         while True:
             async with queues.condition:
-                while len(accepted_groups) < self.mini_batch_size and queues.completed.empty():
+                while len(accepted_groups) < self.mini_batch_size and queues.rollout_buffer.empty():
                     if queues.active_producers == 0:
                         raise GenerationStalledError(
                             "Generation exhausted its dataset before assembling a complete training batch: "

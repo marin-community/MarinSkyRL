@@ -11,6 +11,7 @@ import collections
 
 import pytest
 
+from skyrl_train.rollout_buffer import MemoryRolloutBuffer
 from skyrl_train.fully_async_trainer import (
     FullyAsyncRayPPOTrainer,
     GenerationStalledError,
@@ -24,7 +25,7 @@ from skyrl_train.utils.data_tracker import DataConsumptionTracker
 
 def _make_queues(*, active_producers=0) -> _GenerationQueues:
     return _GenerationQueues(
-        completed=asyncio.Queue(),
+        rollout_buffer=MemoryRolloutBuffer(),
         retries=asyncio.Queue(),
         condition=asyncio.Condition(),
         active_producers=active_producers,
@@ -129,7 +130,7 @@ async def test_get_admitted_batch_returns_complete_group_set():
 
     queues = _make_queues()
     for i in range(2):
-        queues.completed.put_nowait(
+        queues.rollout_buffer.requeue(
             GeneratedOutputGroup(
                 trajectory_batch={
                     "response_ids": [[1]],

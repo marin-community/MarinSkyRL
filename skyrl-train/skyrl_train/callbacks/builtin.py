@@ -31,12 +31,9 @@ import torch
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC
 from skyrl_train.async_rollout_state import (
-    GeneratedOutputGroup,
     GenerationBufferState,
     GenerationQueuesProvider,
-    RolloutReference,
 )
-from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.utils.data_tracker import DataConsumptionState, DataConsumptionTracker
 from skyrl_train.io import io
@@ -1118,8 +1115,8 @@ class DataTrackingCallback(TrainerCallback):
 class BufferCheckpointCallback(TrainerCallback):
     """Persist async rollout work with each checkpoint and during shutdown.
 
-    Saves FineStore references for completed work, admitted output groups, and
-    stale-group retry prompts so resume preserves pending epoch work.
+    Saves an opaque buffer snapshot, admitted output groups, and retry prompts
+    so resume preserves pending epoch work.
     """
 
     ARTIFACT_NAME = "generation_buffer_state.pt"
@@ -1141,55 +1138,25 @@ class BufferCheckpointCallback(TrainerCallback):
         if self._queues is None:
             return False
         state = self._queues.shutdown_snapshot()
-        return bool(state.completed_groups or state.completed_rollouts or state.admitted_groups or state.retry_prompts)
-
-    @staticmethod
-    def _serialize_groups(groups: List[GeneratedOutputGroup]) -> List[dict]:
-        return [
-            {
-                "trajectory_batch": dict(item.trajectory_batch),
-                "uid": item.uid,
-                "earliest_model_step": item.earliest_model_step,
-                "source_prompts": item.source_prompts,
-                "rollout_id": item.rollout_id,
-                "rollout_store_path": item.rollout_store_path,
-            }
-            for item in groups
-        ]
+        return state.has_pending_work()
 
     async def _save_bound_state(
         self,
         checkpoint_path: str,
         buffer_state: GenerationBufferState,
     ) -> None:
-        completed = self._serialize_groups(buffer_state.completed_groups)
-        completed_rollouts = [
-            {"rollout_id": item.rollout_id, "uid": item.uid, "store_path": item.store_path}
-            for item in buffer_state.completed_rollouts
-        ]
-        admitted = self._serialize_groups(buffer_state.admitted_groups)
-        retry_prompts = buffer_state.retry_prompts
-
         artifact_path = os.path.join(checkpoint_path, self.ARTIFACT_NAME)
 
         def save_state() -> None:
             with io.open_file(artifact_path, "wb") as f:
-                torch.save(
-                    {
-                        "completed_groups": completed,
-                        "completed_rollouts": completed_rollouts,
-                        "admitted_groups": admitted,
-                        "retry_prompts": retry_prompts,
-                    },
-                    f,
-                )
+                torch.save(buffer_state, f)
 
         await asyncio.to_thread(save_state)
         logger.info(
             "Saved {} completed, {} admitted generation groups, and {} pending retries to {}",
-            len(completed) + len(completed_rollouts),
-            len(admitted),
-            len(retry_prompts),
+            len(buffer_state.buffer.pending_uids) if buffer_state.buffer else 0,
+            len(buffer_state.admitted_groups),
+            len(buffer_state.retry_prompts),
             artifact_path,
         )
 
@@ -1212,12 +1179,7 @@ class BufferCheckpointCallback(TrainerCallback):
             raise RuntimeError("BufferCheckpointCallback queues were not bound before checkpoint save")
 
         buffer_state = self._queues.snapshot()
-        if not (
-            buffer_state.completed_groups
-            or buffer_state.completed_rollouts
-            or buffer_state.admitted_groups
-            or buffer_state.retry_prompts
-        ):
+        if not buffer_state.has_pending_work():
             return control
 
         ckpt_path = os.path.join(
@@ -1234,32 +1196,10 @@ class BufferCheckpointCallback(TrainerCallback):
 
         artifact_path = os.path.join(ckpt_path, BufferCheckpointCallback.ARTIFACT_NAME)
         if not io.exists(artifact_path):
-            return GenerationBufferState(completed_groups=[], retry_prompts=[])
+            return GenerationBufferState(buffer=None, retry_prompts=[])
 
         with io.open_file(artifact_path, "rb") as f:
             state = torch.load(f, map_location="cpu", weights_only=False)
-
-        def deserialize_groups(entries: List[dict]) -> List[GeneratedOutputGroup]:
-            groups = []
-            for entry in entries:
-                trajectory_batch: TrajectoryBatch = entry["trajectory_batch"]
-                groups.append(
-                    GeneratedOutputGroup(
-                        trajectory_batch=trajectory_batch,
-                        uid=entry["uid"],
-                        earliest_model_step=entry["earliest_model_step"],
-                        source_prompts=entry["source_prompts"],
-                        rollout_id=entry.get("rollout_id"),
-                        rollout_store_path=entry.get("rollout_store_path"),
-                    )
-                )
-            return groups
-
-        items = deserialize_groups(state["completed_groups"])
-        admitted = deserialize_groups(state.get("admitted_groups", []))
-        return GenerationBufferState(
-            completed_groups=items,
-            retry_prompts=state["retry_prompts"],
-            admitted_groups=admitted,
-            completed_rollouts=[RolloutReference(**entry) for entry in state.get("completed_rollouts", [])],
-        )
+        if not isinstance(state, GenerationBufferState):
+            raise ValueError("invalid rollout buffer checkpoint state")
+        return state

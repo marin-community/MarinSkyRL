@@ -11,6 +11,7 @@ import torch
 
 from skyrl_train.callbacks.builtin import BufferCheckpointCallback
 from skyrl_train.async_rollout_state import GeneratedOutputGroup
+from skyrl_train.rollout_buffer import MemoryRolloutBuffer
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer, _GenerationQueues
 from skyrl_train.trajectory_runners.base import TrajectoryID
 from skyrl_train.io import io
@@ -52,7 +53,7 @@ class _FakeTrainer:
         self.cfg = _Cfg()
         self.cfg.trainer.ckpt_path = ckpt_path
         self._generation_queues = _GenerationQueues(
-            completed=buffer,
+            rollout_buffer=buffer,
             retries=asyncio.Queue(),
             condition=asyncio.Condition(),
         )
@@ -69,7 +70,7 @@ class _FakeControl:
 
 def _make_shutdown_trainer(tmp_path, *, global_step: int, uid: str, consumed: bool):
     queues = _GenerationQueues(
-        completed=asyncio.Queue(maxsize=1),
+        rollout_buffer=MemoryRolloutBuffer(1),
         retries=asyncio.Queue(),
         condition=asyncio.Condition(),
     )
@@ -79,7 +80,7 @@ def _make_shutdown_trainer(tmp_path, *, global_step: int, uid: str, consumed: bo
     callback = BufferCheckpointCallback()
     callback.bind_queues(queues)
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
-    trainer.cfg = _FakeTrainer(str(tmp_path), asyncio.Queue()).cfg
+    trainer.cfg = _FakeTrainer(str(tmp_path), MemoryRolloutBuffer()).cfg
     trainer.global_step = global_step
     trainer._buffer_checkpoint_callback = callback
     trainer._shutdown_complete = False
@@ -99,7 +100,7 @@ def _make_shutdown_trainer(tmp_path, *, global_step: int, uid: str, consumed: bo
 @pytest.mark.asyncio
 async def test_roundtrip_empty_buffer():
     """Empty buffer produces no artifact file."""
-    buf = asyncio.Queue(maxsize=4)
+    buf = MemoryRolloutBuffer(4)
     with tempfile.TemporaryDirectory() as tmpdir:
         step_dir = os.path.join(tmpdir, "global_step_10")
         os.makedirs(step_dir)
@@ -113,10 +114,10 @@ async def test_roundtrip_empty_buffer():
 @pytest.mark.asyncio
 async def test_roundtrip_with_items():
     """Items survive save -> load roundtrip and queue is non-destructively snapshotted."""
-    buf = asyncio.Queue(maxsize=8)
+    buf = MemoryRolloutBuffer(8)
     items = [_make_item(f"uid_{i}", step=5) for i in range(3)]
     for item in items:
-        buf.put_nowait(item)
+        buf.requeue(item)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         step_dir = os.path.join(tmpdir, "global_step_5")
@@ -127,7 +128,7 @@ async def test_roundtrip_with_items():
         await cb.on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
 
         # Buffer should still have all 3 items (non-destructive)
-        assert buf.qsize() == 3
+        assert buf.pending_count() == 3
 
         # Artifact should exist
         artifact_path = os.path.join(step_dir, cb.ARTIFACT_NAME)
@@ -135,9 +136,9 @@ async def test_roundtrip_with_items():
 
         # Load and verify
         buffer_state = BufferCheckpointCallback.load_buffer_state(step_dir)
-        assert len(buffer_state.completed_groups) == 3
+        assert len(buffer_state.buffer.state) == 3
         assert buffer_state.retry_prompts == []
-        for i, item in enumerate(buffer_state.completed_groups):
+        for i, item in enumerate(buffer_state.buffer.state):
             assert item.uid == f"uid_{i}"
             assert item.earliest_model_step == 5
             assert item.source_prompts == [{"uid": f"uid_{i}"}]
@@ -149,7 +150,7 @@ async def test_roundtrip_with_items():
 
 @pytest.mark.asyncio
 async def test_roundtrip_preserves_admitted_groups_outside_completed_queue():
-    buf = asyncio.Queue(maxsize=1)
+    buf = MemoryRolloutBuffer(1)
     with tempfile.TemporaryDirectory() as tmpdir:
         step_dir = os.path.join(tmpdir, "global_step_5")
         os.makedirs(step_dir)
@@ -163,12 +164,12 @@ async def test_roundtrip_preserves_admitted_groups_outside_completed_queue():
 
         buffer_state = BufferCheckpointCallback.load_buffer_state(step_dir)
         assert [group.uid for group in buffer_state.admitted_groups] == ["admitted"]
-        assert buffer_state.completed_groups == []
+        assert buffer_state.buffer is None or buffer_state.buffer.state == []
 
 
 def test_consumed_admitted_groups_are_only_included_by_final_flush_snapshot():
     queues = _GenerationQueues(
-        completed=asyncio.Queue(maxsize=1),
+        rollout_buffer=MemoryRolloutBuffer(1),
         retries=asyncio.Queue(),
         condition=asyncio.Condition(),
     )
@@ -205,7 +206,7 @@ async def test_shutdown_flush_does_not_attach_buffer_to_older_model_checkpoint(t
 
 @pytest.mark.asyncio
 async def test_roundtrip_with_pending_retry():
-    buf = asyncio.Queue(maxsize=1)
+    buf = MemoryRolloutBuffer(1)
     with tempfile.TemporaryDirectory() as tmpdir:
         step_dir = os.path.join(tmpdir, "global_step_5")
         os.makedirs(step_dir)
@@ -217,15 +218,15 @@ async def test_roundtrip_with_pending_retry():
         await cb.on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
         buffer_state = BufferCheckpointCallback.load_buffer_state(step_dir)
 
-        assert buffer_state.completed_groups == []
+        assert buffer_state.buffer is None or buffer_state.buffer.state == []
         assert buffer_state.retry_prompts == [[{"uid": "retry-me"}]]
         assert trainer._generation_queues.retries.get_nowait() == [{"uid": "retry-me"}]
 
 
 @pytest.mark.asyncio
 async def test_save_failure_is_not_downgraded(monkeypatch, tmp_path):
-    buffer = asyncio.Queue(maxsize=1)
-    buffer.put_nowait(_make_item("uid", step=5))
+    buffer = MemoryRolloutBuffer(1)
+    buffer.requeue(_make_item("uid", step=5))
     trainer = _FakeTrainer(str(tmp_path), buffer)
     callback = BufferCheckpointCallback()
     callback.bind_queues(trainer._generation_queues)
@@ -243,7 +244,7 @@ def test_load_missing_file():
     """Missing artifacts return empty completed and retry collections."""
     with tempfile.TemporaryDirectory() as tmpdir:
         buffer_state = BufferCheckpointCallback.load_buffer_state(tmpdir)
-        assert buffer_state.completed_groups == []
+        assert buffer_state.buffer is None or buffer_state.buffer.state == []
         assert buffer_state.admitted_groups == []
         assert buffer_state.retry_prompts == []
 
@@ -253,7 +254,7 @@ def test_load_malformed_state_fails_instead_of_dropping_retries():
         artifact_path = os.path.join(tmpdir, BufferCheckpointCallback.ARTIFACT_NAME)
         torch.save({"retry_prompts": [[{"uid": "retry-me"}]]}, artifact_path)
 
-        with pytest.raises(KeyError, match="completed_groups"):
+        with pytest.raises(ValueError, match="invalid rollout buffer checkpoint state"):
             BufferCheckpointCallback.load_buffer_state(tmpdir)
 
 

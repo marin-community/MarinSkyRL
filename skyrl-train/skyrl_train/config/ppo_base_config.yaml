@@ -336,6 +336,8 @@ trainer:
   distillation_token_budget: null
   reset_distillation_token_count_on_resume: false
   reset_global_step_on_resume: false
+  rollout_buffer:
+    backend: finestore
   ckpt_path: "${oc.env:HOME}/ckpts/"
   max_ckpts_to_keep: -1
   ckpt_interval: 5

@@ -15,38 +15,36 @@ class GeneratedOutputGroup:
     earliest_model_step: int
     source_prompts: List[dict]
     rollout_id: str | None = None
-    rollout_store_path: str | None = None
 
 
 @dataclass(frozen=True)
-class RolloutReference:
-    """A committed group whose payload lives in a FineStore archive."""
+class RolloutBufferSnapshot:
+    """Backend-owned state for pending work at a checkpoint boundary."""
 
-    rollout_id: str
-    uid: str
-    store_path: str
+    backend: str
+    pending_uids: tuple[str, ...]
+    state: object
 
 
 @dataclass
 class GenerationBufferState:
-    """Completed references, admitted groups, and retries stored with a checkpoint."""
+    """Completed buffer state, admitted groups, and retries stored with a checkpoint."""
 
-    completed_groups: List[GeneratedOutputGroup]
+    buffer: RolloutBufferSnapshot | None
     retry_prompts: List[List[dict]]
     admitted_groups: List[GeneratedOutputGroup] = field(default_factory=list)
-    completed_rollouts: List[RolloutReference] = field(default_factory=list)
+
+    def has_pending_work(self) -> bool:
+        return bool((self.buffer and self.buffer.pending_uids) or self.admitted_groups or self.retry_prompts)
 
     def pending_uids(self) -> set[str]:
         """Return dataset UIDs whose work survives in this checkpoint."""
         uids = set()
-        for group in self.completed_groups:
-            if not isinstance(group.uid, str):
-                raise ValueError("completed generation group uid must be a string")
-            uids.add(group.uid)
-        for reference in self.completed_rollouts:
-            if not isinstance(reference.uid, str):
-                raise ValueError("completed rollout reference uid must be a string")
-            uids.add(reference.uid)
+        if self.buffer is not None:
+            for uid in self.buffer.pending_uids:
+                if not isinstance(uid, str):
+                    raise ValueError("completed rollout uid must be a string")
+                uids.add(uid)
         for group in self.admitted_groups:
             if not isinstance(group.uid, str):
                 raise ValueError("admitted generation group uid must be a string")

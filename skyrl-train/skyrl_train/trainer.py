@@ -26,7 +26,7 @@ from skyrl_train.curriculum import CurriculumSampler
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.rollout_buffer import ROLLOUT_BUFFER_SUBDIR, FineStoreRolloutBuffer, SynchronousRollout
+from skyrl_train.rollout_buffer import RolloutBuffer, RolloutSlotPolicy, SynchronousRollout, create_rollout_buffer
 from skyrl_train.trajectory_selection import trajectory_selector_from_config
 from skyrl_train.trajectory_runners.base import (
     TrajectoryRequestBatch,
@@ -233,7 +233,7 @@ class RayPPOTrainer:
         self.all_startup_timings = {}
         self._checkpoint_save_failures = 0.0
         self._shutdown_complete = False
-        self._rollout_buffer: FineStoreRolloutBuffer | None = None
+        self._rollout_buffer: RolloutBuffer | None = None
         self.global_step = 0
         self._last_saved_step: int | None = None
         self._pending_checkpoint_upload: tuple[asyncio.Task[tuple[float, float]], TrainerState] | None = None
@@ -559,10 +559,14 @@ class RayPPOTrainer:
             finally:
                 await self._close_rollout_buffer()
 
-    async def _open_rollout_buffer(self) -> FineStoreRolloutBuffer:
+    async def _open_rollout_buffer(
+        self, capacity: int = 0, slot_policy: RolloutSlotPolicy | None = None
+    ) -> RolloutBuffer:
         if self._rollout_buffer is None:
-            path = join_resource_path(self.cfg.trainer.ckpt_path, ROLLOUT_BUFFER_SUBDIR)
-            self._rollout_buffer = await asyncio.to_thread(FineStoreRolloutBuffer, path)
+            backend = self.cfg.trainer.rollout_buffer.backend
+            self._rollout_buffer = await asyncio.to_thread(
+                create_rollout_buffer, backend, self.cfg.trainer.ckpt_path, capacity, slot_policy
+            )
         return self._rollout_buffer
 
     async def _close_rollout_buffer(self) -> None:
@@ -581,10 +585,8 @@ class RayPPOTrainer:
             source_prompts=source_prompts,
             model_step=self.global_step,
         )
-        rollout_id = await asyncio.to_thread(rollout_buffer.writer().write_rollout, rollout)
-        restored = await asyncio.to_thread(rollout_buffer.read_rollout, rollout_id)
-        if not isinstance(restored, SynchronousRollout):
-            raise ValueError(f"rollout {rollout_id} is not a synchronous generation result")
+        await rollout_buffer.writer().write_rollout(rollout)
+        restored = (await rollout_buffer.next_batch(1))[0]
         return restored.trajectory_batch, restored.uids
 
     async def _startup_trajectory_runner(self) -> None:
