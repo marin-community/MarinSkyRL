@@ -3,8 +3,8 @@ defaults:
   - _self_
 
 data:
-  train_data: ["${oc.env:PIVOT_D_PIVOT_URI}"]
-  val_data: ["${oc.env:PIVOT_PROBE_URI}"]
+  train_data: ["${oc.env:PIVOT_RUN_ROOT}/initial_policy/qwen_d_pivot.parquet"]
+  val_data: ["${oc.env:PIVOT_RUN_ROOT}/data/probe.parquet"]
 
 trainer:
   epochs: 2

@@ -3,7 +3,7 @@ defaults:
   - _self_
 
 data:
-  val_data: ["${oc.env:PIVOT_CANDIDATES_URI}"]
+  val_data: []
 
 trainer:
   export_path: ${oc.env:PIVOT_RUN_ROOT}/initial_policy/exports
