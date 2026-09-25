@@ -18,7 +18,13 @@ from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
 
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
-from skyrl_train.rollout_observability import rollout_phase, rollout_wait, run_environment, time_tokenization
+from skyrl_train.rollout_observability import (
+    MODEL_CLIENT_AWAIT,
+    rollout_phase,
+    rollout_wait,
+    run_environment,
+    time_tokenization,
+)
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
@@ -460,7 +466,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 engine_input = InferenceEngineInput(
                     prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
                 )
-            with rollout_wait("model_client_await"):
+            with rollout_wait(MODEL_CLIENT_AWAIT):
                 engine_output = await self.model_client.generate(engine_input)
             if engine_output["token_provenance"] == TokenProvenance.RECONSTRUCTED:
                 self._reject_inexact_chat("the model client returned reconstructed token IDs")

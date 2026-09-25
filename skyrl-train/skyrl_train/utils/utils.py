@@ -6,7 +6,6 @@ import sys
 import logging
 import math
 import socket
-from types import MappingProxyType
 
 import ray
 import torch
@@ -666,7 +665,7 @@ def validate_cfg(cfg: DictConfig):
     if cfg.generator.gdn_backend not in set(GDNBackend):
         raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
     validate_generator_cfg(cfg)
-    resolve_strategy_limited_telemetry(cfg)
+    resolve_ratio_diagnostics_pooling(cfg)
     validate_batch_invariant_config(cfg)
     validate_moe_router_replay_config(cfg)
     validate_hf_export_config(cfg)
@@ -871,39 +870,25 @@ def validate_cfg(cfg: DictConfig):
         raise ValueError("generator.engine_init_timeout_seconds must be greater than zero")
 
 
-# Telemetry families that measure only on some trainer strategies, keyed by their switch.
-STRATEGY_LIMITED_TELEMETRY = MappingProxyType(
-    {
-        # Pooling reduces across Megatron's data-parallel ranks; FSDP has no such path.
-        "trainer.algorithm.ratio_diagnostics.pooled": frozenset({"megatron"}),
-    }
-)
-
-
-def resolve_strategy_limited_telemetry(cfg: DictConfig) -> None:
-    """Resolve each strategy-limited telemetry switch against ``trainer.strategy``.
-
-    A null switch turns on where the strategy supports its family and off elsewhere. An explicit
-    true on an unsupported strategy raises. An absent switch leaves its family off.
-    """
+def resolve_ratio_diagnostics_pooling(cfg: DictConfig) -> None:
+    """Enable pooled ratio diagnostics on Megatron unless explicitly disabled."""
+    section = OmegaConf.select(cfg, "trainer.algorithm.ratio_diagnostics")
+    if section is None or "pooled" not in section:
+        return
     strategy = cfg.trainer.strategy
-    dropped = []
-    for key, strategies in STRATEGY_LIMITED_TELEMETRY.items():
-        section_key, _, switch = key.rpartition(".")
-        section = OmegaConf.select(cfg, section_key)
-        if section is None or switch not in section:
-            continue
-        value = section.get(switch)
-        supported = strategy in strategies
-        if value is None:
-            section[switch] = supported
-            if not supported:
-                dropped.append(key)
-        elif value and not supported:
-            raise ValueError(f"{key}=true needs trainer.strategy in {sorted(strategies)}; got {strategy!r}")
-    if dropped:
-        pronoun = "it" if len(dropped) == 1 else "them"
-        logger.info(f"trainer.strategy={strategy} does not support {', '.join(dropped)}; leaving {pronoun} off")
+    supported = strategy == "megatron"
+    value = section.pooled
+    if value is None:
+        section.pooled = supported
+        if not supported:
+            logger.info(
+                "trainer.strategy={} does not support trainer.algorithm.ratio_diagnostics.pooled; leaving it off",
+                strategy,
+            )
+    elif value and not supported:
+        raise ValueError(
+            f"trainer.algorithm.ratio_diagnostics.pooled=true needs trainer.strategy=megatron; got {strategy!r}"
+        )
 
 
 def validate_batch_invariant_config(cfg: DictConfig) -> None:

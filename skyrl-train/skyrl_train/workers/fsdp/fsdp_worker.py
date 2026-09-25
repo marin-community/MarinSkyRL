@@ -948,14 +948,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
         torch.distributed.barrier()
 
-    async def broadcast_to_inference_engines(self, inference_engine_client):
-        # Cover full-tensor extraction and conversion, all chunks and the
-        # final receiver/cache barriers; extraction can dominate the peak.
-        with self._memory.span(
-            "broadcast_to_inference_engines", step=self._model_version_step, step_kind=StepKind.MODEL_VERSION_STEP
-        ):
-            return await self._broadcast_to_inference_engines(inference_engine_client)
-
     async def _broadcast_to_inference_engines(self, inference_engine_client):
         use_prefix_cache = self.cfg.generator.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(self.cfg.generator.model_dtype)

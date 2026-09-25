@@ -22,6 +22,7 @@ from skyrl_train.telemetry import TRAINER_ROLE, phase_attributes, phase_duration
 
 
 RolloutPhase = Literal["collect", "assemble", "finalize", "tokenize", "retain"]
+MODEL_CLIENT_AWAIT = "model_client_await"
 _PARENTS = {
     "collect": "rollout_call",
     "assemble": "rollout_call",
@@ -221,7 +222,7 @@ def rollout_wait(name: str) -> Iterator[None]:
     finally:
         finished = observation.clock()
         observation.record_wait(name, finished - started)
-        if name == "model_client_await":
+        if name == MODEL_CLIENT_AWAIT:
             observation.model_await_count += 1
             if len(observation.model_awaits) < _MAX_MODEL_INTERVALS:
                 observation.model_awaits.append(

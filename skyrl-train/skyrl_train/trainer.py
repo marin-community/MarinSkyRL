@@ -1765,6 +1765,25 @@ class RayPPOTrainer:
         self._num_experts_cache: Optional[int] = num_experts
         return num_experts
 
+    def _record_consumed_staleness(
+        self, uids: List[str], rollout_staleness: List[int], response_masks: torch.Tensor
+    ) -> None:
+        counts: dict[str, _ConsumedGroupStaleness] = {}
+        for uid, steps, mask in zip(uids, rollout_staleness, response_masks, strict=True):
+            group = counts.setdefault(
+                uid, _ConsumedGroupStaleness(staleness=steps, groups=1, sequences=0, response_tokens=0)
+            )
+            if group.staleness != steps:
+                raise ValueError("Consumed group rows must share the admitted staleness")
+            group.sequences += 1
+            group.response_tokens += int(mask.sum().item())
+        for group in counts.values():
+            record_event(
+                "consumed_staleness",
+                asdict(group),
+                attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
+            )
+
     def convert_to_training_input(
         self,
         trajectory_batch: TrajectoryBatch,
@@ -1923,22 +1942,7 @@ class RayPPOTrainer:
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         if self._training_metrics_enabled and rollout_staleness is not None:
-            # One event per consumed group: its admitted staleness and the tokens it contributed.
-            counts: dict[str, _ConsumedGroupStaleness] = {}
-            for uid, steps, mask in zip(uids, rollout_staleness, response_masks_tensor, strict=True):
-                group = counts.setdefault(
-                    uid, _ConsumedGroupStaleness(staleness=steps, groups=1, sequences=0, response_tokens=0)
-                )
-                if group.staleness != steps:
-                    raise ValueError("Consumed group rows must share the admitted staleness")
-                group.sequences += 1
-                group.response_tokens += int(mask.sum().item())
-            for group in counts.values():
-                record_event(
-                    "consumed_staleness",
-                    asdict(group),
-                    attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
-                )
+            self._record_consumed_staleness(uids, rollout_staleness, response_masks_tensor)
         if self.cfg.trainer.step_wise_training:
             assert "trajectory_ids" in trajectory_batch, (
                 "Expected `trajectory_ids` in trajectory batch for step wise training"

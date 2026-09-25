@@ -718,6 +718,68 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             await self.shutdown()
 
+    def _record_async_run_configuration(self) -> None:
+        if not self._training_metrics_enabled:
+            return
+        placement = self.cfg.trainer.placement
+        megatron = self.cfg.trainer.policy.get("megatron_config", {})
+        record_event(
+            "async_run_configuration",
+            {
+                "strategy": self.cfg.trainer.strategy,
+                "policy_nodes": placement.policy_num_nodes,
+                "policy_gpus_per_node": placement.policy_num_gpus_per_node,
+                "policy_tp": megatron.get("tensor_model_parallel_size"),
+                "policy_pp": megatron.get("pipeline_model_parallel_size"),
+                "policy_cp": megatron.get("context_parallel_size"),
+                "policy_ep": megatron.get("expert_model_parallel_size"),
+                "generation_workers": self.num_parallel_generation_workers,
+                "mini_batch_size": self.mini_batch_size,
+                "max_staleness_steps": self.max_staleness_steps,
+            },
+            attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
+        )
+
+    def _record_core_step_window(self, started_unix_ms: int, duration_seconds: float) -> None:
+        if not self._async_telemetry_enabled:
+            return
+        record_event(
+            "async_step_window",
+            {
+                "started_unix_ms": started_unix_ms,
+                "finished_unix_ms": time.time_ns() // 1_000_000,
+                "duration_seconds": duration_seconds,
+            },
+            attributes={"role": TRAINER_ROLE, "step": str(self.global_step), "window": "core"},
+        )
+
+    def _update_async_step_metrics(
+        self, training_input: TrainingInputBatch, *, core_seconds: float, cycle_started: float
+    ) -> None:
+        if not self._training_metrics_enabled:
+            return
+        placement = self.cfg.trainer.placement
+        generator = self.cfg.generator
+        consumed = consumed_work(training_input)
+        self.all_metrics.update(
+            async_step_metrics(
+                core_seconds=core_seconds,
+                cycle_seconds=time.perf_counter() - cycle_started,
+                buffer_wait_seconds=self.all_timings["wait_for_generation_buffer"],
+                training_seconds=self.all_timings["run_training"],
+                sync_seconds=self.all_timings["sync_weights"],
+                consumed_loss_tokens=consumed.loss_tokens,
+                consumed_response_tokens=consumed.response_tokens,
+                policy_gpus=placement.policy_num_nodes * placement.policy_num_gpus_per_node,
+                inference_gpus=(
+                    generator.num_inference_engines
+                    * generator.inference_engine_tensor_parallel_size
+                    * generator.inference_engine_pipeline_parallel_size
+                    * generator.inference_engine_data_parallel_size
+                ),
+            )
+        )
+
     async def _train_loop(self):
         """
         Internal training loop, separated for proper trajectory-runner lifecycle management.
@@ -789,25 +851,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             return
 
         self._log_startup_timings()
-        if self._training_metrics_enabled:
-            placement = self.cfg.trainer.placement
-            megatron = self.cfg.trainer.policy.get("megatron_config", {})
-            record_event(
-                "async_run_configuration",
-                {
-                    "strategy": self.cfg.trainer.strategy,
-                    "policy_nodes": placement.policy_num_nodes,
-                    "policy_gpus_per_node": placement.policy_num_gpus_per_node,
-                    "policy_tp": megatron.get("tensor_model_parallel_size"),
-                    "policy_pp": megatron.get("pipeline_model_parallel_size"),
-                    "policy_cp": megatron.get("context_parallel_size"),
-                    "policy_ep": megatron.get("expert_model_parallel_size"),
-                    "generation_workers": self.num_parallel_generation_workers,
-                    "mini_batch_size": self.mini_batch_size,
-                    "max_staleness_steps": self.max_staleness_steps,
-                },
-                attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
-            )
+        self._record_async_run_configuration()
 
         # Create initial trainer state for on_train_begin callback
         start_epoch = self.global_step // self.num_steps_per_epoch
@@ -1003,20 +1047,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # The core wall ends here. Checkpointing and evaluation run in the callbacks
                     # below, inside the step timer.
                     core_seconds = time.perf_counter() - core_started
-                    if self._async_telemetry_enabled:
-                        record_event(
-                            "async_step_window",
-                            {
-                                "started_unix_ms": core_started_unix_ms,
-                                "finished_unix_ms": time.time_ns() // 1_000_000,
-                                "duration_seconds": core_seconds,
-                            },
-                            attributes={
-                                "role": TRAINER_ROLE,
-                                "step": str(self.global_step),
-                                "window": "core",
-                            },
-                        )
+                    self._record_core_step_window(core_started_unix_ms, core_seconds)
 
                     # 5. Run callback-requested work before closing the inclusive step timer.
                     logger.info(status)
@@ -1024,28 +1055,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     step_state = self._create_trainer_state(epoch, active_step_duration=step_timer.elapsed)
                     await self._run_step_end_callbacks(step_state)
 
-                if self._training_metrics_enabled:
-                    placement = self.cfg.trainer.placement
-                    generator = self.cfg.generator
-                    consumed = consumed_work(training_input)
-                    self.all_metrics.update(
-                        async_step_metrics(
-                            core_seconds=core_seconds,
-                            cycle_seconds=time.perf_counter() - cycle_started,
-                            buffer_wait_seconds=self.all_timings["wait_for_generation_buffer"],
-                            training_seconds=self.all_timings["run_training"],
-                            sync_seconds=self.all_timings["sync_weights"],
-                            consumed_loss_tokens=consumed.loss_tokens,
-                            consumed_response_tokens=consumed.response_tokens,
-                            policy_gpus=placement.policy_num_nodes * placement.policy_num_gpus_per_node,
-                            inference_gpus=(
-                                generator.num_inference_engines
-                                * generator.inference_engine_tensor_parallel_size
-                                * generator.inference_engine_pipeline_parallel_size
-                                * generator.inference_engine_data_parallel_size
-                            ),
-                        )
-                    )
+                self._update_async_step_metrics(training_input, core_seconds=core_seconds, cycle_started=cycle_started)
 
                 # 6. Log metrics
                 if self._control.should_log:

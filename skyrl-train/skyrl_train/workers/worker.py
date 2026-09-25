@@ -1098,6 +1098,12 @@ class PolicyWorkerBase(Worker):
             self._model_version_step = int(step)
         return output
 
+    async def broadcast_to_inference_engines(self, inference_engine_client):
+        with self._memory.span(
+            "broadcast_to_inference_engines", step=self._model_version_step, step_kind=StepKind.MODEL_VERSION_STEP
+        ):
+            return await self._broadcast_to_inference_engines(inference_engine_client)
+
     def _ppo_train_impl(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         self._drain_r3_decentral_stagger(train_data)
 

@@ -518,23 +518,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ),
         )
 
-    # This cannot inherit PolicyWorkerBase.ppo_train: Megatron Core must own
-    # pipeline scheduling and gradient accumulation, so only policy semantics
-    # are shared with the ordinary worker through backend-neutral utilities.
-    def ppo_train(self, train_data) -> "TrainingOutputBatch":
+    def _ppo_train_impl(self, train_data) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
         timing = MegatronTrainTimings(
             enabled=bool(OmegaConf.select(self.cfg, "trainer.policy_train_spans", default=False))
         )
         outcome = "failure"
         try:
-            with self._memory.span(
-                "ppo_train",
-                step=int(train_data.metadata["global_step"]),
-                step_kind=StepKind.GLOBAL_STEP,
-            ):
-                output = self._ppo_train_with_timings(train_data, timing)
-            self._model_version_step = int(train_data.metadata["global_step"])
+            output = self._ppo_train_with_timings(train_data, timing)
             outcome = "success"
             return output
         finally:
@@ -680,19 +671,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean}
-        # The update these weights belong to. The expert-block sender checks it before sending.
-        self._model_version_step = int(train_data.metadata["global_step"])
         return output
 
     async def expert_block_rpc(self, method: str, *args):
         """Call a method of this rank's expert-block sender."""
         return getattr(self._expert_block_sender, method)(*args)
-
-    async def broadcast_to_inference_engines(self, inference_engine_client):
-        with self._memory.span(
-            "broadcast_to_inference_engines", step=self._model_version_step, step_kind=StepKind.MODEL_VERSION_STEP
-        ):
-            return await self._broadcast_to_inference_engines(inference_engine_client)
 
     async def _broadcast_to_inference_engines(self, inference_engine_client):
         from torch.multiprocessing.reductions import reduce_tensor

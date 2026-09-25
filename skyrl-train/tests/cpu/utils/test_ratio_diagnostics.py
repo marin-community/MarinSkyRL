@@ -11,7 +11,7 @@ from loguru import logger
 
 from omegaconf import OmegaConf
 
-from skyrl_train.utils.utils import resolve_strategy_limited_telemetry
+from skyrl_train.utils.utils import resolve_ratio_diagnostics_pooling
 
 from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
@@ -263,13 +263,13 @@ def test_shipped_ratio_diagnostics_pool_on_megatron_and_cost_nothing_elsewhere()
     messages = []
     sink = logger.add(messages.append, level="INFO")
     try:
-        resolve_strategy_limited_telemetry(fsdp)
+        resolve_ratio_diagnostics_pooling(fsdp)
     finally:
         logger.remove(sink)
     assert fsdp.trainer.algorithm.ratio_diagnostics.pooled is False
     assert ["trainer.algorithm.ratio_diagnostics.pooled" in message for message in messages] == [True]
     megatron = OmegaConf.merge(config, {"trainer": {"strategy": "megatron"}})
-    resolve_strategy_limited_telemetry(megatron)
+    resolve_ratio_diagnostics_pooling(megatron)
     assert megatron.trainer.algorithm.ratio_diagnostics.pooled is True
 
 
@@ -279,7 +279,7 @@ def test_an_explicit_strategy_limited_setting_is_rejected_where_its_family_canno
         config, {"trainer": {"strategy": "fsdp2", "algorithm": {"ratio_diagnostics": {"pooled": True}}}}
     )
     with pytest.raises(ValueError, match="ratio_diagnostics.pooled=true"):
-        resolve_strategy_limited_telemetry(requested)
+        resolve_ratio_diagnostics_pooling(requested)
 
 
 def test_an_explicit_off_is_kept_where_the_family_could_measure():
@@ -287,5 +287,5 @@ def test_an_explicit_off_is_kept_where_the_family_could_measure():
     off_on_megatron = OmegaConf.merge(
         config, {"trainer": {"strategy": "megatron", "algorithm": {"ratio_diagnostics": {"pooled": False}}}}
     )
-    resolve_strategy_limited_telemetry(off_on_megatron)
+    resolve_ratio_diagnostics_pooling(off_on_megatron)
     assert off_on_megatron.trainer.algorithm.ratio_diagnostics.pooled is False
