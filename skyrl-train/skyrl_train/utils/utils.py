@@ -56,25 +56,13 @@ from .loss_reduction import SEQUENCE_MEAN_LOSS_REDUCTION, SUPPORTED_LOSS_REDUCTI
 from .nccl_environment import worker_nccl_environment
 from .placement_geometry import validate_colocated_engine_geometry
 
-MOE_ROUTER_REPLAY_STRATEGIES = frozenset({"fsdp", "fsdp2", "megatron"})
-
 
 def moe_router_replay_requested(cfg: DictConfig, role: str = "policy") -> bool:
-    return bool(cfg.trainer[role].fsdp_config.get("moe_router_replay", False))
+    return bool(cfg.trainer[role].megatron_config.get("moe_router_replay", False))
 
 
 def moe_router_replay_enabled(cfg: DictConfig) -> bool:
-    return cfg.trainer.strategy in MOE_ROUTER_REPLAY_STRATEGIES and moe_router_replay_requested(cfg)
-
-
-def validate_moe_router_replay_config(cfg: DictConfig) -> None:
-    """Reject router replay on strategies whose workers never consume captured routes."""
-    if moe_router_replay_requested(cfg) and cfg.trainer.strategy not in MOE_ROUTER_REPLAY_STRATEGIES:
-        supported = ", ".join(sorted(MOE_ROUTER_REPLAY_STRATEGIES))
-        raise ValueError(
-            f"trainer.policy.fsdp_config.moe_router_replay is not supported with "
-            f"trainer.strategy='{cfg.trainer.strategy}'; use one of: {supported}"
-        )
+    return moe_router_replay_requested(cfg)
 
 
 def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
@@ -157,9 +145,8 @@ def resolve_actor_cuda_env(
     silently collapse onto GPU 0 when CVD is left unmasked on the SIF Ray and
     ``ray.get_gpu_ids()`` collides), it MASKS each actor to exactly one visible
     device and forces a stable PCI ordering BEFORE any CUDA / device-mesh init.
-    With one visible device, ``set_device(0)`` and ``init_device_mesh`` and
-    FSDP's ``device_id=current_device()`` can ONLY land on that one physical
-    GPU, so EP×FSDP cannot stack ranks on a shared GPU.
+    With one visible device, ``set_device(0)`` and ``init_device_mesh``
+    can only land on that physical GPU.
 
     Returns a dict of env vars to apply (only the keys that should be set):
       - ``CUDA_DEVICE_ORDER`` = "PCI_BUS_ID" (so the logical index agrees with
@@ -364,17 +351,14 @@ def validate_batch_sizes(cfg: DictConfig):
     # Validate policy mini batch size
     policy_world_size = cfg.trainer.placement.policy_num_nodes * cfg.trainer.placement.policy_num_gpus_per_node
 
-    if cfg.trainer.strategy == "megatron":
-        pp = cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
-        cp = cfg.trainer.policy.megatron_config.context_parallel_size
-        tp = cfg.trainer.policy.megatron_config.tensor_model_parallel_size
-        assert policy_world_size % (pp * cp * tp) == 0, (
-            f"policy_world_size {policy_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
-            "This ensures that the data parallel size is an integer."
-        )
-        policy_dp_size = policy_world_size // (pp * cp * tp)
-    else:
-        policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
+    pp = cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
+    cp = cfg.trainer.policy.megatron_config.context_parallel_size
+    tp = cfg.trainer.policy.megatron_config.tensor_model_parallel_size
+    assert policy_world_size % (pp * cp * tp) == 0, (
+        f"policy_world_size {policy_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+        "This ensures that the data parallel size is an integer."
+    )
+    policy_dp_size = policy_world_size // (pp * cp * tp)
 
     assert cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size == 0, (
         f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
@@ -473,7 +457,7 @@ def validate_megatron_cfg(cfg: DictConfig):
         )
         # The fused router bypasses the replay hook entirely; catch it at config
         # validation on the launcher CPU instead of at model build on the GPUs.
-        if config.fsdp_config.get("moe_router_replay", False):
+        if config.megatron_config.get("moe_router_replay", False):
             for kwargs_name in ("transformer_config_kwargs", "model_config_kwargs"):
                 for key_path, value in _iter_config_kwargs(config.megatron_config.get(kwargs_name, {})):
                     if key_path[-1] == "moe_router_fusion" and value:
@@ -493,72 +477,6 @@ def _iter_config_kwargs(node):
                 yield (key, *path), leaf
         else:
             yield (key,), value
-
-
-def _validate_cp_cfg(cfg: DictConfig):
-    """Validate the torch-native Context-Parallel (CP) config (Stage 0; FSDP2-only).
-
-    CP shards the sequence dim with a torch-native ring-SDPA pass on the FSDP2 mesh.
-    It is mutually exclusive with Ulysses sequence parallelism (which also shards the
-    seq dim) and is gated entirely off by default (`context_parallel_size == 1`), in
-    which case this function is a strict no-op and the run is byte-identical to today.
-
-    For every role (policy/ref/critic) with `fsdp_config.context_parallel_size > 1`:
-      - trainer.strategy must be "fsdp2" (CP path is FSDP2-only here),
-      - <role>.sequence_parallel_size must be 1 (G2 — CP ⊥ Ulysses),
-      - cp_style must be in {"ring_sdpa"} ("ring_flash_attn" reserved for a later stage),
-      - cp_rotate_method must be in {"allgather", "all_to_all"},
-      - sample packing must be off (packed-varlen CP is deferred),
-      - context_parallel_size must divide the role's world size (cheap arithmetic guard;
-        full mesh divisibility is re-checked in Stage 3).
-
-    See notes/RL/skyrl/fsdp2_context_parallel_stages/.
-    """
-    placement = cfg.trainer.placement
-    role_world_sizes = {
-        "policy": placement.policy_num_gpus_per_node * placement.policy_num_nodes,
-        "ref": placement.ref_num_gpus_per_node * placement.ref_num_nodes,
-        "critic": placement.critic_num_gpus_per_node * placement.critic_num_nodes,
-    }
-    valid_cp_styles = {"ring_sdpa"}
-    valid_rotate_methods = {"allgather", "all_to_all"}
-
-    for role in ("policy", "ref", "critic"):
-        role_cfg = cfg.trainer[role]
-        cp_size = role_cfg.fsdp_config.context_parallel_size
-        assert cp_size >= 1, f"trainer.{role}.fsdp_config.context_parallel_size must be >= 1, got {cp_size}"
-        if cp_size == 1:
-            # CP disabled for this role -> strict no-op, no further constraints.
-            continue
-
-        assert cfg.trainer.strategy == "fsdp2", (
-            f"context parallel (trainer.{role}.fsdp_config.context_parallel_size={cp_size}) "
-            f"is only supported with trainer.strategy='fsdp2', got '{cfg.trainer.strategy}'"
-        )
-        assert role_cfg.sequence_parallel_size == 1, (
-            f"context parallel (trainer.{role}.fsdp_config.context_parallel_size={cp_size}) is mutually "
-            f"exclusive with ulysses sequence parallel; found trainer.{role}.sequence_parallel_size="
-            f"{role_cfg.sequence_parallel_size} (both shard the sequence dim)"
-        )
-        cp_style = role_cfg.fsdp_config.cp_style
-        assert cp_style in valid_cp_styles, (
-            f"trainer.{role}.fsdp_config.cp_style='{cp_style}' is not supported; "
-            f"must be one of {sorted(valid_cp_styles)} (ring_flash_attn is reserved for a later stage)"
-        )
-        cp_rotate = role_cfg.fsdp_config.cp_rotate_method
-        assert cp_rotate in valid_rotate_methods, (
-            f"trainer.{role}.fsdp_config.cp_rotate_method='{cp_rotate}' is invalid; "
-            f"must be one of {sorted(valid_rotate_methods)}"
-        )
-        assert not cfg.trainer.use_sample_packing, (
-            f"context parallel (trainer.{role}.fsdp_config.context_parallel_size={cp_size}) does not yet "
-            "support sample packing; set trainer.use_sample_packing=false (packed-varlen CP is deferred)"
-        )
-        world_size = role_world_sizes[role]
-        assert world_size % cp_size == 0, (
-            f"trainer.{role}.fsdp_config.context_parallel_size={cp_size} must divide the {role} world size "
-            f"({world_size}); full mesh divisibility is re-checked in Stage 3"
-        )
 
 
 def validate_hf_export_config(cfg: DictConfig) -> None:
@@ -591,22 +509,26 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
+    if cfg.trainer.strategy != "megatron":
+        raise ValueError(f"Unsupported training strategy: {cfg.trainer.strategy}")
+    if cfg.trainer.critic.model.path:
+        raise ValueError("Megatron does not support a critic worker")
     distillation_plan = compile_distillation_plan_from_config(cfg)
     validate_distillation_runtime_support(distillation_plan)
     if (
         distillation_plan is not None
         and distillation_plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
-        and cfg.trainer.strategy in {"fsdp", "fsdp2", "deepspeed"}
-        and (
+    ):
+        if (
             cfg.trainer.use_sample_packing
             or cfg.trainer.policy.sequence_parallel_size != 1
-            or cfg.trainer.policy.fsdp_config.context_parallel_size != 1
-        )
-    ):
-        raise ValueError(
-            "student_topk_policy_surrogate on FSDP2/DeepSpeed requires trainer.use_sample_packing=false, "
-            "trainer.policy.sequence_parallel_size=1, and trainer.policy.fsdp_config.context_parallel_size=1"
-        )
+            or cfg.trainer.policy.megatron_config.context_parallel_size != 1
+            or cfg.trainer.policy.megatron_config.tensor_model_parallel_size != 1
+        ):
+            raise ValueError(
+                "selected-ID distillation on Megatron requires trainer.use_sample_packing=false, "
+                "sequence_parallel_size=1, context_parallel_size=1, and tensor_model_parallel_size=1"
+            )
     trajectory_selector = trajectory_selector_from_config(cfg)
     if trajectory_selector is not None:
         if cfg.trainer.step_wise_training:
@@ -636,7 +558,6 @@ def validate_cfg(cfg: DictConfig):
         "trajectory_runner.process_pool.num_coordinators": cfg.trajectory_runner.process_pool.num_coordinators,
         "trajectory_runner.process_pool.cpus_per_coordinator": cfg.trajectory_runner.process_pool.cpus_per_coordinator,
         "trajectory_runner.process_pool.executor_workers": cfg.trajectory_runner.process_pool.executor_workers,
-        "trainer.policy.fsdp_config.expert_loader_chunk_rows": cfg.trainer.policy.fsdp_config.expert_loader_chunk_rows,
     }
     for path, value in runtime_values.items():
         if value <= 0:
@@ -666,14 +587,7 @@ def validate_cfg(cfg: DictConfig):
         raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
     validate_generator_cfg(cfg)
     validate_batch_invariant_config(cfg)
-    validate_moe_router_replay_config(cfg)
     validate_hf_export_config(cfg)
-    # Validate context-parallel config (no-op when context_parallel_size == 1 for all roles)
-    _validate_cp_cfg(cfg)
-    assert cfg.trainer.sequence_parallel_backend == "ulysses", (
-        f"only ulysses is supported as of now, got {cfg.trainer.sequence_parallel_backend}"
-    )
-
     try:
         resolve_grug_query_bias_update(cfg.trainer.policy)
     except ValueError as error:
@@ -690,31 +604,6 @@ def validate_cfg(cfg: DictConfig):
     )
 
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
-    colocate_ref = cfg.trainer.placement.colocate_all or cfg.trainer.placement.colocate_policy_ref
-    if (
-        cfg.trainer.strategy == "fsdp2"
-        and use_ref_model
-        and colocate_ref
-        and not cfg.trainer.ref.fsdp_config.cpu_offload
-    ):
-        logger.warning(
-            "Enabling trainer.ref.fsdp_config.cpu_offload for the colocated FSDP2 reference model. "
-            "Persistent FSDP2 CPU offload avoids reallocating the entire reference shard on every training step."
-        )
-        cfg.trainer.ref.fsdp_config.cpu_offload = True
-
-    if cfg.trainer.strategy in ("fsdp", "fsdp2"):
-        assert not (cfg.trainer.policy.fsdp_config.cpu_offload and cfg.trainer.strategy == "fsdp"), (
-            "fwd pass cpu offloading is not supported for FSDP1 policy worker, use FSDP2 instead"
-        )
-        assert not (cfg.trainer.critic.fsdp_config.cpu_offload and cfg.trainer.strategy == "fsdp"), (
-            "fwd pass cpu offloading is not supported for FSDP1 critic worker, use FSDP2 instead"
-        )
-
-    if cfg.trainer.strategy == "deepspeed":
-        assert cfg.trainer.policy.deepspeed_config.zero_optimization.stage == 3, (
-            "only deepspeed stage 3 is currently supported!"
-        )
 
     validate_batch_sizes(cfg)
 
@@ -769,14 +658,6 @@ def validate_cfg(cfg: DictConfig):
         algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
 
-    if cfg.trainer.strategy == "deepspeed" and not (
-        cfg.trainer.policy.optimizer_config.offload_after_step
-        and cfg.trainer.critic.optimizer_config.offload_after_step
-    ):
-        raise ValueError(
-            "`offload_after_step=False` is not supported for DeepSpeed, please set `offload_after_step` to `true` for both policy and critic"
-        )
-
     behavior_clip = cfg.trainer.algorithm.policy_loss_type == "behavior_clip"
     if behavior_clip and cfg.trainer.algorithm.use_tis:
         raise ValueError(
@@ -806,19 +687,7 @@ def validate_cfg(cfg: DictConfig):
         ], "TIS is only implemented for regular and dual_clip policy loss types"
 
     if cfg.trainer.policy.model.lora.rank > 0:
-        # LoRA enabled
-        # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
-        assert cfg.generator.backend == "vllm", "LoRA enabled requires vLLM backend"
-        assert cfg.trainer.strategy in ("fsdp", "fsdp2"), "LoRA enabled requires fsdp/fsdp2 training backend"
-
-        if cfg.trainer.target_modules is not None:
-            logger.warning(
-                "`trainer.target_modules` is deprecated, use `trainer.policy.model.lora.target_modules` or `trainer.critic.model.lora.target_modules` instead"
-            )
-        if cfg.trainer.exclude_modules is not None:
-            logger.warning(
-                "`trainer.exclude_modules` is deprecated, use `trainer.policy.model.lora.exclude_modules` or `trainer.critic.model.lora.exclude_modules` instead"
-            )
+        raise ValueError("Megatron training does not support LoRA")
 
     if (
         cfg.trainer.strategy == "megatron"
@@ -1191,8 +1060,7 @@ def _validate_dcp_cfg(cfg: DictConfig):
         )
     # (e) vLLM rejects DCP together with R3 router capture (enable_return_routed_experts).
     # R3 capture is configured at the generator level (direct flag or engine_init_kwargs),
-    # Training-side replay also requires an FSDP/FSDP2 strategy; unsupported strategies
-    # reject the flag during top-level config validation.
+    # Training-side replay is configured through the Megatron policy config.
     #
     # Opt-in bypass: VLLM_ALLOW_ROUTED_EXPERTS_DCP=1 lifts this guard, mirroring the
     # identical env-var-gated bypass in the patched vLLM fork

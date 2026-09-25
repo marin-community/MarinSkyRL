@@ -7,73 +7,12 @@ We provide example scripts for running efficient large scale MoE training with m
 For details on configuring the Megatron backend, and enabling checkpointing, see :ref:`megatron-configurations`, and :ref:`megatron-checkpointing`.
 
 
-When to use the Megatron backend
---------------------------------
+Parallelism with Megatron
+-------------------------
 
-SkyRL supports efficient data-parallel training with the FSDP and the DeepSpeed backend, with support for Ulysses sequence parallelism for long context training. The Megatron backend is useful to stack additional parallelism strategies (TP, PP, EP) on top of data and sequence/context parallelism. This is helpful both for fitting larger models into memory and for training throughput for MoE models (with EP). The Megatron backend is thus useful for efficient training of small MoE models like ``Qwen3-30B-A3B`` as well as large-scale training with large models such as ``Qwen3-235B-A22B`` and/or large datasets. For resources on understanding different parallelism strategies, see :ref:`parallelism-resources`.
-
-Comparison to FSDP
-------------------
-We show performance comparisons for the Megatron and FSDP2 backends on the Search-R1 task (4K max context length) for various model sizes in the table below. Training speed for small scale dense models with Megatron
-is similar to the FSDP2 backend, and Megatron enables high throughput training for larger scale MoE models where FSDP is no longer feasible as the only parallelism strategy.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 20 15 20 20 20 10
-
-   * - Model
-     - Backend
-     - Compute
-     - Policy Training Time (s)
-     - Forward Pass Time (s)
-     - Avg Num Tokens
-   * - Qwen2.5-3B-Instruct
-     - Megatron
-     - 8xH100
-     - 48
-     - 39
-     - 658
-   * - Qwen2.5-3B-Instruct
-     - FSDP2
-     - 8xH100
-     - 42
-     - 28
-     - 658
-   * - Qwen2.5-7B-Instruct
-     - Megatron
-     - 8xH100
-     - 93
-     - 46
-     - 819
-   * - Qwen2.5-7B-Instruct
-     - FSDP2
-     - 8xH100
-     - 100
-     - 33
-     - 834
-   * - Qwen3-30B-A3B
-     - Megatron
-     - 4x8xH100
-     - 189
-     - 145
-     - 1158
-
-For all experiments, we used a train batch size of 512. For Qwen2.5 3B and 7B Megatron was configured with only data parallel=8. 
-For Qwen3-30B-A3B Megatron was configured with DP=4, TP=2, and EP=8, and the FSDP2 backend was unable to complete a training step due to memory constraints. 
-All statistics shown were averaged over the first 10 steps of training. Micro batch sizes were tuned to be the max possible for each backend.
-
-.. list-table::
-   :widths: 50 50
-   :header-rows: 0
-
-   * - .. image:: images/search-r1-3b.svg
-         :width: 400px
-         :align: center
-     - .. image:: images/search-r1-30b.svg
-         :width: 400px
-         :align: center
-
-.. centered:: Left: Matching Qwen2.5-3B-Instruct reward curves for Megatron and FSDP2. Right: Qwen3-30B-A3B reward curve for Megatron (330 steps on 4 8xH100 nodes over 4 days).
+Megatron combines data, tensor, pipeline, context, and expert parallelism. Configure these
+sizes under ``trainer.policy.megatron_config`` and ``trainer.ref.megatron_config``.
+The examples cover Qwen3-30B-A3B and Qwen3-235B-A22B.
 
 A script for running the Qwen3-30B-A3B experiment can be found `here <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/megatron/run_search_megatron.sh>`_. 
 Additionally, we provide a script for running basic GSM8K training on Qwen3-235B-A22B with Megatron `here <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/megatron/run_megatron_qwen3-235b-a22b.sh>`_. 
@@ -86,15 +25,11 @@ For more details on configuring the Megatron backend, and enabling checkpointing
 Installation
 ------------
 
-Setting up the Docker image
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-To get started, you can follow the instructions for installing via Docker in the :doc:`../getting-started/installation` page, but using the ``novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8-megatron`` image instead of the default image.
+The root project lock contains the Megatron and vLLM runtime closure. From the repository root:
 
-This ensures that the necessary dependencies needed for Megatron are installed and don't need to be built on each node for each run, which can be time consuming. Previously, we recommended setting PYTHONPATH to the location of TransformerEngine installation, but this is no longer necessary.
+.. code-block:: bash
 
-~~~~~~~~~~~~~~~
-In order to use flash attention with the megatron backend, you must use ``flash_attn`` version ``2.7.4.post1`` or lower for compatibility with ``TransformerEngine==2.7.0``.
-This is handled in the ``pyproject.toml`` file for the ``mcore`` extra.
+    uv sync --frozen --extra megatron --extra vllm --group dev
 
 Configuration
 -------------

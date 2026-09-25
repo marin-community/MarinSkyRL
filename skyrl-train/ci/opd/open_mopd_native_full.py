@@ -57,7 +57,7 @@ def hydra_arguments(
         "trainer.policy.optimizer_config.weight_decay=0",
         "trainer.policy.optimizer_config.scheduler=constant",
         f"trainer.policy.optimizer_config.max_grad_norm={training.gradient_clip}",
-        "trainer.strategy=fsdp2",
+        "trainer.strategy=megatron",
         "trainer.use_sample_packing=false",
         "trainer.flash_attn=true",
         "trainer.placement.colocate_all=false",

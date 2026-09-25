@@ -9,7 +9,6 @@ from typing import Any
 
 import pytest
 import yaml
-from omegaconf.errors import ConfigKeyError
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
@@ -28,7 +27,7 @@ def _raw_config() -> dict[str, Any]:
         },
         "runtime": {
             "launcher_commit": "a" * 40,
-            "profile": "fsdp",
+            "profile": "megatron",
             "entrypoint": "skyrl_train.entrypoints.fully_async",
         },
         "iris": {
@@ -81,7 +80,7 @@ def _raw_config() -> dict[str, Any]:
             "model_num_attention_heads": 8,
             "trainer": {
                 "seed": 42,
-                "strategy": "fsdp2",
+                "strategy": "megatron",
                 "algorithm": {"use_kl_loss": False},
                 "placement": {
                     "colocate_all": True,

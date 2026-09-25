@@ -44,7 +44,7 @@ def init_worker_process_group_with_device(timeout_seconds: int, backend: str = "
     falls back to *"Guessing device ID based on global rank"*.
 
     Single source of truth shared by every backend's ``init_worker_process_group`` (the base
-    FSDP/DeepSpeed worker and the Megatron policy/ref workers), so the device-pinned init is
+    Megatron policy/ref workers), so the device-pinned init is
     not duplicated (and cannot drift) across backends.
 
     ``LOCAL_RANK`` is resolved upstream by ``resolve_pinned_local_rank`` (workers/worker.py) for

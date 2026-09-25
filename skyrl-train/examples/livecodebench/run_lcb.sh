@@ -9,13 +9,13 @@ train_data="['${DATA_DIR}/deepcoder_train.json']"
 val_data="['${DATA_DIR}/test_livecodebench.json']"
 
 # NOTE (sumanthrh): micro_train_batch_size and micro_forward_batch_size can be tuned
-uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --frozen --extra megatron --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data=$train_data \
   data.val_data=$val_data \
   trainer.policy.model.path="Qwen/Qwen2.5-3B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.policy.optimizer_config.max_grad_norm=0.5 \
   trainer.placement.policy_num_gpus_per_node=8 \
   trainer.placement.ref_num_gpus_per_node=8 \
@@ -23,7 +23,7 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.inference_engine_tensor_parallel_size=4 \
   trainer.policy_mini_batch_size=4 \
   trainer.train_batch_size=16 \
-  trainer.micro_forward_batch_size_per_gpu=16 \
+  trainer.micro_forward_batch_size_per_gpu=2 \
   trainer.micro_train_batch_size_per_gpu=2 \
   trainer.max_prompt_length=29000 \
   generator.max_input_length=29000 \

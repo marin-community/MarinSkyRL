@@ -47,7 +47,6 @@ _CONFIGS = {
     "snowball_ultra_rlvr2_split64.yaml": (65536, 6528, 999999),
     "tasktrove_dq_sweep_30b.yaml": (131072, 16384, 90),
     "tasktrove_dq_sweep_30b_cp6.yaml": (131072, 16384, 90),
-    "tasktrove_dq_sweep_30b_gb200.yaml": (131072, 16384, 90),
     "tasktrove_dq_sweep_30b_ncclnet.yaml": (32768, 4096, 30),
     "tasktrove_dq_sweep_30b_terminus2.yaml": (32768, 4096, 30),
 }
@@ -67,7 +66,6 @@ _FLASH_ATTN_CONFIGS = {
     "snowball_ultra_rlvr2_split64.yaml",
     "tasktrove_dq_sweep_30b.yaml",
     "tasktrove_dq_sweep_30b_cp6.yaml",
-    "tasktrove_dq_sweep_30b_gb200.yaml",
     "tasktrove_dq_sweep_30b_ncclnet.yaml",
     "tasktrove_dq_sweep_30b_terminus2.yaml",
 }

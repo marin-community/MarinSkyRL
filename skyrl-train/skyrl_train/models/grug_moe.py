@@ -53,7 +53,7 @@ GRUG_ATTN_GATE_SCALE = 2.0
 GRUG_QK_RMS_NORM_EPS = 1e-6
 GRUG_XSA_EPS = 1e-6
 GRUG_ROUTER_RENORM_EPS = 1e-9
-GRUG_SUPPORTED_TRAINING_STRATEGIES = frozenset({"fsdp2", "megatron"})
+GRUG_SUPPORTED_TRAINING_STRATEGIES = frozenset({"megatron"})
 
 
 def is_grug_router_bias(model_type: str | None, name: str) -> bool:
@@ -253,9 +253,9 @@ class GrugMoeConfig(PretrainedConfig):
         if sliding_window <= 0:
             raise ValueError("sliding_window must be positive")
         if not disable_pko:
-            raise ValueError("Grug FSDP2 training supports only disable_pko=true")
+            raise ValueError("Grug training supports only disable_pko=true")
         if not disable_long_rope:
-            raise ValueError("Grug FSDP2 training supports only disable_long_rope=true")
+            raise ValueError("Grug training supports only disable_long_rope=true")
         if grugmoe_attention_mode != GRUG_MOE_ATTENTION_MODE:
             raise ValueError(f"unsupported Grug attention mode {grugmoe_attention_mode!r}")
         if int(grugmoe_artifact_schema_version) != GRUG_MOE_ARTIFACT_SCHEMA_VERSION:
@@ -268,7 +268,7 @@ class GrugMoeConfig(PretrainedConfig):
         if tie_word_embeddings:
             raise ValueError("Grug checkpoints use untied embeddings")
         if router_z_loss_coef != 0.0:
-            raise ValueError("Grug FSDP2 RL requires router_z_loss_coef=0")
+            raise ValueError("Grug RL requires router_z_loss_coef=0")
 
         architectures = kwargs.pop("architectures", None)
         if architectures not in (None, [GRUG_MOE_ARCHITECTURE]):
@@ -411,16 +411,14 @@ class GrugMoeExperts(nn.Module, ExpertGradientAveraging):
             )
             self._grouped_mm_logged = True
 
-        # Torchtitan is an EP-extra dependency. Import the kernel only when this
-        # explicitly requested path runs so eager model loading stays lightweight.
-        from skyrl_train.models.layers.moe import _run_experts_grouped_mm  # noqa: PLC0415
-
-        return _run_experts_grouped_mm(
-            self.gate_proj.weight,
-            self.down_proj.weight,
-            self.up_proj.weight,
-            routed_input,
-            num_tokens_per_expert,
+        offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+        gate = torch._grouped_mm(
+            routed_input.bfloat16(), self.gate_proj.weight.bfloat16().transpose(-2, -1), offs=offsets
+        )
+        up = torch._grouped_mm(routed_input.bfloat16(), self.up_proj.weight.bfloat16().transpose(-2, -1), offs=offsets)
+        hidden = F.silu(gate) * up
+        return torch._grouped_mm(hidden, self.down_proj.weight.bfloat16().transpose(-2, -1), offs=offsets).to(
+            routed_input.dtype
         )
 
 

@@ -174,7 +174,7 @@ def _proc_rss_kb(pid: int) -> int:
 
 def _proc_cmdline(pid: int) -> str:
     """NUL-joined /proc/<pid>/cmdline as a space-joined string (Ray sets the
-    proctitle here via setproctitle, e.g. ``ray::FSDPPolicyWorkerBase.forward``),
+    proctitle here via setproctitle, e.g. ``ray::MegatronPolicyWorkerBase.forward``),
     or "" on failure."""
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
@@ -193,7 +193,7 @@ def _bucket_for_cmdline(cmd: str) -> str:
         return "plasma"
     if "rolloutcoordinator" in c or "rollout_coordinator" in c or "skyrl_entrypoint" in c:
         return "coord"
-    if "policyworker" in c or "fsdppolicyworker" in c or "policy_worker" in c:
+    if "policyworker" in c or "policy_worker" in c:
         return "workers"
     return "other"
 
@@ -233,9 +233,8 @@ def _log_host_ram_breakdown(peaks: dict | None = None) -> None:
 
     WHY (2026-07-13, the 80B naive-map gs1 host-RAM OOM): the monitor above prints
     the cgroup TOTAL and only the monitor process's OWN RSS — zero attribution. The
-    gs1 ~750 GiB/node peak is arithmetically unexplained (the cpu_offload FSDP shard
-    is ~180 GiB/node), so we must MEASURE which bucket holds it. Buckets by
-    /proc/<pid>/cmdline: policy FSDP workers / raylet / plasma-store /
+    gs1 ~750 GiB/node peak needs attribution. Buckets by
+    /proc/<pid>/cmdline: policy workers / raylet / plasma-store /
     rollout-coordinator / other; plus /dev/shm (plasma) and host-pinned bytes.
 
     CAVEAT: summed VmRSS double-counts shared pages (shm, shared libs), so the
