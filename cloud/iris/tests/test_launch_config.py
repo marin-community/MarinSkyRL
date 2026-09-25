@@ -9,7 +9,6 @@ from typing import Any
 
 import pytest
 import yaml
-from omegaconf.errors import ConfigKeyError
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
