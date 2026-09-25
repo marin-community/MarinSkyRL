@@ -31,8 +31,8 @@ from transformers import AutoTokenizer
 from skyrl_train.io import io
 from skyrl_train.checkpoint_generation import COMMIT_FILENAME
 from marinskyrl.resource_locator import join_resource_path
-from skyrl_train.checkpoint_listing import extract_step_from_path, list_committed_checkpoint_dirs
-from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
+from skyrl_train.checkpoint_listing import list_committed_checkpoint_dirs
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, extract_step_from_path
 from skyrl_train.curriculum import CurriculumConfig, CurriculumSampler, SamplingKind
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.domain_sampling import DomainWeightedSampler

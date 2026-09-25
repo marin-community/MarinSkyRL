@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from marinskyrl.checkpoint_paths import extract_step_from_path
 from skyrl_train.checkpoint_generation import (
     COMMIT_FILENAME,
     MANIFEST_FILENAME,
@@ -15,7 +16,7 @@ from skyrl_train.checkpoint_generation import (
     resolve_checkpoint_payload,
     shutdown_buffer_artifact_path,
 )
-from skyrl_train.checkpoint_listing import extract_step_from_path, list_committed_checkpoint_dirs
+from skyrl_train.checkpoint_listing import list_committed_checkpoint_dirs
 from skyrl_train.io import io
 from skyrl_train import checkpoint_generation as generations
 from skyrl_train.utils.trainer_utils import validate_consistency_for_latest_checkpoint

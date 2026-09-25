@@ -12,8 +12,8 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 import ray
 
+from marinskyrl.checkpoint_paths import extract_step_from_path
 from skyrl_train.entrypoints.main_base import config_dir, run_ray_driver
-from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 from skyrl_train.utils.trainer_utils import ResumeMode
 from tests.training_batch_replay import (

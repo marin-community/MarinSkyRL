@@ -95,10 +95,10 @@ from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.checkpoint_paths import (
     GLOBAL_STEP_PREFIX,
     LATEST_CHECKPOINT_FILE,
+    extract_step_from_path,
 )
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculativeDecodingConfig, runai_model_uri
-from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.checkpoint_generation import (
     ATTEMPTS_DIRECTORY,
     commit_attempt,

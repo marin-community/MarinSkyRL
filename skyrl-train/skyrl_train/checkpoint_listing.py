@@ -3,7 +3,7 @@
 import os
 
 from loguru import logger
-from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, extract_step_from_path as extract_step_from_path
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
 
 from skyrl_train.checkpoint_generation import resolve_checkpoint_payload
 from skyrl_train.io import io

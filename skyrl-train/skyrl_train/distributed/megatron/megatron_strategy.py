@@ -15,7 +15,7 @@ from torch import optim
 from torch import distributed as dist
 
 from skyrl_train.distributed.strategy import DistributedStrategy
-from skyrl_train.checkpoint_listing import extract_step_from_path
+from marinskyrl.checkpoint_paths import extract_step_from_path
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl_train.io import io
 from skyrl_train.timing_observability import checkpoint_phase

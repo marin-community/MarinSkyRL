@@ -27,8 +27,8 @@ from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as Fsspec
 from torch.distributed.checkpoint.metadata import Metadata
 from torch.distributed.checkpoint.planner import LoadItemType
 
+from marinskyrl.checkpoint_paths import extract_step_from_path
 from marinskyrl.remote_io import create_s3_filesystem
-from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
 from skyrl_train.timing_observability import checkpoint_phase
 
