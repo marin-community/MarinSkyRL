@@ -12,8 +12,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Iterator, Protocol
 
-import psutil
-import torch
 from loguru import logger
 
 from skyrl_train.telemetry import DRIVER_ROLE, TRAINER_ROLE, WORKER_ROLE, phase_duration
@@ -73,6 +71,27 @@ def _cgroup_memory_bytes(filename: str) -> int | None:
         return None
 
 
+def _process_rss_bytes() -> int | None:
+    """Read current Linux RSS without adding a dependency to the launcher install."""
+    try:
+        with open("/proc/self/statm") as source:
+            resident_pages = int(source.read().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _cuda_memory_bytes() -> tuple[int | None, int | None, int | None]:
+    # The launcher imports timing helpers without installing the optional GPU runtime.
+    try:
+        import torch
+    except ImportError:
+        return None, None, None
+    if not torch.cuda.is_initialized():
+        return None, None, None
+    return torch.cuda.memory_allocated(), torch.cuda.memory_reserved(), torch.cuda.max_memory_allocated()
+
+
 @contextmanager
 def checkpoint_phase(
     backend: str,
@@ -110,6 +129,7 @@ def checkpoint_phase(
                 "role": WORKER_ROLE if rank >= 0 else DRIVER_ROLE if operation == "export" else TRAINER_ROLE,
             }
             phase_duration.record(duration, attributes=attributes)
+            cuda_allocated, cuda_reserved, cuda_peak_allocated = _cuda_memory_bytes()
             observation = {
                 "schema": "checkpoint_phase_v1",
                 **attributes,
@@ -119,16 +139,14 @@ def checkpoint_phase(
                 "bytes_written": sample.bytes_written,
                 "scratch_bytes": sample.scratch_bytes,
                 "counters": sample.counters,
-                "process_rss_bytes": psutil.Process(os.getpid()).memory_info().rss,
+                "process_rss_bytes": _process_rss_bytes(),
                 "process_peak_rss_since_start_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                 * (1 if sys.platform == "darwin" else 1024),
                 "cgroup_memory_current_bytes": _cgroup_memory_bytes("memory.current"),
                 "cgroup_memory_peak_bytes": _cgroup_memory_bytes("memory.peak"),
-                "cuda_allocated_bytes": torch.cuda.memory_allocated() if torch.cuda.is_initialized() else None,
-                "cuda_reserved_bytes": torch.cuda.memory_reserved() if torch.cuda.is_initialized() else None,
-                "cuda_peak_allocated_since_start_bytes": (
-                    torch.cuda.max_memory_allocated() if torch.cuda.is_initialized() else None
-                ),
+                "cuda_allocated_bytes": cuda_allocated,
+                "cuda_reserved_bytes": cuda_reserved,
+                "cuda_peak_allocated_since_start_bytes": cuda_peak_allocated,
             }
             logger.info("checkpoint_observation {}", json.dumps(observation, sort_keys=True))
         except Exception:
