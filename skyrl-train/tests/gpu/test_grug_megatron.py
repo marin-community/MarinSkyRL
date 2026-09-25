@@ -484,7 +484,14 @@ def test_grug_megatron_muonh_pp2_ep2_checkpoint_continues_exactly(tmp_path):
     cfg.trainer.policy.optimizer_config.optimizer_kwargs = {"adam_lr": 2.0e-2}
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     batch = _padded_batch(tokenizer.pad_token_id, prompt_length=48, response_length=48, variable_lengths=True)
-    names = [LM_HEAD_NAME, EMBED_GATE_NAME, STACKED_EXPERT_NAME, ROUTER_NAME, BIAS_NAMES[0]]
+    names = [
+        LM_HEAD_NAME,
+        EMBED_GATE_NAME,
+        STACKED_EXPERT_NAME,
+        ROUTER_NAME,
+        "model.layers.0.self_attn.q_proj.weight",
+        BIAS_NAMES[0],
+    ]
     initialize_ray(cfg)
     try:
         policy = _init_policy(cfg, 4)
@@ -509,9 +516,9 @@ def test_grug_megatron_muonh_pp2_ep2_checkpoint_continues_exactly(tmp_path):
             status = _train_step(policy, batch)
             assert status["log_ratio_abs_max"] < TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE
         saved = rank0_validation_snapshot(policy, names)
-        for name in names[:4]:
+        for name in names[:-1]:
             assert not torch.equal(saved[name], before[name]), name
-        torch.testing.assert_close(saved[names[4]], before[names[4]], rtol=0, atol=0)
+        torch.testing.assert_close(saved[names[-1]], before[names[-1]], rtol=0, atol=0)
 
         checkpoint = str(tmp_path / "checkpoint")
         ray.get(

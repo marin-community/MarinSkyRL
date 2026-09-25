@@ -421,7 +421,7 @@ class MegatronStrategy(DistributedStrategy):
                 _muonh_fp32_groups_as_lists(state_dict["optimizer"])
             optimizer.load_state_dict(state_dict.pop("optimizer"))
             if muonh:
-                _restore_muonh_adamh_step(optimizer, state_dict["optimizer_recipe_step"])
+                _restore_muonh_adamh_step(optimizer, common_state["optimizer_recipe_step"])
             load_megatron_grads_to_gpu(model)
             self.log("Loaded optimizer state dict.")
 
