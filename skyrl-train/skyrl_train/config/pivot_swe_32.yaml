@@ -7,6 +7,7 @@ data:
   val_data: ["${oc.env:PIVOT_PROBE_URI}"]
 
 trainer:
+  epochs: 2
   max_steps: 32
   train_batch_size: 4
   policy_mini_batch_size: 4
