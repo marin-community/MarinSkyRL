@@ -2075,12 +2075,17 @@ def _write_final_config(
             original_model_path.rstrip("/").rsplit("/", 1)[-1],
             force_add=True,
         )
-    if policy_tokenizer is not None:
+    tokenizer_path = (
+        policy_tokenizer.local_path
+        if policy_tokenizer is not None
+        else (policy_model.local_path if policy_model is not None else None)
+    )
+    if tokenizer_path is not None:
         for role in ("policy", "ref"):
             OmegaConf.update(
                 skyrl,
                 f"trainer.{role}.model.tokenizer_path",
-                policy_tokenizer.local_path,
+                tokenizer_path,
                 force_add=True,
             )
             OmegaConf.update(skyrl, f"trainer.{role}.model.tokenizer_revision", None, force_add=True)
