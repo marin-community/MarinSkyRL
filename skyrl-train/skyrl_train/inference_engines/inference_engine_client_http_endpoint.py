@@ -17,6 +17,7 @@ import time
 import requests
 import traceback
 from contextlib import asynccontextmanager
+from enum import StrEnum
 from http import HTTPStatus
 from typing import Any, Coroutine, Dict, Optional, TypeVar
 
@@ -73,6 +74,15 @@ class ModelList(BaseModel):
     data: list[ModelCard]
 
 
+class _RequestOutcome(StrEnum):
+    INCOMPLETE = "incomplete"
+    COMPLETED = "completed"
+    CLIENT_DISCONNECT = "client_disconnect"
+    SEND_FAILURE = "send_failure"
+    SERVER_CANCELLED = "server_cancelled"
+    APPLICATION_ERROR = "application_error"
+
+
 class _RequestOutcomeMiddleware:
     """Record the close outcome visible at the ASGI boundary for inference requests."""
 
@@ -85,13 +95,13 @@ class _RequestOutcomeMiddleware:
         if scope["type"] != "http" or endpoint not in _INFERENCE_ENDPOINTS:
             return await self.app(scope, receive, send)
 
-        reason = "incomplete"
+        reason = _RequestOutcome.INCOMPLETE
 
         async def observed_receive():
             nonlocal reason
             message = await receive()
             if message["type"] == "http.disconnect":
-                reason = "client_disconnect"
+                reason = _RequestOutcome.CLIENT_DISCONNECT
             return message
 
         async def observed_send(message):
@@ -99,27 +109,27 @@ class _RequestOutcomeMiddleware:
             try:
                 await send(message)
             except OSError:
-                reason = "send_failure"
+                reason = _RequestOutcome.SEND_FAILURE
                 raise
             if (
-                reason == "incomplete"
+                reason is _RequestOutcome.INCOMPLETE
                 and message["type"] == "http.response.body"
                 and not message.get("more_body", False)
             ):
-                reason = "completed"
+                reason = _RequestOutcome.COMPLETED
 
         try:
             await self.app(scope, observed_receive, observed_send)
         except asyncio.CancelledError:
-            if reason == "incomplete":
-                reason = "server_cancelled"
+            if reason is _RequestOutcome.INCOMPLETE:
+                reason = _RequestOutcome.SERVER_CANCELLED
             raise
         except Exception:
-            if reason == "incomplete":
-                reason = "application_error"
+            if reason is _RequestOutcome.INCOMPLETE:
+                reason = _RequestOutcome.APPLICATION_ERROR
             raise
         finally:
-            self.bridge_stats.record_request_outcome(endpoint, reason)
+            self.bridge_stats.record_request_outcome(endpoint, reason.value)
 
 
 def is_engine_error_response(response: Dict[str, Any]) -> bool:

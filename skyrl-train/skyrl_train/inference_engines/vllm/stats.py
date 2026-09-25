@@ -11,13 +11,16 @@ from typing import Any
 
 
 HTTP_BRIDGE_OUTCOME_METRIC = "request_outcome"
-HTTP_BRIDGE_HISTOGRAM_BOUNDS = {
+HTTP_BRIDGE_SUMMARY_BOUNDS = {
     "event_loop_lag_seconds": (0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0),
     "response_bytes": (1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576),
     "json_serialization_seconds": (0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1),
+}
+HTTP_BRIDGE_HISTOGRAM_BOUNDS = {
+    **HTTP_BRIDGE_SUMMARY_BOUNDS,
     HTTP_BRIDGE_OUTCOME_METRIC: (),  # The exported _count is the outcome counter.
 }
-HTTP_BRIDGE_METRIC_NAMES = ("event_loop_lag_seconds", "response_bytes", "json_serialization_seconds")
+HTTP_BRIDGE_SUMMARY_METRIC_NAMES = tuple(HTTP_BRIDGE_SUMMARY_BOUNDS)
 VLLM_NUM_ENGINES_METRIC = "vllm/num_engines"
 VLLM_FINISH_REASONS = ("stop", "length", "abort", "error", "repetition")
 VLLM_HISTOGRAM_UNITS = {
@@ -170,11 +173,11 @@ class HTTPBridgeStatsAccumulator:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._interval = {name: _IntervalDistributionAccumulator() for name in HTTP_BRIDGE_METRIC_NAMES}
+        self._interval = {name: _IntervalDistributionAccumulator() for name in HTTP_BRIDGE_SUMMARY_METRIC_NAMES}
         self._histograms: dict[tuple[str, tuple[tuple[str, str], ...]], HistogramAccumulator] = {}
 
     def observe(self, name: str, value: float, *, attributes: Mapping[str, str] | None = None) -> None:
-        if name not in HTTP_BRIDGE_METRIC_NAMES:
+        if name not in HTTP_BRIDGE_SUMMARY_METRIC_NAMES:
             raise ValueError(f"unknown HTTP bridge metric: {name}")
         labels = tuple(sorted((attributes or {}).items()))
         with self._lock:
@@ -206,7 +209,7 @@ class HTTPBridgeStatsAccumulator:
                 for (name, labels), histogram in self._histograms.items()
             )
             if read_mode is IntervalReadMode.RESET:
-                self._interval = {name: _IntervalDistributionAccumulator() for name in HTTP_BRIDGE_METRIC_NAMES}
+                self._interval = {name: _IntervalDistributionAccumulator() for name in HTTP_BRIDGE_SUMMARY_METRIC_NAMES}
         return HTTPBridgeStatsSnapshot(histograms=histograms, **summaries)
 
 
