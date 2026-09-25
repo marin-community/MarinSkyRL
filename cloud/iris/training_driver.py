@@ -30,7 +30,7 @@ from cloud.iris.rl_data import (
     resolve_rl_train_data_with_sources,
 )
 from marinskyrl.process_diagnostics import ProcessOutcomeKind, write_process_outcome
-from marinskyrl.resource_locator import model_source_for_path
+from marinskyrl.resource_locator import is_cloud_uri, model_source_for_path
 from cloud.iris.launch_config import RunMode, load_launch_config
 from cloud.iris.rl_config_translation import TaskLocalSkyRLValues, apply_task_local_values
 
@@ -459,11 +459,13 @@ def main() -> None:
     args = create_parser().parse_args()
     launch_config = load_launch_config(args.config)
     allocation = launch_config.iris.allocation
+    model_uri = str(launch_config.inputs.model.uri)
+    model_is_cloud = is_cloud_uri(model_uri)
     config = LocalRLConfig(
         job_name=str(launch_config.iris.job_name),
         model_path=str(launch_config.skyrl.trainer.policy.model.path),
-        model_source_uri=str(launch_config.inputs.model.uri),
-        model_source_identity=str(launch_config.inputs.model.identity),
+        model_source_uri=model_uri if model_is_cloud else None,
+        model_source_identity=str(launch_config.inputs.model.identity) if model_is_cloud else None,
         train_data=list(launch_config.inputs.train_data),
         val_data=list(launch_config.inputs.validation_data),
         experiments_dir=str(launch_config.runtime.experiments_dir),

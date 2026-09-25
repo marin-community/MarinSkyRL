@@ -86,7 +86,7 @@ if __name__ == "__main__":
     cfg.generator.backend = "vllm"
     cfg.generator.weight_sync_backend = "nccl"
     cfg.trainer = OmegaConf.create()
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.strategy = "megatron"
     initialize_ray(cfg)
 
     total_ranks = args.num_nodes

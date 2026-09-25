@@ -1,9 +1,6 @@
 """
-For FSDP and DeepSpeed, run:
-uv run --isolated --group dev --extra deepspeed -- pytest tests/gpu/gpu_ci/test_save_load_checkpoint.py -m "not megatron"
-
-For Megatron, run:
-uv run --isolated --group dev --extra vllm --extra megatron -- pytest tests/gpu/gpu_ci/test_save_load_checkpoint.py -m "megatron"
+Run with:
+uv run --group dev --extra vllm --extra megatron pytest tests/gpu/gpu_ci/test_save_load_checkpoint.py
 """
 
 import ray
@@ -12,7 +9,6 @@ import hydra
 import torch
 import os
 import shutil
-import json
 import pickle
 import fsspec
 from datetime import timedelta
@@ -23,7 +19,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from skyrl_train.utils.utils import print_mem
-from tests.gpu.utils import init_worker_with_type, make_dummy_experience, get_model_logits_from_actor, validate_cfg
+from tests.gpu.utils import init_worker_with_type, get_model_logits_from_actor, validate_cfg
 from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -143,25 +139,8 @@ def test_megatron_prepended_shard_save_preserves_dcp_format_and_load_values(tmp_
         dist.destroy_process_group()
 
 
-def run_one_training_step(
-    actor_group,
-    strategy,
-    experience=None,
-    global_step=None,
-    local_step=None,
-    accumulation_steps=None,
-    megatron_batch=None,
-):
-    if strategy == "megatron":
-        assert megatron_batch is not None, "Megatron requires a TrainingInputBatch for ppo_train"
-        return ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", megatron_batch))
-    else:
-        assert experience is not None, f"{strategy} requires an Experience for training_step"
-        return ray.get(
-            actor_group.async_run_ray_method(
-                "pass_through", "training_step", experience, global_step, local_step, accumulation_steps
-            )
-        )
+def run_one_training_step(actor_group, batch):
+    return ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", batch))
 
 
 def get_test_actor_config(strategy: str, optimizer_checkpoint_sharding_type: str | None = None) -> DictConfig:
@@ -171,8 +150,7 @@ def get_test_actor_config(strategy: str, optimizer_checkpoint_sharding_type: str
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
     cfg.trainer.strategy = strategy
-    if strategy == "megatron":
-        cfg.trainer.policy.megatron_config.optimizer_checkpoint_sharding_type = optimizer_checkpoint_sharding_type
+    cfg.trainer.policy.megatron_config.optimizer_checkpoint_sharding_type = optimizer_checkpoint_sharding_type
 
     cfg.trainer.ckpt_path = CKPT_PATH
     cfg.trainer.export_path = CKPT_PATH
@@ -186,11 +164,8 @@ def get_test_actor_config(strategy: str, optimizer_checkpoint_sharding_type: str
 @pytest.mark.parametrize(
     ("strategy, optimizer_checkpoint_sharding_type"),
     [
-        ("deepspeed", None),
-        ("fsdp", None),
-        ("fsdp2", None),
-        pytest.param("megatron", "fully_reshardable", marks=pytest.mark.megatron),
-        pytest.param("megatron", "dp_reshardable", marks=pytest.mark.megatron),
+        ("megatron", "fully_reshardable"),
+        ("megatron", "dp_reshardable"),
     ],
 )
 def test_save_load_checkpoint(ray_init_fixture, strategy, optimizer_checkpoint_sharding_type):
@@ -216,36 +191,15 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, optimizer_checkpoint_s
 
         checkpoint_dir = None
         # Create dummy experiences for training steps
-        dummy_experience_1 = make_dummy_experience()  # First training step
-        dummy_experience_2 = make_dummy_experience()  # Second training step
-
-        # Ensure the second experience is different from the first
-        for i, seq in enumerate(dummy_experience_2.sequences):
-            dummy_experience_2.sequences[i] = torch.randint(100, 200, seq.shape, device=seq.device)
-
         # For Megatron, build training batches and reuse the second one pre/post checkpoint resume
-        if "megatron" in strategy:
-            from tests.gpu.test_megatron_worker import get_test_training_batch
+        from tests.gpu.test_megatron_worker import get_test_training_batch
 
-            dp_size = actor_group.actor_infos[0].rank.dp_size
-            train_batch_1 = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)
-            train_batch_2 = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)
-        else:
-            train_batch_1 = None
-            train_batch_2 = None
-
-        global_step, local_step, accumulation_steps = 0, 0, 1
+        dp_size = actor_group.actor_infos[0].rank.dp_size
+        train_batch_1 = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)
+        train_batch_2 = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)
 
         # Step 1: Do initial training step
-        run_one_training_step(
-            actor_group,
-            strategy,
-            experience=dummy_experience_1,
-            global_step=global_step,
-            local_step=local_step,
-            accumulation_steps=accumulation_steps,
-            megatron_batch=train_batch_1,
-        )
+        run_one_training_step(actor_group, train_batch_1)
 
         checkpoint_path = os.path.expandvars(os.path.join(cfg.trainer.ckpt_path, "global_step_1", "policy"))
         checkpoint_dir = os.path.expandvars(os.path.join(cfg.trainer.ckpt_path, "global_step_1"))  # Store for cleanup
@@ -256,13 +210,12 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, optimizer_checkpoint_s
                 "pass_through", "save_checkpoint", ckpt_dir=checkpoint_path, tokenizer=tokenizer
             )
         )
-        if strategy == "megatron":
-            # This persisted format controls how the next process constructs its load template.
-            from megatron.core import dist_checkpointing
-            from skyrl_train.distributed.megatron.megatron_strategy import _saved_optimizer_sharding_type
+        # This persisted format controls how the next process constructs its load template.
+        from megatron.core import dist_checkpointing
+        from skyrl_train.distributed.megatron.megatron_strategy import _saved_optimizer_sharding_type
 
-            common_state = dist_checkpointing.load_common_state_dict(checkpoint_path)
-            assert _saved_optimizer_sharding_type(common_state) == optimizer_checkpoint_sharding_type
+        common_state = dist_checkpointing.load_common_state_dict(checkpoint_path)
+        assert _saved_optimizer_sharding_type(common_state) == optimizer_checkpoint_sharding_type
 
         # Step 2.1: Make sure that offloading still works after saving checkpoint
         memory_after_saving = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))[0]
@@ -285,23 +238,9 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, optimizer_checkpoint_s
             assert os.path.exists(os.path.join(huggingface_dir, file)), (
                 f"File {file} not found in huggingface directory"
             )
-        if "fsdp" in strategy:
-            fsdp_config_path = os.path.join(checkpoint_path, "fsdp_config.json")
-            with open(fsdp_config_path, "r") as f:
-                fsdp_config = json.load(f)
-            assert fsdp_config["fsdp_strategy"] == strategy
-            assert fsdp_config["world_size"] == NUM_GPUS
 
         # Step 3: Do second training step and record results
-        run_one_training_step(
-            actor_group,
-            strategy,
-            experience=dummy_experience_2,
-            global_step=global_step + 1,
-            local_step=local_step,
-            accumulation_steps=accumulation_steps,
-            megatron_batch=train_batch_2,
-        )
+        run_one_training_step(actor_group, train_batch_2)
 
         # Create test input for comparing model outputs
         dp_size = actor_group.actor_infos[0].rank.dp_size
@@ -316,15 +255,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, optimizer_checkpoint_s
         ray.get(actor_group.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint_path))
 
         # Step 6: Now repeat the exact same second training step
-        run_one_training_step(
-            actor_group,
-            strategy,
-            experience=dummy_experience_2,
-            global_step=global_step + 1,
-            local_step=local_step,
-            accumulation_steps=accumulation_steps,
-            megatron_batch=train_batch_2,
-        )
+        run_one_training_step(actor_group, train_batch_2)
 
         # Get logits after loading checkpoint and repeating second training
         logits_after_reload_and_training = get_model_logits_from_actor(actor_group, test_input, attention_mask)

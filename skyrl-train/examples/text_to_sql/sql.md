@@ -27,7 +27,7 @@ huggingface-cli download seeklhy/OmniSQL-datasets data.zip --repo-type dataset -
 unzip $HOME/data/sql/db_files/data.zip -d $HOME/data/sql/db_files/
 ```
 
-If you modify the db_files path, update `DB_PATH` in `run_sql_fsdp.sh` accordingly.
+If you modify the db_files path, update `DB_PATH` in `run_skyrl_sql.sh` accordingly.
 
 ## Training
 

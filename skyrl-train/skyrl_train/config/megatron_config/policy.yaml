@@ -44,3 +44,6 @@ checkpoint_plan_cache: true
 # Re-run the eval-mode and train-mode forwards inside ppo_train and log how far each is
 # from the old log-probs, separating eval repeatability from train/eval drift.
 check_train_eval_parity: false
+
+# Replay expert choices captured during rollout.
+moe_router_replay: false

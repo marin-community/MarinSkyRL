@@ -19,10 +19,10 @@
 
 ## Key Features
 The `skyrl-train` package supports:
-- PPO and GRPO
-- Training Backends: FSDP, FSDP2, Megatron, and DeepSpeed
+- GRPO and related policy-gradient objectives
+- Megatron training backend
 - Inference backends: vLLM, SGLang, and any custom OpenAI API compatible endpoint that exposes a method to perform weight sync
-- Ulysses sequence parallelism for long-context training
+- Megatron context and tensor parallelism for long-context training
 - Colocated or disaggregated training and generation (including on heterogeneous hardware)
 - Synchronous RL or async one-off pipelining
 - Simple batched rollouts or Asynchronous rollouts for multi-turn conversations
@@ -59,17 +59,14 @@ Then, create a new virtual environment and install the dependencies:
 
 ```bash
 # creates the root project venv at ../.venv/
-uv sync --extra vllm
+uv sync --frozen --extra megatron --extra vllm
 source ../.venv/bin/activate
 ```
 
 #### Training profiles and backends
 
-Select `cpu` for CPU training. GPU-only component extras imply the `cuda` profile, so ordinary FSDP/vLLM
-training selects `vllm`; add `fsdp` only for its TorchTitan expert-parallel dependencies. Native CUDA artifacts
-are selected by architecture from the frozen root lock. FSDP plus vLLM supports x86_64 H100 and aarch64 GB200;
-the aarch64 Grug path uses eager attention without the x86_64-only FlashAttention and TorchTitan artifacts. Iris
-installs and validates that profile in its standard task image before training.
+Select `cpu` for CPU launcher tests. GPU training installs the frozen `megatron` and `vllm`
+extras; Iris resolves them from the root lock before launch.
 
 Then, prepare the dataset:
 

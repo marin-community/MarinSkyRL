@@ -29,7 +29,7 @@ selects the flash backend instead.
 The HF checkpoint keeps its stacked `[E, ...]` expert tensors. The bridge maps
 each Megatron per-expert grouped-GEMM weight to one slice of the stacked tensor
 on import and re-stacks on export, so exported checkpoints and weight sync use
-the same names as FSDP2 training and vLLM serving. The router bias becomes
+the same names as vLLM serving. The router bias becomes
 Megatron's persistent fp32 `expert_bias` buffer and is sent to vLLM in fp32 in
 its own weight-sync bucket; every other tensor is sent in the generator dtype.
 
@@ -43,8 +43,8 @@ state and gradient buffers on CPU from each policy update until the next one.
 
 ## Numerics
 
-Two Megatron behaviours break the on-policy contract that the recomputed old
-log-probabilities equal the training forward, which FSDP2 satisfies exactly:
+Two Megatron behaviours can break the on-policy contract that recomputed old
+log-probabilities equal the training forward:
 
 - Megatron's unfused unpermute combines the top-k expert outputs with an atomic
   scatter-add. For top-2 routing the two-term sum is order-independent, but Grug
@@ -93,30 +93,22 @@ set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
 
 With 1024-token prompts, 8192-token generations, 64 prompts x 8 samples per
 step, four policy nodes at PP2 x EP8 x DP16 and four vLLM nodes at DP8 x EP8,
-against the FSDP2 trainer at the same geometry:
-
-| phase | Megatron | FSDP2 |
-| --- | --- | --- |
-| step | 190-196s | 634s |
-| policy_train | 26-27s | 457s |
-| generate | 134-139s | 131s |
-| fwd_logprobs | 6-7s | 32s |
-| sync_weights | 15-17s | 11.3s |
+Megatron completed steps in 190-196 seconds. Policy training took 26-27 seconds,
+generation 134-139 seconds, forward log-probabilities 6-7 seconds, and weight
+synchronization 15-17 seconds.
 
 With equal micro-batch sizes the recomputed old log-probs and the training
 forward agree exactly at this scale: `policy/log_ratio_abs_max` is 0 and
 `policy/ppo_ratio_exact_unit_fraction` is 1.0 on every step.
 
-The Megatron numbers use `cloud/iris/configs/snowball_megatron_full.yaml`,
-which overlaps gradient reduction and parameter gathering with compute and
-reduces gradients in bf16. Generation takes about 70% of the step, so further
-gains come from the generator rather than the trainer.
+The measurements use `cloud/iris/configs/snowball_megatron_full.yaml`, which
+overlaps gradient reduction and parameter gathering with compute and reduces
+gradients in bf16. Generation takes about 70% of the step.
 
 ## Query bias
 
-Only the frozen query-bias mode is supported on Megatron. The bias steers
-expert selection exactly as in the HF model but is never updated; the
-`loss_free`, `interpolate`, and `replace` modes remain FSDP2-only.
+Only the frozen query-bias mode is supported. The bias steers expert
+selection exactly as in the HF model but is never updated.
 
 ## Validation
 

@@ -104,11 +104,14 @@ A thread-safe accumulator in the bridge is the sole producer of `HTTPBridgeStats
 cumulative histograms and an interval view with `PEEK` and `RESET` semantics matching `InferenceStatsSnapshot`:
 
 - `event_loop_lag_seconds`, measured from scheduled versus actual wake time on the Uvicorn loop;
-- `response_bytes`, measured from the rendered non-streaming body and emitted streaming chunks; and
-- `json_serialization_seconds`, measured around rendering the response body that is returned to the client.
+- `response_bytes`, measured from the rendered non-streaming body and emitted streaming chunks;
+- `json_serialization_seconds`, measured around rendering the response body that is returned to the client; and
+- `request_outcome`, a cumulative count by inference endpoint and ASGI-observed outcome: completed,
+  client disconnect, send failure, server cancellation, application error, or incomplete return.
 
-Metric labels are bounded to endpoint, transport mode, and status class. Model names, session IDs, trajectory IDs,
-task IDs, and exception text are excluded.
+Metric labels are bounded to endpoint, transport mode, status class, and outcome reason. Model names, session IDs,
+trajectory IDs, task IDs, and exception text are excluded. ASGI outcomes identify where the bridge observed a
+disconnect or failed send; they do not identify which peer initiated a TCP close.
 
 The inference stats callback consumes one typed inference snapshot containing engine and bridge observations. At a
 training-step boundary, it reads `RESET` and projects count, mean, p95, and maximum bridge values into

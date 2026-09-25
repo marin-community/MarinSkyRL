@@ -104,13 +104,12 @@ def test_gpu_rl_images_install_the_root_training_extras(dockerfile_path: Path) -
     assert "COPY chat_templates ${SKYRL_HOME}/chat_templates" in dockerfile
     assert "COPY docker/sync_gpu_rl_env.sh /usr/local/bin/sync-gpu-rl-env" in dockerfile
     assert "ENV RL_SYNC=/usr/local/bin/sync-gpu-rl-env" in dockerfile
-    assert 'if [ "${INSTALL_MEGATRON}" = "0" ]; then' in dockerfile
+    assert "Megatron native imports OK" in dockerfile
     assert "skyrl-train/uv.lock" not in dockerfile
 
 
-@pytest.mark.parametrize(("install_megatron", "policy_extra"), [("0", "fsdp"), ("1", "megatron")])
 def test_gpu_rl_sync_selects_policy_and_implied_cuda_component(
-    tmp_path: Path, install_megatron: str, policy_extra: str
+    tmp_path: Path
 ) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -120,7 +119,6 @@ def test_gpu_rl_sync_selects_policy_and_implied_cuda_component(
     fake_uv.chmod(0o755)
     environment = os.environ | {
         "ARGUMENTS_PATH": str(arguments_path),
-        "INSTALL_MEGATRON": install_megatron,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
     }
 
@@ -132,7 +130,7 @@ def test_gpu_rl_sync_selects_policy_and_implied_cuda_component(
 
     arguments = arguments_path.read_text().splitlines()
     assert arguments[:7] == ["sync", "--frozen", "--no-cache", "--extra", "vllm", "--extra", "telemetry"]
-    assert ["--extra", policy_extra] == arguments[9:11]
+    assert ["--extra", "megatron"] == arguments[9:11]
     assert arguments[-2:] == ["--no-install-package", "vllm"]
 @pytest.mark.parametrize("dockerfile_path", GPU_RL_DOCKERFILES)
 def test_megatron_native_packages_are_kept_out_of_the_common_layer(dockerfile_path: Path) -> None:
@@ -147,9 +145,7 @@ def test_megatron_native_packages_are_kept_out_of_the_common_layer(dockerfile_pa
 
 def test_arm64_megatron_has_strict_native_import_gates() -> None:
     dockerfile = GPU_RL_ARM64_DOCKERFILE.read_text()
-    gate = dockerfile[
-        dockerfile.index("# Megatron backend asserts"):dockerfile.index("# FSDP expert-parallel assert")
-    ]
+    gate = dockerfile[dockerfile.index("# Megatron backend asserts."):dockerfile.index("# The S3 client stack")]
 
     commands = re.findall(r'-c "([^"\\]*(?:\\.[^"\\]*)*)"', gate)
     imported_modules: set[str] = set()
@@ -160,7 +156,6 @@ def test_arm64_megatron_has_strict_native_import_gates() -> None:
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported_modules.add(node.module)
 
-    assert 'if [ "${INSTALL_MEGATRON}" = "1" ]' in gate
     assert {"causal_conv1d", "mamba_ssm", "megatron.core", "megatron.bridge", "transformer_engine"} <= imported_modules
     assert "torch" in imported_modules
     assert "transformer_engine.pytorch" in imported_modules
@@ -206,22 +201,14 @@ def test_gpu_images_accept_only_their_known_pip_check_findings(tmp_path: Path) -
         "The package `megatron-bridge` requires `flashinfer-cubin==0.6.8.post1`, but `0.6.12` is installed",
     ]
 
-    def check(platform: str, diagnostics: str, install_megatron: bool) -> int:
+    def check(platform: str, diagnostics: str) -> int:
         report.write_text(diagnostics + "\n")
         return subprocess.run(
-            ["bash", str(GPU_RL_PIP_CHECK_SCRIPT), str(report), platform, "1" if install_megatron else "0"],
+            ["bash", str(GPU_RL_PIP_CHECK_SCRIPT), str(report), platform],
             check=False,
         ).returncode
 
     for platform, expected in reports.items():
-        standard_diagnostics = "\n".join(expected)
-        assert check(platform, standard_diagnostics, False) == 0
-        obsolete_quack_conflict = (
-            standard_diagnostics
-            + "\nThe package `quack-kernels` requires `nvidia-cutlass-dsl==4.6.0`, but `4.5.3` is installed"
-        )
-        assert check(platform, obsolete_quack_conflict, False) != 0
-        assert check(platform, standard_diagnostics + "\nThe package `unexpected` is incompatible", False) != 0
         megatron_expected = [*expected, *megatron]
         if platform == "linux_aarch64":
             megatron_expected.append("The package `transformer-engine-cu12` was built for a different platform")
@@ -233,5 +220,5 @@ def test_gpu_images_accept_only_their_known_pip_check_findings(tmp_path: Path) -
                 ]
             )
         megatron_diagnostics = "\n".join(megatron_expected)
-        assert check(platform, megatron_diagnostics, True) == 0
-        assert check(platform, megatron_diagnostics + "\nThe package `unexpected` is incompatible", True) != 0
+        assert check(platform, megatron_diagnostics) == 0
+        assert check(platform, megatron_diagnostics + "\nThe package `unexpected` is incompatible") != 0

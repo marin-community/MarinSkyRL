@@ -19,7 +19,7 @@ CISPO_EPS_CLIP_LOW=0
 CISPO_EPS_CLIP_HIGH=5
 USE_KL_LOSS=false
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra megatron --extra vllm -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.policy_loss_type="$POLICY_LOSS" \
@@ -27,7 +27,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.cispo.cispo_eps_clip_high=$CISPO_EPS_CLIP_HIGH \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   generator.num_inference_engines=$NUM_GPUS \
   generator.inference_engine_tensor_parallel_size=1 \

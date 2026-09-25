@@ -35,7 +35,7 @@ from skyrl_train.models.megatron_router_replay import (
     slice_sequence_parallel,
     validate_replay_geometry,
 )
-from skyrl_train.models.router_replay import dense_replay_targets
+from skyrl_train.models.megatron_router_replay import dense_replay_targets
 
 
 # Sentinel: distinguishes "caller did not pass logprob_chunk_size" (=> fall back to

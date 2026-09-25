@@ -177,11 +177,7 @@ def checkpoint_export_plan(cfg: DictConfig) -> CheckpointExportPlan:
 
 def policy_export_workers(cfg: DictConfig) -> RayPolicyExportWorkers:
     """Create exactly one policy worker per saved policy rank."""
-    if cfg.trainer.strategy in ("fsdp", "fsdp2"):
-        from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
-    elif cfg.trainer.strategy == "deepspeed":
-        from skyrl_train.workers.deepspeed.deepspeed_worker import PolicyWorker
-    elif cfg.trainer.strategy == "megatron":
+    if cfg.trainer.strategy == "megatron":
         from skyrl_train.workers.megatron.megatron_worker import PolicyWorker
     else:
         raise ValueError(f"checkpoint export does not support strategy {cfg.trainer.strategy!r}")

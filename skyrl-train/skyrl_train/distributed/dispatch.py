@@ -363,8 +363,8 @@ class MeshDispatch(Dispatch):
 
         # DISPATCH FAN-OUT INSTRUMENT (ungated, only for `forward` to avoid log spam).
         # The 131k MoE-RL wedge (FR-proven 2026-06-30) showed only rank 0 RAN the
-        # per-step forward after the weight-sync drain, while the FSDP partner (rank
-        # 16 on mesh_fsdp=[0,16]) sat idle in `select`. The open question was whether
+        # per-step forward after the weight-sync drain, while a peer rank sat idle
+        # in `select`. The open question was whether
         # the DRIVER only KEYED the forward to rank 0 (a dispatch-keying bug) or
         # whether it fanned to all 32 actors but only rank 0's async-actor loop
         # SCHEDULED the dispatched task (a post-drain re-occupation race). This log

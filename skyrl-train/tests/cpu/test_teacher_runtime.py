@@ -527,3 +527,29 @@ def test_local_teacher_runtime_rejects_unplanned_additional_residency_slots(monk
 
     with pytest.raises(ValueError, match="exactly one rotating residency slot"):
         prepare_distillation_runtime(cfg, tokenizer)
+
+
+@pytest.mark.asyncio
+async def test_local_teacher_pool_builds_one_engine_per_data_parallel_group(monkeypatch):
+    engine = _Engine()
+    engine_kwargs = {}
+    tokenizer = _Tokenizer({"a": 0, "b": 1, "c": 2})
+
+    def create_engine(**kwargs):
+        engine_kwargs.update(kwargs)
+        return [engine]
+
+    monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
+    monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", create_engine)
+    cfg = _config()
+    cfg.teachers.primary.resources.gpus_per_node = 8
+    cfg.teachers.primary.resources.data_parallel_size = 8
+    cfg.teachers.primary.resources.expert_parallel_size = 8
+    prepared = prepare_distillation_runtime(cfg, tokenizer)
+    runtime = await start_sync_distillation_runtime(cfg, prepared)
+    assert runtime is not None
+    await runtime.close()
+    assert engine_kwargs["num_inference_engines"] == 1
+    assert engine_kwargs["tensor_parallel_size"] == 1
+    assert engine_kwargs["data_parallel_size"] == 8
+    assert engine_kwargs["expert_parallel_size"] == 8

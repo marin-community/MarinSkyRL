@@ -632,6 +632,7 @@ def extract_terminal_bench_agent_env(parsed: ParsedRLConfig) -> tuple:
 
 _OPTIONAL_HYDRA_PATTERNS = {
     ".distillation",
+    ".domain_weights",
     ".engine_init_kwargs",
     ".speculative_decoding",
     ".hf_hub_",

@@ -310,7 +310,7 @@ class MegatronWorker:
         """Install the MoE router replay controller when the role requests it.
 
         Called after ``self.model`` and ``self.actor_module`` exist. The knob
-        lives on ``trainer.<role>.fsdp_config.moe_router_replay``; for
+        lives on ``trainer.<role>.megatron_config.moe_router_replay``; for
         ``strategy=megatron`` the top-level config guard admits it only once
         the replay plumbing is complete, so tests enable it after
         ``validate_cfg``.
@@ -653,8 +653,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         torch.cuda.empty_cache()
 
-        # #1685 fix ported from fsdp_worker.broadcast_to_inference_engines (FlashInfer-CUTLASS
-        # w13 gate/up swap skipped on the megatron RL update path -> MoE token-salad): bracket
+        # Bracket
         # the WHOLE multi-chunk sync with vLLM's layerwise reload so model.load_weights defers
         # processing and a single finalize re-runs process_weights_after_loading (re-applying
         # swap_w13_to_w31) EXACTLY once. This is required for both NCCL broadcast and colocated

@@ -326,8 +326,8 @@ class MegatronStrategy(DistributedStrategy):
                 self.save_hf_configs(self.hf_config, hf_dir, tokenizer)
 
                 # Persist replicated client state (e.g. ZClip / StaleClip warmup
-                # counters + EMA stats) so they survive chain-restarts, matching
-                # the FSDP2 strategy. client_state is global (not sharded), so a
+                # counters + EMA stats) so they survive chain-restarts.
+                # client_state is global (not sharded), so a
                 # single rank-0 file suffices; every rank reads it back on load.
                 extra_state_path = os.path.join(work_dir, "extra_state.pt")
                 with io.open_file(extra_state_path, "wb") as f:
