@@ -244,12 +244,15 @@ def test_megatron_muonh_matches_independent_jax_steps_after_own_state_resume():
                 adam_optimizer.load_state_dict(saved_adam)
 
 
-def test_megatron_muonh_splits_fused_qkv_and_gate_up_before_hyperball_update():
+@pytest.mark.parametrize("groups", [1, 2])
+def test_megatron_muonh_splits_fused_qkv_and_gate_up_before_hyperball_update(groups):
     torch.manual_seed(31)
-    q, k, v = (torch.randn(rows, 5) for rows in (8, 4, 4))
+    q, k, v = (torch.randn(rows * groups, 5) for rows in (4, 2, 2))
     q_grad, k_grad, v_grad = (torch.randn_like(weight) for weight in (q, k, v))
-    fused = torch.cat((q.view(2, 4, 5), k.view(2, 2, 5), v.view(2, 2, 5)), dim=1).reshape(16, 5)
-    fused_grad = torch.cat((q_grad.view(2, 4, 5), k_grad.view(2, 2, 5), v_grad.view(2, 2, 5)), dim=1).reshape(16, 5)
+    fused = torch.cat((q.view(groups, 4, 5), k.view(groups, 2, 5), v.view(groups, 2, 5)), dim=1).reshape(8 * groups, 5)
+    fused_grad = torch.cat(
+        (q_grad.view(groups, 4, 5), k_grad.view(groups, 2, 5), v_grad.view(groups, 2, 5)), dim=1
+    ).reshape(8 * groups, 5)
     gate, up = torch.randn(6, 5), torch.randn(6, 5)
     gate_grad, up_grad = torch.randn_like(gate), torch.randn_like(up)
     fused_gate_up = torch.cat((gate, up), dim=0)
@@ -281,8 +284,8 @@ def test_megatron_muonh_splits_fused_qkv_and_gate_up_before_hyperball_update():
     optimizer.step()
 
     expected_qkv = torch.cat(
-        (reference[0].view(2, 4, 5), reference[1].view(2, 2, 5), reference[2].view(2, 2, 5)), dim=1
-    ).reshape(16, 5)
+        (reference[0].view(groups, 4, 5), reference[1].view(groups, 2, 5), reference[2].view(groups, 2, 5)), dim=1
+    ).reshape(8 * groups, 5)
     torch.testing.assert_close(actual_qkv, expected_qkv, rtol=0, atol=0)
     torch.testing.assert_close(actual_gate_up, torch.cat((reference[3], reference[4]), dim=0), rtol=0, atol=0)
 

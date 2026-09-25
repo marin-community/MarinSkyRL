@@ -58,7 +58,9 @@ def _muon_update_(
         for parameter_part, direction_part in zip(
             parameter_view.split(qkv_split_shapes, dim=1), direction_view.split(qkv_split_shapes, dim=1)
         ):
-            logical_parameter = parameter_part.reshape(-1, parameter.shape[1]).contiguous()
+            # A single QKV group can leave the split contiguous, so contiguous()
+            # would alias parameter_part and make the write-back overlap.
+            logical_parameter = parameter_part.reshape(-1, parameter.shape[1]).clone()
             logical_direction = direction_part.reshape_as(logical_parameter).contiguous()
             _matrix_step_(
                 logical_parameter, logical_direction, lr=lr, ns_steps=ns_steps, muon_eps=eps, clamp_final_norm=True
