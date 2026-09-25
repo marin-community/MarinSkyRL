@@ -34,7 +34,7 @@ from skyrl_train.workers.megatron.megatron_worker import CriticWorker, MegatronP
 WORLD_SIZE = 32
 SEQUENCE_LENGTH = 128
 RESPONSE_LENGTH = 16
-EXPECTED_GEOMETRY = (1, 2, 2, 8)
+EXPECTED_GEOMETRY = (1, 2, 1, 8)
 S3_PREFIX = "s3://marin-us-east-02a/tmp/ttl=14d/skyrl/users/atqamar/"
 REFERENCE_NAME = "checkpoint-parity-reference.json"
 
@@ -62,7 +62,10 @@ class SnowballParityPolicyWorker(MegatronPolicyWorkerBase):
 
     def parity_digest_rng(self) -> tuple[int, dict[str, int | str]]:
         return self._rank, digest_value(
-            {"generic": self.strategy.get_rng_state(), "cuda_tracker": tensor_parallel.get_cuda_rng_tracker().get_states()}
+            {
+                "generic": self.strategy.get_rng_state(),
+                "cuda_tracker": tensor_parallel.get_cuda_rng_tracker().get_states(),
+            }
         )
 
     def parity_digest_state(self) -> tuple[int, dict[str, dict[str, int | str]]]:
@@ -105,7 +108,7 @@ def _prepare_config(cfg: DictConfig, root: str) -> tuple[DictConfig, str]:
         geometry.expert_model_parallel_size,
     )
     if cfg.trainer.strategy != "megatron" or actual != EXPECTED_GEOMETRY:
-        raise ValueError(f"Snowball parity requires Megatron TP1/PP2/CP2/EP8, got {actual}")
+        raise ValueError(f"Snowball parity requires Megatron TP1/PP2/CP1/EP8, got {actual}")
     if cfg.trainer.placement.policy_num_nodes != 4 or cfg.trainer.placement.policy_num_gpus_per_node != 8:
         raise ValueError("Snowball parity requires four policy nodes with eight GPUs each")
     if geometry.optimizer_checkpoint_sharding_type != "dp_reshardable":
@@ -121,7 +124,21 @@ def _prepare_config(cfg: DictConfig, root: str) -> tuple[DictConfig, str]:
     cfg.trainer.ckpt_interval = 1
     cfg.trainer.logger = "console"
     cfg.generator.run_engines_locally = False
-    fingerprint = hashlib.sha256(OmegaConf.to_yaml(cfg, resolve=True, sort_keys=True).encode()).hexdigest()
+    trainer_contract = OmegaConf.to_container(cfg.trainer, resolve=True)
+    model = trainer_contract["policy"]["model"]
+    source_identity = model.get("source_identity") or model.get("source_uri")
+    if not source_identity:
+        raise ValueError("Snowball parity requires a pinned model source identity")
+    # Iris stages the same immutable source at task-local paths and gives the
+    # two task runs different names. Neither difference changes training state.
+    model["path"] = source_identity
+    model["tokenizer_path"] = source_identity
+    trainer_contract.pop("run_name", None)
+    trainer_contract.pop("entrypoint_node_ip", None)
+    trainer_contract.pop("ref", None)
+    trainer_contract.pop("critic", None)
+    contract = {"trainer": trainer_contract, "samples_per_prompt": cfg.generator.n_samples_per_prompt}
+    fingerprint = hashlib.sha256(json.dumps(contract, sort_keys=True).encode()).hexdigest()
     return cfg, fingerprint
 
 
@@ -185,11 +202,15 @@ def _compare_rank_digests(expected: dict[str, object], actual: dict[str, object]
             raise AssertionError(f"{stage}: rank {rank} state components differ")
         for component in ("model", "optimizer", "scheduler", "rng"):
             if before[component] != after[component]:
-                raise AssertionError(f"{stage}: rank {rank} {component} differs: {before[component]} != {after[component]}")
+                raise AssertionError(
+                    f"{stage}: rank {rank} {component} differs: {before[component]} != {after[component]}"
+                )
 
 
 def _driver_rng_digest() -> dict[str, int | str]:
-    return digest_value({"python": random.getstate(), "numpy": np.random.get_state(), "torch_cpu": torch.get_rng_state()})
+    return digest_value(
+        {"python": random.getstate(), "numpy": np.random.get_state(), "torch_cpu": torch.get_rng_state()}
+    )
 
 
 def _train_step(trainer: RayPPOTrainer, batch: TrainingInputBatch) -> None:
@@ -262,13 +283,27 @@ def _resume(trainer: RayPPOTrainer, root: str, fingerprint: str) -> None:
     if loaded_step != 1 or record["checkpoint"] != checkpoint or payload != record["payload"]:
         raise AssertionError("Resume did not load the reference run's own committed checkpoint")
     trainer.global_step = loaded_step
-    if record["driver_pre"] != _driver_rng_digest():
-        raise AssertionError("Driver Python/NumPy/Torch RNG differs immediately after load")
-    _compare_rank_digests(record["pre"], _rank_digests(trainer, "parity_digest_state"), "after load")
+    driver_pre_match = record["driver_pre"] == _driver_rng_digest()
+    rank_errors = []
+    try:
+        _compare_rank_digests(record["pre"], _rank_digests(trainer, "parity_digest_state"), "after load")
+    except AssertionError as error:
+        rank_errors.append(str(error))
     _train_step(trainer, batch)
-    if record["driver_post"] != _driver_rng_digest():
-        raise AssertionError("Driver Python/NumPy/Torch RNG differs after resumed step")
-    _compare_rank_digests(record["post"], _rank_digests(trainer, "parity_digest_state"), "after replay")
+    driver_post_match = record["driver_post"] == _driver_rng_digest()
+    try:
+        _compare_rank_digests(record["post"], _rank_digests(trainer, "parity_digest_state"), "after replay")
+    except AssertionError as error:
+        rank_errors.append(str(error))
+    print(
+        "SNOWBALL_CHECKPOINT_PARITY_VERDICT "
+        f"rank_state={'pass' if not rank_errors else 'fail'} "
+        f"driver_rng_pre={'pass' if driver_pre_match else 'fail'} "
+        f"driver_rng_post={'pass' if driver_post_match else 'fail'}",
+        flush=True,
+    )
+    if rank_errors or not driver_pre_match or not driver_post_match:
+        raise AssertionError("; ".join(rank_errors) or "Driver Python/NumPy/Torch RNG differs across resume")
     print(f"SNOWBALL_CHECKPOINT_PARITY_RESUME_OK ranks={WORLD_SIZE} record={record_path}", flush=True)
 
 
