@@ -1,0 +1,106 @@
+# Matched control/candidate checkpoint benchmark, not a production RLVR2 run.
+# Keep the 32-policy-H100 Snowball TP1/PP2/CP2/EP8 mesh and batch geometry;
+# use a bounded GSM8K rollout on one separate H100x8 node to isolate saves.
+entrypoint: standard
+
+context_budget:
+  request_window_tokens: 4096
+  max_new_tokens_per_turn: 32
+  max_turns: 1
+
+environment:
+  env_class: gsm8k
+
+trainer:
+  strategy: megatron
+  seed: 42
+  flash_attn: true
+  use_sample_packing: true
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+  offload_optimizer_during_rollouts: true
+  algorithm:
+    advantage_estimator: rloo_n
+    group_advantage_min_size: 4
+    advantage_batch_normalize: false
+    eps_clip_low: 0.2
+    eps_clip_high: 0.2
+    use_entropy_loss: false
+    use_kl_loss: false
+    use_kl_in_reward: false
+    loss_reduction: token_mean
+  epochs: 1
+  max_steps: 5
+  update_epochs_per_batch: 1
+  train_batch_size: 512
+  policy_mini_batch_size: 512
+  eval_batch_size: 100
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+  eval_before_train: false
+  eval_interval: -1
+  ckpt_interval: 1
+  max_ckpts_to_keep: 2
+  resume_mode: none
+  logger: console
+  policy:
+    optimizer_config:
+      optimizer: AdamW
+      lr: 4.0e-6
+      weight_decay: 0.0
+      max_grad_norm: 0.5
+    megatron_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 2
+      context_parallel_size: 2
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      optimizer_checkpoint_sharding_type: dp_reshardable
+      # Transformer Engine's default p2p mode rejects this model's sliding-window attention.
+      transformer_config_kwargs:
+        cp_comm_type: a2a
+      ddp_config:
+        overlap_grad_reduce: true
+        overlap_param_gather: true
+        grad_reduce_in_fp32: false
+  placement:
+    colocate_all: false
+    policy_num_nodes: 4
+    policy_num_gpus_per_node: 8
+
+generator:
+  backend: vllm
+  model_dtype: bfloat16
+  vllm_attention_backend: FLASH_ATTN
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_data_parallel_size: 8
+  inference_engine_expert_parallel_size: 8
+  num_inference_engines: 1
+  n_samples_per_prompt: 16
+  gpu_memory_utilization: 0.75
+  max_num_seqs: 16
+  max_num_batched_tokens: 16384
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+  enforce_eager: false
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: false
+  sampling_params:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+
+data:
+  kind: parquet
+  train_data: []
+  val_data: []
+
+extra_env:
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  # Work around a corrupt NumPy wheel in one east node's shared uv cache.
+  UV_CACHE_DIR: /uv/cache/checkpoint-benchmark-20260923
+  RUNAI_STREAMER_CONCURRENCY: "2"
+  # Preserve every rank's checkpoint phases without forwarding repeated startup noise.
+  RAY_DEDUP_LOGS_ALLOW_REGEX: checkpoint_observation

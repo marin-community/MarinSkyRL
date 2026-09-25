@@ -118,7 +118,7 @@ from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
-from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
+from skyrl_train.timing_observability import checkpoint_phase, publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
     read_hf_export_request,
@@ -646,7 +646,16 @@ class RayPPOTrainer:
         """Save one requested step checkpoint without terminating training on storage failure."""
         await self._drain_checkpoint_upload()
         try:
-            with Timer("save_checkpoints", self.all_timings):
+            with (
+                Timer("save_checkpoints", self.all_timings),
+                checkpoint_phase(
+                    str(self.cfg.trainer.strategy),
+                    "save",
+                    "checkpoint_foreground_pause",
+                    rank=-1,
+                    step=self.global_step,
+                ),
+            ):
                 snapshot = await self._save_checkpoints_with_residency()
         except OSError:
             self._record_checkpoint_save_failure(state)
@@ -1072,6 +1081,21 @@ class RayPPOTrainer:
             len(training_input["sequences"]),
             duration_seconds,
         )
+        resume_started = getattr(self, "_checkpoint_resume_started", None)
+        if resume_started is not None and self.global_step == getattr(self, "_checkpoint_resumed_from_step", -2) + 1:
+            logger.info(
+                "checkpoint_resume_observation {}",
+                json.dumps(
+                    {
+                        "schema": "checkpoint_resume_v1",
+                        "loaded_step": self._checkpoint_resumed_from_step,
+                        "first_optimizer_step": self.global_step,
+                        "duration_to_first_optimizer_step_seconds": time.perf_counter() - resume_started,
+                    },
+                    sort_keys=True,
+                ),
+            )
+            self._checkpoint_resume_started = None
 
     def _log_training_step_completed(self, *, epoch: int, duration_seconds: float) -> None:
         logger.info(
@@ -1100,8 +1124,10 @@ class RayPPOTrainer:
 
         # Load checkpoint state if resumption is enabled.
         if self.resume_mode != ResumeMode.NONE:
+            self._checkpoint_resume_started = time.perf_counter()
             with Timer("load_checkpoints", self.all_startup_timings):
                 self.global_step, _ = self.load_checkpoints()
+            self._checkpoint_resumed_from_step = self.global_step
 
         await self._start_draft_trainer()
 

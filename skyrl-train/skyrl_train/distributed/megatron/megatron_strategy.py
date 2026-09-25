@@ -14,8 +14,10 @@ from torch import optim
 from torch import distributed as dist
 
 from skyrl_train.distributed.strategy import DistributedStrategy
+from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl_train.io import io
+from skyrl_train.timing_observability import checkpoint_phase
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
 import megatron.core.parallel_state as mpu
 from skyrl_train.distributed.megatron.megatron_utils import (
@@ -190,6 +192,8 @@ class MegatronStrategy(DistributedStrategy):
         tag=None,
         tokenizer: Optional[PreTrainedTokenizer] = None,
     ):
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        step = extract_step_from_path(os.path.dirname(ckpt_dir.rstrip("/")))
         # Extract base model.
         model: List[nn.Module] = model.actor_module
         materialize_megatron_params(model)
@@ -243,13 +247,14 @@ class MegatronStrategy(DistributedStrategy):
 
         with io.local_work_dir(ckpt_dir) as work_dir:
             # TODO(tgriggs): Support configurable async saves.
-            async_save_request = dist_checkpointing.save(
-                sharded_state_dict=sharded_state_dict,
-                checkpoint_dir=work_dir,
-                sharded_strategy=save_strategy,
-                async_sharded_save=False,
-                validate_access_integrity=True,
-            )
+            with checkpoint_phase("megatron", "save", "distributed_checkpoint", rank=rank, step=step):
+                async_save_request = dist_checkpointing.save(
+                    sharded_state_dict=sharded_state_dict,
+                    checkpoint_dir=work_dir,
+                    sharded_strategy=save_strategy,
+                    async_sharded_save=False,
+                    validate_access_integrity=True,
+                )
             assert async_save_request is None, "Async save is not yet supported for Megatron"
 
             # Only global rank 0 saves the Huggingface config and tokenizer.
@@ -281,90 +286,100 @@ class MegatronStrategy(DistributedStrategy):
     ):
         if not ckpt_dir or not io.exists(ckpt_dir):
             raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        step = extract_step_from_path(os.path.dirname(ckpt_dir.rstrip("/")))
+        operation = "resume" if load_training_state else "export"
 
         # Extract base model.
-        model: List[nn.Module] = model.actor_module
-        materialize_megatron_params(model)
-        assert len(model) == 1, "Megatron virtual pipeline parallel is not yet supported"
-        unwrapped_model = model[0]
-        if hasattr(unwrapped_model, "module"):
-            unwrapped_model = unwrapped_model.module
+        with checkpoint_phase("megatron", operation, "prepare_model_load", rank=rank, step=step):
+            model: List[nn.Module] = model.actor_module
+            materialize_megatron_params(model)
+            assert len(model) == 1, "Megatron virtual pipeline parallel is not yet supported"
+            unwrapped_model = model[0]
+            if hasattr(unwrapped_model, "module"):
+                unwrapped_model = unwrapped_model.module
 
-        # Extract sharded state dicts.
-        sharded_state_dict = {}
-        model_sharded_state_dict = unwrapped_model.sharded_state_dict()
-        sharded_state_dict["model"] = model_sharded_state_dict
-        if scheduler and load_training_state:
-            sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
+            sharded_state_dict = {}
+            model_sharded_state_dict = unwrapped_model.sharded_state_dict()
+            sharded_state_dict["model"] = model_sharded_state_dict
+            if scheduler and load_training_state:
+                sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
         read_context = (
             remote_checkpoint_metadata(ckpt_dir)
             if ckpt_dir.startswith("s3://")
             else io.node_cached_read_dir(ckpt_dir, _NODE_LOCAL_CHECKPOINT_CACHE)
         )
-        with read_context as read_dir:
+        with checkpoint_phase("megatron", operation, "read_and_load", rank=rank, step=step), read_context as read_dir:
             if optimizer and load_training_state:
-                common_state = dist_checkpointing.load_common_state_dict(read_dir)
-                saved_type = _saved_optimizer_sharding_type(common_state)
-                # Gradients are not checkpointed. Free their GPU buffers now: building the
-                # optimizer's sharded state dict for loading allocates a full set of moments
-                # before optimizer.load_state_dict allocates the checkpointed ones, and with the
-                # gradients resident that second copy is what OOMs a policy that trains fine.
-                # The empty buffers come back after the optimizer state is restored below.
-                offload_megatron_grads_to_cpu(model)
-                sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
-                    model_sharded_state_dict,
-                    is_loading=True,
-                    metadata=_optimizer_checkpoint_metadata(saved_type),
-                )
+                with checkpoint_phase("megatron", operation, "prepare_optimizer_load", rank=rank, step=step):
+                    common_state = dist_checkpointing.load_common_state_dict(read_dir)
+                    saved_type = _saved_optimizer_sharding_type(common_state)
+                    # Gradients are not checkpointed. Free their GPU buffers now: building the
+                    # optimizer's sharded state dict for loading allocates a full set of moments
+                    # before optimizer.load_state_dict allocates the checkpointed ones, and with the
+                    # gradients resident that second copy is what OOMs a policy that trains fine.
+                    # The empty buffers come back after the optimizer state is restored below.
+                    offload_megatron_grads_to_cpu(model)
+                    sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
+                        model_sharded_state_dict,
+                        is_loading=True,
+                        metadata=_optimizer_checkpoint_metadata(saved_type),
+                    )
             # Load the checkpoint in parallel.
             load_strategy = (
-                DirectS3TorchDistLoadShardedStrategy(ckpt_dir)
+                DirectS3TorchDistLoadShardedStrategy(ckpt_dir, operation=operation)
                 if ckpt_dir.startswith("s3://")
                 else get_default_load_sharded_strategy(read_dir)
             )
             load_strategy = FullyParallelLoadStrategyWrapper(
                 load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
             )
-            state_dict = dist_checkpointing.load(
-                sharded_state_dict=sharded_state_dict, checkpoint_dir=read_dir, sharded_strategy=load_strategy
-            )
+            with checkpoint_phase("megatron", operation, "distributed_checkpoint", rank=rank, step=step):
+                state_dict = dist_checkpointing.load(
+                    sharded_state_dict=sharded_state_dict, checkpoint_dir=read_dir, sharded_strategy=load_strategy
+                )
 
         # Load the model, optimizer, and scheduler state dicts.
         assert "model" in state_dict, (
             f"Model state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
         )
-        model[0].load_state_dict(state_dict.pop("model"), strict=load_module_strict)
+        with checkpoint_phase("megatron", operation, "apply_model_state", rank=rank, step=step):
+            model[0].load_state_dict(state_dict.pop("model"), strict=load_module_strict)
         self.log("Loaded model state dict.")
 
         if optimizer and load_training_state:
             assert "optimizer" in state_dict, (
                 f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             )
-            optimizer.load_state_dict(state_dict.pop("optimizer"))
-            load_megatron_grads_to_gpu(model)
+            with checkpoint_phase("megatron", operation, "apply_optimizer_state", rank=rank, step=step):
+                optimizer.load_state_dict(state_dict.pop("optimizer"))
+                load_megatron_grads_to_gpu(model)
             self.log("Loaded optimizer state dict.")
 
         if scheduler and load_training_state:
             assert "lr_scheduler" in state_dict, (
                 f"LR scheduler state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             )
-            scheduler.load_state_dict(state_dict["lr_scheduler"])
+            with checkpoint_phase("megatron", operation, "apply_scheduler_state", rank=rank, step=step):
+                scheduler.load_state_dict(state_dict["lr_scheduler"])
             self.log("Loaded LR scheduler state dict.")
 
         # Load RNG state, if present.
         if load_training_state and "rng" in state_dict:
-            self.load_rng_state(state_dict["rng"])
+            with checkpoint_phase("megatron", operation, "apply_rng_state", rank=rank, step=step):
+                self.load_rng_state(state_dict["rng"])
 
         # Restore replicated client state (ZClip / StaleClip), if present. Guarded
         # for backward-compat with checkpoints written before this file existed.
         states = {}
         extra_state_path = os.path.join(ckpt_dir, "extra_state.pt")
         if load_training_state and io.exists(extra_state_path):
-            with io.open_file(extra_state_path, "rb") as f:
-                extra_state = torch.load(f, weights_only=False)
-            states = extra_state.get("client_state", {}) or {}
-            self.log("Loaded client state (ZClip / StaleClip) from checkpoint.")
+            with checkpoint_phase("megatron", operation, "apply_client_and_rank_rng_state", rank=rank, step=step):
+                with io.open_file(extra_state_path, "rb") as f:
+                    extra_state = torch.load(f, weights_only=False)
+                states = extra_state.get("client_state", {}) or {}
+                self.log("Loaded client state (ZClip / StaleClip) from checkpoint.")
 
         return ckpt_dir, states
 

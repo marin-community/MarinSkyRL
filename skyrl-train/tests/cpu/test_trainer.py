@@ -619,6 +619,8 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
 
 def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed():
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron"}})
+    trainer.global_step = 6
     trainer.all_metrics = {}
     trainer.all_timings = {}
     trainer._checkpoint_save_failures = 0.0
@@ -651,6 +653,8 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
 
 def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron"}})
+    trainer.global_step = 6
     trainer.all_metrics = {}
     trainer.all_timings = {}
     trainer._checkpoint_save_failures = 0.0
