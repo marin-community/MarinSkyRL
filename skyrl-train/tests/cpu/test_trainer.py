@@ -1547,6 +1547,7 @@ def test_normalize_mini_batch_size():
     # Test Case 2: Basic valid configuration for CriticWorker
     critic_worker = create_critic_worker_with_config(
         train_batch_size=128,
+        critic_mini_batch_size=8,
         micro_train_batch_size_per_gpu=2,
         n_samples_per_prompt=2,
         dp_size=4,
