@@ -6,7 +6,7 @@ from datasets import Dataset, load_dataset
 from omegaconf import OmegaConf
 
 from infra.rl_data import pivot_swe
-from infra.rl_data.sources import prepare_pivot_swe_row
+from infra.rl_data.sources import prepare_pivot_row
 from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraEnv
 from skyrl_gym.verification import RolloutEvidence
 
@@ -27,7 +27,7 @@ def _raw_row(trajectory_id):
 
 
 def test_prepared_swe_pivot_uses_local_action_grader():
-    row = prepare_pivot_swe_row(_raw_row(7), 3)
+    row = prepare_pivot_row(_raw_row(7), 3, dataset="swe")
     env = NemotronUltraEnv(OmegaConf.create({}), extras={"extra_info": row["extra_info"]})
     assert env.init(row["prompt"])[1]["chat_completion_params"]["tools"][0]["name"] == "execute_bash"
 
@@ -74,13 +74,13 @@ def test_smoke_sample_splits_trajectory_ids_and_writes_parquet(tmp_path, monkeyp
 
 def test_initial_qwen_rewards_select_only_mixed_pivots_and_keep_predictions(tmp_path):
     candidate_path = tmp_path / "train.parquet"
-    Dataset.from_list([prepare_pivot_swe_row(_raw_row(index), index) for index in (1, 2, 3)]).to_parquet(
+    Dataset.from_list([prepare_pivot_row(_raw_row(index), index, dataset="swe") for index in (1, 2, 3)]).to_parquet(
         str(candidate_path)
     )
     evaluation_path = tmp_path / "eval.jsonl"
     with evaluation_path.open("w") as destination:
         for index, rewards in ((1, (1, 0)), (2, (0, 0)), (3, (0, 1))):
-            extra_info = prepare_pivot_swe_row(_raw_row(index), index)["extra_info"]
+            extra_info = prepare_pivot_row(_raw_row(index), index, dataset="swe")["extra_info"]
             for reward in rewards:
                 destination.write(
                     json.dumps(

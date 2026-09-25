@@ -27,17 +27,19 @@ from skyrl_gym.envs.nemotron_ultra.math_with_judge import grade_math
 from skyrl_gym.envs.nemotron_ultra.mcqa import grade_mcqa
 from skyrl_gym.envs.nemotron_ultra.nvarc import grade_inductive_arc, grade_transductive_arc
 from skyrl_gym.envs.nemotron_ultra.ns_tools import execute_python_calls
+from skyrl_gym.envs.nemotron_ultra.pivot import (
+    TERMINAL_AGENT,
+    TOOL_COMPARISON_THRESHOLDS,
+    grade_pivot_response,
+    pivot_assistant_message,
+)
 from skyrl_gym.envs.nemotron_ultra.rdkit_chemistry import grade_rdkit_chemistry
 from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
+from skyrl_gym.envs.nemotron_ultra.terminal_pivot import grade_terminal_pivot
 from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
 from skyrl_gym.verification import RolloutEvidence, VerificationResult
 
-_TOOL_COMPARISON_AGENTS = {
-    "single_step_tool_use_with_argument_comparison_agent",
-    "swe_pivot_single_step_tool_use_with_argument_comparison_agent",
-    "toolcall_schema_single_step_tool_use_with_argument_comparison_agent",
-}
 _FORMAT_AGENTS = {"citation_format_simple_agent", "freeform_formatting_simple_agent"}
 _STRUCTURED_OUTPUT_AGENTS = {"structured_outputs_simple_agent", "structured_outputs_v3_simple_agent"}
 _JAILBREAK_AGENTS = {
@@ -73,6 +75,7 @@ class NemotronUltraEnv(BaseTextEnv):
         if ultra.get("route") != "skyrl_gym":
             raise ValueError("terminal-bench Nemotron Ultra rows must not execute in the SkyRL Gym environment")
         self.agent = str(ultra["agent"])
+        self.pivot_dataset = ultra.get("pivot_dataset")
         self.record = self._decode_mapping(ultra.get("record_json"), "record_json")
         self.request = self._decode_mapping(ultra.get("request_json"), "request_json")
         self.evidence: RolloutEvidence | None = None
@@ -195,12 +198,19 @@ class NemotronUltraEnv(BaseTextEnv):
                     verification=VerificationResult.unavailable("failed Lean attempt will be replaced by a correction"),
                     reset_conversation=[{"role": "user", "content": correction_prompt}],
                 )
-        elif self.agent in _TOOL_COMPARISON_AGENTS:
+        elif self.pivot_dataset is not None:
+            reward, details = grade_pivot_response(self.pivot_dataset, self.record, self._assistant_message(action))
+            diagnostics.update(details)
+        elif self.agent in TOOL_COMPARISON_THRESHOLDS:
             reward, category = grade_expected_action(
                 self.record["expected_action"],
                 self._assistant_message(action),
             )
             diagnostics["category"] = category.value
+        elif self.agent == TERMINAL_AGENT:
+            message = pivot_assistant_message(self._assistant_message(action))
+            reward, details = grade_terminal_pivot(message["content"] or "", self.record)
+            diagnostics.update(details)
         elif self.agent == "calendar_simple_agent":
             reward, reason = grade_calendar(action, self.record["exp_cal_state"])
             diagnostics["reason"] = reason

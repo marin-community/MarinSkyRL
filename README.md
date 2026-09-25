@@ -25,6 +25,9 @@ This is a fork of SkyRL maintained for the [Marin project](https://github.com/ma
 
 MarinSkyRL is maintained as a hard snapshot; no upstream sync or merge-back is planned.
 
+See [Pivot dataset verifiers](docs/pivot-verifiers.md) for local sampling, grading, and training-row preparation
+for the four public NVIDIA agentic Pivot datasets.
+
 ## MarinSkyRL packaging
 
 The repository root builds one `marinskyrl` wheel containing the typed Iris launcher, `skyrl_train`, and
