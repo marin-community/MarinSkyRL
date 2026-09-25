@@ -36,6 +36,7 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from dataclasses import dataclass, field
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpointCallback
+from skyrl_train.checkpoint_generation import resolve_checkpoint_payload
 from torchdata.stateful_dataloader import StatefulDataLoader
 from typing import List, Literal, Tuple, TypeVar
 from enum import Enum, auto
@@ -449,6 +450,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     # Set at startup when generator.weight_sync_transport is expert_block.
     _expert_block_sync: ExpertBlockSync | None = None
 
+    def _defers_megatron_checkpoint_commit(self) -> bool:
+        # This loop overlaps rollout producers with training. It cannot use the
+        # synchronous loop's late-step publication barrier without a separate
+        # producer-state quiescence protocol.
+        return False
+
     def __init__(self, *args, **kwargs):
         # Extract cfg before base init so we can initialize async-specific knobs used by our overrides.
         cfg = kwargs.get("cfg", args[0] if len(args) > 0 else None)
@@ -546,6 +553,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Register buffer checkpoint callback for saving/restoring generation buffer on resume
         self._buffer_checkpoint_callback = BufferCheckpointCallback()
         self.callback_handler.add_callback(self._buffer_checkpoint_callback)
+        self._required_checkpoint_callback_files = {
+            DataTrackingCallback.ARTIFACT_NAME,
+            BufferCheckpointCallback.ARTIFACT_NAME,
+        }
         self._pending_buffer_restore_path = None
         self._staleness_manager = _AsyncStalenessManager(
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
@@ -657,7 +668,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 )
             return
         checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{target_step}")
-        await callback.flush_to_checkpoint(checkpoint_path)
+        payload_path = await asyncio.to_thread(resolve_checkpoint_payload, checkpoint_path)
+        await callback.flush_to_checkpoint(payload_path)
 
     async def shutdown(self) -> None:
         """Bank the compatible async buffer before releasing trainer resources."""

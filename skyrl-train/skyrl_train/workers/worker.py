@@ -1446,7 +1446,8 @@ class PolicyWorkerBase(Worker):
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.TRAINING_STEP_EXIT)
         return status
 
-    def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
+    def save_checkpoint(self, ckpt_dir: Path, tokenizer=None) -> int:
+        """Start the rank-local save and return this rank as its completion receipt."""
         # Persist ZClip / StaleClip state alongside the model so warmup
         # counters and EMA stats survive chain-restarts. Without this,
         # warmup_buffer resets to [] on every resume and (with default
@@ -1468,6 +1469,7 @@ class PolicyWorkerBase(Worker):
             client_state=client_state,
         )
         self._start_checkpoint_upload(upload)
+        return self._rank
 
     def load_checkpoint(
         self,
@@ -1686,7 +1688,8 @@ class CriticWorkerBase(Worker):
             status["raw_grad_norm"] = grad_norm
         return status
 
-    def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
+    def save_checkpoint(self, ckpt_dir: str, tokenizer=None) -> int:
+        """Start the rank-local save and return this rank as its completion receipt."""
         upload = self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
@@ -1696,6 +1699,7 @@ class CriticWorkerBase(Worker):
             tokenizer=tokenizer,
         )
         self._start_checkpoint_upload(upload)
+        return self._rank
 
     def load_checkpoint(
         self,

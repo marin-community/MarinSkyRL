@@ -5,9 +5,11 @@ uv  run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer.py
 import contextlib
 import asyncio
 import threading
+import time
 from pathlib import Path
 import collections
 import gc
+import random
 import weakref
 from types import SimpleNamespace
 
@@ -23,6 +25,7 @@ from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.group_admission import GroupAdmissionStalledError, GroupAdvantageInvariant
 import skyrl_train.trainer as trainer_module
 from skyrl_train.trainer import CheckpointSnapshot, RayPPOTrainer
+from skyrl_train.checkpoint_generation import COMMIT_FILENAME, commit_attempt, resolve_checkpoint_payload
 from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.utils.policy_losses import ppo_policy_loss
 from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch, TrainingOutputBatch
@@ -583,6 +586,8 @@ class _ResidencyInferenceClient:
 @pytest.mark.parametrize("save_error", [None, RuntimeError("storage of size 0")])
 def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_residency(save_error, monkeypatch):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron"}})
+    trainer.global_step = 1
     trainer.colocate_all = True
     trainer.policy_model = _ResidencyPolicyGroup()
     trainer.inference_engine_client = _ResidencyInferenceClient()
@@ -591,7 +596,7 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
     monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
     save_observations = []
 
-    def snapshot_checkpoint():
+    def save_checkpoint_payloads():
         save_observations.append(
             (
                 trainer.policy_model.model_on_gpu,
@@ -602,7 +607,7 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
         if save_error is not None:
             raise save_error
 
-    trainer._snapshot_checkpoint = snapshot_checkpoint
+    trainer._save_checkpoint_payloads = save_checkpoint_payloads
 
     if save_error is None:
         asyncio.run(trainer._save_checkpoints_with_residency())
@@ -617,23 +622,37 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
     assert trainer.inference_engine_client.wake_tags == [["weights"], ["kv_cache"]]
 
 
-def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed():
+def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(tmp_path):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {"trainer": {"strategy": "fsdp2", "ckpt_path": str(tmp_path), "max_ckpts_to_keep": -1}}
+    )
+    trainer.global_step = 6
     trainer.all_metrics = {}
     trainer.all_timings = {}
     trainer._checkpoint_save_failures = 0.0
+    trainer._last_optimizer_step_finished_at = None
+    trainer._last_saved_step = None
     trainer._pending_checkpoint_upload = None
     attempts = 0
     saved_steps = []
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
 
     async def save_with_residency():
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise OSError("AccessDenied")
+        step_dir = tmp_path / "global_step_6"
+        attempt_dir = Path(trainer_module.new_attempt_path(str(step_dir)))
+        attempt_dir.mkdir(parents=True)
+        trainer._active_checkpoint_payload_path = str(attempt_dir)
+        trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
+        torch.save({"global_step": 6}, attempt_dir / trainer_module.TRAINER_STATE_FILENAME)
 
     async def call_event_async(event, state, control, **_kwargs):
         assert event == "on_save"
+        assert not latest.exists()
         saved_steps.append(state.global_step)
         return control
 
@@ -647,16 +666,19 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
     assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
     asyncio.run(trainer._save_intermediate_checkpoint(state))
     assert saved_steps == [6]
+    assert latest.read_text() == "6"
 
 
 def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron"}})
+    trainer.global_step = 6
     trainer.all_metrics = {}
     trainer.all_timings = {}
     trainer._checkpoint_save_failures = 0.0
     trainer._pending_checkpoint_upload = None
 
-    async def fail_save():
+    async def fail_save(**_kwargs):
         raise ValueError("invalid checkpoint state")
 
     trainer._save_checkpoints_with_residency = fail_save
@@ -668,68 +690,663 @@ def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
     assert trainer.all_metrics == {}
 
 
+def test_dataloader_save_failure_preserves_previous_latest_checkpoint(tmp_path, monkeypatch):
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    latest = checkpoint_root / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("0")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "fsdp2", "ckpt_path": str(checkpoint_root)}})
+    trainer.global_step = 1
+    trainer.policy_model = SimpleNamespace(async_run_ray_method=lambda *args, **kwargs: [0])
+    trainer.critic_model = None
+    trainer.tokenizer = None
+
+    def fail_dataloader_state():
+        raise OSError("dataloader state unavailable")
+
+    trainer.train_dataloader = SimpleNamespace(state_dict=fail_dataloader_state)
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+    monkeypatch.setattr(trainer_module.ray, "wait", lambda refs, **_kwargs: (refs[:1], refs[1:]))
+
+    with pytest.raises(OSError, match="dataloader state unavailable"):
+        trainer.save_checkpoints()
+
+    assert latest.read_text() == "0"
+    assert not (checkpoint_root / "global_step_1" / trainer_module.TRAINER_STATE_FILENAME).exists()
+
+
+@pytest.mark.parametrize("worker_class", [PolicyWorkerBase, CriticWorkerBase])
+def test_checkpoint_worker_returns_global_rank_receipt_after_save(tmp_path, worker_class):
+    worker = worker_class.__new__(worker_class)
+    worker._rank = 3
+    worker._local_rank = 1
+    worker.model = object()
+    worker.optimizer = object()
+    worker.scheduler = object()
+    worker.strategy = SimpleNamespace(save_checkpoint=lambda **_kwargs: None)
+
+    assert worker.save_checkpoint(tmp_path) == 3
+
+
+@pytest.mark.parametrize("omit_optimizer", [False, True])
+def test_fully_versioned_fsdp_save_commits_only_complete_rank_files(tmp_path, monkeypatch, omit_optimizer):
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    latest = checkpoint_root / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("0")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {"trainer": {"strategy": "fsdp2", "ckpt_path": str(checkpoint_root), "max_ckpts_to_keep": -1}}
+    )
+    trainer.global_step = 1
+    trainer.critic_model = None
+    trainer.tokenizer = None
+    trainer.train_dataloader = SimpleNamespace(state_dict=lambda: {"cursor": 1})
+    trainer._pending_sync_prompts = []
+    trainer.distillation_scored_tokens_total = 0
+    trainer._domain_balancer = None
+    trainer._last_optimizer_step_finished_at = None
+    trainer.all_timings = {}
+
+    def save_rank(_dispatch, _method, *, ckpt_dir=None, tokenizer=None):
+        if _method == "wait_checkpoint_upload":
+            return [0]
+        assert _method == "save_checkpoint"
+        assert ckpt_dir is not None
+        del tokenizer
+        policy_dir = Path(ckpt_dir)
+        policy_dir.mkdir(parents=True)
+        for name in ("model", "extra_state") if omit_optimizer else ("model", "optim", "extra_state"):
+            (policy_dir / f"{name}_world_size_1_rank_0.pt").write_bytes(b"state")
+        (policy_dir / "fsdp_config.json").write_text("{}")
+        return [0]
+
+    trainer.policy_model = SimpleNamespace(async_run_ray_method=save_rank)
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+    monkeypatch.setattr(trainer_module.ray, "wait", lambda refs, **_kwargs: (refs[:1], refs[1:]))
+
+    if omit_optimizer:
+        with pytest.raises(RuntimeError, match="optim_world_size_1_rank_0.pt"):
+            trainer.save_checkpoints()
+        assert latest.read_text() == "0"
+        assert not (checkpoint_root / "global_step_1" / COMMIT_FILENAME).exists()
+    else:
+        trainer.save_checkpoints()
+        assert latest.read_text() == "1"
+        payload = resolve_checkpoint_payload(str(checkpoint_root / "global_step_1"), verify_files=True)
+        assert Path(payload, "policy", "model_world_size_1_rank_0.pt").read_bytes() == b"state"
+
+
+@pytest.mark.parametrize("failed_phase", ["snapshot", "upload"])
+def test_fsdp_failed_rank_settles_peers_before_same_step_retry(tmp_path, monkeypatch, failed_phase):
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    latest = checkpoint_root / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("0")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "strategy": "fsdp2",
+                "ckpt_path": str(checkpoint_root),
+                "max_ckpts_to_keep": -1,
+                "distributed": {"worker_collective_timeout_seconds": 10},
+            }
+        }
+    )
+    trainer.global_step = 1
+    trainer.critic_model = None
+    trainer.tokenizer = None
+    trainer.train_dataloader = SimpleNamespace(state_dict=lambda: {"cursor": 1})
+    trainer._pending_sync_prompts = []
+    trainer.distillation_scored_tokens_total = 0
+    trainer._domain_balancer = None
+    trainer._last_optimizer_step_finished_at = None
+    trainer.all_timings = {}
+
+    pending_refs = set()
+    attempts = []
+
+    def worker(_dispatch, method, *, ckpt_dir=None, tokenizer=None):
+        del tokenizer
+        if method == "save_checkpoint":
+            # A new attempt is unsafe while any previous rank is still active.
+            assert not pending_refs
+            attempt = len(attempts) + 1
+            attempt_path = Path(ckpt_dir).parent
+            attempts.append(attempt_path)
+            policy_dir = Path(ckpt_dir)
+            policy_dir.mkdir(parents=True)
+            for rank in range(2):
+                for name in ("model", "optim", "extra_state"):
+                    (policy_dir / f"{name}_world_size_2_rank_{rank}.pt").write_bytes(b"state")
+            (policy_dir / "fsdp_config.json").write_text("{}")
+            refs = [("snapshot", attempt, rank) for rank in range(2)]
+        elif method == "wait_checkpoint_upload":
+            attempt = len(attempts)
+            refs = [("upload", attempt, rank) for rank in range(2)]
+        else:
+            raise AssertionError(method)
+        pending_refs.update(refs)
+        return refs
+
+    def get_ref(ref):
+        pending_refs.remove(ref)
+        phase, attempt, rank = ref
+        if attempt == 1 and phase == failed_phase and rank == 0:
+            raise OSError("injected rank failure")
+        return rank if phase == "snapshot" else None
+
+    trainer.policy_model = SimpleNamespace(async_run_ray_method=worker)
+    monkeypatch.setattr(trainer_module.ray, "wait", lambda refs, **_kwargs: (refs[:1], refs[1:]))
+    monkeypatch.setattr(trainer_module.ray, "get", get_ref)
+
+    with pytest.raises(OSError, match="injected rank failure"):
+        trainer.save_checkpoints()
+    assert not pending_refs
+    assert latest.read_text() == "0"
+    assert not (checkpoint_root / "global_step_1" / COMMIT_FILENAME).exists()
+
+    trainer.save_checkpoints()
+    assert not pending_refs
+    assert latest.read_text() == "1"
+    assert len(attempts) == 2 and attempts[0] != attempts[1]
+    assert resolve_checkpoint_payload(str(checkpoint_root / "global_step_1"), verify_files=True) == str(attempts[1])
+
+
+@pytest.mark.parametrize("missing_file", [None, "__1_0.distcp", "common.pt", "metadata.json"])
+def test_fully_versioned_megatron_save_requires_rank_and_common_state(tmp_path, monkeypatch, missing_file):
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    latest = checkpoint_root / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("0")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {"trainer": {"strategy": "megatron", "ckpt_path": str(checkpoint_root), "max_ckpts_to_keep": -1}}
+    )
+    trainer.global_step = 1
+    trainer.critic_model = None
+    trainer.tokenizer = None
+    trainer.train_dataloader = SimpleNamespace(state_dict=lambda: {"cursor": 1})
+    trainer._pending_sync_prompts = []
+    trainer.distillation_scored_tokens_total = 0
+    trainer._domain_balancer = None
+    trainer._last_optimizer_step_finished_at = None
+    trainer.all_timings = {}
+
+    def save_ranks(_dispatch, _method, *, ckpt_dir, tokenizer):
+        del tokenizer
+        policy_dir = Path(ckpt_dir)
+        policy_dir.mkdir(parents=True)
+        for name in (
+            ".metadata",
+            "__0_0.distcp",
+            "__1_0.distcp",
+            "common.pt",
+            "metadata.json",
+            "extra_state.pt",
+            "huggingface/config.json",
+        ):
+            if name != missing_file:
+                target = policy_dir / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"state")
+        return [0, 1]
+
+    trainer.policy_model = SimpleNamespace(async_run_ray_method=save_ranks)
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+    monkeypatch.setattr(trainer_module.ray, "wait", lambda refs, **_kwargs: (refs[:1], refs[1:]))
+
+    if missing_file is not None:
+        with pytest.raises(RuntimeError, match=missing_file):
+            trainer.save_checkpoints()
+        assert latest.read_text() == "0"
+        assert not (checkpoint_root / "global_step_1" / COMMIT_FILENAME).exists()
+    else:
+        trainer.save_checkpoints()
+        assert latest.read_text() == "1"
+        payload = resolve_checkpoint_payload(str(checkpoint_root / "global_step_1"), verify_files=True)
+        assert Path(payload, "policy", "__1_0.distcp").read_bytes() == b"state"
+
+
+def test_on_save_callback_failure_does_not_publish_partial_checkpoint(tmp_path):
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("1")
+    previous = tmp_path / "global_step_1"
+    previous.mkdir()
+    (previous / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"previous")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "fsdp2", "ckpt_path": str(tmp_path)}})
+    trainer.global_step = 2
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer._checkpoint_save_failures = 0.0
+    trainer._pending_checkpoint_upload = None
+    trainer._control = SimpleNamespace()
+    step_dir = tmp_path / "global_step_2"
+
+    async def save_payloads():
+        attempt_dir = Path(trainer_module.new_attempt_path(str(step_dir)))
+        attempt_dir.mkdir(parents=True)
+        trainer._active_checkpoint_payload_path = str(attempt_dir)
+        trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
+        torch.save({"global_step": 2}, attempt_dir / trainer_module.TRAINER_STATE_FILENAME)
+
+    async def fail_callback(event, state, control, **_kwargs):
+        assert event == "on_save"
+        (Path(trainer._active_checkpoint_payload_path) / "data_consumption_state.pt").write_bytes(b"partial")
+        raise OSError("callback write failed")
+
+    trainer._save_checkpoints_with_residency = save_payloads
+    trainer.callback_handler = SimpleNamespace(call_event_async=fail_callback)
+
+    asyncio.run(trainer._save_intermediate_checkpoint(SimpleNamespace(global_step=2)))
+
+    assert latest.read_text() == "1"
+    assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
+    assert resolve_checkpoint_payload(str(previous)) == str(previous)
+    assert not (step_dir / COMMIT_FILENAME).exists()
+
+
+def test_megatron_commit_captures_rng_after_late_step_callbacks(tmp_path):
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    torch_state = torch.get_rng_state()
+    try:
+        random.seed(37)
+        np.random.seed(37)
+        torch.manual_seed(37)
+        latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+        latest.write_text("1")
+        trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+        trainer.cfg = OmegaConf.create(
+            {"trainer": {"strategy": "megatron", "ckpt_path": str(tmp_path), "max_ckpts_to_keep": -1}}
+        )
+        trainer.global_step = 2
+        trainer.all_metrics = {}
+        trainer.all_timings = {}
+        trainer._checkpoint_save_failures = 0.0
+        trainer._pending_checkpoint_upload = None
+        trainer._last_optimizer_step_finished_at = None
+        trainer._last_saved_step = None
+        trainer.eval_dataset = object()
+        trainer._control = SimpleNamespace(
+            reset=lambda: None,
+            should_save=True,
+            should_save_hf_model=False,
+            should_evaluate=False,
+        )
+        exported_steps = []
+
+        def draw():
+            random.random()
+            np.random.random()
+            torch.rand(1)
+
+        async def save_payloads(**_kwargs):
+            attempt = Path(trainer_module.new_attempt_path(str(tmp_path / "global_step_2")))
+            attempt.mkdir(parents=True)
+            trainer._active_checkpoint_payload_path = str(attempt)
+            trainer._checkpoint_required_files = {
+                trainer_module.TRAINER_STATE_FILENAME,
+                trainer_module.DRIVER_RNG_STATE_FILENAME,
+                "data.pt",
+            }
+            torch.save({"global_step": 2}, attempt / trainer_module.TRAINER_STATE_FILENAME)
+            torch.save({"cursor": 2}, attempt / "data.pt")
+
+        async def callback(event, _state, control, **_kwargs):
+            if event == "on_save":
+                control.should_save_hf_model = True
+                control.should_evaluate = True
+                draw()
+            elif event == "on_evaluate":
+                draw()
+            return control
+
+        async def evaluate():
+            draw()
+            return {"eval/score": 1.0}
+
+        def export(step):
+            exported_steps.append(step)
+            draw()
+
+        trainer._save_checkpoints_with_residency = save_payloads
+        trainer._write_checkpoint_continuation_state = lambda step, **_kwargs: torch.save(
+            {"global_step": step}, Path(trainer._active_checkpoint_payload_path, trainer_module.TRAINER_STATE_FILENAME)
+        )
+        trainer.callback_handler = SimpleNamespace(call_event_async=callback)
+        trainer.eval = evaluate
+        trainer.handle_hf_export = export
+
+        asyncio.run(trainer._run_step_end_callbacks(SimpleNamespace(global_step=2)))
+        assert latest.read_text() == "1"
+        assert not (tmp_path / "global_step_2" / COMMIT_FILENAME).exists()
+        draw()  # on_log
+        draw()  # on_epoch_end
+        trainer.global_step = 3
+        asyncio.run(trainer._publish_pending_megatron_checkpoint())
+
+        assert latest.read_text() == "2"
+        assert exported_steps == [2]
+        payload = resolve_checkpoint_payload(str(tmp_path / "global_step_2"), verify_files=True)
+        with open(Path(payload, trainer_module.DRIVER_RNG_STATE_FILENAME), "rb") as source:
+            saved = torch.load(source, map_location="cpu", weights_only=False)
+        expected_next = (random.random(), np.random.random(), torch.rand(1).item())
+        trainer_module._restore_driver_rng_state(saved)
+        assert (random.random(), np.random.random(), torch.rand(1).item()) == expected_next
+
+        random.seed(100)
+        np.random.seed(100)
+        torch.manual_seed(100)
+        resumed = RayPPOTrainer.__new__(RayPPOTrainer)
+        resumed.cfg = OmegaConf.create(
+            {
+                "trainer": {
+                    "strategy": "megatron",
+                    "ckpt_path": str(tmp_path),
+                    "resume_path": str(tmp_path / "global_step_2"),
+                    "restore_dataloader_state": True,
+                }
+            }
+        )
+        resumed.resume_mode = ResumeMode.FROM_PATH
+        resumed.colocate_all = True
+        resumed.train_dataloader = SimpleNamespace(load_state_dict=lambda _state: None)
+        resumed.policy_model = SimpleNamespace(async_run_ray_method=lambda *_args, **_kwargs: [])
+        resumed.critic_model = None
+        resumed._domain_balancer = None
+        resumed._offload_policy_optimizer = lambda *_args, **_kwargs: None
+        with patch("skyrl_train.trainer.ray.get", return_value=None):
+            loaded_step, _ = resumed.load_checkpoints()
+        assert loaded_step == 2
+        assert (random.random(), np.random.random(), torch.rand(1).item()) == expected_next
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+        torch.set_rng_state(torch_state)
+
+
+def test_megatron_rng_write_failure_keeps_previous_checkpoint_published(tmp_path):
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("1")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {"trainer": {"strategy": "megatron", "ckpt_path": str(tmp_path), "max_ckpts_to_keep": -1}}
+    )
+    trainer.global_step = 3
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer._checkpoint_save_failures = 0.0
+    trainer._pending_megatron_checkpoint_commit = trainer_module.PendingMegatronCommit(
+        step=2,
+        state=SimpleNamespace(global_step=2),
+        requested_at=time.perf_counter(),
+        requested_unix=time.time(),
+    )
+    attempt = Path(trainer_module.new_attempt_path(str(tmp_path / "global_step_2")))
+    attempt.mkdir(parents=True)
+    (attempt / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"trainer")
+    trainer._active_checkpoint_payload_path = str(attempt)
+    trainer._checkpoint_required_files = {
+        trainer_module.TRAINER_STATE_FILENAME,
+        trainer_module.DRIVER_RNG_STATE_FILENAME,
+    }
+
+    def fail_write(_state):
+        raise OSError("driver RNG upload failed")
+
+    trainer._write_driver_rng_state = fail_write
+    trainer._write_checkpoint_continuation_state = lambda _step, **_kwargs: None
+    trainer.callback_handler = SimpleNamespace(call_event_async=AsyncMock())
+    trainer._control = SimpleNamespace()
+    asyncio.run(trainer._publish_pending_megatron_checkpoint())
+
+    assert latest.read_text() == "1"
+    assert not (tmp_path / "global_step_2" / COMMIT_FILENAME).exists()
+    assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
+
+
+def test_megatron_late_callback_failure_does_not_publish_checkpoint(tmp_path):
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("1")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron", "ckpt_path": str(tmp_path)}})
+    trainer.global_step = 2
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer._pending_checkpoint_upload = None
+    trainer._control = SimpleNamespace(
+        reset=lambda: None,
+        should_save=True,
+        should_save_hf_model=False,
+        should_evaluate=True,
+    )
+    trainer.eval_dataset = object()
+
+    async def save_payloads(**_kwargs):
+        attempt = Path(trainer_module.new_attempt_path(str(tmp_path / "global_step_2")))
+        attempt.mkdir(parents=True)
+        trainer._active_checkpoint_payload_path = str(attempt)
+        trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
+        (attempt / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"trainer")
+
+    async def callback(event, _state, control, **_kwargs):
+        if event == "on_evaluate":
+            raise RuntimeError("evaluation callback failed")
+        return control
+
+    trainer._save_checkpoints_with_residency = save_payloads
+    trainer.callback_handler = SimpleNamespace(call_event_async=callback)
+    trainer.eval = AsyncMock(return_value={"eval/score": 1.0})
+
+    with pytest.raises(RuntimeError, match="evaluation callback failed"):
+        asyncio.run(trainer._run_step_end_callbacks(SimpleNamespace(global_step=2)))
+
+    assert latest.read_text() == "1"
+    assert not (tmp_path / "global_step_2" / COMMIT_FILENAME).exists()
+
+
+def test_retention_failure_does_not_undo_published_checkpoint(tmp_path):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "fsdp2", "ckpt_path": str(tmp_path)}})
+    trainer.global_step = 2
+    trainer.all_timings = {}
+    trainer._last_optimizer_step_finished_at = None
+    trainer._last_saved_step = None
+
+    def fail_cleanup():
+        raise OSError("retention unavailable")
+
+    trainer._cleanup_old_checkpoints = fail_cleanup
+    step_dir = tmp_path / "global_step_2"
+    attempt_dir = Path(trainer_module.new_attempt_path(str(step_dir)))
+    attempt_dir.mkdir(parents=True)
+    (attempt_dir / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"trainer")
+    trainer._active_checkpoint_payload_path = str(attempt_dir)
+    trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
+    trainer._publish_checkpoint()
+
+    assert (tmp_path / trainer_module.LATEST_CHECKPOINT_FILE).read_text() == "2"
+    assert trainer._last_saved_step == 2
+
+
+def test_same_step_replacement_commits_without_rewriting_latest(tmp_path, monkeypatch):
+    step_path = tmp_path / "global_step_2"
+    previous_attempt = Path(trainer_module.new_attempt_path(str(step_path)))
+    previous_attempt.mkdir(parents=True)
+    (previous_attempt / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"previous")
+    commit_attempt(str(step_path), str(previous_attempt), required_files={trainer_module.TRAINER_STATE_FILENAME})
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("2")
+
+    replacement = Path(trainer_module.new_attempt_path(str(step_path)))
+    replacement.mkdir(parents=True)
+    (replacement / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"replacement")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron", "ckpt_path": str(tmp_path)}})
+    trainer.global_step = 2
+    trainer.all_timings = {}
+    trainer._last_optimizer_step_finished_at = None
+    trainer._last_saved_step = None
+    trainer._cleanup_old_checkpoints = lambda: None
+    trainer._active_checkpoint_payload_path = str(replacement)
+    trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
+
+    original_write = trainer_module.io.write_bytes_atomic
+
+    def fail_redundant_pointer_write(path, payload):
+        if path == str(latest):
+            raise OSError("redundant latest pointer write failed")
+        original_write(path, payload)
+
+    monkeypatch.setattr(trainer_module.io, "write_bytes_atomic", fail_redundant_pointer_write)
+    trainer._publish_checkpoint()
+
+    assert latest.read_text() == "2"
+    assert resolve_checkpoint_payload(str(step_path), verify_files=True) == str(replacement)
+    assert (previous_attempt / trainer_module.TRAINER_STATE_FILENAME).read_bytes() == b"previous"
+
+
+def test_stale_checkpoint_writer_cannot_replace_newer_latest(tmp_path):
+    step_path = tmp_path / "global_step_2"
+    previous_attempt = Path(trainer_module.new_attempt_path(str(step_path)))
+    previous_attempt.mkdir(parents=True)
+    (previous_attempt / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"previous")
+    commit_attempt(str(step_path), str(previous_attempt), required_files={trainer_module.TRAINER_STATE_FILENAME})
+    previous_commit = (step_path / COMMIT_FILENAME).read_bytes()
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("3")
+
+    replacement = Path(trainer_module.new_attempt_path(str(step_path)))
+    replacement.mkdir(parents=True)
+    (replacement / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"replacement")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "megatron", "ckpt_path": str(tmp_path)}})
+    trainer.global_step = 2
+    trainer.all_timings = {}
+    trainer._last_optimizer_step_finished_at = None
+    trainer._active_checkpoint_payload_path = str(replacement)
+    trainer._checkpoint_required_files = {trainer_module.TRAINER_STATE_FILENAME}
+
+    with pytest.raises(RuntimeError, match="older step"):
+        trainer._publish_checkpoint()
+
+    assert latest.read_text() == "3"
+    assert (step_path / COMMIT_FILENAME).read_bytes() == previous_commit
+    assert resolve_checkpoint_payload(str(step_path), verify_files=True) == str(previous_attempt)
+
+
+def _pending_fsdp_snapshot(tmp_path, step, *, optimizer_step_finished_at=None):
+    step_path = tmp_path / f"global_step_{step}"
+    attempt_path = Path(trainer_module.new_attempt_path(str(step_path)))
+    (attempt_path / "policy").mkdir(parents=True)
+    model_file = attempt_path / "policy" / "model_world_size_1_rank_0.pt"
+    snapshot = CheckpointSnapshot(
+        step=step,
+        step_path=str(step_path),
+        attempt_path=str(attempt_path),
+        required_files=frozenset(
+            {"data.pt", trainer_module.TRAINER_STATE_FILENAME, "policy/model_world_size_1_rank_0.pt"}
+        ),
+        upload_started_at=0.0,
+        dataloader_payload=b"data",
+        trainer_state_path=str(attempt_path / trainer_module.TRAINER_STATE_FILENAME),
+        trainer_state_payload=b"trainer",
+        optimizer_step_finished_at=optimizer_step_finished_at,
+    )
+    return snapshot, model_file
+
+
 def test_checkpoint_marker_waits_for_rank_uploads(monkeypatch, tmp_path):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.policy_model = SimpleNamespace(async_run_ray_method=lambda *_args: [object()])
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "strategy": "fsdp2",
+                "ckpt_path": str(tmp_path),
+                "distributed": {"worker_collective_timeout_seconds": 10},
+            }
+        }
+    )
+    upload_ref = object()
+    trainer.policy_model = SimpleNamespace(async_run_ray_method=lambda *_args: [upload_ref])
     trainer.critic_model = None
     trainer._last_saved_step = None
+    trainer._last_optimizer_step_finished_at = None
+    trainer.all_timings = {}
     trainer._cleanup_old_checkpoints = MagicMock()
     upload_started = threading.Event()
     release_upload = threading.Event()
+    optimizer_finished = trainer_module.time.monotonic() - 5
+    snapshot, model_file = _pending_fsdp_snapshot(tmp_path, step=6, optimizer_step_finished_at=optimizer_finished)
+    trainer.global_step = 7
+    trainer._last_optimizer_step_finished_at = (7, trainer_module.time.monotonic())
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
 
-    def wait_for_upload(_refs):
+    def wait_for_upload(refs, *, num_returns, timeout):
+        assert refs == [upload_ref]
+        assert num_returns == 1
         upload_started.set()
-        assert release_upload.wait(timeout=1)
+        assert release_upload.wait(timeout=min(timeout, 5))
+        model_file.write_bytes(b"model")
+        return [upload_ref], []
 
-    monkeypatch.setattr(trainer_module.ray, "get", wait_for_upload)
-    snapshot = CheckpointSnapshot(
-        step=6,
-        upload_started_at=0.0,
-        dataloader_path=str(tmp_path / "global_step_6" / "data.pt"),
-        dataloader_payload=b"data",
-        trainer_state_path=str(tmp_path / "global_step_6" / "trainer_state.pt"),
-        trainer_state_payload=b"trainer",
-        marker_path=str(tmp_path / "latest_ckpt_global_step.txt"),
-    )
+    monkeypatch.setattr(trainer_module.ray, "wait", wait_for_upload)
+    monkeypatch.setattr(trainer_module.ray, "get", lambda ref: None)
 
     async def finish_upload():
         task = asyncio.create_task(trainer._finish_checkpoint_upload(snapshot, commit=True))
-        assert await asyncio.to_thread(upload_started.wait, 1)
-        assert not Path(snapshot.marker_path).exists()
+        assert await asyncio.to_thread(upload_started.wait, 5)
+        assert not latest.exists()
+        assert not (tmp_path / "global_step_6" / COMMIT_FILENAME).exists()
         release_upload.set()
         await task
 
     asyncio.run(finish_upload())
 
-    assert Path(snapshot.dataloader_path).read_bytes() == b"data"
+    assert Path(snapshot.attempt_path, "data.pt").read_bytes() == b"data"
     assert Path(snapshot.trainer_state_path).read_bytes() == b"trainer"
-    assert Path(snapshot.marker_path).read_text() == "6"
+    assert latest.read_text() == "6"
+    assert resolve_checkpoint_payload(snapshot.step_path, verify_files=True) == snapshot.attempt_path
+    assert trainer.all_timings["checkpoint_pointer_lag"] >= 5
     assert trainer._last_saved_step == 6
     trainer._cleanup_old_checkpoints.assert_called_once_with()
 
 
 def test_background_checkpoint_failure_does_not_advance_marker(monkeypatch, tmp_path):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.policy_model = SimpleNamespace(async_run_ray_method=lambda *_args: [object()])
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "strategy": "fsdp2",
+                "ckpt_path": str(tmp_path),
+                "distributed": {"worker_collective_timeout_seconds": 10},
+            }
+        }
+    )
+    upload_ref = object()
+    trainer.policy_model = SimpleNamespace(async_run_ray_method=lambda *_args: [upload_ref])
     trainer.critic_model = None
     trainer._pending_checkpoint_upload = None
     trainer._checkpoint_save_failures = 0.0
     trainer.all_metrics = {}
     trainer.all_timings = {}
+    previous = tmp_path / "global_step_5"
+    previous.mkdir()
+    (previous / trainer_module.TRAINER_STATE_FILENAME).write_bytes(b"previous")
+    latest = tmp_path / trainer_module.LATEST_CHECKPOINT_FILE
+    latest.write_text("5")
+    snapshot, _ = _pending_fsdp_snapshot(tmp_path, step=6)
 
-    def fail_upload(_refs):
+    def fail_upload(ref):
+        assert ref is upload_ref
         raise OSError("AccessDenied")
 
+    monkeypatch.setattr(trainer_module.ray, "wait", lambda refs, *, num_returns, timeout: ([upload_ref], []))
     monkeypatch.setattr(trainer_module.ray, "get", fail_upload)
-    snapshot = CheckpointSnapshot(
-        step=6,
-        upload_started_at=0.0,
-        dataloader_path=str(tmp_path / "global_step_6" / "data.pt"),
-        dataloader_payload=b"data",
-        trainer_state_path=str(tmp_path / "global_step_6" / "trainer_state.pt"),
-        trainer_state_payload=b"trainer",
-        marker_path=str(tmp_path / "latest_ckpt_global_step.txt"),
-    )
     state = SimpleNamespace(global_step=6)
 
     async def drain_failure():
@@ -738,7 +1355,9 @@ def test_background_checkpoint_failure_does_not_advance_marker(monkeypatch, tmp_
 
     asyncio.run(drain_failure())
 
-    assert not Path(snapshot.marker_path).exists()
+    assert latest.read_text() == "5"
+    assert resolve_checkpoint_payload(str(previous)) == str(previous)
+    assert not (tmp_path / "global_step_6" / COMMIT_FILENAME).exists()
     assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
 
 

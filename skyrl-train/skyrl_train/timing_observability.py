@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import json
+import os
+import resource
+import sys
+import time
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
-from dataclasses import dataclass
-from typing import Protocol
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import Iterator, Protocol
 
-from skyrl_train.telemetry import TRAINER_ROLE, phase_duration
+import psutil
+import torch
+from loguru import logger
+
+from skyrl_train.telemetry import DRIVER_ROLE, TRAINER_ROLE, WORKER_ROLE, phase_duration
 
 
 TIMING_PARENTS: dict[str, str | None] = {
@@ -43,6 +53,86 @@ class PhaseTiming:
     duration_seconds: float
     root: str
     parent: str | None
+
+
+@dataclass
+class CheckpointPhaseSample:
+    """Additional data known only after a checkpoint phase completes."""
+
+    bytes_written: int | None = None
+    scratch_bytes: int | None = None
+    failed: bool = False
+    counters: dict[str, float | int] = field(default_factory=dict)
+
+
+def _cgroup_memory_bytes(filename: str) -> int | None:
+    try:
+        with open(os.path.join("/sys/fs/cgroup", filename)) as source:
+            return int(source.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+@contextmanager
+def checkpoint_phase(
+    backend: str,
+    operation: str,
+    phase: str,
+    *,
+    rank: int,
+    step: int | None,
+    started_monotonic: float | None = None,
+    started_unix: float | None = None,
+) -> Iterator[CheckpointPhaseSample]:
+    """Publish a rank-local checkpoint wall span without synchronizing CUDA."""
+    started = time.perf_counter() if started_monotonic is None else started_monotonic
+    started_unix = time.time() if started_unix is None else started_unix
+    sample = CheckpointPhaseSample()
+    outcome = "success"
+    try:
+        yield sample
+    except BaseException:
+        outcome = "failure"
+        raise
+    finally:
+        if sample.failed:
+            outcome = "failure"
+        duration = time.perf_counter() - started
+        try:
+            attributes = {
+                "backend": backend,
+                "operation": operation,
+                "phase": phase,
+                "rank": str(rank),
+                "step": str(step),
+                "outcome": outcome,
+                "clock_domain": "inclusive_wall",
+                "role": WORKER_ROLE if rank >= 0 else DRIVER_ROLE if operation == "export" else TRAINER_ROLE,
+            }
+            phase_duration.record(duration, attributes=attributes)
+            observation = {
+                "schema": "checkpoint_phase_v1",
+                **attributes,
+                "duration_seconds": duration,
+                "started_unix_seconds": started_unix,
+                "ended_unix_seconds": time.time(),
+                "bytes_written": sample.bytes_written,
+                "scratch_bytes": sample.scratch_bytes,
+                "counters": sample.counters,
+                "process_rss_bytes": psutil.Process(os.getpid()).memory_info().rss,
+                "process_peak_rss_since_start_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                * (1 if sys.platform == "darwin" else 1024),
+                "cgroup_memory_current_bytes": _cgroup_memory_bytes("memory.current"),
+                "cgroup_memory_peak_bytes": _cgroup_memory_bytes("memory.peak"),
+                "cuda_allocated_bytes": torch.cuda.memory_allocated() if torch.cuda.is_initialized() else None,
+                "cuda_reserved_bytes": torch.cuda.memory_reserved() if torch.cuda.is_initialized() else None,
+                "cuda_peak_allocated_since_start_bytes": (
+                    torch.cuda.max_memory_allocated() if torch.cuda.is_initialized() else None
+                ),
+            }
+            logger.info("checkpoint_observation {}", json.dumps(observation, sort_keys=True))
+        except Exception:
+            logger.opt(exception=True).warning("Could not publish checkpoint timing")
 
 
 class TimingSink(Protocol):

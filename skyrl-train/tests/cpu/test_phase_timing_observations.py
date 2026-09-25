@@ -1,8 +1,11 @@
 import ast
 import inspect
+import json
 import textwrap
+import time
 
 import pytest
+from loguru import logger
 
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl_train.trainer import RayPPOTrainer
@@ -36,6 +39,40 @@ def test_unknown_spans_are_not_published():
     observations, step = calls[0]
     assert [item.name for item in observations] == ["step"]
     assert step == 7
+
+
+def test_first_resumed_optimizer_step_emits_one_machine_readable_duration():
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.global_step = 5
+    trainer._checkpoint_resumed_from_step = 5
+    trainer._checkpoint_resume_started = time.perf_counter() - 1.0
+    observations = []
+    sink = logger.add(
+        lambda message: observations.append(json.loads(message.record["message"].split(" ", 1)[1])),
+        filter=lambda record: record["message"].startswith("checkpoint_resume_observation "),
+    )
+    try:
+        trainer._log_optimizer_step_completed(epoch=0, training_input={"sequences": [1]}, duration_seconds=0.1)
+        assert observations == []
+
+        trainer.global_step = 6
+        before_optimizer_log = time.monotonic()
+        trainer._log_optimizer_step_completed(epoch=0, training_input={"sequences": [1]}, duration_seconds=0.1)
+        assert trainer._last_optimizer_step_finished_at[0] == 6
+        assert before_optimizer_log <= trainer._last_optimizer_step_finished_at[1] <= time.monotonic()
+        trainer._log_optimizer_step_completed(epoch=0, training_input={"sequences": [1]}, duration_seconds=0.1)
+        assert len(observations) == 1
+        assert observations[0]["schema"] == "checkpoint_resume_v1"
+        assert observations[0]["loaded_step"] == 5
+        assert observations[0]["first_optimizer_step"] == 6
+        assert observations[0]["duration_to_first_optimizer_step_seconds"] >= 1.0
+
+        fresh = RayPPOTrainer.__new__(RayPPOTrainer)
+        fresh.global_step = 1
+        fresh._log_optimizer_step_completed(epoch=0, training_input={"sequences": [1]}, duration_seconds=0.1)
+        assert len(observations) == 1
+    finally:
+        logger.remove(sink)
 
 
 def test_post_step_work_is_published_under_the_step_root():

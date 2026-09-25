@@ -7,7 +7,11 @@ gradients, which are not checkpointed, must be off the device for both calls.
 """
 
 import contextlib
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
+import torch
 
 from tests.cpu.util import stub_megatron_modules
 
@@ -39,7 +43,7 @@ def _load_with_fakes(monkeypatch, tmp_path):
         megatron_strategy, "offload_megatron_grads_to_cpu", lambda model: setattr(grads, "resident", False)
     )
     monkeypatch.setattr(megatron_strategy, "load_megatron_grads_to_gpu", lambda model: setattr(grads, "resident", True))
-    monkeypatch.setattr(megatron_strategy.io, "exists", lambda path: path == str(tmp_path))
+    monkeypatch.setattr(megatron_strategy.io, "exists", lambda path: Path(path).exists())
     monkeypatch.setattr(megatron_strategy.io, "node_cached_read_dir", lambda path, cache: contextlib.nullcontext(path))
     monkeypatch.setattr(
         megatron_strategy.dist_checkpointing,
@@ -62,11 +66,41 @@ def _load_with_fakes(monkeypatch, tmp_path):
     model = SimpleNamespace(actor_module=[module])
     optimizer = _Optimizer(grads)
     scheduler = SimpleNamespace(state_dict=lambda: {}, load_state_dict=lambda state: None)
-    strategy.load_checkpoint(model, str(tmp_path), optimizer=optimizer, scheduler=scheduler)
-    return optimizer, grads
+    _, states = strategy.load_checkpoint(model, str(tmp_path), optimizer=optimizer, scheduler=scheduler)
+    return optimizer, grads, states
 
 
 def test_resume_rebuilds_the_optimizer_state_with_the_gradients_off_the_device(monkeypatch, tmp_path):
-    optimizer, grads = _load_with_fakes(monkeypatch, tmp_path)
+    optimizer, grads, _ = _load_with_fakes(monkeypatch, tmp_path)
     assert optimizer.grads_resident_during == {"sharded_state_dict": False, "load_state_dict": False}
     assert grads.resident, "training needs its gradient buffers back after the optimizer state is restored"
+
+
+def test_resume_returns_replicated_client_state_in_worker_expected_shape(monkeypatch, tmp_path):
+    client_state = {"z_clip_state": {"warmup_buffer": [1.0]}, "stale_clip_state": {"ema": 0.5}}
+    torch.save({"client_state": client_state, "tag": "step-1"}, tmp_path / "extra_state.pt")
+
+    _, _, states = _load_with_fakes(monkeypatch, tmp_path)
+
+    assert states == {"client_state": client_state}
+
+
+def test_rank_rng_selection_preserves_exact_rank_and_maps_resized_dp(monkeypatch):
+    rank_states = [
+        {"coordinates": (0, 0, 0, 0, 0, 0), "generic": "dp0"},
+        {"coordinates": (0, 0, 0, 0, 0, 1), "generic": "dp1"},
+    ]
+    monkeypatch.setattr(megatron_strategy.dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(megatron_strategy, "_rng_parallel_coordinates", lambda: (0, 0, 0, 0, 0, 1))
+    assert megatron_strategy._select_rank_rng_state(rank_states, 1)["generic"] == "dp1"
+
+    monkeypatch.setattr(megatron_strategy.dist, "get_world_size", lambda: 3)
+    monkeypatch.setattr(megatron_strategy, "_rng_parallel_coordinates", lambda: (0, 0, 0, 0, 0, 2))
+    assert megatron_strategy._select_rank_rng_state(rank_states, 2)["generic"] == "dp0"
+
+
+def test_rank_rng_selection_rejects_changed_model_parallel_slice(monkeypatch):
+    monkeypatch.setattr(megatron_strategy.dist, "get_world_size", lambda: 3)
+    monkeypatch.setattr(megatron_strategy, "_rng_parallel_coordinates", lambda: (0, 1, 0, 0, 0, 0))
+    with pytest.raises(ValueError, match="matching model-parallel geometry"):
+        megatron_strategy._select_rank_rng_state([{"coordinates": (0, 0, 0, 0, 0, 0), "generic": "saved"}], 0)
