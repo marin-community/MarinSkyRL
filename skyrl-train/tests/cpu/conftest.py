@@ -1,7 +1,10 @@
+import json
 import os
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import pytest
 from omegaconf import OmegaConf
@@ -13,6 +16,10 @@ os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 import ray  # noqa: E402
 import torch  # noqa: E402
 import torch.distributed as dist  # noqa: E402
+import zstandard  # noqa: E402
+from marinskyrl.environment_contract import TrainingType  # noqa: E402
+from skyrl_train import learner_memory  # noqa: E402
+from skyrl_train import telemetry as training_telemetry  # noqa: E402
 from skyrl_train.distillation import ChosenTokenTeacherEvidence  # noqa: E402
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec  # noqa: E402
 from skyrl_train.trajectory_runners.types import TrajectoryID, VerifierTestCollection  # noqa: E402
@@ -157,3 +164,116 @@ def single_rank_group():
     finally:
         if created:
             dist.destroy_process_group()
+
+
+@dataclass
+class DeliveredTelemetry:
+    """Records the real rigging exporter posted, each with its batch's resource attributes."""
+
+    rows: list[dict] = field(default_factory=list)
+
+    def flush(self) -> list[dict]:
+        assert training_telemetry.telemetry.flush(timeout=5)
+        return self.rows
+
+    def select(self, name: str, **attributes: str) -> list[dict]:
+        return [
+            row
+            for row in self.flush()
+            if row["name"] == name and all(row["attributes"].get(key) == value for key, value in attributes.items())
+        ]
+
+    def values(self, name: str, **attributes: str) -> list[float]:
+        return [row["value"] for row in self.select(name, **attributes)]
+
+
+@pytest.fixture
+def telemetry_endpoint(monkeypatch) -> Iterator[DeliveredTelemetry]:
+    """Point process telemetry at a fake Finelog endpoint that accepts every batch."""
+    exporter = training_telemetry.telemetry
+    exporter.shutdown(timeout=0)
+    delivered = DeliveredTelemetry()
+
+    def post(session, endpoint, *, data, headers, timeout):
+        if headers.get("Content-Encoding") == "zstd":
+            data = zstandard.ZstdDecompressor().decompress(data)
+        envelope = json.loads(data)
+        resource = envelope["resource"]["attributes"]
+        delivered.rows.extend({**row, "resource": resource} for row in envelope["records"])
+        return SimpleNamespace(
+            status_code=200, headers={}, json=lambda: {"batch_id": envelope["batch_id"], "status": "accepted"}
+        )
+
+    monkeypatch.setattr(exporter.requests.Session, "post", post)
+    monkeypatch.setenv("SKYRL_TELEMETRY_ENDPOINT", "http://finelog.test/v1/ingest")
+    monkeypatch.setenv("SKYRL_RUN_ID", "telemetry-test")
+    monkeypatch.setenv("SKYRL_EXECUTION_UID", "test-attempt")
+    monkeypatch.setenv("SKYRL_TRAINING_TYPE", TrainingType.ASYNC.value)
+    yield delivered
+    exporter.shutdown(timeout=0)
+
+
+@pytest.fixture
+def delivered_telemetry(telemetry_endpoint) -> Iterator[DeliveredTelemetry]:
+    """Own trainer-role process telemetry for one test and yield what it delivers."""
+    with training_telemetry.process_telemetry(training_telemetry.TRAINER_ROLE):
+        yield telemetry_endpoint
+
+
+@dataclass
+class FakeCuda:
+    """The torch.cuda allocator surface the learner memory recorder reads."""
+
+    allocated: int = 100
+    reserved: int = 160
+    peak_allocated: int = 900
+    peak_reserved: int = 960
+    failure: str | None = None
+    backend: str = "native"
+
+    def current_device(self):
+        if self.failure == "identity":
+            raise RuntimeError("CUDA context unavailable")
+        return 2
+
+    def get_allocator_backend(self):
+        return self.backend
+
+    def get_device_properties(self, device):
+        return SimpleNamespace(uuid="GPU-physical-two")
+
+    def reset_peak_memory_stats(self, device):
+        if self.failure == "reset":
+            raise RuntimeError("CUDA peak reset unavailable")
+        self.peak_allocated, self.peak_reserved = self.allocated, self.reserved
+
+    def use_memory(self, allocated, reserved):
+        self.allocated, self.reserved = allocated, reserved
+        self.peak_allocated = max(self.peak_allocated, allocated)
+        self.peak_reserved = max(self.peak_reserved, reserved)
+
+    def memory_stats(self, device):
+        if self.failure == "sample":
+            raise RuntimeError("CUDA memory sample unavailable")
+        return {
+            "allocated_bytes.all.current": self.allocated,
+            "reserved_bytes.all.current": self.reserved,
+            "allocated_bytes.all.peak": self.peak_allocated,
+            "reserved_bytes.all.peak": self.peak_reserved,
+        }
+
+    def mem_get_info(self, device):
+        return 2000, 4096
+
+    def empty_cache(self):
+        pass
+
+    def synchronize(self):
+        pass
+
+
+@pytest.fixture
+def fake_cuda(monkeypatch) -> FakeCuda:
+    cuda = FakeCuda()
+    monkeypatch.setattr(learner_memory.torch, "cuda", cuda)
+    return cuda
