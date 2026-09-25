@@ -45,10 +45,10 @@ class Phase(StrEnum):
 
 
 class FixedDataset(Dataset):
-    """Provide a stable dataloader state for the full trainer checkpoint."""
+    """Provide a stable dataloader state and a two-update scheduler horizon."""
 
     def __len__(self) -> int:
-        return WORLD_SIZE
+        return WORLD_SIZE * 2
 
     def __getitem__(self, index: int) -> tuple[list[dict[str, str]], None]:
         return [{"role": "user", "content": f"Fixed parity prompt {index}"}], None
