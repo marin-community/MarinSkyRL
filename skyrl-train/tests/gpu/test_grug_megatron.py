@@ -266,7 +266,7 @@ def _init_policy(cfg, world_size: int):
 
 
 def _train_step(policy, batch: TrainingInputBatch) -> dict[str, float]:
-    train_output = ray.get(policy.async_run_ray_method("pass_through", "ppo_train", batch))[0]
+    train_output = ray.get(policy.async_run_ray_method("mesh", "ppo_train", batch))[0]
     status = train_output.metadata["train_status"]
     assert math.isfinite(status["policy_loss"])
     return status
@@ -465,6 +465,70 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
         assert all(exported[name].dtype == torch.float32 for name in BIAS_NAMES)
         reloaded = ray.get(_hf_response_logprobs.remote(str(export_dir), batch))
         _assert_logprobs_close(post_update, reloaded, batch["response_mask"])
+    finally:
+        ray.shutdown()
+
+
+def test_grug_megatron_muonh_pp2_ep2_checkpoint_continues_exactly(tmp_path):
+    require_hoppers(4)
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    _write_tiny_checkpoint(model_path)
+    cfg = _config(str(model_path), world_size=4, pp=2, ep=2)
+    # Keep the scoring and training micro-batch shapes identical for MoE routing.
+    cfg.trainer.micro_forward_batch_size_per_gpu = 1
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.trainer.policy.optimizer_config.optimizer = "MuonH"
+    cfg.trainer.policy.optimizer_config.weight_decay = 0.0
+    cfg.trainer.policy.optimizer_config.adam_betas = [0.9, 0.95]
+    cfg.trainer.policy.optimizer_config.optimizer_kwargs = {"adam_lr": 2.0e-2}
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    batch = _padded_batch(tokenizer.pad_token_id, prompt_length=48, response_length=48, variable_lengths=True)
+    names = [LM_HEAD_NAME, EMBED_GATE_NAME, STACKED_EXPERT_NAME, ROUTER_NAME, BIAS_NAMES[0]]
+    initialize_ray(cfg)
+    try:
+        policy = _init_policy(cfg, 4)
+        routes = ray.get(policy.async_run_ray_method("pass_through", "grug_optimizer_route_snapshot"))
+        expected = {
+            "embedding.word_embeddings.weight": "adam",
+            "embed_norm.down_proj.weight": "grug_muonh",
+            "self_attention.linear_qkv.weight": "grug_muonh_qkv",
+            "mlp.experts.linear_fc1.weight0": "grug_muonh_gate_up",
+            "output_layer.weight": "grug_adamh",
+        }
+        for suffix, route in expected.items():
+            observed = {
+                value for snapshot in routes for name, value in snapshot["routes"].items() if name.endswith(suffix)
+            }
+            assert observed == {route}, (suffix, observed)
+
+        before = rank0_validation_snapshot(policy, names)
+        for _ in range(2):
+            scores = _megatron_response_logprobs(policy, batch)
+            batch["action_log_probs"] = (scores * batch["response_mask"]).float()
+            status = _train_step(policy, batch)
+            assert status["log_ratio_abs_max"] < TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE
+        saved = rank0_validation_snapshot(policy, names)
+        for name in names[:4]:
+            assert not torch.equal(saved[name], before[name]), name
+        torch.testing.assert_close(saved[names[4]], before[names[4]], rtol=0, atol=0)
+
+        checkpoint = str(tmp_path / "checkpoint")
+        ray.get(
+            policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint, tokenizer=tokenizer)
+        )
+        scores = _megatron_response_logprobs(policy, batch)
+        batch["action_log_probs"] = (scores * batch["response_mask"]).float()
+        _train_step(policy, batch)
+        continued = rank0_validation_snapshot(policy, names)
+        ray.get(policy.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint))
+        restored = rank0_validation_snapshot(policy, names)
+        for name in names:
+            torch.testing.assert_close(restored[name], saved[name], rtol=0, atol=0)
+        _train_step(policy, batch)
+        resumed = rank0_validation_snapshot(policy, names)
+        for name in names:
+            torch.testing.assert_close(resumed[name], continued[name], rtol=0, atol=0)
     finally:
         ray.shutdown()
 
