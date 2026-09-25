@@ -49,7 +49,7 @@ def test_buffer_contract_preserves_order_and_evidence_across_snapshot(tmp_path, 
             restored.restore(snapshot)
             first = await restored.next_batch(2)
             if backend == "memory":
-                # In-memory admission retains the previous full-scan behavior.
+                # Memory admission scans all ready groups to filter stale work.
                 assert [group.uid for group in first] == ["fast", "slow", "later"]
             else:
                 second = await restored.next_batch(2)

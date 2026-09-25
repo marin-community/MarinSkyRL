@@ -78,10 +78,10 @@ class GenerationStalledError(RuntimeError):
     """Raised when generation cannot make progress (no active producers, or dataset exhausted)."""
 
 
-def _drain_queue(queue: asyncio.Queue[_QueueItem], max_items: int | None = None) -> List[_QueueItem]:
-    """Remove available items without yielding, up to an optional limit."""
+def _drain_queue(queue: asyncio.Queue[_QueueItem]) -> List[_QueueItem]:
+    """Remove available items without yielding."""
     items = []
-    while max_items is None or len(items) < max_items:
+    while True:
         try:
             items.append(queue.get_nowait())
         except asyncio.QueueEmpty:
@@ -137,12 +137,6 @@ class _GenerationQueues:
         for prompts in retries:
             self.retries.put_nowait(prompts)
         return GenerationBufferState(self.rollout_buffer.snapshot(), retries, admitted_groups)
-
-    async def drain_completed(self, max_items: int) -> List[GeneratedOutputGroup]:
-        return await self.rollout_buffer.next_batch(max_items)
-
-    def requeue_completed(self, group: GeneratedOutputGroup) -> None:
-        self.rollout_buffer.requeue(group)
 
 
 @dataclass
@@ -999,7 +993,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             )
             # Drain any generation outputs that arrived after the training loop
             # stopped consuming (race between producer enqueue and consumer exit).
-            n_drained = len(await generation_queues.drain_completed(generation_queues.rollout_buffer.pending_count()))
+            n_drained = len(
+                await generation_queues.rollout_buffer.next_batch(generation_queues.rollout_buffer.pending_count())
+            )
             assert generation_queues.retries.empty(), (
                 f"Epoch ended with {generation_queues.retries.qsize()} stale-group retries still pending"
             )
@@ -1110,7 +1106,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         return status
 
     async def _run_generate_for_a_group_loop(self, queues: _GenerationQueues):
-        """Generate dataset rows or retries and route only fresh groups to the completed queue."""
+        """Generate dataset rows or retries and write fresh groups to the rollout buffer."""
         try:
             while True:
                 rand_prompts = await self._next_generation_prompts(queues)
@@ -1485,7 +1481,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             active_producers=queues.active_producers,
                         )
 
-                completed_groups = await queues.drain_completed(self.mini_batch_size)
+                completed_groups = await queues.rollout_buffer.next_batch(self.mini_batch_size)
                 partition = self._partition_completed_groups(
                     completed_groups,
                     occupied_uids={group.uid for group in accepted_groups}
@@ -1515,7 +1511,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 rejection_counts_since_admission.update(selection.discarded_reasons)
 
                 for group in selection.surplus_groups:
-                    queues.requeue_completed(group)
+                    queues.rollout_buffer.requeue(group)
 
                 if selection.admitted_groups:
                     watchdog.observe(now=loop.time(), progressed=True)

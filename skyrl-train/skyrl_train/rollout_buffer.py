@@ -7,7 +7,7 @@ import io
 import uuid
 from collections import deque
 from dataclasses import dataclass
-from typing import Generic, Protocol, TypeVar
+from typing import Generic, Protocol, TypeVar, cast, runtime_checkable
 
 import pyarrow as pa
 import torch
@@ -15,7 +15,7 @@ from finestore.reader import ReadView
 from finestore.store import DataStore
 
 from marinskyrl.resource_locator import join_resource_path
-from skyrl_train.async_rollout_state import GeneratedOutputGroup, RolloutBufferSnapshot
+from skyrl_train.async_rollout_state import RolloutBufferBackend, RolloutBufferSnapshot
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 
 
@@ -41,17 +41,28 @@ class SynchronousRollout:
     model_step: int
     rollout_id: str | None = None
 
+    @property
+    def rollout_uids(self) -> tuple[str, ...]:
+        return tuple(self.uids)
 
-Rollout = GeneratedOutputGroup | SynchronousRollout
-RolloutT = TypeVar("RolloutT", GeneratedOutputGroup, SynchronousRollout)
+    @property
+    def rollout_model_step(self) -> int:
+        return self.model_step
 
 
-def _uids(rollout: Rollout) -> tuple[str, ...]:
-    return (rollout.uid,) if isinstance(rollout, GeneratedOutputGroup) else tuple(rollout.uids)
+@runtime_checkable
+class Rollout(Protocol):
+    trajectory_batch: TrajectoryBatch
+    rollout_id: str | None
+
+    @property
+    def rollout_uids(self) -> tuple[str, ...]: ...
+
+    @property
+    def rollout_model_step(self) -> int: ...
 
 
-def _step(rollout: Rollout) -> int:
-    return rollout.earliest_model_step if isinstance(rollout, GeneratedOutputGroup) else rollout.model_step
+RolloutT = TypeVar("RolloutT", bound=Rollout)
 
 
 class RolloutWriter(Protocol[RolloutT]):
@@ -147,7 +158,7 @@ class MemoryRolloutBuffer(Generic[RolloutT]):
         return RolloutSlot(self.writer(), self._slot_policy)
 
     async def next_batch(self, max_items: int) -> list[RolloutT]:
-        # The previous async trainer scanned every available in-memory result.
+        # Scan all ready groups so admission can reject stale work and retain surplus.
         result = list(self._pending)
         self._pending.clear()
         return result
@@ -159,11 +170,13 @@ class MemoryRolloutBuffer(Generic[RolloutT]):
 
     def snapshot(self) -> RolloutBufferSnapshot:
         return RolloutBufferSnapshot(
-            "memory", tuple(uid for r in self._pending for uid in _uids(r)), list(self._pending)
+            RolloutBufferBackend.MEMORY,
+            tuple(uid for r in self._pending for uid in r.rollout_uids),
+            list(self._pending),
         )
 
     def restore(self, snapshot: RolloutBufferSnapshot) -> None:
-        if snapshot.backend != "memory":
+        if snapshot.backend != RolloutBufferBackend.MEMORY:
             raise ValueError(f"cannot restore {snapshot.backend} snapshot into memory buffer")
         records = snapshot.state
         if not isinstance(records, list):
@@ -239,12 +252,12 @@ class FineStoreRolloutBuffer(Generic[RolloutT]):
             transaction.table(ROLLOUT_TABLE).add(
                 {
                     "rollout_id": rollout_id,
-                    "uid": _uids(rollout)[0],
-                    "model_step": _step(rollout),
+                    "uid": rollout.rollout_uids[0],
+                    "model_step": rollout.rollout_model_step,
                     "payload": payload.getvalue(),
                 }
             )
-        return _FineStorePointer(rollout_id, _uids(rollout), self.path)
+        return _FineStorePointer(rollout_id, rollout.rollout_uids, self.path)
 
     def _append(self, pointer: _FineStorePointer) -> None:
         if self.full():
@@ -263,10 +276,10 @@ class FineStoreRolloutBuffer(Generic[RolloutT]):
             if row is None:
                 raise KeyError(f"rollout {pointer.rollout_id} was not committed")
             rollout = torch.load(io.BytesIO(row["payload"]), map_location="cpu", weights_only=False)
-            if not isinstance(rollout, (GeneratedOutputGroup, SynchronousRollout)):
+            if not isinstance(rollout, Rollout):
                 raise ValueError(f"rollout {pointer.rollout_id} has an unexpected payload type")
             rollout.rollout_id = pointer.rollout_id
-            result.append(rollout)
+            result.append(cast(RolloutT, rollout))
         return result
 
     async def next_batch(self, max_items: int) -> list[RolloutT]:
@@ -293,11 +306,13 @@ class FineStoreRolloutBuffer(Generic[RolloutT]):
 
     def snapshot(self) -> RolloutBufferSnapshot:
         return RolloutBufferSnapshot(
-            "finestore", tuple(uid for p in self._pending for uid in p.uids), list(self._pending)
+            RolloutBufferBackend.FINESTORE,
+            tuple(uid for p in self._pending for uid in p.uids),
+            list(self._pending),
         )
 
     def restore(self, snapshot: RolloutBufferSnapshot) -> None:
-        if snapshot.backend != "finestore":
+        if snapshot.backend != RolloutBufferBackend.FINESTORE:
             raise ValueError(f"cannot restore {snapshot.backend} snapshot into FineStore buffer")
         pointers = snapshot.state
         if not isinstance(pointers, list) or not all(isinstance(p, _FineStorePointer) for p in pointers):
@@ -328,8 +343,9 @@ class FineStoreRolloutBuffer(Generic[RolloutT]):
 def create_rollout_buffer(
     backend: str, checkpoint_root: str, capacity: int = 0, slot_policy: RolloutSlotPolicy | None = None
 ) -> RolloutBuffer:
-    if backend == "memory":
+    selected = RolloutBufferBackend(backend)
+    if selected is RolloutBufferBackend.MEMORY:
         return MemoryRolloutBuffer(capacity, slot_policy)
-    if backend == "finestore":
+    if selected is RolloutBufferBackend.FINESTORE:
         return FineStoreRolloutBuffer(join_resource_path(checkpoint_root, ROLLOUT_BUFFER_SUBDIR), capacity, slot_policy)
-    raise ValueError(f"unknown rollout buffer backend: {backend}")
+    raise AssertionError(f"unhandled rollout buffer backend: {selected}")

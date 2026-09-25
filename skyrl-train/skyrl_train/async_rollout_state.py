@@ -1,6 +1,7 @@
 """Shared state records for fully asynchronous rollout generation."""
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import List, Protocol
 
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
@@ -16,12 +17,25 @@ class GeneratedOutputGroup:
     source_prompts: List[dict]
     rollout_id: str | None = None
 
+    @property
+    def rollout_uids(self) -> tuple[str, ...]:
+        return (self.uid,)
+
+    @property
+    def rollout_model_step(self) -> int:
+        return self.earliest_model_step
+
+
+class RolloutBufferBackend(StrEnum):
+    MEMORY = "memory"
+    FINESTORE = "finestore"
+
 
 @dataclass(frozen=True)
 class RolloutBufferSnapshot:
     """Backend-owned state for pending work at a checkpoint boundary."""
 
-    backend: str
+    backend: RolloutBufferBackend
     pending_uids: tuple[str, ...]
     state: object
 
