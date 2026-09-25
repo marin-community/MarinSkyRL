@@ -268,8 +268,6 @@ def calculate_per_dataset_metrics(
     concat_uids: List[str],
     concat_data_sources: List[str],
     n_samples_per_prompt: int,
-    *,
-    telemetry_enabled: bool,
 ) -> Dict[str, float]:
     """Calculate metrics per data source."""
     eval_metrics = {}
@@ -298,13 +296,12 @@ def calculate_per_dataset_metrics(
         sanitized_data_source = sanitize_data_source(data_source)
         eval_metrics[f"eval/{sanitized_data_source}/avg_score"] = avg_score
         eval_metrics[f"eval/{sanitized_data_source}/pass_at_{n_samples_per_prompt}"] = pass_at_n
-        if telemetry_enabled:
-            eval_metrics.update(
-                {
-                    f"eval/{sanitized_data_source}/{key}": value
-                    for key, value in evaluation_response_metrics(subset_trajectory_batch).items()
-                }
-            )
+        eval_metrics.update(
+            {
+                f"eval/{sanitized_data_source}/{key}": value
+                for key, value in evaluation_response_metrics(subset_trajectory_batch).items()
+            }
+        )
 
     return eval_metrics
 

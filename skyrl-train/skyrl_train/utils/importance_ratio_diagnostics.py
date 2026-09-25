@@ -44,7 +44,7 @@ LOG_RATIO_BASE_METRIC_KEYS = (
 )
 
 
-def absolute_quantiles(values: torch.Tensor, probabilities: tuple[float, ...]) -> list[float]:
+def linear_quantiles(values: torch.Tensor, probabilities: tuple[float, ...]) -> list[float]:
     """Linear-interpolated quantiles of a finite 1-D tensor; torch.quantile refuses more than 2**24 values."""
     count = values.numel()
     positions = torch.tensor(probabilities, dtype=torch.float64) * (count - 1)
@@ -72,7 +72,7 @@ def ratio_statistics(delta: torch.Tensor, *, eps_clip_low: float = 0.2, eps_clip
     if not count:
         return result
     absolute = delta.abs()
-    quantiles = absolute_quantiles(absolute, (0.95, 0.99, 0.999))
+    quantiles = linear_quantiles(absolute, (0.95, 0.99, 0.999))
     maximum = delta.max()
     weights = (delta - maximum).exp()
     weight_sum = weights.sum()
@@ -103,22 +103,18 @@ def ratio_statistics(delta: torch.Tensor, *, eps_clip_low: float = 0.2, eps_clip
     return result
 
 
-def _grouped_moments(values: torch.Tensor | None, groups: torch.Tensor, n_groups: int) -> dict[str, torch.Tensor]:
+def _grouped_moments(values: torch.Tensor, groups: torch.Tensor, n_groups: int) -> dict[str, torch.Tensor]:
     """Per-group token counts and finite-token sums of delta, |delta| and the 2x indicator."""
 
     def total(weights: torch.Tensor | None = None) -> torch.Tensor:
         return torch.bincount(groups, weights, minlength=n_groups).double()
 
-    if values is None:
-        return {"selected": total(), "finite": torch.zeros(n_groups, dtype=torch.float64)}
     finite = torch.isfinite(values)
-    all_finite = bool(finite.all())
-    finite_values = values if all_finite else torch.where(finite, values, 0)
+    finite_values = torch.where(finite, values, 0)
     absolute = finite_values.abs()
-    selected = total()
     return {
-        "selected": selected,
-        "finite": selected if all_finite else total(finite.double()),
+        "selected": total(),
+        "finite": total(finite.double()),
         "sum": total(finite_values),
         "abs_sum": total(absolute),
         "outside": total((absolute > LOG_RATIO_DOUBLING).double()),
@@ -141,18 +137,16 @@ def _moment_metrics(totals: dict[str, float]) -> dict[str, float]:
 
 def mismatch_ratio_metrics(
     learner_logprobs: torch.Tensor,
-    rollout_logprobs: torch.Tensor | None,
+    rollout_logprobs: torch.Tensor,
     loss_mask: torch.Tensor,
-    rollout_staleness: torch.Tensor | None,
+    rollout_staleness: torch.Tensor,
     *,
     eps_clip_low: float = 0.2,
     eps_clip_high: float = 0.2,
 ) -> dict[str, float]:
     """Trainer-minus-vLLM log-ratio statistics by staleness bucket and response position."""
     mask = loss_mask.detach().cpu() > 0
-    staleness = (
-        torch.zeros(mask.shape[0], dtype=torch.int32) if rollout_staleness is None else rollout_staleness.detach().cpu()
-    )
+    staleness = rollout_staleness.detach().cpu()
     row_bucket = torch.zeros(mask.shape[0], dtype=torch.uint8)
     for index, (_, lower) in enumerate(MISMATCH_STALENESS_BUCKETS):
         row_bucket[staleness >= lower] = index
@@ -162,43 +156,35 @@ def mismatch_ratio_metrics(
     groups = torch.masked_select(
         4 * row_bucket.unsqueeze(1) + first.to(torch.uint8) + 2 * last.to(torch.uint8), mask
     ).long()
-    values = None
-    if rollout_logprobs is not None:
-        # CPU float64 and masking before subtraction avoid padded NaNs.
-        values = (
-            torch.masked_select(learner_logprobs.detach().cpu(), mask).double()
-            - torch.masked_select(rollout_logprobs.detach().cpu(), mask).double()
-        )
+    # CPU float64 and masking before subtraction avoid padded NaNs.
+    values = (
+        torch.masked_select(learner_logprobs.detach().cpu(), mask).double()
+        - torch.masked_select(rollout_logprobs.detach().cpu(), mask).double()
+    )
     grid = {
         key: total.view(len(MISMATCH_STALENESS_BUCKETS), 4)
         for key, total in _grouped_moments(values, groups, 4 * len(MISMATCH_STALENESS_BUCKETS)).items()
     }
     position_classes = {f"first{POSITION_WINDOW}": [1, 3], f"last{POSITION_WINDOW}": [2, 3], "middle": [0]}
     # Only these two buckets get the sorted statistics; the others take moments from the grid.
-    full_statistics = {}
-    if values is not None:
-        full_statistics["pooled"] = ratio_statistics(values, eps_clip_low=eps_clip_low, eps_clip_high=eps_clip_high)
-        staleness0 = groups < 4
-        full_statistics["staleness0"] = (
-            full_statistics["pooled"]
-            if bool(staleness0.all())
-            else ratio_statistics(values[staleness0], eps_clip_low=eps_clip_low, eps_clip_high=eps_clip_high)
-        )
+    staleness0 = groups < 4
+    pooled = ratio_statistics(values, eps_clip_low=eps_clip_low, eps_clip_high=eps_clip_high)
+    full_statistics = {
+        "pooled": pooled,
+        "staleness0": pooled
+        if bool(staleness0.all())
+        else ratio_statistics(values[staleness0], eps_clip_low=eps_clip_low, eps_clip_high=eps_clip_high),
+    }
     bucket_rows = {"pooled": slice(None)}
     bucket_rows.update({name: slice(index, index + 1) for index, (name, _) in enumerate(MISMATCH_STALENESS_BUCKETS)})
 
     def moments(rows: slice, classes: list[int]) -> dict[str, float]:
-        totals = {key: total[rows][:, classes].sum().item() for key, total in grid.items()}
-        return _moment_metrics({"sum": 0.0, "abs_sum": 0.0, "outside": 0.0, **totals})
+        return _moment_metrics({key: total[rows][:, classes].sum().item() for key, total in grid.items()})
 
     result = {}
     for name, rows in bucket_rows.items():
         prefix = f"policy/mismatch/{name}/"
-        if values is None:
-            metrics = {**moments(rows, [0, 1, 2, 3]), "missing_behavior": 1.0}
-            metrics.pop("finite_fraction", None)
-        else:
-            metrics = {**(full_statistics.get(name) or moments(rows, [0, 1, 2, 3])), "missing_behavior": 0.0}
+        metrics = {**(full_statistics.get(name) or moments(rows, [0, 1, 2, 3])), "missing_behavior": 0.0}
         result.update({prefix + key: value for key, value in metrics.items()})
         for position, classes in position_classes.items():
             stats = moments(rows, classes)

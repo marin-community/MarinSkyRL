@@ -16,6 +16,8 @@ import collections
 import os
 import sys
 import time
+
+import torch
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer, consumed_work
@@ -1779,7 +1781,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         logger.debug(f"Example generated: {vis}")
 
         with Timer("convert_to_training_input", self.all_timings):
-            return self.convert_to_training_input(trajectory_batch, uids, rollout_staleness=rollout_staleness)
+            training_input = self.convert_to_training_input(trajectory_batch, uids, rollout_staleness=rollout_staleness)
+        if self._training_metrics_enabled:
+            self._record_consumed_staleness(uids, rollout_staleness, training_input["response_mask"][: len(uids)])
+        return training_input
+
+    def _record_consumed_staleness(
+        self, uids: List[str], rollout_staleness: List[int], response_masks: torch.Tensor
+    ) -> None:
+        counts: dict[str, dict[str, int]] = {}
+        for uid, steps, mask in zip(uids, rollout_staleness, response_masks, strict=True):
+            group = counts.setdefault(uid, {"staleness": steps, "groups": 1, "sequences": 0, "response_tokens": 0})
+            group["sequences"] += 1
+            group["response_tokens"] += int(mask.sum().item())
+        for group in counts.values():
+            record_event("consumed_staleness", group, attributes={"role": TRAINER_ROLE, "step": str(self.global_step)})
 
     def load_checkpoints(self) -> Tuple[int, str]:
         """

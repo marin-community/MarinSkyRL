@@ -167,11 +167,8 @@ def _calculate_eval_metrics(
     uids: List[str],
     data_sources: List[str | None],
     samples_per_prompt: int,
-    telemetry_enabled: bool,
 ) -> Dict[str, float]:
-    metrics = calculate_per_dataset_metrics(
-        batch, uids, data_sources, samples_per_prompt, telemetry_enabled=telemetry_enabled
-    )
+    metrics = calculate_per_dataset_metrics(batch, uids, data_sources, samples_per_prompt)
     overall_avg_score, overall_pass_at_n = get_metrics_from_trajectory_batch(batch, uids)
     metrics.update(
         {
@@ -179,8 +176,7 @@ def _calculate_eval_metrics(
             f"eval/all/pass_at_{samples_per_prompt}": overall_pass_at_n,
         }
     )
-    if telemetry_enabled:
-        metrics.update({f"eval/all/{key}": value for key, value in evaluation_response_metrics(batch).items()})
+    metrics.update({f"eval/all/{key}": value for key, value in evaluation_response_metrics(batch).items()})
     return metrics
 
 
@@ -256,7 +252,6 @@ async def evaluate(
             rollouts.uids,
             concat_data_sources,
             cfg.generator.eval_n_samples_per_prompt,
-            cfg.trainer.training_metrics,
         )
         _dump_eval_results(cfg, global_step, tokenizer, rollouts, concat_data_sources, eval_metrics)
 
@@ -322,7 +317,6 @@ async def evaluate_step_wise(
         uids_last_step,
         data_sources_last_step,
         cfg.generator.eval_n_samples_per_prompt,
-        cfg.trainer.training_metrics,
     )
     _dump_eval_results(cfg, global_step, tokenizer, rollouts, concat_data_sources, eval_metrics)
 

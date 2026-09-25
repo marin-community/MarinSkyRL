@@ -8,7 +8,7 @@ import torch
 
 from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
-    absolute_quantiles,
+    linear_quantiles,
     mismatch_ratio_metrics,
     ratio_statistics,
     gather_ratio_tensor,
@@ -187,10 +187,10 @@ def test_quantiles_stay_exact_above_the_size_torch_refuses():
     with pytest.raises(RuntimeError):
         torch.quantile(values, values.new_tensor(probabilities))
     expected = numpy.quantile(values.numpy(), probabilities, method="linear")
-    assert absolute_quantiles(values, probabilities) == pytest.approx(expected, abs=1e-6)
+    assert linear_quantiles(values, probabilities) == pytest.approx(expected, abs=1e-6)
     small = torch.rand(1000, dtype=torch.float64)
     expected = torch.quantile(small, small.new_tensor(probabilities)).tolist()
-    assert absolute_quantiles(small, probabilities) == pytest.approx(expected, rel=1e-12)
+    assert linear_quantiles(small, probabilities) == pytest.approx(expected, rel=1e-12)
     ties = torch.tensor([0.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0], dtype=torch.float64)
     tied = torch.quantile(ties, ties.new_tensor(probabilities)).tolist()
-    assert absolute_quantiles(ties, probabilities) == pytest.approx(tied, rel=1e-12)
+    assert linear_quantiles(ties, probabilities) == pytest.approx(tied, rel=1e-12)

@@ -470,8 +470,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
         self._maybe_install_router_replay("policy")
 
-        # The update whose weights this rank now holds; None until the first update.
-        self._model_version_step: int | None = None
         self._expert_block_sender = (
             ExpertBlockSender(self, mpu)
             if self.cfg.generator.weight_sync_transport == WeightSyncTransport.EXPERT_BLOCK
