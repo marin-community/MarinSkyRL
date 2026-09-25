@@ -11,6 +11,7 @@ from skyrl_train.distributed.grug_muonh import _matrix_step_
 
 
 type MegatronGrugRoute = Literal["grug_muonh", "grug_muonh_qkv", "grug_muonh_gate_up", "grug_adamh", "adam"]
+_ADAMH_SCRATCH_BYTES = 16 * 1024 * 1024
 
 
 def megatron_grug_route(name: str, parameter: Tensor) -> MegatronGrugRoute:
@@ -76,6 +77,24 @@ def _muon_update_(
         return
 
     _matrix_step_(parameter, direction, lr=lr, ns_steps=ns_steps, muon_eps=eps, clamp_final_norm=True)
+
+
+def _adamh_direction_in_grad_(
+    gradient: Tensor, exp_avg: Tensor, exp_avg_sq: Tensor, *, step: int, betas: tuple[float, float], eps: float
+) -> None:
+    """Reuse the consumed FP32 gradient for AdamH's direction, with bounded scratch."""
+    beta1, beta2 = betas
+    bias1 = 1 - beta1**step
+    bias2 = 1 - beta2**step
+    row_bytes = gradient[0].numel() * gradient.element_size()
+    rows_per_chunk = max(1, _ADAMH_SCRATCH_BYTES // row_bytes)
+    for start in range(0, gradient.shape[0], rows_per_chunk):
+        end = start + rows_per_chunk
+        direction_chunk = gradient[start:end]
+        direction_chunk.copy_(exp_avg[start:end]).div_(bias1)
+        denominator = exp_avg_sq[start:end].clone().div_(bias2).sqrt_().add_(eps)
+        direction_chunk.div_(denominator)
+        del denominator
 
 
 class MegatronGrugMuonH(Optimizer):
@@ -155,16 +174,21 @@ class MegatronGrugMuonH(Optimizer):
                     state["exp_avg"].mul_(beta1).add_(gradient, alpha=1 - beta1)
                     state["exp_avg_sq"].mul_(beta2).addcmul_(gradient, gradient, value=1 - beta2)
                     step = int(state["step"].item())
-                    direction = (state["exp_avg"] / (1 - beta1**step)) / (
-                        (state["exp_avg_sq"] / (1 - beta2**step)).sqrt() + group["eps"]
+                    _adamh_direction_in_grad_(
+                        gradient,
+                        state["exp_avg"],
+                        state["exp_avg_sq"],
+                        step=step,
+                        betas=(beta1, beta2),
+                        eps=group["eps"],
                     )
-                    _matrix_step_(parameter, direction, lr=group["lr"], clamp_final_norm=False)
+                    _matrix_step_(parameter, gradient, lr=group["lr"], clamp_final_norm=False)
                     continue
 
                 momentum_buffer = state["momentum_buffer"]
                 momentum_buffer.mul_(group["momentum"]).add_(gradient)
                 direction = (
-                    gradient.add(momentum_buffer, alpha=group["momentum"]) if group["nesterov"] else momentum_buffer
+                    gradient.add_(momentum_buffer, alpha=group["momentum"]) if group["nesterov"] else momentum_buffer
                 )
                 _muon_update_(
                     parameter,

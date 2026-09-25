@@ -14,7 +14,11 @@ from skyrl_train.config.utils import get_default_config
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy, resolve_fsdp_parameter_storage_dtype
 from skyrl_train.distributed.grug_muonh import GrugMuonH
 from skyrl_train.distributed.grug_muonh import build_grug_muonh, grug_muonh_route
-from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH, megatron_grug_route
+from skyrl_train.distributed.megatron.grug_muonh import (
+    MegatronGrugMuonH,
+    _adamh_direction_in_grad_,
+    megatron_grug_route,
+)
 
 
 FIXTURE = Path(__file__).with_name("fixtures") / "grug_muonh_jax_golden.npz"
@@ -187,6 +191,19 @@ def test_muonh_routes_default_to_master_learning_rate():
         )
 
     assert {group["lr"] for group in optimizer.param_groups} == {master_learning_rate}
+
+
+def test_megatron_adamh_reuses_gradient_across_scratch_chunks_without_changing_direction():
+    torch.manual_seed(11)
+    shape = (1025, 4096)  # Just over the 16 MiB scratch chunk boundary.
+    exp_avg = torch.randn(shape)
+    exp_avg_sq = torch.rand(shape).add_(0.01)
+    gradient = torch.empty_like(exp_avg)
+    expected = (exp_avg / (1 - 0.9**3)) / ((exp_avg_sq / (1 - 0.95**3)).sqrt() + 1e-8)
+
+    _adamh_direction_in_grad_(gradient, exp_avg, exp_avg_sq, step=3, betas=(0.9, 0.95), eps=1e-8)
+
+    torch.testing.assert_close(gradient, expected, rtol=0, atol=0)
 
 
 def test_megatron_muonh_matches_independent_jax_steps_after_own_state_resume():
