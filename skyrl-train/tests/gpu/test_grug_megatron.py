@@ -21,6 +21,7 @@ from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
+from skyrl_train.distributed.megatron.grug_muonh import _offloaded_muon_direction_in_grad_
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX, GrugMoeConfig, GrugMoeForCausalLM
@@ -601,3 +602,25 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
     finally:
         ray.util.remove_placement_group(shared_pg)
         ray.shutdown()
+
+
+@pytest.mark.parametrize("nesterov", [False, True])
+def test_megatron_muonh_offloaded_direction_matches_cuda_reference(nesterov):
+    require_hoppers(1)
+    torch.manual_seed(11)
+    shape = (1025, 4096)  # Crosses the 16 MiB transfer-chunk boundary.
+    gradient = torch.randn(shape, device="cuda")
+    momentum = torch.randn(shape, device="cuda")
+    expected_momentum = momentum.clone().mul_(0.95).add_(gradient)
+    expected_direction = gradient.clone()
+    if nesterov:
+        expected_direction.add_(expected_momentum, alpha=0.95)
+    else:
+        expected_direction.copy_(expected_momentum)
+
+    actual_direction = gradient.clone()
+    actual_momentum = momentum.cpu().pin_memory()
+    _offloaded_muon_direction_in_grad_(actual_direction, actual_momentum, beta=0.95, nesterov=nesterov)
+
+    torch.testing.assert_close(actual_direction, expected_direction, rtol=0, atol=0)
+    torch.testing.assert_close(actual_momentum, expected_momentum.cpu(), rtol=0, atol=0)

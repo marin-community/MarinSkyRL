@@ -11,7 +11,7 @@ from skyrl_train.distributed.grug_muonh import _matrix_step_
 
 
 type MegatronGrugRoute = Literal["grug_muonh", "grug_muonh_qkv", "grug_muonh_gate_up", "grug_adamh", "adam"]
-_ADAMH_SCRATCH_BYTES = 16 * 1024 * 1024
+_DIRECTION_SCRATCH_BYTES = 16 * 1024 * 1024
 
 
 def megatron_grug_route(name: str, parameter: Tensor) -> MegatronGrugRoute:
@@ -87,7 +87,7 @@ def _adamh_direction_in_grad_(
     bias1 = 1 - beta1**step
     bias2 = 1 - beta2**step
     row_bytes = gradient[0].numel() * gradient.element_size()
-    rows_per_chunk = max(1, _ADAMH_SCRATCH_BYTES // row_bytes)
+    rows_per_chunk = max(1, _DIRECTION_SCRATCH_BYTES // row_bytes)
     for start in range(0, gradient.shape[0], rows_per_chunk):
         end = start + rows_per_chunk
         direction_chunk = gradient[start:end]
@@ -95,6 +95,27 @@ def _adamh_direction_in_grad_(
         denominator = exp_avg_sq[start:end].clone().div_(bias2).sqrt_().add_(eps)
         direction_chunk.div_(denominator)
         del denominator
+
+
+def _offloaded_muon_direction_in_grad_(gradient: Tensor, momentum: Tensor, *, beta: float, nesterov: bool) -> None:
+    """Update CPU momentum in bounded GPU chunks, leaving the direction in the consumed gradient."""
+    if not gradient.is_contiguous():
+        raise ValueError("Offloaded MuonH requires contiguous FP32 master gradients")
+    gradient_flat = gradient.view(-1)
+    momentum_flat = momentum.view(-1)
+    elements_per_chunk = max(1, _DIRECTION_SCRATCH_BYTES // gradient.element_size())
+    for start in range(0, gradient_flat.numel(), elements_per_chunk):
+        gradient_chunk = gradient_flat[start : start + elements_per_chunk]
+        momentum_chunk = momentum_flat[start : start + elements_per_chunk]
+        scratch = torch.empty_like(gradient_chunk)
+        scratch.copy_(momentum_chunk)
+        scratch.mul_(beta).add_(gradient_chunk)
+        momentum_chunk.copy_(scratch)
+        if nesterov:
+            gradient_chunk.add_(scratch, alpha=beta)
+        else:
+            gradient_chunk.copy_(scratch)
+        del scratch
 
 
 class MegatronGrugMuonH(Optimizer):
@@ -116,8 +137,10 @@ class MegatronGrugMuonH(Optimizer):
         eps: float,
         muon_eps: float,
         qkv_split_shapes: tuple[int, int, int],
+        offload_momentum: bool = False,
     ) -> None:
         self.qkv_split_shapes = qkv_split_shapes
+        self.offload_momentum = offload_momentum
         super().__init__(
             params,
             defaults={
@@ -139,11 +162,48 @@ class MegatronGrugMuonH(Optimizer):
             for parameter in group["params"]:
                 state = self.state[parameter]
                 if route == "grug_adamh":
-                    state.setdefault("step", torch.zeros((), dtype=torch.int64, device=parameter.device))
-                    state.setdefault("exp_avg", torch.zeros_like(parameter))
-                    state.setdefault("exp_avg_sq", torch.zeros_like(parameter))
+                    if "step" not in state:
+                        state["step"] = torch.zeros((), dtype=torch.int64, device=parameter.device)
+                    if "exp_avg" not in state:
+                        state["exp_avg"] = torch.zeros_like(parameter)
+                    if "exp_avg_sq" not in state:
+                        state["exp_avg_sq"] = torch.zeros_like(parameter)
                 else:
-                    state.setdefault("momentum_buffer", torch.zeros_like(parameter))
+                    if "momentum_buffer" not in state:
+                        state["momentum_buffer"] = (
+                            torch.zeros(
+                                parameter.shape, dtype=parameter.dtype, device="cpu", pin_memory=parameter.is_cuda
+                            )
+                            if self.offload_momentum
+                            else torch.zeros_like(parameter)
+                        )
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        if not self.offload_momentum:
+            super().load_state_dict(state_dict)
+            return
+        # PyTorch moves per-parameter state to the parameter's GPU on load.
+        # Keep Muon moments on CPU without ever materializing that GPU copy.
+        saved_momenta = {}
+        stripped_state = {}
+        for parameter_id, values in state_dict["state"].items():
+            if "momentum_buffer" in values:
+                saved_momenta[parameter_id] = values["momentum_buffer"]
+                stripped_state[parameter_id] = {key: value for key, value in values.items() if key != "momentum_buffer"}
+            else:
+                stripped_state[parameter_id] = values
+        existing = {parameter: values.get("momentum_buffer") for parameter, values in self.state.items()}
+        super().load_state_dict({**state_dict, "state": stripped_state})
+        for saved_group, current_group in zip(state_dict["param_groups"], self.param_groups, strict=True):
+            for parameter_id, parameter in zip(saved_group["params"], current_group["params"], strict=True):
+                if parameter_id not in saved_momenta:
+                    continue
+                saved = saved_momenta[parameter_id]
+                buffer = existing.get(parameter)
+                if buffer is None or buffer.shape != saved.shape:
+                    buffer = torch.empty(saved.shape, dtype=parameter.dtype, device="cpu", pin_memory=parameter.is_cuda)
+                buffer.copy_(saved)
+                self.state[parameter]["momentum_buffer"] = buffer
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -186,10 +246,18 @@ class MegatronGrugMuonH(Optimizer):
                     continue
 
                 momentum_buffer = state["momentum_buffer"]
-                momentum_buffer.mul_(group["momentum"]).add_(gradient)
-                direction = (
-                    gradient.add_(momentum_buffer, alpha=group["momentum"]) if group["nesterov"] else momentum_buffer
-                )
+                if momentum_buffer.device.type == "cpu" and gradient.is_cuda:
+                    _offloaded_muon_direction_in_grad_(
+                        gradient, momentum_buffer, beta=group["momentum"], nesterov=group["nesterov"]
+                    )
+                    direction = gradient
+                else:
+                    momentum_buffer.mul_(group["momentum"]).add_(gradient)
+                    direction = (
+                        gradient.add_(momentum_buffer, alpha=group["momentum"])
+                        if group["nesterov"]
+                        else momentum_buffer
+                    )
                 _muon_update_(
                     parameter,
                     direction,

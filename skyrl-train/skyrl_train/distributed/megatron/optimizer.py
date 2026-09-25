@@ -38,10 +38,12 @@ def _grug_muonh_extra(optim_config: Mapping) -> dict:
     if not isinstance(raw, Mapping):
         raise TypeError("MuonH optimizer_kwargs must be a mapping")
     extra = dict(raw)
-    known = {"adam_lr", "momentum", "nesterov", "backend_steps", "epsilon", "muon_epsilon"}
+    known = {"adam_lr", "momentum", "nesterov", "backend_steps", "epsilon", "muon_epsilon", "offload_momentum"}
     unknown = sorted(set(extra) - known)
     if unknown:
         raise ValueError(f"Unknown MuonH optimizer_kwargs: {unknown}")
+    if "offload_momentum" in extra and not isinstance(extra["offload_momentum"], bool):
+        raise TypeError("MuonH offload_momentum must be a bool")
     if float(optim_config.get("weight_decay", 0.0)) != 0.0:
         raise ValueError("MuonH requires weight_decay=0")
     return extra
@@ -78,6 +80,7 @@ def _register_grug_muonh(optim_config: Mapping) -> None:
             "eps": config.adam_eps,
             "muon_eps": muon_eps,
             "qkv_split_shapes": (query_rows, kv_rows, kv_rows),
+            "offload_momentum": extra.get("offload_momentum", False),
         }
 
     entry = EmergingOptimizerEntry(
