@@ -7,7 +7,6 @@ import binascii
 import copy
 from importlib.resources import files
 import json
-import logging
 import math
 import os
 from dataclasses import dataclass, field
@@ -28,8 +27,6 @@ from marinskyrl.speculative_decoding import SYNC_TRAINING_ENTRYPOINT, parse_spec
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 from marinskyrl.remote_io import filesystem_and_path, open_output_stream
 
-logger = logging.getLogger(__name__)
-
 # Directory containing the bundled example RL config YAML files.
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
 RL_CONFIG_TASK_DIR = "/tmp/marin-rl-configs"
@@ -47,10 +44,6 @@ class RLEntrypoint(StrEnum):
     TERMINAL_BENCH_GENERATE = "terminal_bench_generate"
 
 
-# The synchronous loop's former name, accepted with a warning.
-DEPRECATED_ENTRYPOINT_NAMES = MappingProxyType({"standard": RLEntrypoint.SYNC})
-
-
 RL_ENTRYPOINTS = MappingProxyType(
     {
         RLEntrypoint.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async",
@@ -65,19 +58,14 @@ CHECKPOINT_EXPORT_ENTRYPOINT = CHECKPOINT_EXPORT_MODULE
 
 
 def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
-    """Resolve one supported RL execution mode to its packaged module; absent means the synchronous loop."""
-    if value in DEPRECATED_ENTRYPOINT_NAMES:
-        replacement = DEPRECATED_ENTRYPOINT_NAMES[value]
-        logger.warning(
-            "%s: entrypoint %r is the old name for %r; update the config", config_path, value, replacement.value
-        )
-        value = replacement
+    """Resolve one supported RL execution mode to its packaged module; ``standard`` names the synchronous loop too."""
+    name = RLEntrypoint.SYNC if value in (None, "standard") else value
     try:
-        entrypoint = RLEntrypoint(RLEntrypoint.SYNC if value is None else value)
+        entrypoint = RLEntrypoint(name)
     except ValueError as error:
         choices = ", ".join(item.value for item in RLEntrypoint)
         raise ValueError(
-            f"{config_path}: entrypoint must be a registered name ({choices}); got {value!r}. "
+            f"{config_path}: entrypoint must be a registered name ({choices}); got {name!r}. "
             "Python module paths are not accepted in RL configs."
         ) from error
 
@@ -95,15 +83,6 @@ def training_type_for_entrypoint(module: str, *, colocate_all: bool) -> Training
     if entrypoint is RLEntrypoint.FULLY_ASYNC or (entrypoint is RLEntrypoint.TERMINAL_BENCH and not colocate_all):
         return TrainingType.ASYNC
     return TrainingType.SYNC
-
-
-def training_type_for_skyrl_config(module: str, skyrl: Mapping[str, Any]) -> TrainingType | None:
-    """The trainer an entrypoint module runs under a SkyRL config's placement."""
-    trainer = skyrl.get("trainer")
-    placement = trainer.get("placement") if isinstance(trainer, Mapping) else None
-    colocate_all = placement.get("colocate_all") if isinstance(placement, Mapping) else None
-    # The terminal_bench entrypoint runs async only for an explicit false, so null means colocated.
-    return training_type_for_entrypoint(module, colocate_all=colocate_all is not False)
 
 
 def registered_rl_entrypoint_module(module: str) -> str:
@@ -540,49 +519,6 @@ def materialize_launch_config(
     return str(destination)
 
 
-def fully_async_defaults() -> dict[str, Any]:
-    """The trainer.fully_async block of SkyRL's base config, unresolved."""
-    base = OmegaConf.load(Path(str(files("skyrl_train.config"))) / "ppo_base_config.yaml")
-    defaults = OmegaConf.to_container(base.trainer.fully_async, resolve=False)
-    if not isinstance(defaults, dict):
-        raise TypeError("trainer.fully_async in ppo_base_config.yaml must be a mapping")
-    return defaults
-
-
-def inert_fully_async_settings(
-    skyrl: Mapping[str, Any],
-    module: str,
-    *,
-    defaults: Mapping[str, Any] | None = None,
-) -> tuple[str, ...]:
-    """Return the trainer.fully_async keys a config sets although its entrypoint's trainer never reads them.
-
-    ``defaults`` drops keys that hold their base-config value, for a composed document that carries every key.
-    """
-    trainer = skyrl.get("trainer")
-    if not isinstance(trainer, Mapping) or training_type_for_skyrl_config(module, skyrl) is TrainingType.ASYNC:
-        return ()
-    fully_async = trainer.get("fully_async")
-    if not isinstance(fully_async, Mapping):
-        return ()
-    return tuple(
-        f"trainer.fully_async.{key}"
-        for key, value in fully_async.items()
-        if defaults is None or key not in defaults or defaults[key] != value
-    )
-
-
-def warn_inert_fully_async_settings(settings: tuple[str, ...], module: str, *, source: object) -> None:
-    """Log the trainer.fully_async keys an entrypoint never reads."""
-    if settings:
-        logger.warning(
-            "%s: entrypoint %s never runs the fully async trainer and never reads %s",
-            source,
-            module,
-            ", ".join(settings),
-        )
-
-
 def parse_rl_config(
     config_path: str,
     model_override: Optional[str] = None,
@@ -597,7 +533,6 @@ def parse_rl_config(
     context_budget = resolve_context_budget(raw, path)
 
     entrypoint = resolve_rl_entrypoint(raw.get("entrypoint"), config_path=path)
-    warn_inert_fully_async_settings(inert_fully_async_settings(raw, entrypoint), entrypoint, source=path)
     config_groups = raw.get("config_groups", {})
     trainer, generator, terminal_bench, materialized_raw = _materialize_context_budget(raw, context_budget)
     data = dict(raw.get("data", {}))

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from importlib.resources import files
+import logging
 from pathlib import Path
 import tempfile
 from typing import Any, Mapping
@@ -16,18 +18,17 @@ from cloud.iris.rl_config_translation import (
     RL_ENTRYPOINTS,
     RLEntrypoint,
     compose_skyrl_config,
-    fully_async_defaults,
-    inert_fully_async_settings,
     parse_rl_config,
     registered_rl_entrypoint_module,
     training_type_for_entrypoint,
     validate_tp_divides_heads,
-    warn_inert_fully_async_settings,
 )
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
+from marinskyrl.environment_contract import TrainingType
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.task_sources import data_source
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_DRAFT_MODEL_CACHE_TTL_DAYS = 14
 
@@ -300,6 +301,29 @@ def validate_iris_allocation(config: dict[str, Any]) -> IrisAllocationConfig:
     return IrisAllocationConfig(**allocation)
 
 
+def _warn_inert_fully_async_settings(skyrl: Mapping[str, Any], entrypoint: str, job_name: str) -> None:
+    """Warn about trainer.fully_async values changed from their defaults for a trainer that never reads them."""
+    trainer = skyrl.get("trainer", {})
+    # The terminal_bench entrypoint runs async only for an explicit false, so null means colocated.
+    colocate_all = trainer.get("placement", {}).get("colocate_all") is not False
+    if training_type_for_entrypoint(entrypoint, colocate_all=colocate_all) is TrainingType.ASYNC:
+        return
+    base = OmegaConf.load(Path(str(files("skyrl_train.config"))) / "ppo_base_config.yaml")
+    defaults = OmegaConf.to_container(base.trainer.fully_async, resolve=False)
+    inert = [
+        f"trainer.fully_async.{key}"
+        for key, value in trainer.get("fully_async", {}).items()
+        if key not in defaults or defaults[key] != value
+    ]
+    if inert:
+        logger.warning(
+            "launch config %s: entrypoint %s never runs the fully async trainer and never reads %s",
+            job_name,
+            entrypoint,
+            ", ".join(inert),
+        )
+
+
 def validate_launch_config(config: DictConfig) -> LaunchTopology:
     """Validate launch semantics before an Iris job can be submitted."""
     raw = _resolved_config(config)
@@ -351,11 +375,7 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
         int(generator["inference_engine_tensor_parallel_size"]),
         skyrl.get("model_num_attention_heads"),
     )
-    warn_inert_fully_async_settings(
-        inert_fully_async_settings(skyrl, entrypoint, defaults=fully_async_defaults()),
-        entrypoint,
-        source=f"launch config {raw['iris']['job_name']}",
-    )
+    _warn_inert_fully_async_settings(skyrl, entrypoint, raw["iris"]["job_name"])
     if entrypoint == RL_ENTRYPOINTS[RLEntrypoint.FULLY_ASYNC]:
         trainer = skyrl.get("trainer", {})
         if trainer.get("train_batch_size") != trainer.get("policy_mini_batch_size"):
