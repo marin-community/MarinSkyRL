@@ -4,11 +4,11 @@ The experiments swap only the Megatron policy worker and the vLLM engines for th
 Ray runs locally with logical GPUs so placement code runs unchanged. Synchronous training runs the standard
 entrypoint at staleness 0; asynchronous training runs the Gym worker-pool entrypoint at positive staleness, so
 the two modes also cover both rollout-worker topologies. The asynchronous run also keeps its rollout payloads in
-a FineStore archive.
+a FineStore archive. Either mode runs single-turn groups, or multi-turn groups trained step-wise.
 
 Usage::
 
-    uv run --frozen --no-sync python -m tests.cpu.tiny_training.experiment --mode async --steps 20
+    uv run --frozen --no-sync python -m tests.cpu.tiny_training.experiment --mode async --shape step-wise --steps 20
 """
 
 import argparse
@@ -46,24 +46,40 @@ class TrainingMode(StrEnum):
     ASYNC = "async"
 
 
+class RolloutShape(StrEnum):
+    SINGLE_TURN = "single-turn"
+    STEP_WISE = "step-wise"
+
+
 MAX_STALENESS_STEPS = {TrainingMode.SYNC: 0, TrainingMode.ASYNC: 1}
-# The async run draws prompts from an adaptive curriculum; the sync run reads the dataset in seeded passes.
+MAX_TURNS = {RolloutShape.SINGLE_TURN: 1, RolloutShape.STEP_WISE: 2}
+N_SAMPLES_PER_PROMPT = 4
+# The async single-turn run draws prompts from an adaptive curriculum, which step-wise training does not support;
+# the other runs read the dataset in seeded passes.
 SAMPLING_KIND = {TrainingMode.SYNC: None, TrainingMode.ASYNC: "thompson"}
 # The async run's worker processes commit payloads to a FineStore archive; the sync run keeps them in Ray.
 FINESTORE_ARCHIVE = {TrainingMode.SYNC: False, TrainingMode.ASYNC: True}
 
 
-def tiny_training_config(root: Path, mode: TrainingMode, *, max_steps: int, num_prompts: int = 64) -> DictConfig:
+def sampling_kind(mode: TrainingMode, shape: RolloutShape) -> str | None:
+    return SAMPLING_KIND[mode] if shape is RolloutShape.SINGLE_TURN else None
+
+
+def tiny_training_config(
+    root: Path, mode: TrainingMode, shape: RolloutShape, *, max_steps: int, num_prompts: int = 64
+) -> DictConfig:
     """Build a complete training config for the tiny policy under ``root``."""
     model_dir = build_tiny_policy(root / "model")
+    max_turns = MAX_TURNS[shape]
     cfg = get_default_config()
     overrides = {
         "data": {
-            "train_data": [str(write_gsm8k_dataset(root / "data" / "train.jsonl", num_prompts))],
-            "val_data": [str(write_gsm8k_dataset(root / "data" / "validation.jsonl", 8))],
-            "sampling": {"kind": SAMPLING_KIND[mode]},
+            "train_data": [str(write_gsm8k_dataset(root / "data" / "train.jsonl", num_prompts, max_turns=max_turns))],
+            "val_data": [str(write_gsm8k_dataset(root / "data" / "validation.jsonl", 8, max_turns=max_turns))],
+            "sampling": {"kind": sampling_kind(mode, shape)},
         },
         "trainer": {
+            "step_wise_training": shape is RolloutShape.STEP_WISE,
             "debug_mode": "off",
             "placement": {"colocate_all": False, "policy_num_gpus_per_node": 1},
             "policy": {"model": {"path": str(model_dir)}, "optimizer_config": {"lr": 1.0e-3}},
@@ -91,7 +107,8 @@ def tiny_training_config(root: Path, mode: TrainingMode, *, max_steps: int, num_
         "generator": {
             "num_inference_engines": 1,
             "inference_engine_tensor_parallel_size": 1,
-            "n_samples_per_prompt": 4,
+            "n_samples_per_prompt": N_SAMPLES_PER_PROMPT,
+            "max_turns": max_turns,
             "inference_stats_interval": 0,
             "sampling_params": {"max_generate_length": 16},
             # Each retention storage operation spawns a process that re-imports the entrypoint.
@@ -176,10 +193,11 @@ def run_tiny_training(cfg: DictConfig, mode: TrainingMode) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mode", type=TrainingMode, choices=list(TrainingMode), required=True)
+    parser.add_argument("--shape", type=RolloutShape, choices=list(RolloutShape), required=True)
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--root", type=Path, required=True)
     args = parser.parse_args()
-    run_tiny_training(tiny_training_config(args.root, args.mode, max_steps=args.steps), args.mode)
+    run_tiny_training(tiny_training_config(args.root, args.mode, args.shape, max_steps=args.steps), args.mode)
 
 
 if __name__ == "__main__":

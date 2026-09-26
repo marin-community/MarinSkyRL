@@ -81,10 +81,12 @@ def build_tiny_policy(output_dir: Path) -> Path:
     return output_dir
 
 
-def write_gsm8k_dataset(path: Path, num_prompts: int) -> Path:
+def write_gsm8k_dataset(path: Path, num_prompts: int, *, max_turns: int) -> Path:
     """Write ``num_prompts`` GSM8K-environment rows whose ground truth is always ``1``.
 
-    Rows alternate between the two ``CURRICULUM_BINS``, so curriculum sampling can read the dataset.
+    Rows alternate between the two ``CURRICULUM_BINS``, so curriculum sampling can read the dataset. With
+    ``max_turns`` above one, the rows use the multi-turn GSM8K environment, which asks again after each wrong
+    answer until the turns run out.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as handle:
@@ -92,9 +94,9 @@ def write_gsm8k_dataset(path: Path, num_prompts: int) -> Path:
             grade = index % len(CURRICULUM_BINS)
             row = {
                 "prompt": [{"role": "user", "content": f"Question {index}: what is one? End with '#### 1'."}],
-                "env_class": "gsm8k",
+                "env_class": "gsm8k" if max_turns == 1 else "gsm8k_multi_turn",
                 "reward_spec": {"method": "rule", "ground_truth": GROUND_TRUTH},
-                "extra_info": {"data_source": CURRICULUM_BINS[grade], "grade": grade},
+                "extra_info": {"data_source": CURRICULUM_BINS[grade], "grade": grade, "max_turns": max_turns},
             }
             handle.write(json.dumps(row) + "\n")
     return path

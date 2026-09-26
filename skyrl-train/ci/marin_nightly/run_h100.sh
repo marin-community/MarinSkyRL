@@ -47,6 +47,19 @@ MAX_STALENESS_STEPS="${MAX_STALENESS_STEPS:-0}"
 COLOCATE_ALL="${COLOCATE_ALL:-true}"
 # A FineStore archive for rollout payloads, in the cluster's own region; unset keeps them in Ray's object store.
 FINESTORE_ROOT="${FINESTORE_ROOT:-null}"
+# Above 1, the run uses multi-turn GSM8K, which asks again after a wrong answer, and trains it step-wise.
+MAX_TURNS="${MAX_TURNS:-1}"
+if (( MAX_TURNS > 1 )); then
+  DATASET_ARGS=(examples/turn_level_rewards/gsm8k_multi_turn_dataset.py --max_turns "$MAX_TURNS")
+  TURN_ARGS=(
+    environment.env_class=gsm8k_multi_turn
+    generator.max_turns="$MAX_TURNS"
+    trainer.step_wise_training=true
+  )
+else
+  DATASET_ARGS=(examples/gsm8k/gsm8k_dataset.py)
+  TURN_ARGS=(environment.env_class=gsm8k)
+fi
 
 # train_batch_size * MAX_STEPS prompts get consumed; keep some margin. Evaluation is off, but
 # data.val_data still has to resolve, so a handful of rows is enough.
@@ -70,7 +83,7 @@ echo "::: using the frozen root environment at ${NIGHTLY_RL_ENV}"
 "$PYTHON" -c "import torch, vllm; print(f'torch {torch.__version__} | vllm {vllm.__version__}')"
 
 echo "::: preparing a ${TRAIN_ROWS}-prompt GSM8K slice"
-"$PYTHON" examples/gsm8k/gsm8k_dataset.py --output_dir "$DATA_DIR"
+"$PYTHON" "${DATASET_ARGS[@]}" --output_dir "$DATA_DIR"
 DATA_DIR="$DATA_DIR" TRAIN_ROWS="$TRAIN_ROWS" VAL_ROWS="$VAL_ROWS" "$PYTHON" - <<'PY'
 import os
 import pathlib
@@ -87,7 +100,7 @@ PY
 
 echo "::: training ${MODEL} for ${MAX_STEPS} steps"
 echo "::: shape: batch=${TRAIN_BATCH_SIZE} samples=${N_SAMPLES} gen_len=${MAX_GEN_LEN} lr=${LR}"
-echo "::: rollouts: max_staleness_steps=${MAX_STALENESS_STEPS} colocate_all=${COLOCATE_ALL} finestore_root=${FINESTORE_ROOT}"
+echo "::: rollouts: max_staleness_steps=${MAX_STALENESS_STEPS} colocate_all=${COLOCATE_ALL} finestore_root=${FINESTORE_ROOT} max_turns=${MAX_TURNS}"
 # vLLM warms up DeepGEMM FP8 kernels whenever the GPU supports them (is_deep_gemm_supported() is
 # true on Hopper) regardless of whether the `deep_gemm` package actually imported -- and it is not
 # in this environment, so the warmup hard-fails at engine start. This is a bf16 model that never
@@ -142,7 +155,7 @@ START=$(date +%s)
   generator.gpu_memory_utilization=0.7 \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  environment.env_class=gsm8k \
+  "${TURN_ARGS[@]}" \
   2>&1 | tee "$LOG"
 ELAPSED=$(( $(date +%s) - START ))
 
