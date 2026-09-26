@@ -28,7 +28,7 @@ def _raw_config() -> dict[str, Any]:
         "runtime": {
             "launcher_commit": "a" * 40,
             "profile": "megatron",
-            "entrypoint": "skyrl_train.entrypoints.fully_async",
+            "entrypoint": "skyrl_train.entrypoints.gym_worker_pool",
         },
         "iris": {
             "cluster": "cw-us-east-08a",
@@ -71,7 +71,7 @@ def _raw_config() -> dict[str, Any]:
             "validation_data": [],
         },
         "skyrl": {
-            "entrypoint": "fully_async",
+            "entrypoint": "gym_worker_pool",
             "context_budget": {
                 "request_window_tokens": 1024,
                 "max_new_tokens_per_turn": 256,
@@ -113,23 +113,23 @@ def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize(
-    ("entrypoint", "colocate_all", "num_nodes", "expected"),
+    ("entrypoint", "max_staleness_steps", "expected"),
     [
-        ("fully_async", True, 1, "async"),
-        ("standard", True, 1, "sync"),
-        ("terminal_bench", True, 1, "sync"),
-        ("terminal_bench", False, 2, "async"),
-        ("terminal_bench", None, 1, "sync"),
-        ("generate", True, 1, None),
+        ("gym_worker_pool", 0, "sync"),
+        ("gym_worker_pool", 2, "async"),
+        ("standard", 0, "sync"),
+        ("terminal_bench", 1, "async"),
+        ("generate", 0, None),
     ],
 )
-def test_composed_launch_records_the_trainer_its_entrypoint_runs(
-    tmp_path: Path, entrypoint: str, colocate_all: bool | None, num_nodes: int, expected: str | None
+def test_composed_launch_records_whether_training_runs_ahead_of_its_updates(
+    tmp_path: Path, entrypoint: str, max_staleness_steps: int, expected: str | None
 ) -> None:
     raw = _raw_config()
     raw["skyrl"]["entrypoint"] = entrypoint
-    raw["skyrl"]["trainer"]["placement"]["colocate_all"] = colocate_all
-    raw["iris"]["allocation"]["num_nodes"] = num_nodes
+    raw["skyrl"]["trainer"]["placement"]["colocate_all"] = False
+    raw["skyrl"]["trainer"]["rollout_buffer"] = {"max_staleness_steps": max_staleness_steps}
+    raw["iris"]["allocation"]["num_nodes"] = 2
     path = tmp_path / "launch.yaml"
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
@@ -164,14 +164,6 @@ def test_launch_config_rejects_allocation_smaller_than_role_plan() -> None:
     raw["iris"]["allocation"]["num_nodes"] = 0
 
     with pytest.raises(ValueError, match="num_nodes"):
-        validate_launch_config(compose_launch_config(raw))
-
-
-def test_fully_async_launch_requires_equal_training_batches() -> None:
-    raw = deepcopy(_raw_config())
-    raw["skyrl"]["trainer"]["policy_mini_batch_size"] = 4
-
-    with pytest.raises(ValueError, match="train_batch_size == trainer.policy_mini_batch_size"):
         validate_launch_config(compose_launch_config(raw))
 
 

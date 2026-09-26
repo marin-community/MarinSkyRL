@@ -18,13 +18,12 @@ from marinskyrl.distillation import (
 )
 from skyrl_train.distillation import ChosenTokenTeacherEvidence, TeacherScoreRequest
 from skyrl_train.distillation_adapters import (
+    AdmittedGroupDistillationAdapter,
     AsyncTeacherQueueLimits,
-    FullyAsyncRayPPOTrainerDistillationAdapter,
-    RayPPOTrainerDistillationAdapter,
     TeacherEvidenceCoordinator,
     build_routed_teacher_scoring_work,
 )
-from skyrl_train.distillation_runtime import SyncDistillationRuntime
+from skyrl_train.distillation_runtime import DistillationRuntime
 from skyrl_train.teacher_oracle import (
     RotatingTeacherOracleOwner,
     TeacherCapabilities,
@@ -67,6 +66,16 @@ def _plan() -> DistillationPlan:
             ),
         ),
     )
+
+
+_SHARED_FINGERPRINTS = {
+    "math-teacher": "sha256:shared-tokenizer",
+    "code-teacher": "sha256:shared-tokenizer",
+}
+_QUEUE_LIMITS = {
+    "math-teacher": AsyncTeacherQueueLimits(max_queued=2, workers=1),
+    "code-teacher": AsyncTeacherQueueLimits(max_queued=2, workers=1),
+}
 
 
 def _trajectory_batch():
@@ -198,26 +207,14 @@ async def test_mixed_routes_survive_out_of_order_scoring_and_endpoint_failover()
         return code
 
     owner = await TeacherOracleOwner.create({"math-teacher": start_math, "code-teacher": start_code})
-    adapter = FullyAsyncRayPPOTrainerDistillationAdapter(
-        TeacherEvidenceCoordinator(owner),
-        teacher_limits={
-            "math-teacher": AsyncTeacherQueueLimits(max_queued=2, workers=1),
-            "code-teacher": AsyncTeacherQueueLimits(max_queued=2, workers=1),
-        },
-    )
+    adapter = AdmittedGroupDistillationAdapter(TeacherEvidenceCoordinator(owner), teacher_limits=_QUEUE_LIMITS)
     await adapter.start()
     routed_batch = route_trajectory_batch(
         _trajectory_batch(),
         route_keys=("math", "code", "math", "code"),
         router=PlanTeacherRouter(_plan()),
     )
-    work = build_routed_teacher_scoring_work(
-        routed_batch,
-        tokenizer_fingerprints={
-            "math-teacher": "sha256:shared-tokenizer",
-            "code-teacher": "sha256:shared-tokenizer",
-        },
-    )
+    work = build_routed_teacher_scoring_work(routed_batch, tokenizer_fingerprints=_SHARED_FINGERPRINTS)
 
     scoring = asyncio.create_task(adapter.score_routed_before_batch_assembly(work))
     await asyncio.wait_for(code_completed.wait(), timeout=1)
@@ -270,7 +267,7 @@ async def test_mixed_routes_survive_out_of_order_scoring_and_endpoint_failover()
 
 
 @pytest.mark.asyncio
-async def test_sync_adapter_fans_out_mixed_routes_during_model_forward():
+async def test_runtime_routes_mixed_group_from_trajectory_metadata():
     math = RoutingTeacherService("math-teacher", "math-r7")
     code = RoutingTeacherService("code-teacher", "code-r4")
 
@@ -280,79 +277,36 @@ async def test_sync_adapter_fans_out_mixed_routes_during_model_forward():
     async def start_code():
         return code
 
-    adapter = RayPPOTrainerDistillationAdapter(
-        TeacherEvidenceCoordinator(
-            await TeacherOracleOwner.create({"math-teacher": start_math, "code-teacher": start_code})
-        )
-    )
-    routed_batch = route_trajectory_batch(
-        _trajectory_batch(),
-        route_keys=("math", "code", "math", "code"),
-        router=PlanTeacherRouter(_plan()),
-    )
-    work = build_routed_teacher_scoring_work(
-        routed_batch,
-        tokenizer_fingerprints={
-            "math-teacher": "sha256:shared-tokenizer",
-            "code-teacher": "sha256:shared-tokenizer",
-        },
-    )
-
-    forward_result, scored = await adapter.score_routed_while_model_forwarding(work, lambda: "forward-complete")
-    await adapter.close()
-
-    assert forward_result == "forward-complete"
-    assert scored.trajectory_ids == routed_batch.trajectory_ids
-    assert math.requests[0].trajectory_ids == ("math-a_0", "math-b_0")
-    assert code.requests[0].trajectory_ids == ("code-a_0", "code-b_0")
-
-
-@pytest.mark.asyncio
-async def test_sync_runtime_routes_mixed_batch_from_trajectory_metadata():
-    math = RoutingTeacherService("math-teacher", "math-r7")
-    code = RoutingTeacherService("code-teacher", "code-r4")
-
-    async def start_math():
-        return math
-
-    async def start_code():
-        return code
-
-    runtime = SyncDistillationRuntime(
+    runtime = DistillationRuntime(
         _plan(),
         await TeacherOracleOwner.create({"math-teacher": start_math, "code-teacher": start_code}),
-        tokenizer_fingerprints={
-            "math-teacher": "sha256:shared-tokenizer",
-            "code-teacher": "sha256:shared-tokenizer",
-        },
+        tokenizer_fingerprints=_SHARED_FINGERPRINTS,
+        teacher_limits=_QUEUE_LIMITS,
     )
+    await runtime.start()
     trajectory_batch = _trajectory_batch()
     trajectory_batch["teacher_route_keys"] = ["math", "code", "math", "code"]
 
-    forward_result, scored = await runtime.score_while_model_forwarding(
-        trajectory_batch,
-        lambda: "forward-complete",
-    )
+    ticket = await runtime.submit_before_batch_assembly(trajectory_batch)
+    scored = await ticket.result()
     await runtime.close()
 
-    assert forward_result == "forward-complete"
     assert tuple(route.route_id for route in scored.routes) == ("math", "code", "math", "code")
     assert math.requests[0].trajectory_ids == ("math-a_0", "math-b_0")
     assert code.requests[0].trajectory_ids == ("code-a_0", "code-b_0")
 
 
 @pytest.mark.asyncio
-async def test_sync_runtime_requires_explicit_routes_for_multi_route_plan():
+async def test_runtime_requires_explicit_routes_for_multi_route_plan():
+    runtime = DistillationRuntime(
+        _plan(),
+        {},
+        tokenizer_fingerprints=_SHARED_FINGERPRINTS,
+        teacher_limits=_QUEUE_LIMITS,
+    )
+
     with pytest.raises(ValueError, match="requires teacher_route_keys"):
-        runtime = SyncDistillationRuntime(
-            _plan(),
-            {},
-            tokenizer_fingerprints={
-                "math-teacher": "sha256:shared-tokenizer",
-                "code-teacher": "sha256:shared-tokenizer",
-            },
-        )
-        await runtime.score_while_model_forwarding(_trajectory_batch(), lambda: "forward-complete")
+        await runtime.submit_before_batch_assembly(_trajectory_batch())
 
 
 def test_router_rejects_unknown_route_before_partitioning():

@@ -1,15 +1,16 @@
-"""Exact weighted route mixtures for multi-teacher training batches."""
+"""Exact weighted route mixtures for multi-teacher training prompts."""
 
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping, Sequence
 import math
 import random
 from typing import Any
 
 import datasets
-from torch.utils.data import Sampler
+
+from skyrl_train.rollouts.loader import JudgedGroup
 
 ROUTE_COLUMN = "teacher_route"
 
@@ -32,83 +33,52 @@ def weighted_quotas(total: int, weights: Mapping[str, float], batch_index: int) 
     return quotas
 
 
-class DomainWeightedSampler(Sampler[int]):
-    """Cycle shuffled route pools with an exact per-batch weighted mixture.
+class DomainWeightedOrder:
+    """Cycle shuffled route pools, composing every window of ``window_size`` rows with an exact weighted mixture.
 
-    The sampler and iterator expose torchdata's stateful protocol, so a
-    checkpoint can restore the same route and row sequence mid-epoch.
+    Rows within one window are unique. Groups can finish out of order or be discarded, so a training batch
+    matches the mixture in expectation rather than exactly.
     """
 
-    def __init__(self, dataframe: datasets.Dataset, weights: Mapping[str, float], seed: int, batch_size: int):
-        if batch_size <= 0:
-            raise ValueError("batch_size must be positive")
+    def __init__(self, dataframe: datasets.Dataset, weights: Mapping[str, float], *, seed: int, window_size: int):
+        if window_size <= 0:
+            raise ValueError("window_size must be positive")
         if ROUTE_COLUMN not in dataframe.column_names:
             raise ValueError(f"Domain-weighted sampling requires a top-level {ROUTE_COLUMN!r} column")
         self.weights = dict(weights)
         self.names = tuple(self.weights)
-        self.batch_size = batch_size
-        self.seed = seed
-        self.epoch = 0
-        self.num_samples = len(dataframe) // batch_size * batch_size
-        if self.num_samples == 0:
-            raise ValueError(f"Dataset has fewer than {batch_size} rows")
+        self.window_size = window_size
         pools: dict[str, list[int]] = defaultdict(list)
         for index, route in enumerate(dataframe[ROUTE_COLUMN]):
             pools[str(route)].append(index)
         unknown = set(pools) - set(self.names)
         if unknown:
             raise ValueError(f"Dataset has unknown teacher routes: {sorted(unknown)}")
-        self.pools = {name: pools[name] for name in self.names}
         max_quotas = {
-            name: max(weighted_quotas(batch_size, self.weights, batch)[name] for batch in range(len(self.names)))
+            name: max(weighted_quotas(window_size, self.weights, window)[name] for window in range(len(self.names)))
             for name in self.names
         }
-        underfilled = {name: quota for name, quota in max_quotas.items() if len(self.pools[name]) < quota}
+        underfilled = {name: quota for name, quota in max_quotas.items() if len(pools[name]) < quota}
         if underfilled:
-            raise ValueError(f"Domain-weighted route pools cannot fill a unique batch: {underfilled}")
-
-    def __len__(self) -> int:
-        return self.num_samples
-
-    def __iter__(self) -> DomainWeightedSamplerIterator:
-        iterator = DomainWeightedSamplerIterator(self, epoch=self.epoch)
-        self.epoch += 1
-        return iterator
-
-    def state_dict(self) -> dict[str, int]:
-        return {"epoch": self.epoch}
-
-    def load_state_dict(self, state_dict: Mapping[str, int]) -> None:
-        self.epoch = state_dict["epoch"]
-
-
-class DomainWeightedSamplerIterator(Iterator[int]):
-    """Stateful draw stream for one weighted-sampler epoch."""
-
-    def __init__(self, sampler: DomainWeightedSampler, epoch: int):
-        self.sampler = sampler
-        self.rng = random.Random(sampler.seed + epoch)
-        self.pools = {name: list(rows) for name, rows in sampler.pools.items()}
+            raise ValueError(f"Domain-weighted route pools cannot fill a unique window: {underfilled}")
+        self.rng = random.Random(seed)
+        self.pools = {name: list(pools[name]) for name in self.names}
         for rows in self.pools.values():
             self.rng.shuffle(rows)
-        self.cursors = {name: 0 for name in sampler.names}
-        self.yielded = 0
-        self.batch_index = 0
-        self.batch: list[int] = []
-        self.batch_position = 0
+        self.cursors = {name: 0 for name in self.names}
+        self.window_index = 0
+        self.window: list[int] = []
+        self.window_position = 0
 
-    def __iter__(self) -> DomainWeightedSamplerIterator:
-        return self
-
-    def __next__(self) -> int:
-        if self.yielded >= len(self.sampler):
-            raise StopIteration
-        if self.batch_position == len(self.batch):
-            self._next_batch()
-        index = self.batch[self.batch_position]
-        self.batch_position += 1
-        self.yielded += 1
+    def next_index(self) -> int:
+        if self.window_position == len(self.window):
+            self._next_window()
+        index = self.window[self.window_position]
+        self.window_position += 1
         return index
+
+    def observe(self, groups: Sequence[JudgedGroup]) -> dict[str, float]:
+        return {}
 
     def _take(self, route: str, count: int) -> list[int]:
         selected: list[int] = []
@@ -127,29 +97,27 @@ class DomainWeightedSamplerIterator(Iterator[int]):
                 seen.add(row)
         return selected
 
-    def _next_batch(self) -> None:
-        quotas = weighted_quotas(self.sampler.batch_size, self.sampler.weights, self.batch_index)
-        self.batch = [row for name in self.sampler.names for row in self._take(name, quotas[name])]
-        self.rng.shuffle(self.batch)
-        self.batch_position = 0
-        self.batch_index += 1
+    def _next_window(self) -> None:
+        quotas = weighted_quotas(self.window_size, self.weights, self.window_index)
+        self.window = [row for name in self.names for row in self._take(name, quotas[name])]
+        self.rng.shuffle(self.window)
+        self.window_position = 0
+        self.window_index += 1
 
     def state_dict(self) -> dict[str, Any]:
         return {
             "rng_state": self.rng.getstate(),
             "pools": {name: list(rows) for name, rows in self.pools.items()},
             "cursors": dict(self.cursors),
-            "yielded": self.yielded,
-            "batch_index": self.batch_index,
-            "batch": list(self.batch),
-            "batch_position": self.batch_position,
+            "window_index": self.window_index,
+            "window": list(self.window),
+            "window_position": self.window_position,
         }
 
-    def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
-        self.rng.setstate(state_dict["rng_state"])
-        self.pools = {name: list(rows) for name, rows in state_dict["pools"].items()}
-        self.cursors = dict(state_dict["cursors"])
-        self.yielded = state_dict["yielded"]
-        self.batch_index = state_dict["batch_index"]
-        self.batch = list(state_dict["batch"])
-        self.batch_position = state_dict["batch_position"]
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        self.rng.setstate(state["rng_state"])
+        self.pools = {name: list(rows) for name, rows in state["pools"].items()}
+        self.cursors = dict(state["cursors"])
+        self.window_index = state["window_index"]
+        self.window = list(state["window"])
+        self.window_position = state["window_position"]

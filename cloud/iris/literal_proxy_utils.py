@@ -56,6 +56,9 @@ from urllib.parse import urlsplit, urlunsplit
 # fronts the LOCAL vLLM; external reach is via the existing pinggy/controller path).
 DEFAULT_LITERAL_PROXY_PORT = 8010
 DEFAULT_LITERAL_PROXY_HOST = "127.0.0.1"
+# The Iris controller dials the task's advertise host, so a controller-ingress proxy must
+# listen on every interface; a loopback bind refuses every agent request.
+CONTROLLER_INGRESS_PROXY_HOST = "0.0.0.0"
 _LITERAL_PROXY_PORT_BASE = 10000
 _LITERAL_PROXY_PORT_COUNT = 10000
 

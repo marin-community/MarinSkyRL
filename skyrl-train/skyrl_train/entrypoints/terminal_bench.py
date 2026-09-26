@@ -7,29 +7,14 @@ import hydra
 from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
 from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
+from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources
+from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec
 
 
 class TerminalBenchExp(BasePPOExp):
-    def uses_fully_async_trainer(self) -> bool:
-        return self.cfg.trainer.placement.colocate_all is False
-
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
-        del inference_engine_client
-        # Harbor is an optional agent-harness dependency and is absent from the CPU launcher environment.
-        from skyrl_train.trajectory_runners.harbor.execution import (  # noqa: PLC0415
-            ExecutionEnvironment,
-            HarborRunnerSpec,
-            ProcessPoolResources,
-            TrajectoryWorkload,
-            build_harbor_trajectory_runner,
-        )
-
-        return build_harbor_trajectory_runner(
-            spec=HarborRunnerSpec.from_config(cfg),
-            workload=TrajectoryWorkload(environment=ExecutionEnvironment.PRODUCTION),
-            tokenizer=tokenizer,
-            resources=ProcessPoolResources.from_config(cfg),
-        )
+        del tokenizer, inference_engine_client
+        return RolloutWorkerPool(HarborRunnerSpec.from_config(cfg), RolloutWorkerResources.from_config(cfg))
 
     def get_train_dataset(self):
         """Initializes the training dataset.
@@ -62,36 +47,6 @@ class TerminalBenchExp(BasePPOExp):
             )
             return prompts_dataset
         return None
-
-    def get_trainer(
-        self,
-        cfg,
-        tracker,
-        tokenizer,
-        train_dataset,
-        eval_dataset,
-        inference_engine_client,
-        trajectory_runner,
-        colocate_pg,
-    ):
-        from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer  # noqa: PLC0415
-        from skyrl_train.trainer import RayPPOTrainer  # noqa: PLC0415
-
-        # Check if async training is configured via placement.colocate_all=false
-        # Async training requires non-colocated placement (separate GPU sets for policy/ref/inference)
-        use_async = cfg.trainer.placement.colocate_all is False
-
-        trainer_cls = FullyAsyncRayPPOTrainer if use_async else RayPPOTrainer
-        return trainer_cls(
-            cfg=cfg,
-            tracker=tracker,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            inference_engine_client=inference_engine_client,
-            trajectory_runner=trajectory_runner,
-            colocate_pg=colocate_pg,
-        )
 
 
 @ray.remote(num_cpus=1, max_retries=0)

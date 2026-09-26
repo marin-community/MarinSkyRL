@@ -1,15 +1,16 @@
 """Adaptive curriculum sampling over prompt-dataset bins.
 
 Training rows carry a bin assignment in their ``extra_info`` column: ``data_source`` names the
-bin (e.g. ``"g0-gsm8k"``) and ``grade`` orders bins by difficulty (0 easiest). CurriculumSampler
+bin (e.g. ``"g0-gsm8k"``) and ``grade`` orders bins by difficulty (0 easiest). CurriculumOrder
 draws dataset rows with replacement according to per-bin weights, updated each training step from
-per-sample rollout rewards. A prompt group (one uid's rollouts) is "informative" when its rewards
-are not all equal — an all-pass or all-fail group contributes no GRPO gradient signal.
+the rewards of the groups batch selection judged. A prompt group (one row's rollouts) is
+"informative" when its rewards are not all equal — an all-pass or all-fail group contributes no
+GRPO gradient signal.
 
 The module splits sampling mechanics from weighting policy:
 
-- ``CurriculumSampler`` owns the draw stream (batch-unique rejection draws, RNG, torchdata
-  Stateful checkpointing) and folds each step's rewards into ``BinStats``.
+- ``CurriculumOrder`` owns the draw stream (window-unique rejection draws, RNG, checkpoint
+  state) and folds each step's groups into ``BinStats``.
 - ``BinStats`` holds the decayed per-bin sufficient statistics (informative/total group counts
   and solved/sample counts, whose ratio is a decayed pass-rate estimate).
 - ``RowStats`` records the same evidence per dataset row (visit counts, per-visit-decayed
@@ -18,16 +19,16 @@ The module splits sampling mechanics from weighting policy:
   normalizes the ``data.sampling`` config subtree into a policy instance once, at construction.
 """
 
-from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Callable, Dict, Iterator, List
+from typing import Any, Callable, Dict, List
 
 import numpy as np
 from omegaconf import DictConfig
-from torch.utils.data import Sampler
 
 from skyrl_train.dataset import PromptDataset
+from skyrl_train.rollouts.loader import JudgedGroup
 
 EXTRA_INFO_KEY = "extra_info"
 DATA_SOURCE_KEY = "data_source"
@@ -156,7 +157,7 @@ class GroupOutcome:
 
 
 class BinStats:
-    """Decayed per-bin sufficient statistics, written by the sampler, read by policies.
+    """Decayed per-bin sufficient statistics, written by the curriculum order, read by policies.
 
     All arrays decay multiplicatively each step before the step's counts are added.
     ``reversion_mass`` adds per-step pseudo-evidence at the weight-curve peak (pass 0.5):
@@ -313,7 +314,7 @@ class WeightPolicy:
     """Turns curriculum statistics into per-bin sampling weights.
 
     Policies are stateless by default; a policy with internal state overrides the
-    observe/state hooks so the sampler can checkpoint it alongside the statistics.
+    observe/state hooks so the curriculum order can checkpoint it alongside the statistics.
     """
 
     def weights(self, stats: BinStats, rng: np.random.Generator) -> np.ndarray:
@@ -470,126 +471,67 @@ def build_policy(config: CurriculumConfig, bins: DatasetBins) -> WeightPolicy:
     raise ValueError(f"Unknown sampling kind: {config.kind}")
 
 
-class _CurriculumSamplerIterator(Iterator[int]):
-    """One epoch pass over the sampler; Stateful for torchdata's snapshot protocol.
+class CurriculumOrder:
+    """Draw dataset rows with replacement from per-bin curriculum weights, learning from each step's groups.
 
-    Only the within-pass position is stored here — the draw stream itself is owned by the
-    sampler's persistent RNG, whose state torchdata saves separately via the sampler-level
-    ``state_dict``, so restore does not replay draws.
+    Draws are uniform within a bin and deterministic given the seed and draw history. Rows are distinct within
+    each consecutive window of ``window_size`` draws: two groups of one row in the same batch would share a uid,
+    and the rollout buffer keeps only one of them.
     """
 
-    def __init__(self, sampler: "CurriculumSampler"):
-        self.sampler = sampler
-        self.yielded = 0
-        self._batch_rows: set[int] = set()
-
-    def __iter__(self) -> "_CurriculumSamplerIterator":
-        return self
-
-    def __next__(self) -> int:
-        if self.yielded >= len(self.sampler):
-            raise StopIteration
-        if self.yielded % self.sampler.batch_size == 0:
-            self._batch_rows.clear()
-        self.yielded += 1
-        row = self.sampler._draw(exclude=self._batch_rows)
-        self._batch_rows.add(row)
-        return row
-
-    def state_dict(self) -> Dict[str, Any]:
-        return {"yielded": self.yielded, "batch_rows": sorted(self._batch_rows)}
-
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        self.yielded = state_dict["yielded"]
-        self._batch_rows = set(state_dict["batch_rows"])
-
-
-class CurriculumSampler(Sampler[int]):
-    """Samples dataset rows with replacement from per-bin curriculum weights.
-
-    Each epoch pass yields exactly ``len(dataset)`` indices so the trainer's len()-based
-    epoch/step arithmetic is unchanged. Draws are uniform within a bin and deterministic
-    given the seed and draw history. The sampler and its iterator implement the torchdata
-    Stateful protocol, so StatefulDataLoader checkpoints resume the exact draw stream, the
-    decayed statistics, and the policy's internal state.
-    """
-
-    def __init__(self, dataset: PromptDataset, config: CurriculumConfig, seed: int, batch_size: int):
-        if batch_size < 1:
-            raise ValueError(f"batch_size must be positive, got {batch_size}")
+    def __init__(self, dataset: PromptDataset, config: CurriculumConfig, *, seed: int, window_size: int):
+        if window_size < 1:
+            raise ValueError(f"window_size must be positive, got {window_size}")
         self.config = config
         self.bins = dataset_bins(dataset)
-        self.num_rows = len(dataset)
-        self.batch_size = batch_size
+        self.window_size = window_size
         self.rng = np.random.default_rng(seed)
         self.stats = BinStats(self.bins, decay=config.decay, reversion_mass=config.reversion_mass)
-        self.rows = RowStats(self.num_rows, instance_decay=config.instance_decay)
+        self.rows = RowStats(len(dataset), instance_decay=config.instance_decay)
         self.policy = build_policy(config, self.bins)
-        self.draw_count = 0
         self.update_count = 0
         self.weights = self.policy.weights(self.stats, self.rng)
+        self._window_rows: list[int] = []
 
-    def __len__(self) -> int:
-        return self.num_rows
+    def next_index(self) -> int:
+        if len(self._window_rows) == self.window_size:
+            self._window_rows = []
+        row = self._draw(exclude=set(self._window_rows))
+        self._window_rows.append(row)
+        return row
 
-    def __iter__(self) -> _CurriculumSamplerIterator:
-        return _CurriculumSamplerIterator(self)
-
-    def _draw(self, exclude: set[int] = frozenset()) -> int:
-        """Draw one dataset row, rejecting rows already used in the current batch.
-
-        Duplicate rows within one train batch would merge into a single uid group and
-        violate the trainer's exact physical-group-size invariant. Rejection is cheap:
-        every bin is far larger than a train batch.
-        """
-        self.draw_count += 1
+    def _draw(self, exclude: set[int]) -> int:
         for _ in range(1000):
             bin_idx = int(self.rng.choice(len(self.weights), p=self.weights))
             rows = self.bins.bin_rows[bin_idx]
             row = int(rows[self.rng.integers(len(rows))])
             if row not in exclude:
                 return row
-        raise RuntimeError(f"Could not draw a batch-unique row after 1000 attempts (batch_size={self.batch_size})")
+        raise RuntimeError(f"Could not draw a window-unique row after 1000 attempts (window_size={self.window_size})")
 
-    def _group_outcomes(self, uids: List[str], rewards: List[float], n_samples_per_prompt: int) -> List[GroupOutcome]:
-        groups: Dict[str, List[float]] = defaultdict(list)
-        for uid, reward in zip(uids, rewards):
-            groups[uid].append(reward)
+    def observe(self, groups: Sequence[JudgedGroup]) -> Dict[str, float]:
+        """Fold one training step's judged groups into the statistics, redraw the bin weights, and return metrics.
 
-        outcomes = []
-        for uid, group_rewards in groups.items():
-            if len(group_rewards) % n_samples_per_prompt != 0:
-                raise ValueError(
-                    f"uid {uid} has {len(group_rewards)} samples, not a multiple of "
-                    f"n_samples_per_prompt={n_samples_per_prompt}"
-                )
-            row = int(uid)
-            outcomes.append(
-                GroupOutcome(
-                    row=row,
-                    bin_index=int(self.bins.row_to_bin[row]),
-                    size=len(group_rewards),
-                    solved=sum(reward > 0 for reward in group_rewards),
-                    informative=any(reward != group_rewards[0] for reward in group_rewards),
-                )
-            )
-        return outcomes
-
-    def update(self, uids: List[str], rewards: List[float], n_samples_per_prompt: int) -> None:
-        """Fold one training step's per-sample rewards into the statistics.
-
-        ``uids`` are dataset row indices as strings, one per rollout sample; a group is one
-        uid's rollouts.
+        The groups include those dynamic sampling discarded: without all-pass and all-fail groups the statistics
+        would be biased toward informative bins. A sample counts as solved when its reward is positive.
         """
-        if len(uids) != len(rewards):
-            raise ValueError(f"Got {len(uids)} uids but {len(rewards)} rewards")
-        outcomes = self._group_outcomes(uids, rewards, n_samples_per_prompt)
+        outcomes = [
+            GroupOutcome(
+                row=int(group.uid),
+                bin_index=int(self.bins.row_to_bin[int(group.uid)]),
+                size=len(group.rewards),
+                solved=sum(reward > 0 for reward in group.rewards),
+                informative=any(reward != group.rewards[0] for reward in group.rewards),
+            )
+            for group in groups
+        ]
         self.update_count += 1
         self.stats.apply_step(outcomes)
         for outcome in outcomes:
             self.rows.observe_group(outcome.row, outcome.solved, outcome.size, self.update_count)
         self.policy.observe_step(self.stats)
         self.weights = self.policy.weights(self.stats, self.rng)
+        return self.metrics()
 
     def metrics(self) -> Dict[str, float]:
         """Per-bin curriculum metrics for the current step."""
@@ -612,16 +554,16 @@ class CurriculumSampler(Sampler[int]):
             "rows": self.rows.state_dict(),
             "policy": self.policy.state_dict(),
             "weights": self.weights.copy(),
-            "draw_count": self.draw_count,
             "update_count": self.update_count,
             "rng_state": self.rng.bit_generator.state,
+            "window_rows": list(self._window_rows),
         }
 
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
         self.stats.load_state_dict(state_dict["stats"])
         self.rows.load_state_dict(state_dict["rows"])
         self.policy.load_state_dict(state_dict["policy"])
         self.weights = state_dict["weights"].copy()
-        self.draw_count = state_dict["draw_count"]
         self.update_count = state_dict["update_count"]
         self.rng.bit_generator.state = state_dict["rng_state"]
+        self._window_rows = list(state_dict["window_rows"])

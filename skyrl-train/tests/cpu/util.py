@@ -44,7 +44,6 @@ def example_dummy_config():
     generator_overrides = {
         "sampling_params": {"max_generate_length": 20},
         "n_samples_per_prompt": 1,
-        "batched": False,
         "max_turns": 1,
         "enable_http_endpoint": False,
         "http_endpoint_host": "127.0.0.1",

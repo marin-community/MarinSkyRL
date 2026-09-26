@@ -119,7 +119,6 @@ def engine_client(cfg, model_path: str, geometry: Geometry) -> InferenceEngineCl
         enforce_eager=False,
         engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
         gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
-        async_engine=True,
         max_num_batched_tokens=MAX_MODEL_LEN * geometry.engine_dp,
         max_num_seqs=cfg.trainer.train_batch_size,
         tokenizer=tokenizer,
@@ -138,7 +137,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
 
     class CorruptibleEngine(vllm_engine.AsyncVLLMInferenceEngine):
         async def flip_installed_byte(self):
-            return await self._get_engine().collective_rpc(flip_one_installed_byte)
+            return await self.llm.collective_rpc(flip_one_installed_byte)
 
     # The test's actor only adds the byte-flipping RPC. The transport is the production code.
     monkeypatch.setattr(vllm_engine, "AsyncVLLMRayActor", ray.remote(CorruptibleEngine))

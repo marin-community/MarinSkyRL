@@ -289,8 +289,6 @@ First, ensure sure your config matches your available GPUs. You may need to adju
 - ``trainer.placement.policy_num_gpus_per_node``
 - ``generator.num_inference_engines``
 
-Then, configure how the environment should be executed. For multi-turn environments, we recommend setting ``generator.batched=false`` and ``generator.async_engine=true`` to ensure that each environment is executed asynchronously. If your environment is single-turn, you may get better performance by reversing these settings.
-
 **Launch Training**
 
 .. code-block:: bash

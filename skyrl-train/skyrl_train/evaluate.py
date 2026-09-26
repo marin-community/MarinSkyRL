@@ -29,7 +29,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import validate_trajec
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.trajectory_runners.trajectory_retention import (
-    TrajectorySink,
+    RetentionSink,
     make_trajectory_sink,
 )
 
@@ -107,7 +107,7 @@ async def _collect_evaluation_rollouts(
     trajectory_runner: TrajectoryRunner,
     cfg: DictConfig,
     global_step: int | None,
-    sink: TrajectorySink,
+    sink: RetentionSink,
     val_set_name: str | None,
     accumulator: _EvaluationAccumulator,
 ) -> _EvaluationRollouts:
@@ -212,7 +212,7 @@ async def evaluate(
     global_step: int | None,
     tokenizer: AutoTokenizer,
     val_set_name: str | None = None,
-    trajectory_sink: TrajectorySink | None = None,
+    trajectory_sink: RetentionSink | None = None,
 ) -> Dict[str, float]:
     """Runs generation and evaluation of trajectories.
 
@@ -225,7 +225,7 @@ async def evaluate(
         tokenizer (AutoTokenizer): tokenizer to use
         val_set_name (str | None): optional name of the validation set being evaluated,
             used for unique orchestrator naming
-        trajectory_sink (TrajectorySink | None): trainer-owned retention sink; a standalone evaluation builds one from cfg
+        trajectory_sink (RetentionSink | None): trainer-owned retention sink; a standalone evaluation builds one from cfg
 
     Returns:
         Dict[str, float]: evaluation metrics
@@ -268,7 +268,7 @@ async def evaluate_step_wise(
     cfg: DictConfig,
     global_step: int | None,
     tokenizer: AutoTokenizer,
-    trajectory_sink: TrajectorySink,
+    trajectory_sink: RetentionSink,
     val_set_name: str | None = None,
 ) -> Dict[str, float]:
     """Runs generation and evaluation of trajectories for step-wise training.
@@ -284,7 +284,7 @@ async def evaluate_step_wise(
         tokenizer (AutoTokenizer): tokenizer to use
         val_set_name (str | None): optional name of the validation set being evaluated,
             used for unique orchestrator naming
-        trajectory_sink (TrajectorySink): trainer-owned retention sink
+        trajectory_sink (RetentionSink): trainer-owned retention sink
 
     Returns:
         Dict[str, float]: evaluation metrics

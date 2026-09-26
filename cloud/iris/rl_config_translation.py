@@ -36,8 +36,8 @@ RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
 class RLEntrypoint(StrEnum):
     """Execution modes supported by Iris RL configurations."""
 
-    FULLY_ASYNC = "fully_async"
     GENERATE = "generate"
+    GYM_WORKER_POOL = "gym_worker_pool"
     MINI_SWE = "mini_swe"
     STANDARD = "standard"
     TERMINAL_BENCH = "terminal_bench"
@@ -46,8 +46,8 @@ class RLEntrypoint(StrEnum):
 
 RL_ENTRYPOINTS = MappingProxyType(
     {
-        RLEntrypoint.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async",
         RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
+        RLEntrypoint.GYM_WORKER_POOL: "skyrl_train.entrypoints.gym_worker_pool",
         RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
         RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
         RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
@@ -75,14 +75,15 @@ def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
 _RL_ENTRYPOINTS_BY_MODULE = MappingProxyType({module: name for name, module in RL_ENTRYPOINTS.items()})
 
 
-def training_type_for_entrypoint(module: str, *, colocate_all: bool) -> TrainingType | None:
-    """The trainer an entrypoint module runs, or None for a module that trains nothing."""
+def training_type_for_entrypoint(module: str, *, max_staleness_steps: int) -> TrainingType | None:
+    """How an entrypoint module trains, or None for a module that trains nothing.
+
+    Every training entrypoint runs the rollout-buffer loop, which is synchronous at staleness 0.
+    """
     entrypoint = _RL_ENTRYPOINTS_BY_MODULE.get(module)
     if entrypoint is None or entrypoint in (RLEntrypoint.GENERATE, RLEntrypoint.TERMINAL_BENCH_GENERATE):
         return None
-    if entrypoint is RLEntrypoint.FULLY_ASYNC or (entrypoint is RLEntrypoint.TERMINAL_BENCH and not colocate_all):
-        return TrainingType.ASYNC
-    return TrainingType.SYNC
+    return TrainingType.SYNC if max_staleness_steps == 0 else TrainingType.ASYNC
 
 
 def registered_rl_entrypoint_module(module: str) -> str:
@@ -560,7 +561,6 @@ def parse_rl_config(
         num_inference_engines=generator.get("num_inference_engines", 1),
         tensor_parallel_size=generator.get("inference_engine_tensor_parallel_size", 4),
         pipeline_parallel_size=generator.get("inference_engine_pipeline_parallel_size", 1),
-        async_engine=generator.get("async_engine", True),
         engine_init_kwargs=generator.get("engine_init_kwargs", {}),
         context=f"{path}: generator.speculative_decoding",
     )

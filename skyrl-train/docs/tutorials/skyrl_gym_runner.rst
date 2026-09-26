@@ -20,24 +20,14 @@ the training loop for updating the model.
 ``SkyRLGymTrajectoryRunner`` is implemented to enforce token-in-token-out (TI/TO) in most cases. To see
 what TI/TO is and why it is important, please refer to `issue #123 <https://github.com/NovaSky-AI/SkyRL/issues/123>`_.
 
-To implement ``TrajectoryRunner.run()``, ``SkyRLGymTrajectoryRunner`` implements ``collect_batched()``
-for single-turn generation, and ``agent_loop()`` for multi-turn generation.
+To implement ``TrajectoryRunner.run()``, ``SkyRLGymTrajectoryRunner`` runs ``agent_loop()`` for every
+trajectory, whether the environment takes a single turn or many.
 
-Single-turn generation
-----------------------
+Agent loop
+----------
 
-``SkyRLGymTrajectoryRunner.collect_batched()`` is used when ``config.generator.batched`` is set to ``True``.
-In this case, only a single assistant message is generated for each prompt. It is used for tasks
-such as math problems, where the model is expected to generate a single response without interacting
-with the environment. We pass a list of prompts to each invocation of the underlying LLM engine's
-``.generate()`` method (hence "batched").
-
-Multi-turn generation
----------------------
-
-``SkyRLGymTrajectoryRunner.agent_loop()`` is used when ``config.generator.batched`` is set to ``False``, where
-the model is expected to interact with the environment for multiple turns (though ``agent_loop()`` can
-also be used for single-turn generation). We pass a single prompt to each invocation of the underlying
+``SkyRLGymTrajectoryRunner.agent_loop()`` lets the model interact with the environment for up to
+``generator.max_turns`` turns. We pass a single prompt to each invocation of the underlying
 LLM engine's ``.generate()`` method.
 
 There are three distinct codepaths in ``agent_loop()``, each managing the chat history and tokens

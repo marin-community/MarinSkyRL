@@ -1,39 +1,19 @@
-"""Workload-owned construction for Harbor trajectory runners."""
+"""Construction of Harbor trajectory runners inside rollout workers."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from enum import StrEnum
-from typing import Protocol
+from dataclasses import dataclass
+
+import ray
 from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizerBase
 
+from skyrl_train.rollouts.workers import WorkerShard
+from skyrl_train.trajectory_runners.base import TrajectoryRunner
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
-from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryRequestBatch
-from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink
 
-
-class HarborRunner(Protocol):
-    """Lifecycle surface shared by in-process and process-isolated Harbor runners."""
-
-    async def startup(self) -> None: ...
-
-    async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch: ...
-
-    async def shutdown(self) -> None: ...
-
-    def set_trajectory_sink(self, sink: TrajectorySink) -> None: ...
-
-    async def start_eval_session(
-        self,
-        *,
-        run_name: str,
-        eval_step: int,
-        val_set_name: str | None = None,
-        n_concurrent_trials: int | None = None,
-    ) -> None: ...
-
-    async def stop_eval_session(self) -> None: ...
+DEFAULT_CONCURRENT_TRIALS = 16
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", None)
 
 
 def _detached(config: DictConfig) -> DictConfig:
@@ -41,49 +21,35 @@ def _detached(config: DictConfig) -> DictConfig:
     return OmegaConf.create(OmegaConf.to_container(config, resolve=True))
 
 
-class ExecutionEnvironment(StrEnum):
-    """The environment in which a trajectory workload runs."""
-
-    PRODUCTION = "production"
-    DEVELOPMENT = "development"
-    TEST = "test"
-
-
-@dataclass(frozen=True)
-class TrajectoryWorkload:
-    """Workload facts that determine the execution placement."""
-
-    environment: ExecutionEnvironment
+def configured_concurrent_trials(terminal_bench_config: DictConfig) -> int:
+    """The trial concurrency the config asks for across the whole pool."""
+    harbor = terminal_bench_config.get("harbor", None)
+    if harbor is not None:
+        return int(harbor.get("n_concurrent_trials", DEFAULT_CONCURRENT_TRIALS))
+    return int(terminal_bench_config.get("n_concurrent_trials", DEFAULT_CONCURRENT_TRIALS))
 
 
-@dataclass(frozen=True)
-class ProcessPoolResources:
-    """Resources for the process-isolated Harbor runner pool."""
+def per_worker_limits(terminal_bench_config: DictConfig, worker_count: int) -> DictConfig:
+    """Divide Harbor's per-process limits among the pool's workers, so the pool's total load matches the config.
 
-    num_coordinators: int
-    cpus_per_coordinator: int
-    executor_workers: int
-    rpc_timeout_seconds: float
-
-    @classmethod
-    def from_config(cls, config: DictConfig) -> ProcessPoolResources:
-        process_pool = config.trajectory_runner.process_pool
-        resources = cls(
-            num_coordinators=int(process_pool.num_coordinators),
-            cpus_per_coordinator=int(process_pool.cpus_per_coordinator),
-            executor_workers=int(process_pool.executor_workers),
-            rpc_timeout_seconds=float(process_pool.rpc_timeout_seconds),
+    ``harbor.n_concurrent_trials`` bounds one process's concurrent sandboxes and model calls, and
+    ``environment.kwargs.connection_pool_maxsize`` sizes one process's Daytona HTTP pool. Neither drops below 1.
+    """
+    scaled = OmegaConf.create(OmegaConf.to_container(terminal_bench_config, resolve=False))
+    harbor = scaled.get("harbor", None)
+    if harbor is not None and "n_concurrent_trials" in harbor:
+        harbor.n_concurrent_trials = max(1, int(harbor.n_concurrent_trials) // worker_count)
+    environment_kwargs = OmegaConf.select(scaled, "environment.kwargs")
+    if environment_kwargs is not None and "connection_pool_maxsize" in environment_kwargs:
+        environment_kwargs.connection_pool_maxsize = max(
+            1, int(environment_kwargs.connection_pool_maxsize) // worker_count
         )
-        if resources.num_coordinators <= 0 or resources.cpus_per_coordinator <= 0:
-            raise ValueError("trajectory runner process-pool sizes must be positive")
-        if resources.executor_workers <= 0 or resources.rpc_timeout_seconds <= 0:
-            raise ValueError("trajectory runner executor size and RPC timeout must be positive")
-        return resources
+    return scaled
 
 
 @dataclass(frozen=True)
 class HarborRunnerSpec:
-    """Serializable inputs required to construct one Harbor runner."""
+    """Serializable inputs that build one rollout worker's Harbor runner."""
 
     config: DictConfig
     runner_config: DictConfig
@@ -97,20 +63,24 @@ class HarborRunnerSpec:
             terminal_bench_config=_detached(config.terminal_bench_config),
         )
 
-    def with_runner_config(self, runner_config: DictConfig) -> HarborRunnerSpec:
-        return replace(self, runner_config=_detached(runner_config))
+    def build(self, tokenizer: PreTrainedTokenizerBase, shard: WorkerShard) -> TrajectoryRunner:
+        """Construct this worker's Harbor runner with its share of the per-process limits.
 
-    def with_terminal_bench_config(self, terminal_bench_config: DictConfig) -> HarborRunnerSpec:
-        return replace(self, terminal_bench_config=_detached(terminal_bench_config))
-
-    def build(self, tokenizer: PreTrainedTokenizerBase) -> HarborRunner:
-        """Construct an in-process Harbor runner."""
+        Evaluation runs on one worker, so its session keeps the pool's full trial concurrency.
+        """
+        # Harbor is an optional agent-harness dependency and is absent from the CPU launcher environment.
         from skyrl_train.trajectory_runners.harbor.runner import HarborTrajectoryRunner  # noqa: PLC0415
 
+        runner_config = self.runner_config.copy()
+        if runner_config.get("http_endpoint_host", None) in LOOPBACK_HOSTS:
+            # The trainer's endpoint listens on every interface. Agents outside this host's network namespace
+            # cannot reach its loopback address, but they can reach the node address.
+            runner_config.http_endpoint_host = ray.util.get_node_ip_address()
         algorithm = self.config.trainer.algorithm
         return HarborTrajectoryRunner(
-            trajectory_runner_cfg=self.runner_config,
-            terminal_bench_cfg=self.terminal_bench_config,
+            trajectory_runner_cfg=runner_config,
+            terminal_bench_cfg=per_worker_limits(self.terminal_bench_config, shard.count),
+            eval_concurrent_trials=configured_concurrent_trials(self.terminal_bench_config),
             tokenizer=tokenizer,
             moe_router_replay=bool(self.config.trainer.policy.megatron_config.get("moe_router_replay", False)),
             rollout_logprobs_required=rollout_logprobs_enabled(algorithm),
@@ -118,18 +88,3 @@ class HarborRunnerSpec:
             tis_splice=bool(algorithm.tis_splice),
             tis_lcs_alert_threshold=float(algorithm.tis_lcs_alert_threshold),
         )
-
-
-def build_harbor_trajectory_runner(
-    *,
-    spec: HarborRunnerSpec,
-    workload: TrajectoryWorkload,
-    tokenizer: PreTrainedTokenizerBase,
-    resources: ProcessPoolResources,
-) -> HarborRunner:
-    """Select execution placement from the runner workload, before trainer construction."""
-    if workload.environment is ExecutionEnvironment.PRODUCTION:
-        from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import RolloutDispatcher  # noqa: PLC0415
-
-        return RolloutDispatcher(spec=spec, resources=resources)
-    return spec.build(tokenizer)

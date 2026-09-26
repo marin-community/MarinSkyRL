@@ -171,9 +171,9 @@ trainer:
     policy_per_gpu_bundles: true
     policy_force_cvd_mask: true
 
-  fully_async:
+  rollout_buffer:
     max_staleness_steps: 16
-    num_parallel_generation_workers: 128
+    max_in_flight: 128
 
 generator:
   vllm_attention_backend: FLASH_ATTN
@@ -205,8 +205,6 @@ generator:
 
   run_engines_locally: true
   weight_sync_backend: nccl
-  async_engine: true
-  batched: false
   enable_http_endpoint: true
   inference_stats_interval: 1
   append_eos_token_after_stop_str_in_multi_turn: true
@@ -227,9 +225,9 @@ data:
   val_data: []
 
 trajectory_runner:
-  process_pool:
-    num_coordinators: 4
-    cpus_per_coordinator: 8
+  rollout_workers:
+    num_workers: 4
+    cpus_per_worker: 8
 
 extra_env:
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

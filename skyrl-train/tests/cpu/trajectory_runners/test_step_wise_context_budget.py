@@ -52,7 +52,6 @@ def test_clamp_generation_tokens_reserves_only_remaining_request_window():
 @patch("skyrl_gym.make")
 async def test_step_wise_generation_clamps_final_request_to_tokenized_window(mock_make):
     cfg = get_default_config().generator
-    cfg.batched = False
     cfg.use_conversation_multi_turn = True
     cfg.max_turns = 2
     cfg.max_input_length = 4
@@ -93,7 +92,6 @@ async def test_step_wise_generation_clamps_final_request_to_tokenized_window(moc
 @patch("skyrl_gym.make")
 async def test_step_wise_stop_eos_keeps_published_behavior_evidence_aligned(mock_make):
     cfg = get_default_config().generator
-    cfg.batched = False
     cfg.use_conversation_multi_turn = True
     cfg.max_turns = 2
     cfg.sampling_params.stop = ["ok"]
@@ -132,7 +130,6 @@ async def test_step_wise_stop_eos_keeps_published_behavior_evidence_aligned(mock
 @patch("skyrl_gym.make")
 async def test_step_wise_collector_preserves_student_topk(mock_make):
     cfg = get_default_config().generator
-    cfg.batched = False
     cfg.use_conversation_multi_turn = True
     cfg.max_turns = 1
     cfg.sampling_params.logprobs = 2

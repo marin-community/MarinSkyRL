@@ -29,7 +29,6 @@ class AgentLoopOutput:
     disposition: TrainingDisposition
     loss_mask: List[int]
     env_metrics: Dict[str, Any]
-    captured_global_step: Optional[int] = None
     token_provenance: TokenProvenance = TokenProvenance.ENGINE
     error_treatment: Optional[str] = None
 
@@ -120,4 +119,3 @@ class TrajectoryBatch(TypedDict):
     teacher_route_keys: Optional[List[str]]
     is_last_step: Optional[List[bool]]
     exclude_from_baseline: Optional[List[bool]]
-    actual_global_step: Optional[int]

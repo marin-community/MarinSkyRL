@@ -444,14 +444,12 @@ def test_failed_multi_turn_full_tito_cannot_enter_required_logprob_training(trun
             "loss_masks": [loss_mask],
             "rollout_logprobs": [rollout_logprobs],
         },
-        earliest_model_step=0,
     )
     policy = GroupAdmissionPolicy(
         GroupAdvantageInvariant.no_group_advantage(physical_group_size=1),
-        max_staleness_steps=0,
         rollout_logprobs_required=True,
     )
-    decision = policy.evaluate(group, global_step=0)
+    decision = policy.evaluate(group)
     assert decision.primary_rejection is AdmissionRejection.FULLY_MASKED
 
 

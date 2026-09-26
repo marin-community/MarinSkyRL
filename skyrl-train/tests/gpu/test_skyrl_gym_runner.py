@@ -6,7 +6,7 @@ import os
 import pytest
 import ray
 from skyrl_train.utils.utils import initialize_ray
-from tests.gpu.gpu_ci.test_skyrl_gym_runner import run_generator_end_to_end, get_test_actor_config
+from tests.gpu.gpu_ci.test_skyrl_gym_runner import run_trajectory_runner_end_to_end, get_test_actor_config
 
 
 # TODO: Make this test lightweight. It currently requires a ~20GB dataset download. Then, transfer the test to gpu_ci.
@@ -17,9 +17,7 @@ async def test_generator_multi_turn_text2sql():
     """
     initialize_ray(get_test_actor_config())
     try:
-        await run_generator_end_to_end(
-            use_async_engine=True,
-            batched=False,
+        await run_trajectory_runner_end_to_end(
             n_samples_per_prompt=5,
             num_inference_engines=2,
             tensor_parallel_size=2,

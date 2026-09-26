@@ -41,8 +41,9 @@ uv run python -m cloud.iris.launch iris launch --config my-launch.yaml
 ```
 
 The run id is the document's `run.id`. Pick one you will recognise next week; the picker shows it
-verbatim beside everyone else's. Composing the document sets `runtime.training_type` from the
-entrypoint and `trainer.placement.colocate_all`, and the task runtime exports it before Ray starts.
+verbatim beside everyone else's. Composing the document sets `runtime.training_type` from
+`trainer.rollout_buffer.max_staleness_steps`: `sync` at 0 and `async` above it. The task runtime
+exports it before Ray starts.
 
 **What does not work** is calling the trainer directly:
 
@@ -87,10 +88,9 @@ trainer with `metric_source=vllm`, controller, and controller with `metric_sourc
 row is direct evidence that a producer never started -- most often the Ray one, which means the
 launch did not go through `task_runtime.py`.
 
-Four panels can be legitimately empty, for two unrelated reasons, and their titles say which.
-Rollout buffer occupancy and off-policy staleness are asynchronous-only: a synchronous run is
-on-policy by construction and has no buffer. The two Ray panels need a launch that starts Ray
-itself, which is a launch-path question rather than a synchronous-versus-asynchronous one.
+Two panels can be legitimately empty: the Ray panels need a launch that starts Ray itself, which is
+a launch-path question rather than a trainer-mode question. Every run fills the rollout buffer
+occupancy and off-policy staleness panels; a synchronous run's staleness is always 0.
 
 Two properties of the data mislead people. Work counters are deltas, so they sum; gauges such as
 `policy_step` are snapshots, so they do not. And the engine's metrics arrive under the same service
@@ -98,12 +98,8 @@ as the trainer's, told apart only by `metric_source`.
 
 ## Asynchronous runs
 
-A fully asynchronous run fills every panel here, plus the rollout buffer and staleness ones.
-
-There is also a deeper asynchronous view, **Async RL Training** (`/d/marin-async-rl`), with about
-sixty panels. **It is not merged and not on grafana.oa.dev.** It lives on
-`atqamar/async-non-agentic-rl-v2-dashboard` in marin, alongside the asynchronous instrumentation on
-a branch of this repository. Until both land, use the dashboard above.
+An asynchronous run appears on **RL Post-training (async)**, and its staleness ranges up to
+`trainer.rollout_buffer.max_staleness_steps`.
 
 ## The nightly
 

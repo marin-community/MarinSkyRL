@@ -20,7 +20,6 @@ SUPPORTED_PI_THINKING_FORMATS = frozenset({"chat-template", "qwen-chat-template"
 
 class TrajectoryRunnerMode(StrEnum):
     SKYRL_GYM = "skyrl_gym"
-    FULLY_ASYNC_SKYRL_GYM = "fully_async_skyrl_gym"
     MINI_SWE = "mini_swe"
     HARBOR = "harbor"
 
@@ -191,11 +190,6 @@ def trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRunnerMode) 
             expected_value="an integer",
             satisfied=isinstance(sampling_params.get("logprobs"), int),
         ),
-        CapabilityRequirement(
-            config_path="generator.batched",
-            expected_value="false",
-            satisfied=not bool(cfg.generator.get("batched", False)),
-        ),
     )
 
     def exact_chat_capabilities(runner: str) -> TrajectoryRunnerCapabilities:
@@ -205,16 +199,6 @@ def trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRunnerMode) 
             full_context_continuation=EvidenceFidelity.EXACT,
             action_tokens=ActionTokenHandling.RUNTIME_VALIDATED,
             requirements=exact_chat_requirements,
-        )
-
-    if mode is TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM and exact_chat_requested:
-        return exact_chat_capabilities("fully-async SkyRL Gym exact chat")
-    if mode is TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM:
-        return TrajectoryRunnerCapabilities(
-            runner="fully-async SkyRL Gym",
-            sampled_completion=EvidenceFidelity.RETOKENIZED,
-            full_context_continuation=EvidenceFidelity.UNAVAILABLE,
-            action_tokens=ActionTokenHandling.RETOKENIZED,
         )
 
     if exact_chat_requested:

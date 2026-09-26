@@ -291,25 +291,39 @@ def record_policy_step(step: int) -> None:
     policy_step.set(step, attributes={"role": TRAINER_ROLE})
 
 
-def record_generated_work(
-    response_ids: Sequence[Sequence[int]], is_last_step: Sequence[bool] | None, weights_step: int
-) -> None:
+@dataclass(frozen=True)
+class GeneratedWork:
+    """Rollouts, samples, and generated tokens in one rollout result."""
+
+    rollout_count: int
+    sample_count: int
+    generated_token_count: int
+
+    @classmethod
+    def from_batch(cls, response_ids: Sequence[Sequence[int]], is_last_step: Sequence[bool] | None) -> "GeneratedWork":
+        sample_count = len(response_ids)
+        return cls(
+            rollout_count=sample_count if is_last_step is None else sum(is_last_step),
+            sample_count=sample_count,
+            generated_token_count=sum(len(response) for response in response_ids),
+        )
+
+
+def record_generated_work(work: GeneratedWork, weights_step: int) -> None:
     """Count generated work against the policy version that produced it.
 
-    Not against the step that recorded it: the producer runs before the group is enqueued, and a
-    group can wait in the buffer across step boundaries, so the producer cannot know which step will
-    consume it. Staleness is recorded by `record_rollout_staleness` where the trainer measures it.
+    Not against the step that recorded it: a group can wait in the buffer across step boundaries, so
+    the producer cannot know which step will consume it. Staleness is recorded by
+    `record_rollout_staleness` where the trainer measures it.
     """
-    sample_count = len(response_ids)
-    rollout_count = sample_count if is_last_step is None else sum(is_last_step)
-    generated_token_count = sum(len(response) for response in response_ids)
+    rollout_count = work.rollout_count
     progress_time = time.time()
-    if sample_count:
+    if work.sample_count:
         _process_state.last_progress_timestamp = progress_time
     for work_kind, count in (
         ("rollout", rollout_count),
-        ("sample", sample_count),
-        ("generated_token", generated_token_count),
+        ("sample", work.sample_count),
+        ("generated_token", work.generated_token_count),
     ):
         if count:
             work_completed.add(

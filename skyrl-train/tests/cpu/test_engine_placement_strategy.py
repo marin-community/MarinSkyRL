@@ -181,6 +181,18 @@ def test_colocated_config_rejects_non_node_atomic_tp_geometry():
         validate_cfg(cfg)
 
 
+def test_colocated_config_rejects_asynchronous_rollouts_before_allocation():
+    cfg = example_dummy_config()
+    cfg.trainer.train_batch_size = 4
+    cfg.trainer.policy_mini_batch_size = 4
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.trainer.placement.colocate_all = True
+    cfg.trainer.rollout_buffer.max_staleness_steps = 1
+
+    with pytest.raises(ValueError, match="colocate_all requires"):
+        validate_cfg(cfg)
+
+
 def test_config_rejects_nonpositive_engine_startup_timeout():
     cfg = example_dummy_config()
     cfg.trainer.train_batch_size = 4
@@ -290,7 +302,6 @@ def inference_scheduler(monkeypatch):
             enable_prefix_caching=True,
             enforce_eager=False,
             engine_init_timeout_seconds=30,
-            async_engine=True,
             engine_init_kwargs={"language_model_only": False},
             **kwargs,
         )
@@ -310,7 +321,6 @@ def test_two_ep8_engines_get_a_node_each_and_every_worker_is_checked(inference_s
         inference_engine_pipeline_parallel_size=1,
         inference_engine_data_parallel_size=8,
         inference_engine_expert_parallel_size=8,
-        async_engine=True,
     )
     cfg.generator.engine_init_kwargs = {"language_model_only": False}
     engines = create_ray_wrapped_inference_engines_from_config(cfg, None, None)

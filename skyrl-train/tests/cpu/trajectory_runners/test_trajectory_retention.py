@@ -14,8 +14,6 @@ from skyrl_train.trajectory_runners.base import (
     TrajectoryBatch,
     TrajectoryID,
 )
-from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec, ProcessPoolResources
-from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import RolloutDispatcher
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import (
     RETENTION_METRIC_PREFIX,
@@ -60,6 +58,31 @@ class _BlockingPublisher:
 
     def close(self):
         return None
+
+
+class _HeldPublisher:
+    """Publishes to storage, but reports a best-effort publication finished only once released."""
+
+    def __init__(self, storage):
+        self._storage = storage
+        self._result = None
+        self.released = False
+
+    def execute(self, request):
+        return self._storage.execute(request)
+
+    def submit(self, request):
+        self._result = self._storage.execute(request)
+        return True
+
+    def poll(self):
+        if not self.released:
+            return None
+        result, self._result = self._result, None
+        return result
+
+    def close(self):
+        return self.poll()
 
 
 class _FailingPublisher:
@@ -342,11 +365,27 @@ async def test_best_effort_retention_does_not_wait_for_blocked_storage(tmp_path)
     )
 
     output = await asyncio.wait_for(trajectory_runner.run(_input()), 0.1)
-    backpressured = await asyncio.wait_for(trajectory_runner.run(_input(step=8)), 0.1)
+    queued = await asyncio.wait_for(trajectory_runner.run(_input(step=8)), 0.1)
 
     assert publisher.pending
     assert output["rollout_metrics"]["generate/trajectory_retention/enqueued"] == 3.0
-    assert backpressured["rollout_metrics"]["generate/trajectory_retention/dropped_by_backpressure"] == 3.0
+    assert queued["rollout_metrics"]["generate/trajectory_retention/selected"] == 3.0
+    assert queued["rollout_metrics"]["generate/trajectory_retention/enqueued"] == 0.0
+
+
+def test_groups_retained_during_a_publication_are_published_after_it(tmp_path):
+    sink = _sink(_config(tmp_path, required=False))
+    publisher = sink.publisher = _HeldPublisher(sink.publisher)
+
+    for step in (7, 8, 9):
+        sink.retain(_input(step=step), _output())
+    publisher.released = True
+    sink.close()
+
+    records = _records(tmp_path)
+    assert len(records) == 9
+    assert {record["global_step"] for record in records} == {7, 8, 9}
+    assert len(list(tmp_path.rglob("*.zip"))) == 3
 
 
 def test_step_wise_rows_form_one_replayable_trajectory_with_explicit_boundaries():
@@ -677,46 +716,6 @@ def test_initialization_reconciles_archive_written_before_ledger_commit(tmp_path
     assert metrics["generate/trajectory_retention/duplicates"] == 3.0
     assert metrics["generate/trajectory_retention/written"] == 0.0
     assert len(list(tmp_path.rglob("*.zip"))) == 1
-
-
-class _ProcessCoordinator:
-    """One coordinator actor that returns a finished batch, standing in for the Ray RPC."""
-
-    def __init__(self):
-        self.run_shard = _ProcessRemote()
-
-
-class _ProcessRemote:
-    def remote(self, input_batch, *_args):
-        positions = {trajectory_id.to_string(): index for index, trajectory_id in enumerate(_input()["trajectory_ids"])}
-        indices = [positions[trajectory_id.to_string()] for trajectory_id in input_batch["trajectory_ids"]]
-        _, output = _select_batch_rows(indices)
-        future = asyncio.get_running_loop().create_future()
-        future.set_result(output)
-        return future
-
-
-def _process_dispatcher(harbor_runner_spec: HarborRunnerSpec) -> RolloutDispatcher:
-    dispatcher = RolloutDispatcher(
-        spec=harbor_runner_spec,
-        resources=ProcessPoolResources(1, 1, 1, 30),
-    )
-    dispatcher._actors = [_ProcessCoordinator()]
-    return dispatcher
-
-
-@pytest.mark.asyncio
-async def test_process_dispatcher_retains_its_coordinators_batch_under_the_harbor_runner(tmp_path, harbor_runner_spec):
-    """Retention when the process dispatcher replaces the runner the sink was attached to."""
-    dispatcher = _process_dispatcher(harbor_runner_spec)
-    dispatcher.set_trajectory_sink(TrajectorySink(_config(tmp_path), _Tokenizer()))
-
-    output = await dispatcher.run(_input())
-
-    assert output["rollout_metrics"]["generate/trajectory_retention/written"] == 3.0
-    assert {record["trajectory"]["instance_id"] for record in _records(tmp_path)} == {"a", "b", "c"}
-    # The proxy must not stamp its own name: retained provenance is independent of process placement.
-    assert {record["provenance"]["runner"] for record in _records(tmp_path)} == {"HarborTrajectoryRunner"}
 
 
 def test_retention_takes_the_run_id_the_initiator_set(monkeypatch):

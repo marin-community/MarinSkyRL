@@ -6,7 +6,7 @@ import copy
 from dataclasses import replace
 from uuid import uuid4
 import skyrl_gym
-from typing import Callable, List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 
 from skyrl_train.trajectory_runners.base import TrajectoryID, TrajectoryRequestBatch
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
@@ -65,8 +65,6 @@ class StepWiseRolloutCollector:
         return getattr(self._runner, name)
 
     def validate(self) -> None:
-        if self._runner.batched:
-            raise ValueError("step-wise collection does not support batched generation")
         if self._runner.custom_chat_template is not None:
             raise ValueError("step-wise collection does not support a custom chat template")
         if not self._runner.use_conversation_multi_turn:
@@ -84,7 +82,6 @@ class StepWiseRolloutCollector:
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
-        global_step_fn: Optional[Callable[[], int]] = None,
     ) -> List[AgentLoopOutput]:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -134,8 +131,6 @@ class StepWiseRolloutCollector:
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, int]] = []
         per_step_outputs: List[AgentLoopOutput] = []
-        # Capture global_step at first inference for accurate staleness tracking
-        captured_global_step: Optional[int] = None
         max_model_len = self.trajectory_runner_cfg.get("engine_init_kwargs", {}).get("max_model_len")
         while not done:
             if retokenize_chat_history:
@@ -177,10 +172,6 @@ class StepWiseRolloutCollector:
                 prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=request_sampling_params
             )
             engine_output = await self.model_client.generate(engine_input)
-            # Capture global_step after first inference returns — at this point the vLLM
-            # engine has definitively served the request with its current weights.
-            if captured_global_step is None and global_step_fn is not None:
-                captured_global_step = global_step_fn()
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             sampled_ids = list(output_ids)
@@ -296,10 +287,6 @@ class StepWiseRolloutCollector:
                 components=per_step_output.reward.components,
                 token_credit=per_step_output.reward.token_credit,
             )
-
-        # Attach captured global_step to the first per-step output
-        if per_step_outputs and captured_global_step is not None:
-            per_step_outputs[0].captured_global_step = captured_global_step
 
         await self._run_in_executor_if_available(env.close)
 

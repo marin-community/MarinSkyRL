@@ -64,8 +64,6 @@ python -m skyrl_train.entrypoints.terminal_bench \
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.async_engine=true \
-  generator.batched=false \
   generator.enable_http_endpoint=true \
   generator.http_endpoint_host=127.0.0.1 \
   generator.http_endpoint_port=8000

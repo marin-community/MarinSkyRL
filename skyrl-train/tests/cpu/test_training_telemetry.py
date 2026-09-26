@@ -1,4 +1,4 @@
-"""Telemetry the fully async loop delivers to Finelog over two training steps."""
+"""Telemetry the rollout-buffer training loop delivers to Finelog over two training steps."""
 
 import asyncio
 import collections
@@ -8,12 +8,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 from omegaconf import OmegaConf
-from torchdata.stateful_dataloader import StatefulDataLoader
 
-from skyrl_train import fully_async_trainer
 from skyrl_train import trainer as trainer_module
 from skyrl_train.distributed.dispatch import ActorInfo, MeshRank
-from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
+from skyrl_train.rollouts.context import TrainingContext
+from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.timing_observability import STEP_WALL_PHASES
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
@@ -46,8 +45,8 @@ DASHBOARD_METRICS = {
 PHASE_WINDOWS = {"rollout_wait", "training", "weight_sync"}
 ROLLOUT_CALL_BODY = {"call_id", "started_unix_ms", "finished_unix_ms", "response_tokens"}
 ROLLOUT_PHASES = {"rollout_call", "rollout_finalize", "rollout_retain", "rollout_call_residual"}
-PRODUCER_WAITS = {"prompt", "slot", "enqueue"}
-DISPOSITIONS = {"consumed", "stale_enqueue", "fully_masked", "duplicate_uid", "insufficient_reward_spread"}
+DISPATCH_WAITS = {"prompt", "slot", "enqueue"}
+DISPOSITIONS = {"consumed", "fully_masked", "duplicate_uid", "insufficient_reward_spread"}
 WORK_KINDS = {"consumed_sample", "consumed_response_token", "consumed_loss_token"}
 CONSUMED_STALENESS_BODY = {"staleness", "groups", "sequences", "response_tokens"}
 PERFORMANCE_METRICS = {
@@ -65,7 +64,7 @@ MISMATCH_METRICS = {
 }
 
 # Rows the scripted runner turns into each disposition; twin appears twice, so one copy is a duplicate.
-PROMPT_UIDS = ["twin", "twin", "masked", "uniform", "late", "a", "b", "c"]
+PROMPT_UIDS = ["twin", "twin", "masked", "uniform", "a", "b", "c", "d"]
 RESPONSE = [5, 6, 7]
 
 
@@ -82,7 +81,7 @@ class PromptRows(torch.utils.data.Dataset):
 
 
 class ScriptedRunner(TrajectoryRunner):
-    """Return a two-sample group whose rewards, masks and sampled step the prompt's uid selects."""
+    """Return a two-sample group whose rewards and masks the prompt's uid selects."""
 
     def __init__(self):
         self.calls = collections.Counter()
@@ -100,8 +99,6 @@ class ScriptedRunner(TrajectoryRunner):
             "rollout_metrics": {},
             "rollout_logprobs": [[-1.0, -0.5, -0.25], [-1.0, -0.5, -0.25]],
         }
-        if uid == "late" and self.calls[uid] == 1:
-            output["actual_global_step"] = -5
         return output
 
 
@@ -131,43 +128,41 @@ class FakeTracker:
         self.logs.append((dict(metrics), step))
 
 
-def _async_config():
+def _config(max_staleness_steps: int):
     cfg = example_dummy_config()
     OmegaConf.update(
         cfg,
         "trainer",
         {
+            "train_batch_size": 2,
             "policy_mini_batch_size": 2,
             "max_steps": 2,
             "ckpt_interval": -1,
             "hf_save_interval": -1,
             "eval_interval": -1,
             "placement": {"colocate_all": False},
-            "fully_async": {"num_parallel_generation_workers": 2, "max_staleness_steps": 1},
+            "rollout_buffer": {"max_staleness_steps": max_staleness_steps, "max_in_flight": None},
             "algorithm": {"use_kl_loss": False, "dynamic_sampling": {"type": "filter"}},
         },
     )
-    OmegaConf.update(cfg, "generator", {"n_samples_per_prompt": 2, "async_engine": True})
+    OmegaConf.update(cfg, "generator", {"n_samples_per_prompt": 2})
     OmegaConf.update(cfg, "data", {"shuffle": False})
     return cfg
 
 
-async def _train_two_steps(monkeypatch) -> FullyAsyncRayPPOTrainer:
-    cfg = _async_config()
-    # One loader process keeps the prompt order the scripted dispositions rely on.
-    monkeypatch.setattr(
-        fully_async_trainer,
-        "build_dataloader",
-        lambda cfg, dataset, **kwargs: StatefulDataLoader(dataset, batch_size=1, collate_fn=dataset.collate_fn),
-    )
-    trainer = FullyAsyncRayPPOTrainer(
+async def _train_two_steps(monkeypatch, max_staleness_steps: int) -> RayPPOTrainer:
+    cfg = _config(max_staleness_steps)
+    runner = ScriptedRunner()
+    dataset = PromptRows()
+    trainer = RayPPOTrainer(
         cfg=cfg,
         tracker=FakeTracker(),
         tokenizer=None,
-        train_dataset=PromptRows(),
+        train_dataset=dataset,
         eval_dataset=None,
         inference_engine_client=FakeEngines(),
-        trajectory_runner=ScriptedRunner(),
+        trajectory_runner=runner,
+        context=TrainingContext.from_config(cfg, dataset, runner),
     )
     trainer.policy_model, trainer.ref_model, trainer.critic_model = FakePolicyGroup(), None, None
     trainer.tokenizer = SimpleNamespace(decode=str, pad_token_id=0)
@@ -177,7 +172,7 @@ async def _train_two_steps(monkeypatch) -> FullyAsyncRayPPOTrainer:
 
     for name in (
         "_startup_trajectory_runner",
-        "async_sync_policy_weights_to_inference_engines",
+        "sync_policy_weights_to_inference_engines",
         "_drain_policy_event_loops",
         "_finalize_training",
         "shutdown",
@@ -188,19 +183,26 @@ async def _train_two_steps(monkeypatch) -> FullyAsyncRayPPOTrainer:
     # The fake policy returns its outputs directly instead of Ray object refs.
     monkeypatch.setattr(trainer_module, "ray", SimpleNamespace(get=lambda refs: refs))
     monkeypatch.setattr(
-        fully_async_trainer,
+        trainer_module,
         "monitor_event_loop_lag",
-        functools.partial(fully_async_trainer.monitor_event_loop_lag, interval=0.001),
+        functools.partial(trainer_module.monitor_event_loop_lag, interval=0.001),
     )
-    await trainer.train()
+    try:
+        await trainer.train()
+    finally:
+        await trainer.context.close()
     return trainer
 
 
 @pytest.mark.asyncio
-async def test_two_async_steps_deliver_every_record_the_dashboard_reads(delivered_telemetry, monkeypatch):
-    trainer = await _train_two_steps(monkeypatch)
+@pytest.mark.parametrize("max_staleness_steps", [0, 1])
+async def test_two_steps_deliver_every_record_the_dashboard_reads(
+    ray_module, delivered_telemetry, monkeypatch, max_staleness_steps
+):
+    trainer = await _train_two_steps(monkeypatch, max_staleness_steps)
     rows = delivered_telemetry.flush()
 
+    # The launch environment names the training type, and every record carries it.
     assert {row["resource"]["training_type"] for row in rows} == {"async"}
     assert DASHBOARD_EVENTS | DASHBOARD_METRICS <= {row["name"] for row in rows}
     windows = delivered_telemetry.select("async_phase_window", outcome="success")
@@ -213,7 +215,7 @@ async def test_two_async_steps_deliver_every_record_the_dashboard_reads(delivere
         row["attributes"]["phase"] for row in delivered_telemetry.select("phase_duration_seconds", root="rollout_call")
     }
     assert phases == ROLLOUT_PHASES
-    assert PRODUCER_WAITS <= {row["attributes"]["wait"] for row in delivered_telemetry.select("rollout_waits")}
+    assert DISPATCH_WAITS <= {row["attributes"]["wait"] for row in delivered_telemetry.select("rollout_waits")}
     assert DISPOSITIONS <= {row["attributes"]["disposition"] for row in delivered_telemetry.select("rollout_groups")}
     assert delivered_telemetry.values("rollout_groups", disposition="consumed") == [1.0] * 4
     assert len(delivered_telemetry.values("rollout_buffer_dwell_seconds", disposition="consumed")) == 4

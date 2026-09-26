@@ -13,8 +13,6 @@ from omegaconf import MISSING, DictConfig, OmegaConf
 from cloud.iris.ray_storage import RaySpillBackend, resolve_ray_spill_target
 from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
 from cloud.iris.rl_config_translation import (
-    RL_ENTRYPOINTS,
-    RLEntrypoint,
     compose_skyrl_config,
     parse_rl_config,
     registered_rl_entrypoint_module,
@@ -224,9 +222,9 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
     resolved = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
     OmegaConf.set_struct(resolved, False)
     resolved.runtime.entrypoint = compiled.entrypoint
-    # The terminal_bench entrypoint runs async only for an explicit false, so null means colocated.
-    colocate_all = compiled.config.trainer.placement.colocate_all is not False
-    training_type = training_type_for_entrypoint(compiled.entrypoint, colocate_all=colocate_all)
+    training_type = training_type_for_entrypoint(
+        compiled.entrypoint, max_staleness_steps=compiled.config.trainer.rollout_buffer.max_staleness_steps
+    )
     resolved.runtime.training_type = None if training_type is None else training_type.value
     resolved.inputs.data_kind = parsed.data_kind
     resolved.skyrl = compiled.config
@@ -348,10 +346,6 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
         int(generator["inference_engine_tensor_parallel_size"]),
         skyrl.get("model_num_attention_heads"),
     )
-    if entrypoint == RL_ENTRYPOINTS[RLEntrypoint.FULLY_ASYNC]:
-        trainer = skyrl.get("trainer", {})
-        if trainer.get("train_batch_size") != trainer.get("policy_mini_batch_size"):
-            raise ValueError("fully async SkyRL requires trainer.train_batch_size == trainer.policy_mini_batch_size")
     trainer_seed = skyrl.get("trainer", {}).get("seed")
     if trainer_seed != run["seed"]:
         raise ValueError(f"run.seed={run['seed']} does not match skyrl.trainer.seed={trainer_seed!r}")

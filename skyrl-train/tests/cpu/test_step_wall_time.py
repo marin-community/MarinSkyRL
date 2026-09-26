@@ -1,4 +1,4 @@
-"""Exclusive async optimizer-step accounting and its boundaries."""
+"""Exclusive optimizer-step accounting and its boundaries."""
 
 import asyncio
 from types import SimpleNamespace
@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock
 import pytest
 from omegaconf import OmegaConf
 
-from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl_train.timing_observability import STEP_WALL_PHASES, StepWallTime, phase_timing_observations
 from skyrl_train.trainer import RayPPOTrainer
 
@@ -122,7 +121,7 @@ def test_checkpoint_drain_separates_background_elapsed_from_trainer_wait():
 
 
 def test_pretraining_evaluation_is_startup_only():
-    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.global_step = 0
     trainer.all_timings = {}
     trainer.cfg = OmegaConf.create({"trainer": {"tracker_commit_each_step": True}})

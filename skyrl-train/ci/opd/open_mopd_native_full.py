@@ -104,14 +104,12 @@ def hydra_arguments(
         "generator.max_num_seqs=64",
         "generator.run_engines_locally=true",
         "generator.weight_sync_backend=nccl",
-        "generator.async_engine=true",
-        "generator.batched=true",
         "environment.env_class=prompt_only",
         f"environment.skyrl_gym.aime.evaluation_token_budget={training.response_limit}",
         "environment.skyrl_gym.aime.strict_box_verify=true",
         f"environment.skyrl_gym.aime.max_gen_length={training.response_limit}",
-        "trajectory_runner.process_pool.num_coordinators=1",
-        "trajectory_runner.process_pool.cpus_per_coordinator=4",
+        "trajectory_runner.rollout_workers.num_workers=1",
+        "trajectory_runner.rollout_workers.cpus_per_worker=4",
     ]
     for teacher, target_share in zip(config.teachers, training.target_gradient_shares, strict=True):
         domain = teacher.domain

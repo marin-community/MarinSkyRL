@@ -13,8 +13,8 @@ data:
   # against these terminal-bench task roots at rollout time.
   terminal_bench_data: []
   sampling:
-    kind: null # null = stock shuffle; domain-weighted|naive|thompson|learnability|grade-uniform|grade-adaptive|grade-prior
-    domain_weights: {} # fixed exact per-batch teacher-route mixture when kind=domain-weighted
+    kind: null # null = seeded passes (data.shuffle); domain-weighted|naive|thompson|learnability|grade-uniform|grade-adaptive|grade-prior
+    domain_weights: {} # exact teacher-route mixture in every train_batch_size prompts drawn when kind=domain-weighted
     decay: 0.95 # per-step multiplicative decay of bin sufficient stats
     epsilon: 0.05 # per-bin probability floor (thompson/learnability/grade-prior)
     reversion_mass: 0.0 # per-step pseudo-evidence pulling every bin's belief toward the weight-curve peak
@@ -51,8 +51,7 @@ trainer:
   # Telemetry families exported when the task has a telemetry endpoint.
   training_metrics: true # trainer scalars, loop events and trainer-minus-vLLM log-ratio statistics
   policy_train_spans: true # per-rank policy-update phase walls and CUDA memory
-  generate_spans: true # the synchronous trainer's rollout-call phases and waits
-  async_spans: true # async-loop windows, rollout calls, waits and group dispositions
+  rollout_spans: true # training-loop phase windows, rollout calls, dispatch waits and group dispositions
   distributed:
     placement_group_timeout_seconds: 180
     worker_collective_timeout_seconds: 1800
@@ -220,7 +219,6 @@ trainer:
     dynamic_sampling:
       type: null
       max_sample_batches: 30
-      min_replace_ratio: 0.3
       informative_on: shaped
       min_reward_std: 0.0
 
@@ -259,32 +257,38 @@ trainer:
       entropy_window: 10
       min_lr_scale: 0.1
 
-  fully_async:
-    max_staleness_steps: 4
+  # Rollout workers generate prompt groups under leases from the rollout buffer; each step trains on
+  # train_batch_size groups. At 0 staleness every group comes from the current policy (synchronous training).
+  rollout_buffer:
+    # How many steps the generating policy may lag the step that trains on its group. colocate_all requires 0.
+    max_staleness_steps: 0
+    # Cap on prompt groups generating at once; null bounds generation only by staleness.
+    max_in_flight: null
+    # FineStore archive that keeps every trainable group, and lets a checkpoint record URIs instead of copying
+    # groups. Resuming requires the same archive. null keeps payloads only in Ray's object store.
+    finestore_root: null
 
-    # Exclusive optimizer-step wall-time budgets in seconds. The corresponding
-    # timing/step_wall/* values sum to timing/step; legacy timing/* spans can overlap.
-    step_phase_budgets:
-      group_admission: 1800
-      batch_assembly: 600
-      training_preparation: 900
-      advantages: 300
-      policy_training: 3600
-      group_bookkeeping: 60
-      weight_sync: 600
-      step_end_bookkeeping: 60
-      checkpoint_work: 1800
-      evaluation: 1800
-      unaccounted: 5
+  # Bound teacher-scoring work independently for each logical teacher. Queue
+  # backpressure is applied when a rollout group is admitted, before learner
+  # batch assembly.
+  teacher_scoring:
+    max_queued_per_teacher: 8
+    workers_per_teacher: 1
 
-    num_parallel_generation_workers: 768
-
-    # Bound teacher-scoring work independently for each logical teacher. Queue
-    # backpressure is applied when a rollout group is admitted, before learner
-    # batch assembly.
-    teacher_scoring:
-      max_queued_per_teacher: 8
-      workers_per_teacher: 1
+  # Exclusive optimizer-step wall-time budgets in seconds. The corresponding
+  # timing/step_wall/* values sum to timing/step; legacy timing/* spans can overlap.
+  step_phase_budgets:
+    group_admission: 1800
+    batch_assembly: 600
+    training_preparation: 900
+    advantages: 300
+    policy_training: 3600
+    group_bookkeeping: 60
+    weight_sync: 600
+    step_end_bookkeeping: 60
+    checkpoint_work: 1800
+    evaluation: 1800
+    unaccounted: 5
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
@@ -365,9 +369,9 @@ generator:
   weight_sync_backend: "nccl"
   # How weights reach the engines. "broadcast": trainer rank 0 sends every tensor to every engine.
   # "expert_block": each MoE expert matrix is broadcast from a Megatron rank that holds it to the vLLM
-  # workers that serve it. Needs FullyAsyncRayPPOTrainer, a Grug MoE on the megatron strategy at TP=1
-  # and ETP=1, local vLLM engines at TP=1 with EP=DP>1, the NCCL weight-sync backend and vLLM's TRITON
-  # MoE backend.
+  # workers that serve it. Needs engines that are not colocated with training, a Grug MoE on the megatron
+  # strategy at TP=1 and ETP=1, local vLLM engines at TP=1 with EP=DP>1, the NCCL weight-sync backend and
+  # vLLM's TRITON MoE backend.
   weight_sync_transport: "broadcast"
   expert_block_sync:
     timeout_seconds: 600  # For creating the sync groups and for the broadcasts of each sync.
@@ -392,8 +396,6 @@ generator:
   # with the compiled engine packing and cannot be safely toggled as a vLLM implementation detail alone.
   inference_engine_mp_backend: false
   n_samples_per_prompt: 5
-  async_engine: true
-  batched: false
   max_input_length: ${trainer.max_prompt_length}
   vllm_v1_disable_multiproc: true
   enable_prefix_caching: true
@@ -527,8 +529,10 @@ environment:
   env_class: "gsm8k"
 
 trajectory_runner:
-  process_pool:
-    num_coordinators: 4
-    cpus_per_coordinator: 8
-    executor_workers: 256
-    rpc_timeout_seconds: 21600
+  # Rollout worker processes for runners that generate outside the trainer process (Harbor, and SkyRL-Gym under
+  # the gym_worker_pool entrypoint). Every worker runs on the trainer's node.
+  rollout_workers:
+    num_workers: 4
+    cpus_per_worker: 8
+    executor_threads: 256 # width of each worker's default thread pool, which Harbor's model client runs on
+    progress_timeout_seconds: 21600 # fail a worker's requests when none of them completes for this long

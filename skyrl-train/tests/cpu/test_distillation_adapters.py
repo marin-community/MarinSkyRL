@@ -1,5 +1,4 @@
 import asyncio
-import threading
 from dataclasses import replace
 
 import pytest
@@ -14,9 +13,8 @@ from skyrl_train.distillation import (
     prepare_sparse_forward_kl,
 )
 from skyrl_train.distillation_adapters import (
+    AdmittedGroupDistillationAdapter,
     AsyncTeacherQueueLimits,
-    FullyAsyncRayPPOTrainerDistillationAdapter,
-    RayPPOTrainerDistillationAdapter,
     RoutedTeacherScoringPartition,
     RoutedTeacherScoringWork,
     ScoredDistillationBatch,
@@ -213,39 +211,9 @@ def test_teacher_scoring_work_collates_exact_rollout_coordinates_and_route_weigh
 
 
 @pytest.mark.asyncio
-async def test_sync_adapter_overlaps_teacher_score_with_model_forward():
-    teacher_started = threading.Event()
-    forward_started = threading.Event()
-
-    class InterlockedTeacherService(ControlledTeacherService):
-        async def score(self, request: TeacherScoreRequest) -> ChosenTokenTeacherEvidence:
-            teacher_started.set()
-            assert await asyncio.to_thread(forward_started.wait, 1)
-            self.release.set()
-            return await super().score(request)
-
-    service = InterlockedTeacherService()
-    adapter = RayPPOTrainerDistillationAdapter(await _coordinator(service))
-
-    def model_forward() -> str:
-        forward_started.set()
-        assert teacher_started.wait(1)
-        return "forward-complete"
-
-    forward_result, scored = await asyncio.wait_for(
-        adapter.score_while_model_forwarding(_work(), model_forward),
-        timeout=2,
-    )
-
-    assert forward_result == "forward-complete"
-    torch.testing.assert_close(scored.distillation.loss_weights, torch.tensor([[0.5, 0.125]]))
-    await adapter.close()
-
-
-@pytest.mark.asyncio
-async def test_fully_async_adapter_scores_generated_group_before_batch_assembly():
+async def test_admitted_group_adapter_scores_generated_group_before_batch_assembly():
     service = ControlledTeacherService()
-    adapter = FullyAsyncRayPPOTrainerDistillationAdapter(
+    adapter = AdmittedGroupDistillationAdapter(
         await _coordinator(service),
         teacher_limits={"teacher-a": AsyncTeacherQueueLimits(max_queued=1, workers=1)},
     )
@@ -264,9 +232,9 @@ async def test_fully_async_adapter_scores_generated_group_before_batch_assembly(
 
 
 @pytest.mark.asyncio
-async def test_fully_async_adapter_bounds_pending_teacher_work_per_teacher():
+async def test_admitted_group_adapter_bounds_pending_teacher_work_per_teacher():
     service = ControlledTeacherService()
-    adapter = FullyAsyncRayPPOTrainerDistillationAdapter(
+    adapter = AdmittedGroupDistillationAdapter(
         await _coordinator(service),
         teacher_limits={"teacher-a": AsyncTeacherQueueLimits(max_queued=1, workers=1)},
     )
@@ -292,11 +260,11 @@ async def test_fully_async_adapter_bounds_pending_teacher_work_per_teacher():
 
 
 @pytest.mark.asyncio
-async def test_fully_async_adapter_does_not_block_one_teacher_behind_another_full_queue():
+async def test_admitted_group_adapter_does_not_block_one_teacher_behind_another_full_queue():
     service_a = ControlledTeacherService("teacher-a")
     service_b = ControlledTeacherService("teacher-b")
     limits = AsyncTeacherQueueLimits(max_queued=1, workers=1)
-    adapter = FullyAsyncRayPPOTrainerDistillationAdapter(
+    adapter = AdmittedGroupDistillationAdapter(
         await _coordinator(service_a, service_b),
         teacher_limits={"teacher-a": limits, "teacher-b": limits},
     )

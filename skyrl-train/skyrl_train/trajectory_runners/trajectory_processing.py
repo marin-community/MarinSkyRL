@@ -1,12 +1,12 @@
 import torch
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol, Sequence
+from typing import List, Tuple, Union, Optional, Dict, Any, Sequence
 from collections import defaultdict
 from enum import StrEnum
 import numpy as np
 from skyrl_train.group_admission import group_is_fully_excluded_from_training
-from skyrl_train.trajectory_runners.base import (
+from skyrl_train.trajectory_runners.types import (
     TrajectoryBatch,
     TrajectoryRequestBatch,
     TrajectoryID,
@@ -1021,6 +1021,34 @@ def concatenate_trajectory_batches(
     return result
 
 
+def combine_trajectory_batches_in_request_order(
+    batches: List[TrajectoryBatch],
+    requested_ids: List[TrajectoryID] | None,
+    *,
+    require_rollout_logprobs: bool,
+    tis_lcs_alert_threshold: float,
+) -> TrajectoryBatch:
+    """Combine independently produced reward groups into the original request order."""
+    if len(batches) == 1:
+        return batches[0]
+    result = concatenate_trajectory_batches(
+        batches,
+        require_rollout_logprobs=require_rollout_logprobs,
+        tis_lcs_alert_threshold=tis_lcs_alert_threshold,
+    )
+    if requested_ids is None:
+        return result
+    returned_ids = result.get("trajectory_ids")
+    if returned_ids is None:
+        raise ValueError("buffered rollout omitted trajectory IDs")
+    positions = {row.to_string(): index for index, row in enumerate(returned_ids)}
+    order = [positions[row.to_string()] for row in requested_ids]
+    for key, values in list(result.items()):
+        if isinstance(values, list) and len(values) == len(order):
+            result[key] = [values[index] for index in order]
+    return result
+
+
 def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatch) -> None:
     """Validate the shape and value categories of a trajectory batch."""
     if not trajectory_batch["response_ids"]:
@@ -1276,18 +1304,6 @@ def prepare_trajectory_request(
     }
 
     return trajectory_request, uids
-
-
-class HasCapturedGlobalStep(Protocol):
-    captured_global_step: Optional[int]
-
-
-def minimum_captured_global_step(outputs: Iterable[HasCapturedGlobalStep]) -> Optional[int]:
-    """Return the minimum model-step value recorded across a rollout group."""
-    return min(
-        (output.captured_global_step for output in outputs if output.captured_global_step is not None),
-        default=None,
-    )
 
 
 def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None, chat_template_kwargs=None):
