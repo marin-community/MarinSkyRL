@@ -46,7 +46,7 @@ from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECO
 from skyrl_train.utils.utils import use_per_engine_strict_pack_pg
 from skyrl_train.inference_engines.placement import (
     colocated_engine_bundle_layout,
-    node_local_bundle_nodes,
+    inference_bundle_nodes,
     verified_inference_replica_placements,
 )
 
@@ -508,6 +508,7 @@ def create_ray_wrapped_inference_engines(
     max_logprobs: int = 1,
     require_v1_model_runner: bool = False,
     mp_backend: bool = False,
+    allow_cross_node_ep: bool = False,
     placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
 ) -> List[InferenceEngineInterface]:
     """
@@ -542,6 +543,18 @@ def create_ray_wrapped_inference_engines(
 
     if backend == "vllm" and data_parallel_size > 1 and not async_engine:
         raise ValueError("vLLM data-parallel rollout engines require async_engine=True")
+
+    if allow_cross_node_ep and (
+        backend != "vllm"
+        or not async_engine
+        or tensor_parallel_size != 1
+        or pipeline_parallel_size != 1
+        or data_parallel_size < 2
+        or expert_parallel_size != data_parallel_size
+        or shared_pg is not None
+        or inference_engine_enable_sleep
+    ):
+        raise ValueError("Cross-node EP requires non-colocated async vLLM at TP=PP=1 and EP=DP>1")
 
     inference_engine_actors = []
     weight_sync_relative_rank_offsets = []
@@ -676,14 +689,12 @@ def create_ray_wrapped_inference_engines(
             owned_placement_groups.append(shared_pg)
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
         elif use_per_engine_strict_pack:
-            # ray/uni backend, multi-GPU engines (TP*PP*DP > 1): one STRICT_PACK PG per
-            # engine so each engine's per_engine_gpu_count {GPU:1} bundles are
-            # guaranteed co-located on a single node (no cross-node TP all-reduce in
-            # decode). #232 fix.
+            # Each engine owns a group. TP/PP and ordinary DP groups remain node-local.
+            # Explicit cross-node EP uses PACK while preserving one GPU per verified rank.
             for _ in range(num_inference_engines):
                 pg = placement_group(
                     [{"GPU": 1, "CPU": 1} for _ in range(per_engine_gpu_count)],
-                    strategy="STRICT_PACK",
+                    strategy="PACK" if allow_cross_node_ep else "STRICT_PACK",
                 )
                 per_engine_pgs.append(pg)
                 owned_placement_groups.append(pg)
@@ -711,14 +722,15 @@ def create_ray_wrapped_inference_engines(
     else:
         placement_mode = EnginePlacementMode.SHARED
 
-    stage_nodes: list[list[str]] = []
+    bundle_nodes: list[list[str]] = []
     if verify_workers:
         try:
-            stage_nodes = node_local_bundle_nodes(
+            bundle_nodes = inference_bundle_nodes(
                 per_engine_pgs,
                 data_parallel_size=data_parallel_size,
                 node_gpu_capacities=node_gpu_capacities,
                 pipeline_parallel_size=pipeline_parallel_size,
+                allow_cross_node_ep=allow_cross_node_ep,
             )
         except Exception:
             _release_node_local_gang([], per_engine_pgs)
@@ -738,7 +750,7 @@ def create_ray_wrapped_inference_engines(
             placement_mode=placement_mode,
             colocated_engine_bundles=colocated_engine_bundles,
         )
-        if data_parallel_size > 1:
+        if data_parallel_size > 1 and not allow_cross_node_ep:
             _validate_node_local_dp_ranks(i, engine_pg, dp_rank_bundle_indices)
 
         rendezvous = _reserve_engine_rendezvous(
@@ -1021,12 +1033,13 @@ def create_ray_wrapped_inference_engines(
             if verify_workers:
                 placements = verified_inference_replica_placements(
                     startup_results,
-                    stage_nodes=stage_nodes,
+                    bundle_nodes=bundle_nodes,
                     node_hosts=node_hosts,
                     relative_rank_offsets=weight_sync_relative_rank_offsets,
                     data_parallel_size=data_parallel_size,
                     expert_parallel_size=expert_parallel_size,
                     pipeline_parallel_size=pipeline_parallel_size,
+                    allow_cross_node_ep=allow_cross_node_ep,
                 )
                 for index, engine in enumerate(engines):
                     engine.worker_placements = placements[
