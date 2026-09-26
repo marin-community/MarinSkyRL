@@ -48,6 +48,11 @@ trainer:
   debug_mode: "light"
   # null follows debug_mode (on for light/distributed); true/false explicitly overrides it.
   collective_phase_diagnostics: null
+  # Telemetry families exported when the task has a telemetry endpoint.
+  training_metrics: true # trainer scalars, loop events and trainer-minus-vLLM log-ratio statistics
+  policy_train_spans: true # per-rank policy-update phase walls and CUDA memory
+  generate_spans: true # the synchronous trainer's rollout-call phases and waits
+  async_spans: true # async-loop windows, rollout calls, waits and group dispositions
   distributed:
     placement_group_timeout_seconds: 180
     worker_collective_timeout_seconds: 1800

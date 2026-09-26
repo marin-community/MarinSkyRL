@@ -1,9 +1,10 @@
 from unittest.mock import AsyncMock, MagicMock
 
-from omegaconf import OmegaConf
 import pytest
+from omegaconf import OmegaConf
 
 from skyrl_train.entrypoints import fully_async
+from skyrl_train.entrypoints.fully_async import AsyncPPOExp
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient
 
 
@@ -41,3 +42,26 @@ async def test_trajectory_runner_uses_direct_model_client_without_http(monkeypat
     output = await model_client.generate({"prompt_token_ids": [[1, 2]]})
     assert output["response_ids"] == [[3]]
     assert output["token_provenance"] == "engine"
+
+
+def test_the_async_entrypoint_trains_inside_the_trainer_telemetry_lifecycle(telemetry_endpoint, monkeypatch):
+    class Trainer:
+        async def train(self):
+            pass
+
+        async def shutdown(self):
+            pass
+
+    exp = AsyncPPOExp.__new__(AsyncPPOExp)
+    exp.cfg = OmegaConf.create({"trainer": {"progress": {"mode": "off"}}})
+    monkeypatch.setattr(exp, "_setup_trainer", lambda: Trainer())
+    monkeypatch.setattr("skyrl_train.utils.progress.configure_progress", lambda progress: None)
+
+    exp.run()
+
+    rows = telemetry_endpoint.rows
+    assert [(row["name"], row["attributes"]["role"]) for row in rows] == [
+        ("lifecycle", "trainer"),
+        ("terminal", "trainer"),
+    ]
+    assert rows[-1]["body"]["status"] == "completed"

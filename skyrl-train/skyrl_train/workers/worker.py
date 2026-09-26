@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import contextlib
 import logging
 import os
 import socket
@@ -42,6 +43,9 @@ from skyrl_train.utils.policy_math import ppo_critic_loss
 from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
 )
+from skyrl_train.learner_memory import LearnerCudaMetrics
+from skyrl_train.timing_observability import PhaseBreakdown
+from skyrl_train.telemetry import WORKER_ROLE, ProcessTelemetry, TelemetryConfig
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
 from skyrl_train.distillation import student_topk_logprobs
 from skyrl_train.dataset.replay_buffer import Experience
@@ -88,6 +92,10 @@ def _grug_query_bias_updater(
     target_weight = 1.0 if update.mode is GrugQueryBiasUpdateMode.REPLACE else update.interpolation_weight
     assert target_weight is not None
     return GrugQuantileBiasUpdater(model, valid_tokens, target_weight=target_weight)
+
+
+# Rigging's own shutdown waits two seconds; the extra covers the round trip to every rank.
+TELEMETRY_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -307,7 +315,16 @@ class Worker(DistributedTorchRayActor):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         configure_progress(cfg.trainer.progress)
+        # Rigging drops records from a process that never configured it.
+        self._telemetry = contextlib.ExitStack()
+        telemetry_config = TelemetryConfig.from_environment()
+        if telemetry_config.endpoint is not None:
+            self._telemetry.enter_context(ProcessTelemetry(telemetry_config, WORKER_ROLE))
         enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
+
+    def close_telemetry(self) -> None:
+        """Record the terminal event and drain queued telemetry; ray.kill would drop both."""
+        self._telemetry.close()
 
     def init_model(self, *args, **kwargs):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
@@ -811,6 +828,9 @@ class PPORayActorGroup:
         Args:
             no_restart: If True, prevents Ray from restarting the actors.
         """
+        # ray.kill skips the actor's atexit handlers; a dead actor only costs the timeout.
+        drains = [actor.close_telemetry.remote() for actor in self._actor_handlers]
+        ray.wait(drains, num_returns=len(drains), timeout=TELEMETRY_DRAIN_TIMEOUT_SECONDS)
         for actor in self._actor_handlers:
             try:
                 ray.kill(actor, no_restart=no_restart)
@@ -829,6 +849,9 @@ class PolicyWorkerBase(Worker):
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
         self._grug_query_bias_window: GrugQueryBiasWindow | None = None
+        self._policy_train_spans: bool = self.cfg.trainer.policy_train_spans
+        self._memory = LearnerCudaMetrics(enabled=self._policy_train_spans, rank=self._rank)
+        self._model_version_step: int | None = None
 
     async def _begin_vllm_layerwise_weight_reload(self, inference_engine_client, *, enabled: bool) -> None:
         """Open a rank-synchronized vLLM reload around a streamed weight update."""
@@ -893,6 +916,32 @@ class PolicyWorkerBase(Worker):
             torch.distributed.barrier()
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
+        step = int(train_data.metadata["global_step"])
+        with self._memory.span("ppo_train", step=step):
+            timing = PhaseBreakdown("ppo_train", enabled=self._policy_train_spans)
+            outcome = "failure"
+            try:
+                output = self._ppo_train_impl(train_data, timing)
+                outcome = "success"
+            finally:
+                timing.publish(
+                    clock_domain="cpu_dispatch_wall",
+                    attributes={
+                        "backend": "megatron",
+                        "outcome": outcome,
+                        "rank": str(self._rank),
+                        "role": WORKER_ROLE,
+                        "step": str(step),
+                    },
+                )
+        self._model_version_step = step
+        return output
+
+    async def broadcast_to_inference_engines(self, inference_engine_client):
+        with self._memory.span("broadcast_to_inference_engines", step=self._model_version_step):
+            return await self._broadcast_to_inference_engines(inference_engine_client)
+
+    def _ppo_train_impl(self, train_data: TrainingInputBatch, timing: PhaseBreakdown) -> TrainingOutputBatch:
         self._drain_r3_decentral_stagger(train_data)
 
         global_step = train_data.metadata["global_step"]

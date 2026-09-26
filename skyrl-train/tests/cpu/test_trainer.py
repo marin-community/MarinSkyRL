@@ -1468,6 +1468,7 @@ def test_normalize_mini_batch_size():
             {
                 "trainer": {
                     "progress": _TEST_PROGRESS_CONFIG,
+                    "policy_train_spans": False,
                     "train_batch_size": train_batch_size,
                     "policy_mini_batch_size": policy_mini_batch_size,
                     "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
@@ -1505,6 +1506,7 @@ def test_normalize_mini_batch_size():
             {
                 "trainer": {
                     "progress": _TEST_PROGRESS_CONFIG,
+                    "policy_train_spans": False,
                     "train_batch_size": train_batch_size,
                     "critic_mini_batch_size": critic_mini_batch_size,
                     "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
@@ -1685,6 +1687,7 @@ def test_ppo_train_batch_calculations():
         {
             "trainer": {
                 "progress": _TEST_PROGRESS_CONFIG,
+                "policy_train_spans": False,
                 "micro_train_batch_size_per_gpu": 2,
                 "update_epochs_per_batch": 1,
                 "policy": {
@@ -1895,3 +1898,14 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     # Pass: ref disabled -> requirement reduces to policy_dp. With policy_dp=2, tbs=2 is valid.
     cfg = create_config(train_batch_size=2, policy_dp=2, ref_dp=3, include_ref=False)
     validate_batch_sizes(cfg)
+
+
+def test_informative_group_fraction_counts_groups_whose_rewards_differ(dummy_config):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.all_metrics = {}
+    # Group a has reward spread; group b is a tie and carries no advantage signal.
+    trainer.postprocess_trajectory_batch(
+        {"response_ids": [[1], [2], [3], [4]], "rewards": [1.0, 0.0, 0.5, 0.5]}, ["a", "a", "b", "b"]
+    )
+    assert trainer.all_metrics["reward/informative_group_fraction"] == 0.5

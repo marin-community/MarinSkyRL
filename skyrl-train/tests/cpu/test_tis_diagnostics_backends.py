@@ -9,9 +9,16 @@ env) we stub those submodules via the shared tests/cpu/util.py helper — only i
 megatron is genuinely absent, so a real-megatron env is left untouched.
 """
 
+import asyncio
+
 import pytest
 import torch
 from omegaconf import OmegaConf
+
+from skyrl_train.learner_memory import LearnerCudaMetrics
+from skyrl_train.timing_observability import PhaseBreakdown
+from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.workers.worker import PolicyWorkerBase
 
 from skyrl_train.utils.importance_ratio_diagnostics import (
     TIS_DIAG_KEYS,
@@ -173,6 +180,7 @@ def _megatron_mini_batch_metrics(
     global_loss_denom=None,
     policy_loss_fn=_fake_policy_loss_fn,
     log_ratio_offsets=(0.0, 0.0),
+    timings: PhaseBreakdown | None = None,
 ) -> list[dict]:
     old_lp, _, loss_mask = _tis_tensors()
 
@@ -216,6 +224,9 @@ def _megatron_mini_batch_metrics(
     monkeypatch.setattr(
         mmw.mpu, "get_pipeline_model_parallel_group", lambda: torch.distributed.group.WORLD, raising=False
     )
+    monkeypatch.setattr(
+        mmw.mpu, "get_data_parallel_group", lambda **kwargs: torch.distributed.group.WORLD, raising=False
+    )
 
     def micro_batch(offset: float) -> mmw.MegatronPolicyMicroBatch:
         sequences = torch.zeros(BATCH_SIZE, SEQ_LEN)
@@ -239,6 +250,7 @@ def _megatron_mini_batch_metrics(
         seq_len=SEQ_LEN,
         micro_batch_size=BATCH_SIZE,
         temperature=1.0,
+        timings=timings,
     )
 
 
@@ -351,3 +363,43 @@ def test_log_ratio_monitor_marks_failed_diagnostics():
 
     assert metrics["log_ratio_diagnostics_failed"] == 1.0
     assert metrics["log_ratio_abs_mean"] == 0.0
+
+
+def test_a_policy_update_publishes_its_megatron_phases_and_memory(
+    single_rank_group, fake_cuda, delivered_telemetry, monkeypatch
+):
+    class Policy(PolicyWorkerBase):
+        def _ppo_train_impl(self, train_data, timing):
+            fake_cuda.use_memory(600, 700)
+            _megatron_mini_batch_metrics(use_tis=False, rollout_lp=None, monkeypatch=monkeypatch, timings=timing)
+            fake_cuda.use_memory(150, 200)
+            return TrainingOutputBatch()
+
+        async def _broadcast_to_inference_engines(self, inference_engine_client):
+            fake_cuda.use_memory(400, 500)
+
+    worker = object.__new__(Policy)
+    worker._rank, worker._policy_train_spans, worker._model_version_step = 0, True, None
+    worker._memory = LearnerCudaMetrics(enabled=True, rank=0)
+    batch = TrainingInputBatch({"sequences": torch.zeros(1, 1)})
+    batch.metadata = {"global_step": 7}
+
+    worker.ppo_train(batch)
+    asyncio.run(worker.broadcast_to_inference_engines(None))
+
+    phases = {
+        row["attributes"]["phase"]: row["attributes"].get("parent")
+        for row in delivered_telemetry.select("phase_duration_seconds", root="ppo_train", backend="megatron")
+    }
+    assert phases == {
+        "ppo_train": None,
+        "megatron_forward_backward_scheduler": "ppo_train",
+        "megatron_pipeline_metric_broadcast": "ppo_train",
+        "ppo_train_residual": "ppo_train",
+    }
+    exits = delivered_telemetry.select("cuda_memory_observation", boundary="exit", step="7")
+    assert {row["attributes"]["phase"]: row["body"]["peak_allocated_bytes"] for row in exits} == {
+        "ppo_train": 600,
+        "broadcast_to_inference_engines": 400,
+    }
+    assert all(row["attributes"]["worker_role"] == "policy" and row["attributes"]["rank"] == "0" for row in exits)

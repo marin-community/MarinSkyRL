@@ -173,7 +173,7 @@ def test_async_batch_conversion_reports_comparable_stage_timings(monkeypatch):
         now[0] += 11.0
         return batch, uids
 
-    def convert(batch, uids):
+    def convert(batch, uids, *, rollout_staleness):
         now[0] += 3.0
         return {"rewards": batch["rewards"], "uids": uids}
 

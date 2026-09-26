@@ -18,6 +18,7 @@ from cloud.iris.rl_config_translation import (
     compose_skyrl_config,
     parse_rl_config,
     registered_rl_entrypoint_module,
+    training_type_for_entrypoint,
     validate_tp_divides_heads,
 )
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
@@ -58,6 +59,7 @@ class RuntimeConfig:
     launcher_commit: str = MISSING
     profile: str = MISSING
     entrypoint: str = ""
+    training_type: str | None = None
     experiments_dir: str = "/app/experiments"
     task_env: dict[str, str] = field(default_factory=dict)
 
@@ -222,6 +224,10 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
     resolved = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
     OmegaConf.set_struct(resolved, False)
     resolved.runtime.entrypoint = compiled.entrypoint
+    # The terminal_bench entrypoint runs async only for an explicit false, so null means colocated.
+    colocate_all = compiled.config.trainer.placement.colocate_all is not False
+    training_type = training_type_for_entrypoint(compiled.entrypoint, colocate_all=colocate_all)
+    resolved.runtime.training_type = None if training_type is None else training_type.value
     resolved.inputs.data_kind = parsed.data_kind
     resolved.skyrl = compiled.config
     return compose_launch_config(resolved)
