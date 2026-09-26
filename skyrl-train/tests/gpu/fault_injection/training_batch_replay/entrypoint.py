@@ -13,12 +13,13 @@ from omegaconf import DictConfig, OmegaConf
 import ray
 
 from skyrl_train.entrypoints.main_base import config_dir, run_ray_driver
+from skyrl_train.rollouts.context import TrainingContext
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 from skyrl_train.utils.trainer_utils import ResumeMode
 from tests.training_batch_replay import (
     BatchReplayProvenance,
-    CapturingFullyAsyncRayPPOTrainer,
+    CapturingRayPPOTrainer,
     DIAGNOSTIC_CONFIG_KEY,
     config_fingerprint,
     load_training_batch_artifact,
@@ -104,9 +105,8 @@ def _capture_experiment_class():
             trajectory_runner,
             colocate_pg,
         ):
-            if cfg.trainer.placement.colocate_all:
-                raise ValueError("pre-forward capture currently requires fully-async, non-colocated training")
-            return CapturingFullyAsyncRayPPOTrainer(
+            return CapturingRayPPOTrainer(
+                context=TrainingContext.from_config(cfg, train_dataset, trajectory_runner),
                 cfg=cfg,
                 tracker=tracker,
                 tokenizer=tokenizer,

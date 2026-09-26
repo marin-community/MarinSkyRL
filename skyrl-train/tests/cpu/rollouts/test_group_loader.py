@@ -25,6 +25,11 @@ def test_each_pass_visits_every_prompt_in_a_fresh_seeded_order():
     assert sorted(uids[:8]) == sorted(uids[8:]) == [str(index) for index in range(8)]
     assert uids[:8] != uids[8:]
     assert _take(GroupLoader(_Prompts(8), seed=3, shuffle=True), 16) == uids
+    assert _take(GroupLoader(_Prompts(8), seed=4, shuffle=True), 16) != uids
+
+
+def test_unshuffled_passes_follow_dataset_order():
+    assert _take(GroupLoader(_Prompts(3), seed=0, shuffle=False), 6) == ["0", "1", "2", "0", "1", "2"]
 
 
 def test_retries_come_first_and_resume_continues_the_same_sequence():

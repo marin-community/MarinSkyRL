@@ -4,27 +4,18 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from typing import Any, Protocol
 
 import ray
 from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
 
-from skyrl_train.rollouts.buffer import RolloutGroup, RolloutLease, RolloutWriter
+from skyrl_train.rollouts.buffer import RolloutTask, RolloutWriter
 from skyrl_train.tokenizer import tokenizer_from_config
-from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink, retain_trajectories
+from skyrl_train.trajectory_runners.base import TrajectoryRunner
+from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink
 from skyrl_train.trajectory_runners.types import TrajectoryBatch, TrajectoryRequestBatch
 from skyrl_train.worker_setup import configure_worker_process
-
-
-@dataclass(frozen=True)
-class RolloutTask:
-    """One prompt group to generate under a buffer lease."""
-
-    lease: RolloutLease
-    prompt: dict
-    request: TrajectoryRequestBatch
 
 
 class RolloutWorkers(Protocol):
@@ -33,27 +24,12 @@ class RolloutWorkers(Protocol):
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None: ...
 
 
-class TaskRunner(Protocol):
-    async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch: ...
-
-
 class RunnerSpec(Protocol):
     """Picklable inputs that build a trajectory runner inside a rollout worker process."""
 
     config: DictConfig
 
-    def build(self, tokenizer: PreTrainedTokenizerBase) -> Any: ...
-
-
-async def run_rollout_task(
-    runner: TaskRunner, task: RolloutTask, writer: RolloutWriter, sink: RetentionSink | None
-) -> None:
-    """Generate one task's group, retain it, and write it to the buffer."""
-    output = await runner.run(task.request, disable_tqdm=True)
-    if sink is not None:
-        await retain_trajectories(sink, task.request, output)
-    group = RolloutGroup(output, task.prompt["uid"], task.lease.policy_step, task.prompt, task.request)
-    await writer.write_rollout(task.lease, group)
+    def build(self, tokenizer: PreTrainedTokenizerBase) -> TrajectoryRunner: ...
 
 
 @ray.remote
@@ -63,9 +39,8 @@ class RolloutWorker:
     def __init__(self, spec: RunnerSpec, sink: RetentionSink | None):
         configure_worker_process()
         self._runner = spec.build(tokenizer_from_config(spec.config))
-        self._sink = sink
         if sink is not None:
-            sink.bind_runner(type(self._runner).__name__)
+            self._runner.set_trajectory_sink(sink)
 
     async def startup(self) -> None:
         await self._runner.startup()
@@ -77,7 +52,7 @@ class RolloutWorker:
         return await self._runner.run(input_batch, disable_tqdm=True)
 
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None:
-        await run_rollout_task(self._runner, task, writer, self._sink)
+        await self._runner.run_task(task, writer)
 
     async def start_eval_session(self, **session: Any) -> None:
         await self._runner.start_eval_session(**session)
@@ -104,6 +79,7 @@ class RolloutWorkerPool:
         self._load: list[int] = []
 
     def set_trajectory_sink(self, sink: RetentionSink) -> None:
+        """Retain trajectories inside each worker, where its runner produces them."""
         self._sink = sink
 
     async def startup(self) -> None:
@@ -119,10 +95,7 @@ class RolloutWorkerPool:
             ray.kill(actor)
 
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
-        output = await self._submit(lambda actor: actor.run.remote(input_batch))
-        if self._sink is not None:
-            await retain_trajectories(self._sink, input_batch, output)
-        return output
+        return await self._submit(lambda actor: actor.run.remote(input_batch))
 
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None:
         await self._submit(lambda actor: actor.run_task.remote(task, writer))

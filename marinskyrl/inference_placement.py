@@ -68,21 +68,6 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
         raise ValueError("generator.weight_sync_transport=expert_block requires: " + "; ".join(problems))
 
 
-def validate_expert_block_trainer(config: Mapping[str, Any], *, uses_fully_async_trainer: bool) -> None:
-    """Reject ``expert_block`` for an entrypoint that does not run ``FullyAsyncRayPPOTrainer``.
-
-    No other trainer reads the option, so the run would sync by broadcast.
-    """
-    if (
-        config["generator"]["weight_sync_transport"] == WeightSyncTransport.EXPERT_BLOCK
-        and not uses_fully_async_trainer
-    ):
-        raise ValueError(
-            "generator.weight_sync_transport=expert_block requires an entrypoint that runs "
-            "FullyAsyncRayPPOTrainer (skyrl_train.entrypoints.fully_async, or terminal_bench without colocation)"
-        )
-
-
 @dataclass(frozen=True)
 class InferenceWorkerPlacement:
     """What one vLLM worker reports about itself."""

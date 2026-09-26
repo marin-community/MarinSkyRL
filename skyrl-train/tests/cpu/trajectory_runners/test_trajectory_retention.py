@@ -14,8 +14,6 @@ from skyrl_train.trajectory_runners.base import (
     TrajectoryBatch,
     TrajectoryID,
 )
-from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec, ProcessPoolResources
-from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import RolloutDispatcher
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import (
     RETENTION_METRIC_PREFIX,
@@ -658,46 +656,6 @@ def test_initialization_reconciles_archive_written_before_ledger_commit(tmp_path
     assert metrics["generate/trajectory_retention/duplicates"] == 3.0
     assert metrics["generate/trajectory_retention/written"] == 0.0
     assert len(list(tmp_path.rglob("*.zip"))) == 1
-
-
-class _ProcessCoordinator:
-    """One coordinator actor that returns a finished batch, standing in for the Ray RPC."""
-
-    def __init__(self):
-        self.run_shard = _ProcessRemote()
-
-
-class _ProcessRemote:
-    def remote(self, input_batch, *_args):
-        positions = {trajectory_id.to_string(): index for index, trajectory_id in enumerate(_input()["trajectory_ids"])}
-        indices = [positions[trajectory_id.to_string()] for trajectory_id in input_batch["trajectory_ids"]]
-        _, output = _select_batch_rows(indices)
-        future = asyncio.get_running_loop().create_future()
-        future.set_result(output)
-        return future
-
-
-def _process_dispatcher(harbor_runner_spec: HarborRunnerSpec) -> RolloutDispatcher:
-    dispatcher = RolloutDispatcher(
-        spec=harbor_runner_spec,
-        resources=ProcessPoolResources(1, 1, 1, 30),
-    )
-    dispatcher._actors = [_ProcessCoordinator()]
-    return dispatcher
-
-
-@pytest.mark.asyncio
-async def test_process_dispatcher_retains_its_coordinators_batch_under_the_harbor_runner(tmp_path, harbor_runner_spec):
-    """Retention when the process dispatcher replaces the runner the sink was attached to."""
-    dispatcher = _process_dispatcher(harbor_runner_spec)
-    dispatcher.set_trajectory_sink(TrajectorySink(_config(tmp_path), _Tokenizer()))
-
-    output = await dispatcher.run(_input())
-
-    assert output["rollout_metrics"]["generate/trajectory_retention/written"] == 3.0
-    assert {record["trajectory"]["instance_id"] for record in _records(tmp_path)} == {"a", "b", "c"}
-    # The proxy must not stamp its own name: retained provenance is independent of process placement.
-    assert {record["provenance"]["runner"] for record in _records(tmp_path)} == {"HarborTrajectoryRunner"}
 
 
 def test_retention_takes_the_run_id_the_initiator_set(monkeypatch):

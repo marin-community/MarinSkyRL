@@ -35,11 +35,12 @@ from skyrl_train.trajectory_runners.types import TrajectoryBatch, TrajectoryRequ
 class RolloutBufferConfig:
     """Batch shape, generation concurrency, and selection rules of one training run.
 
-    ``max_candidate_groups`` bounds the dynamic-sampling candidates one batch may inspect; None is unbounded.
+    ``max_in_flight`` caps concurrent rollouts and ``max_candidate_groups`` bounds the dynamic-sampling candidates
+    one batch may inspect; None leaves either unbounded.
     """
 
     batch_size: int
-    max_in_flight: int
+    max_in_flight: int | None
     max_staleness_steps: int
     dynamic_sampling: DynamicSamplingType | None
     max_candidate_groups: int | None
@@ -47,12 +48,15 @@ class RolloutBufferConfig:
     def __post_init__(self) -> None:
         if self.batch_size < 1:
             raise ValueError(f"rollout batch size must be positive, got {self.batch_size}")
-        if self.max_in_flight < self.batch_size:
-            raise ValueError(
-                f"max in-flight rollouts ({self.max_in_flight}) must be at least the batch size ({self.batch_size})"
-            )
+        if self.max_in_flight is not None and self.max_in_flight < 1:
+            raise ValueError(f"max in-flight rollouts must be positive, got {self.max_in_flight}")
         if self.max_staleness_steps < 0:
             raise ValueError(f"max_staleness_steps must be non-negative, got {self.max_staleness_steps}")
+
+    @property
+    def max_untrained_groups(self) -> int:
+        """Groups leased, committed, or batched that the next ``max_staleness_steps + 1`` steps can train on."""
+        return (self.max_staleness_steps + 1) * self.batch_size
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,15 @@ class RolloutLease:
 
     lease_id: str
     policy_step: int
+
+
+@dataclass(frozen=True)
+class RolloutTask:
+    """One prompt group to generate under a buffer lease."""
+
+    lease: RolloutLease
+    prompt: dict
+    request: TrajectoryRequestBatch
 
 
 @dataclass
@@ -259,7 +272,7 @@ class RolloutBuffer:
     """Lease accounting, committed groups, and batch selection for one training run.
 
     The trainer publishes each policy step after syncing its weights to inference. Leases open only after
-    the first publish. Besides ``max_in_flight``, leases are bounded so that groups not yet trained (leased,
+    the first publish. Besides any ``max_in_flight`` cap, leases are bounded so that groups not yet trained (leased,
     committed, or in the current batch) never exceed ``max_staleness_steps + 1`` batches: a group leased now
     can only be trained within that many steps, so generating more would only produce stale work.
 
@@ -286,9 +299,10 @@ class RolloutBuffer:
             return 0
         running = len(self._leases)
         batched = self.config.batch_size if self._batch_taken else len(self._admitted)
-        untrained = running + len(self._ready) + batched
-        trainable = (self.config.max_staleness_steps + 1) * self.config.batch_size
-        return min(self.config.max_in_flight - running, trainable - untrained)
+        available = self.config.max_untrained_groups - (running + len(self._ready) + batched)
+        if self.config.max_in_flight is None:
+            return available
+        return min(self.config.max_in_flight - running, available)
 
     async def acquire_lease(self) -> RolloutLease:
         """Wait for generation capacity and lease it at the current policy step."""

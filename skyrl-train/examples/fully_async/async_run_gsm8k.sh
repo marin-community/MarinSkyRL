@@ -1,19 +1,16 @@
 set -x
 
 # Fully async GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
-# This bash script is copied from examples/async/async_run_gsm8k.sh, except for:
-# - running skyrl_train.entrypoints.fully_async
-# - setting the generator.batched=false.
-# - colocate_all=false
-# - the chat template configuration at the end.
+# Training and generation run on separate GPUs (colocate_all=false), and generation may run up to
+# MAX_STALENESS_STEPS policy steps ahead of training.
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/gsm8k/run_gsm8k.sh
+# bash examples/fully_async/async_run_gsm8k.sh
 
 # NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
 
-# You can override the default values with e.g.: `NUM_GPUS=1 bash examples/gsm8k/run_gsm8k.sh`.
+# You can override the default values with e.g.: `MAX_STALENESS_STEPS=1 bash examples/fully_async/async_run_gsm8k.sh`.
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${NUM_INFERENCE_GPUS:=2}"
@@ -23,16 +20,14 @@ set -x
 : "${INFERENCE_BACKEND:=vllm}"
 # : "${INFERENCE_BACKEND:=sglang}"
 
-# Fully async specific configuration knobs:
+# Rollout buffer knobs; see docs/tutorials/fully_async.rst.
 : "${MINI_BATCH_SIZE:=256}"
 : "${MAX_STALENESS_STEPS:=4}"
-: "${NUM_PARALLEL_GENERATION_WORKERS:=$(( MINI_BATCH_SIZE * (MAX_STALENESS_STEPS + 1) ))}"
 
-uv run --isolated --extra megatron --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.fully_async \
+uv run --isolated --extra megatron --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.gym_worker_pool \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
-  trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
-  trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
+  trainer.rollout_buffer.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.algorithm.policy_loss_type="behavior_clip" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
@@ -61,7 +56,6 @@ uv run --isolated --extra megatron --extra $INFERENCE_BACKEND -m skyrl_train.ent
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
   generator.async_engine=true \
-  generator.batched=false \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \

@@ -3,12 +3,8 @@
 import numpy as np
 import pytest
 from datasets import Dataset
-from torch.utils.data import SequentialSampler
 
 from skyrl_train.curriculum import CurriculumConfig, CurriculumSampler, SamplingKind, WeightingKind, dataset_bins
-from skyrl_train.dataset import PromptDataset
-from skyrl_train.utils.trainer_utils import build_dataloader
-from tests.cpu.util import example_dummy_config
 
 
 class _StubCurriculumDataset:
@@ -281,87 +277,6 @@ def test_dataset_bins_requires_consistent_metadata():
     )
     with pytest.raises(ValueError, match="inconsistent grades"):
         dataset_bins(inconsistent)
-
-
-class _StubTokenizer:
-    """Picklable tokenizer stub; length filtering just measures the raw prompt."""
-
-    def apply_chat_template(self, messages, add_generation_prompt):
-        return messages
-
-
-def _parquet_prompt_dataset(tmp_path):
-    """Two bins: g0-easy with 2 rows (rows 0-1), g1-hard with 18 rows (rows 2-19)."""
-    rows = [("g0-easy", 0)] * 2 + [("g1-hard", 1)] * 18
-    data = {
-        "prompt": [f"prompt {i}" for i in range(len(rows))],
-        "env_class": ["gsm8k"] * len(rows),
-        "extra_info": [{"data_source": name, "grade": grade} for name, grade in rows],
-    }
-    parquet_path = str(tmp_path / "train.parquet")
-    Dataset.from_dict(data).to_parquet(parquet_path)
-    return PromptDataset(datasets=[parquet_path], tokenizer=_StubTokenizer(), max_prompt_length=100, num_workers=1)
-
-
-def _curriculum_config(kind):
-    config = example_dummy_config()
-    config.data.sampling.kind = kind
-    config.trainer.train_batch_size = 5
-    return config
-
-
-def test_build_dataloader_grade_uniform_draw_frequencies(tmp_path):
-    dataset = _parquet_prompt_dataset(tmp_path)
-    config = _curriculum_config("grade-uniform")
-    dataloader = build_dataloader(config, dataset, is_train=True)
-
-    assert isinstance(dataloader.sampler, CurriculumSampler)
-    assert dataloader.num_workers == 0  # draws must not be prefetched ahead of weight updates
-
-    easy_draws = total_draws = 0
-    for _ in range(30):
-        for batch in dataloader:
-            for item in batch:
-                easy_draws += int(item["uid"]) < 2
-                total_draws += 1
-    # grade-uniform puts half the mass on the 2-row g0 bin vs its 10% row share.
-    # Batch-unique draws cap g0 at 2 of every 5-row batch, so the observed
-    # fraction lands between the 10% row share and the 40% per-batch ceiling.
-    assert total_draws == 30 * 20
-    assert 0.25 < easy_draws / total_draws <= 0.4
-
-
-def test_build_dataloader_eval_loader_ignores_curriculum(tmp_path):
-    dataset = _parquet_prompt_dataset(tmp_path)
-    dataloader = build_dataloader(_curriculum_config("thompson"), dataset, is_train=False)
-    assert isinstance(dataloader.sampler, SequentialSampler)
-
-
-def test_build_dataloader_rejects_unsupported_modes(tmp_path):
-    dataset = _parquet_prompt_dataset(tmp_path)
-    config = _curriculum_config("thompson")
-    with pytest.raises(ValueError, match="fully async"):
-        build_dataloader(config, dataset, is_train=True, is_fully_async=True)
-    config.trainer.step_wise_training = True
-    with pytest.raises(ValueError, match="step_wise_training"):
-        build_dataloader(config, dataset, is_train=True)
-
-
-def test_stateful_dataloader_checkpoint_resumes_draws(tmp_path):
-    dataset = _parquet_prompt_dataset(tmp_path)
-    config = _curriculum_config("thompson")
-
-    dataloader = build_dataloader(config, dataset, is_train=True)
-    it = iter(dataloader)
-    [next(it) for _ in range(2)]
-    dataloader.sampler.update(["0", "0", "5", "5"], [0.0, 1.0, 1.0, 1.0], 2)
-    snapshot = dataloader.state_dict()
-    remaining = list(it)
-
-    resumed = build_dataloader(config, dataset, is_train=True)
-    resumed.load_state_dict(snapshot)
-    assert list(iter(resumed)) == remaining
-    np.testing.assert_allclose(resumed.sampler.stats.total, dataloader.sampler.stats.total)
 
 
 def test_draws_are_unique_within_each_batch():

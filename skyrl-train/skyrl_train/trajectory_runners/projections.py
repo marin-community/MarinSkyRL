@@ -41,13 +41,6 @@ class TrajectoryProjection(Protocol, Generic[InteractionT]):
     def project(self, outputs: InteractionT, request: TrajectoryRequestBatch) -> TrajectoryBatch: ...
 
 
-class IdentityTrajectoryProjection:
-    """Return a batch that a collector has already normalized."""
-
-    def project(self, outputs: TrajectoryBatch, request: TrajectoryRequestBatch) -> TrajectoryBatch:
-        return outputs
-
-
 class WholeTrajectoryProjection:
     """Emit one trainer sample for each completed environment trajectory."""
 

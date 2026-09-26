@@ -15,8 +15,7 @@ from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import (
     RolloutDispatcher,
 )
 from skyrl_train.trajectory_runners.types import BatchMetadata, TrainingPhase, TrajectoryID
-from skyrl_train.rollouts.buffer import RolloutLease
-from skyrl_train.rollouts.workers import RolloutTask
+from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 
 
 class _RemoteMethod:

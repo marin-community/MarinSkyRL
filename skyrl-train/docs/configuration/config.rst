@@ -60,7 +60,7 @@ General Training Configuration
 
 - ``epochs``: Number of epochs/ passes over the full dataset (similar to SFT)
 - ``update_epochs_per_batch``: Number of gradient update passes over each training batch. This is equivalent to the concept of "PPO epochs" where you iterate over the same experience multiple times.
-- ``train_batch_size``: Batch size of prompts used for each dataloader step.
+- ``train_batch_size``: Number of prompt groups in each training step's batch.
 - ``policy_mini_batch_size``: Mini batch size used during RL training step. Each mini batch corresponds to one optimizer step. For example, if the ``train_batch_size`` is 4 and ``policy_mini_batch_size`` is 2, then there will be 2 optimizer steps (i.e., model updates) for a given training batch. Note that is this the global mini batch size. The actual size of the mini batch per worker would be ``policy_mini_batch_size/ number of DP ranks``
 - ``critic_mini_batch_size``: Similar to ``policy_mini_batch_size`` but for the critic model (if applicable). Note that in general, the critic model can tolerate off-policy updates more than the policy. Thus, you would want to set ``critic_mini_batch_size`` to be lower compared ``policy_mini_batch_size`` (i.e., more critic updates).
 - ``micro_train_batch_size_per_gpu``: Micro batch size during training step. This is common for both policy and critic models. Each mini batch is split into micro batches of this size, gradients are computed and accumulated over these micro batches.
@@ -110,6 +110,30 @@ Checkpoint Configuration
     logger: "wandb"
 
 For an in-depth guide on checkpointing and resumption, please refer to the :doc:`checkpointing guide <../checkpointing-logging/checkpointing>`.
+
+Rollout Buffer Configuration
+----------------------------
+
+.. code-block:: yaml
+
+    rollout_buffer:
+      max_staleness_steps: 0
+      max_in_flight: null
+    teacher_scoring:
+      max_queued_per_teacher: 8
+      workers_per_teacher: 1
+
+Rollout workers generate prompt groups under leases from a rollout buffer, and each training step trains on
+``train_batch_size`` groups. See :doc:`../tutorials/fully_async` for the full design.
+
+- ``rollout_buffer.max_staleness_steps``: How many policy steps may separate the step at which a group was leased
+  from the step that trains on it. ``0`` is synchronous on-policy training and is required when ``placement.colocate_all=true``.
+  A positive value lets generation run ahead of training.
+- ``rollout_buffer.max_in_flight``: Maximum number of prompt groups generating at once. ``null`` bounds generation
+  only by staleness. A value below ``train_batch_size`` generates each batch in several waves.
+- ``teacher_scoring.max_queued_per_teacher``: Maximum number of score requests queued for each distillation teacher.
+  A full queue holds back admission of further groups.
+- ``teacher_scoring.workers_per_teacher``: Number of score requests each teacher runs concurrently.
 
 Logging and Debugging Configuration
 -----------------------------------
@@ -286,9 +310,8 @@ Algorithm Configuration
 
       # dynamic sampling parameters
       dynamic_sampling:
-        type: null # filter (DAPO), replace (POLARIS/WebSailor), or null
-        max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
-        min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
+        type: null # filter (DAPO) or null
+        max_sample_batches: 30 # inspect at most this many batches of candidate groups per step, -1 for no limit
       
       # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
       use_tis: false 
@@ -339,9 +362,8 @@ Algorithm Configuration
 - ``algorithm.clip_ratio_c``: Clip ratio for dual clip PPO loss.
 - ``algorithm.value_clip``: Clip value for value loss.
 - ``algorithm.dynamic_sampling``: Dynamic sampling configuration.
-  - ``algorithm.dynamic_sampling.type``: Type of dynamic sampling to use. We support ``filter`` (`DAPO <https://dapo-sia.github.io/>`_), ``replace`` (`POLARIS <https://hkunlp.github.io/blog/2025/Polaris/>`_ / `WebSailor <https://arxiv.org/abs/2507.02592>`_), or ``null`` for no dynamic sampling. Fully asynchronous training supports ``filter`` and ``null``; ``replace`` is synchronous only. The filter uses unshaped verifier outcomes and draws a fresh prompt for every uniform-outcome group.
-  - ``algorithm.dynamic_sampling.max_sample_batches``: Maximum number of batches to sample before stopping. Set to ``-1`` to sample forever. Fully asynchronous training converts this to a per-step candidate-group limit of ``max_sample_batches * train_batch_size`` and never shortens the training batch.
-  - ``algorithm.dynamic_sampling.min_replace_ratio``: Minimum proportion of good samples with which to replace bad samples for ``replace`` strategy.
+  - ``algorithm.dynamic_sampling.type``: ``filter`` (`DAPO <https://dapo-sia.github.io/>`_) or ``null`` for no dynamic sampling. The filter judges each group as it arrives at the rollout buffer, discards groups without enough reward spread, and keeps drawing prompts until the batch is full.
+  - ``algorithm.dynamic_sampling.max_sample_batches``: Per-step limit on candidate groups, in units of ``train_batch_size``: a step that inspects ``max_sample_batches * train_batch_size`` candidates without filling its batch fails. Set to ``-1`` for no limit. The training batch is never shortened.
 - ``algorithm.use_tis``: Whether to use Truncated Importance Sampling (TIS) as proposed in `this blog <https://fengyao.notion.site/off-policy-rl>`_. 
 - ``algorithm.tis_imp_ratio_cap``: Cap parameter for the importance ratio in TIS.
 - ``algorithm.clip_cov``: Clip-Cov parameters (only used when ``policy_loss_type`` is ``clip_cov``):
@@ -422,7 +444,6 @@ Generator Configuration
     inference_engine_data_parallel_size: 1
     n_samples_per_prompt: 5
     async_engine: true
-    batched: true
     max_input_length: ${trainer.max_prompt_length} # max generator input length used for multi-turn conversations - for single turn set equal to max_prompt_length
     enable_prefix_caching: true
     enable_chunked_prefill: true
@@ -533,7 +554,7 @@ Weight Transfer Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - ``generator.weight_sync_backend``: Backend to use for weight synchronization. Currently, we support ``nccl`` and ``gloo``.
-- ``generator.weight_sync_transport``: How weights reach the engines. ``broadcast`` (default) sends every tensor from trainer rank 0 to every engine. ``expert_block`` broadcasts each MoE expert matrix from a Megatron rank that holds it to the vLLM workers that serve that expert, writing into their live parameters; dense weights go to one worker per replica, which broadcasts them within its node. It requires ``FullyAsyncRayPPOTrainer``, a Grug MoE trained with the ``megatron`` strategy at ``tensor_model_parallel_size: 1`` and ``expert_tensor_parallel_size: 1``, local vLLM engines at TP=1 with EP equal to DP and DP>1 (each is placed on one node, and its workers are checked at startup), ``weight_sync_backend: nccl`` and vLLM's TRITON MoE backend. Trainer and engine EP sizes may differ, and engines may be pipeline-parallel. Anything else is refused at startup. Each sync logs ``timing/expert_block_sync/{install,policy,receiver,expert,dense}_seconds``.
+- ``generator.weight_sync_transport``: How weights reach the engines. ``broadcast`` (default) sends every tensor from trainer rank 0 to every engine. ``expert_block`` broadcasts each MoE expert matrix from a Megatron rank that holds it to the vLLM workers that serve that expert, writing into their live parameters; dense weights go to one worker per replica, which broadcasts them within its node. It requires inference engines that are not colocated with training (``trainer.placement.colocate_all: false``), a Grug MoE trained with the ``megatron`` strategy at ``tensor_model_parallel_size: 1`` and ``expert_tensor_parallel_size: 1``, local vLLM engines at TP=1 with EP equal to DP and DP>1 (each is placed on one node, and its workers are checked at startup), ``weight_sync_backend: nccl`` and vLLM's TRITON MoE backend. Trainer and engine EP sizes may differ, and engines may be pipeline-parallel. Anything else is refused at startup. Each sync logs ``timing/expert_block_sync/{install,policy,receiver,expert,dense}_seconds``.
 - ``generator.expert_block_sync.timeout_seconds``: Timeout for creating the sync groups at startup and for the broadcasts of each sync.
 - ``generator.expert_block_sync.verify``: If set, replay synchronization and verify it against the trainer values.
 - ``generator.override_existing_update_group``: Whether to override the existing update group for the inference engine. This is applicable only for remote inference engines. During training, `skyrl-train` forms a custom process group ("update group") with the rank 0 training worker and all the inference engine ranks.  If ``override_existing_update_group=enable``, then during initialization, a previous weight update group will be overriden in the inference engine. For example, if you have a remote server setup and you run training for the same model multiple times, it is helpful to override the previous update group. We recommend leaving this to ``auto`` - since it will automatically determine if the previous update group should be overridden based on ``run_engines_locally``.
@@ -559,7 +580,6 @@ Generation Parameters
 ~~~~~~~~~~~~~~~~~~~~~
 
 - ``generator.n_samples_per_prompt``: Number of samples to generate per prompt. Note that the total size of the training batch will be ``trainer.train_batch_size * generator.n_samples_per_prompt``.
-- ``generator.batched``: Whether to use batched inference. This is applicable only for single turn generation.
 - ``generator.max_input_length``: Maximum input length for the inference engine. For single turn generation, this can be same as ``trainer.max_prompt_length`` (i.e., the initial prompt length). For multi-turn generation, this is the maximum input length used for multi-turn conversations at each turn.
 - ``generator.sampling_params``: Sampling parameters for the inference engine during trajectory generation phase.
 
@@ -576,7 +596,7 @@ Generation Parameters
 - ``generator.chat_template``: Custom chat template configuration if needed.
     - ``generator.chat_template.source``: Source of the chat template. Can be either ``name`` or ``file``.
     - ``generator.chat_template.name_or_path``: Name or path of the chat template. If the source is ``name``, then it should be one of the supported templates in :code_link:`skyrl_train/trajectory_runners/trajectory_processing.py`. If the source is ``file``, then this field should be a path to a Jinja2 template file.
-- ``generator.chat_template_kwargs``: Chat templating kwargs to pass to ``tokenizer.apply_chat_template``. Applicable only for non-batched generation with ``generator.batched=false``.
+- ``generator.chat_template_kwargs``: Chat templating kwargs to pass to ``tokenizer.apply_chat_template``.
 
 Misc Configuration
 ~~~~~~~~~~~~~~~~~~

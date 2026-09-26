@@ -1,7 +1,9 @@
 """Run the production training entrypoints end to end on CPU with a tiny GSM8K policy.
 
 The experiments swap only the Megatron policy worker and the vLLM engines for the CPU backend.
-Ray runs locally with logical GPUs so placement code runs unchanged.
+Ray runs locally with logical GPUs so placement code runs unchanged. Synchronous training runs the standard
+entrypoint at staleness 0; asynchronous training runs the Gym worker-pool entrypoint at positive staleness, so
+the two modes also cover both rollout-worker topologies.
 
 Usage::
 
@@ -23,7 +25,7 @@ from skyrl_train.config.trajectory_runner_capabilities import (
 )
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset import PromptDataset
-from skyrl_train.entrypoints.fully_async import AsyncPPOExp
+from skyrl_train.entrypoints.gym_worker_pool import GymWorkerPoolExp
 from skyrl_train.entrypoints.main_base import BasePPOExp, EntrypointOperation
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
@@ -33,14 +35,15 @@ from tests.cpu.tiny_training.tiny_model import build_tiny_policy, write_gsm8k_da
 
 LOGICAL_GPUS = 4
 METRICS_FILE = "metrics.jsonl"
-MAX_STALENESS_STEPS = 1
-ASYNC_CHAT_TEMPLATE = "qwen2_5_with_generation_tag_simplified"
 WORKER_ENV_VARS = {"HF_HUB_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false", "OMP_NUM_THREADS": "4"}
 
 
 class TrainingMode(StrEnum):
     SYNC = "sync"
     ASYNC = "async"
+
+
+MAX_STALENESS_STEPS = {TrainingMode.SYNC: 0, TrainingMode.ASYNC: 1}
 
 
 def tiny_training_config(root: Path, mode: TrainingMode, *, max_steps: int, num_prompts: int = 64) -> DictConfig:
@@ -57,7 +60,7 @@ def tiny_training_config(root: Path, mode: TrainingMode, *, max_steps: int, num_
             "placement": {"colocate_all": False, "policy_num_gpus_per_node": 1},
             "policy": {"model": {"path": str(model_dir)}, "optimizer_config": {"lr": 1.0e-3}},
             "algorithm": {"use_kl_loss": False},
-            "fully_async": {"max_staleness_steps": MAX_STALENESS_STEPS, "num_parallel_generation_workers": 8},
+            "rollout_buffer": {"max_staleness_steps": MAX_STALENESS_STEPS[mode], "max_in_flight": 8},
             "train_batch_size": 4,
             "policy_mini_batch_size": 4,
             "micro_train_batch_size_per_gpu": 8,
@@ -83,8 +86,6 @@ def tiny_training_config(root: Path, mode: TrainingMode, *, max_steps: int, num_
         },
         "trajectory_runner": {"process_pool": {"num_coordinators": 2, "cpus_per_coordinator": 1}},
     }
-    if mode is TrainingMode.ASYNC:
-        overrides["generator"]["chat_template"] = {"source": "name", "name_or_path": ASYNC_CHAT_TEMPLATE}
     return OmegaConf.merge(cfg, overrides)
 
 
@@ -141,21 +142,17 @@ class TinyTrainingExp(BasePPOExp):
         return InferenceEngineClient(engines, self.tokenizer, self.cfg)
 
 
-class TinyAsyncTrainingExp(TinyTrainingExp, AsyncPPOExp):
-    """The fully asynchronous entrypoint with the CPU backend."""
+class TinyWorkerPoolTrainingExp(TinyTrainingExp, GymWorkerPoolExp):
+    """The Gym worker-pool entrypoint with the CPU backend."""
 
 
-EXPERIMENTS = {TrainingMode.SYNC: TinyTrainingExp, TrainingMode.ASYNC: TinyAsyncTrainingExp}
-RUNNER_MODES = {
-    TrainingMode.SYNC: TrajectoryRunnerMode.SKYRL_GYM,
-    TrainingMode.ASYNC: TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM,
-}
+EXPERIMENTS = {TrainingMode.SYNC: TinyTrainingExp, TrainingMode.ASYNC: TinyWorkerPoolTrainingExp}
 
 
 def run_tiny_training(cfg: DictConfig, mode: TrainingMode) -> None:
     """Validate the config as the production driver does, then run in a fresh local Ray session."""
     validate_cfg(cfg)
-    validate_trajectory_runner_capabilities(cfg, RUNNER_MODES[mode], EntrypointOperation.TRAIN)
+    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM, EntrypointOperation.TRAIN)
     ray.init(num_cpus=os.cpu_count(), num_gpus=LOGICAL_GPUS, runtime_env={"env_vars": WORKER_ENV_VARS})
     try:
         EXPERIMENTS[mode](cfg).run()

@@ -91,8 +91,6 @@ Now that we have our dataset and database files, let's walk through the some of 
         generator.max_turns=6 \
         # we need to make sure to set async_engine=true for async rollouts
         generator.async_engine=true \
-        # we need to make sure to set batched=false for async rollouts
-        generator.batched=false \
 
         #### context length related configurations
         # trainer.max_prompt_length is the max length of the initial prompt
@@ -143,7 +141,7 @@ Now that we have our dataset and database files, let's walk through the some of 
         ... # Other parameters (see `examples/text_to_sql/run_skyrl_sql.sh` for the full script)
 
 - All we have to do to enable multi-turn training with async rollouts is to simply set ``generator.max_turns`` to the maximum number of turns we want the agent to take,
-  and to make sure ``generator.async_engine=true`` and ``generator.batched=false``. 
+  and to make sure ``generator.async_engine=true``.
 
 - Chat templating and loss masking for multi-turn conversations are handled by the ``SkyRLGymTrajectoryRunner`` class.
 

@@ -31,23 +31,18 @@ from skyrl_train.trajectory_runners.skyrl_gym_contracts import (
     environment_metrics_from_step,
     fold_verification_results,
     publish_rollout_evidence,
-    reward_from_env_step,
     verification_from_env_step,
 )
 from skyrl_train.trajectory_runners.trajectory_processing import (
     _sentinel_routed_experts_row,
     get_custom_chat_template,
     get_generation_prompt_ids,
-    apply_overlong_filtering,
-    get_rollout_metrics,
     normalize_token_ids,
 )
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelClient
 from skyrl_train.trajectory_runners.selected_topk import align_student_topk
 from skyrl_train.trajectory_runners.collectors import RolloutCollector, collect_agent_loops
 from skyrl_train.trajectory_runners.projections import (
-    attach_unshaped_rewards,
-    IdentityTrajectoryProjection,
     TrajectoryProjection,
     WholeTrajectoryProjection,
 )
@@ -70,33 +65,6 @@ class WholeTrajectoryCollector:
             disable_tqdm=disable_tqdm,
             on_error=lambda index, error: self._runner.failed_agent_loop_output(request, index, error),
         )
-
-
-class BatchedTrajectoryCollector:
-    """Collect a batch from the supported single-turn batched environment path."""
-
-    def __init__(self, runner):
-        self._runner = runner
-
-    def validate(self) -> None:
-        pass
-
-    async def collect(self, request: TrajectoryRequestBatch, *, disable_tqdm: bool = False):
-        del disable_tqdm
-        runner = self._runner
-        sampling_params = request.get("sampling_params")
-        max_tokens = runner.trajectory_runner_cfg.sampling_params.max_generate_length
-        if sampling_params is not None:
-            max_tokens = sampling_params.get("max_tokens", sampling_params.get("max_new_tokens", max_tokens))
-        batch = await runner.collect_batched(
-            request["prompts"],
-            request["env_classes"],
-            request["env_extras"],
-            max_tokens,
-            sampling_params,
-            request.get("trajectory_ids"),
-        )
-        return batch
 
 
 PipelineOutputT = TypeVar("PipelineOutputT")
@@ -152,18 +120,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         self.model_client = model_client or DirectModelClient(inference_engine_client)
         self.tokenizer = tokenizer
         if pipeline is None:
-            pipeline = (
-                TrajectoryPipeline(BatchedTrajectoryCollector, IdentityTrajectoryProjection())
-                if trajectory_runner_cfg.batched
-                else TrajectoryPipeline(
-                    WholeTrajectoryCollector,
-                    WholeTrajectoryProjection(trajectory_runner_cfg, tokenizer),
-                )
+            pipeline = TrajectoryPipeline(
+                WholeTrajectoryCollector,
+                WholeTrajectoryProjection(trajectory_runner_cfg, tokenizer),
             )
         self.collector = pipeline.collector_type(self)
         self.projection = pipeline.projection
         self.max_turns = trajectory_runner_cfg.max_turns
-        self.batched = trajectory_runner_cfg.batched
         self.require_exact_chat_transport = trajectory_runner_cfg.get("require_exact_chat_transport", False) is True
         self.use_conversation_multi_turn = trajectory_runner_cfg.use_conversation_multi_turn
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
@@ -177,7 +140,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         else:
             self.env_executor = None
 
-        self._validate_cfg(trajectory_runner_cfg)
         self.collector.validate()
 
         # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
@@ -209,12 +171,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         self.genrm_config = dict(ultra_config.get("genrm", {}))
         genrm_judge = self.genrm_config.get("judge")
         self.genrm_judge = OpenAIJudge(**dict(genrm_judge)) if genrm_judge is not None else None
-
-    def _validate_cfg(self, trajectory_runner_cfg: DictConfig):
-        if len(trajectory_runner_cfg.chat_template_kwargs) and trajectory_runner_cfg.batched:
-            raise ValueError(
-                "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
-            )
 
     def failed_agent_loop_output(
         self,
@@ -789,164 +745,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             env_metrics=env_metrics,
             token_provenance=token_provenance,
         )
-
-    async def collect_batched(
-        self,
-        prompts: List[ConversationType],
-        env_classes: List[str],
-        env_extras: List[Dict[str, Any]],
-        max_tokens: int,
-        sampling_params: Optional[Dict[str, Any]] = None,
-        trajectory_ids: Optional[List[TrajectoryID]] = None,
-    ) -> TrajectoryBatch:
-        """
-        Single-turn batched generation (can use the synchronous offline engine)
-
-        Args:
-            prompts: List[ConversationType]
-            env_classes: List[str]
-            env_extras: List[Dict[str, Any]]
-            max_tokens: int
-            sampling_params: Optional[Dict[str, Any]]
-            trajectory_ids: Stable rollout identities used for sticky serving sessions.
-        Returns:
-            TrajectoryBatch
-        """
-        envs = []
-        init_prompts = []
-        for env_class, env_extra, prompt in zip(env_classes, env_extras, prompts):
-            env_extra["max_turns"] = self.max_turns
-            env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
-            env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extra)
-            init_prompt, _ = await self._run_in_executor_if_available(env.init, prompt)
-            init_prompts.append(init_prompt)
-            envs.append(env)
-
-        # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
-        session_ids = (
-            [trajectory_id.instance_id for trajectory_id in trajectory_ids] if trajectory_ids is not None else None
-        )
-        engine_input = InferenceEngineInput(
-            prompts=init_prompts,
-            session_ids=session_ids,
-            sampling_params=sampling_params,
-        )
-        engine_output = await self.model_client.generate(engine_input)
-        outputs = engine_output["responses"]
-        responses = engine_output["response_ids"]
-        stop_reasons = engine_output["stop_reasons"]
-        logprobs = engine_output.get("response_logprobs", None)
-        selected_indices = engine_output.get("student_topk_indices")
-        selected_logprobs = engine_output.get("behavior_topk_logprobs")
-        if (selected_indices is None) != (selected_logprobs is None):
-            raise ValueError("Inference engine must return student top-K IDs and behavior scores together")
-        if selected_indices is not None and (
-            len(selected_indices) != len(responses) or len(selected_logprobs) != len(responses)
-        ):
-            raise ValueError("Inference engine student top-K rows must align with responses")
-
-        truncated_responses = []
-        rewards = []
-        unshaped_rewards = []
-        successes = []
-        exclude_from_baseline = []
-        loss_masks = []
-        env_metrics = []
-        truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
-        truncated_selected_indices: list[list[list[int]]] = []
-        truncated_selected_logprobs: list[list[list[float]]] = []
-
-        for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
-            publish_rollout_evidence(
-                env,
-                messages=init_prompts[i],
-                response=output,
-                stop_reason=stop_reasons[i],
-                response_token_ids=response,
-                behavior_logprobs=None if logprobs is None else logprobs[i],
-                metadata={"generation_token_budget": max_tokens},
-            )
-            # step on environment and compute reward
-            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
-            verification = verification_from_env_step(env_step_output)
-
-            if len(response) > max_tokens:
-                response = response[:max_tokens]
-            loss_masks.append([1] * len(response))
-            truncated_responses.append(response)
-            if selected_indices is not None:
-                if len(selected_indices[i]) < len(response) or len(selected_logprobs[i]) < len(response):
-                    raise ValueError("Inference engine student top-K tokens must align with response tokens")
-                truncated_selected_indices.append(selected_indices[i][: len(response)])
-                truncated_selected_logprobs.append(selected_logprobs[i][: len(response)])
-            if logprobs is not None:
-                sample_logprobs = logprobs[i][: len(response)]
-                truncated_logprobs.append(sample_logprobs)
-
-            evidence = RolloutEvidence(
-                messages=tuple(init_prompts[i]),
-                response=output,
-                stop_reason=stop_reasons[i],
-                generated_token_count=len(response),
-                response_token_ids=tuple(response),
-                behavior_logprobs=None if logprobs is None else tuple(truncated_logprobs[-1]),
-            )
-            reward_result = reward_from_env_step(env_step_output, verification)
-            reward_result.validate_for(evidence)
-            disposition = TrainingDisposition.train()
-            rewards.append(reward_result.optimization_reward)
-            unshaped_rewards.append(reward_result.unshaped_reward)
-            successes.append(
-                verification.passed
-                if verification.passed is not None
-                else verification.score is not None and verification.score > 0.0
-            )
-            exclude_from_baseline.append(not disposition.baseline_eligible)
-
-            # Get environment-specific metrics
-            env_metrics.append(environment_metrics_from_step(env_step_output, env.get_metrics()))
-            # Close the environment
-            await self._run_in_executor_if_available(env.close)
-
-        # init_prompts is a BATCH (list of conversations), so this returns per-sample
-        # rows (list[list[int]]). On transformers 5.x a bare tokenize=True yields a
-        # BatchEncoding (mapping) rather than the list rows; extract input_ids in that
-        # case. normalize_token_ids is NOT used here — its singleton-unwrap would
-        # corrupt a one-element batch — and we key off the mapping interface (not
-        # return_dict) so a tokenizer/mock that already returns list rows is unchanged.
-        prompt_encodings = self.tokenizer.apply_chat_template(
-            init_prompts,
-            add_generation_prompt=True,
-            tokenize=True,
-        )
-        prompt_token_ids = prompt_encodings["input_ids"] if hasattr(prompt_encodings, "keys") else prompt_encodings
-        rollout_metrics = get_rollout_metrics(
-            responses,
-            rewards,
-            env_metrics,
-            env_classes,
-            successes=successes,
-        )
-
-        if self.trajectory_runner_cfg.apply_overlong_filtering:
-            loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
-
-        trajectory_batch: TrajectoryBatch = {
-            "prompt_token_ids": prompt_token_ids,
-            "response_ids": truncated_responses,
-            "rewards": rewards,
-            "loss_masks": loss_masks,
-            "stop_reasons": stop_reasons,
-            "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": truncated_logprobs,
-            "exclude_from_baseline": exclude_from_baseline,
-        }
-        if selected_indices is not None:
-            trajectory_batch["student_topk_indices"] = truncated_selected_indices
-            trajectory_batch["behavior_topk_logprobs"] = truncated_selected_logprobs
-        attach_unshaped_rewards(trajectory_batch, unshaped_rewards)
-
-        return trajectory_batch
 
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """Run the configured environment loop and project its interaction records."""

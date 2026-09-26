@@ -7,7 +7,6 @@ from loguru import logger
 from ray.exceptions import GetTimeoutError
 
 import skyrl_train.trainer as trainer_module
-from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl_train.trainer import RayPPOTrainer
 
 
@@ -46,8 +45,9 @@ async def test_startup_failure_still_runs_trainer_shutdown():
     events = []
     trainer = object.__new__(RayPPOTrainer)
     trainer._shutdown_complete = False
-    trainer._rollout_buffer = None
-    trainer._sync_rollout_pipeline = None
+    trainer.global_step = 0
+    trainer._distillation_runtime = None
+    trainer.context = SimpleNamespace(close=AsyncMock())
 
     async def fail_startup():
         events.append("startup")
@@ -70,6 +70,7 @@ async def test_trainer_shutdown_is_idempotent():
     events = []
     trainer = object.__new__(RayPPOTrainer)
     trainer._shutdown_complete = False
+    trainer.context = SimpleNamespace(close=AsyncMock())
 
     async def teardown():
         events.append("teardown")
@@ -84,14 +85,12 @@ async def test_trainer_shutdown_is_idempotent():
 
 @pytest.mark.asyncio
 async def test_training_failure_log_record_does_not_contain_exception_object():
-    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer = object.__new__(RayPPOTrainer)
     trainer.global_step = 12
-    trainer._active_trajectory_tasks = set()
-    trainer._rollout_buffer = None
-    trainer._expert_block_sync = None
+    trainer._distillation_runtime = None
+    trainer.context = SimpleNamespace(close=AsyncMock())
     trainer.trajectory_runner = SimpleNamespace(startup=AsyncMock())
     trainer._train_loop = AsyncMock(side_effect=_UnpickleableError("GPU worker ran out of memory"))
-    trainer._cancel_trajectory_tasks = Mock()
     trainer._teardown = AsyncMock()
     messages = []
     sink_id = logger.add(messages.append, level="ERROR")

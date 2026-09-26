@@ -38,7 +38,6 @@ uv run --isolated --extra megatron --extra vllm -m examples.multiply.main_multip
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
   generator.async_engine=true \
-  generator.batched=false \
   environment.env_class=multiply \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \

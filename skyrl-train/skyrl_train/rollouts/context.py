@@ -13,7 +13,11 @@ from loguru import logger
 from omegaconf import DictConfig
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-from skyrl_train.dynamic_sampling import GroupSelectionPolicy, resolve_dynamic_sampling_criteria
+from skyrl_train.dynamic_sampling import (
+    DynamicSamplingType,
+    GroupSelectionPolicy,
+    resolve_dynamic_sampling_criteria,
+)
 from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.rollouts.buffer import (
@@ -24,9 +28,10 @@ from skyrl_train.rollouts.buffer import (
     RolloutBufferConfig,
     RolloutContentPolicy,
     RolloutGroup,
+    RolloutTask,
 )
 from skyrl_train.rollouts.loader import GroupLoader, GroupLoaderState, PromptGroupDataset
-from skyrl_train.rollouts.workers import RolloutTask, RolloutWorkers
+from skyrl_train.rollouts.workers import RolloutWorkers
 from skyrl_train.telemetry import record_generated_work, record_rollout_buffer
 from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request
 from skyrl_train.trajectory_runners.types import TrajectoryRequestBatch
@@ -100,26 +105,26 @@ class TrainingContext:
 
     @classmethod
     def from_config(cls, config: DictConfig, dataset: PromptGroupDataset, workers: RolloutWorkers) -> TrainingContext:
-        backend = config.trainer.rollout_buffer.backend
-        if backend != "memory":
-            raise ValueError(f"the rollout-buffer training loop supports only the memory backend, got {backend!r}")
+        if config.data.sampling.kind is not None:
+            raise ValueError(
+                "data.sampling.kind is not supported: the rollout-buffer loader reads the dataset in seeded passes"
+            )
         algorithm = config.trainer.algorithm
         dynamic_sampling = algorithm.dynamic_sampling
-        selection = GroupSelectionPolicy.for_fully_async(
-            dynamic_sampling.type,
+        selection = GroupSelectionPolicy(
+            DynamicSamplingType(dynamic_sampling.type) if dynamic_sampling.type is not None else None,
             criteria=resolve_dynamic_sampling_criteria(
                 dynamic_sampling.informative_on, float(dynamic_sampling.min_reward_std)
             ),
         )
+        batch_size = config.trainer.train_batch_size
         max_sample_batches = int(dynamic_sampling.max_sample_batches)
         buffer_config = RolloutBufferConfig(
-            batch_size=config.trainer.policy_mini_batch_size,
-            max_in_flight=config.trainer.fully_async.num_parallel_generation_workers,
-            max_staleness_steps=config.trainer.fully_async.max_staleness_steps,
+            batch_size=batch_size,
+            max_in_flight=config.trainer.rollout_buffer.max_in_flight,
+            max_staleness_steps=config.trainer.rollout_buffer.max_staleness_steps,
             dynamic_sampling=selection.sampling_type,
-            max_candidate_groups=(
-                max_sample_batches * config.trainer.train_batch_size if max_sample_batches > 0 else None
-            ),
+            max_candidate_groups=max_sample_batches * batch_size if max_sample_batches > 0 else None,
         )
         admission = GroupAdmissionPolicy(
             GroupAdvantageInvariant.from_config(algorithm.resolved_group_advantage),
@@ -172,7 +177,7 @@ class TrainingContext:
                 self.loader.retry(prompt)
             for policy_step, work in admission.generated:
                 record_generated_work(work, policy_step)
-            record_rollout_buffer(admission.ready_count, self.config.max_in_flight)
+            record_rollout_buffer(admission.ready_count, self.config.max_untrained_groups)
             if admission.payloads:
                 admitted = await self._until_failure(asyncio.gather(*admission.payloads))
                 groups.extend(admitted)

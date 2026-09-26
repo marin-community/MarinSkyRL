@@ -2,9 +2,7 @@ import ast
 import inspect
 import textwrap
 
-import pytest
 
-from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.timing_observability import phase_timing_observations, publish_step_timings
 
@@ -50,9 +48,8 @@ def test_post_step_work_is_published_under_the_step_root():
     assert {item.root for item in observations} == {"step"}
 
 
-@pytest.mark.parametrize("trainer_class", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
-def test_step_end_callbacks_run_inside_production_step_timer(trainer_class):
-    tree = ast.parse(textwrap.dedent(inspect.getsource(trainer_class._train_loop)))
+def test_step_end_callbacks_run_inside_production_step_timer():
+    tree = ast.parse(textwrap.dedent(inspect.getsource(RayPPOTrainer._train_loop)))
     step_timer_blocks = [
         node
         for node in ast.walk(tree)

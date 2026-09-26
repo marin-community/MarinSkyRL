@@ -7,7 +7,13 @@ import json
 from pathlib import Path
 from typing import Any
 
-from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryRequestBatch, propagate_teacher_routes
+from skyrl_train.rollouts.buffer import RolloutTask, RolloutWriter
+from skyrl_train.trajectory_runners.base import (
+    TrajectoryBatch,
+    TrajectoryRequestBatch,
+    propagate_teacher_routes,
+    run_rollout_task,
+)
 from skyrl_train.trajectory_runners.harbor.dataset import TerminalBenchTaskDataset
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunner
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
@@ -148,6 +154,9 @@ class NemotronUltraTrajectoryRouter:
 
     async def stop_eval_session(self) -> None:
         await asyncio.gather(self.gym_runner.stop_eval_session(), self.harbor_runner.stop_eval_session())
+
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None:
+        await run_rollout_task(self, task, writer)
 
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         env_extras = input_batch.get("env_extras")

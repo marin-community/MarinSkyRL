@@ -170,9 +170,9 @@ trainer:
     policy_per_gpu_bundles: true
     policy_force_cvd_mask: true
 
-  fully_async:
+  rollout_buffer:
     max_staleness_steps: 16
-    num_parallel_generation_workers: 128
+    max_in_flight: 128
 
 generator:
   gdn_backend: flashqla
@@ -206,7 +206,6 @@ generator:
   run_engines_locally: true
   weight_sync_backend: nccl
   async_engine: true
-  batched: false
   enable_http_endpoint: true
   inference_stats_interval: 1
   append_eos_token_after_stop_str_in_multi_turn: true

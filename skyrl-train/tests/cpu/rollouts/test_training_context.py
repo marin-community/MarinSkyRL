@@ -7,10 +7,15 @@ import pytest
 
 from skyrl_train.dynamic_sampling import GroupSelectionPolicy
 from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
-from skyrl_train.rollouts.buffer import RolloutBufferConfig, RolloutContentPolicy, RolloutGroup, RolloutWriter
+from skyrl_train.rollouts.buffer import (
+    RolloutBufferConfig,
+    RolloutContentPolicy,
+    RolloutGroup,
+    RolloutTask,
+    RolloutWriter,
+)
 from skyrl_train.rollouts.context import RolloutRequestSpec, TrainingContext
 from skyrl_train.rollouts.loader import GroupLoader
-from skyrl_train.rollouts.workers import RolloutTask
 
 SAMPLES_PER_PROMPT = 2
 STALL_TIMEOUT = 10.0
@@ -19,7 +24,7 @@ CONTENT_POLICY = RolloutContentPolicy(
         GroupAdvantageInvariant.exact_physical(physical_group_size=SAMPLES_PER_PROMPT),
         rollout_logprobs_required=False,
     ),
-    GroupSelectionPolicy.for_fully_async(None),
+    GroupSelectionPolicy(None),
 )
 
 

@@ -5,6 +5,7 @@ Run with:
 uv run --isolated --group dev --extra cpu pytest tests/cpu/test_trajectory_batch_postprocess.py
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,7 +18,7 @@ from omegaconf import OmegaConf
 
 class DummyDataset:
     def __len__(self):
-        return 1
+        return 4
 
     def __getitem__(self, idx):
         return "dummy"
@@ -49,12 +50,9 @@ def create_config(batch_size):
     return default_config
 
 
-def test_response_level_rewards():
-    """Test postprocess_trajectory_batch with response-level rewards (List[float])."""
-
-    # Test length=1
-    config = create_config(1)
-    trainer = RayPPOTrainer(
+def make_trainer(config) -> RayPPOTrainer:
+    batch_size = config.trainer.train_batch_size
+    return RayPPOTrainer(
         cfg=config,
         tracker=None,
         tokenizer=None,
@@ -62,7 +60,15 @@ def test_response_level_rewards():
         eval_dataset=None,
         inference_engine_client=None,
         trajectory_runner=MagicMock(),
+        context=SimpleNamespace(config=SimpleNamespace(max_staleness_steps=0, batch_size=batch_size)),
     )
+
+
+def test_response_level_rewards():
+    """Test postprocess_trajectory_batch with response-level rewards (List[float])."""
+
+    # Test length=1
+    trainer = make_trainer(create_config(1))
 
     trajectory_batch: TrajectoryBatch = {
         "prompt_token_ids": [[1, 2]],
@@ -79,16 +85,7 @@ def test_response_level_rewards():
     assert result["rewards"] == [[0.0, 0.0, 1.0]]
 
     # Test length=2
-    config = create_config(2)
-    trainer = RayPPOTrainer(
-        cfg=config,
-        tracker=None,
-        tokenizer=None,
-        train_dataset=DummyDataset(),
-        eval_dataset=None,
-        inference_engine_client=None,
-        trajectory_runner=MagicMock(),
-    )
+    trainer = make_trainer(create_config(2))
 
     trajectory_batch: TrajectoryBatch = {
         "prompt_token_ids": [[1, 2], [3, 4]],
@@ -109,16 +106,7 @@ def test_token_level_rewards():
     """Test postprocess_trajectory_batch with token-level rewards (List[List[float]])."""
 
     # Test length=1
-    config = create_config(1)
-    trainer = RayPPOTrainer(
-        cfg=config,
-        tracker=None,
-        tokenizer=None,
-        train_dataset=DummyDataset(),
-        eval_dataset=None,
-        inference_engine_client=None,
-        trajectory_runner=MagicMock(),
-    )
+    trainer = make_trainer(create_config(1))
 
     per_token_rewards = [[0.1, 0.2, 0.3]]
     trajectory_batch: TrajectoryBatch = {
@@ -136,16 +124,7 @@ def test_token_level_rewards():
     assert result["rewards"] == per_token_rewards
 
     # Test length=2
-    config = create_config(2)
-    trainer = RayPPOTrainer(
-        cfg=config,
-        tracker=None,
-        tokenizer=None,
-        train_dataset=DummyDataset(),
-        eval_dataset=None,
-        inference_engine_client=None,
-        trajectory_runner=MagicMock(),
-    )
+    trainer = make_trainer(create_config(2))
 
     per_token_rewards = [[0.1, 0.3], [0.2, 0.1, 0.1]]
     trajectory_batch: TrajectoryBatch = {
@@ -166,15 +145,7 @@ def test_token_level_rewards():
 def test_pass_at_k_uses_unshaped_outcomes():
     config = create_config(4)
     config.generator.n_samples_per_prompt = 2
-    trainer = RayPPOTrainer(
-        cfg=config,
-        tracker=None,
-        tokenizer=None,
-        train_dataset=DummyDataset(),
-        eval_dataset=None,
-        inference_engine_client=None,
-        trajectory_runner=MagicMock(),
-    )
+    trainer = make_trainer(config)
     trajectory_batch: TrajectoryBatch = {
         "prompt_token_ids": [[1], [1], [2], [2]],
         "response_ids": [[3], [4], [5], [6]],

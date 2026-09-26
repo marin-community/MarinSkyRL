@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl_train.rollouts.buffer import RolloutGroup
+from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.trajectory_runners.base import TrajectoryID
 from skyrl_train.trajectory_selection import BestOfNTrajectorySelector
 
@@ -24,12 +24,13 @@ def _group(uid: str, policy_step: int, *, rewards: list[float] | None = None) ->
     return RolloutGroup(batch, uid, policy_step, {"uid": uid}, {})
 
 
-@pytest.mark.parametrize("sync_phase", ["initial", "training_step"])
+@pytest.mark.parametrize("reason", ["initial", "training_step"])
 @pytest.mark.parametrize("offload_enabled", [False, True])
-def test_async_weight_sync_respects_optimizer_offload_policy(sync_phase, offload_enabled):
-    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
+    trainer = object.__new__(RayPPOTrainer)
     trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(offload_optimizer_during_rollouts=offload_enabled))
     trainer.colocate_all = False
+    trainer.global_step = 0
     trainer.all_startup_timings = {}
     trainer.all_timings = {}
     events = []
@@ -53,30 +54,25 @@ def test_async_weight_sync_respects_optimizer_offload_policy(sync_phase, offload
     async def sync_weights():
         events.append("sync")
 
-    async def drain():
-        events.append("drain")
-
     trainer.policy_model = Policy()
     trainer.inference_engine_client = Engine()
-    trainer.async_sync_policy_weights_to_inference_engines = sync_weights
-    trainer._drain_policy_event_loops = drain
+    trainer.sync_policy_weights_to_inference_engines = sync_weights
 
-    asyncio.run(trainer._sync_policy_weights_and_offload_optimizer(sync_phase=sync_phase))
+    asyncio.run(trainer._sync_policy_for_rollouts(reason=reason))
 
     assert trainer.policy_model.optimizer_on_gpu != offload_enabled
-    assert events == (["pause"] if sync_phase == "training_step" else []) + (["offload"] if offload_enabled else []) + [
-        "sync",
-        "drain",
-    ] + (["resume"] if sync_phase == "training_step" else [])
+    paused = reason == "training_step"
+    assert events == (["pause"] if paused else []) + (["offload"] if offload_enabled else []) + ["sync"] + (
+        ["resume"] if paused else []
+    )
 
 
 def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatch):
-    trainer = object.__new__(FullyAsyncRayPPOTrainer)
-    trainer.context = SimpleNamespace(config=SimpleNamespace(max_staleness_steps=2))
+    trainer = object.__new__(RayPPOTrainer)
+    trainer.context = SimpleNamespace(config=SimpleNamespace(batch_size=2, max_staleness_steps=2))
     trainer.cfg = SimpleNamespace(
         trainer=SimpleNamespace(algorithm=SimpleNamespace(policy_loss_type="pg", tis_lcs_alert_threshold=0.0))
     )
-    trainer.mini_batch_size = 2
     trainer.global_step = 10
     trainer.all_metrics = {}
     trainer.all_timings = {}
@@ -121,7 +117,7 @@ def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatc
     ],
 )
 def test_rollout_stall_timeout_scales_with_recent_step_times(history, expected):
-    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer = object.__new__(RayPPOTrainer)
     trainer._step_time_history = collections.deque(history, maxlen=5)
     trainer.group_admission_stall_timeout = None
 
@@ -138,10 +134,10 @@ class _RecordingDistillationRuntime:
 
 
 def test_teacher_scores_only_the_rows_the_learner_selects():
-    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer = object.__new__(RayPPOTrainer)
     runtime = _RecordingDistillationRuntime()
-    trainer._async_distillation_runtime = runtime
-    trainer._async_distillation_tickets = {}
+    trainer._distillation_runtime = runtime
+    trainer._distillation_tickets = {}
     trainer.trajectory_selector = BestOfNTrajectorySelector(2)
 
     asyncio.run(trainer._submit_admitted_groups_for_teacher_scoring([_group("best", 10, rewards=[0.25, 0.75])]))
@@ -149,4 +145,4 @@ def test_teacher_scores_only_the_rows_the_learner_selects():
     (submitted,) = runtime.submitted
     assert submitted["response_ids"] == [[3]]
     assert submitted["trajectory_ids"][0].repetition_id == 1
-    assert set(trainer._async_distillation_tickets) == {"best"}
+    assert set(trainer._distillation_tickets) == {"best"}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Protocol
 from types import MappingProxyType
 from skyrl_train.metric_names import (
     TIS_ALIGNED_TOKENS_METRIC,
@@ -20,6 +21,7 @@ from skyrl_train.trajectory_runners.types import (
     TrajectoryRequestBatch as TrajectoryRequestBatch,
     TrainingPhase as TrainingPhase,
 )
+from skyrl_train.rollouts.buffer import RolloutGroup, RolloutTask, RolloutWriter
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import shape_trajectory_rewards
 from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink, retain_trajectories
 
@@ -45,6 +47,17 @@ def propagate_teacher_routes(input_batch: TrajectoryRequestBatch, output: Trajec
     if output_route_keys is not None and output_route_keys != route_keys:
         raise ValueError("trajectory runner output teacher_route_keys do not match request metadata")
     output["teacher_route_keys"] = route_keys
+
+
+class BatchRunner(Protocol):
+    async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch: ...
+
+
+async def run_rollout_task(runner: BatchRunner, task: RolloutTask, writer: RolloutWriter) -> None:
+    """Generate one leased prompt group and write it to the rollout buffer."""
+    output = await runner.run(task.request, disable_tqdm=True)
+    group = RolloutGroup(output, task.prompt["uid"], task.lease.policy_step, task.prompt, task.request)
+    await writer.write_rollout(task.lease, group)
 
 
 class TrajectoryRunner(ABC):
@@ -89,6 +102,9 @@ class TrajectoryRunner(ABC):
         if self.trajectory_sink is not None:
             await retain_trajectories(self.trajectory_sink, input_batch, output)
         return output
+
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None:
+        await run_rollout_task(self, task, writer)
 
     def set_trajectory_sink(self, sink: RetentionSink) -> None:
         """Attach the trainer-owned sink used by shared output finalization."""

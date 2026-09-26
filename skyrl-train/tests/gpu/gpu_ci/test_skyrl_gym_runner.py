@@ -64,7 +64,6 @@ MODEL_TO_GENERATION_PROMPT = {
 
 async def run_trajectory_runner_end_to_end(
     use_async_engine,
-    batched,
     n_samples_per_prompt,
     num_inference_engines,
     tensor_parallel_size,
@@ -116,7 +115,6 @@ async def run_trajectory_runner_end_to_end(
             },
             "append_eos_token_after_stop_str_in_multi_turn": True,  # for search
             "max_input_length": max_input_length,
-            "batched": batched,
             "max_turns": max_turns,
             "use_conversation_multi_turn": use_conversation_multi_turn,
             "apply_overlong_filtering": False,
@@ -226,32 +224,17 @@ async def run_trajectory_runner_end_to_end(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("use_async_engine", "batched", "n_samples_per_prompt", "num_inference_engines", "tensor_parallel_size"),
-    [
-        (False, True, 5, 2, 1),  # tests SkyRLGymTrajectoryRunner.collect_batched for single-turn
-        (True, False, 5, 1, 2),  # tests SkyRLGymTrajectoryRunner.agent_loop for single-turn
-        # Add more combinations as needed
-    ],
-    ids=[
-        "test_generator_single_turn_gsm8k_batched",
-        "test_generator_single_turn_gsm8k_async_engine",
-    ],
-)
-async def test_trajectory_runner_single_turn_gsm8k(
-    use_async_engine, batched, n_samples_per_prompt, num_inference_engines, tensor_parallel_size
-):
+async def test_trajectory_runner_single_turn_gsm8k():
     """
     Test the trajectory runner with a single turn of GSM8K
     """
     initialize_ray(get_test_actor_config())
     try:
         await run_trajectory_runner_end_to_end(
-            use_async_engine=use_async_engine,
-            batched=batched,
-            n_samples_per_prompt=n_samples_per_prompt,
-            num_inference_engines=num_inference_engines,
-            tensor_parallel_size=tensor_parallel_size,
+            use_async_engine=True,
+            n_samples_per_prompt=5,
+            num_inference_engines=1,
+            tensor_parallel_size=2,
         )
     finally:
         ray.shutdown()
@@ -266,7 +249,6 @@ async def test_trajectory_runner_multi_turn_search():
     try:
         await run_trajectory_runner_end_to_end(
             use_async_engine=True,
-            batched=False,
             n_samples_per_prompt=5,
             num_inference_engines=2,
             tensor_parallel_size=2,
@@ -298,7 +280,6 @@ async def test_trajectory_runner_formatting_use_conversation_multi_turn(model_na
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         trajectory_batch = await run_trajectory_runner_end_to_end(
             use_async_engine=True,
-            batched=False,
             n_samples_per_prompt=1,
             num_inference_engines=1,
             tensor_parallel_size=1,
@@ -374,7 +355,6 @@ async def test_trajectory_runner_formatting_no_use_conversation_multi_turn(model
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         trajectory_batch = await run_trajectory_runner_end_to_end(
             use_async_engine=True,
-            batched=False,
             n_samples_per_prompt=1,
             num_inference_engines=1,
             tensor_parallel_size=1,

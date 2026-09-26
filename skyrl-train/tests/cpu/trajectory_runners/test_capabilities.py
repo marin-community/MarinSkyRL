@@ -102,21 +102,14 @@ def test_harbor_behavior_logprobs_require_supported_pi_thinking_format(thinking_
 
 
 @pytest.mark.parametrize(
-    ("mode", "expected_runner"),
-    [
-        (TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM, "fully-async SkyRL Gym"),
-        (TrajectoryRunnerMode.MINI_SWE, "mini-swe"),
-    ],
-)
-@pytest.mark.parametrize(
     ("use_tis", "policy_loss_type"),
     [(True, "regular"), (False, "behavior_clip")],
 )
-def test_behavior_logprobs_reject_runners_without_exact_evidence(mode, expected_runner, use_tis, policy_loss_type):
+def test_behavior_logprobs_reject_runners_without_exact_evidence(use_tis, policy_loss_type):
     cfg = _skyrl_config(use_tis=use_tis, policy_loss_type=policy_loss_type)
 
-    with pytest.raises(ValueError, match=expected_runner):
-        validate_trajectory_runner_capabilities(cfg, mode)
+    with pytest.raises(ValueError, match="mini-swe"):
+        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.MINI_SWE)
 
 
 @pytest.mark.parametrize(
@@ -138,15 +131,14 @@ def test_behavior_logprobs_reject_multiturn_custom_template_retokenization():
         validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
 
 
-@pytest.mark.parametrize("mode", [TrajectoryRunnerMode.SKYRL_GYM, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM])
-def test_full_tito_accepts_exact_structured_chat_transport(mode):
+def test_full_tito_accepts_exact_structured_chat_transport():
     cfg = _skyrl_config(use_tis=True)
     cfg.trainer.algorithm.tito_full = True
     cfg.generator.chat_template.name_or_path = "qwen2_5_with_generation_tag_simplified"
     cfg.generator.sampling_params = {"logprobs": 0}
     cfg.generator.require_exact_chat_transport = True
 
-    validate_trajectory_runner_capabilities(cfg, mode)
+    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
 
 
 def test_exact_structured_chat_transport_requires_logprobs():
@@ -156,24 +148,13 @@ def test_exact_structured_chat_transport_requires_logprobs():
     cfg.generator.require_exact_chat_transport = True
 
     with pytest.raises(ValueError, match="generator.sampling_params.logprobs=an integer"):
-        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM)
-
-
-def test_exact_structured_chat_transport_requires_unbatched_runner():
-    cfg = _skyrl_config(use_tis=False)
-    cfg.generator.batched = True
-    cfg.generator.chat_template.name_or_path = "qwen2_5_with_generation_tag_simplified"
-    cfg.generator.sampling_params = {"logprobs": 0}
-    cfg.generator.require_exact_chat_transport = True
-
-    with pytest.raises(ValueError, match="generator.batched=false"):
         validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
 
 
-def test_distillation_accepts_reconstructed_fully_async_learner_tokens(local_distillation_config):
+def test_distillation_accepts_skyrl_gym_learner_tokens(local_distillation_config):
     cfg = local_distillation_config(_skyrl_config(use_tis=False))
 
-    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM)
+    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
 
 
 @pytest.mark.parametrize(("agent_name", "version"), [("terminus-2", None), ("opencode", "1.18.2"), ("pi", None)])
@@ -192,7 +173,7 @@ def test_distillation_rejects_harbor_without_exact_token_evidence(local_distilla
         validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
 
 
-def test_distillation_accepts_fully_async_harbor_with_exact_token_evidence(local_distillation_config):
+def test_distillation_accepts_separately_placed_harbor_with_exact_token_evidence(local_distillation_config):
     cfg = local_distillation_config(_harbor_config("terminus-2"))
     cfg.trainer.algorithm.use_tis = False
     cfg.trainer.placement.colocate_all = False

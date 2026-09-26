@@ -44,7 +44,6 @@ uv run --isolated --extra megatron --extra vllm --env-file .env.llm_judge -m exa
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
   generator.async_engine=true \
-  generator.batched=true \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \

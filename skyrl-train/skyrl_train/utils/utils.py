@@ -741,11 +741,6 @@ def validate_generator_cfg(cfg: DictConfig):
             "num_inference_engines should be equal to the number of remote_inference_engine_urls"
         )
 
-    if not cfg.generator.async_engine and cfg.generator.backend == "vllm":
-        assert cfg.generator.batched, (
-            "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
-        )
-
     # TODO(tgriggs): use a more modular config validation
     if cfg.trainer.logger == "wandb":
         assert os.environ.get("WANDB_API_KEY"), "`WANDB_API_KEY` is required for `wandb` logger"

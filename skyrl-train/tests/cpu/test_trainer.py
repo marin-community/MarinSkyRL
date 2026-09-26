@@ -5,7 +5,6 @@ uv  run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer.py
 import asyncio
 import threading
 from pathlib import Path
-import collections
 from types import SimpleNamespace
 
 import torch
@@ -17,8 +16,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 
 from skyrl_train.distributed.dispatch import MeshRank
-from skyrl_train.group_admission import GroupAdmissionStalledError, GroupAdvantageInvariant
+from skyrl_train.group_admission import GroupAdvantageInvariant
 import skyrl_train.trainer as trainer_module
+from skyrl_train.rollouts.context import TrainingContextState
+from skyrl_train.rollouts.loader import GroupLoaderState
 from skyrl_train.trainer import CheckpointSnapshot, RayPPOTrainer
 from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.utils.policy_losses import ppo_policy_loss
@@ -192,7 +193,7 @@ def test_online_speculator_capture_seals_target_snapshot_before_training_boundar
     trainer = _online_speculator_trainer(interval_steps=2)
     monkeypatch.setattr(trainer_module.io, "exists", lambda _uri: False)
 
-    asyncio.run(trainer._begin_speculator_capture())
+    asyncio.run(trainer._begin_speculator_capture(trainer.global_step))
     asyncio.run(trainer._seal_speculator_capture())
 
     assert trainer.inference_engine_client.begins == [
@@ -217,12 +218,12 @@ def test_online_speculator_capture_cadence_is_idempotent(monkeypatch):
     trainer = _online_speculator_trainer(interval_steps=3)
     monkeypatch.setattr(trainer_module.io, "exists", lambda _uri: False)
 
-    asyncio.run(trainer._begin_speculator_capture())
+    asyncio.run(trainer._begin_speculator_capture(trainer.global_step))
     assert trainer.inference_engine_client.begins == []
 
     trainer.global_step = 3
-    asyncio.run(trainer._begin_speculator_capture())
-    asyncio.run(trainer._begin_speculator_capture())
+    asyncio.run(trainer._begin_speculator_capture(trainer.global_step))
+    asyncio.run(trainer._begin_speculator_capture(trainer.global_step))
 
     assert len(trainer.inference_engine_client.begins) == 1
 
@@ -238,7 +239,7 @@ def test_online_speculator_update_overlaps_then_refreshes_at_boundary(monkeypatc
     )
 
     async def scenario():
-        await trainer._begin_speculator_capture()
+        await trainer._begin_speculator_capture(trainer.global_step)
         await trainer._seal_speculator_capture()
         await trainer._start_speculator_update()
         assert trainer._draft_trainer_update_ref is not None
@@ -317,7 +318,7 @@ def test_online_speculator_busy_draft_trainer_skips_capture(monkeypatch) -> None
     monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda _ref: (False, None))
     monkeypatch.setattr(trainer_module, "read_latest_draft_checkpoint", lambda _root, **_kwargs: None)
 
-    asyncio.run(trainer._begin_speculator_capture())
+    asyncio.run(trainer._begin_speculator_capture(trainer.global_step))
 
     assert trainer.inference_engine_client.begins == []
 
@@ -336,7 +337,7 @@ def test_online_speculator_capture_accepts_multiple_vllm_ranks(monkeypatch) -> N
 
     trainer.inference_engine_client.begin_online_eagle_capture = begin_cross_node
 
-    asyncio.run(trainer._begin_speculator_capture())
+    asyncio.run(trainer._begin_speculator_capture(trainer.global_step))
 
     assert trainer._speculator_capture_active is True
 
@@ -344,7 +345,7 @@ def test_online_speculator_capture_accepts_multiple_vllm_ranks(monkeypatch) -> N
 def test_online_speculator_partial_capture_is_still_handed_off(monkeypatch) -> None:
     trainer = _online_speculator_trainer()
     monkeypatch.setattr(trainer_module.io, "exists", lambda _uri: False)
-    asyncio.run(trainer._begin_speculator_capture())
+    asyncio.run(trainer._begin_speculator_capture(trainer.global_step))
 
     async def partial_seal(_destination):
         return [
@@ -436,62 +437,6 @@ def test_online_speculator_refresh_failure_is_retryable(monkeypatch) -> None:
     assert len(trainer.inference_engine_client.refreshes) == 2
 
 
-def test_sync_group_admission_uses_elapsed_time_instead_of_batch_count():
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.group_advantage_invariant = GroupAdvantageInvariant.exact_physical(physical_group_size=2)
-    trainer.group_admission_state = None
-    trainer._group_admission_watchdog = None
-    trainer._step_time_history = collections.deque(maxlen=5)
-    trainer.all_metrics = {}
-    trainer.global_step = 1
-    trainer.cfg = OmegaConf.create(
-        {
-            "trainer": {
-                "train_batch_size": 1,
-                "algorithm": {
-                    "policy_loss_type": "regular",
-                    "tis_lcs_alert_threshold": 0.005,
-                    "group_admission": {"stall_timeout": 10.0},
-                },
-            }
-        }
-    )
-    fully_masked = {
-        "prompt_token_ids": [[1], [1]],
-        "response_ids": [[2], [2]],
-        "rewards": [0.0, 0.0],
-        "loss_masks": [[0], [0]],
-        "stop_reasons": ["error", "error"],
-        "rollout_metrics": {},
-        "rollout_logprobs": None,
-        "exclude_from_baseline": [True, True],
-    }
-
-    with patch("skyrl_train.trainer.time.monotonic", side_effect=[100.0, 100.0, 109.0, 110.0]):
-        assert trainer.handle_group_admission(fully_masked, ["masked", "masked"]).keep_sampling
-        assert trainer.handle_group_admission(fully_masked, ["masked", "masked"]).keep_sampling
-        with pytest.raises(GroupAdmissionStalledError, match="no admission progress for 10s"):
-            trainer.handle_group_admission(fully_masked, ["masked", "masked"])
-
-
-def test_sync_group_refill_requests_only_missing_prompts_without_losing_order():
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.cfg = OmegaConf.create({"trainer": {"train_batch_size": 4}})
-    trainer.group_admission_state = {"num_prompts_in_batch": 3}
-    trainer._pending_sync_prompts = []
-
-    refill = trainer._select_sync_generation_prompts([{"uid": uid} for uid in ["d", "e", "f", "g"]])
-
-    assert [prompt["uid"] for prompt in refill] == ["d"]
-    assert [prompt["uid"] for prompt in trainer._pending_sync_prompts] == ["e", "f", "g"]
-
-    trainer.group_admission_state = None
-    next_batch = trainer._select_sync_generation_prompts([{"uid": uid} for uid in ["h", "i", "j", "k"]])
-
-    assert [prompt["uid"] for prompt in next_batch] == ["e", "f", "g", "h"]
-    assert [prompt["uid"] for prompt in trainer._pending_sync_prompts] == ["i", "j", "k"]
-
-
 _TEST_PROGRESS_CONFIG = {
     "mode": "tqdm",
     "min_interval_seconds": 0.5,
@@ -508,13 +453,17 @@ def dummy_config():
 
 class DummyDataset:
     def __len__(self):
-        return 1
+        return 2
 
     def __getitem__(self, idx):
         return "dummy"
 
     def collate_fn(self, batch):
         return batch
+
+
+def _stub_context(cfg) -> SimpleNamespace:
+    return SimpleNamespace(config=SimpleNamespace(max_staleness_steps=0, batch_size=cfg.trainer.train_batch_size))
 
 
 class _CapturingPolicyGroup:
@@ -580,10 +529,11 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
     trainer.colocate_all = True
     trainer.policy_model = _ResidencyPolicyGroup()
     trainer.inference_engine_client = _ResidencyInferenceClient()
-    trainer.sync_policy_weights_to_inference_engines = lambda: []
+    trainer.sync_policy_weights_to_inference_engines = AsyncMock()
     trainer.all_timings = {}
+    trainer.global_step = 3
     monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
-    trainer.train_dataloader = SimpleNamespace(state_dict=lambda: {})
+    trainer.context = SimpleNamespace(state_dict=AsyncMock(return_value={}))
     save_observations = []
 
     def snapshot_checkpoint(rollout_state):
@@ -1084,7 +1034,6 @@ def test_load_checkpoints_offloads_disaggregated_optimizer_before_policy_restore
     trainer.resume_mode = ResumeMode.FROM_PATH
     trainer.colocate_all = False
     trainer.all_startup_timings = {}
-    trainer.train_dataloader = MagicMock()
     trainer.policy_model = _CheckpointResidencyPolicyGroup()
     trainer.policy_model.model_on_gpu = True
     trainer.policy_model.optimizer_on_gpu = True
@@ -1100,41 +1049,15 @@ def test_load_checkpoints_offloads_disaggregated_optimizer_before_policy_restore
     assert "offload_policy_optimizer_before_checkpoint_load" in trainer.all_startup_timings
 
 
-class _CursorDataLoader:
-    def __init__(self):
-        self.cursor = 0
-
-    def load_state_dict(self, state):
-        self.cursor = state["cursor"]
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        value = f"row-{self.cursor}"
-        self.cursor += 1
-        return value
-
-
-@pytest.mark.parametrize(
-    ("restore_dataloader_state", "expected_row", "restore_pending_prompts"),
-    [(False, "row-0", False), (True, "row-7", True)],
-)
-def test_load_checkpoints_restores_refill_state_only_with_dataloader_cursor(
-    tmp_path,
-    dummy_config,
-    restore_dataloader_state,
-    expected_row,
-    restore_pending_prompts,
-):
+@pytest.mark.parametrize("restore_dataloader_state", [False, True])
+def test_load_checkpoints_restores_rollout_state_only_when_requested(tmp_path, dummy_config, restore_dataloader_state):
     checkpoint_path = tmp_path / "global_step_12"
     checkpoint_path.mkdir()
-    pending_prompts = [{"uid": "prompt-7"}, {"uid": "prompt-8"}]
-    torch.save(
-        {"global_step": 12, "pending_sync_prompts": pending_prompts},
-        checkpoint_path / "trainer_state.pt",
+    torch.save({"global_step": 12}, checkpoint_path / "trainer_state.pt")
+    rollout_state = TrainingContextState(
+        loader=GroupLoaderState(epoch=0, position=7, retries=[{"uid": "prompt-3"}]), ready=[]
     )
-    torch.save({"cursor": 7}, checkpoint_path / "data.pt")
+    torch.save(rollout_state, checkpoint_path / "data.pt")
 
     dummy_config.trainer.resume_path = str(checkpoint_path)
     dummy_config.trainer.restore_dataloader_state = restore_dataloader_state
@@ -1142,7 +1065,7 @@ def test_load_checkpoints_restores_refill_state_only_with_dataloader_cursor(
     trainer.cfg = dummy_config
     trainer.resume_mode = ResumeMode.FROM_PATH
     trainer.colocate_all = True
-    trainer.train_dataloader = _CursorDataLoader()
+    trainer._restored_rollout_state = None
     trainer.policy_model = MagicMock()
     trainer.policy_model.async_run_ray_method.return_value = []
     trainer.critic_model = None
@@ -1153,8 +1076,7 @@ def test_load_checkpoints_restores_refill_state_only_with_dataloader_cursor(
 
     assert global_step == 12
     assert loaded_path == str(checkpoint_path)
-    assert next(trainer.train_dataloader) == expected_row
-    assert trainer._pending_sync_prompts == (pending_prompts if restore_pending_prompts else [])
+    assert trainer._restored_rollout_state == (rollout_state if restore_dataloader_state else None)
 
 
 @pytest.mark.parametrize(
@@ -1181,7 +1103,6 @@ def test_load_checkpoints_can_start_a_new_stage_with_continued_model_training_st
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = dummy_config
     trainer.resume_mode = ResumeMode.FROM_PATH
-    trainer.train_dataloader = _CursorDataLoader()
     trainer.policy_model = MagicMock()
     trainer.policy_model.async_run_ray_method.return_value = []
     trainer.critic_model = None
@@ -1210,6 +1131,7 @@ def test_calculate_kl_create_experience_batched(dummy_config, dummy_trajectory_r
         eval_dataset=DummyDataset(),
         inference_engine_client=None,
         trajectory_runner=dummy_trajectory_runner,
+        context=_stub_context(dummy_config),
     )
     data = _get_test_data(trainer)
     # Assertions
@@ -1229,6 +1151,7 @@ def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config, dum
         eval_dataset=DummyDataset(),
         inference_engine_client=None,
         trajectory_runner=dummy_trajectory_runner,
+        context=_stub_context(dummy_config),
     )
     data = _get_test_data(trainer)
 

@@ -28,7 +28,7 @@ def _raw_config() -> dict[str, Any]:
         "runtime": {
             "launcher_commit": "a" * 40,
             "profile": "megatron",
-            "entrypoint": "skyrl_train.entrypoints.fully_async",
+            "entrypoint": "skyrl_train.entrypoints.gym_worker_pool",
         },
         "iris": {
             "cluster": "cw-us-east-08a",
@@ -71,7 +71,7 @@ def _raw_config() -> dict[str, Any]:
             "validation_data": [],
         },
         "skyrl": {
-            "entrypoint": "fully_async",
+            "entrypoint": "gym_worker_pool",
             "context_budget": {
                 "request_window_tokens": 1024,
                 "max_new_tokens_per_turn": 256,
@@ -140,14 +140,6 @@ def test_launch_config_rejects_allocation_smaller_than_role_plan() -> None:
     raw["iris"]["allocation"]["num_nodes"] = 0
 
     with pytest.raises(ValueError, match="num_nodes"):
-        validate_launch_config(compose_launch_config(raw))
-
-
-def test_fully_async_launch_requires_equal_training_batches() -> None:
-    raw = deepcopy(_raw_config())
-    raw["skyrl"]["trainer"]["policy_mini_batch_size"] = 4
-
-    with pytest.raises(ValueError, match="train_batch_size == trainer.policy_mini_batch_size"):
         validate_launch_config(compose_launch_config(raw))
 
 

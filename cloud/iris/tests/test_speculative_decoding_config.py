@@ -194,7 +194,7 @@ def test_speculator_rejects_nonreplayable_model_sources(tmp_path: Path, field: s
         (("generator", "backend", "sglang"), "requires generator.backend=vllm"),
         (("generator", "run_engines_locally", False), "requires generator.run_engines_locally=true"),
         (("trainer", "placement", {"colocate_all": True}), "requires trainer.placement.colocate_all=false"),
-        (("entrypoint", None, "fully_async"), "training is not supported"),
+        (("entrypoint", None, "gym_worker_pool"), "training is not supported"),
         (("entrypoint", None, "mini_swe"), "training is not supported"),
         (("entrypoint", None, "terminal_bench"), "training is not supported"),
     ],

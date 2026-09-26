@@ -11,7 +11,6 @@ from typing import Mapping, Protocol, Sequence
 
 class DynamicSamplingType(StrEnum):
     FILTER = "filter"
-    REPLACE = "replace"
 
 
 class DynamicSamplingRewardSource(StrEnum):
@@ -113,24 +112,10 @@ class GroupSelectionPolicy:
         self,
         sampling_type: DynamicSamplingType | None,
         *,
-        criteria: DynamicSamplingCriteria,
+        criteria: DynamicSamplingCriteria = DEFAULT_DYNAMIC_SAMPLING_CRITERIA,
     ) -> None:
         self.sampling_type = sampling_type
         self.criteria = criteria
-
-    @classmethod
-    def for_fully_async(
-        cls,
-        sampling_type: str | None,
-        *,
-        criteria: DynamicSamplingCriteria = DEFAULT_DYNAMIC_SAMPLING_CRITERIA,
-    ) -> GroupSelectionPolicy:
-        resolved_type = DynamicSamplingType(sampling_type) if sampling_type is not None else None
-        if resolved_type not in (None, DynamicSamplingType.FILTER):
-            raise ValueError(
-                f"fully asynchronous training supports dynamic_sampling.type=filter or null; got {sampling_type!r}"
-            )
-        return cls(resolved_type, criteria=criteria)
 
     def evaluate(self, group: GeneratedGroup) -> GroupSelectionResult:
         if self.sampling_type is None:

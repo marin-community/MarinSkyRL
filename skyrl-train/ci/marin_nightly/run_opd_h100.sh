@@ -154,7 +154,6 @@ START=$(date +%s)
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
   generator.async_engine=true \
-  generator.batched=true \
   environment.env_class=gsm8k \
   2>&1 | tee "$LOG"
 ELAPSED=$(( $(date +%s) - START ))

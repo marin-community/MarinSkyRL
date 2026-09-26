@@ -28,7 +28,6 @@ from skyrl_train.config.trajectory_runner_capabilities import (
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
 )
-from marinskyrl.inference_placement import validate_expert_block_trainer
 from marinskyrl.speculative_decoding import (
     STANDARD_TRAINING_ENTRYPOINT,
     parse_speculative_decoding_config,
@@ -255,6 +254,32 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
     )
 
 
+def build_gym_trajectory_runner(
+    cfg: DictConfig, tokenizer: PreTrainedTokenizerBase, inference_engine_client: InferenceEngineClient
+) -> TrajectoryRunner:
+    """Build the SkyRL-Gym runner, collecting step-wise trajectories when step-wise training is enabled."""
+    from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection  # noqa: PLC0415
+    from skyrl_train.trajectory_runners.skyrl_gym import (  # noqa: PLC0415
+        SkyRLGymTrajectoryRunner,
+        TrajectoryPipeline,
+    )
+    from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector  # noqa: PLC0415
+
+    pipeline = None
+    if cfg.trainer.step_wise_training:
+        pipeline = TrajectoryPipeline(
+            StepWiseRolloutCollector,
+            StepWiseTrajectoryProjection(cfg.generator, tokenizer),
+        )
+    return SkyRLGymTrajectoryRunner(
+        trajectory_runner_cfg=cfg.generator,
+        skyrl_gym_cfg=cfg.environment.skyrl_gym,
+        inference_engine_client=inference_engine_client,
+        tokenizer=tokenizer,
+        pipeline=pipeline,
+    )
+
+
 class BasePPOExp:
     def __init__(self, cfg: DictConfig):
         """
@@ -297,10 +322,6 @@ class BasePPOExp:
             inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
         logger.info("Inference engines ready: mode={} count={}", engine_mode, len(inference_engines))
         return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
-
-    def uses_fully_async_trainer(self) -> bool:
-        """Return whether this entrypoint schedules learner batches fully asynchronously."""
-        return False
 
     def _configure_log_level(self):
         """Configure loguru log level from trainer config."""
@@ -450,26 +471,7 @@ class BasePPOExp:
         Returns:
             TrajectoryRunner: The runner.
         """
-        from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection  # noqa: PLC0415
-        from skyrl_train.trajectory_runners.skyrl_gym import (  # noqa: PLC0415
-            SkyRLGymTrajectoryRunner,
-            TrajectoryPipeline,
-        )
-        from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector  # noqa: PLC0415
-
-        pipeline = None
-        if cfg.trainer.step_wise_training:
-            pipeline = TrajectoryPipeline(
-                StepWiseRolloutCollector,
-                StepWiseTrajectoryProjection(cfg.generator, tokenizer),
-            )
-        gym_runner = SkyRLGymTrajectoryRunner(
-            trajectory_runner_cfg=cfg.generator,
-            skyrl_gym_cfg=cfg.environment.skyrl_gym,
-            inference_engine_client=inference_engine_client,
-            tokenizer=tokenizer,
-            pipeline=pipeline,
-        )
+        gym_runner = build_gym_trajectory_runner(cfg, tokenizer, inference_engine_client)
         terminal_bench_data = list(cfg.data.get("terminal_bench_data", []))
         if not terminal_bench_data:
             return gym_runner
@@ -514,14 +516,16 @@ class BasePPOExp:
         trajectory_runner: TrajectoryRunner,
         colocate_pg,
     ):
-        """Initializes the trainer.
+        """Initializes the trainer, with the trajectory runner as its rollout workers.
 
         Returns:
             RayPPOTrainer: The trainer.
         """
+        from skyrl_train.rollouts.context import TrainingContext  # noqa: PLC0415
         from skyrl_train.trainer import RayPPOTrainer  # noqa: PLC0415
 
         return RayPPOTrainer(
+            context=TrainingContext.from_config(cfg, train_dataset, trajectory_runner),
             cfg=cfg,
             tracker=tracker,
             tokenizer=tokenizer,
@@ -563,7 +567,6 @@ class BasePPOExp:
         Returns:
             RayPPOTrainer: The trainer.
         """
-        validate_expert_block_trainer(self.cfg, uses_fully_async_trainer=self.uses_fully_async_trainer())
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
@@ -575,16 +578,8 @@ class BasePPOExp:
         tracker = self.get_tracker()
 
         tokenizer = self.tokenizer
-        from skyrl_train.teacher_runtime import (  # noqa: PLC0415
-            prepare_async_distillation_runtime,
-            prepare_distillation_runtime,
-            start_async_distillation_runtime,
-            start_sync_distillation_runtime,
-        )
+        from skyrl_train.teacher_runtime import prepare_distillation_runtime, start_distillation_runtime  # noqa: PLC0415
 
-        prepare_distillation_runtime = (
-            prepare_async_distillation_runtime if self.uses_fully_async_trainer() else prepare_distillation_runtime
-        )
         prepared_distillation = prepare_distillation_runtime(self.cfg, tokenizer)
         inference_engine_client = self.create_inference_engine_client()
 
@@ -612,15 +607,9 @@ class BasePPOExp:
                 self.cfg.trainer.strategy,
                 len(trainer.policy_model.actor_infos),
             )
-            start_distillation_runtime = (
-                start_async_distillation_runtime if self.uses_fully_async_trainer() else start_sync_distillation_runtime
-            )
             distillation_runtime = asyncio.run(start_distillation_runtime(self.cfg, prepared_distillation))
             if distillation_runtime is not None:
-                if self.uses_fully_async_trainer():
-                    trainer.configure_async_distillation(distillation_runtime)
-                else:
-                    trainer.configure_sync_distillation(distillation_runtime)
+                trainer.configure_distillation(distillation_runtime)
         except BaseException:
             asyncio.run(trainer.shutdown())
             raise

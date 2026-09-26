@@ -10,9 +10,6 @@ from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMo
 
 
 class TerminalBenchExp(BasePPOExp):
-    def uses_fully_async_trainer(self) -> bool:
-        return self.cfg.trainer.placement.colocate_all is False
-
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
         del inference_engine_client
         # Harbor is an optional agent-harness dependency and is absent from the CPU launcher environment.
@@ -62,38 +59,6 @@ class TerminalBenchExp(BasePPOExp):
             )
             return prompts_dataset
         return None
-
-    def get_trainer(
-        self,
-        cfg,
-        tracker,
-        tokenizer,
-        train_dataset,
-        eval_dataset,
-        inference_engine_client,
-        trajectory_runner,
-        colocate_pg,
-    ):
-        from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer  # noqa: PLC0415
-        from skyrl_train.rollouts.context import TrainingContext  # noqa: PLC0415
-        from skyrl_train.trainer import RayPPOTrainer  # noqa: PLC0415
-
-        trainer_args = {
-            "cfg": cfg,
-            "tracker": tracker,
-            "tokenizer": tokenizer,
-            "train_dataset": train_dataset,
-            "eval_dataset": eval_dataset,
-            "inference_engine_client": inference_engine_client,
-            "trajectory_runner": trajectory_runner,
-            "colocate_pg": colocate_pg,
-        }
-        if not self.uses_fully_async_trainer():
-            return RayPPOTrainer(**trainer_args)
-        # The Harbor dispatcher's coordinators are the rollout workers.
-        return FullyAsyncRayPPOTrainer(
-            context=TrainingContext.from_config(cfg, train_dataset, trajectory_runner), **trainer_args
-        )
 
 
 @ray.remote(num_cpus=1, max_retries=0)

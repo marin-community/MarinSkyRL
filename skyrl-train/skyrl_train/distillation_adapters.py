@@ -1,11 +1,11 @@
-"""Trainer-regime adapters for scheduling teacher scoring."""
+"""Build teacher-scoring work and schedule it on bounded per-teacher queues."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, TypeVar, cast
+from typing import Any, cast
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -31,10 +31,6 @@ from skyrl_train.teacher_routing import RoutedTrajectoryBatch, TeacherRoute
 from skyrl_train.trajectory_runners.types import TrajectoryBatch
 
 
-_ForwardResult = TypeVar("_ForwardResult")
-_ScoreResult = TypeVar("_ScoreResult")
-
-
 async def _gather_or_cancel(tasks: list[asyncio.Future[Any]]) -> list[Any]:
     """Gather tasks, cancelling and draining every sibling if one fails."""
     try:
@@ -44,19 +40,6 @@ async def _gather_or_cancel(tasks: list[asyncio.Future[Any]]) -> list[Any]:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
-
-
-async def _score_while_model_forwarding(
-    scoring: Awaitable[_ScoreResult],
-    model_forward: Callable[[], _ForwardResult],
-) -> tuple[_ForwardResult, _ScoreResult]:
-    results = await _gather_or_cancel(
-        [
-            asyncio.create_task(asyncio.to_thread(model_forward)),
-            asyncio.ensure_future(scoring),
-        ]
-    )
-    return results[0], results[1]
 
 
 @dataclass(frozen=True)
@@ -358,7 +341,7 @@ def build_routed_teacher_scoring_work(
 
 
 class TeacherEvidenceCoordinator:
-    """Share scoring and objective preparation across trainer regimes."""
+    """Score teacher work and prepare the matching learner objective input."""
 
     def __init__(self, oracle_owner: TeacherOracleCollection) -> None:
         self._oracle_owner = oracle_owner
@@ -390,14 +373,6 @@ class TeacherEvidenceCoordinator:
             raise TypeError(f"unsupported teacher evidence type: {type(evidence).__name__}")
         return ScoredDistillationBatch(evidence=evidence, distillation=distillation)
 
-    async def score_routed(self, work: RoutedTeacherScoringWork) -> RoutedScoredDistillationBatch:
-        """Fan out logical teachers and restore evidence to original row coordinates."""
-        scored_partitions = await _gather_or_cancel(
-            [asyncio.create_task(self.score(partition.work)) for partition in work.partitions]
-        )
-
-        return self.assemble_routed(work, tuple(scored_partitions))
-
     @staticmethod
     def assemble_routed(
         work: RoutedTeacherScoringWork,
@@ -427,39 +402,9 @@ class TeacherEvidenceCoordinator:
         await self._oracle_owner.close()
 
 
-class RayPPOTrainerDistillationAdapter:
-    """Overlap synchronous trainer model forwards with teacher scoring."""
-
-    def __init__(self, coordinator: TeacherEvidenceCoordinator) -> None:
-        self._coordinator = coordinator
-
-    @classmethod
-    def from_oracles(cls, oracles: TeacherOracleCollection) -> RayPPOTrainerDistillationAdapter:
-        return cls(TeacherEvidenceCoordinator(oracles))
-
-    async def score_while_model_forwarding(
-        self,
-        work: TeacherScoringWork,
-        model_forward: Callable[[], _ForwardResult],
-    ) -> tuple[_ForwardResult, ScoredDistillationBatch]:
-        """Run the blocking trainer forward and remote teacher score concurrently."""
-        return await _score_while_model_forwarding(self._coordinator.score(work), model_forward)
-
-    async def score_routed_while_model_forwarding(
-        self,
-        work: RoutedTeacherScoringWork,
-        model_forward: Callable[[], _ForwardResult],
-    ) -> tuple[_ForwardResult, RoutedScoredDistillationBatch]:
-        """Fan out a mixed-domain batch while the synchronous model forward runs."""
-        return await _score_while_model_forwarding(self._coordinator.score_routed(work), model_forward)
-
-    async def close(self) -> None:
-        await self._coordinator.close()
-
-
 @dataclass(frozen=True)
 class AsyncTeacherScoreTicket:
-    """A submitted score whose result gates fully-async batch assembly."""
+    """A submitted score whose result gates learner batch assembly."""
 
     _result: asyncio.Future[ScoredDistillationBatch]
 
@@ -505,8 +450,8 @@ class AsyncTeacherQueueLimits:
             raise ValueError("teacher queue and worker limits must be positive")
 
 
-class FullyAsyncRayPPOTrainerDistillationAdapter:
-    """Bound teacher work per logical teacher before rollout batch assembly."""
+class AdmittedGroupDistillationAdapter:
+    """Bound teacher work per logical teacher between rollout admission and learner batch assembly."""
 
     def __init__(
         self,
@@ -515,7 +460,7 @@ class FullyAsyncRayPPOTrainerDistillationAdapter:
         teacher_limits: Mapping[str, AsyncTeacherQueueLimits],
     ) -> None:
         if not teacher_limits:
-            raise ValueError("fully-async distillation requires at least one teacher queue")
+            raise ValueError("distillation requires at least one teacher queue")
         self._coordinator = coordinator
         self._queues = {
             teacher_id: asyncio.Queue[_QueuedTeacherScore](maxsize=limits.max_queued)
@@ -529,7 +474,7 @@ class FullyAsyncRayPPOTrainerDistillationAdapter:
 
     async def start(self) -> None:
         if self._closed:
-            raise RuntimeError("fully-async distillation adapter is closed")
+            raise RuntimeError("distillation adapter is closed")
         if self._workers:
             return
         self._accepting = True
@@ -548,7 +493,7 @@ class FullyAsyncRayPPOTrainerDistillationAdapter:
             raise ValueError(f"no scoring queue configured for teacher {work.request.teacher_id!r}") from error
         async with submission_lock:
             if not self._accepting:
-                raise RuntimeError("fully-async distillation adapter is not accepting work")
+                raise RuntimeError("distillation adapter is not accepting work")
             result = asyncio.get_running_loop().create_future()
             await queue.put(_QueuedTeacherScore(work=work, result=result))
         return AsyncTeacherScoreTicket(result)
@@ -594,7 +539,7 @@ class FullyAsyncRayPPOTrainerDistillationAdapter:
         self._workers.clear()
         await self._coordinator.close()
 
-    async def __aenter__(self) -> FullyAsyncRayPPOTrainerDistillationAdapter:
+    async def __aenter__(self) -> AdmittedGroupDistillationAdapter:
         await self.start()
         return self
 

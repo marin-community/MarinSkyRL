@@ -105,7 +105,6 @@ def hydra_arguments(
         "generator.run_engines_locally=true",
         "generator.weight_sync_backend=nccl",
         "generator.async_engine=true",
-        "generator.batched=true",
         "environment.env_class=prompt_only",
         f"environment.skyrl_gym.aime.evaluation_token_budget={training.response_limit}",
         "environment.skyrl_gym.aime.strict_box_verify=true",

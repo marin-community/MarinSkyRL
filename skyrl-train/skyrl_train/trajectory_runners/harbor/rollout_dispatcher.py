@@ -23,17 +23,13 @@ from skyrl_train.trajectory_runners.base import (
 )
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec, ProcessPoolResources
 from skyrl_train.trajectory_runners.trajectory_processing import combine_trajectory_batches_in_request_order
-from skyrl_train.rollouts.buffer import RolloutWriter
-from skyrl_train.rollouts.workers import RolloutTask, run_rollout_task
-from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink, retain_trajectories
+from skyrl_train.rollouts.buffer import RolloutTask, RolloutWriter
+from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink
 from skyrl_train.tokenizer import create_tokenizer
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.utils.fd_monitor import start_fd_monitor
 from skyrl_train.worker_setup import configure_worker_process
 
-# A literal because the harbor package does not import off Linux and this runs in the driver.
-# Nothing catches a rename of the class: fan-out would fail at startup on `bind_runner`.
-RETAINED_RUNNER_NAME = "HarborTrajectoryRunner"
 DEFAULT_CONCURRENT_TRIALS = 16
 
 
@@ -126,9 +122,9 @@ class RolloutCoordinator:
     """One rollout-orchestration worker process (own event loop, own Harbor).
 
     Holds its own ``HarborTrajectoryRunner`` scoped to ``n_concurrent_trials // K``
-    and ``connection_pool_maxsize // K``. Training tasks retain their groups and
-    write them straight to the rollout buffer. Evaluation shards return their
-    trajectories to the evaluator.
+    and ``connection_pool_maxsize // K``. The runner retains every group it
+    generates. Training tasks write theirs straight to the rollout buffer;
+    evaluation shards return theirs to the evaluator.
 
     NOTE: the actor is created with ``num_cpus`` set at ``.options(...)`` time by
     the dispatcher (so the PlacementGroup bundle sizing is explicit and visible
@@ -154,7 +150,6 @@ class RolloutCoordinator:
         self._shard_idx = shard_idx
         self._num_coordinators = num_coordinators
         self._executor_workers = executor_workers
-        self._trajectory_sink = trajectory_sink
 
         scaled_tb_cfg = _scale_terminal_bench_cfg(spec.terminal_bench_config, num_coordinators)
         spec = spec.with_terminal_bench_config(scaled_tb_cfg)
@@ -169,6 +164,8 @@ class RolloutCoordinator:
         )
 
         self._runner = spec.build(tokenizer)
+        if trajectory_sink is not None:
+            self._runner.set_trajectory_sink(trajectory_sink)
 
         _log().info(
             f"[RolloutCoordinator {shard_idx}/{num_coordinators}] constructed "
@@ -208,7 +205,7 @@ class RolloutCoordinator:
         return await self._runner.run(sub_batch)
 
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None:
-        await run_rollout_task(self._runner, task, writer, self._trajectory_sink)
+        await self._runner.run_task(task, writer)
 
     # ---- Eval session passthrough (single-coordinator delegation) ----
     async def start_eval_session(
@@ -256,7 +253,7 @@ class RolloutDispatcher:
         self._coordinator_rpc_timeout = resources.rpc_timeout_seconds
         self._eval_concurrent_trials = _configured_concurrent_trials(spec.terminal_bench_config)
 
-        # The trainer-owned sink. ``run`` retains finished batches here; coordinators retain their training tasks.
+        # The trainer-owned sink, which each coordinator's runner retains its groups to.
         self._trajectory_sink: Optional[RetentionSink] = None
 
         self._actors: List = []
@@ -347,12 +344,12 @@ class RolloutDispatcher:
         _log().info(f"[RolloutDispatcher] {self._num_coordinators} coordinators started")
 
     def set_trajectory_sink(self, sink: RetentionSink) -> None:
-        """Attach the trainer-owned sink used to retain each returned batch.
+        """Attach the trainer-owned sink, which each coordinator's Harbor runner binds and retains its groups to.
 
-        Binds it to the Harbor runner rather than to this proxy. ``runner_name`` is
-        recorded on each retained trajectory, so process placement must not change provenance.
+        Coordinators receive the sink when they start, so a different sink cannot be attached afterwards.
         """
-        sink.bind_runner(RETAINED_RUNNER_NAME)
+        if self._actors and sink is not self._trajectory_sink:
+            raise RuntimeError("attach the trajectory sink before the rollout coordinators start")
         self._trajectory_sink = sink
 
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
@@ -386,9 +383,6 @@ class RolloutDispatcher:
         )
 
         propagate_teacher_routes(input_batch, result)
-        # Outside the deadline: a slow sink write is not an unresponsive coordinator.
-        if self._trajectory_sink is not None:
-            await retain_trajectories(self._trajectory_sink, input_batch, result)
         return result
 
     async def _run_group(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:

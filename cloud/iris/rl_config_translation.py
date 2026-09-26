@@ -35,8 +35,8 @@ RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
 class RLEntrypoint(StrEnum):
     """Execution modes supported by Iris RL configurations."""
 
-    FULLY_ASYNC = "fully_async"
     GENERATE = "generate"
+    GYM_WORKER_POOL = "gym_worker_pool"
     MINI_SWE = "mini_swe"
     STANDARD = "standard"
     TERMINAL_BENCH = "terminal_bench"
@@ -45,8 +45,8 @@ class RLEntrypoint(StrEnum):
 
 RL_ENTRYPOINTS = MappingProxyType(
     {
-        RLEntrypoint.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async",
         RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
+        RLEntrypoint.GYM_WORKER_POOL: "skyrl_train.entrypoints.gym_worker_pool",
         RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
         RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
         RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",

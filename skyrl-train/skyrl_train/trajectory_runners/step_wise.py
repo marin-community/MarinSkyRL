@@ -65,8 +65,6 @@ class StepWiseRolloutCollector:
         return getattr(self._runner, name)
 
     def validate(self) -> None:
-        if self._runner.batched:
-            raise ValueError("step-wise collection does not support batched generation")
         if self._runner.custom_chat_template is not None:
             raise ValueError("step-wise collection does not support a custom chat template")
         if not self._runner.use_conversation_multi_turn:

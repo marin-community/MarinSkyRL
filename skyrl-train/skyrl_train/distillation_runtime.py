@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import replace
-from typing import TypeVar
+from collections.abc import Sequence
 
 from marinskyrl.distillation import DistillationPlan
 from skyrl_train.distillation_adapters import (
+    AdmittedGroupDistillationAdapter,
     AsyncRoutedTeacherScoreTicket,
     AsyncTeacherQueueLimits,
-    FullyAsyncRayPPOTrainerDistillationAdapter,
-    RayPPOTrainerDistillationAdapter,
     RoutedScoredDistillationBatch,
     RoutedTeacherScoringWork,
     TeacherEvidenceCoordinator,
@@ -23,9 +20,6 @@ from skyrl_train.teacher_routing import PlanTeacherRouter, route_trajectory_batc
 from skyrl_train.domain_gradient_balance import DomainGradientBalancer
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.types import TrajectoryBatch
-
-
-_ForwardResult = TypeVar("_ForwardResult", bound=TrainingInputBatch)
 
 
 class _RoutedDistillationPlanner:
@@ -55,44 +49,12 @@ class _RoutedDistillationPlanner:
         )
 
 
-class SyncDistillationRuntime:
-    """Feed the synchronous trainer without coupling it to an oracle backend."""
+class DistillationRuntime:
+    """Score admitted rollout groups before learner batch assembly.
 
-    def __init__(
-        self,
-        plan: DistillationPlan,
-        oracles: TeacherOracleCollection,
-        *,
-        tokenizer_fingerprints: dict[str, str],
-    ) -> None:
-        self._planner = _RoutedDistillationPlanner(plan, tokenizer_fingerprints=tokenizer_fingerprints)
-        self._adapter = RayPPOTrainerDistillationAdapter.from_oracles(oracles)
-        self.domain_balancer = (
-            DomainGradientBalancer(plan.domain_gradient_balance) if plan.domain_gradient_balance is not None else None
-        )
-        self.domain_balance_metrics: dict[str, float] = {}
-
-    async def score_while_model_forwarding(
-        self,
-        trajectory_batch: TrajectoryBatch,
-        model_forward: Callable[[], _ForwardResult],
-    ) -> tuple[_ForwardResult, RoutedScoredDistillationBatch]:
-        work = self._planner.build_work(trajectory_batch)
-        forwarded, scored = await self._adapter.score_routed_while_model_forwarding(work, model_forward)
-        self.domain_balance_metrics = {}
-        if self.domain_balancer is not None:
-            balanced, self.domain_balance_metrics = self.domain_balancer.apply(
-                scored.distillation, tuple(route.route_id for route in scored.routes)
-            )
-            scored = replace(scored, distillation=balanced)
-        return forwarded, scored
-
-    async def close(self) -> None:
-        await self._adapter.close()
-
-
-class AsyncDistillationRuntime:
-    """Score admitted rollout groups ahead of fully-async learner batch assembly."""
+    Each group is submitted when the rollout buffer admits it, so teacher scoring overlaps generation. The
+    trainer attaches the scored groups, in learner row order, once it assembles the training input.
+    """
 
     def __init__(
         self,
@@ -103,7 +65,7 @@ class AsyncDistillationRuntime:
         teacher_limits: dict[str, AsyncTeacherQueueLimits],
     ) -> None:
         self._planner = _RoutedDistillationPlanner(plan, tokenizer_fingerprints=tokenizer_fingerprints)
-        self._adapter = FullyAsyncRayPPOTrainerDistillationAdapter(
+        self._adapter = AdmittedGroupDistillationAdapter(
             coordinator=TeacherEvidenceCoordinator(oracles),
             teacher_limits=teacher_limits,
         )
@@ -129,7 +91,7 @@ class AsyncDistillationRuntime:
     ) -> dict[str, float]:
         """Attach scored groups and return per-domain balance metrics, if enabled."""
         if not scored_groups:
-            raise ValueError("fully-async distillation requires at least one scored group")
+            raise ValueError("distillation requires at least one scored group")
         response_shape = training_input["response_mask"].shape
         row_count = sum(len(scored.trajectory_ids) for scored in scored_groups)
         if "pad_size" not in training_input.metadata:

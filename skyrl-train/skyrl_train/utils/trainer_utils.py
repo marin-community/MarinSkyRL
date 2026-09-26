@@ -1,6 +1,4 @@
-from copy import deepcopy
-from typing import List, Dict, Any, Union, Callable, Optional, TypedDict
-from dataclasses import dataclass
+from typing import List, Dict, Any, Union, Callable, Optional
 from omegaconf import OmegaConf, DictConfig
 from enum import Enum
 import ray
@@ -10,31 +8,17 @@ import os
 from loguru import logger
 import json
 import torch
-import numpy as np
-from collections import defaultdict
 from torch.utils.data import Dataset, Subset
-from skyrl_train.dynamic_sampling import (
-    DynamicSamplingCriteria,
-    DynamicSamplingType,
-    group_is_informative_for_dynamic_sampling,
-)
-from skyrl_train.batch_sampling import accumulate_selected_groups
 from skyrl_train.trajectory_runners.trajectory_processing import (
     get_metrics_from_trajectory_batch,
 )
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
-from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
-    REWARD_SHAPING_ROW_KEYS,
-    refresh_trajectory_reward_shaping_metrics,
-)
 from transformers import AutoTokenizer
 from skyrl_train.io import io
 from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.checkpoint_listing import extract_step_from_path, list_checkpoint_dirs
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
-from skyrl_train.curriculum import CurriculumConfig, CurriculumSampler, SamplingKind
 from skyrl_train.dataset import PromptDataset
-from skyrl_train.domain_sampling import DomainWeightedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 BasicType = Union[int, float, str, bool, type(None)]
@@ -268,243 +252,6 @@ def dump_per_dataset_eval_results(
     logger.info(f"Dumped aggregated eval metrics to {aggregated_filename}")
 
 
-class DynamicSamplingState(TypedDict, total=False):
-    """Schema for dynamic sampling state dictionary.
-
-    Fields:
-        sample_batch_count: Counter for the number of sample batches processed
-        collected_trajectory_batch: Accumulated trajectory batch (filter strategy only)
-        collected_uids: Accumulated UIDs (filter strategy only)
-        num_prompts_in_batch: Number of prompts collected so far (filter strategy only)
-    """
-
-    sample_batch_count: int
-    collected_trajectory_batch: Optional[TrajectoryBatch]
-    collected_uids: Optional[List[str]]
-    num_prompts_in_batch: Optional[int]
-
-
-@dataclass(frozen=True)
-class DynamicSamplingResult:
-    trajectory_batch: TrajectoryBatch
-    uids: List[str]
-    keep_sampling: bool
-    state: Optional[DynamicSamplingState]
-
-
-def handle_dynamic_sampling(
-    trajectory_batch: TrajectoryBatch,
-    uids: List[str],
-    sampling_config: Dict[str, Any],
-    collected_state: Optional[DynamicSamplingState] = None,
-) -> DynamicSamplingResult:
-    """
-    Handle dynamic sampling with different strategies (filter, replace).
-
-    filter (used in DAPO) - filter out groups with std == 0 and group size > 1 and resample until we have enough prompts
-    replace (used in POLARIS, WebSailor) - replace bad (std == 0) samples with good (std > 0) samples
-
-    Args:
-        trajectory_batch: Current trajectory batch
-        uids: Current batch UIDs
-        sampling_config: Configuration dict with sampling parameters
-        collected_state: State for accumulating data across batches (for filter strategy)
-
-    Returns:
-        The processed batch, UIDs, continuation decision, and updated state.
-    """
-    sampling_type_value = sampling_config.get("type", None)
-
-    if sampling_type_value is None:
-        return DynamicSamplingResult(trajectory_batch, uids, False, None)
-
-    try:
-        sampling_type = DynamicSamplingType(sampling_type_value)
-    except ValueError:
-        raise ValueError(f"Invalid dynamic sampling type: {sampling_type_value}") from None
-
-    if sampling_type is DynamicSamplingType.REPLACE:
-        return handle_replace_sampling(trajectory_batch, uids, sampling_config)
-    if sampling_type is DynamicSamplingType.FILTER:
-        return handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state)
-    raise AssertionError(f"unhandled dynamic sampling type: {sampling_type}")
-
-
-def handle_replace_sampling(
-    trajectory_batch: TrajectoryBatch, uids: List[str], sampling_config: Dict[str, Any]
-) -> DynamicSamplingResult:
-    """
-    Handle replace sampling strategy based on POLARIS implementation
-
-    Reference: https://github.com/ChenxinAn-fdu/POLARIS/blob/8c82adb16b8e45c1a34f6d0e23e35deb66dd1ae7/verl/verl/trainer/ppo/ray_trainer.py#L995-L1022.
-
-    Args:
-        trajectory_batch: Current trajectory batch
-        uids: Current batch UIDs
-        sampling_config: Configuration dict with sampling parameters
-    Returns:
-        The processed batch, UIDs, and continuation decision.
-    """
-    n_samples_per_prompt = sampling_config["n_samples_per_prompt"]
-    min_replace_ratio = sampling_config["min_replace_ratio"]
-
-    # Extract rewards and convert to sequence-level if needed
-    rewards_list = trajectory_batch["rewards"]
-    if rewards_list and isinstance(rewards_list[0], list):
-        # Token-level rewards: sum to get sequence rewards
-        rewards = np.array([sum(r) for r in rewards_list])
-    else:
-        rewards = np.array(rewards_list)
-
-    # get mapping of uids to list of indices and metrics
-    uid2indices = defaultdict(list)
-    uid2metric_vals = defaultdict(list)
-    for idx, uid in enumerate(uids):
-        uid2indices[uid].append(idx)
-        uid2metric_vals[uid].append(rewards[idx])
-
-    # Group by UID and calculate metrics
-    uid2metric_std = {}
-    for uid, metric_vals in uid2metric_vals.items():
-        uid2metric_std[uid] = np.std(metric_vals)
-
-    # Determine good UIDs: those with std > 0 (or group size == 1)
-    good_uids = set([uid for uid, std in uid2metric_std.items() if std > 0 or n_samples_per_prompt == 1])
-    bad_uids = set([uid for uid, std in uid2metric_std.items() if std == 0 and n_samples_per_prompt > 1])
-
-    logger.info(f"Replace sampling: {len(good_uids)} good UIDs out of {len(uid2metric_vals)} total prompts")
-
-    # Check if we have enough good UIDs (more than min_replace_ratio of the batch)
-    if len(good_uids) > len(uid2metric_vals) * min_replace_ratio:
-        logger.info("============= Dynamic sampling replace ===========")
-        logger.info(f"Number of good prompts: {len(good_uids)}")
-        logger.info(f"Number of bad prompts: {len(bad_uids)}")
-
-        # Get good uids to replace the bad uids (length of bad uids)
-        replacement_uids = get_bad_sample_replacements(good_uids, bad_uids)  # uids to replace the bad uids
-        # get replacement indices
-        replacement_indices = []
-        for uid in replacement_uids:
-            replacement_indices.extend(uid2indices[uid])
-        # get bad indices
-        bad_indices = []
-        for uid in bad_uids:
-            bad_indices.extend(uid2indices[uid])
-
-        # Replace bad samples with good ones (modify in place because replacement_idx and bad_idx should not overlap)
-        for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
-            trajectory_batch["prompt_token_ids"][bad_idx] = trajectory_batch["prompt_token_ids"][replacement_idx].copy()
-            trajectory_batch["response_ids"][bad_idx] = trajectory_batch["response_ids"][replacement_idx].copy()
-            replacement_reward = trajectory_batch["rewards"][replacement_idx]
-            trajectory_batch["rewards"][bad_idx] = (
-                replacement_reward.copy() if isinstance(replacement_reward, list) else replacement_reward
-            )
-            for key in ("unshaped_rewards", "unshaped_reward_available"):
-                if trajectory_batch.get(key) is not None:
-                    trajectory_batch[key][bad_idx] = trajectory_batch[key][replacement_idx]
-            trajectory_batch["loss_masks"][bad_idx] = trajectory_batch["loss_masks"][replacement_idx].copy()
-            if trajectory_batch["stop_reasons"]:
-                trajectory_batch["stop_reasons"][bad_idx] = trajectory_batch["stop_reasons"][replacement_idx]
-
-            if trajectory_batch["rollout_logprobs"]:
-                trajectory_batch["rollout_logprobs"][bad_idx] = trajectory_batch["rollout_logprobs"][replacement_idx]
-            for key in REWARD_SHAPING_ROW_KEYS:
-                if trajectory_batch.get(key) is not None:
-                    trajectory_batch[key][bad_idx] = deepcopy(trajectory_batch[key][replacement_idx])
-
-        # Update UIDs accordingly
-        replaced_uids = uids.copy()
-        for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
-            replaced_uids[bad_idx] = uids[replacement_idx]
-
-        logger.info(f"After replacement - Replaced {len(bad_indices) // n_samples_per_prompt} bad prompts")
-        logger.info("==================================================")
-        refresh_trajectory_reward_shaping_metrics(trajectory_batch)
-
-        return DynamicSamplingResult(trajectory_batch, replaced_uids, False, None)
-    else:
-        logger.warning("===================== Warning (Dynamic sampling replace) ====================")
-        logger.warning("In this mini-batch, most training samples receive low variance rewards.")
-        logger.warning("If you continue to see this warning, please check your data difficulty distribution.")
-        logger.warning("==================================================")
-
-        return DynamicSamplingResult(trajectory_batch, uids, True, None)
-
-
-def handle_filter_sampling(
-    trajectory_batch: TrajectoryBatch,
-    uids: List[str],
-    sampling_config: Dict[str, Any],
-    collected_state: Optional[DynamicSamplingState],
-) -> DynamicSamplingResult:
-    """
-    Handle filter-based sampling strategy (like DAPO).
-
-    Args:
-        trajectory_batch: Current trajectory batch
-        uids: Current batch UIDs
-        sampling_config: Configuration dict with sampling parameters
-        collected_state: State for accumulating data across batches
-
-    Returns:
-        The processed batch, UIDs, continuation decision, and updated state.
-    """
-    target_batch_size = sampling_config["train_batch_size"]
-
-    uid2indices = defaultdict(list)
-    for row_index, uid in enumerate(uids):
-        uid2indices[uid].append(row_index)
-    criteria = sampling_config["criteria"]
-    if not isinstance(criteria, DynamicSamplingCriteria):
-        raise ValueError("dynamic sampling filter requires resolved DynamicSamplingCriteria")
-    kept_uids = [
-        uid
-        for uid, row_indices in uid2indices.items()
-        if group_is_informative_for_dynamic_sampling(
-            trajectory_batch,
-            row_indices,
-            criteria=criteria,
-        )
-    ]
-    accumulated = accumulate_selected_groups(
-        trajectory_batch,
-        uids,
-        kept_uids,
-        target_group_count=target_batch_size,
-        sample_batch_count=collected_state["sample_batch_count"],
-        tis_lcs_alert_threshold=float(sampling_config.get("tis_lcs_alert_threshold", 0.005)),
-        require_rollout_logprobs=False,
-        state=collected_state,
-    )
-
-    # Check if we have enough prompts
-    if accumulated.keep_sampling:
-        logger.info("============= Dynamic sampling filter =============")
-        logger.info(f"Dynamic sampling: {collected_state['num_prompts_in_batch']} < {target_batch_size} prompts")
-        logger.info(f"Resample batch {collected_state['sample_batch_count']}, continue sampling...")
-        logger.info("==================================================")
-        return DynamicSamplingResult(trajectory_batch, uids, True, collected_state)
-
-    logger.info("============= Dynamic sampling filter =============")
-    logger.info(f"Dynamic sampling: collected {collected_state['num_prompts_in_batch']} >= {target_batch_size} prompts")
-    logger.info("==================================================")
-    return DynamicSamplingResult(accumulated.trajectory_batch, accumulated.uids, False, None)
-
-
-def get_bad_sample_replacements(good_uids: List[str], bad_uids: List[str]) -> List[str]:
-    num_replacements = len(bad_uids)
-    num_candidates = len(good_uids)
-
-    if num_candidates >= num_replacements:
-        perm = np.random.permutation(num_candidates)
-        chosen_replacement_uids = np.array(list(good_uids))[perm[:num_replacements]]
-    else:
-        indices = np.random.randint(low=0, high=num_candidates, size=(num_replacements,))
-        chosen_replacement_uids = np.array(list(good_uids))[indices]
-
-    return chosen_replacement_uids
-
-
 def _evaluation_dataset(dataset: PromptDataset, num_prompts: int | None, seed: int) -> Dataset:
     if num_prompts is None:
         return dataset
@@ -518,71 +265,18 @@ def _evaluation_dataset(dataset: PromptDataset, num_prompts: int | None, seed: i
     return Subset(dataset, indices)
 
 
-def build_dataloader(
-    cfg: DictConfig, dataset: PromptDataset, is_train=True, is_fully_async=False
-) -> StatefulDataLoader:
-    """
-    Build the dataloader for the training or evaluation dataset.
-
-    Args:
-        cfg: Config object
-        dataset: Dataset object
-        is_train: Whether to build the dataloader for training or evaluation
-        is_fully_async: If is_train, whether to build the dataloader for fully async training, which
-            mainly makes the batch size 1.
-    """
-    # prepare dataloader
-    batch_size = cfg.trainer.train_batch_size if is_train else cfg.trainer.eval_batch_size
-
-    # Seed the dataloader for reproducibility.
-    seeded_generator = torch.Generator()
-    seeded_generator.manual_seed(cfg.trainer.seed)
-
-    loader_dataset = (
-        dataset if is_train else _evaluation_dataset(dataset, cfg.trainer.eval_num_prompts, cfg.trainer.seed)
-    )
-
-    sampler = None
-    if is_train and cfg.data.sampling.kind is not None:
-        if is_fully_async:
-            raise ValueError("data.sampling.kind is not supported with fully async training")
-        if cfg.trainer.step_wise_training:
-            raise ValueError("data.sampling.kind requires per-prompt uids; step_wise_training is not supported")
-        sampling_seed = cfg.data.sampling.seed if cfg.data.sampling.seed is not None else cfg.trainer.seed
-        if cfg.data.sampling.kind == SamplingKind.DOMAIN_WEIGHTED:
-            sampler = DomainWeightedSampler(
-                dataset.dataframe,
-                weights=cfg.data.sampling.domain_weights,
-                seed=sampling_seed,
-                batch_size=batch_size,
-            )
-        else:
-            sampler = CurriculumSampler(
-                dataset,
-                CurriculumConfig.from_dict_config(cfg.data.sampling, group_size=cfg.generator.n_samples_per_prompt),
-                sampling_seed,
-                batch_size=batch_size,
-            )
-
+def build_eval_dataloader(cfg: DictConfig, dataset: PromptDataset) -> StatefulDataLoader:
+    """Build the evaluation dataloader over ``trainer.eval_num_prompts`` seeded prompts, or the whole dataset."""
     dataloader = StatefulDataLoader(
-        loader_dataset,
-        batch_size=batch_size if not is_fully_async else 1,
-        shuffle=is_train and cfg.data.shuffle and sampler is None,
-        sampler=sampler,
+        _evaluation_dataset(dataset, cfg.trainer.eval_num_prompts, cfg.trainer.seed),
+        batch_size=cfg.trainer.eval_batch_size,
+        shuffle=False,
         collate_fn=dataset.collate_fn,
         # Items are in-memory row lookups; worker processes would cost more to start than they save.
         num_workers=0,
-        drop_last=True if is_train else False,
-        generator=seeded_generator,
+        drop_last=False,
     )
-    if is_train:
-        if not is_fully_async:
-            logger.info(f"Total steps: {len(dataloader) * cfg.trainer.epochs}")
-        else:
-            logger.info(f"Total steps: {len(dataloader) // cfg.trainer.train_batch_size * cfg.trainer.epochs}")
-    else:
-        logger.info(f"Validation set size: {len(dataloader)}")
-
+    logger.info(f"Validation set size: {len(dataloader)}")
     return dataloader
 
 

@@ -215,7 +215,6 @@ trainer:
     dynamic_sampling:
       type: null
       max_sample_batches: 30
-      min_replace_ratio: 0.3
       informative_on: shaped
       min_reward_std: 0.0
 
@@ -254,17 +253,20 @@ trainer:
       entropy_window: 10
       min_lr_scale: 0.1
 
-  fully_async:
-    max_staleness_steps: 4
+  # Rollout workers generate prompt groups under leases from the rollout buffer; each step trains on
+  # train_batch_size groups. At 0 staleness every group comes from the current policy (synchronous training).
+  rollout_buffer:
+    # How many steps the generating policy may lag the step that trains on its group. colocate_all requires 0.
+    max_staleness_steps: 0
+    # Cap on prompt groups generating at once; null bounds generation only by staleness.
+    max_in_flight: null
 
-    num_parallel_generation_workers: 768
-
-    # Bound teacher-scoring work independently for each logical teacher. Queue
-    # backpressure is applied when a rollout group is admitted, before learner
-    # batch assembly.
-    teacher_scoring:
-      max_queued_per_teacher: 8
-      workers_per_teacher: 1
+  # Bound teacher-scoring work independently for each logical teacher. Queue
+  # backpressure is applied when a rollout group is admitted, before learner
+  # batch assembly.
+  teacher_scoring:
+    max_queued_per_teacher: 8
+    workers_per_teacher: 1
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
@@ -277,8 +279,6 @@ trainer:
   distillation_token_budget: null
   reset_distillation_token_count_on_resume: false
   reset_global_step_on_resume: false
-  rollout_buffer:
-    backend: memory
   ckpt_path: "${oc.env:HOME}/ckpts/"
   max_ckpts_to_keep: -1
   ckpt_interval: 5
@@ -347,9 +347,9 @@ generator:
   weight_sync_backend: "nccl"
   # How weights reach the engines. "broadcast": trainer rank 0 sends every tensor to every engine.
   # "expert_block": each MoE expert matrix is broadcast from a Megatron rank that holds it to the vLLM
-  # workers that serve it. Needs FullyAsyncRayPPOTrainer, a Grug MoE on the megatron strategy at TP=1
-  # and ETP=1, local vLLM engines at TP=1 with EP=DP>1, the NCCL weight-sync backend and vLLM's TRITON
-  # MoE backend.
+  # workers that serve it. Needs engines that are not colocated with training, a Grug MoE on the megatron
+  # strategy at TP=1 and ETP=1, local vLLM engines at TP=1 with EP=DP>1, the NCCL weight-sync backend and
+  # vLLM's TRITON MoE backend.
   weight_sync_transport: "broadcast"
   expert_block_sync:
     timeout_seconds: 600  # For creating the sync groups and for the broadcasts of each sync.
@@ -375,7 +375,6 @@ generator:
   inference_engine_mp_backend: false
   n_samples_per_prompt: 5
   async_engine: true
-  batched: false
   max_input_length: ${trainer.max_prompt_length}
   vllm_v1_disable_multiproc: true
   enable_prefix_caching: true

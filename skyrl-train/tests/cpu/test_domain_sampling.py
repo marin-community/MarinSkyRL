@@ -1,11 +1,9 @@
 from collections import Counter
 
 import datasets
-from omegaconf import OmegaConf
 import pytest
 
 from skyrl_train.domain_sampling import DomainWeightedSampler, weighted_quotas
-from skyrl_train.utils.trainer_utils import build_dataloader
 
 
 def test_domain_weighted_sampler_emits_exact_quota_per_batch_and_resumes():
@@ -42,39 +40,3 @@ def test_domain_weighted_sampler_rejects_empty_or_underfilled_route_pools():
 
     with pytest.raises(ValueError, match="if"):
         DomainWeightedSampler(dataset, weights={"math": 2, "code": 2, "if": 1}, seed=7, batch_size=11)
-
-
-def test_training_dataloader_uses_exact_domain_weights():
-    class RouteDataset:
-        dataframe = datasets.Dataset.from_dict({"teacher_route": ["math"] * 8 + ["code"] * 8 + ["if"] * 8})
-
-        def __len__(self):
-            return len(self.dataframe)
-
-        def __getitem__(self, index):
-            return self.dataframe[index]
-
-        def collate_fn(self, rows):
-            return rows
-
-    config = OmegaConf.create(
-        {
-            "data": {
-                "sampling": {"kind": "domain-weighted", "seed": 7, "domain_weights": {"math": 2, "code": 2, "if": 1}},
-                "shuffle": True,
-            },
-            "trainer": {"train_batch_size": 6, "seed": 7, "step_wise_training": False, "epochs": 1},
-            "generator": {"enable_http_endpoint": False},
-        }
-    )
-
-    dataloader = build_dataloader(config, RouteDataset(), is_train=True)
-    iterator = iter(dataloader)
-    batch = next(iterator)
-    checkpoint = dataloader.state_dict()
-    expected_next = next(iterator)
-    resumed = build_dataloader(config, RouteDataset(), is_train=True)
-    resumed.load_state_dict(checkpoint)
-
-    assert Counter(row["teacher_route"] for row in batch) == {"math": 3, "code": 2, "if": 1}
-    assert next(iter(resumed)) == expected_next

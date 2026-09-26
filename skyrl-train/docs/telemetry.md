@@ -2,7 +2,7 @@
 
 Install `skyrl-train[telemetry]` to export driver and trainer lifecycle, policy
 steps, generated rollouts, samples and tokens, exclusive rollout or inference
-wait and train-step durations, and fully async rollout-buffer occupancy through
+wait and train-step durations, and rollout-buffer occupancy through
 `rigging.telemetry`. The same extra lets each Iris controller forward a bounded
 allowlist of its local Ray scheduler, logical CPU/GPU, placement-group and object
 store snapshots. A rollout is one completed trajectory; a sample is one generated
