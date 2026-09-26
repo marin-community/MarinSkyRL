@@ -5,7 +5,6 @@ from typing import TypedDict
 
 from skyrl_train.batch_sampling import accumulate_selected_groups
 from skyrl_train.group_admission import (
-    AdmissionAction,
     AdmissionRejection,
     GroupAdmissionPolicy,
     GroupAdvantageInvariant,
@@ -46,12 +45,8 @@ def admit_or_collect_replacements(
     state: GroupAdmissionSamplingState,
 ) -> GroupAdmissionSamplingResult:
     """Drop retryable groups and collect a complete replacement batch."""
-    policy = GroupAdmissionPolicy(
-        invariant,
-        max_staleness_steps=0,
-        rollout_logprobs_required=rollout_logprobs_required,
-    )
-    admissions = policy.evaluate_batch(trajectory_batch, uids, global_step=0)
+    policy = GroupAdmissionPolicy(invariant, rollout_logprobs_required=rollout_logprobs_required)
+    admissions = policy.evaluate_batch(trajectory_batch, uids)
     rejection_counts = {rejection: 0 for rejection in AdmissionRejection}
     selected_uids = []
     for admission in admissions:
@@ -60,7 +55,7 @@ def admit_or_collect_replacements(
             continue
         assert admission.decision.primary_rejection is not None
         rejection_counts[admission.decision.primary_rejection] += 1
-        if admission.decision.action is AdmissionAction.FAIL:
+        if admission.decision.fatal:
             raise TrainingGroupInvariantError(
                 uid=admission.uid,
                 decision=admission.decision,

@@ -10,7 +10,7 @@ from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryRequestBatch
-from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink
+from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink
 
 
 class HarborRunner(Protocol):
@@ -22,7 +22,7 @@ class HarborRunner(Protocol):
 
     async def shutdown(self) -> None: ...
 
-    def set_trajectory_sink(self, sink: TrajectorySink) -> None: ...
+    def set_trajectory_sink(self, sink: RetentionSink) -> None: ...
 
     async def start_eval_session(
         self,

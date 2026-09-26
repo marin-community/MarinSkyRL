@@ -23,9 +23,9 @@ from skyrl_train.trajectory_runners.base import (
 )
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec, ProcessPoolResources
 from skyrl_train.trajectory_runners.trajectory_processing import combine_trajectory_batches_in_request_order
-from skyrl_train.rollout_buffer import Rollout, RolloutRequest, RolloutWriter
-from skyrl_train.rollout_worker import LocalRolloutWorker
-from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
+from skyrl_train.rollouts.buffer import RolloutWriter
+from skyrl_train.rollouts.workers import RolloutTask, run_rollout_task
+from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink, retain_trajectories
 from skyrl_train.tokenizer import create_tokenizer
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.utils.fd_monitor import start_fd_monitor
@@ -126,9 +126,9 @@ class RolloutCoordinator:
     """One rollout-orchestration worker process (own event loop, own Harbor).
 
     Holds its own ``HarborTrajectoryRunner`` scoped to ``n_concurrent_trials // K``
-    and ``connection_pool_maxsize // K``. Training shards commit their own
-    output to the rollout buffer and return receipts over Ray. Evaluation
-    shards still return their trajectories to the evaluator.
+    and ``connection_pool_maxsize // K``. Training tasks retain their groups and
+    write them straight to the rollout buffer. Evaluation shards return their
+    trajectories to the evaluator.
 
     NOTE: the actor is created with ``num_cpus`` set at ``.options(...)`` time by
     the dispatcher (so the PlacementGroup bundle sizing is explicit and visible
@@ -141,6 +141,7 @@ class RolloutCoordinator:
         shard_idx: int,
         num_coordinators: int,
         executor_workers: int,
+        trajectory_sink: RetentionSink | None,
     ):
         configure_worker_process()
         # Each actor process gets its own FD monitor (per-process daemon thread),
@@ -153,6 +154,7 @@ class RolloutCoordinator:
         self._shard_idx = shard_idx
         self._num_coordinators = num_coordinators
         self._executor_workers = executor_workers
+        self._trajectory_sink = trajectory_sink
 
         scaled_tb_cfg = _scale_terminal_bench_cfg(spec.terminal_bench_config, num_coordinators)
         spec = spec.with_terminal_bench_config(scaled_tb_cfg)
@@ -201,30 +203,12 @@ class RolloutCoordinator:
         await self._runner.shutdown()
         _log().info(f"[RolloutCoordinator {self._shard_idx}] shutdown complete")
 
-    async def run_shard(self, sub_batch: TrajectoryRequestBatch, global_step: Optional[int]) -> TrajectoryBatch:
-        """Run one group's generation locally and return the TrajectoryBatch.
-
-        ``global_step`` is the dispatcher's current step at submission time. We
-        pin the runner's ``global_step_fn`` to return it for the duration of
-        the call so the in-actor staleness/step-time bookkeeping
-        (``_record_step_time``/``actual_global_step``) behaves exactly as it
-        would single-process. The dispatcher remains the authority on staleness
-        accounting; this only affects the ``actual_global_step`` hint the actor
-        returns in the TrajectoryBatch.
-        """
-        if global_step is not None:
-            self._runner.global_step_fn = lambda: global_step
-
+    async def run_shard(self, sub_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
+        """Run one group's generation locally and return the TrajectoryBatch."""
         return await self._runner.run(sub_batch)
 
-    async def produce(
-        self,
-        request: RolloutRequest,
-        writer: RolloutWriter,
-    ):
-        self._runner.global_step_fn = lambda: request.model_step
-        receipts = await LocalRolloutWorker(self._runner, writer).produce(request)
-        return receipts[0]
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None:
+        await run_rollout_task(self._runner, task, writer, self._trajectory_sink)
 
     # ---- Eval session passthrough (single-coordinator delegation) ----
     async def start_eval_session(
@@ -254,9 +238,9 @@ class RolloutDispatcher:
     the request order after concurrent execution. It owns no trainer staleness state.
 
     Lifecycle mirrors ``TrajectoryRunner``: ``startup`` / ``run`` /
-    ``shutdown`` (+ optional eval-session passthrough). ``global_step_fn`` is set
-    by the trainer; we forward its current value into each ``run_shard`` so the
-    actor's staleness hint is accurate.
+    ``shutdown`` (+ optional eval-session passthrough). The coordinators are also
+    the training loop's rollout workers: ``run_task`` sends one task to a
+    coordinator, which writes the group to the rollout buffer.
     """
 
     def __init__(
@@ -272,12 +256,8 @@ class RolloutDispatcher:
         self._coordinator_rpc_timeout = resources.rpc_timeout_seconds
         self._eval_concurrent_trials = _configured_concurrent_trials(spec.terminal_bench_config)
 
-        # Trainer sets this; default returns None until then.
-        self.global_step_fn = None
-
-        # The coordinators' runners never receive it: the sink is trainer-owned, lives in this
-        # process, and run() gets the finished batch back here.
-        self._trajectory_sink: Optional[TrajectorySink] = None
+        # The trainer-owned sink. ``run`` retains finished batches here; coordinators retain their training tasks.
+        self._trajectory_sink: Optional[RetentionSink] = None
 
         self._actors: List = []
         # Ray async actors admit every group RPC concurrently. Harbor then applies
@@ -298,14 +278,6 @@ class RolloutDispatcher:
             f"cpus_per_coordinator={self._cpus_per_coordinator}, "
             f"coordinator_rpc_timeout={self._coordinator_rpc_timeout:g}s"
         )
-
-    def _current_global_step(self) -> Optional[int]:
-        if self.global_step_fn is None:
-            return None
-        try:
-            return self.global_step_fn()
-        except Exception:
-            return None
 
     async def startup(self) -> None:
         """Create the K coordinators (pinned to the proxy's node) and start each runner.
@@ -360,6 +332,7 @@ class RolloutDispatcher:
                 shard_idx=shard_idx,
                 num_coordinators=self._num_coordinators,
                 executor_workers=self._executor_workers,
+                trajectory_sink=self._trajectory_sink,
             )
             # Await THIS coordinator's startup/readiness to completion before
             # constructing the next one, so its heavy GPFS import + tokenizer
@@ -373,7 +346,7 @@ class RolloutDispatcher:
 
         _log().info(f"[RolloutDispatcher] {self._num_coordinators} coordinators started")
 
-    def set_trajectory_sink(self, sink: TrajectorySink) -> None:
+    def set_trajectory_sink(self, sink: RetentionSink) -> None:
         """Attach the trainer-owned sink used to retain each returned batch.
 
         Binds it to the Harbor runner rather than to this proxy. ``runner_name`` is
@@ -419,8 +392,10 @@ class RolloutDispatcher:
         return result
 
     async def _run_group(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
-        step = self._current_global_step()
-        return await self._dispatch_group(input_batch, lambda actor: actor.run_shard.remote(input_batch, step))
+        return await self._dispatch_group(input_batch, lambda actor: actor.run_shard.remote(input_batch))
+
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None:
+        await self._dispatch_group(task.request, lambda actor: actor.run_task.remote(task, writer))
 
     async def _dispatch_group(self, input_batch: TrajectoryRequestBatch, submit_rpc: Callable[[Any], Any]):
         metadata = input_batch.get("batch_metadata")
@@ -560,42 +535,3 @@ class RolloutDispatcher:
             async with self._routing_condition:
                 self._eval_session_active = False
                 self._routing_condition.notify_all()
-
-
-class HarborRolloutWorker:
-    """Dispatch training groups to Harbor worker processes that own their writes."""
-
-    def __init__(self, dispatcher: RolloutDispatcher, writer: RolloutWriter):
-        self.dispatcher = dispatcher
-        self.writer = writer
-
-    async def produce(self, request: RolloutRequest, disable_tqdm: bool = False):
-        input_batch = request.trajectory_request
-        trajectory_ids = input_batch.get("trajectory_ids")
-        if not trajectory_ids or len(trajectory_ids) != len(input_batch["prompts"]):
-            raise ValueError("buffered Harbor execution requires one trajectory ID per request row")
-        if len(request.uids) != len(trajectory_ids):
-            raise ValueError("buffered Harbor execution requires one UID per request row")
-
-        groups: dict[str, list[int]] = defaultdict(list)
-        for index, trajectory_id in enumerate(trajectory_ids):
-            groups[trajectory_id.instance_id].append(index)
-        prompt_by_uid = {prompt["uid"]: prompt for prompt in request.source_prompts}
-        jobs = []
-        for indices in groups.values():
-            sub_batch = self.dispatcher._select_request_rows(input_batch, indices)
-            group_uids = [request.uids[index] for index in indices]
-            group_prompts = [prompt_by_uid[uid] for uid in dict.fromkeys(group_uids)]
-            shard_request = RolloutRequest(sub_batch, group_prompts, group_uids, request.model_step, request.kind)
-            jobs.append(
-                self.dispatcher._dispatch_group(
-                    sub_batch, lambda actor, task=shard_request: actor.produce.remote(task, self.writer)
-                )
-            )
-        return await asyncio.gather(*jobs)
-
-    async def retain(self, rollout: Rollout) -> None:
-        if self.dispatcher._trajectory_sink is not None:
-            if rollout.request_batch is None:
-                raise ValueError("buffered Harbor rollout omitted its request batch")
-            await retain_trajectories(self.dispatcher._trajectory_sink, rollout.request_batch, rollout.trajectory_batch)

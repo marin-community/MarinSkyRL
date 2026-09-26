@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
@@ -63,15 +63,14 @@ class SynchronousCurriculum:
             "train",
             step,
         )
-        return RolloutRequest(trajectory_request, prompts, uids, step, "batch")
+        return RolloutRequest(trajectory_request, prompts, uids, step)
 
 
 class SynchronousRolloutBuffer:
     """Release one curriculum assignment per completed and consumed training batch."""
 
-    def __init__(self, storage: RolloutBuffer, retain: Callable[[Rollout], Awaitable[None]]):
+    def __init__(self, storage: RolloutBuffer):
         self.storage = storage
-        self.retain = retain
         self._capacity = asyncio.Event()
         self._ready = asyncio.Event()
         self._request: RolloutRequest | None = None
@@ -115,8 +114,6 @@ class SynchronousRolloutBuffer:
         rollouts = await self.storage.next_batch(self._count)
         if len(rollouts) != self._count:
             raise RuntimeError(f"buffer returned {len(rollouts)} of {self._count} completed rollouts")
-        for rollout in rollouts:
-            await self.retain(rollout)
         return SynchronousRolloutBatch(self._request, rollouts)
 
     def acknowledge(self) -> None:

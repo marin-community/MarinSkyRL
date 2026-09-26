@@ -58,7 +58,6 @@ def tiny_training_config(root: Path, mode: TrainingMode, *, max_steps: int, num_
             "policy": {"model": {"path": str(model_dir)}, "optimizer_config": {"lr": 1.0e-3}},
             "algorithm": {"use_kl_loss": False},
             "fully_async": {"max_staleness_steps": MAX_STALENESS_STEPS, "num_parallel_generation_workers": 8},
-            "rollout_buffer": {"backend": "memory"},
             "train_batch_size": 4,
             "policy_mini_batch_size": 4,
             "micro_train_batch_size_per_gpu": 8,
@@ -82,6 +81,7 @@ def tiny_training_config(root: Path, mode: TrainingMode, *, max_steps: int, num_
             # Each retention storage operation spawns a process that re-imports the entrypoint.
             "trajectory_retention": {"enabled": False},
         },
+        "trajectory_runner": {"process_pool": {"num_coordinators": 2, "cpus_per_coordinator": 1}},
     }
     if mode is TrainingMode.ASYNC:
         overrides["generator"]["chat_template"] = {"source": "name", "name_or_path": ASYNC_CHAT_TEMPLATE}

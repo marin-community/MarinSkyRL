@@ -21,7 +21,7 @@ def _config():
     )
 
 
-def _step(response_ids, reward, *, captured_global_step=None, token_provenance="engine"):
+def _step(response_ids, reward, *, token_provenance="engine"):
     outcome = float(sum(reward) if isinstance(reward, list) else reward)
     return AgentLoopOutput(
         evidence=RolloutEvidence(
@@ -39,7 +39,6 @@ def _step(response_ids, reward, *, captured_global_step=None, token_provenance="
         disposition=TrainingDisposition.train(),
         loss_mask=[1] * len(response_ids),
         env_metrics={"score": outcome},
-        captured_global_step=captured_global_step,
         token_provenance=token_provenance,
     )
 
@@ -47,7 +46,7 @@ def _step(response_ids, reward, *, captured_global_step=None, token_provenance="
 def test_whole_trajectory_projection_preserves_one_sample_per_trajectory():
     projection = WholeTrajectoryProjection(_config(), _Tokenizer())
     output = projection.project(
-        [_step([3, 4], [0.0, 1.0], captured_global_step=7)],
+        [_step([3, 4], [0.0, 1.0])],
         {"env_classes": None, "sampling_params": {"logprobs": True}},
     )
 
@@ -55,7 +54,6 @@ def test_whole_trajectory_projection_preserves_one_sample_per_trajectory():
     assert output["rewards"] == [[0.0, 1.0]]
     assert output["loss_masks"] == [[1, 1]]
     assert output["rollout_logprobs"] == [[-0.1, -0.1]]
-    assert output["actual_global_step"] == 7
     assert output["rollout_metrics"]["generate/token_provenance/reconstructed_fraction"] == 0.0
     assert "trajectory_ids" not in output
 
@@ -102,7 +100,7 @@ def test_step_wise_projection_preserves_group_identity_and_final_step():
     output = projection.project(
         [
             [
-                _step([3], [1.0], captured_global_step=5),
+                _step([3], [1.0]),
                 _step([4, 5], [0.0, 2.0], token_provenance="reconstructed"),
             ]
         ],
@@ -122,7 +120,6 @@ def test_step_wise_projection_preserves_group_identity_and_final_step():
         ("task", 2, 1),
     ]
     assert output["is_last_step"] == [False, True]
-    assert output["actual_global_step"] == 5
     assert output["rollout_metrics"]["generate/token_provenance/reconstructed_fraction"] == 0.5
 
 

@@ -21,7 +21,7 @@ from skyrl_train.trajectory_runners.types import (
     TrainingPhase as TrainingPhase,
 )
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import shape_trajectory_rewards
-from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
+from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink, retain_trajectories
 
 
 def propagate_teacher_routes(input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> None:
@@ -61,7 +61,7 @@ class TrajectoryRunner(ABC):
     """
 
     trajectory_runner_cfg = MappingProxyType({})
-    trajectory_sink: TrajectorySink | None = None
+    trajectory_sink: RetentionSink | None = None
 
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """Acquire trajectories and apply runner-independent output finalization.
@@ -90,7 +90,7 @@ class TrajectoryRunner(ABC):
             await retain_trajectories(self.trajectory_sink, input_batch, output)
         return output
 
-    def set_trajectory_sink(self, sink: TrajectorySink) -> None:
+    def set_trajectory_sink(self, sink: RetentionSink) -> None:
         """Attach the trainer-owned sink used by shared output finalization."""
         sink.bind_runner(type(self).__name__)
         self.trajectory_sink = sink

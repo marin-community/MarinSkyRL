@@ -8,7 +8,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
+from typing import Generic, Protocol, TypeVar, cast, runtime_checkable
 
 import pyarrow as pa
 import torch
@@ -67,13 +67,12 @@ class SynchronousRollout:
 
 @dataclass(frozen=True)
 class RolloutRequest:
-    """One producer assignment and the record shape expected by its reader."""
+    """One synchronous producer assignment."""
 
     trajectory_request: TrajectoryRequestBatch
     source_prompts: list[dict]
     uids: list[str]
     model_step: int
-    kind: Literal["group", "batch"]
 
 
 class RolloutDataLoader(Protocol):
@@ -160,8 +159,6 @@ class RolloutBuffer(Protocol[RolloutT]):
 
     def writer(self) -> RolloutWriter[RolloutT]: ...
 
-    def remote_writer(self) -> RolloutWriter[RolloutT]: ...
-
     def publish(self, receipt: RolloutReceipt) -> None: ...
 
     def request_slot(self) -> RolloutSlot[RolloutT]: ...
@@ -207,9 +204,6 @@ class MemoryRolloutBuffer(Generic[RolloutT]):
 
     def writer(self) -> RolloutWriter[RolloutT]:
         return _MemoryWriter(self)
-
-    def remote_writer(self) -> RolloutWriter[RolloutT]:
-        raise ValueError("memory rollout buffer cannot be written from a remote producer")
 
     def publish(self, receipt: RolloutReceipt) -> None:
         if self.full():
@@ -327,9 +321,6 @@ class FineStoreRolloutBuffer(Generic[RolloutT]):
 
     def writer(self) -> RolloutWriter[RolloutT]:
         return _FineStoreWriter(self.path)
-
-    def remote_writer(self) -> RolloutWriter[RolloutT]:
-        return self.writer()
 
     def publish(self, receipt: RolloutReceipt) -> None:
         if receipt.store_path != self.path:

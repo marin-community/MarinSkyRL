@@ -128,13 +128,8 @@ class AdmissionRejection(StrEnum):
     DUPLICATE_UID = "duplicate_uid"
 
 
-class AdmissionAction(StrEnum):
-    """Shared caller action for an admission decision."""
-
-    ACCEPT = "accept"
-    RETRY_PROMPT = "retry_prompt"
-    REPLACE_PROMPT = "replace_prompt"
-    FAIL = "fail"
+# Rejections that mean the harness broke the run's structural contract; they fail training.
+FATAL_REJECTIONS = frozenset({AdmissionRejection.PHYSICAL_GROUP_SIZE, AdmissionRejection.MISSING_ROLLOUT_LOGPROBS})
 
 
 @dataclass(frozen=True)
@@ -152,19 +147,8 @@ class AdmissionDecision:
         return self.rejections[0] if self.rejections else None
 
     @property
-    def action(self) -> AdmissionAction:
-        """Route stale, replaceable, and structurally invalid work consistently."""
-        if self.accepted:
-            return AdmissionAction.ACCEPT
-        fatal_rejections = {
-            AdmissionRejection.PHYSICAL_GROUP_SIZE,
-            AdmissionRejection.MISSING_ROLLOUT_LOGPROBS,
-        }
-        if any(rejection in fatal_rejections for rejection in self.rejections):
-            return AdmissionAction.FAIL
-        if AdmissionRejection.STALE in self.rejections:
-            return AdmissionAction.RETRY_PROMPT
-        return AdmissionAction.REPLACE_PROMPT
+    def fatal(self) -> bool:
+        return any(rejection in FATAL_REJECTIONS for rejection in self.rejections)
 
 
 @dataclass(frozen=True)
@@ -225,13 +209,11 @@ class TrainingGroupInvariantError(ValueError):
 
 class GeneratedGroup(Protocol):
     trajectory_batch: Mapping[str, object]
-    earliest_model_step: int
 
 
 @dataclass(frozen=True)
 class _BatchGroup:
     trajectory_batch: Mapping[str, object]
-    earliest_model_step: int = 0
 
 
 def _aligned_sequence(batch: Mapping[str, object], key: str, row_count: int) -> Sequence[object] | None:
@@ -314,28 +296,23 @@ def group_is_fully_excluded_from_training(trajectory_batch: Mapping[str, object]
 
 
 class GroupAdmissionPolicy:
-    """Evaluate completed groups without mutating async lifecycle state."""
+    """Check a completed group's content against the run's training contract.
+
+    Staleness depends on when a group is read, so the rollout buffer checks it separately.
+    """
 
     def __init__(
         self,
         invariant: GroupAdvantageInvariant,
         *,
-        max_staleness_steps: int,
         rollout_logprobs_required: bool,
     ) -> None:
         self.invariant = invariant
-        self.max_staleness_steps = max_staleness_steps
         self.rollout_logprobs_required = rollout_logprobs_required
 
-    def is_stale(self, group: GeneratedGroup, *, global_step: int) -> bool:
-        """Return whether the group's oldest sample exceeds the run's staleness cap."""
-        return global_step - group.earliest_model_step > self.max_staleness_steps
-
-    def evaluate(self, group: GeneratedGroup, *, global_step: int) -> AdmissionDecision:
+    def evaluate(self, group: GeneratedGroup) -> AdmissionDecision:
         facts = _inspect_group(group)
         rejections = []
-        if self.is_stale(group, global_step=global_step):
-            rejections.append(AdmissionRejection.STALE)
         if facts.trainable_count == 0:
             rejections.append(AdmissionRejection.FULLY_MASKED)
         if (
@@ -356,8 +333,6 @@ class GroupAdmissionPolicy:
         self,
         trajectory_batch: Mapping[str, object],
         uids: Sequence[str],
-        *,
-        global_step: int,
     ) -> tuple[BatchGroupAdmission, ...]:
         """Evaluate each UID group in a concatenated trajectory batch."""
         response_ids = trajectory_batch.get("response_ids")
@@ -384,7 +359,7 @@ class GroupAdmissionPolicy:
                 BatchGroupAdmission(
                     uid=uid,
                     row_indices=tuple(indices),
-                    decision=self.evaluate(batch_group, global_step=global_step),
+                    decision=self.evaluate(batch_group),
                     physical_count=facts.physical_count,
                 )
             )
@@ -428,8 +403,8 @@ def assert_training_groups_eligible(
     invariant: GroupAdvantageInvariant,
 ) -> None:
     """Fail when a synchronous or async training batch violates its group contract."""
-    policy = GroupAdmissionPolicy(invariant, max_staleness_steps=0, rollout_logprobs_required=False)
-    for admission in policy.evaluate_batch(trajectory_batch, uids, global_step=0):
+    policy = GroupAdmissionPolicy(invariant, rollout_logprobs_required=False)
+    for admission in policy.evaluate_batch(trajectory_batch, uids):
         if not admission.decision.accepted:
             raise TrainingGroupInvariantError(
                 uid=admission.uid,

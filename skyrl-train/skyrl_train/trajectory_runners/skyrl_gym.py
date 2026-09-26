@@ -205,10 +205,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             )
             self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
 
-        # Optional callback to get trainer's current global_step (for accurate staleness tracking).
-        # Set by the fully-async trainer before generation workers start.
-        self.global_step_fn: Optional[Callable[[], int]] = None
-
         ultra_config = skyrl_gym_cfg.get("nemotron_ultra", {})
         self.genrm_config = dict(ultra_config.get("genrm", {}))
         genrm_judge = self.genrm_config.get("judge")
@@ -262,7 +258,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             ),
             loss_mask=[0],
             env_metrics={"agent_loop_error": 1.0},
-            captured_global_step=self.global_step_fn() if self.global_step_fn is not None else None,
             error_treatment=ErrorTreatment.MASK.value,
         )
 
@@ -282,7 +277,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
-        global_step_fn: Optional[Callable[[], int]] = None,
     ) -> AgentLoopOutput:
         """Run one environment loop and always release its environment."""
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
@@ -298,7 +292,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 max_input_length,
                 sampling_params=sampling_params,
                 trajectory_id=trajectory_id,
-                global_step_fn=global_step_fn,
             )
         finally:
             await self._run_in_executor_if_available(env.close)
@@ -313,7 +306,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
-        global_step_fn: Optional[Callable[[], int]] = None,
     ) -> AgentLoopOutput:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -426,8 +418,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
         verification_results: List[VerificationResult] = []
-        # Capture global_step at first inference for accurate staleness tracking
-        captured_global_step: Optional[int] = None
         token_provenance = TokenProvenance.ENGINE
         continuation_assistant_index: int | None = None
 
@@ -466,10 +456,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             if engine_output["token_provenance"] == TokenProvenance.RECONSTRUCTED:
                 self._reject_inexact_chat("the model client returned reconstructed token IDs")
                 token_provenance = TokenProvenance.RECONSTRUCTED
-            # Capture global_step after first inference returns — at this point the vLLM
-            # engine has definitively served the request with its current weights.
-            if captured_global_step is None and global_step_fn is not None:
-                captured_global_step = global_step_fn()
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             topk_ids_batch = engine_output.get("student_topk_indices")
@@ -801,7 +787,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             disposition=TrainingDisposition.train(),
             loss_mask=loss_mask,
             env_metrics=env_metrics,
-            captured_global_step=captured_global_step,
             token_provenance=token_provenance,
         )
 

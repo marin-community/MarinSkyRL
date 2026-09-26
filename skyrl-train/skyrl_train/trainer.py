@@ -26,7 +26,7 @@ from skyrl_train.curriculum import CurriculumSampler
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.rollout_buffer import RolloutBuffer, RolloutRequest, RolloutSlotPolicy, create_rollout_buffer
+from skyrl_train.rollout_buffer import RolloutBuffer, RolloutRequest, create_rollout_buffer
 from skyrl_train.rollout_pipeline import SynchronousCurriculum, SynchronousRolloutBuffer, SynchronousRolloutPipeline
 from skyrl_train.rollout_worker import bind_rollout_worker
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
@@ -119,7 +119,7 @@ from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
-from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
+from skyrl_train.telemetry import GeneratedWork, critical_phase, record_generated_work, record_policy_step
 from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
@@ -142,7 +142,7 @@ class CheckpointSnapshot:
     step: int
     upload_started_at: float
     dataloader_path: str
-    dataloader_payload: bytes | None
+    dataloader_payload: bytes
     trainer_state_path: str
     trainer_state_payload: bytes
     marker_path: str
@@ -563,14 +563,10 @@ class RayPPOTrainer:
             finally:
                 await self._close_rollout_buffer()
 
-    async def _open_rollout_buffer(
-        self, capacity: int = 0, slot_policy: RolloutSlotPolicy | None = None
-    ) -> RolloutBuffer:
+    async def _open_rollout_buffer(self) -> RolloutBuffer:
         if self._rollout_buffer is None:
             backend = self.cfg.trainer.rollout_buffer.backend
-            self._rollout_buffer = await asyncio.to_thread(
-                create_rollout_buffer, backend, self.cfg.trainer.ckpt_path, capacity, slot_policy
-            )
+            self._rollout_buffer = await asyncio.to_thread(create_rollout_buffer, backend, self.cfg.trainer.ckpt_path)
         return self._rollout_buffer
 
     async def _close_rollout_buffer(self) -> None:
@@ -598,7 +594,10 @@ class RayPPOTrainer:
             self.all_metrics.update(trajectory_batch["rollout_metrics"])
         if not self.cfg.trainer.step_wise_training:
             validate_trajectory_batch(len(request.trajectory_request["prompts"]), trajectory_batch)
-        record_generated_work(trajectory_batch["response_ids"], trajectory_batch.get("is_last_step"), self.global_step)
+        record_generated_work(
+            GeneratedWork.from_batch(trajectory_batch["response_ids"], trajectory_batch.get("is_last_step")),
+            self.global_step,
+        )
         return trajectory_batch, request
 
     async def _startup_trajectory_runner(self) -> None:
@@ -658,7 +657,8 @@ class RayPPOTrainer:
             # The interval save may have just written this same step; do not write it twice.
             if self._control.should_save and self._last_saved_step != self.global_step:
                 with Timer("save_checkpoints", self.all_timings):
-                    snapshot = await asyncio.to_thread(self._snapshot_checkpoint)
+                    rollout_state = await self._rollout_state()
+                    snapshot = await asyncio.to_thread(self._snapshot_checkpoint, rollout_state)
                 try:
                     await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
                 except BaseException:
@@ -672,13 +672,14 @@ class RayPPOTrainer:
 
     async def _save_checkpoints_with_residency(self) -> CheckpointSnapshot:
         """Save a checkpoint, swapping colocated training and inference residency when needed."""
+        rollout_state = await self._rollout_state()
         if not self.colocate_all:
-            return await asyncio.to_thread(self._snapshot_checkpoint)
+            return await asyncio.to_thread(self._snapshot_checkpoint, rollout_state)
 
         await self.inference_engine_client.sleep()
         try:
             self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
-            return await asyncio.to_thread(self._snapshot_checkpoint)
+            return await asyncio.to_thread(self._snapshot_checkpoint, rollout_state)
         finally:
             await self._sync_policy_for_rollouts(reason="checkpoint_restore")
 
@@ -724,8 +725,7 @@ class RayPPOTrainer:
         ray.get(actor_refs)
         if commit:
             io.write_bytes_atomic(snapshot.trainer_state_path, snapshot.trainer_state_payload)
-            if snapshot.dataloader_payload is not None:
-                io.write_bytes_atomic(snapshot.dataloader_path, snapshot.dataloader_payload)
+            io.write_bytes_atomic(snapshot.dataloader_path, snapshot.dataloader_payload)
             io.write_bytes_atomic(snapshot.marker_path, str(snapshot.step).encode())
             self._last_saved_step = snapshot.step
             cleanup_started = time.monotonic()
@@ -1192,7 +1192,7 @@ class RayPPOTrainer:
         self.global_step += 1  # start training at global_step 1
         rollout_buffer = await self._open_rollout_buffer()
         worker = bind_rollout_worker(self.trajectory_runner, rollout_buffer)
-        sync_buffer = SynchronousRolloutBuffer(rollout_buffer, worker.retain)
+        sync_buffer = SynchronousRolloutBuffer(rollout_buffer)
         curriculum = SynchronousCurriculum(
             self.train_dataloader,
             epochs=self.cfg.trainer.epochs,
@@ -2685,14 +2685,23 @@ class RayPPOTrainer:
 
     def save_checkpoints(self) -> None:
         """Save and publish a complete checkpoint before returning."""
-        snapshot = self._snapshot_checkpoint()
+        snapshot = self._snapshot_checkpoint(self.train_dataloader.state_dict())
         upload_duration, cleanup_duration = self._finish_checkpoint_upload_blocking(snapshot, commit=True)
         self.all_timings["checkpoint_upload"] = self.all_timings.get("checkpoint_upload", 0.0) + upload_duration
         self.all_timings["cleanup_old_checkpoints"] = (
             self.all_timings.get("cleanup_old_checkpoints", 0.0) + cleanup_duration
         )
 
-    def _snapshot_checkpoint(self) -> CheckpointSnapshot:
+    async def _rollout_state(self) -> object:
+        """Return the data-position state saved as ``data.pt`` with each checkpoint."""
+        return self.train_dataloader.state_dict()
+
+    def _restore_rollout_state(self, state: object, trainer_state: dict) -> None:
+        """Load the ``data.pt`` state saved by ``_rollout_state``."""
+        self.train_dataloader.load_state_dict(state)
+        self._pending_sync_prompts = trainer_state.get("pending_sync_prompts", [])
+
+    def _snapshot_checkpoint(self, rollout_state: object) -> CheckpointSnapshot:
         """
         Stage model shards and serialize trainer state for later publication.
 
@@ -2735,16 +2744,11 @@ class RayPPOTrainer:
                 self.critic_model.offload_to_cpu()
                 self.policy_model.backload_to_gpu()
 
-        # Serialize dataloader state for publication after the rank uploads complete.
+        # Serialize rollout data state for publication after the rank uploads complete.
         dataloader_save_path = os.path.join(global_step_folder, "data.pt")
-        dataloader_payload = None
-        try:
-            dataloader_state_dict = self.train_dataloader.state_dict()
-            dataloader_buffer = stdlib_io.BytesIO()
-            torch.save(dataloader_state_dict, dataloader_buffer)
-            dataloader_payload = dataloader_buffer.getvalue()
-        except Exception as e:
-            logger.warning(f"Failed to save dataloader state: {e}")
+        dataloader_buffer = stdlib_io.BytesIO()
+        torch.save(rollout_state, dataloader_buffer)
+        dataloader_payload = dataloader_buffer.getvalue()
 
         # Save additional trainer state
         trainer_state = {
@@ -2894,14 +2898,10 @@ class RayPPOTrainer:
         if not self.cfg.trainer.restore_dataloader_state:
             logger.info("Dataloader state restoration disabled; starting the configured dataset from the beginning")
         elif io.exists(dataloader_state_path):
-            try:
-                with io.open_file(dataloader_state_path, "rb") as f:
-                    dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
-                self.train_dataloader.load_state_dict(dataloader_state)
-                self._pending_sync_prompts = trainer_state.get("pending_sync_prompts", [])
-                logger.info("Successfully loaded dataloader state")
-            except Exception as e:
-                logger.warning(f"Failed to load dataloader state: {e}. Dataloader will start from beginning.")
+            with io.open_file(dataloader_state_path, "rb") as f:
+                dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
+            self._restore_rollout_state(dataloader_state, trainer_state)
+            logger.info("Successfully loaded dataloader state")
         else:
             logger.warning(
                 f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."

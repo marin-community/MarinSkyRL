@@ -11,9 +11,7 @@ from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryReque
 from skyrl_train.trajectory_runners.harbor.dataset import TerminalBenchTaskDataset
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunner
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
-from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
-from skyrl_train.rollout_buffer import Rollout, RolloutBuffer, RolloutRequest
-from skyrl_train.rollout_worker import bind_rollout_executor
+from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink, retain_trajectories
 
 
 def _select_rows(batch: TrajectoryRequestBatch, indices: list[int]) -> TrajectoryRequestBatch:
@@ -113,18 +111,7 @@ class NemotronUltraTrajectoryRouter:
         self.task_paths = _task_index(terminal_bench_data)
         self.require_rollout_logprobs = require_rollout_logprobs
         self.tis_lcs_alert_threshold = tis_lcs_alert_threshold
-        self._global_step_fn = None
-        self.trajectory_sink: TrajectorySink | None = None
-
-    @property
-    def global_step_fn(self):
-        return self._global_step_fn
-
-    @global_step_fn.setter
-    def global_step_fn(self, callback) -> None:
-        self._global_step_fn = callback
-        self.gym_runner.global_step_fn = callback
-        self.harbor_runner.global_step_fn = callback
+        self.trajectory_sink: RetentionSink | None = None
 
     async def startup(self) -> None:
         await asyncio.gather(self.gym_runner.startup(), self.harbor_runner.startup())
@@ -132,7 +119,7 @@ class NemotronUltraTrajectoryRouter:
     async def shutdown(self) -> None:
         await asyncio.gather(self.gym_runner.shutdown(), self.harbor_runner.shutdown())
 
-    def set_trajectory_sink(self, sink: TrajectorySink) -> None:
+    def set_trajectory_sink(self, sink: RetentionSink) -> None:
         sink.bind_runner(type(self).__name__)
         self.trajectory_sink = sink
 
@@ -219,55 +206,3 @@ class NemotronUltraTrajectoryRouter:
         if self.trajectory_sink is not None:
             await retain_trajectories(self.trajectory_sink, input_batch, result)
         return result
-
-
-class NemotronUltraRolloutWorker:
-    """Route training tasks to workers without buffer methods on the harness router."""
-
-    def __init__(self, router: NemotronUltraTrajectoryRouter, buffer: RolloutBuffer):
-        self.router = router
-        self.gym_worker = bind_rollout_executor(router.gym_runner, buffer)
-        self.harbor_worker = bind_rollout_executor(router.harbor_runner, buffer)
-
-    async def produce(self, request: RolloutRequest, disable_tqdm: bool = False):
-        input_batch = request.trajectory_request
-        env_extras = input_batch.get("env_extras")
-        if env_extras is None or len(env_extras) != len(request.uids):
-            raise ValueError("Nemotron Ultra routing requires one env_extras mapping per request row")
-        prompt_by_uid = {prompt["uid"]: prompt for prompt in request.source_prompts}
-        jobs = []
-        for use_harbor in (False, True):
-            indices = [
-                index for index, extras in enumerate(env_extras) if (_swe_instance_id(extras) is not None) == use_harbor
-            ]
-            if not indices:
-                continue
-            child_batch = _select_rows(input_batch, indices)
-            child_uids = [request.uids[index] for index in indices]
-            child_prompts = [prompt_by_uid[uid] for uid in dict.fromkeys(child_uids)]
-            worker = self.harbor_worker if use_harbor else self.gym_worker
-            if use_harbor:
-                missing = [
-                    _swe_instance_id(env_extras[index])
-                    for index in indices
-                    if _swe_instance_id(env_extras[index]).casefold() not in self.router.task_paths
-                ]
-                if missing:
-                    raise ValueError(f"terminal-bench task {missing[0]!r} is absent from the configured task data")
-                child_batch["prompts"] = [
-                    self.router.task_paths[_swe_instance_id(env_extras[index]).casefold()] for index in indices
-                ]
-            jobs.append(
-                worker.produce(
-                    RolloutRequest(child_batch, child_prompts, child_uids, request.model_step, request.kind),
-                    disable_tqdm=disable_tqdm,
-                )
-            )
-        outputs = await asyncio.gather(*jobs)
-        return [receipt for output in outputs for receipt in output]
-
-    async def retain(self, rollout: Rollout) -> None:
-        if self.router.trajectory_sink is not None:
-            if rollout.request_batch is None:
-                raise ValueError("buffered routed rollout omitted its request batch")
-            await retain_trajectories(self.router.trajectory_sink, rollout.request_batch, rollout.trajectory_batch)

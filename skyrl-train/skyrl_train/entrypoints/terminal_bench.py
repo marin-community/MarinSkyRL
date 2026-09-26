@@ -75,22 +75,24 @@ class TerminalBenchExp(BasePPOExp):
         colocate_pg,
     ):
         from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer  # noqa: PLC0415
+        from skyrl_train.rollouts.context import TrainingContext  # noqa: PLC0415
         from skyrl_train.trainer import RayPPOTrainer  # noqa: PLC0415
 
-        # Check if async training is configured via placement.colocate_all=false
-        # Async training requires non-colocated placement (separate GPU sets for policy/ref/inference)
-        use_async = cfg.trainer.placement.colocate_all is False
-
-        trainer_cls = FullyAsyncRayPPOTrainer if use_async else RayPPOTrainer
-        return trainer_cls(
-            cfg=cfg,
-            tracker=tracker,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            inference_engine_client=inference_engine_client,
-            trajectory_runner=trajectory_runner,
-            colocate_pg=colocate_pg,
+        trainer_args = {
+            "cfg": cfg,
+            "tracker": tracker,
+            "tokenizer": tokenizer,
+            "train_dataset": train_dataset,
+            "eval_dataset": eval_dataset,
+            "inference_engine_client": inference_engine_client,
+            "trajectory_runner": trajectory_runner,
+            "colocate_pg": colocate_pg,
+        }
+        if not self.uses_fully_async_trainer():
+            return RayPPOTrainer(**trainer_args)
+        # The Harbor dispatcher's coordinators are the rollout workers.
+        return FullyAsyncRayPPOTrainer(
+            context=TrainingContext.from_config(cfg, train_dataset, trajectory_runner), **trainer_args
         )
 
 

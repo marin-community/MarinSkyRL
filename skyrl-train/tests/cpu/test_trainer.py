@@ -583,9 +583,10 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
     trainer.sync_policy_weights_to_inference_engines = lambda: []
     trainer.all_timings = {}
     monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+    trainer.train_dataloader = SimpleNamespace(state_dict=lambda: {})
     save_observations = []
 
-    def snapshot_checkpoint():
+    def snapshot_checkpoint(rollout_state):
         save_observations.append(
             (
                 trainer.policy_model.model_on_gpu,

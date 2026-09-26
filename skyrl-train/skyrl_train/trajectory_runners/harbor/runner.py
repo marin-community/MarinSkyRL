@@ -2,10 +2,8 @@ import asyncio
 import logging
 import os
 import re
-import time
-from collections import deque
 from dataclasses import dataclass, replace
-from typing import Callable, Deque, List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any
 
 import numpy as np
 from skyrl_gym.verification import (
@@ -588,40 +586,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # Eval-specific timeout (default 900s = 15 minutes)
         self._eval_timeout_override_sec = self._harbor_config_builder.get_eval_timeout_override_sec(default=900)
 
-        # Staleness tracking — captures the global_step that was current at each
-        # trial's Harbor pickup time (= the moment SkyRL/Harbor first attempted to
-        # dispatch the trial to vLLM). Set externally by FullyAsyncRayPPOTrainer.
-        self.global_step_fn: Optional[Callable[[], int]] = None
-        # Rolling (global_step, time.time()) history; we look up `started_at` for
-        # each trial against this history to estimate `actual_global_step`. Bounded
-        # to keep memory flat; long-tail trials past the window fall back to the
-        # earliest retained step (conservative — biases staleness slightly higher).
-        self._step_time_history: Deque[Tuple[int, float]] = deque(maxlen=512)
-
-    def _record_step_time(self) -> None:
-        """Append (global_step, now) to the step-time history if the step has advanced."""
-        if self.global_step_fn is None:
-            return
-        try:
-            step = self.global_step_fn()
-        except Exception:
-            return
-        now = time.time()
-        if not self._step_time_history or self._step_time_history[-1][0] != step:
-            self._step_time_history.append((step, now))
-
-    def _step_at_time(self, t: float) -> Optional[int]:
-        """Return the global_step that was active at wall-clock time `t` per history."""
-        if not self._step_time_history:
-            return None
-        result = self._step_time_history[0][0]
-        for step, ts in self._step_time_history:
-            if ts <= t:
-                result = step
-            else:
-                break
-        return result
-
     def _configure_harbor_logging(self, level: str) -> None:
         """
         Configure Harbor's logging level.
@@ -982,12 +946,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         This method includes restart logic to recover from orchestrator failures
         without killing the entire training job.
         """
-        # Record current global_step at the moment we enter run(). Used as
-        # both a history checkpoint and the conservative fallback for
-        # actual_global_step if no trial reports a started_at.
-        self._record_step_time()
-        entry_global_step = self.global_step_fn() if self.global_step_fn is not None else None
-
         num_trials = len(input_batch["prompts"])
         is_eval = self._eval_session_active
         mode_str = f"eval ({self._eval_session_name})" if is_eval else "training"
@@ -1430,28 +1388,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 + ", ".join(f"{k.split('_', 2)[-1]}={v:.3f}" for k, v in sorted(component_metrics.items()))
             )
 
-        # Estimate actual_global_step for staleness tracking. Use the EARLIEST
-        # Harbor pickup time (`started_at`) across the group's trials — that's
-        # the moment the first trial transitioned from queued-in-Harbor to
-        # actually-running, i.e. the first attempt to dispatch to vLLM.
-        # Robust to vLLM fragility (no dependence on vLLM responses) and to
-        # individual-trial failures (we take whatever started). Falls back to
-        # the global_step captured at run() entry (worst case = same as
-        # the pre-patch behavior).
-        actual_global_step: Optional[int] = None
-        earliest_started_ts: Optional[float] = None
-        for r in results:
-            if isinstance(r, TrialResult) and r.started_at is not None:
-                ts = r.started_at.timestamp()
-                if earliest_started_ts is None or ts < earliest_started_ts:
-                    earliest_started_ts = ts
-        # Record current step+time again so the history covers gather completion.
-        self._record_step_time()
-        if earliest_started_ts is not None:
-            actual_global_step = self._step_at_time(earliest_started_ts)
-        if actual_global_step is None:
-            actual_global_step = entry_global_step
-
         trajectory_batch: TrajectoryBatch = {
             "prompt_token_ids": [list(output.evidence.prompt_token_ids) for output in all_outputs],
             "response_ids": [list(output.evidence.response_token_ids) for output in all_outputs],
@@ -1464,7 +1400,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": rollout_logprobs_list,
             "exclude_from_baseline": [not output.disposition.baseline_eligible for output in all_outputs],
-            "actual_global_step": actual_global_step,
         }
         attach_terminal_classifications(trajectory_batch, all_outputs)
         if self._reward_shaping_enabled:

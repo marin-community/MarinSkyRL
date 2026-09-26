@@ -1,7 +1,7 @@
 import torch
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol, Sequence
+from typing import List, Tuple, Union, Optional, Dict, Any, Sequence
 from collections import defaultdict
 from enum import StrEnum
 import numpy as np
@@ -1026,9 +1026,6 @@ def combine_trajectory_batches_in_request_order(
         require_rollout_logprobs=require_rollout_logprobs,
         tis_lcs_alert_threshold=tis_lcs_alert_threshold,
     )
-    observed_steps = [step for batch in batches if (step := batch.get("actual_global_step")) is not None]
-    if observed_steps:
-        result["actual_global_step"] = min(observed_steps)
     if requested_ids is None:
         return result
     returned_ids = result.get("trajectory_ids")
@@ -1292,18 +1289,6 @@ def prepare_trajectory_request(
     }
 
     return trajectory_request, uids
-
-
-class HasCapturedGlobalStep(Protocol):
-    captured_global_step: Optional[int]
-
-
-def minimum_captured_global_step(outputs: Iterable[HasCapturedGlobalStep]) -> Optional[int]:
-    """Return the minimum model-step value recorded across a rollout group."""
-    return min(
-        (output.captured_global_step for output in outputs if output.captured_global_step is not None),
-        default=None,
-    )
 
 
 def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None, chat_template_kwargs=None):

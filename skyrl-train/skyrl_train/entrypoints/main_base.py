@@ -326,14 +326,9 @@ class BasePPOExp:
 
     def get_tokenizer(self, padding_side="left"):
         """Initializes a tokenizer for the given model."""
-        from skyrl_train.tokenizer import create_tokenizer  # noqa: PLC0415
+        from skyrl_train.tokenizer import tokenizer_from_config  # noqa: PLC0415
 
-        return create_tokenizer(
-            model_path=self.cfg.trainer.policy.model.tokenizer_path,
-            disable_fast_tokenizer=self.cfg.trainer.disable_fast_tokenizer,
-            padding_side=padding_side,
-            revision=self.cfg.trainer.policy.model.get("tokenizer_revision"),
-        )
+        return tokenizer_from_config(self.cfg, padding_side)
 
     def get_train_dataset(self):
         """Initializes the training dataset.

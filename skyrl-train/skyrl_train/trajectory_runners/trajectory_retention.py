@@ -14,6 +14,9 @@ import zipfile
 
 from omegaconf import DictConfig
 from loguru import logger
+import ray
+from ray.actor import ActorHandle
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from transformers import PreTrainedTokenizerBase
 
 from marinskyrl.resource_locator import join_resource_path
@@ -398,9 +401,8 @@ def build_trajectory_records(
     verifier_tests = output.get("verifier_tests")
     if verifier_tests is not None and len(verifier_tests) != len(output["response_ids"]):
         raise ValueError("verifier tests must have one entry per trajectory row")
-    model_version_step = output.get("actual_global_step")
-    if model_version_step is None:
-        model_version_step = max(0, metadata.global_step - 1)
+    # A request's step names the policy version being trained, which has completed one fewer update.
+    model_version_step = max(0, metadata.global_step - 1)
 
     records = []
     for group in _group_rows(input_batch, output):
@@ -749,6 +751,18 @@ def _empty_metrics() -> dict[str, float]:
     }
 
 
+class RetentionSink(Protocol):
+    """Where trajectory runners send finished batches for retention."""
+
+    config: TrajectoryRetentionConfig
+
+    def bind_runner(self, runner_name: str) -> None: ...
+
+    def retain(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> dict[str, float]: ...
+
+    def close(self) -> None: ...
+
+
 class TrajectorySink:
     """Select, bound, and persist normalized trajectory records."""
 
@@ -1086,7 +1100,7 @@ _RETENTION_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1, threa
 
 
 async def retain_trajectories(
-    sink: TrajectorySink,
+    sink: RetentionSink,
     input_batch: TrajectoryRequestBatch,
     output: TrajectoryBatch,
 ) -> None:
@@ -1115,6 +1129,33 @@ async def retain_trajectories(
     output["rollout_metrics"] = rollout_metrics
 
 
-def make_trajectory_sink(config: DictConfig, tokenizer: PreTrainedTokenizerBase) -> TrajectorySink:
-    """Build the shared sink from the runner configuration."""
-    return TrajectorySink(parse_trajectory_retention_config(config.get("trajectory_retention")), tokenizer)
+class SharedTrajectorySink:
+    """A picklable handle to the run's one ``TrajectorySink`` actor.
+
+    Rollout workers retain from many processes, and the retention ledger admits a single writer. Only the
+    trainer, which owns the sink, closes it.
+    """
+
+    def __init__(self, config: TrajectoryRetentionConfig, actor: ActorHandle):
+        self.config = config
+        self._actor = actor
+
+    def bind_runner(self, runner_name: str) -> None:
+        ray.get(self._actor.bind_runner.remote(runner_name))
+
+    def retain(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> dict[str, float]:
+        if not self.config.enabled:
+            return {}
+        return ray.get(self._actor.retain.remote(input_batch, output))
+
+    def close(self) -> None:
+        ray.get(self._actor.close.remote())
+        ray.kill(self._actor)
+
+
+def make_trajectory_sink(config: DictConfig, tokenizer: PreTrainedTokenizerBase) -> SharedTrajectorySink:
+    """Start the run's sink on this node, where a local ``output_path`` resolves as it does here."""
+    retention = parse_trajectory_retention_config(config.get("trajectory_retention"))
+    node = NodeAffinitySchedulingStrategy(node_id=ray.get_runtime_context().get_node_id(), soft=False)
+    actor = ray.remote(TrajectorySink).options(num_cpus=0, scheduling_strategy=node).remote(retention, tokenizer)
+    return SharedTrajectorySink(retention, actor)

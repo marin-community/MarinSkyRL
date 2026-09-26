@@ -1,7 +1,5 @@
 import asyncio
 from collections.abc import Awaitable, Callable
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import ray
@@ -13,12 +11,12 @@ from skyrl_train.trajectory_runners.harbor.execution import (
     build_harbor_trajectory_runner,
 )
 from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import (
-    HarborRolloutWorker,
     RolloutCoordinatorRPCTimeoutError,
     RolloutDispatcher,
 )
 from skyrl_train.trajectory_runners.types import BatchMetadata, TrainingPhase, TrajectoryID
-from skyrl_train.rollout_buffer import FineStoreRolloutBuffer, RolloutRequest, SynchronousRollout
+from skyrl_train.rollouts.buffer import RolloutLease
+from skyrl_train.rollouts.workers import RolloutTask
 
 
 class _RemoteMethod:
@@ -27,12 +25,6 @@ class _RemoteMethod:
 
     def remote(self, *args, **kwargs):
         return self._call(*args, **kwargs)
-
-
-@ray.remote
-def _stage_in_process_isolated_worker(writer):
-    rollout = SynchronousRollout(_output([TrajectoryID("remote", 0)]), ["remote"], [{"uid": "remote"}], 3)
-    return asyncio.run(writer.write_rollout(rollout))
 
 
 class _Coordinator:
@@ -44,10 +36,13 @@ class _SessionCoordinator(_Coordinator):
     def __init__(self, name: str, calls: list[tuple[str, str]]):
         self.eval_concurrency: list[int | None] = []
 
-        async def run_shard(input_batch, _global_step):
+        async def run_shard(input_batch):
             phase = input_batch["batch_metadata"].training_phase
             calls.append((name, phase))
             return _output(input_batch["trajectory_ids"])
+
+        async def run_task(task, _writer):
+            calls.append((name, f"task {task.prompt['uid']}"))
 
         async def start_eval_session(*, n_concurrent_trials=None, **_kwargs):
             calls.append((name, "start_eval"))
@@ -57,6 +52,7 @@ class _SessionCoordinator(_Coordinator):
             calls.append((name, "stop_eval"))
 
         super().__init__(run_shard)
+        self.run_task = _RemoteMethod(run_task)
         self.start_eval_session = _RemoteMethod(start_eval_session)
         self.stop_eval_session = _RemoteMethod(stop_eval_session)
 
@@ -95,7 +91,6 @@ def _output(ids: list[TrajectoryID]) -> dict:
         "rollout_metrics": {},
         "rollout_logprobs": None,
         "trajectory_ids": ids,
-        "actual_global_step": 7,
     }
 
 
@@ -149,7 +144,7 @@ def test_development_harbor_workload_selects_in_process_execution():
 async def test_dispatcher_partitions_complete_groups_and_restores_request_order(harbor_runner_spec):
     calls: list[list[str]] = []
 
-    async def run_group(input_batch, _global_step):
+    async def run_group(input_batch):
         ids = input_batch["trajectory_ids"]
         calls.append([trajectory_id.to_string() for trajectory_id in ids])
         return _output(list(reversed(ids)))
@@ -165,52 +160,19 @@ async def test_dispatcher_partitions_complete_groups_and_restores_request_order(
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_returns_only_buffer_receipts_for_training(tmp_path, harbor_runner_spec):
-    async def produce(request, writer):
-        assert request.kind == "batch"
-        return await writer.write_rollout(
-            SynchronousRollout(
-                _output(request.trajectory_request["trajectory_ids"]),
-                request.uids,
-                request.source_prompts,
-                request.model_step,
-            )
-        )
+async def test_training_tasks_avoid_the_eval_coordinator(harbor_runner_spec):
+    calls: list[tuple[str, str]] = []
+    dispatcher = _dispatcher(
+        [_SessionCoordinator("eval", calls), _SessionCoordinator("train", calls)],
+        harbor_runner_spec,
+    )
+    task = RolloutTask(RolloutLease("lease", 1), {"uid": "a"}, _request([TrajectoryID("a", 0)], "train"))
 
-    actors = []
-    for _ in range(2):
-        actors.append(SimpleNamespace(produce=_RemoteMethod(produce)))
-    dispatcher = _dispatcher(actors, harbor_runner_spec, timeout=30)
-    ids = [TrajectoryID("a", 0), TrajectoryID("b", 0), TrajectoryID("a", 1), TrajectoryID("b", 1)]
-    request = _request(ids, "train")
-    prompts = [{"uid": "a"}, {"uid": "b"}]
-    buffer = FineStoreRolloutBuffer(str(tmp_path / "rollouts"))
-    try:
-        receipts = await HarborRolloutWorker(dispatcher, buffer.remote_writer()).produce(
-            RolloutRequest(request, prompts, [id.instance_id for id in ids], 7, "batch")
-        )
-        assert buffer.empty()
-        for receipt in receipts:
-            buffer.publish(receipt)
-        groups = await buffer.next_batch(2)
-        assert [group.uids[0] for group in groups] == ["a", "b"]
-        assert [group.trajectory_batch["response_ids"] for group in groups] == [[[0], [1]], [[100], [101]]]
-    finally:
-        buffer.close()
+    await dispatcher.start_eval_session(run_name="run", eval_step=0)
+    await dispatcher.run_task(task, writer=None)
+    await dispatcher.stop_eval_session()
 
-
-@pytest.mark.asyncio
-async def test_process_isolated_writer_commits_without_returning_payload(tmp_path, ray_init):
-    buffer = FineStoreRolloutBuffer(str(tmp_path / "remote"))
-    try:
-        source_root = Path(__file__).resolve().parents[2]
-        worker = _stage_in_process_isolated_worker.options(runtime_env={"env_vars": {"PYTHONPATH": str(source_root)}})
-        receipt = await worker.remote(buffer.remote_writer())
-        assert receipt.uids == ("remote",)
-        buffer.publish(receipt)
-        assert (await buffer.next_batch(1))[0].trajectory_batch["response_ids"] == [[0]]
-    finally:
-        buffer.close()
+    assert calls == [("eval", "start_eval"), ("train", "task a"), ("eval", "stop_eval")]
 
 
 @pytest.mark.asyncio
@@ -253,7 +215,7 @@ async def test_dispatcher_preserves_global_eval_concurrency_when_training_is_sha
 async def test_dispatcher_concatenates_fully_excluded_group_without_logprobs(harbor_runner_spec):
     harbor_runner_spec.config.trainer.algorithm.use_tis = True
 
-    async def run_group(input_batch, _global_step):
+    async def run_group(input_batch):
         ids = input_batch["trajectory_ids"]
         output = _output(ids)
         if ids[0].instance_id == "masked":
@@ -301,7 +263,7 @@ async def test_dispatcher_does_not_require_rollout_logprobs_during_eval(harbor_r
 
 @pytest.mark.asyncio
 async def test_dispatcher_rejects_output_from_the_wrong_group(harbor_runner_spec):
-    async def wrong_group(_input_batch, _global_step):
+    async def wrong_group(_input_batch):
         return _output([TrajectoryID("other", 0)])
 
     dispatcher = _dispatcher([_Coordinator(wrong_group)], harbor_runner_spec)
@@ -314,7 +276,7 @@ async def test_dispatcher_rejects_output_from_the_wrong_group(harbor_runner_spec
 async def test_coordinator_rpc_returns_one_group_unchanged(harbor_runner_spec):
     expected = _output([TrajectoryID("a", 0)])
 
-    async def completed_rpc(_input_batch, _global_step):
+    async def completed_rpc(_input_batch):
         return expected
 
     dispatcher = _dispatcher([_Coordinator(completed_rpc)], harbor_runner_spec)
@@ -350,7 +312,7 @@ async def test_coordinator_rpc_timeout_resets_on_same_actor_progress(harbor_runn
             return self._expired
 
     class _TimedRemoteMethod:
-        def remote(self, input_batch, _global_step):
+        def remote(self, input_batch):
             nonlocal slow_result
             instance_id = input_batch["trajectory_ids"][0].instance_id
             result = asyncio.get_running_loop().create_future()
@@ -403,7 +365,7 @@ async def test_coordinator_rpc_timeout_cancels_remote_work(ray_init, harbor_runn
 async def test_coordinator_rpc_preserves_remote_timeout_error(harbor_runner_spec):
     remote_error = TimeoutError("remote post-processing timed out")
 
-    async def failed_rpc(_input_batch, _global_step):
+    async def failed_rpc(_input_batch):
         raise remote_error
 
     dispatcher = _dispatcher([_Coordinator(failed_rpc)], harbor_runner_spec)
