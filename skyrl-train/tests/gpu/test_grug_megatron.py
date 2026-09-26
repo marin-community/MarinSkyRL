@@ -24,7 +24,11 @@ from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX, GrugMoeForCausalLM
-from skyrl_train.fixtures.tiny_grug import TOY_SHAPE, write_tiny_checkpoint as _write_tiny_checkpoint
+from skyrl_train.fixtures.tiny_grug import (
+    NUM_LAYERS,
+    TOY_SHAPE,
+    write_tiny_checkpoint as _write_tiny_checkpoint,
+)
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.torch_utils import logprobs_from_logits
@@ -40,8 +44,6 @@ from tests.gpu.grug_serving import (
 )
 from tests.gpu.utils import get_test_actor_config, init_worker_with_type
 
-NUM_LAYERS = 8
-NUM_EXPERTS = 8
 ROLLOUT_WORLD_SIZE = 2
 RESPONSE_LENGTH = 8
 PROMPT_LENGTH = 12

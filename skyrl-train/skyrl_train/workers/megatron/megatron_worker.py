@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import os
 import random
+from contextlib import nullcontext
 import numpy as np
 from enum import StrEnum
 from typing import List, Dict, Any, Optional
@@ -33,6 +34,7 @@ from skyrl_train.distributed.megatron.optimizer import (
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
+from skyrl_train.config.mismatch_probe import ALL_TRAINER_PROBE_MODES
 from skyrl_train.distributed.megatron.remote_model import install_remote_hf_state
 from skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
@@ -79,6 +81,15 @@ from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 class _MegatronInitMode(StrEnum):
     TRAINING = "training"
     CHECKPOINT_EXPORT = "checkpoint-export"
+
+
+_PROBE_HASH_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+def _update_probe_tensor_digest(digest, tensor: torch.Tensor) -> None:
+    flat = tensor.detach().contiguous().view(torch.uint8).flatten()
+    for offset in range(0, flat.numel(), _PROBE_HASH_CHUNK_BYTES):
+        digest.update(flat[offset : offset + _PROBE_HASH_CHUNK_BYTES].cpu().numpy().tobytes())
 
 
 class MegatronWorker:
@@ -258,19 +269,14 @@ class MegatronWorker:
         keep_fraction = data.metadata["probe_keep_fraction"]
         micro_batch_size = data.metadata["probe_micro_batch_size"]
         controller = self.model.router_replay
-        if mode not in {"native", "repeat", "router_replay", "router_replay_filtered"}:
+        if mode not in ALL_TRAINER_PROBE_MODES:
             raise ValueError(f"unsupported probe mode: {mode}")
         if mode.startswith("router_replay") and controller is None:
             raise ValueError(f"probe mode {mode} requires an installed Megatron router replay controller")
         module_modes = [(module, module.training) for chunk in self.actor_module for module in chunk.modules()]
-        cpu_rng = torch.get_rng_state()
-        cuda_rng = torch.cuda.get_rng_state()
+        rng_state = MegatronStrategy.get_rng_state()
         rng_tracker = get_cuda_rng_tracker()
         tracker_states = copy.deepcopy(rng_tracker.get_states())
-        numpy_rng = np.random.get_state()
-        python_rng = random.getstate()
-        from contextlib import nullcontext
-
         scope = controller.scoring_mode(mode, keep_fraction) if mode.startswith("router_replay") else nullcontext()
         try:
             with scope:
@@ -283,11 +289,8 @@ class MegatronWorker:
         finally:
             for module, was_training in module_modes:
                 module.training = was_training
-            torch.set_rng_state(cpu_rng)
-            torch.cuda.set_rng_state(cuda_rng)
+            MegatronStrategy.load_rng_state(rng_state)
             rng_tracker.set_states(tracker_states)
-            np.random.set_state(numpy_rng)
-            random.setstate(python_rng)
 
     def probe_weights_digest(self) -> str:
         """Hash each local model shard exactly for same-weight and update checks."""
@@ -295,9 +298,7 @@ class MegatronWorker:
         for chunk_index, chunk in enumerate(self.actor_module):
             for name, tensor in (*chunk.named_parameters(), *chunk.named_buffers()):
                 digest.update(f"{chunk_index}:{name}:{tensor.dtype}:{tuple(tensor.shape)}\0".encode())
-                flat = tensor.detach().contiguous().view(torch.uint8).flatten()
-                for offset in range(0, flat.numel(), 8 * 1024 * 1024):
-                    digest.update(flat[offset : offset + 8 * 1024 * 1024].cpu().numpy().tobytes())
+                _update_probe_tensor_digest(digest, tensor)
         return digest.hexdigest()
 
     def probe_training_state_digests(self) -> dict[str, str]:
@@ -311,9 +312,7 @@ class MegatronWorker:
             def add(item):
                 if isinstance(item, torch.Tensor):
                     digest.update(f"tensor:{item.dtype}:{tuple(item.shape)}\0".encode())
-                    flat = item.detach().contiguous().view(torch.uint8).flatten()
-                    for offset in range(0, flat.numel(), 8 * 1024 * 1024):
-                        digest.update(flat[offset : offset + 8 * 1024 * 1024].cpu().numpy().tobytes())
+                    _update_probe_tensor_digest(digest, item)
                 elif isinstance(item, np.ndarray):
                     digest.update(f"array:{item.dtype}:{item.shape}\0".encode())
                     digest.update(item.tobytes())

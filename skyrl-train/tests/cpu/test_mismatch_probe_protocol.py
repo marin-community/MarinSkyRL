@@ -1,7 +1,6 @@
 import pytest
 
 from skyrl_train.mismatch_probe.protocol import (
-    chosen_logprobs_from_prompt_logprobs,
     probe_hash,
     request_seed,
     require_token_identity,
@@ -29,16 +28,3 @@ def test_token_identity_mutation_is_caught_before_comparison():
         require_token_identity(**(kwargs | {"trainer_response": [3, 5]}))
     with pytest.raises(ValueError, match="prompt IDs differ"):
         require_token_identity(**(kwargs | {"trainer_prompt": [1, 8]}))
-
-
-def test_prompt_logprob_extraction_requires_each_chosen_token():
-    scored = chosen_logprobs_from_prompt_logprobs(
-        prompt_lengths=[2, 1],
-        response_ids=[[7, 8], [9]],
-        prompt_logprobs=[[None, {2: -0.1}, {7: -1.0}, {8: -2.0}], [None, {9: -3.0}]],
-    )
-    assert scored == [[-1.0, -2.0], [-3.0]]
-    with pytest.raises(ValueError, match="omitted frozen token"):
-        chosen_logprobs_from_prompt_logprobs(
-            prompt_lengths=[1], response_ids=[[9]], prompt_logprobs=[[None, {8: -3.0}]]
-        )

@@ -13,6 +13,7 @@ import random
 import re
 import time
 import tomllib
+from dataclasses import dataclass
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,11 +26,19 @@ from omegaconf import OmegaConf
 
 from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.callbacks.base import TrainerCallback, TrainerControl, TrainerState
+from skyrl_train.config.mismatch_probe import (
+    CACHE_BOTH,
+    CACHE_OFF,
+    CACHE_ON,
+    GENERATION_SCORING,
+    rescore_scoring,
+    trainer_scoring,
+)
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.group_admission import GroupAdvantageInvariant, GroupAdvantageKind
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.inference_engines.vllm_teacher_oracle import tokenizer_vocabulary_fingerprint
-from skyrl_train.mismatch_probe.archive import MismatchArchive, read_frozen_probe
+from skyrl_train.mismatch_probe.archive import MismatchArchive, mismatch_schema, read_frozen_probe
 from skyrl_train.mismatch_probe.protocol import (
     probe_hash,
     request_seed,
@@ -43,11 +52,31 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
 )
 
 
-def _route_bytes(routes: torch.Tensor | None, length: int) -> tuple[bytes | None, list[int] | None, str | None]:
+@dataclass(frozen=True)
+class EncodedRoutes:
+    """Router choices encoded with their NumPy shape and dtype."""
+
+    data: bytes | None
+    shape: list[int] | None
+    dtype: str | None
+    replacements: bytes | None = None
+
+
+@dataclass(frozen=True)
+class ProbeSamples:
+    """Trajectory rows and stable request identities for one probe."""
+
+    trajectory: dict
+    prompt_ids: list[str]
+    sample_ids: list[str]
+    seeds: list[int]
+
+
+def _route_bytes(routes: torch.Tensor | None, length: int) -> EncodedRoutes:
     if routes is None:
-        return None, None, None
+        return EncodedRoutes(None, None, None)
     value = routes[:length].contiguous().cpu().numpy()
-    return value.tobytes(), list(value.shape), str(value.dtype)
+    return EncodedRoutes(value.tobytes(), list(value.shape), str(value.dtype))
 
 
 def _reorder_batch(batch: TrainingInputBatch, order: list[int]) -> TrainingInputBatch:
@@ -165,10 +194,11 @@ class MismatchProbeCallback(TrainerCallback):
             require_rollout_logprobs=True,
             tis_lcs_alert_threshold=float(trainer.cfg.trainer.algorithm.tis_lcs_alert_threshold),
         )
-        return trajectory, uids, sample_ids, seeds
+        return ProbeSamples(trajectory, uids, sample_ids, seeds)
 
     def _from_source(self):
-        manifest, rows, generations = read_frozen_probe(self.spec.reuse_probe)
+        source = read_frozen_probe(self.spec.reuse_probe)
+        manifest, rows, generations = source.manifest, source.probes, source.generations
         expected = int(self.spec.prompts.count) * int(self.spec.prompts.samples_per_prompt)
         if len(rows) != expected:
             raise ValueError(f"reuse_probe has {len(rows)} samples but this recipe requests {expected}")
@@ -205,7 +235,7 @@ class MismatchProbeCallback(TrainerCallback):
             "stop_reasons": ["reused"] * len(rows),
             "rollout_metrics": None,
         }
-        return (
+        return ProbeSamples(
             trajectory,
             [row.prompt_id for row in rows],
             [row.sample_id for row in rows],
@@ -245,7 +275,7 @@ class MismatchProbeCallback(TrainerCallback):
         if padded_count < 0 or padded_count != training_input.metadata.get("pad_size", 0):
             raise ValueError("mismatch probe training collation changed the number of frozen samples")
         rows = []
-        schema = self._schema()
+        schema = mismatch_schema()
         for position, sample_id in enumerate(sample_ids):
             response_length = len(trajectory["response_ids"][position])
             prompt_tokens = training_input["sequences"][position, :prompt_width]
@@ -262,17 +292,16 @@ class MismatchProbeCallback(TrainerCallback):
                 trainer_response=trainer_response,
             )
             routes = training_input.get("rollout_routed_experts")
-            route_bytes, route_shape, route_dtype = _route_bytes(
-                None if routes is None else routes[position], response_length
-            )
+            encoded_routes = _route_bytes(None if routes is None else routes[position], response_length)
             route_valid_mask = None
-            if route_shape is not None:
-                if len(route_shape) != 3 or route_shape[0] != response_length:
+            if encoded_routes.shape is not None:
+                if len(encoded_routes.shape) != 3 or encoded_routes.shape[0] != response_length:
                     raise ValueError("captured routes must align with the frozen response tokens")
                 # vLLM captures a forward for every response token except its final
                 # sampled token. Expert ID zero is a valid choice on earlier rows.
                 route_valid_mask = [
-                    [token_index < response_length - 1] * route_shape[1] for token_index in range(response_length)
+                    [token_index < response_length - 1] * encoded_routes.shape[1]
+                    for token_index in range(response_length)
                 ]
             advantage = None
             if self.source_manifest is None:
@@ -296,9 +325,9 @@ class MismatchProbeCallback(TrainerCallback):
                     advantage=advantage,
                     request_seed=seeds[position],
                     batch_position=position,
-                    routed_experts=route_bytes,
-                    routed_experts_shape=route_shape,
-                    routed_experts_dtype=route_dtype,
+                    routed_experts=encoded_routes.data,
+                    routed_experts_shape=encoded_routes.shape,
+                    routed_experts_dtype=encoded_routes.dtype,
                     route_valid_mask=route_valid_mask,
                 )
             )
@@ -339,12 +368,6 @@ class MismatchProbeCallback(TrainerCallback):
             ),
         }
 
-    @staticmethod
-    def _schema():
-        from finestore import mismatch
-
-        return mismatch
-
     async def _rescore_vllm(self, trainer, update: int):
         rows = self.probes
         prefixes = []
@@ -356,10 +379,10 @@ class MismatchProbeCallback(TrainerCallback):
                 overrides.append({"logprob_token_ids": [token]})
                 positions.append((row_index, token))
         cache_setting = self.spec.rescore_prefix_cache
-        cache_modes = ("off", "on") if cache_setting == "both" else (cache_setting,)
+        cache_modes = (CACHE_OFF, CACHE_ON) if cache_setting == CACHE_BOTH else (cache_setting,)
         result = []
         for cache_mode in cache_modes:
-            if cache_mode == "off":
+            if cache_mode == CACHE_OFF:
                 await trainer.inference_engine_client.reset_prefix_cache()
             started = time.monotonic()
             output = await trainer.inference_engine_client.generate(
@@ -370,7 +393,7 @@ class MismatchProbeCallback(TrainerCallback):
                         "max_tokens": 1,
                         "logprobs": 1,
                         "temperature": 1.0,
-                        "skip_reading_prefix_cache": cache_mode == "off",
+                        "skip_reading_prefix_cache": cache_mode == CACHE_OFF,
                         "seed": request_seed(int(self.spec.seed), f"reread:{update}:{cache_mode}", 0),
                     },
                     "sampling_params_per_prompt": overrides,
@@ -389,19 +412,19 @@ class MismatchProbeCallback(TrainerCallback):
                 if not math.isfinite(score):
                     raise ValueError(f"vLLM re-read returned a nonfinite score at flattened position {position}")
                 chosen[row_index].append(score)
-            label = f"vllm.rescore@{update}" if cache_mode == "off" else f"vllm.rescore@{update}:on"
+            label = rescore_scoring(update, cache_mode)
             self.timing[f"{label}/seconds"] = duration
             cache_hits = output.get("prefix_cache_hit_tokens")
             if cache_hits is None or len(cache_hits) != len(positions):
                 raise ValueError("vLLM re-read omitted prefix-cache hit counts")
             self.cache_hit_tokens[label] = sum(cache_hits)
-            if cache_mode == "off" and self.cache_hit_tokens[label]:
+            if cache_mode == CACHE_OFF and self.cache_hit_tokens[label]:
                 raise ValueError("cache-off re-read unexpectedly used cached prefix tokens")
             for row, values in zip(rows, chosen, strict=True):
                 if len(values) != len(row.vllm_output_ids):
                     raise ValueError(f"vLLM re-read returned incomplete scores for {row.sample_id}")
                 result.append(
-                    self._schema().ScoreRow(
+                    mismatch_schema().ScoreRow(
                         probe_hash=self.probe_hash,
                         sample_id=row.sample_id,
                         scoring=label,
@@ -463,7 +486,9 @@ class MismatchProbeCallback(TrainerCallback):
             if not np.all(observed[valid]):
                 missing = int(np.count_nonzero(valid & ~observed))
                 raise ValueError(f"{mode} missed {missing} captured routing rows for {row.sample_id}")
-            result.append((selected.tobytes(), list(selected.shape), str(selected.dtype), changed.tobytes()))
+            result.append(
+                EncodedRoutes(selected.tobytes(), list(selected.shape), str(selected.dtype), changed.tobytes())
+            )
         return result
 
     def _trainer_scores(self, trainer, update: int):
@@ -497,7 +522,7 @@ class MismatchProbeCallback(TrainerCallback):
             values = concatenate_outputs_after_mesh_dispatch(trainer.policy_model.actor_infos, outputs)["output"][:n]
             route_observations = self._route_observations(trainer, outputs, mode)
             duration = time.monotonic() - started
-            label = f"trainer@{update}:{mode}"
+            label = trainer_scoring(update, mode)
             self.timing[f"{label}/seconds"] = duration
             for ordered_position, original_position in enumerate(order):
                 row = rows[original_position]
@@ -506,7 +531,7 @@ class MismatchProbeCallback(TrainerCallback):
                 if len(logprobs) != length or not all(math.isfinite(value) for value in logprobs):
                     raise ValueError(f"{label} returned incomplete or nonfinite scores for {row.sample_id}")
                 result.append(
-                    self._schema().ScoreRow(
+                    mismatch_schema().ScoreRow(
                         probe_hash=self.probe_hash,
                         sample_id=row.sample_id,
                         scoring=label,
@@ -516,22 +541,22 @@ class MismatchProbeCallback(TrainerCallback):
                         forward_seconds=duration / n,
                         expert_choices=None
                         if route_observations[original_position] is None
-                        else route_observations[original_position][0],
+                        else route_observations[original_position].data,
                         expert_choices_shape=None
                         if route_observations[original_position] is None
-                        else route_observations[original_position][1],
+                        else route_observations[original_position].shape,
                         expert_choices_dtype=None
                         if route_observations[original_position] is None
-                        else route_observations[original_position][2],
+                        else route_observations[original_position].dtype,
                         replacement_mask=None
                         if route_observations[original_position] is None
-                        else route_observations[original_position][3],
+                        else route_observations[original_position].replacements,
                     )
                 )
         return result
 
     def _manifest(self, trainer, *, status: str):
-        schema = self._schema()
+        schema = mismatch_schema()
         return schema.ManifestRow(
             archive=self.archive_uri,
             status=status,
@@ -597,23 +622,24 @@ class MismatchProbeCallback(TrainerCallback):
         started = time.monotonic()
         if update == 0:
             if self.spec.reuse_probe:
-                trajectory, uids, sample_ids, seeds = await asyncio.to_thread(self._from_source)
+                samples = await asyncio.to_thread(self._from_source)
             else:
                 generation_started = time.monotonic()
                 original_metrics = dict(trainer.all_metrics)
                 try:
-                    trajectory, uids, sample_ids, seeds = await self._generate(trainer)
+                    samples = await self._generate(trainer)
                 finally:
                     trainer.all_metrics = original_metrics
                 self.timing["probe/generation_seconds"] = time.monotonic() - generation_started
-            self._collate_and_freeze(trainer, trajectory, uids, sample_ids, seeds)
+            self._collate_and_freeze(trainer, samples.trajectory, samples.prompt_ids, samples.sample_ids, samples.seeds)
         elif self.training_input is None:
             raise RuntimeError("mismatch probe update 0 was not collected")
 
         # The policy is still offloaded and the inference engine awake after
         # each normal weight sync. Re-read first, then temporarily swap residency.
         rescore_started = time.monotonic()
-        rescore_rows = await self._rescore_vllm_after_weight_hash(trainer, update)
+        self.weights[update] = "pending"
+        rescore_rows = await self._rescore_vllm(trainer, update)
         self.timing[f"update@{update}/vllm_total_seconds"] = time.monotonic() - rescore_started
         if trainer.colocate_all:
             await trainer.inference_engine_client.sleep()
@@ -646,10 +672,10 @@ class MismatchProbeCallback(TrainerCallback):
         if update == 0 and self.source_manifest is None:
             for row, values in zip(self.probes, self.generation_scores, strict=True):
                 scores.append(
-                    self._schema().ScoreRow(
+                    mismatch_schema().ScoreRow(
                         probe_hash=self.probe_hash,
                         sample_id=row.sample_id,
-                        scoring="vllm.generate@0",
+                        scoring=GENERATION_SCORING,
                         update=0,
                         weights_hash=self.weights[0],
                         logprobs=values,
@@ -664,13 +690,13 @@ class MismatchProbeCallback(TrainerCallback):
                 key: float(value) for key, value in trainer.all_timings.items() if isinstance(value, (int, float))
             },
         }
-        reference_name = f"vllm.rescore@{update}"
+        reference_name = rescore_scoring(update, CACHE_OFF)
         reference = {row.sample_id: row for row in scores if row.scoring == reference_name}
         if not reference:
-            reference = {row.sample_id: row for row in scores if row.scoring == f"{reference_name}:on"}
+            reference = {row.sample_id: row for row in scores if row.scoring == rescore_scoring(update, CACHE_ON)}
         if len(reference) == len(self.probes):
             for mode in ("native", "repeat", *self.spec.extra_trainer_modes):
-                name = f"trainer@{update}:{mode}"
+                name = trainer_scoring(update, mode)
                 scored = {row.sample_id: row for row in scores if row.scoring == name}
                 if len(scored) != len(self.probes):
                     continue
@@ -719,8 +745,3 @@ class MismatchProbeCallback(TrainerCallback):
             len(scores),
             status,
         )
-
-    async def _rescore_vllm_after_weight_hash(self, trainer, update: int):
-        # Use a temporary marker until the trainer shards have been hashed.
-        self.weights[update] = "pending"
-        return await self._rescore_vllm(trainer, update)

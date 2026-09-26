@@ -46,26 +46,3 @@ def require_token_identity(
         raise ValueError(f"mismatch probe token identity failed for {sample_id}: prompt IDs differ")
     if list(engine_response) != list(trainer_response):
         raise ValueError(f"mismatch probe token identity failed for {sample_id}: response IDs differ")
-
-
-def chosen_logprobs_from_prompt_logprobs(
-    *,
-    prompt_lengths: Sequence[int],
-    response_ids: Sequence[Sequence[int]],
-    prompt_logprobs: Sequence[Sequence[dict[int, float] | None]],
-) -> list[list[float]]:
-    """Read exact chosen tokens at causal positions from vLLM prompt scoring."""
-    if len(prompt_lengths) != len(response_ids) or len(response_ids) != len(prompt_logprobs):
-        raise ValueError("vLLM prompt-logprob rows do not align with frozen probe rows")
-    result = []
-    for row, (prefix_length, tokens, scores) in enumerate(
-        zip(prompt_lengths, response_ids, prompt_logprobs, strict=True)
-    ):
-        chosen = []
-        for offset, token in enumerate(tokens):
-            position = prefix_length + offset
-            if position >= len(scores) or scores[position] is None or token not in scores[position]:
-                raise ValueError(f"vLLM omitted frozen token {token} at row {row}, response offset {offset}")
-            chosen.append(float(scores[position][token]))
-        result.append(chosen)
-    return result

@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any
+
+from skyrl_train.config.mismatch_probe import GENERATION_SCORING
 
 
-def _schema():
+def mismatch_schema():
     # The schema lives in Marin FineStore so the producer and report reader
     # validate against precisely the same row contract.
     try:
@@ -17,13 +21,22 @@ def _schema():
     return mismatch
 
 
+@dataclass(frozen=True)
+class FrozenProbeSource:
+    """Completed source archive rows needed to reuse frozen tokens."""
+
+    manifest: Any
+    probes: list[Any]
+    generations: dict[str, Any]
+
+
 class MismatchArchive:
     """One archive writer; each completed score group is a transaction."""
 
     def __init__(self, uri: str, *, writer_id: str):
         from finestore.store import DataStore
 
-        self.schema = _schema()
+        self.schema = mismatch_schema()
         self.uri = uri
         self.store = DataStore.open(uri, writer_id=writer_id)
         self.schema.register_mismatch_tables(self.store)
@@ -51,21 +64,21 @@ class MismatchArchive:
         self.store.close()
 
 
-def read_frozen_probe(uri: str):
-    """Read a completed source archive without copying its generation scores."""
+def read_frozen_probe(uri: str) -> FrozenProbeSource:
+    """Read completed source rows, including their generation scores."""
     from finestore.reader import ReadView
 
-    schema = _schema()
+    schema = mismatch_schema()
     view = ReadView(uri)
     manifests = [schema.ManifestRow.model_validate(row) for row in view.scan(schema.MANIFEST_TABLE).to_pylist()]
     if len(manifests) != 1 or manifests[0].status != "complete":
         raise ValueError(f"reuse_probe source {uri} is not a single complete mismatch archive")
     probes = [schema.ProbeRow.model_validate(row) for row in view.scan(schema.PROBE_TABLE).to_pylist()]
     scores = [schema.ScoreRow.model_validate(row) for row in view.scan(schema.SCORES_TABLE).to_pylist()]
-    generations = {row.sample_id: row for row in scores if row.scoring == "vllm.generate@0"}
+    generations = {row.sample_id: row for row in scores if row.scoring == GENERATION_SCORING}
     if not probes or len(generations) != len(probes):
         raise ValueError("reuse_probe source has incomplete generation-time scores")
     probes.sort(key=lambda row: row.batch_position)
     if any(row.probe_hash != manifests[0].probe_hash for row in probes):
         raise ValueError("reuse_probe source probe hashes do not match the manifest")
-    return manifests[0], probes, generations
+    return FrozenProbeSource(manifests[0], probes, generations)

@@ -22,6 +22,7 @@ from transformers import AutoTokenizer
 from collections import defaultdict, deque
 
 import numpy as np
+from skyrl_train.mismatch_probe.callback import MismatchProbeCallback
 from skyrl_train.curriculum import CurriculumSampler
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
@@ -310,8 +311,6 @@ class RayPPOTrainer:
         else:
             self.callback_handler = DefaultCallbackHandler(cfg)
         if cfg.trainer.mismatch_probe.enabled:
-            from skyrl_train.mismatch_probe.callback import MismatchProbeCallback
-
             self.callback_handler.add_callback(MismatchProbeCallback(cfg))
 
         # Trainer control object for callback coordination

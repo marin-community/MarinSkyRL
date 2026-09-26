@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from collections import deque
 from contextlib import contextmanager
+from skyrl_train.config.mismatch_probe import PROBE_MODES
 from enum import Enum
 import math
 from typing import Callable, Mapping, Optional, Sequence, Tuple
@@ -255,15 +256,13 @@ class MegatronRouterReplay:
         self._sentinel_rows = 0
         self._scoring_mode = "router_replay"
         self._keep_fraction: float | None = None
-        self._replacement_slots = 0
-        self._captured_slots = 0
 
     @contextmanager
     def scoring_mode(self, mode: str, keep_fraction: float | None = None):
         """Scope a probe forward without changing subsequent training forwards."""
         if self._phase is not _Phase.IDLE:
             raise RuntimeError("router replay: scoring mode requires an idle controller")
-        if mode not in {"router_replay", "router_replay_filtered"}:
+        if mode not in PROBE_MODES:
             raise ValueError(f"unsupported replay scoring mode: {mode}")
         if mode == "router_replay_filtered" and keep_fraction is None:
             raise ValueError("filtered replay requires keep_fraction")
@@ -366,13 +365,6 @@ class MegatronRouterReplay:
         self._sentinel_rows = 0
         return {"hit_fraction": hit_fraction, "sentinel_fraction": sentinel_fraction}
 
-    def pop_probe_metrics(self) -> dict[str, float]:
-        """Return filtered replacement rate since the previous probe read."""
-        rate = self._replacement_slots / self._captured_slots if self._captured_slots else 0.0
-        self._replacement_slots = 0
-        self._captured_slots = 0
-        return {"replacement_fraction": rate}
-
     def take_probe_observations(self) -> list[dict[str, object]]:
         """Return route choices captured only for an explicitly marked probe forward."""
         observations, self._probe_observations = self._probe_observations, []
@@ -393,8 +385,9 @@ class MegatronRouterReplay:
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return ``(probs, top_indices)`` with rollout choices on masked rows.
 
-        Masked rows return the captured target experts; every other row returns
-        the native top-k. ``probs`` are always the live routing scores gathered
+        Masked rows use captured experts, with implausible choices replaced by
+        native experts in filtered mode. Other rows use the native top-k.
+        ``probs`` are always the live routing scores gathered
         at the returned indices, so gradients flow through the gate on both
         replayed and native rows. Runs mcore's ``default_compute_topk``
         unconditionally to keep the autograd graph identical to a flag-off
@@ -419,8 +412,6 @@ class MegatronRouterReplay:
         replaced = torch.zeros_like(targets, dtype=torch.bool)
         if self._scoring_mode == "router_replay_filtered":
             idx, replaced = filtered_replay_topk(scores, native_idx, targets, mask, self._keep_fraction)
-            self._replacement_slots += int(replaced.sum().item())
-            self._captured_slots += int(mask.sum().item()) * topk
         else:
             idx = torch.where(mask.unsqueeze(-1), targets, native_idx)
         probs = scores.gather(1, idx)

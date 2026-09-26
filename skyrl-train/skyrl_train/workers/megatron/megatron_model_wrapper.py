@@ -58,6 +58,16 @@ class MegatronForwardMicroBatch:
 
 
 @dataclass(frozen=True)
+class RouterReplayTargets:
+    """Per-layer router targets and aligned row masks for one forward."""
+
+    per_layer: dict[int, torch.Tensor]
+    mask: torch.Tensor
+    response_mask: torch.Tensor
+    probe_positions: Optional[torch.Tensor]
+
+
+@dataclass(frozen=True)
 class MegatronPolicyMicroBatch:
     """Typed policy payload consumed by the Megatron pipeline scheduler."""
 
@@ -188,8 +198,8 @@ class MegatronModelWrapper:
         (packing or left-pad removal, with the CP chunk split), flattens
         sequence-major (``s*B + b``, mirroring the router view), and slices to
         this TP rank's contiguous sequence chunk under sequence parallelism.
-        Returns ``(per_layer, mask, response_mask)`` keyed by capture index for
-        the layers the model chunk about to run owns.
+        The result contains per-layer targets, replay and response masks, and
+        optional probe positions aligned to the model chunk's router rows.
         """
         controller = self.router_replay
         assert controller is not None
@@ -261,7 +271,7 @@ class MegatronModelWrapper:
             if probe_positions is not None:
                 probe_positions = slice_sequence_parallel(probe_positions, **slice_kwargs)
         per_layer = {idx: flat[:, idx, :].to(device) for idx in layer_indices}
-        return per_layer, mask.to(device), response_mask.to(device), probe_positions
+        return RouterReplayTargets(per_layer, mask.to(device), response_mask.to(device), probe_positions)
 
     def _forward_micro_batch(
         self,
@@ -291,11 +301,15 @@ class MegatronModelWrapper:
             layer_indices = self.router_replay.local_indices_for_module.get(
                 id(model), self.router_replay.local_layer_indices
             )
-            per_layer, mask, response_mask, probe_positions = self._build_router_replay_targets(
+            targets = self._build_router_replay_targets(
                 sequences, attention_mask, rollout_routed_experts, num_actions, layer_indices, probe_row_indices
             )
             self.router_replay.begin_forward(
-                per_layer, mask, response_mask, record_recompute=record_recompute, probe_positions=probe_positions
+                targets.per_layer,
+                targets.mask,
+                targets.response_mask,
+                record_recompute=record_recompute,
+                probe_positions=targets.probe_positions,
             )
             armed = True
         try:
