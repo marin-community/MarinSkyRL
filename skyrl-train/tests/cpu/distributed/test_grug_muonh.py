@@ -29,7 +29,7 @@ class _Router(_Weight):
 
 
 class _TinyGrug(nn.Module):
-    """Small module whose parameter names cover every production route."""
+    """HF-shaped fixture for the MuonH, AdamH, and Adam update rules."""
 
     def __init__(self, fixture) -> None:
         super().__init__()
