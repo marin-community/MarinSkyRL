@@ -45,7 +45,7 @@ from marinskyrl.inference_placement import (
     validate_expert_block_transport,
 )
 from marinskyrl.resource_locator import is_cloud_uri
-from marinskyrl.runtime_options import GDNBackend, R3Transport, WeightSyncTransport
+from marinskyrl.runtime_options import GDNBackend, PauseMode, R3Transport, WeightSyncTransport
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from .algorithm_registry import (
@@ -58,7 +58,6 @@ from .algorithm_registry import (
 )
 from .logging_utils import format_exception_text
 from .loss_reduction import SEQUENCE_MEAN_LOSS_REDUCTION, SUPPORTED_LOSS_REDUCTIONS
-from skyrl_train.inference_engines.base import PauseMode
 from .nccl_environment import worker_nccl_environment
 from .placement_geometry import validate_colocated_engine_geometry
 
@@ -628,14 +627,8 @@ def validate_cfg(cfg: DictConfig):
         algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
 
-    fully_async = cfg.trainer.fully_async
-    if fully_async.pause_mode not in tuple(PauseMode):
-        raise ValueError(f"trainer.fully_async.pause_mode must be one of {[mode.value for mode in PauseMode]}")
-    if type(fully_async.clear_kv_cache_on_weight_sync) is not bool:
-        raise ValueError("trainer.fully_async.clear_kv_cache_on_weight_sync must be boolean")
-    if type(fully_async.first_token_admission) is not bool:
-        raise ValueError("trainer.fully_async.first_token_admission must be boolean")
-    max_buffered_groups = fully_async.max_buffered_groups
+    PauseMode(cfg.trainer.fully_async.pause_mode)
+    max_buffered_groups = cfg.trainer.fully_async.max_buffered_groups
     if max_buffered_groups is not None and (type(max_buffered_groups) is not int or max_buffered_groups < 1):
         raise ValueError("trainer.fully_async.max_buffered_groups must be a positive integer or null")
     behavior_clip = cfg.trainer.algorithm.policy_loss_type == "behavior_clip"

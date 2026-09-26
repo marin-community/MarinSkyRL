@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-from enum import StrEnum
 from typing import List, Dict, TypedDict, Any, Optional, Hashable, NotRequired
 
 from skyrl_train.policy_version import PolicyVersionSegment
@@ -32,13 +31,6 @@ class InferenceEngineInput(TypedDict):
     chat_completion_params: NotRequired[List[Dict[str, Any]]]
     # Preserve sampled tokens when the backend re-renders a structured assistant turn.
     chat_continuations: NotRequired[List[ChatContinuation | None]]
-
-
-class PauseMode(StrEnum):
-    """What the engines do with in-flight requests while weights are reloaded."""
-
-    ABORT = "abort"
-    KEEP = "keep"
 
 
 class InferenceEngineOutput(TypedDict):

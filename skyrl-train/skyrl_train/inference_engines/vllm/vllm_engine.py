@@ -54,7 +54,6 @@ from contextvars import ContextVar
 
 
 from skyrl_train.inference_engines.base import (
-    PauseMode,
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
@@ -65,6 +64,7 @@ from skyrl_train.inference_engines.base import (
 from skyrl_train.inference_engines.response_topk import select_response_topk
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from marinskyrl.inference_placement import InferenceWorkerPlacement
+from marinskyrl.runtime_options import PauseMode
 from skyrl_train.inference_engines.placement import inference_worker_placement
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
 from skyrl_train.weight_sync.expert_block.receiver import ExpertBlockReceiver
@@ -1260,8 +1260,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
     async def pause_generation(self) -> None:
         raise NotImplementedError("Pausing generation is only supported for AsyncVLLMInferenceEngine.")
 
-    async def resume_generation(self, policy_version: int | None = None) -> None:
-        del policy_version
+    async def resume_generation(self) -> None:
         raise NotImplementedError("Resuming generation is only supported for AsyncVLLMInferenceEngine.")
 
 
