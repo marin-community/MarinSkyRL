@@ -27,7 +27,12 @@ from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_
 from megatron.core.utils import get_pg_rank
 
 from skyrl_train.models.grug_megatron import GrugGPTModel, grug_block_spec
-from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, grug_long_layer_flags
+from skyrl_train.models.grug_moe import (
+    GRUG_DEFAULT_GLOBAL_EVERY,
+    GRUG_MOE_MODEL_TYPE,
+    GRUG_SPLIT_EXPERT_SCHEMA_VERSION,
+    grug_long_layer_flags,
+)
 
 GRUG_ROTARY_PERCENT = 0.5
 
@@ -38,7 +43,7 @@ class GrugModelProvider(GPTModelProvider):
 
     grug_qk_mult: float = 1.0
     grug_qk_mult_long_scale: float = 1.0
-    grug_global_every: int = 4
+    grug_global_every: int = GRUG_DEFAULT_GLOBAL_EVERY
     grug_local_kv_heads: int = 1
     grug_global_kv_heads: int = 1
     grug_num_shared_experts: int = 1
@@ -270,7 +275,7 @@ class GrugMoeBridge(MegatronModelBridge):
                     ),
                 ]
             )
-        if config.grugmoe_artifact_schema_version == 2:
+        if config.grugmoe_artifact_schema_version == GRUG_SPLIT_EXPERT_SCHEMA_VERSION:
             mappings.extend(
                 [
                     GatedMLPMapping(
