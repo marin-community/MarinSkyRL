@@ -137,7 +137,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
 
     class CorruptibleEngine(vllm_engine.AsyncVLLMInferenceEngine):
         async def flip_installed_byte(self):
-            return await self._get_engine().collective_rpc(flip_one_installed_byte)
+            return await self.llm.collective_rpc(flip_one_installed_byte)
 
     # The test's actor only adds the byte-flipping RPC. The transport is the production code.
     monkeypatch.setattr(vllm_engine, "AsyncVLLMRayActor", ray.remote(CorruptibleEngine))

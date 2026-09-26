@@ -57,6 +57,13 @@ class RolloutBufferConfig:
         """Groups leased, committed, or batched that the next ``max_staleness_steps + 1`` steps can train on."""
         return (self.max_staleness_steps + 1) * self.batch_size
 
+    @property
+    def max_concurrent_rollouts(self) -> int:
+        """The most groups that can generate at once."""
+        if self.max_in_flight is None:
+            return self.max_untrained_groups
+        return min(self.max_in_flight, self.max_untrained_groups)
+
 
 @dataclass(frozen=True)
 class RolloutLease:

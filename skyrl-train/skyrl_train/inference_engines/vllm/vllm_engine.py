@@ -1074,182 +1074,6 @@ class WorkerWrap:
         return getattr(receiver, method)(*args)
 
 
-class BaseVLLMInferenceEngine(InferenceEngineInterface):
-    """Base class containing shared logic between sync and async VLLM engines."""
-
-    def __init__(self, *args, bundle_indices: list = None, **kwargs):
-        self._rendezvous_port_reservation = kwargs.pop("rendezvous_port_reservation", None)
-        setup_envvars_for_vllm(kwargs, bundle_indices)
-        vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
-        logger.info(
-            f"BaseVLLMInferenceEngine: vllm_v1_disable_multiproc={vllm_v1_disable_multiproc}, "
-            f"vllm.__version__={vllm.__version__}, "
-            f"VLLM_ENABLE_V1_MULTIPROCESSING={os.environ.get('VLLM_ENABLE_V1_MULTIPROCESSING', '<unset>')}"
-        )
-        if vllm_v1_disable_multiproc or vllm.__version__ == "0.8.2":
-            # https://github.com/vllm-project/vllm/blob/effc5d24fae10b29996256eb7a88668ff7941aed/examples/offline_inference/reproduciblity.py#L11
-            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-            logger.info("BaseVLLMInferenceEngine: set VLLM_ENABLE_V1_MULTIPROCESSING=0")
-
-        # Store common attributes
-        self._tp_size = kwargs.get("tensor_parallel_size", 1)
-        self._pp_size = kwargs.get("pipeline_parallel_size", 1)
-        self._dp_size = kwargs.get("data_parallel_size", 1)
-        self._is_lora = kwargs.get("enable_lora", False)
-
-        if "rope_scaling" in kwargs:
-            kwargs.pop("rope_scaling")
-        # Let subclass create the appropriate engine
-        self.llm = self._create_engine(*args, **kwargs)
-
-        # Weight loader is created by subclass after engine initialization
-        self._weight_loader = None
-
-    def tp_size(self):
-        return self._tp_size
-
-    def pp_size(self):
-        return self._pp_size
-
-    def dp_size(self):
-        return self._dp_size
-
-    def _create_engine(self, *args, **kwargs):
-        """Abstract method for subclasses to implement engine creation."""
-        raise NotImplementedError("Subclasses must implement _create_engine")
-
-    def _release_rendezvous_port_reservation(self) -> None:
-        if self._rendezvous_port_reservation is None:
-            return
-        ray.get(self._rendezvous_port_reservation.release.remote())
-        self._rendezvous_port_reservation = None
-
-    def _preprocess_prompts(self, input_batch: InferenceEngineInput):
-        """Common prompt preprocessing logic."""
-        prompts = input_batch.get("prompts")
-        prompt_token_ids = input_batch.get("prompt_token_ids")
-        request_sampling_params = input_batch.get("sampling_params")
-        per_prompt_sampling_params = input_batch.get("sampling_params_per_prompt")
-        if self._validate_rollout_logprob_sampling and request_sampling_params is not None:
-            if request_sampling_params.get("logprobs") is not None:
-                validate_behavior_logprob_sampling(request_sampling_params)
-
-        assert prompts is None and prompt_token_ids is not None, (
-            "The vLLM engine only accepts `prompt_token_ids`, not `prompts`."
-        )
-
-        base_params = request_sampling_params or {}
-        if per_prompt_sampling_params is None:
-            sampling_params = SamplingParams(**base_params)
-        else:
-            if len(per_prompt_sampling_params) != len(prompt_token_ids):
-                raise ValueError("per-prompt sampling parameters must align with prompt token rows")
-            if any(set(override) != {"prompt_logprob_token_ids"} for override in per_prompt_sampling_params):
-                raise ValueError("per-prompt sampling parameters only support prompt_logprob_token_ids")
-            sampling_params = [SamplingParams(**{**base_params, **override}) for override in per_prompt_sampling_params]
-
-        return prompt_token_ids, sampling_params
-
-    @staticmethod
-    def _response_top_k(sampling_params: SamplingParams | list[SamplingParams]) -> int | None:
-        first = sampling_params[0] if isinstance(sampling_params, list) else sampling_params
-        return first.logprobs
-
-    def _postprocess_outputs(self, outputs, response_top_k: int | None = None):
-        """Common output processing logic."""
-        responses: List[str] = []
-        stop_reasons: List[str] = []
-        response_ids: List[List[int]] = []
-        response_logprobs: Optional[List[List[float]]] = []
-        student_topk_indices: List[List[List[int]]] = []
-        behavior_topk_logprobs: List[List[List[float]]] = []
-        all_prompt_logprobs: Optional[List] = None
-
-        for output in outputs:
-            # TODO(tgriggs): Support n>1 sampling.
-            assert len(output.outputs) == 1, (
-                "Each prompt should have only one responses. n>1 sampling is supported by copying prompts."
-            )
-            resp = output.outputs[0]
-            responses.append(resp.text)
-            stop_reasons.append(resp.finish_reason)
-            response_ids.append(resp.token_ids)
-            _logprobs = None
-            selected_ids = []
-            selected_scores = []
-            if resp.logprobs:
-                _logprobs = []
-                for i, token_logprobs in enumerate(resp.logprobs):
-                    token_logprobs: Dict[str, Logprob]
-                    token_id = resp.token_ids[i]
-                    logprob = token_logprobs[token_id].logprob
-                    _logprobs.append(logprob)
-                    if response_top_k is not None and response_top_k > 0:
-                        ids, scores = select_response_topk(
-                            {token_id: value.logprob for token_id, value in token_logprobs.items()}, response_top_k
-                        )
-                        selected_ids.append(ids)
-                        selected_scores.append(scores)
-                    del token_logprobs
-            response_logprobs.append(_logprobs)
-            if response_top_k is not None and response_top_k > 0:
-                if len(selected_ids) != len(resp.token_ids):
-                    raise ValueError("vLLM omitted response top-K logprobs for generated tokens")
-                student_topk_indices.append(selected_ids)
-                behavior_topk_logprobs.append(selected_scores)
-
-            # Extract prompt_logprobs if available (used for teacher scoring)
-            if hasattr(output, "prompt_logprobs") and output.prompt_logprobs is not None:
-                if all_prompt_logprobs is None:
-                    all_prompt_logprobs = []
-                # Convert vLLM's List[Optional[Dict[int, Logprob]]] to
-                # List[Optional[Dict[int, float]]] (extract .logprob from Logprob objects)
-                prompt_lps = []
-                for pos_logprobs in output.prompt_logprobs:
-                    if pos_logprobs is None:
-                        prompt_lps.append(None)
-                    else:
-                        prompt_lps.append(
-                            {
-                                token_id: lp.logprob if hasattr(lp, "logprob") else lp
-                                for token_id, lp in pos_logprobs.items()
-                            }
-                        )
-                all_prompt_logprobs.append(prompt_lps)
-
-        if len(response_logprobs) and response_logprobs[0] is None:
-            response_logprobs = None  # hack: assume uniform sampling params
-
-        result = InferenceEngineOutput(
-            responses=responses,
-            stop_reasons=stop_reasons,
-            response_ids=response_ids,
-            response_logprobs=response_logprobs,
-            prompt_logprobs=all_prompt_logprobs,
-        )
-        if response_top_k is not None and response_top_k > 0:
-            result["student_topk_indices"] = student_topk_indices
-            result["behavior_topk_logprobs"] = behavior_topk_logprobs
-        return result
-
-    def _get_engine(self):
-        """Get the underlying engine for RPC calls."""
-        return self.llm.engine if hasattr(self.llm, "engine") else self.llm
-
-    def get_model_max_len(self) -> int:
-        """Return the context limit resolved by vLLM's model configuration."""
-        return self._get_engine().model_config.max_model_len
-
-    def _is_lora_disk_loading_request(self, request: NamedWeightsUpdateRequest) -> bool:
-        """Check if this is a LoRA disk loading request."""
-        is_lora = request["names"][0] == LORA_DISK_LOAD_NAME
-        if is_lora:
-            assert (
-                request.get("extras") and len(request["extras"]) > 0 and LORA_DISK_PATH_KEY in request["extras"][0]
-            ), f"vLLM LoRA weight update requests must contain the disk load path under key `{LORA_DISK_PATH_KEY}`"
-        return is_lora
-
-
 class V1LoggingStatLoggerFixed(LoggingStatLogger):
     """
     A fixed version of LoggingStatLogger that actually logs during the record method.
@@ -1543,15 +1367,171 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
             return result
 
 
-class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
-    """Asynchronous VLLM engine."""
+class AsyncVLLMInferenceEngine(InferenceEngineInterface):
+    """A vLLM ``AsyncLLMEngine`` serving generation, OpenAI-style requests, and weight updates."""
 
-    def __init__(self, *args, **kwargs):
-        # Generate unique engine ID before calling super().__init__() which calls _create_engine
+    def __init__(self, *args, bundle_indices: list = None, **kwargs):
+        # _create_engine installs stat loggers that report under this engine ID.
         self._stats_engine_id = uuid4().hex
         self._stats_attributes: Dict[str, str] = {}
-        super().__init__(*args, **kwargs)
+        self._rendezvous_port_reservation = kwargs.pop("rendezvous_port_reservation", None)
+        setup_envvars_for_vllm(kwargs, bundle_indices)
+        vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
+        logger.info(
+            f"AsyncVLLMInferenceEngine: vllm_v1_disable_multiproc={vllm_v1_disable_multiproc}, "
+            f"vllm.__version__={vllm.__version__}, "
+            f"VLLM_ENABLE_V1_MULTIPROCESSING={os.environ.get('VLLM_ENABLE_V1_MULTIPROCESSING', '<unset>')}"
+        )
+        if vllm_v1_disable_multiproc or vllm.__version__ == "0.8.2":
+            # https://github.com/vllm-project/vllm/blob/effc5d24fae10b29996256eb7a88668ff7941aed/examples/offline_inference/reproduciblity.py#L11
+            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+            logger.info("AsyncVLLMInferenceEngine: set VLLM_ENABLE_V1_MULTIPROCESSING=0")
+
+        self._tp_size = kwargs.get("tensor_parallel_size", 1)
+        self._pp_size = kwargs.get("pipeline_parallel_size", 1)
+        self._dp_size = kwargs.get("data_parallel_size", 1)
+        self._is_lora = kwargs.get("enable_lora", False)
+
+        if "rope_scaling" in kwargs:
+            kwargs.pop("rope_scaling")
+        self.llm = self._create_engine(*args, **kwargs)
         self._weight_loader = VLLMWeightLoader(self.llm)
+
+    def tp_size(self):
+        return self._tp_size
+
+    def pp_size(self):
+        return self._pp_size
+
+    def dp_size(self):
+        return self._dp_size
+
+    def _release_rendezvous_port_reservation(self) -> None:
+        if self._rendezvous_port_reservation is None:
+            return
+        ray.get(self._rendezvous_port_reservation.release.remote())
+        self._rendezvous_port_reservation = None
+
+    def _preprocess_prompts(self, input_batch: InferenceEngineInput):
+        """Common prompt preprocessing logic."""
+        prompts = input_batch.get("prompts")
+        prompt_token_ids = input_batch.get("prompt_token_ids")
+        request_sampling_params = input_batch.get("sampling_params")
+        per_prompt_sampling_params = input_batch.get("sampling_params_per_prompt")
+        if self._validate_rollout_logprob_sampling and request_sampling_params is not None:
+            if request_sampling_params.get("logprobs") is not None:
+                validate_behavior_logprob_sampling(request_sampling_params)
+
+        assert prompts is None and prompt_token_ids is not None, (
+            "The vLLM engine only accepts `prompt_token_ids`, not `prompts`."
+        )
+
+        base_params = request_sampling_params or {}
+        if per_prompt_sampling_params is None:
+            sampling_params = SamplingParams(**base_params)
+        else:
+            if len(per_prompt_sampling_params) != len(prompt_token_ids):
+                raise ValueError("per-prompt sampling parameters must align with prompt token rows")
+            if any(set(override) != {"prompt_logprob_token_ids"} for override in per_prompt_sampling_params):
+                raise ValueError("per-prompt sampling parameters only support prompt_logprob_token_ids")
+            sampling_params = [SamplingParams(**{**base_params, **override}) for override in per_prompt_sampling_params]
+
+        return prompt_token_ids, sampling_params
+
+    @staticmethod
+    def _response_top_k(sampling_params: SamplingParams | list[SamplingParams]) -> int | None:
+        first = sampling_params[0] if isinstance(sampling_params, list) else sampling_params
+        return first.logprobs
+
+    def _postprocess_outputs(self, outputs, response_top_k: int | None = None):
+        """Common output processing logic."""
+        responses: List[str] = []
+        stop_reasons: List[str] = []
+        response_ids: List[List[int]] = []
+        response_logprobs: Optional[List[List[float]]] = []
+        student_topk_indices: List[List[List[int]]] = []
+        behavior_topk_logprobs: List[List[List[float]]] = []
+        all_prompt_logprobs: Optional[List] = None
+
+        for output in outputs:
+            # TODO(tgriggs): Support n>1 sampling.
+            assert len(output.outputs) == 1, (
+                "Each prompt should have only one responses. n>1 sampling is supported by copying prompts."
+            )
+            resp = output.outputs[0]
+            responses.append(resp.text)
+            stop_reasons.append(resp.finish_reason)
+            response_ids.append(resp.token_ids)
+            _logprobs = None
+            selected_ids = []
+            selected_scores = []
+            if resp.logprobs:
+                _logprobs = []
+                for i, token_logprobs in enumerate(resp.logprobs):
+                    token_logprobs: Dict[str, Logprob]
+                    token_id = resp.token_ids[i]
+                    logprob = token_logprobs[token_id].logprob
+                    _logprobs.append(logprob)
+                    if response_top_k is not None and response_top_k > 0:
+                        ids, scores = select_response_topk(
+                            {token_id: value.logprob for token_id, value in token_logprobs.items()}, response_top_k
+                        )
+                        selected_ids.append(ids)
+                        selected_scores.append(scores)
+                    del token_logprobs
+            response_logprobs.append(_logprobs)
+            if response_top_k is not None and response_top_k > 0:
+                if len(selected_ids) != len(resp.token_ids):
+                    raise ValueError("vLLM omitted response top-K logprobs for generated tokens")
+                student_topk_indices.append(selected_ids)
+                behavior_topk_logprobs.append(selected_scores)
+
+            # Extract prompt_logprobs if available (used for teacher scoring)
+            if hasattr(output, "prompt_logprobs") and output.prompt_logprobs is not None:
+                if all_prompt_logprobs is None:
+                    all_prompt_logprobs = []
+                # Convert vLLM's List[Optional[Dict[int, Logprob]]] to
+                # List[Optional[Dict[int, float]]] (extract .logprob from Logprob objects)
+                prompt_lps = []
+                for pos_logprobs in output.prompt_logprobs:
+                    if pos_logprobs is None:
+                        prompt_lps.append(None)
+                    else:
+                        prompt_lps.append(
+                            {
+                                token_id: lp.logprob if hasattr(lp, "logprob") else lp
+                                for token_id, lp in pos_logprobs.items()
+                            }
+                        )
+                all_prompt_logprobs.append(prompt_lps)
+
+        if len(response_logprobs) and response_logprobs[0] is None:
+            response_logprobs = None  # hack: assume uniform sampling params
+
+        result = InferenceEngineOutput(
+            responses=responses,
+            stop_reasons=stop_reasons,
+            response_ids=response_ids,
+            response_logprobs=response_logprobs,
+            prompt_logprobs=all_prompt_logprobs,
+        )
+        if response_top_k is not None and response_top_k > 0:
+            result["student_topk_indices"] = student_topk_indices
+            result["behavior_topk_logprobs"] = behavior_topk_logprobs
+        return result
+
+    def get_model_max_len(self) -> int:
+        """Return the context limit resolved by vLLM's model configuration."""
+        return self.llm.model_config.max_model_len
+
+    def _is_lora_disk_loading_request(self, request: NamedWeightsUpdateRequest) -> bool:
+        """Check if this is a LoRA disk loading request."""
+        is_lora = request["names"][0] == LORA_DISK_LOAD_NAME
+        if is_lora:
+            assert (
+                request.get("extras") and len(request["extras"]) > 0 and LORA_DISK_PATH_KEY in request["extras"][0]
+            ), f"vLLM LoRA weight update requests must contain the disk load path under key `{LORA_DISK_PATH_KEY}`"
+        return is_lora
 
     def _create_stat_logger_factory(self):
         """Create a factory that produces stat loggers with the engine ID set."""
@@ -1758,7 +1738,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             # the abort itself — the goal is best-effort cleanup, not a
             # second hard exception.
             try:
-                engine = self._get_engine()
+                engine = self.llm
                 await engine.abort(request_ids)
             except Exception as abort_exc:
                 logger.warning(
@@ -1775,7 +1755,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
 
     async def sleep(self, *args: Any, **kwargs: Any):
-        engine = self._get_engine()
+        engine = self.llm
         output_processor = engine.output_processor
         # make sure that the engine is alive
         engine.engine_core.ensure_alive()
@@ -1797,7 +1777,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def init_weight_update_communicator(
         self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
     ):
-        engine = self._get_engine()
+        engine = self.llm
         return await engine.collective_rpc(
             "init_weight_update_communicator",
             args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
@@ -1805,17 +1785,17 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]):
         """Begin bounded capture on every worker rank."""
-        engine = self._get_engine()
+        engine = self.llm
         return await engine.collective_rpc("begin_online_eagle_capture", args=(config,))
 
     async def seal_online_eagle_capture(self, destination: str):
         """Publish capture from every rank before target synchronization."""
-        engine = self._get_engine()
+        engine = self.llm
         return await engine.collective_rpc("seal_online_eagle_capture", args=(destination,))
 
     async def update_draft_weights(self, weights_path: str):
         """Stream one completed checkpoint through vLLM's draft-update API."""
-        engine = self._get_engine()
+        engine = self.llm
         await engine.start_draft_weight_update()
         await engine.update_weights(WeightTransferUpdateRequest(update_info={"weights_path": weights_path}))
         await engine.finish_weight_update()
@@ -1838,12 +1818,12 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def begin_weight_update(self):
         """Signal engines to start accumulating weights for batched loading."""
-        engine = self._get_engine()
+        engine = self.llm
         return await engine.collective_rpc("begin_weight_update")
 
     async def end_weight_update(self):
         """Flush accumulated weights via model.load_weights()."""
-        engine = self._get_engine()
+        engine = self.llm
         return await engine.collective_rpc("end_weight_update")
 
     async def read_engine_weights(self, hf_names, dump_inventory: bool = False):
@@ -1855,31 +1835,31 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         contributions (TP/EP shards) into the full HF tensors to compare against
         the trainer's post-step weights.
         """
-        engine = self._get_engine()
+        engine = self.llm
         return await engine.collective_rpc("read_named_weights", args=(list(hf_names), dump_inventory))
 
     async def read_engine_expert_slots_raw(self, layer_idx: int):
         """TEST-ONLY (D1/D2 diag): per-engine-worker RAW FusedMoE local-slot weights +
         the engine's own expert_map for ``layer_idx``. Returns List[Dict] (one per
         engine worker rank). See ``WorkerWrap.read_expert_slots_raw``."""
-        engine = self._get_engine()
+        engine = self.llm
         return await engine.collective_rpc("read_expert_slots_raw", args=(int(layer_idx),))
 
     async def report_engine_hosts(self):
         """TEST-ONLY (disaggregation proof): hostname of every engine TP/EP worker."""
-        engine = self._get_engine()
+        engine = self.llm
         return await engine.collective_rpc("report_host")
 
     async def report_engine_placement(self):
         """Host, GPU and ranks of every worker of this engine."""
-        return await self._get_engine().collective_rpc("report_device_placement")
+        return await self.llm.collective_rpc("report_device_placement")
 
     async def expert_block_rpc(self, method: str, *args) -> list:
         """Call one expert-block sync method on every worker of this engine.
 
         Weights are installed only while the engine is paused. Returns one reply per worker.
         """
-        engine = self._get_engine()
+        engine = self.llm
         if method == "receive_weights" and not await engine.is_paused():
             raise RuntimeError("Expert-block sync installs weights only while generation is paused")
         return list(await engine.collective_rpc("expert_block_rpc", args=(method, *args)))
@@ -1888,24 +1868,24 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """#1685 fix: open the layerwise-reload bracket on every engine worker so the
         multi-chunk RL sync defers processing; finalize re-runs process_weights_after_loading
         (re-applies the FlashInfer-CUTLASS w13 swap). See WorkerWrap.skyrl_begin_weight_reload."""
-        engine = self._get_engine()
+        engine = self.llm
         return await engine.collective_rpc("skyrl_begin_weight_reload")
 
     async def finish_weight_reload(self):
         """#1685 fix: close the layerwise-reload bracket -> finalize_layerwise_reload ->
         process_weights_after_loading (swap_w13_to_w31) re-applied EXACTLY once."""
-        engine = self._get_engine()
+        engine = self.llm
         return await engine.collective_rpc("skyrl_finish_weight_reload")
 
     async def teardown(self):
         await self._destroy_weights_update_group()
 
     async def reset_prefix_cache(self):
-        engine = self._get_engine()
+        engine = self.llm
         await engine.reset_prefix_cache()
 
     async def _destroy_weights_update_group(self):
-        engine = self._get_engine()
+        engine = self.llm
         return await engine.collective_rpc("destroy_weights_update_group")
 
     # ----------------------------------------
@@ -2103,7 +2083,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def pause_generation(self) -> None:
         """Abort outstanding requests and hold the EngineCore scheduler idle for weight reload."""
-        engine = self._get_engine()
+        engine = self.llm
         outstanding_requests = len(engine.output_processor.request_states)
         # vLLM's scheduler-level pause is a utility RPC into EngineCore. In abort
         # mode it aborts running/waiting requests, waits for the scheduler to reach
@@ -2115,7 +2095,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def resume_generation(self) -> None:
         """Release the EngineCore scheduler after the weight reload completes."""
-        await self._get_engine().resume_generation()
+        await self.llm.resume_generation()
         logger.info("resume_generation() finished, EngineCore scheduler released")
 
 
@@ -2253,13 +2233,8 @@ class VLLMWeightLoader(WeightLoader):
     Workers create VLLMWeightTransferReceiver locally for the actual weight transfer.
     """
 
-    def __init__(self, engine: Any) -> None:
-        """Initialize the loader.
-
-        Args:
-            engine: The vLLM AsyncLLMEngine.
-        """
-        self._engine = engine.engine if hasattr(engine, "engine") else engine
+    def __init__(self, engine: vllm.AsyncLLMEngine) -> None:
+        self._engine = engine
 
     async def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
         """Load weights by coordinating RPC to workers.
