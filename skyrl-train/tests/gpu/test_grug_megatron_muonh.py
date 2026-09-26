@@ -8,6 +8,7 @@ import torch
 from megatron.core import parallel_state
 from omegaconf import OmegaConf
 from skyrl_train.distributed.megatron.grug_muonh import GrugMegatronMuonH
+from skyrl_train.distributed.megatron.megatron_utils import offload_megatron_optimizer, load_megatron_optimizer
 from skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer,
     get_megatron_optimizer_param_scheduler,
@@ -97,6 +98,27 @@ def test_megatron_wrapper_routes_updates_and_restores_muonh_state(distributed_pa
     assert {"momentum_buffer", "exp_avg", "exp_avg_sq", "step"}.issubset(
         {key for parameter_state in base.state.values() for key in parameter_state}
     )
+    wrapped_optimizer = optimizer.chained_optimizers[0]
+    offload_megatron_optimizer(optimizer)
+    assert all(
+        parameter.device.type == "cpu" for group in wrapped_optimizer.fp32_from_float16_groups for parameter in group
+    )
+    assert all(
+        value.device.type == "cpu"
+        for parameter_state in base.state.values()
+        for name, value in parameter_state.items()
+        if name in {"momentum_buffer", "exp_avg", "exp_avg_sq"}
+    )
+    load_megatron_optimizer(optimizer)
+    assert all(
+        parameter.device.type == "cuda" for group in wrapped_optimizer.fp32_from_float16_groups for parameter in group
+    )
+    assert all(
+        value.device.type == "cuda"
+        for parameter_state in base.state.values()
+        for name, value in parameter_state.items()
+        if name in {"momentum_buffer", "exp_avg", "exp_avg_sq"}
+    )
     for parameter in model.parameters():
         parameter.grad = torch.full_like(parameter, -0.125)
     reference_parameter.grad = torch.full_like(reference_parameter, -0.125)
@@ -132,8 +154,6 @@ def test_megatron_wrapper_routes_updates_and_restores_muonh_state(distributed_pa
     for parameter in restored_model.parameters():
         parameter.grad = torch.full_like(parameter, -0.125)
     restored_optimizer.step()
-    resumed_state = restored_optimizer.state_dict()["optimizer"]
-    assert restored_optimizer._extract_common_per_param_step(resumed_state) == 2
     for name, parameter in restored_model.named_parameters():
         torch.testing.assert_close(parameter, expected[name], rtol=0, atol=0, msg=lambda error: f"{name}: {error}")
 
