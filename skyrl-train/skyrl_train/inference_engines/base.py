@@ -50,9 +50,7 @@ class InferenceEngineOutput(TypedDict):
     # also be returned by vLLM, but is not forced into these top-K rows.
     student_topk_indices: NotRequired[List[List[List[int]]]]
     behavior_topk_logprobs: NotRequired[List[List[List[float]]]]
-    # Compact spans aligned with response_ids, under RESPONSE_POLICY_VERSION_SEGMENTS_KEY. A None
-    # version means the engine reported none; fully async training with first_token_admission=true
-    # rejects a sampled token that carries one.
+    # Spans of response_ids, each with the policy version that sampled it.
     response_policy_version_segments: NotRequired[List[List[PolicyVersionSegment]]]
     # prompt_logprobs: per-prompt-token top-K logprobs from vLLM (for teacher scoring).
     # Format: List[List[Optional[Dict[int, float]]]] — outer list is batch,

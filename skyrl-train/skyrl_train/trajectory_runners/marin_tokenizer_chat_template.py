@@ -1,9 +1,6 @@
-"""The chat template of marin-community/marin-tokenizer, the Snowball policies' tokenizer.
+"""marin-community/marin-tokenizer's ``chat_template.jinja`` at revision a5ca45f2feb6c959bd87b81689aa7279b5bdcaa2.
 
-Copied verbatim from ``chat_template.jinja`` at revision a5ca45f2feb6c959bd87b81689aa7279b5bdcaa2. The
-trajectory runner renders every turn through it and reads the ``generation`` blocks as the assistant
-mask, so it must stay byte-identical to what the tokenizer ships.
-"""
+Kept byte-identical; the runner reads its ``generation`` blocks as the assistant mask."""
 
 MARIN_TOKENIZER_CHAT_TEMPLATE = """{{ bos_token }}
 {%- if enable_thinking is defined -%}

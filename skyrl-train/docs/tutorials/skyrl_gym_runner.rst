@@ -106,10 +106,7 @@ The three codepaths are:
      history with the help of ``{% generation %}`` and ``{% endgeneration %}`` tags in the jinja template.
    - Chat history is maintained as string messages and re-tokenized every turn and
      at the end to obtain ``assistant_masks`` and final ``response_ids``.
-   - Re-tokenization happens only once an observation has been appended. A trajectory that ends
-     after its only assistant turn with no observation (a single-turn environment such as gsm8k)
-     trains on the prompt the engine served and the ids it sampled, with the engine's logprobs and
-     policy-version spans; the trainer never sees a re-rendered copy of that turn.
+   - A trajectory ending after one assistant turn with no observation trains on the engine's served and sampled tokens.
    - TI/TO: NOT enforced after an observation
 
 .. note::

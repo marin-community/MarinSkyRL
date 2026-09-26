@@ -517,11 +517,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # cap) workers may wait on the shared queue condition while each still holds ONE
         # completed group, so to fully bound the head-node footprint you should ALSO lower
         # num_parallel_generation_workers toward the engine working set.
-        self.max_buffered_groups = (
-            self.num_parallel_generation_workers
-            if cfg.trainer.fully_async.max_buffered_groups is None
-            else cfg.trainer.fully_async.max_buffered_groups
-        )
+        self.max_buffered_groups = cfg.trainer.fully_async.max_buffered_groups or self.num_parallel_generation_workers
 
         assert (
             # otherwise wasted throughput
@@ -1172,10 +1168,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     async def _sync_policy_weights_and_offload_optimizer(
         self, *, sync_phase: Literal["initial", "training_step"]
     ) -> None:
-        # The initial sync pauses idle engines, so every sync records its installed version the
-        # same way. A failed copy leaves the engines paused: the run ends on the error, and
-        # nothing may sample from half-installed weights before it does. Expert-block sync
-        # writes into live engine parameters, so it needs the initial pause as well.
+        # Pause for the initial sync too, so every sync installs its version the same way.
         await self.inference_engine_client.pause_generation()
         # The shared training path backloads optimizer state before every step when
         # offload_optimizer_during_rollouts is enabled. Offload after each update,
@@ -1186,8 +1179,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         await self.async_sync_policy_weights_to_inference_engines()
         # A hard sync point leaves every policy rank free before the next forward.
         await self._drain_policy_event_loops()
-        # global_step counts the update this sync installs: 0 for the initial weights, and
-        # the step number after that step's update. The engines stamp every sampled span with it.
         await self.inference_engine_client.resume_generation(
             policy_version=self.global_step if self.first_token_admission else None
         )

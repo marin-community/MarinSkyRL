@@ -2265,10 +2265,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         outstanding_requests = len(engine.output_processor.request_states)
         # vLLM's scheduler-level pause is a utility RPC into EngineCore. In abort
         # mode it aborts running/waiting requests, waits for the scheduler to reach
-        # its paused state, and (with clear_cache) drops the KV/prefix cache before
-        # returning; in keep mode the requests stay queued and resume afterwards.
-        # Unlike AsyncLLM.abort(), it cannot report success merely because the
-        # frontend output_processor already removed the request IDs.
+        # its paused state, and clears the KV/prefix cache under clear_cache before returning. Unlike
+        # AsyncLLM.abort(), it cannot report success merely because the frontend
+        # output_processor already removed the request IDs.
         await engine.pause_generation(mode=self._pause_mode.value, clear_cache=self._clear_kv_cache_on_weight_sync)
         logger.info(
             f"pause_generation() finished: mode={self._pause_mode.value} "

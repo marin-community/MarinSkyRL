@@ -81,7 +81,6 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.http_endpoint_port = full_config.generator.http_endpoint_port
         self.enable_opencode_exact_continuation = opencode_exact_continuation_enabled(full_config)
         self.generation_paused_event = threading.Event()
-        # The policy version the trainer named at the last resume; None until it names one.
         self._installed_policy_version: Optional[int] = None
         # One wake-up event per event loop that has passed the pause barrier since the last
         # release: the trainer's loop and, with the HTTP endpoint, the server thread's loop.
@@ -617,12 +616,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         This method is equivalent to a single `chat_completion()` call if we do not use `pause_generation()`.
 
         For subsequent retry requests, we can reuse the original request with the following exceptions:
-        - When the engine returned the served prompt and the sampled token IDs (``return_token_ids``), send
-          the served prompt followed by every token sampled so far as the exact prompt, so the answer
-          continues from the tokens the trainer trains on.
-        - Otherwise update the last assistant message content to the accumulated content, where the role
-          uses the first non-empty response's role, and set continue_final_message=True and
-          add_generation_prompt=False.
+        - Resend served prompt + sampled tokens as the exact prompt when the engine returned both; else continue the
+          message as text: append the accumulated content under the first non-empty response's role, and set
+          continue_final_message=True and add_generation_prompt=False.
         - Adjust remaining max tokens if `max_tokens` or `max_completion_tokens` is present.
         - If no tokens have been generated yet, resend the original request unchanged.
 
@@ -665,8 +661,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         # 1. Loop until the generation is completed.
         while finish_reason == ABORT_FINISH_REASON:
             await self._wait_for_generation_to_resume()
-            # The attempt's tokens are stamped with the version installed when it was sent,
-            # never newer than the version that sampled them.
+            # The version installed when the attempt is sent is never newer than the one that samples it.
             attempt_version = self._installed_policy_version
 
             # 1.1. Prepare the request payload.
@@ -1269,12 +1264,9 @@ class AccumulatedResponse:
     logprobs_content: List[Any] = field(default_factory=list)
     token_ids: List[int] = field(default_factory=list)
     completion_tokens: int = 0
-    # One span per attempt that produced tokens, stamped with the version installed when it was sent.
     policy_version_segments: List[PolicyVersionSegment] = field(default_factory=list)
-    # The prompt the first attempt was served, when the engine returned it.
     served_prompt_token_ids: Optional[List[int]] = None
-    # Each attempt's encoded expert routes with its prompt length and new token count, while every
-    # attempt so far returned routes after an exact prompt; None once they cannot be joined.
+    # Each attempt's (encoded routes, prompt length, new tokens); None once the attempts cannot be joined.
     route_attempts: Optional[List[tuple[str, int, int]]] = field(default_factory=list)
 
 
@@ -1304,8 +1296,7 @@ def _prepare_retry_request(
     cur_request_json = original_request_json.copy()
     exact_prefix = _exact_continuation_prefix(accum)
     if exact_prefix is not None:
-        # Re-rendering the partial answer as text can trim it or move token boundaries; the exact
-        # prefix makes the engine sample the continuation after the tokens the trainer trains on.
+        # Re-rendering the partial answer as text can move token boundaries away from what was sampled.
         cur_request_json[EXACT_PROMPT_TOKEN_IDS_KEY] = exact_prefix
     else:
         if EXACT_PROMPT_TOKEN_IDS_KEY in original_request_json:
@@ -1374,13 +1365,7 @@ def _accumulate_routed_experts(
 
 
 def _join_routed_experts(route_attempts: List[tuple[str, int, int]]) -> str:
-    """Join the attempts' routes into one row per forwarded position of the final prompt and response.
-
-    vLLM returns one row per forwarded position, prompt first, ending at the attempt's penultimate
-    token. A retry's prompt is the served prompt plus the tokens sampled so far, and its last prompt
-    position is the one the earlier attempts never forwarded, so the join keeps each retry's rows from
-    that position on.
-    """
+    """Join each attempt's routes; a retry contributes rows from its last prompt position on."""
     joined = []
     for index, (routes, prompt_length, new_tokens) in enumerate(route_attempts):
         rows = decode_routed_experts(routes)
