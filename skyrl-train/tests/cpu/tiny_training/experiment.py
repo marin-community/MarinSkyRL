@@ -66,9 +66,18 @@ def sampling_kind(mode: TrainingMode, shape: RolloutShape) -> str | None:
 
 
 def tiny_training_config(
-    root: Path, mode: TrainingMode, shape: RolloutShape, *, max_steps: int, num_prompts: int = 64
+    root: Path,
+    mode: TrainingMode,
+    shape: RolloutShape,
+    *,
+    max_steps: int,
+    checkpoint_interval: int,
+    num_prompts: int = 64,
 ) -> DictConfig:
-    """Build a complete training config for the tiny policy under ``root``."""
+    """Build a complete training config for the tiny policy under ``root``.
+
+    The run resumes from the latest checkpoint under ``root``, if an earlier run left one.
+    """
     model_dir = build_tiny_policy(root / "model")
     max_turns = MAX_TURNS[shape]
     cfg = get_default_config()
@@ -98,9 +107,9 @@ def tiny_training_config(
             "max_steps": max_steps,
             "eval_before_train": False,
             "eval_interval": -1,
-            "ckpt_interval": -1,
+            "ckpt_interval": checkpoint_interval,
             "hf_save_interval": -1,
-            "resume_mode": "none",
+            "resume_mode": "latest",
             "ckpt_path": str(root / "ckpts"),
             "export_path": str(root / "exports"),
         },
@@ -195,9 +204,13 @@ def main() -> None:
     parser.add_argument("--mode", type=TrainingMode, choices=list(TrainingMode), required=True)
     parser.add_argument("--shape", type=RolloutShape, choices=list(RolloutShape), required=True)
     parser.add_argument("--steps", type=int, default=20)
+    parser.add_argument("--checkpoint-interval", type=int, default=-1, help="-1 saves no checkpoints")
     parser.add_argument("--root", type=Path, required=True)
     args = parser.parse_args()
-    run_tiny_training(tiny_training_config(args.root, args.mode, args.shape, max_steps=args.steps), args.mode)
+    cfg = tiny_training_config(
+        args.root, args.mode, args.shape, max_steps=args.steps, checkpoint_interval=args.checkpoint_interval
+    )
+    run_tiny_training(cfg, args.mode)
 
 
 if __name__ == "__main__":
