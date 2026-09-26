@@ -134,6 +134,10 @@ trainer:
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
       max_grad_norm: 0.9
+    megatron_config:
+      # The default format gathers the full optimizer state into one rank's host memory,
+      # which pushes the colocated node past Ray's memory-kill threshold at the final save.
+      optimizer_checkpoint_sharding_type: dp_reshardable
   placement:
     colocate_all: true
     policy_num_nodes: null
