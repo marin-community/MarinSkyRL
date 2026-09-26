@@ -1,4 +1,4 @@
-"""Deterministic identity and token-logprob primitives for mismatch archives."""
+"""Deterministic seeds, hashes and token identity checks for mismatch archives."""
 
 from __future__ import annotations
 

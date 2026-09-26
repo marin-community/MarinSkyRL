@@ -18,6 +18,7 @@ TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
 TOKENIZER_REVISION = "7ae557604adf67be50417f59c2c2f167def9a775"
 NUM_LAYERS = 8
 NUM_EXPERTS = 8
+COPY_BLOCK_BYTES = 8 * 1024 * 1024
 TOY_SHAPE = dict(
     hidden_size=64,
     intermediate_size=64,
@@ -102,12 +103,12 @@ def upload_tiny_probe_fixture(path: Path, prefix: str) -> dict[str, str]:
         remote = root / relative
         local_hash = hashlib.sha256()
         with local.open("rb") as source, remote.open("wb") as target:
-            for block in iter(lambda: source.read(8 * 1024 * 1024), b""):
+            for block in iter(lambda: source.read(COPY_BLOCK_BYTES), b""):
                 local_hash.update(block)
                 target.write(block)
         remote_hash = hashlib.sha256()
         with remote.open("rb") as source:
-            for block in iter(lambda: source.read(8 * 1024 * 1024), b""):
+            for block in iter(lambda: source.read(COPY_BLOCK_BYTES), b""):
                 remote_hash.update(block)
         if local_hash.digest() != remote_hash.digest():
             raise ValueError(f"uploaded fixture file differs: {relative}")

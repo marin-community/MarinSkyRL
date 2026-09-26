@@ -38,7 +38,13 @@ from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_disp
 from skyrl_train.group_admission import GroupAdvantageInvariant, GroupAdvantageKind
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.inference_engines.vllm_teacher_oracle import tokenizer_vocabulary_fingerprint
-from skyrl_train.mismatch_probe.archive import MismatchArchive, mismatch_schema, read_frozen_probe
+from skyrl_train.mismatch_probe.archive import (
+    BUILDING_STATUS,
+    COMPLETE_STATUS,
+    MismatchArchive,
+    mismatch_schema,
+    read_frozen_probe,
+)
 from skyrl_train.mismatch_probe.protocol import (
     probe_hash,
     request_seed,
@@ -72,7 +78,7 @@ class ProbeSamples:
     seeds: list[int]
 
 
-def _route_bytes(routes: torch.Tensor | None, length: int) -> EncodedRoutes:
+def _encode_routes(routes: torch.Tensor | None, length: int) -> EncodedRoutes:
     if routes is None:
         return EncodedRoutes(None, None, None)
     value = routes[:length].contiguous().cpu().numpy()
@@ -292,7 +298,7 @@ class MismatchProbeCallback(TrainerCallback):
                 trainer_response=trainer_response,
             )
             routes = training_input.get("rollout_routed_experts")
-            encoded_routes = _route_bytes(None if routes is None else routes[position], response_length)
+            encoded_routes = _encode_routes(None if routes is None else routes[position], response_length)
             route_valid_mask = None
             if encoded_routes.shape is not None:
                 if len(encoded_routes.shape) != 3 or encoded_routes.shape[0] != response_length:
@@ -725,7 +731,7 @@ class MismatchProbeCallback(TrainerCallback):
         trainer.all_metrics[f"mismatch_probe/update_{update}/collated_route_bytes"] = self.batch_layout[
             "collated_route_bytes"
         ]
-        status = "complete" if update == self.updates[-1] else "building"
+        status = COMPLETE_STATUS if update == self.updates[-1] else BUILDING_STATUS
         if self.archive is None:
             self.archive = await asyncio.to_thread(MismatchArchive, self.archive_uri, writer_id=f"probe-{os.getpid()}")
         archive_started = time.monotonic()

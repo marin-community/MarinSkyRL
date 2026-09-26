@@ -31,7 +31,8 @@ def normalize_routed_experts(
 
     vLLM's encoded array starts at the first prompt token and ends at the
     penultimate generated token. The last generated token has no forward pass.
-    Already decoded per-response rows are accepted for in-process producers.
+    Full-sequence NumPy arrays and decoded per-response rows are accepted from
+    in-process producers.
     """
     if isinstance(routes, (str, np.ndarray)):
         if prompt_ids is None:

@@ -299,7 +299,7 @@ def validate_iris_allocation(config: dict[str, Any]) -> IrisAllocationConfig:
 
 def validate_launch_config(config: DictConfig) -> LaunchTopology:
     """Validate launch semantics before an Iris job can be submitted."""
-    from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
+    from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config  # noqa: PLC0415 - keep launcher imports Torch-free
 
     raw = _resolved_config(config)
     if raw["schema_version"] != 1:
