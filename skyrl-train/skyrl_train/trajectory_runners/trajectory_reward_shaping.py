@@ -25,6 +25,7 @@ REWARD_SHAPING_ROW_KEYS = (
     "verifier_tests",
     "exception_types",
     "error_treatments",
+    "server_errors",
 )
 DEFAULT_ACCEPTED_STOP_REASONS = ("complete", "end_turn", "eos", "stop")
 

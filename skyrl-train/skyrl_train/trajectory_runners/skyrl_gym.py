@@ -17,7 +17,13 @@ from typing import Callable, Generic, List, Dict, Any, Optional, Sequence, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
 
-from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
+from skyrl_train.trajectory_runners.base import (
+    TrajectoryRunner,
+    TrajectoryRequestBatch,
+    TrajectoryBatch,
+    TrajectoryID,
+    propagate_data_sources,
+)
 from skyrl_train.rollout_observability import rollout_phase, rollout_wait, run_environment, time_tokenization
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -43,7 +49,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     get_rollout_metrics,
     normalize_token_ids,
 )
-from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelClient
+from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelClient, ModelServerError
 from skyrl_train.trajectory_runners.selected_topk import align_student_topk
 from skyrl_train.trajectory_runners.collectors import RolloutCollector, collect_agent_loops
 from skyrl_train.trajectory_runners.projections import (
@@ -231,6 +237,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         if isinstance(error, ExactChatTransportError):
             raise error
         exception_type = type(error).__name__
+        diagnostics = {"exception_type": exception_type}
+        if isinstance(error, ModelServerError):
+            diagnostics.update(
+                error_category=error.category,
+                request_id=error.request_id,
+                status_code=error.status_code,
+            )
         trajectory_ids = request.get("trajectory_ids")
         trajectory_id = trajectory_ids[index] if trajectory_ids is not None else None
         logger.warning(
@@ -250,7 +263,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             ),
             verification=VerificationResult.error(
                 "SkyRL-Gym agent loop failed",
-                diagnostics={"exception_type": exception_type},
+                diagnostics=diagnostics,
             ),
             reward=RewardResult(
                 unshaped_reward=None,
@@ -974,7 +987,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         if isinstance(outputs, list) and outputs and isinstance(outputs[0], AgentLoopOutput):
             await self._apply_genrm_cohort_rewards(outputs, input_batch)
         with rollout_phase("assemble"):
-            return self.projection.project(outputs, input_batch)
+            batch = self.projection.project(outputs, input_batch)
+            propagate_data_sources(input_batch, batch)
+            return batch
 
     async def _apply_genrm_cohort_rewards(
         self,

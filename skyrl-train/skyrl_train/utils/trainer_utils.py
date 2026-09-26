@@ -344,6 +344,7 @@ def dump_per_dataset_eval_results(
                     "stop_reason": trajectory_batch.get("stop_reasons", [None] * len(input_prompts))[i],
                     "exception_type": (trajectory_batch.get("exception_types") or [None] * len(input_prompts))[i],
                     "error_treatment": (trajectory_batch.get("error_treatments") or [None] * len(input_prompts))[i],
+                    "server_error": (trajectory_batch.get("server_errors") or [None] * len(input_prompts))[i],
                     "env_class": concat_all_envs[i],
                     "env_extras": concat_env_extras[i],
                     "data_source": data_source,
@@ -491,7 +492,7 @@ def handle_replace_sampling(
             trajectory_batch["rewards"][bad_idx] = (
                 replacement_reward.copy() if isinstance(replacement_reward, list) else replacement_reward
             )
-            for key in ("unshaped_rewards", "unshaped_reward_available"):
+            for key in ("unshaped_rewards", "unshaped_reward_available", "data_sources"):
                 if trajectory_batch.get(key) is not None:
                     trajectory_batch[key][bad_idx] = trajectory_batch[key][replacement_idx]
             trajectory_batch["loss_masks"][bad_idx] = trajectory_batch["loss_masks"][replacement_idx].copy()

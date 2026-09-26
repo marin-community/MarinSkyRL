@@ -255,9 +255,27 @@ def test_normalized_output_produces_complete_core_trace_schema():
     assert record["prompt"]["messages"] == [{"role": "user", "content": "first"}]
     assert record["response"]["text"] == "10 11"
     assert record["verifier"] is None
-    assert record["schema_version"] == 3
-    assert record["disposition"] == {"exception_type": None, "error_treatment": None}
+    assert record["schema_version"] == 4
+    assert record["disposition"] == {"exception_type": None, "error_treatment": None, "server_error": None}
     assert record["provenance"]["runner"] == "SkyRLGymTrajectoryRunner"
+
+
+def test_server_error_identity_is_retained_with_the_masked_row():
+    output = _output()
+    output["server_errors"] = [
+        None,
+        {"category": "constrained_decoding", "request_id": "request-123", "status_code": 500},
+        None,
+    ]
+    records = build_trajectory_records(
+        _input(), output, _config(Path("/unused")), _Tokenizer(), runner_name="SkyRLGymTrajectoryRunner"
+    )
+
+    assert records[1].to_json()["disposition"]["server_error"] == {
+        "category": "constrained_decoding",
+        "request_id": "request-123",
+        "status_code": 500,
+    }
 
 
 def test_verifier_tests_are_persisted_with_the_retained_trace():
@@ -428,6 +446,7 @@ def test_train_phase_retains_sample_and_anomalies(tmp_path):
     assert failed["disposition"] == {
         "exception_type": "TurnCapExhaustedError",
         "error_treatment": "passthrough",
+        "server_error": None,
     }
 
 
