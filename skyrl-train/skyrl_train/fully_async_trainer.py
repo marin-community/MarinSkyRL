@@ -59,7 +59,7 @@ from skyrl_train.rollout_observability import (
     observe_rollout_call,
     record_group_disposition,
 )
-from skyrl_train.timing_observability import publish_step_timings
+from skyrl_train.timing_observability import StepWallTime, publish_step_timings
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
 from skyrl_train.io import io
 from skyrl_train.dynamic_sampling import (
@@ -854,10 +854,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # Handle pre-training evaluation if requested by callbacks
         if self._control.should_evaluate and self.eval_dataset is not None:
-            with Timer("eval", self.all_timings):
-                eval_metrics = await self.eval()
-                self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
-                self.tracker.log(eval_metrics, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
+            await self._run_pretraining_evaluation()
             self._control.should_evaluate = False
 
         # main training loop
@@ -903,7 +900,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             for _ in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 cycle_started = time.perf_counter()
+                step_wall = StepWallTime(OmegaConf.to_container(self.cfg.trainer.fully_async.step_phase_budgets))
                 with Timer("step", self.all_timings) as step_timer:
+                    step_wall.start("group_admission")
                     core_started = time.perf_counter()
                     # 1. Discard every completed stale attempt and wait for a full fresh batch.
                     logger.info(
@@ -934,6 +933,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             group.admitted_at = time.perf_counter()
 
                     # 2. Assemble, post-process, and convert the complete generated mini-batch.
+                    step_wall.start("batch_assembly")
                     training_input = await asyncio.to_thread(
                         self.convert_generation_group_mini_batch_to_training_input,
                         cur_generation_group_mini_batch,
@@ -991,11 +991,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         )
 
                     # 3. Run training and record consumed UIDs in the tracker.
+                    step_wall.start("training_preparation")
                     with (
                         Timer("run_training", self.all_timings),
                         async_phase_window("training", step=self.global_step, enabled=self._async_telemetry_enabled),
                     ):
-                        status = await self._run_training(training_input)
+                        status = await self._run_training(training_input, step_wall=step_wall)
+                    step_wall.start("group_bookkeeping")
                     train_duration = self.all_timings["train_critic_and_policy"]
                     self._log_optimizer_step_completed(
                         epoch=epoch,
@@ -1022,6 +1024,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     #    max_staleness_steps accounting — exactly like stock
                     #    fully_async, which never drains trial orchestration. This
                     #    block is now byte-identical for fan-out ON and OFF.
+                    step_wall.start("weight_sync")
                     with (
                         Timer("sync_weights", self.all_timings) as weight_update_timer,
                         async_phase_window("weight_sync", step=self.global_step, enabled=self._async_telemetry_enabled),
@@ -1036,11 +1039,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     core_seconds = time.perf_counter() - core_started
 
                     # 5. Run callback-requested work before closing the inclusive step timer.
+                    step_wall.start("step_end_bookkeeping")
                     logger.info(status)
                     self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
                     step_state = self._create_trainer_state(epoch, active_step_duration=step_timer.elapsed)
-                    await self._run_step_end_callbacks(step_state)
+                    await self._run_step_end_callbacks(step_state, step_wall=step_wall)
 
+                self.all_metrics.update(
+                    step_wall.finish(step_timer.duration, ended_at=step_timer.start_time + step_timer.duration)
+                )
                 self._update_async_step_metrics(training_input, core_seconds=core_seconds, cycle_started=cycle_started)
 
                 # 6. Log metrics
@@ -1182,7 +1189,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if pause:
             await self.inference_engine_client.resume_generation()
 
-    async def _run_training(self, training_input: TrainingInputBatch):
+    async def _run_pretraining_evaluation(self) -> None:
+        # Pre-step evaluation must not be mixed into the first optimizer step's inclusive timers.
+        with Timer("eval_before_train") as pretrain_eval_timer:
+            eval_metrics = await self.eval()
+            self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
+            self.tracker.log(eval_metrics, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
+        startup_eval = {"startup/eval_before_train": pretrain_eval_timer.duration}
+        self._log_metrics_stdout(startup_eval, step=self.global_step, kind="startup")
+        self.tracker.log(startup_eval, step=self.global_step, commit=False)
+
+    async def _run_training(self, training_input: TrainingInputBatch, *, step_wall: StepWallTime | None = None):
         # TODO(Charlie): share this code with the one-step-off async trainer.
         # The initial weight-sync drain can become stale while the rollout
         # buffer fills. Align policy actor loops immediately before every forward.
@@ -1197,16 +1214,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 training_input = self.apply_reward_kl_penalty(training_input)
 
         # calculate advantages and returns / along with tensorboard logging
+        if step_wall is not None:
+            step_wall.start("advantages")
         with Timer("compute_advantages_and_returns", self.all_timings):
             training_input = self.compute_advantages_and_returns(training_input)
             training_input = self.finalize_advantages_for_training(training_input)
 
         if self.cfg.trainer.dump_data_batch:
             # dump data to file
+            if step_wall is not None:
+                step_wall.start("training_preparation")
             with Timer("dump_data_batch", self.all_timings):
                 self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
 
         # train policy/critic model
+        if step_wall is not None:
+            step_wall.start("policy_training")
         with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step", self.global_step):
             status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
 

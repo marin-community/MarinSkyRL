@@ -262,6 +262,21 @@ trainer:
   fully_async:
     max_staleness_steps: 4
 
+    # Exclusive optimizer-step wall-time budgets in seconds. The corresponding
+    # timing/step_wall/* values sum to timing/step; legacy timing/* spans can overlap.
+    step_phase_budgets:
+      group_admission: 1800
+      batch_assembly: 600
+      training_preparation: 900
+      advantages: 300
+      policy_training: 3600
+      group_bookkeeping: 60
+      weight_sync: 600
+      step_end_bookkeeping: 60
+      checkpoint_work: 1800
+      evaluation: 1800
+      unaccounted: 5
+
     num_parallel_generation_workers: 768
 
     # Bound teacher-scoring work independently for each logical teacher. Queue
