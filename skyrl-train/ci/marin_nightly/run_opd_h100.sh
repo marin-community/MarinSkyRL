@@ -12,6 +12,10 @@ TEACHER_SOURCE="${TEACHER_SOURCE:-local_inference}"
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k_opd_nightly}"
 LOG="${LOG:-$PWD/opd-nightly-run.log}"
 SPEC="${SPEC:-ci/marin_nightly/specs/opd-qwen3-sync.json}"
+# The nightly takes one synchronous step. An asynchronous smoke sets MAX_STALENESS_STEPS >= 1 and MAX_STEPS >= 2,
+# so some trained groups come from an older policy than the one they train. The 8-row slice allows 4 steps.
+MAX_STEPS="${MAX_STEPS:-1}"
+MAX_STALENESS_STEPS="${MAX_STALENESS_STEPS:-0}"
 source "$REPOSITORY_ROOT/skyrl-train/ci/marin_nightly/resolve_runtime.sh" \
   "$REPOSITORY_ROOT" "$NIGHTLY_RL_ENV" production
 
@@ -104,7 +108,8 @@ for name, rows in (("train", 8), ("validation", 2)):
     pl.read_parquet(path).head(rows).write_parquet(path)
 PY
 
-echo "::: training ${POLICY_MODEL} for one teacher-sensitive step with ${TEACHER_MODEL}@${TEACHER_REVISION}"
+echo "::: training ${POLICY_MODEL} for ${MAX_STEPS} teacher-sensitive step(s) with ${TEACHER_MODEL}@${TEACHER_REVISION}"
+echo "::: rollouts: max_staleness_steps=${MAX_STALENESS_STEPS}"
 START=$(date +%s)
 "$PYTHON" -m cloud.iris.telemetry_env -- \
   "$PYTHON" -m skyrl_train.entrypoints.main_base \
@@ -129,7 +134,8 @@ START=$(date +%s)
   trainer.placement.critic_num_gpus_per_node=1 \
   trainer.placement.ref_num_gpus_per_node=1 \
   trainer.epochs=1 \
-  trainer.max_steps=1 \
+  trainer.max_steps="$MAX_STEPS" \
+  trainer.rollout_buffer.max_staleness_steps="$MAX_STALENESS_STEPS" \
   trainer.train_batch_size=2 \
   trainer.policy_mini_batch_size=2 \
   trainer.micro_train_batch_size_per_gpu=1 \
