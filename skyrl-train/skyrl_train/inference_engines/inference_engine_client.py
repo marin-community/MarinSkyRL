@@ -696,7 +696,11 @@ class InferenceEngineClient(InferenceEngineInterface):
                 # would cause the endpoint to wrap it as a generic HTTP 500, which
                 # breaks LiteLLM's error classification in downstream consumers
                 # like Harbor.
-                logger.warning(f"Inference engine error: {error_msg}")
+                logger.warning(
+                    "Inference engine error: category={}, request_id={}",
+                    partial_response.get("error_category", "server_error"),
+                    partial_response.get("request_id"),
+                )
                 return partial_response
 
             # 1.3. Parse partial response and in-place update accumulators.
