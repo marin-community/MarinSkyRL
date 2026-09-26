@@ -40,7 +40,7 @@ jobs:
 
       - name: Build on the GitHub-hosted amd64 runner
         if: inputs.target_cluster == 'github-hosted'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile.open-mopd
