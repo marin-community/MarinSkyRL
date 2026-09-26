@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-from pathlib import Path
 
 import pytest
 import ray
@@ -23,7 +22,9 @@ from transformers import AutoTokenizer
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX, GrugMoeConfig, GrugMoeForCausalLM
+from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
+from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX, GrugMoeForCausalLM
+from skyrl_train.fixtures.tiny_grug import TOY_SHAPE, write_tiny_checkpoint as _write_tiny_checkpoint
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.torch_utils import logprobs_from_logits
@@ -39,7 +40,6 @@ from tests.gpu.grug_serving import (
 )
 from tests.gpu.utils import get_test_actor_config, init_worker_with_type
 
-TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
 NUM_LAYERS = 8
 NUM_EXPERTS = 8
 ROLLOUT_WORLD_SIZE = 2
@@ -73,17 +73,6 @@ LOGPROB_MEAN_ABS_TOLERANCE = 3e-2
 TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE = 1e-3
 
 
-TOY_SHAPE = dict(
-    hidden_size=64,
-    intermediate_size=64,
-    shared_expert_intermediate_size=64,
-    num_local_experts=NUM_EXPERTS,
-    num_hidden_layers=NUM_LAYERS,
-    num_attention_heads=2,
-    num_key_value_heads=1,
-    head_dim=64,
-    sliding_window=16,
-)
 # Snowball's attention geometry, expert count, and window at a fraction of its width and depth.
 SNOWBALL_LIKE_SHAPE = dict(
     hidden_size=2560,
@@ -99,39 +88,6 @@ SNOWBALL_LIKE_SHAPE = dict(
 # Snowball's width with few experts, so each expert sees as many tokens per micro-batch
 # as it does at full scale (about 700 for 2700-token rows across two EP ranks).
 SNOWBALL_LIKE_DENSE_EXPERTS_SHAPE = {**SNOWBALL_LIKE_SHAPE, "num_local_experts": 32}
-
-
-def _write_tiny_checkpoint(
-    path: Path,
-    max_position_embeddings: int = 128,
-    num_experts_per_tok: int = 2,
-    shape: dict | None = None,
-    vocab_size_multiple: int = 1,
-) -> None:
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
-    shape = TOY_SHAPE if shape is None else shape
-    config = GrugMoeConfig(
-        vocab_size=((len(tokenizer) + vocab_size_multiple - 1) // vocab_size_multiple) * vocab_size_multiple,
-        num_experts_per_tok=num_experts_per_tok,
-        max_position_embeddings=max_position_embeddings,
-        initializer_range=0.02,
-        qk_mult=1.37,
-        qk_mult_long_scale=1.1,
-        **shape,
-    )
-    torch.manual_seed(17)
-    model = GrugMoeForCausalLM(config)
-    with torch.no_grad():
-        # Non-trivial gates and router biases so the Megatron port has to reproduce them.
-        for module in model.modules():
-            if module.__class__.__name__ == "GrugMoeGatedNorm":
-                module.down_proj.weight.normal_(std=0.2)
-                module.up_proj.weight.normal_(std=0.2)
-        for layer in model.model.layers:
-            layer.self_attn.attn_gate.weight.normal_(std=0.2)
-            layer.mlp.router.bias.copy_(torch.linspace(-0.3, 0.3, config.num_local_experts))
-    model.save_pretrained(path, safe_serialization=True)
-    tokenizer.save_pretrained(path)
 
 
 def _config(model_path: str, *, world_size: int, pp: int, ep: int):
@@ -600,4 +556,73 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
         )
     finally:
         ray.util.remove_placement_group(shared_pg)
+        ray.shutdown()
+
+
+@pytest.mark.vllm
+def test_grug_probe_reread_keeps_chosen_tokens_with_prefix_cache(tmp_path):
+    require_hoppers(ROLLOUT_WORLD_SIZE)
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    _write_tiny_checkpoint(model_path)
+    cfg = _config(str(model_path), world_size=ROLLOUT_WORLD_SIZE, pp=2, ep=1)
+    initialize_ray(cfg)
+    client = grug_engine_client(cfg, str(model_path), probe_capture=True, enable_prefix_caching=True)
+    try:
+        # A full KV block must be shared before the cache-on reread can test
+        # reused prefixes instead of merely testing a cache-enabled engine.
+        shared_prefix = [1, 17, 29, 5, 11] * 4
+        prompts = [shared_prefix + [13, 3], shared_prefix + [19, 3]]
+        rollout = asyncio.run(
+            client.generate(
+                InferenceEngineInput(
+                    prompt_token_ids=prompts,
+                    sampling_params={"temperature": 1.0, "max_tokens": 4, "logprobs": 1, "seed": 17},
+                )
+            )
+        )
+        responses = rollout["response_ids"]
+        assert all(response for response in responses)
+        assert rollout["response_logprobs"] is not None
+        for prompt, response, route in zip(prompts, responses, rollout["routed_experts"], strict=True):
+            captured = normalize_routed_experts(route, prompt, response)
+            assert len(captured) == len(response)
+            assert len(captured[0]) == NUM_LAYERS
+            assert all(expert == 0 for layer in captured[-1] for expert in layer)
+
+        prefixes = []
+        targets = []
+        for prompt, response in zip(prompts, responses, strict=True):
+            for offset, token in enumerate(response):
+                prefixes.append(prompt + response[:offset])
+                targets.append(token)
+        scores = []
+        for cache_mode in ("off", "on"):
+            if cache_mode == "off":
+                asyncio.run(client.reset_prefix_cache())
+            result = asyncio.run(
+                client.generate(
+                    InferenceEngineInput(
+                        prompt_token_ids=prefixes,
+                        sampling_params={
+                            "temperature": 1.0,
+                            "max_tokens": 1,
+                            "logprobs": 1,
+                            "skip_reading_prefix_cache": cache_mode == "off",
+                        },
+                        sampling_params_per_prompt=[{"logprob_token_ids": [token]} for token in targets],
+                    )
+                )
+            )
+            chosen = [row[0][token] for row, token in zip(result["requested_token_logprobs"], targets, strict=True)]
+            assert len(chosen) == len(targets) and all(math.isfinite(value) for value in chosen)
+            hits = result["prefix_cache_hit_tokens"]
+            assert len(hits) == len(targets)
+            if cache_mode == "off":
+                assert sum(hits) == 0
+            else:
+                assert sum(hits) > 0
+            scores.append(chosen)
+        torch.testing.assert_close(torch.tensor(scores[0]), torch.tensor(scores[1]), rtol=0, atol=1e-4)
+    finally:
         ray.shutdown()

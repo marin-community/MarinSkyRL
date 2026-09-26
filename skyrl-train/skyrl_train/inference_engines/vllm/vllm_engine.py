@@ -61,6 +61,7 @@ from skyrl_train.inference_engines.base import (
     LORA_DISK_PATH_KEY,
 )
 from skyrl_train.inference_engines.response_topk import select_response_topk
+from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from marinskyrl.inference_placement import InferenceWorkerPlacement
 from skyrl_train.inference_engines.placement import inference_worker_placement
@@ -1144,8 +1145,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         else:
             if len(per_prompt_sampling_params) != len(prompt_token_ids):
                 raise ValueError("per-prompt sampling parameters must align with prompt token rows")
-            if any(set(override) != {"prompt_logprob_token_ids"} for override in per_prompt_sampling_params):
-                raise ValueError("per-prompt sampling parameters only support prompt_logprob_token_ids")
+            allowed = ({"prompt_logprob_token_ids"}, {"logprob_token_ids"})
+            if any(set(override) not in allowed for override in per_prompt_sampling_params):
+                raise ValueError("per-prompt sampling parameters require one supported token-ID override")
             sampling_params = [SamplingParams(**{**base_params, **override}) for override in per_prompt_sampling_params]
 
         return prompt_token_ids, sampling_params
@@ -1155,7 +1157,12 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         first = sampling_params[0] if isinstance(sampling_params, list) else sampling_params
         return first.logprobs
 
-    def _postprocess_outputs(self, outputs, response_top_k: int | None = None):
+    def _postprocess_outputs(
+        self,
+        outputs,
+        response_top_k: int | None = None,
+        sampling_params: SamplingParams | list[SamplingParams] | None = None,
+    ):
         """Common output processing logic."""
         responses: List[str] = []
         stop_reasons: List[str] = []
@@ -1164,19 +1171,36 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         student_topk_indices: List[List[List[int]]] = []
         behavior_topk_logprobs: List[List[List[float]]] = []
         all_prompt_logprobs: Optional[List] = None
+        all_routed_experts: list[list[list[list[int]]] | None] = []
+        requested_token_logprobs: list[list[dict[int, float]]] = []
+        prefix_cache_hit_tokens: list[int] = []
+        params_by_prompt = sampling_params if isinstance(sampling_params, list) else [sampling_params] * len(outputs)
+        if len(params_by_prompt) != len(outputs):
+            raise ValueError("vLLM sampling parameters do not align with output rows")
+        has_requested_ids = any(params is not None and params.logprob_token_ids for params in params_by_prompt)
+        if has_requested_ids and any(params is None or not params.logprob_token_ids for params in params_by_prompt):
+            raise ValueError("vLLM requested token IDs must cover every row in a scoring batch")
 
-        for output in outputs:
+        for output, row_params in zip(outputs, params_by_prompt, strict=True):
+            prefix_cache_hit_tokens.append(int(output.num_cached_tokens or 0))
             # TODO(tgriggs): Support n>1 sampling.
             assert len(output.outputs) == 1, (
                 "Each prompt should have only one responses. n>1 sampling is supported by copying prompts."
             )
             resp = output.outputs[0]
+            if resp.routed_experts is None:
+                all_routed_experts.append(None)
+            else:
+                all_routed_experts.append(
+                    normalize_routed_experts(resp.routed_experts, output.prompt_token_ids, list(resp.token_ids))
+                )
             responses.append(resp.text)
             stop_reasons.append(resp.finish_reason)
             response_ids.append(resp.token_ids)
             _logprobs = None
             selected_ids = []
             selected_scores = []
+            requested_scores = []
             if resp.logprobs:
                 _logprobs = []
                 for i, token_logprobs in enumerate(resp.logprobs):
@@ -1184,6 +1208,16 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
                     token_id = resp.token_ids[i]
                     logprob = token_logprobs[token_id].logprob
                     _logprobs.append(logprob)
+                    if has_requested_ids:
+                        try:
+                            requested_scores.append(
+                                {
+                                    requested: token_logprobs[requested].logprob
+                                    for requested in row_params.logprob_token_ids
+                                }
+                            )
+                        except KeyError as error:
+                            raise ValueError(f"vLLM omitted requested token {error.args[0]}") from error
                     if response_top_k is not None and response_top_k > 0:
                         ids, scores = select_response_topk(
                             {token_id: value.logprob for token_id, value in token_logprobs.items()}, response_top_k
@@ -1192,6 +1226,10 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
                         selected_scores.append(scores)
                     del token_logprobs
             response_logprobs.append(_logprobs)
+            if has_requested_ids:
+                if len(requested_scores) != len(resp.token_ids):
+                    raise ValueError("vLLM omitted requested token logprobs for generated tokens")
+                requested_token_logprobs.append(requested_scores)
             if response_top_k is not None and response_top_k > 0:
                 if len(selected_ids) != len(resp.token_ids):
                     raise ValueError("vLLM omitted response top-K logprobs for generated tokens")
@@ -1230,6 +1268,13 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         if response_top_k is not None and response_top_k > 0:
             result["student_topk_indices"] = student_topk_indices
             result["behavior_topk_logprobs"] = behavior_topk_logprobs
+        if any(routes is not None for routes in all_routed_experts):
+            if any(routes is None for routes in all_routed_experts):
+                raise ValueError("vLLM omitted routed experts for part of the batch")
+            result["routed_experts"] = all_routed_experts
+        if has_requested_ids:
+            result["requested_token_logprobs"] = requested_token_logprobs
+        result["prefix_cache_hit_tokens"] = prefix_cache_hit_tokens
         return result
 
     def _get_engine(self):
@@ -1312,7 +1357,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             lora_request=lora_requests,
         )
 
-        return self._postprocess_outputs(outputs, self._response_top_k(sampling_params))
+        return self._postprocess_outputs(outputs, self._response_top_k(sampling_params), sampling_params)
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Only supported in AsyncVLLMInferenceEngine."""
@@ -1902,7 +1947,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 )
             raise
 
-        return self._postprocess_outputs(outputs, self._response_top_k(sampling_params))
+        return self._postprocess_outputs(outputs, self._response_top_k(sampling_params), sampling_params)
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))

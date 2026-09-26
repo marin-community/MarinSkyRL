@@ -17,14 +17,17 @@ def normalize_routed_experts(
     penultimate generated token. The last generated token has no forward pass.
     Already decoded per-response rows are accepted for in-process producers.
     """
-    if isinstance(routes, str):
+    if isinstance(routes, (str, np.ndarray)):
         if prompt_ids is None:
-            raise ValueError("encoded routed_experts requires exact prompt token IDs")
+            raise ValueError("routed_experts array requires exact prompt token IDs")
         try:
-            payload = base64.b64decode(routes, validate=True)
-            if not payload.startswith(b"\x93NUMPY"):
-                raise ValueError("missing NumPy array header")
-            rows = np.load(io.BytesIO(payload), allow_pickle=False)
+            if isinstance(routes, str):
+                payload = base64.b64decode(routes, validate=True)
+                if not payload.startswith(b"\x93NUMPY"):
+                    raise ValueError("missing NumPy array header")
+                rows = np.load(io.BytesIO(payload), allow_pickle=False)
+            else:
+                rows = routes
         except (binascii.Error, EOFError, ValueError, OSError) as error:
             raise ValueError("routed_experts must be a base64-encoded NumPy array") from error
         expected = len(prompt_ids) + len(response_ids) - 1

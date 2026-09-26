@@ -6,8 +6,12 @@ from transformers import AutoTokenizer, AutoConfig
 from huggingface_hub import snapshot_download
 
 import asyncio
+import copy
+import hashlib
 import importlib.util
 import os
+import random
+import numpy as np
 from enum import StrEnum
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
@@ -19,6 +23,7 @@ from megatron.bridge import AutoBridge
 import megatron.core.parallel_state as mpu
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
 
 from skyrl_train.distributed.megatron.optimizer import (
     init_megatron_optim_config,
@@ -184,13 +189,13 @@ class MegatronWorker:
         )
         return model
 
-    def forward(self, data):
+    def forward(self, data, *, probe_micro_batch_size: int | None = None):
         """
         Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
         log_r3_resident_set(self._rank, data)
         # Run in micro batches grouped into a single mini-batch
-        micro_bsz = self.cfg.trainer.micro_forward_batch_size_per_gpu
+        micro_bsz = probe_micro_batch_size or self.cfg.trainer.micro_forward_batch_size_per_gpu
         micro_batches = data.chunk(micro_bsz)
 
         # Build typed micro-batches expected by MegatronModelWrapper.forward
@@ -212,6 +217,7 @@ class MegatronWorker:
                     rollout_routed_experts=micro["rollout_routed_experts"]
                     if "rollout_routed_experts" in micro.keys()
                     else None,
+                    probe_row_indices=micro.get("probe_row_indices"),
                 )
             )
 
@@ -245,6 +251,54 @@ class MegatronWorker:
         output = TrainingOutputBatch({"output": log_probs})
         output.metadata = data.metadata
         return output
+
+    def probe_forward(self, data):
+        """Use the normal Megatron policy forward with a scoped probe routing mode."""
+        mode = data.metadata["probe_mode"]
+        keep_fraction = data.metadata["probe_keep_fraction"]
+        micro_batch_size = data.metadata["probe_micro_batch_size"]
+        controller = self.model.router_replay
+        if mode not in {"native", "repeat", "router_replay", "router_replay_filtered"}:
+            raise ValueError(f"unsupported probe mode: {mode}")
+        if mode.startswith("router_replay") and controller is None:
+            raise ValueError(f"probe mode {mode} requires an installed Megatron router replay controller")
+        module_modes = [(module, module.training) for chunk in self.actor_module for module in chunk.modules()]
+        cpu_rng = torch.get_rng_state()
+        cuda_rng = torch.cuda.get_rng_state()
+        rng_tracker = get_cuda_rng_tracker()
+        tracker_states = copy.deepcopy(rng_tracker.get_states())
+        numpy_rng = np.random.get_state()
+        python_rng = random.getstate()
+        from contextlib import nullcontext
+
+        scope = controller.scoring_mode(mode, keep_fraction) if mode.startswith("router_replay") else nullcontext()
+        try:
+            with scope:
+                if controller is not None:
+                    controller.take_probe_observations()
+                output = self.forward(data, probe_micro_batch_size=micro_batch_size)
+                output.metadata = dict(output.metadata)
+                output.metadata["probe_routes"] = controller.take_probe_observations() if controller is not None else []
+                return output
+        finally:
+            for module, was_training in module_modes:
+                module.training = was_training
+            torch.set_rng_state(cpu_rng)
+            torch.cuda.set_rng_state(cuda_rng)
+            rng_tracker.set_states(tracker_states)
+            np.random.set_state(numpy_rng)
+            random.setstate(python_rng)
+
+    def probe_weights_digest(self) -> str:
+        """Hash each local model shard exactly for same-weight and update checks."""
+        digest = hashlib.sha256()
+        for chunk_index, chunk in enumerate(self.actor_module):
+            for name, tensor in (*chunk.named_parameters(), *chunk.named_buffers()):
+                digest.update(f"{chunk_index}:{name}:{tensor.dtype}:{tuple(tensor.shape)}\0".encode())
+                flat = tensor.detach().contiguous().view(torch.uint8).flatten()
+                for offset in range(0, flat.numel(), 8 * 1024 * 1024):
+                    digest.update(flat[offset : offset + 8 * 1024 * 1024].cpu().numpy().tobytes())
+        return digest.hexdigest()
 
     def _log_forward_fingerprint(self, call: str, micro_payloads: List[MegatronForwardMicroBatch]) -> None:
         """Log checksums of this rank's inputs and parameters so two calls can be compared."""
@@ -343,9 +397,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.profiler: Profiler = None
         self._warned_exact_unit_policy_ratio = False
 
-    def forward(self, data):
+    def forward(self, data, *, probe_micro_batch_size: int | None = None):
         with self._memory.span("forward", step=data.metadata.get("global_step")):
-            return super().forward(data)
+            return super().forward(data, probe_micro_batch_size=probe_micro_batch_size)
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self.strategy.offload_to_cpu(

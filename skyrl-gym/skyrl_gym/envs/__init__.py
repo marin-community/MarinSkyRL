@@ -63,6 +63,11 @@ register(
 )
 
 register(
+    id="mismatch_fixture",
+    entry_point="skyrl_gym.envs.mismatch_fixture:MismatchFixtureEnv",
+)
+
+register(
     id="reasoning_gym",
     entry_point="skyrl_gym.envs.reasoning_gym.env:ReasoningGymEnv",
 )

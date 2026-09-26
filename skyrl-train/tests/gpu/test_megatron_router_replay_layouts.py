@@ -22,6 +22,7 @@ PR gate). Layouts whose world size exceeds the node are skipped.
 from __future__ import annotations
 
 import math
+import copy
 
 import pytest
 import ray
@@ -88,6 +89,76 @@ def _routed_batch(pad_token_id: int, *, captured: bool) -> TrainingInputBatch:
 def _response_logprobs(policy, batch: TrainingInputBatch) -> torch.Tensor:
     outputs = ray.get(policy.async_run_ray_method("mesh", "forward", data=batch))
     return concatenate_outputs_after_mesh_dispatch(policy.actor_infos, outputs)["output"].float()
+
+
+def _probe_forward(policy, batch: TrainingInputBatch, mode: str, *, keep_fraction: float | None = None):
+    data = batch.select(["sequences", "attention_mask", "rollout_routed_experts"], ["response_length"])
+    data["probe_row_indices"] = torch.arange(len(data["sequences"]), dtype=torch.long)
+    if mode in {"native", "repeat"}:
+        data["rollout_routed_experts"] = torch.zeros_like(data["rollout_routed_experts"])
+    data.metadata.update(
+        probe_mode=mode,
+        probe_keep_fraction=keep_fraction,
+        probe_micro_batch_size=2 if mode == "repeat" else None,
+        global_step=0,
+    )
+    outputs = ray.get(policy.async_run_ray_method("mesh", "probe_forward", data=data))
+    scores = concatenate_outputs_after_mesh_dispatch(policy.actor_infos, outputs)["output"].float()
+    observations = [item for output in outputs for item in output.metadata["probe_routes"]]
+    return scores, observations
+
+
+@pytest.mark.parametrize("packing", [False, True], ids=["unpacked", "packed"])
+def test_all_placeholder_replay_matches_flag_off_at_same_weights(tmp_path, packing):
+    """The native probe control must be identical to the route-disabled model."""
+    require_hoppers(1)
+    cfg_on, model_path = _layout_config(tmp_path, ("placeholder", 1, 1, 1, 1, 1, packing))
+    cfg_off = copy.deepcopy(cfg_on)
+    cfg_off.trainer.policy.megatron_config.moe_router_replay = False
+    pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
+    empty = _routed_batch(pad_token_id, captured=False)
+    without_routes = empty.select(["sequences", "attention_mask"], ["response_length"])
+    scores = []
+    for cfg, batch in ((cfg_off, without_routes), (cfg_on, empty)):
+        initialize_ray(cfg)
+        try:
+            policy = init_worker_with_type(
+                "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=1, num_nodes=1, cfg=cfg
+            )
+            scores.append(_response_logprobs(policy, batch))
+        finally:
+            ray.shutdown()
+    assert torch.equal(scores[0], scores[1]), f"placeholder control differs with packing={packing}"
+
+
+def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path):
+    require_hoppers(2)
+    cfg, model_path = _layout_config(tmp_path, ("probe-pp2", 2, 1, 2, 1, 1, False))
+    pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
+    batch = _routed_batch(pad_token_id, captured=True)
+    initialize_ray(cfg)
+    try:
+        policy = init_worker_with_type(
+            "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=2, num_nodes=1, cfg=cfg
+        )
+        before = ray.get(policy.async_run_ray_method("pass_through", "probe_weights_digest"))
+        results = {
+            mode: _probe_forward(policy, batch, mode, keep_fraction=1.0 if mode == "router_replay_filtered" else None)
+            for mode in ("native", "repeat", "router_replay", "router_replay_filtered")
+        }
+        after = ray.get(policy.async_run_ray_method("pass_through", "probe_weights_digest"))
+        assert before == after
+        for scores, observations in results.values():
+            assert torch.isfinite(scores).all()
+            positions = [(row["sample"], row["position"], row["layer"]) for row in observations]
+            assert len(positions) == len(set(positions))
+            assert {row["layer"] for row in observations} == set(range(NUM_LAYERS))
+            assert {row["sample"] for row in observations} == set(range(len(batch["sequences"])))
+        assert not torch.equal(results["native"][0], results["router_replay"][0])
+        assert any(any(row["replaced"]) for row in results["router_replay_filtered"][1])
+        assert not any(any(row["replaced"]) for row in results["router_replay"][1])
+    finally:
+        ray.shutdown()
 
 
 def test_router_replay_is_token_exact_across_layouts(tmp_path):

@@ -92,6 +92,10 @@ class WholeTrajectoryProjection:
             exclude_from_baseline=[not output.disposition.baseline_eligible for output in outputs],
             actual_global_step=minimum_captured_global_step(outputs),
         )
+        if request.get("probe_capture_token_identity"):
+            if any(output.engine_response_ids is None for output in outputs):
+                raise ValueError("mismatch probe requires exact vLLM response IDs for every trajectory")
+            batch["engine_response_ids"] = [output.engine_response_ids for output in outputs]
         attach_student_topk(batch, outputs, responses, loss_masks)
         attach_routed_experts(batch, outputs, responses)
         attach_terminal_classifications(batch, outputs)

@@ -309,6 +309,10 @@ class RayPPOTrainer:
             self.callback_handler = CallbackHandler(callbacks)
         else:
             self.callback_handler = DefaultCallbackHandler(cfg)
+        if cfg.trainer.mismatch_probe.enabled:
+            from skyrl_train.mismatch_probe.callback import MismatchProbeCallback
+
+            self.callback_handler.add_callback(MismatchProbeCallback(cfg))
 
         # Trainer control object for callback coordination
         self._control = TrainerControl()
@@ -1163,6 +1167,12 @@ class RayPPOTrainer:
         self._control = await self.callback_handler.call_event_async(
             "on_train_begin", initial_state, self._control, trainer=self
         )
+
+        # A zero-update probe scores the synchronized starting weights and then
+        # follows the ordinary train-end path without reading a training batch.
+        if self._control.should_training_stop:
+            await self._finalize_training(completed_step=self.global_step, epoch=start_epoch)
+            return
 
         # Handle pre-training evaluation if requested by callbacks
         if self._control.should_evaluate and self.eval_dataset is not None:

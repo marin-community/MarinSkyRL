@@ -54,6 +54,7 @@ class MegatronForwardMicroBatch:
     position_ids: torch.Tensor
     num_actions: int
     rollout_routed_experts: Optional[torch.Tensor] = None
+    probe_row_indices: Optional[torch.Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -178,6 +179,7 @@ class MegatronModelWrapper:
         rollout_routed_experts: torch.Tensor,
         num_actions: int,
         layer_indices: tuple[int, ...],
+        probe_row_indices: Optional[torch.Tensor] = None,
     ):
         """Build per-layer router targets in the exact token order the routers see.
 
@@ -209,6 +211,13 @@ class MegatronModelWrapper:
         dense, mask_BS = dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions)
         response_BS = torch.zeros_like(mask_BS)
         response_BS[:, seq_len - response_len :] = True
+        probe_positions = None
+        if probe_row_indices is not None:
+            if probe_row_indices.shape != (batch_size,):
+                raise ValueError("probe row indices must have one entry per sequence")
+            probe_positions = torch.full((batch_size, seq_len, 2), -1, dtype=torch.long, device=device)
+            probe_positions[:, seq_len - response_len :, 0] = probe_row_indices[:, None]
+            probe_positions[:, seq_len - response_len :, 1] = torch.arange(response_len, device=device)
 
         if self.use_sample_packing:
             # The routes tensor is ours, not the pipeline's input: always run the
@@ -217,16 +226,24 @@ class MegatronModelWrapper:
             dense, _ = preprocess_packed_seqs(dense, attention_mask, pre_process=True)
             mask_BS, _ = preprocess_packed_seqs(mask_BS, attention_mask, pre_process=True)
             response_BS, _ = preprocess_packed_seqs(response_BS, attention_mask, pre_process=True)
+            if probe_positions is not None:
+                probe_positions, _ = preprocess_packed_seqs(probe_positions, attention_mask, pre_process=True)
         else:
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids = position_ids.masked_fill(attention_mask == 0, 0)
             dense, _, _ = remove_left_padding(dense, attention_mask, position_ids, pre_process=True)
             mask_BS, _, _ = remove_left_padding(mask_BS, attention_mask, position_ids, pre_process=True)
             response_BS, _, _ = remove_left_padding(response_BS, attention_mask, position_ids, pre_process=True)
+            if probe_positions is not None:
+                probe_positions, _, _ = remove_left_padding(
+                    probe_positions, attention_mask, position_ids, pre_process=True
+                )
 
         flat = sequence_major_flatten(dense)
         mask = sequence_major_flatten(mask_BS)
         response_mask = sequence_major_flatten(response_BS)
+        if probe_positions is not None:
+            probe_positions = sequence_major_flatten(probe_positions)
         tp_size = mpu.get_tensor_model_parallel_world_size()
         if tp_size > 1:
             # Under TP sequence parallelism the router sees this rank's
@@ -241,8 +258,10 @@ class MegatronModelWrapper:
             flat = slice_sequence_parallel(flat, **slice_kwargs)
             mask = slice_sequence_parallel(mask, **slice_kwargs)
             response_mask = slice_sequence_parallel(response_mask, **slice_kwargs)
+            if probe_positions is not None:
+                probe_positions = slice_sequence_parallel(probe_positions, **slice_kwargs)
         per_layer = {idx: flat[:, idx, :].to(device) for idx in layer_indices}
-        return per_layer, mask.to(device), response_mask.to(device)
+        return per_layer, mask.to(device), response_mask.to(device), probe_positions
 
     def _forward_micro_batch(
         self,
@@ -251,6 +270,7 @@ class MegatronModelWrapper:
         attention_mask,
         position_ids,
         rollout_routed_experts: Optional[torch.Tensor] = None,
+        probe_row_indices: Optional[torch.Tensor] = None,
         num_actions: Optional[int] = None,
         record_recompute: bool = False,
     ):
@@ -271,10 +291,12 @@ class MegatronModelWrapper:
             layer_indices = self.router_replay.local_indices_for_module.get(
                 id(model), self.router_replay.local_layer_indices
             )
-            per_layer, mask, response_mask = self._build_router_replay_targets(
-                sequences, attention_mask, rollout_routed_experts, num_actions, layer_indices
+            per_layer, mask, response_mask, probe_positions = self._build_router_replay_targets(
+                sequences, attention_mask, rollout_routed_experts, num_actions, layer_indices, probe_row_indices
             )
-            self.router_replay.begin_forward(per_layer, mask, response_mask, record_recompute=record_recompute)
+            self.router_replay.begin_forward(
+                per_layer, mask, response_mask, record_recompute=record_recompute, probe_positions=probe_positions
+            )
             armed = True
         try:
             if self.use_sample_packing:
@@ -352,6 +374,7 @@ class MegatronModelWrapper:
                 batch.attention_mask,
                 batch.position_ids,
                 rollout_routed_experts=batch.rollout_routed_experts,
+                probe_row_indices=batch.probe_row_indices,
                 num_actions=batch.num_actions,
             )
 

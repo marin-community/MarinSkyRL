@@ -299,6 +299,8 @@ def validate_iris_allocation(config: dict[str, Any]) -> IrisAllocationConfig:
 
 def validate_launch_config(config: DictConfig) -> LaunchTopology:
     """Validate launch semantics before an Iris job can be submitted."""
+    from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
+
     raw = _resolved_config(config)
     if raw["schema_version"] != 1:
         raise ValueError(f"unsupported SkyRL launch schema_version: {raw['schema_version']!r}")
@@ -335,6 +337,10 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
     runtime = raw["runtime"]
     entrypoint = runtime["entrypoint"]
     registered_rl_entrypoint_module(entrypoint)
+    validate_mismatch_probe_config(
+        skyrl,
+        synchronous=entrypoint == RL_ENTRYPOINTS[RLEntrypoint.STANDARD] and run["mode"] == RunMode.TRAIN,
+    )
     expected_profile = runtime_profile_for_strategy(
         skyrl.get("trainer", {}).get("strategy"),
         mode=RuntimeMode.CHECKPOINT_EXPORT if run["mode"] == RunMode.CHECKPOINT_EXPORT else RuntimeMode.TRAINING,

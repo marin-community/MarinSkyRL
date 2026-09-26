@@ -422,6 +422,9 @@ async def test_generate_preserves_response_topk_across_engine_routing(num_engine
                 response_logprobs=[[-0.1, -0.2] for _ in bases],
                 student_topk_indices=[[[base, base + 2], [base + 1, base + 3]] for base in bases],
                 behavior_topk_logprobs=[[[-0.1, -1.1], [-0.2, -1.2]] for _ in bases],
+                routed_experts=[[[[base, base + 1]], [[base + 2, base + 3]]] for base in bases],
+                requested_token_logprobs=[[{base + 4: -0.4}, {base + 5: -0.5}] for base in bases],
+                prefix_cache_hit_tokens=[base * 16 for base in bases],
             )
 
     client = InferenceEngineClient(
@@ -435,6 +438,9 @@ async def test_generate_preserves_response_topk_across_engine_routing(num_engine
 
     assert output["student_topk_indices"] == [[[base, base + 2], [base + 1, base + 3]] for base in range(num_prompts)]
     assert output["behavior_topk_logprobs"] == [[[-0.1, -1.1], [-0.2, -1.2]] for _ in range(num_prompts)]
+    assert output["routed_experts"] == [[[[base, base + 1]], [[base + 2, base + 3]]] for base in range(num_prompts)]
+    assert output["requested_token_logprobs"] == [[{base + 4: -0.4}, {base + 5: -0.5}] for base in range(num_prompts)]
+    assert output["prefix_cache_hit_tokens"] == [base * 16 for base in range(num_prompts)]
 
 
 @pytest.mark.parametrize("num_prompts", [1, 50, 100])

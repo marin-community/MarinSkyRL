@@ -21,6 +21,7 @@ from ray.util.placement_group import (
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
 from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
+from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
@@ -473,6 +474,7 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
+    validate_mismatch_probe_config(cfg)
     if cfg.trainer.strategy != "megatron":
         raise ValueError(f"Unsupported training strategy: {cfg.trainer.strategy}")
     if cfg.trainer.critic.model.path:

@@ -11,6 +11,7 @@ import torch
 from skyrl_train.models.megatron_router_replay import (
     LayerReplayHandle,
     MegatronRouterReplay,
+    filtered_replay_topk,
     capture_layer_indices,
     expand_moe_layer_freq,
     num_moe_layers,
@@ -19,6 +20,66 @@ from skyrl_train.models.megatron_router_replay import (
     validate_replay_geometry,
 )
 from skyrl_train.models.megatron_router_replay import SENTINEL_EXPERT_ID, dense_replay_targets
+
+
+def test_filtered_replay_keeps_positive_probability_choices_and_native_order():
+    scores = torch.tensor([[-0.1, -0.2, -1.0, -4.0], [-0.1, -0.2, -1.0, -4.0]])
+    native = torch.tensor([[0, 1], [0, 1]])
+    captured = torch.tensor([[2, 1], [3, 2]])
+    selected, replaced = filtered_replay_topk(scores, native, captured, torch.tensor([True, True]), 0.5)
+    assert selected.tolist() == [[0, 1], [0, 1]]
+    assert replaced.tolist() == [[True, False], [True, True]]
+    offset_selected, _ = filtered_replay_topk(scores + 100, native, captured, torch.tensor([True, True]), 0.5)
+    assert torch.equal(selected, offset_selected)
+
+
+def test_filtered_replay_zero_fraction_and_native_mask():
+    scores = torch.tensor([[-4.0, -3.0, -2.0, -1.0], [-4.0, -3.0, -2.0, -1.0]])
+    native = torch.tensor([[3, 2], [3, 2]])
+    captured = torch.tensor([[0, 1], [0, 1]])
+    selected, replaced = filtered_replay_topk(scores, native, captured, torch.tensor([True, False]), 0.0)
+    assert selected.tolist() == [[0, 1], [3, 2]]
+    assert not replaced.any()
+    with pytest.raises(ValueError, match="distinct"):
+        filtered_replay_topk(scores, native, torch.tensor([[0, 0], [0, 1]]), torch.tensor([True, False]), 0.5)
+
+
+def test_filtered_replay_scoring_scope_restores_training_mode_after_failure():
+    controller = MegatronRouterReplay(local_layer_indices=[0], recompute_enabled=False)
+    with pytest.raises(RuntimeError, match="injected"):
+        with controller.scoring_mode("router_replay_filtered", 0.5):
+            raise RuntimeError("injected")
+    assert controller._scoring_mode == "router_replay"
+    assert controller._keep_fraction is None
+
+
+def test_probe_observations_record_sample_layer_and_only_response_positions():
+    controller = MegatronRouterReplay(local_layer_indices=[3], recompute_enabled=False)
+    scores = torch.tensor([[4.0, 3.0, 0.0], [4.0, 3.0, 0.0], [4.0, 3.0, 0.0]])
+    targets = torch.tensor([[0, 0], [2, 1], [0, 0]])
+    mask = torch.tensor([False, True, False])
+    positions = torch.tensor([[-1, -1], [7, 0], [7, 1]])
+    controller.begin_forward(
+        {3: targets},
+        mask,
+        torch.tensor([False, True, True]),
+        record_recompute=False,
+        probe_positions=positions,
+    )
+    controller.get_replay_topk(
+        3,
+        scores,
+        2,
+        default_compute_topk=lambda *args, **kwargs: (scores[:, :2], torch.tensor([[0, 1], [0, 1], [0, 1]])),
+    )
+    controller.end_forward()
+    observations = controller.take_probe_observations()
+    assert [(row["sample"], row["position"], row["layer"]) for row in observations] == [(7, 0, 3), (7, 1, 3)]
+    assert observations[0]["native"] == [0, 1]
+    assert observations[0]["effective"] == [2, 1]
+    assert observations[1]["effective"] == [0, 1]
+    assert not observations[1]["route_valid"]
+    assert controller.take_probe_observations() == []
 
 
 def _fake_compute_topk(scores, topk, num_groups=None, group_topk=None):

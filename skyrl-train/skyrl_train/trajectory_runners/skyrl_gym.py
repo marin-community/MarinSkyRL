@@ -419,6 +419,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         collect_topk = isinstance(requested_logprobs, int) and requested_logprobs > 0
         selected_capture_possible = collect_topk and not retokenize_chat_history
         generated_ids: list[int] = []
+        engine_response_ids: list[int] = []
         generated_topk_ids: list[list[int]] = []
         generated_topk_scores: list[list[float]] = []
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
@@ -471,6 +472,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 captured_global_step = global_step_fn()
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
+            engine_response_ids.extend(output_ids)
             topk_ids_batch = engine_output.get("student_topk_indices")
             topk_scores_batch = engine_output.get("behavior_topk_logprobs")
             if (topk_ids_batch is None) != (topk_scores_batch is None):
@@ -803,6 +805,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             env_metrics=env_metrics,
             captured_global_step=captured_global_step,
             token_provenance=token_provenance,
+            engine_response_ids=engine_response_ids if len(engine_response_ids) == len(response_ids) else None,
         )
 
     async def collect_batched(

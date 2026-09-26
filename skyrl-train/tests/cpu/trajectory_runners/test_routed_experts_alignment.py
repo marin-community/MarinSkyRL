@@ -168,6 +168,10 @@ def test_extract_encoded_routed_experts_uses_exact_turn_token_ids():
     got = extract_routed_experts_from_rollout_details([detail])
 
     np.testing.assert_array_equal(got[0], np.asarray([[[7, 8]], [[0, 0]]], dtype=np.int16))
+    np.testing.assert_array_equal(
+        normalize_routed_experts(rows, [10, 11, 12], [20, 21]),
+        np.asarray([[[7, 8]], [[0, 0]]], dtype=np.int16),
+    )
 
 
 @pytest.mark.parametrize(

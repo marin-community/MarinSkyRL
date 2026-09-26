@@ -25,10 +25,18 @@ def grug_engine_client(
     shared_pg=None,
     inference_engine_enable_sleep: bool = False,
     moe_backend: str | None = None,
+    probe_capture: bool = False,
+    enable_prefix_caching: bool = False,
 ) -> InferenceEngineClient:
     """Start vLLM engines for a tiny Grug checkpoint."""
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     engine_init_kwargs = {"max_model_len": MAX_MODEL_LEN}
+    if probe_capture:
+        engine_init_kwargs.update(
+            enable_return_routed_experts=True,
+            logprobs_mode="processed_logprobs",
+            generation_config="vllm",
+        )
     if moe_backend is not None:
         engine_init_kwargs["kernel_config"] = {"moe_backend": moe_backend}
     engines = create_ray_wrapped_inference_engines(
@@ -40,7 +48,7 @@ def grug_engine_client(
         pretrain=model_path,
         seed=23,
         vllm_v1_disable_multiproc=True,
-        enable_prefix_caching=False,
+        enable_prefix_caching=enable_prefix_caching,
         enforce_eager=False,
         engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
         shared_pg=shared_pg,
