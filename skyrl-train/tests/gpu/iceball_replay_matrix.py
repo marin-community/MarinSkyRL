@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 import torch
-from iceball_replay_benchmark import _prepare
+from iceball_replay_benchmark import MEASURED_STEPS, _prepare
 from safetensors import safe_open
 from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore
 
@@ -112,10 +112,10 @@ def main() -> None:
     parser.add_argument("--model-identity", required=True)
     parser.add_argument("--cells", nargs="+", choices=tuple(CELL_BACKEND), default=tuple(CELL_BACKEND))
     parser.add_argument("--repetitions", type=int, default=3)
-    parser.add_argument("--measured-steps", type=int, default=8)
+    parser.add_argument("--measured-steps", type=int, default=MEASURED_STEPS)
     args = parser.parse_args()
-    if args.repetitions < 1 or not 1 <= args.measured_steps <= 8:
-        parser.error("repetitions must be positive and measured-steps must be in [1, 8]")
+    if args.repetitions < 1 or not 1 <= args.measured_steps <= MEASURED_STEPS:
+        parser.error(f"repetitions must be positive and measured-steps must be in [1, {MEASURED_STEPS}]")
 
     output = Path(os.environ["IRIS_OUTPUT_DIR"])
     output.mkdir(parents=True, exist_ok=True)

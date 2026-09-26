@@ -12,7 +12,11 @@ from typing import Iterable
 import torch
 
 from marinskyrl.resource_locator import join_resource_path
-from marinskyrl.model_manifest import HF_WEIGHT_INDEX_FILENAME, read_safetensors_header
+from marinskyrl.model_manifest import (
+    HF_WEIGHT_INDEX_FILENAME,
+    SAFETENSORS_LENGTH_PREFIX_BYTES,
+    read_safetensors_header,
+)
 from skyrl_train.hf_model_io import HF_WEIGHT_FILENAME
 from skyrl_train.io import io
 
@@ -73,7 +77,7 @@ class RemoteSafetensorsTensorStore:
             with io.open_file(shard_uri, "rb") as source:
                 header_bytes, keys = read_safetensors_header(source, shard_uri)
             initial_bytes_read = len(header_bytes)
-            self._headers[shard] = len(header_bytes), json.loads(header_bytes[8:])
+            self._headers[shard] = len(header_bytes), json.loads(header_bytes[SAFETENSORS_LENGTH_PREFIX_BYTES:])
             weight_map = {key: shard for key in keys}
         if not isinstance(weight_map, dict) or not weight_map:
             raise ValueError(f"Safetensors weight index has an empty weight_map: {index_path}")
@@ -93,7 +97,7 @@ class RemoteSafetensorsTensorStore:
         source.seek(0)
         header_bytes, _keys = read_safetensors_header(source, join_resource_path(self.source_uri, shard))
         self.bytes_read += len(header_bytes)
-        cached = len(header_bytes), json.loads(header_bytes[8:])
+        cached = len(header_bytes), json.loads(header_bytes[SAFETENSORS_LENGTH_PREFIX_BYTES:])
         self._headers[shard] = cached
         return cached
 

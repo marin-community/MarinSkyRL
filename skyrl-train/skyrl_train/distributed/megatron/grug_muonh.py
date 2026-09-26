@@ -14,9 +14,9 @@ from torch.optim import Optimizer
 
 Route = Literal["muonh", "adamh", "adam"]
 ROUTE_KEY = "grug_route"
-MUONH_ROUTE = "muonh"
-ADAMH_ROUTE = "adamh"
-ADAM_ROUTE = "adam"
+MUONH_ROUTE: Route = "muonh"
+ADAMH_ROUTE: Route = "adamh"
+ADAM_ROUTE: Route = "adam"
 DEFAULT_MOMENTUM = 0.95
 DEFAULT_NESTEROV = True
 DEFAULT_NS_STEPS = 5
@@ -35,7 +35,7 @@ def grug_muonh_route(name: str, parameter: Tensor) -> Route:
     """Classify the Megatron parameter using Marin's three optimizer routes."""
     lower_name = name.lower()
     if "gated_norm" in lower_name:
-        return "muonh"
+        return MUONH_ROUTE
     if (
         "embed" in lower_name
         or "router_bias" in lower_name
@@ -43,12 +43,12 @@ def grug_muonh_route(name: str, parameter: Tensor) -> Route:
         or ".router" in lower_name
         or lower_name.startswith("router.")
     ):
-        return "adam"
+        return ADAM_ROUTE
     if "output_proj" in lower_name or "lm_head" in lower_name or "output_layer" in lower_name:
-        return "adamh"
+        return ADAMH_ROUTE
     if parameter.ndim in (2, 3):
-        return "muonh"
-    return "adam"
+        return MUONH_ROUTE
+    return ADAM_ROUTE
 
 
 def _newton_schulz_quintic(matrix: Tensor, *, steps: int, eps: float) -> Tensor:
@@ -115,20 +115,23 @@ class GrugMegatronMuonH(Optimizer):
             if group.get("weight_decay", 0.0) != 0.0:
                 raise ValueError("MuonH requires weight_decay=0 for every parameter group")
 
+    def _initialize_parameter_state(self, parameter: Tensor, route: Route, *, prototype: Tensor | None = None) -> dict:
+        state = self.state[parameter]
+        if not state:
+            value = parameter if prototype is None else prototype
+            if route == MUONH_ROUTE:
+                state["momentum_buffer"] = torch.zeros_like(value)
+            else:
+                state["step"] = torch.zeros((), dtype=torch.int64, device=parameter.device)
+                state["exp_avg"] = torch.zeros_like(value)
+                state["exp_avg_sq"] = torch.zeros_like(value)
+        return state
+
     def initialize_state(self) -> None:
         """Populate all states before a distributed checkpoint is loaded."""
         for group in self.param_groups:
-            route = group[ROUTE_KEY]
             for parameter in group["params"]:
-                state = self.state[parameter]
-                if state:
-                    continue
-                if route == MUONH_ROUTE:
-                    state["momentum_buffer"] = torch.zeros_like(parameter)
-                else:
-                    state["step"] = torch.zeros((), dtype=torch.int64, device=parameter.device)
-                    state["exp_avg"] = torch.zeros_like(parameter)
-                    state["exp_avg_sq"] = torch.zeros_like(parameter)
+                self._initialize_parameter_state(parameter, group[ROUTE_KEY])
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -147,14 +150,7 @@ class GrugMegatronMuonH(Optimizer):
                     raise RuntimeError("MuonH does not support sparse gradients")
                 if route != ADAM_ROUTE and parameter.ndim not in (2, 3):
                     raise RuntimeError(f"{route} received a rank-{parameter.ndim} parameter")
-                state = self.state[parameter]
-                if not state:
-                    if route == MUONH_ROUTE:
-                        state["momentum_buffer"] = torch.zeros_like(gradient)
-                    else:
-                        state["step"] = torch.zeros((), dtype=torch.int64, device=parameter.device)
-                        state["exp_avg"] = torch.zeros_like(gradient)
-                        state["exp_avg_sq"] = torch.zeros_like(gradient)
+                state = self._initialize_parameter_state(parameter, route, prototype=gradient)
                 if route == MUONH_ROUTE:
                     momentum_buffer = state["momentum_buffer"]
                     momentum_buffer.mul_(self.momentum).add_(gradient)

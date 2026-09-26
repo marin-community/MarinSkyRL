@@ -3,9 +3,9 @@
 The replay ran on 2026-09-26 as Iris job
 `/atqamar/atqamar-iceball-replay-matrix-guarded-rno-20260926` on one
 non-preemptible node with eight H100 80 GB GPUs. It succeeded with zero failures
-and preemptions. The task output archive is
-`s3://marin-us-east-02a/tmp/ttl=7d/iris/task-outputs/atqamar/atqamar-iceball-replay-matrix-guarded-rno-20260926/0/85f3b4b40a99be0a/outputs.tar.zst`.
-The analysis job was
+and preemptions. Raw task output had seven-day retention; the fixed fixture
+hash, measurement protocol, numerical comparison, and timing table are retained
+below. The analysis job was
 `/atqamar/atqamar-iceball-replay-analysis-detail-20260926`.
 
 Run `iceball_replay_matrix.sh` in the frozen CUDA runtime with
