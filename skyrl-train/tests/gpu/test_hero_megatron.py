@@ -106,7 +106,9 @@ def write_tiny_hero_checkpoint(path: Path):
         pytest.param(1, 1, 2, 2, True, True, 1.0, id="cpu-adamw"),
     ],
 )
-def test_hero_worker_repeated_updates(tmp_path, tp, pp, ep, cp, packing, overlap_param_gather, optimizer_offload):
+def test_hero_worker_repeated_updates(
+    tmp_path, monkeypatch, tp, pp, ep, cp, packing, overlap_param_gather, optimizer_offload
+):
     world_size = pp * max(tp * cp, ep)
     require_hoppers(world_size)
     model_path = tmp_path / "model"
@@ -117,6 +119,7 @@ def test_hero_worker_repeated_updates(tmp_path, tp, pp, ep, cp, packing, overlap
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
     cfg.trainer.policy.megatron_config.ddp_config.overlap_param_gather = overlap_param_gather
     if optimizer_offload is not None:
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
         megatron = cfg.trainer.policy.megatron_config
         cfg.trainer.flash_attn = True
         megatron.ddp_config.grad_reduce_in_fp32 = False
