@@ -24,7 +24,7 @@ from marinskyrl.checkpoint_paths import policy_export_path
 from marinskyrl.hf_model import validate_portable_hf_model_files
 from marinskyrl.packed_tasks import select_task_references
 from marinskyrl.resource_locator import join_resource_path
-from marinskyrl.task_sources import TaskTroveParquetSource, TaskTroveSelectionSnapshot, data_source
+from marinskyrl.task_sources import TaskTroveParquetSource, TaskTroveSelectionSnapshot, data_source, data_source_dict
 from rigging.filesystem.storage_path import StoragePath
 
 
@@ -91,7 +91,7 @@ def _prepared_sources(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     distinct_environment_count=summary.distinct_environment_count,
                 ),
             )
-        prepared.append(json.loads(json.dumps(asdict(source))))
+        prepared.append(data_source_dict(source))
     return prepared
 
 

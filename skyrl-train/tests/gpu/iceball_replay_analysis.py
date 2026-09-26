@@ -12,16 +12,14 @@ from pathlib import Path
 
 import torch
 import zstandard
-from marinskyrl.remote_io import filesystem_and_path
 from marinskyrl.resource_locator import join_resource_path
+from rigging.filesystem.storage_path import StoragePath
 
 _CELL_RESULT = re.compile(r"(.+)-repeat-(\d+)\.json\Z")
 
 
 def _read_archive(uri: str) -> dict[str, bytes]:
-    filesystem, path = filesystem_and_path(uri)
-    with filesystem.open(path, "rb") as source:
-        compressed = source.read()
+    compressed = StoragePath(uri).read_bytes()
     with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(compressed)) as reader:
         data = reader.read()
     with tarfile.open(fileobj=io.BytesIO(data)) as archive:
@@ -75,7 +73,7 @@ def _compare_cells(cells: dict[str, list[dict]], response_mask: list[list[int]])
 def analyze(uri: str) -> dict:
     files = _read_archive(uri)
     setup = json.loads(files["setup.json"])
-    fixture = json.loads(files["remote-store.json"])
+    remote_store = json.loads(files["remote-store.json"])
     batches = torch.load(io.BytesIO(files["fixture.pt"]), map_location="cpu", weights_only=True)["batches"]
     response_mask = batches[0]["response_mask"].tolist()
     result = {
@@ -87,7 +85,7 @@ def analyze(uri: str) -> dict:
         "model_identity": setup["model_identity"],
         "model_stage_seconds": setup["stage_seconds"],
         "gpu_names": setup["gpu_names"],
-        "remote_store": fixture,
+        "remote_store": remote_store,
         "cells": {},
         "pairs": {},
     }
@@ -145,11 +143,10 @@ def main() -> None:
     args = parser.parse_args()
     uri = args.archive_uri
     if not uri.endswith(".tar.zst"):
-        fs, path = filesystem_and_path(join_resource_path(uri, "0", "*", "outputs.tar.zst"))
-        matches = fs.glob(path)
+        matches = StoragePath(join_resource_path(uri, "0", "*", "outputs.tar.zst")).glob()
         if len(matches) != 1:
             raise RuntimeError(f"Expected one result archive for {uri}; found {len(matches)}")
-        uri = fs.unstrip_protocol(matches[0])
+        uri = str(matches[0])
     result = analyze(uri)
     output = args.output
     if output is None and "IRIS_OUTPUT_DIR" in os.environ:
