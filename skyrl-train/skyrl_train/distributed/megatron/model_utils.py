@@ -210,7 +210,6 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
         chunk_size = ctx.chunk_size
         tp_group = ctx.tp_group
 
-        partition_vocab_size = int(vocab_parallel_logits.shape[-1])
         seq_size = int(vocab_parallel_logits.shape[1])
         num_chunks = (seq_size + chunk_size - 1) // chunk_size
 
@@ -220,7 +219,7 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
         # destination exactly once, so ``empty_like`` is safe and avoids the
         # extra full fp32 buffer (12.9 GiB in the failing 30B RL batch).
         #
-        # The temporary log-softmax and chosen-token mask remain fp32 *inside*
+        # The temporary softmax and chosen-token update remain fp32 *inside*
         # the bounded chunk loop; only the returned activation gradient uses
         # the model's native dtype.
         grad_input = torch.empty_like(vocab_parallel_logits)
@@ -238,17 +237,20 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
             )
             softmax_output = softmax_output.exp()
 
-            # 1 if it's the chosen log prob, 0 otherwise
-            is_chosen = (~(target_mask[:, chunk_start:chunk_end])).unsqueeze(-1) * torch.nn.functional.one_hot(
-                masked_target[:, chunk_start:chunk_end],
-                num_classes=partition_vocab_size,
+            # Add the chosen-token gradient in place: a dense int64 one-hot
+            # tensor can exhaust H100 memory even when the logprob path is chunked.
+            softmax_output.neg_()
+            softmax_output.scatter_add_(
+                -1,
+                masked_target[:, chunk_start:chunk_end].unsqueeze(-1),
+                (~target_mask[:, chunk_start:chunk_end]).unsqueeze(-1).to(dtype=softmax_output.dtype),
             )
 
             grad_input_chunk = grad_input[:, chunk_start:chunk_end, :]
-            grad_input_chunk.copy_(is_chosen.float().sub_(softmax_output))
+            grad_input_chunk.copy_(softmax_output)
             grad_input_chunk.mul_(grad_output[:, chunk_start:chunk_end].unsqueeze(dim=-1))
 
-            del softmax_output, is_chosen, logits
+            del softmax_output, logits
 
         # TODO: Investigate PrimeRL's streamed token-and-vocab LM-head backward
         # (`prime_rl/trainer/models/layers/lm_head.py:_SequenceChunkedLogProbEntropyFn`)
