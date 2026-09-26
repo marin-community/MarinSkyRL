@@ -69,6 +69,7 @@ from marinskyrl.environment_contract import (
 )
 from cloud.iris.runtime_environment import (
     CHECKPOINT_EXPORT_ENTRYPOINT,
+    IRIS_TASK_IMAGE,
     MARINSKYRL_ACTIVATION_FILE,
     MARINSKYRL_TASK_ROOT,
     RuntimeProfile,
@@ -1390,6 +1391,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
         job = client.submit(
             entrypoint=entrypoint,
             name=args.job_name,
+            task_image=IRIS_TASK_IMAGE,
             resources=resources,
             environment=EnvironmentSpec(
                 env_vars=env_vars,

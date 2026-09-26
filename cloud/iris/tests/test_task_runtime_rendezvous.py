@@ -57,24 +57,10 @@ def test_matching_rendezvous_runtime_is_accepted():
     assert validated == head
 
 
-def test_python_patch_difference_with_same_ray_is_accepted():
-    head = _head_payload()
-
-    assert (
-        validate_rendezvous_runtime(
-            head,
-            worker_node="worker-node",
-            python_version="3.12.14",
-            ray_version="2.51.1",
-        )
-        == head
-    )
-
-
 @pytest.mark.parametrize(
     ("python_version", "ray_version", "expected_versions"),
     [
-        ("3.13.0", "2.51.1", ("Python 3.12.13", "Python 3.13.0")),
+        ("3.12.14", "2.51.1", ("Python 3.12.13", "Python 3.12.14")),
         ("3.12.13", "2.52.0", ("Ray 2.51.1", "Ray 2.52.0")),
     ],
 )

@@ -11,6 +11,11 @@ MARINSKYRL_TASK_ROOT = "/app/marinskyrl"
 MARINSKYRL_ACTIVATION_FILE = f"{MARINSKYRL_TASK_ROOT}/.iris-runtime-env"
 MARINSKYRL_BOOTSTRAP_SCRIPT = "cloud/iris/bootstrap_runtime.sh"
 CHECKPOINT_EXPORT_ENTRYPOINT = "skyrl_train.entrypoints.checkpoint_export"
+# Ray requires the exact Python patch version on every node. Use one multi-arch
+# task image digest so a gang cannot mix cached versions of the mutable tag.
+IRIS_TASK_IMAGE = (
+    "ghcr.io/marin-community/iris-task@sha256:13519c59442bd70ed5ec2902869f15094992d6849d7e34e353f1338dec7ff5f8"
+)
 
 
 class RuntimeProfile(StrEnum):

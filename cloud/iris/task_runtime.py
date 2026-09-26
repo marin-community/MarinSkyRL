@@ -783,10 +783,10 @@ def validate_rendezvous_runtime(
     python_version: str,
     ray_version: str,
 ) -> RendezvousPayload:
-    """Require one Python minor version and one Ray version across the gang."""
+    """Reject a worker whose Python or Ray version differs from the head."""
     head_python_version = payload.python_version
     head_ray_version = payload.ray_version
-    if head_python_version.rsplit(".", 1)[0] == python_version.rsplit(".", 1)[0] and head_ray_version == ray_version:
+    if head_python_version == python_version and head_ray_version == ray_version:
         return payload
 
     raise RuntimeError(
