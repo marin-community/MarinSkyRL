@@ -93,6 +93,7 @@ class TrajectoryBatch(TypedDict):
 
     prompt_token_ids: List[List[int]]
     response_ids: List[List[int]]
+    data_sources: Optional[List[str | None]]
     rewards: Union[List[float], List[List[float]]]
     unshaped_rewards: Optional[List[float]]
     unshaped_reward_available: Optional[List[bool]]
