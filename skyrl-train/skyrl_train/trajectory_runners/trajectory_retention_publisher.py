@@ -18,8 +18,7 @@ class PublicationRequest:
     request_id: str
     operation: PublicationOperation
     output_path: str
-    archive_path: str | None = None
-    archive_payload: bytes | None = None
+    archives: Mapping[str, bytes] | None = None
     ledger: Mapping[str, Any] | None = None
     retention_config: Mapping[str, Any] | None = None
     record_count: int = 0
