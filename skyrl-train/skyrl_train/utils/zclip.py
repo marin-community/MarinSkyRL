@@ -1,9 +1,8 @@
 """ZClip — reactive grad-norm spike mitigation via EMA z-score.
 
 Port of https://github.com/bluorion-com/ZClip adapted to SkyRL's
-strategy-managed gradient handling. SkyRL's strategy already handles
-the cross-shard reduction for FSDP1/FSDP2/DDP via ``clip_grad_norm_``,
-so this module consumes a scalar pre-clip ``grad_norm`` and returns an
+strategy-managed gradient handling. The strategy handles cross-shard
+gradient reduction, so this module consumes a scalar pre-clip ``grad_norm`` and returns an
 effective ``max_norm`` to clip to. The actual rescaling is done by the
 caller (typically by additional in-place gradient scaling after the
 standard clip).

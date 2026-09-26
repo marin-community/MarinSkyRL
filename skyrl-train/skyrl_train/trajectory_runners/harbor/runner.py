@@ -373,7 +373,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             tokenizer: tokenizer object for encoding and decoding text
             moe_router_replay: when True, capture per-token MoE routed_experts from
                 Harbor rollout_details and plumb them through to the training batch
-                (Stage 1 of the FSDP2 EP/router-replay port). Default False keeps the
+                for Megatron router replay. Default False keeps the
                 TrajectoryBatch byte-identical to today.
             rollout_logprobs_required: Whether the selected policy objective consumes
                 behavior-policy logprobs. Full-TITO rollout assembly defaults to this.

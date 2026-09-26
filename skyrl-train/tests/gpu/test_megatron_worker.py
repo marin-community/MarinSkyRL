@@ -405,50 +405,6 @@ async def test_megatron_train(
             assert isinstance(v, (int, float)), f"{k} should be an int or float"
 
     ray.shutdown()
-    ray_init_for_tests()
-
-    cfg.trainer.strategy = "fsdp2"
-    # NOTE (erictang000): need to set sample packing to false here due to metric calculation differences
-    # between use_sample_packing true/false for FSDP (no diff for megatron)
-    # this shouldn't be the case, but tracking here: https://github.com/NovaSky-AI/SkyRL/issues/211
-    # + tested that this does not affect convergence
-    cfg.trainer.use_sample_packing = False
-    if ep > 1:
-        cfg.trainer.policy.fsdp_config.cpu_offload = True
-    actor_group = init_worker_with_type(
-        "policy",
-        shared_pg=None,
-        colocate_all=False,
-        num_nodes=cfg.trainer.placement.policy_num_nodes,
-        num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
-        cfg=cfg,
-    )
-
-    batch.metadata["global_step"] = 0
-    results_fsdp = ray.get(actor_group.async_run_ray_method("pass_through", "ppo_train", batch))
-    results_fsdp = [results_fsdp[i].metadata["train_status"] for i in range(len(results_fsdp))]
-
-    print("megatron results: ", results_megatron[0])
-    print("\n\n")
-    print("fsdp results: ", results_fsdp[0])
-
-    keys_to_compare = [
-        "policy_loss",
-        "policy_lr",
-        *POLICY_CLIP_METRIC_KEYS,
-        "policy_entropy",
-        "policy_kl",
-        "final_loss",
-    ]
-    for i, result in enumerate(results_fsdp):
-        for k in keys_to_compare:
-            if k == "policy_entropy":
-                # TODO: make entropy calculation only apply to non-padding tokens for all backends
-                # because the logits for padding tokens are all 0 for the non-sample packing case in megatron
-                # the entropy calculation is different (fsdp has random logits for padding tokens)
-                continue
-            assert isinstance(result[k], (int, float)), f"{k} should be an int or float"
-            assert abs(result[k] - results_megatron[i][k]) < 1.5e-1, f"diff in {k} is too large!"
 
 
 @pytest.mark.asyncio

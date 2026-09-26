@@ -18,59 +18,8 @@ Simple training on GSM8K
 The scripts for training on GSM8K are available at :code_link:`examples/gsm8k/`.
 
 
-.. raw:: html
-
-   <style>
-     table.skytable {
-       border-collapse: collapse;
-       margin-bottom: 20px;
-     }
-     table.skytable th, table.skytable td {
-       border: 1px solid #ccc;
-       padding: 6px 10px;
-     }
-     table.skytable th {
-       background: #f2f2f2;
-     }
-     table.skytable tr:nth-child(even) {
-       background: #fafafa;
-     }
-   </style>
-
-   <table class="skytable">
-     <thead>
-       <tr>
-         <th>Backend</th>
-         <th>Model</th>
-         <th>Eval Accuracy</th>
-         <th>Hardware</th>
-         <th>Training Steps</th>
-         <th>Commit</th>
-         <th>WandB</th>
-       </tr>
-     </thead>
-     <tbody>
-       <tr>
-         <td>FSDP2</td>
-         <td>Qwen/Qwen2.5-1.5B-Instruct</td>
-         <td>0.796</td>
-         <td>4xH100</td>
-         <td>140</td>
-         <td><a href="https://github.com/novasky-ai/SkyRL/commit/a95b699">a95b699</a></td>
-         <td><a href="https://wandb.ai/sky-posttraining-uc-berkeley/gsm8k_recipes?nw=nwusersumanthrh99">Link</a></td>
-       </tr>
-       <tr>
-         <td>DeepSpeed</td>
-         <td>Qwen/Qwen2.5-1.5B-Instruct</td>
-         <td>0.791</td>
-         <td>4xH100</td>
-         <td>140</td>
-         <td><a href="https://github.com/novasky-ai/SkyRL/commit/a95b699">a95b699</a></td>
-         <td><a href="https://wandb.ai/sky-posttraining-uc-berkeley/gsm8k_recipes?nw=nwusersumanthrh99">Link</a></td>
-       </tr>
-     </tbody>
-   </table>
-  
+The current GSM8K launch script uses Megatron. Historical result tables from retired
+backends are not training recipes for this fork.
 
 DAPO Recipes
 ~~~~~~~~~~~~
