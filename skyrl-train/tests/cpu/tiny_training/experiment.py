@@ -112,6 +112,8 @@ def tiny_training_config(
             "resume_mode": "latest",
             "ckpt_path": str(root / "ckpts"),
             "export_path": str(root / "exports"),
+            # The experiments replace the tracker, so no logger service is contacted.
+            "logger": "console",
         },
         "generator": {
             "num_inference_engines": 1,
