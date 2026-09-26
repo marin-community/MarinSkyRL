@@ -43,7 +43,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     get_rollout_metrics,
     normalize_token_ids,
 )
-from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelClient
+from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelClient, ModelServerError
 from skyrl_train.trajectory_runners.selected_topk import align_student_topk
 from skyrl_train.trajectory_runners.collectors import RolloutCollector, collect_agent_loops
 from skyrl_train.trajectory_runners.projections import (
@@ -231,6 +231,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         if isinstance(error, ExactChatTransportError):
             raise error
         exception_type = type(error).__name__
+        diagnostics = {"exception_type": exception_type}
+        if isinstance(error, ModelServerError):
+            diagnostics.update(
+                error_category=error.category,
+                request_id=error.request_id,
+                status_code=error.status_code,
+            )
         trajectory_ids = request.get("trajectory_ids")
         trajectory_id = trajectory_ids[index] if trajectory_ids is not None else None
         logger.warning(
@@ -250,7 +257,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             ),
             verification=VerificationResult.error(
                 "SkyRL-Gym agent loop failed",
-                diagnostics={"exception_type": exception_type},
+                diagnostics=diagnostics,
             ),
             reward=RewardResult(
                 unshaped_reward=None,

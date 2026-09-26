@@ -7,7 +7,7 @@ import pytest
 from jinja2 import TemplateError
 
 from skyrl_train.inference_engines.chat_template import SINGLE_TOOL_CALL_TEMPLATE_ERROR
-from skyrl_train.trajectory_runners.model_clients import DirectModelClient
+from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
 
 
 def _encoded_routes(rows):
@@ -31,6 +31,35 @@ async def test_direct_model_client_preserves_engine_tokens():
     output = await DirectModelClient(engine).generate({"prompt_token_ids": [[1, 2]]})
 
     assert output == {**engine_output, "token_provenance": "engine"}
+
+
+@pytest.mark.asyncio
+async def test_direct_chat_client_preserves_server_error_identity_without_message():
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenize.return_value = {"tokens": [1, 2]}
+
+    async def server_error(payload):
+        return {
+            "error": {"message": "private prompt contents", "code": 500},
+            "error_category": "constrained_decoding",
+            "request_id": payload["headers"]["x-request-id"],
+        }
+
+    engine.chat_completion.side_effect = server_error
+    with pytest.raises(ModelServerError) as raised:
+        await DirectModelClient(engine).generate(
+            {
+                "prompts": [[{"role": "user", "content": "secret"}]],
+                "chat_completion_params": [{}],
+            }
+        )
+
+    error = raised.value
+    assert error.request_id == engine.chat_completion.await_args.args[0]["headers"]["x-request-id"]
+    assert error.category == "constrained_decoding"
+    assert error.status_code == 500
+    assert "private prompt contents" not in str(error)
 
 
 @pytest.mark.asyncio
