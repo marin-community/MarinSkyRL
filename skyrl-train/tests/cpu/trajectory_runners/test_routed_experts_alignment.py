@@ -24,7 +24,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
     SENTINEL_EXPERT_ID,
 )
-from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
+from skyrl_train.inference_engines.routed_experts import normalize_routed_experts
 from skyrl_train.dataset.preprocess import (
     _collate_routed_experts_from_arrays,
     convert_prompts_responses_to_batch_tensors,

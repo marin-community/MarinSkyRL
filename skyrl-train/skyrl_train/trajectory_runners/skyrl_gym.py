@@ -137,20 +137,6 @@ class ExactChatTransportError(RuntimeError):
     """The configured exact structured-chat contract was violated at runtime."""
 
 
-def _sole_turn_training_view(first_turn: ModelClientOutput, collect_logprobs: bool):
-    """The served prompt and sampled tokens of a lone assistant turn, with its logprobs, spans and routes."""
-    logprobs = first_turn.get("response_logprobs")
-    spans = first_turn.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY)
-    routes = first_turn.get("routed_experts")
-    return (
-        first_turn["prompt_ids"][0],
-        first_turn["response_ids"][0],
-        logprobs[0] if collect_logprobs and logprobs is not None else None,
-        None if spans is None else spans[0],
-        None if routes is None else routes[0],
-    )
-
-
 class SkyRLGymTrajectoryRunner(TrajectoryRunner):
     def __init__(
         self,
@@ -765,10 +751,12 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             and not rewritten
         )
         if sole_turn:
-            prompt_ids, response_ids, rollout_logprobs, behavior_policy_version_segments, rollout_routes = (
-                _sole_turn_training_view(first_turn, collect_logprobs)
-            )
+            prompt_ids, response_ids = first_turn["prompt_ids"][0], first_turn["response_ids"][0]
             loss_mask = [1] * len(response_ids)
+            logprob_rows = first_turn.get("response_logprobs")
+            rollout_logprobs = logprob_rows[0] if collect_logprobs and logprob_rows is not None else None
+            behavior_policy_version_segments = first_turn.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY, [None])[0]
+            rollout_routes = first_turn.get("routed_experts", [None])[0]
             if rollout_routes:
                 route_sentinel = _sentinel_routed_experts_row(rollout_routes[0])
         elif retokenize_chat_history:

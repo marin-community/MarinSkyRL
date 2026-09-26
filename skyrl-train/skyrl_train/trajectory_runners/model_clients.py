@@ -18,7 +18,7 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.response_topk import select_chat_response_topk
 from skyrl_train.policy_version import RESPONSE_POLICY_VERSION_SEGMENTS_KEY, PolicyVersionSegment
 from skyrl_train.trajectory_runners.types import TokenProvenance
-from skyrl_train.trajectory_runners.routed_experts import choice_routes, normalize_routed_experts
+from skyrl_train.inference_engines.routed_experts import choice_routes, normalize_routed_experts
 
 
 _CHAT_SAMPLING_EXCLUSIONS = frozenset({"max_generate_length", "logprobs", "stop"})

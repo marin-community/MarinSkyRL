@@ -26,7 +26,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient
-from skyrl_train.trajectory_runners.routed_experts import encode_routed_experts
+from skyrl_train.inference_engines.routed_experts import encode_routed_experts
 from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
 from omegaconf import OmegaConf
 import asyncio

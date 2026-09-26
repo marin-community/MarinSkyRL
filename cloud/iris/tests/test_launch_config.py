@@ -221,9 +221,8 @@ def test_a_composed_document_reports_only_non_default_fully_async_settings(
     with caplog.at_level(logging.WARNING, logger="cloud.iris.launch_config"):
         validate_launch_config(config)
 
-    assert [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING] == [
-        "launch config smoke: entrypoint skyrl_train.entrypoints.main_base never runs the fully async trainer "
-        "and never reads trainer.fully_async.pause_mode"
+    assert [record.args for record in caplog.records if record.levelno >= logging.WARNING] == [
+        ("smoke", "skyrl_train.entrypoints.main_base", "trainer.fully_async.pause_mode")
     ]
 
 

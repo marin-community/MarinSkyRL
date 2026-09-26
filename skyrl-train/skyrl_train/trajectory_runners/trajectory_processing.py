@@ -14,7 +14,7 @@ from skyrl_train.trajectory_runners.base import (
     TrainingPhase,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import RETENTION_METRIC_PREFIX
-from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
+from skyrl_train.inference_engines.routed_experts import normalize_routed_experts
 from skyrl_train.metric_names import (
     IDENTITY_AWARE_REWARD_METRIC_PREFIX,
     LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
