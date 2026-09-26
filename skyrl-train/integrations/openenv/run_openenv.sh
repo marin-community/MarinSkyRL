@@ -24,13 +24,13 @@ set -x
 # : "${INFERENCE_BACKEND:=sglang}"
 : "${MAX_TURNS:=1}"
 
-uv run --isolated --extra $INFERENCE_BACKEND --with "openenv@git+https://github.com/meta-pytorch/OpenEnv.git" --with "litellm>=1.75.5" -m integrations.openenv.entrypoints.main_openenv \
+uv run --isolated --extra megatron --extra $INFERENCE_BACKEND --with "openenv@git+https://github.com/meta-pytorch/OpenEnv.git" --with "litellm>=1.75.5" -m integrations.openenv.entrypoints.main_openenv \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.critic_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \

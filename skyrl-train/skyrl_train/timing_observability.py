@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, MutableMapping, Sequence
+import time
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
-from skyrl_train.telemetry import TRAINER_ROLE, phase_duration
+from skyrl_train.telemetry import TRAINER_ROLE, phase_attributes, phase_duration
 
 
 TIMING_PARENTS: dict[str, str | None] = {
     "step": None,
     "generate": "step",
     "wait_for_generation_buffer": "step",
+    "assemble_generation_group_mini_batch": "step",
     "postprocess_trajectory_batch": "step",
     "convert_to_training_input": "step",
     "run_training": "step",
@@ -23,6 +26,7 @@ TIMING_PARENTS: dict[str, str | None] = {
     "critic_train": "train_critic_and_policy",
     "policy_train": "train_critic_and_policy",
     "policy_critic_overlap_train": "train_critic_and_policy",
+    "backload_policy_optimizer_to_gpu": "train_critic_and_policy",
     "sync_weights": "step",
     "offload_policy_model_to_cpu": "step",
     "dump_data_batch": "run_training",
@@ -43,6 +47,58 @@ class PhaseTiming:
     duration_seconds: float
     root: str
     parent: str | None
+
+
+class PhaseBreakdown:
+    """Split one root phase's wall time into child phases and publish the unattributed residual."""
+
+    def __init__(
+        self,
+        root: str,
+        parents: Mapping[str, str] | None = None,
+        *,
+        enabled: bool,
+        clock: Callable[[], float] = time.perf_counter,
+    ) -> None:
+        self.root = root
+        self.enabled = enabled
+        self._parents = parents or {}
+        self.clock = clock
+        self._started = clock() if enabled else 0.0
+        self._durations: dict[str, float] = {}
+
+    @contextmanager
+    def span(self, phase: str) -> Iterator[None]:
+        if not self.enabled:
+            yield
+            return
+        started = self.clock()
+        try:
+            yield
+        finally:
+            self._durations[phase] = self._durations.get(phase, 0.0) + self.clock() - started
+
+    def publish(self, *, clock_domain: str, attributes: Mapping[str, str]) -> float:
+        """Record the root, each entered phase under its parent and the residual; return the root's duration."""
+        if not self.enabled:
+            return 0.0
+        total = self.clock() - self._started
+        parents = {phase: self._parents.get(phase, self.root) for phase in self._durations}
+        children = sum(duration for phase, duration in self._durations.items() if parents[phase] == self.root)
+        rows = [
+            (self.root, total, None),
+            *((phase, duration, parents[phase]) for phase, duration in self._durations.items()),
+        ]
+        rows.append((f"{self.root}_residual", total - children, self.root))
+        for phase, duration, parent in rows:
+            phase_duration.record(
+                duration,
+                attributes={
+                    **attributes,
+                    **phase_attributes(phase=phase, root=self.root, parent=parent, clock_domain=clock_domain),
+                },
+            )
+        return total
 
 
 class TimingSink(Protocol):
@@ -82,10 +138,12 @@ class FinelogTimingSink:
             phase_duration.record(
                 observation.duration_seconds,
                 attributes={
-                    "phase": observation.name,
-                    "root": observation.root,
-                    "parent": observation.parent or "",
-                    "clock_domain": "inclusive_wall",
+                    **phase_attributes(
+                        phase=observation.name,
+                        root=observation.root,
+                        parent=observation.parent,
+                        clock_domain="inclusive_wall",
+                    ),
                     "role": TRAINER_ROLE,
                     "step": str(step),
                 },

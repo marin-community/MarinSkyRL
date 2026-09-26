@@ -15,16 +15,19 @@ import asyncio
 import collections
 import os
 import sys
+import time
+
+import torch
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from loguru import logger
-from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.trainer import RayPPOTrainer, consumed_work
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer, get_system_memory_metrics
 from marinskyrl.runtime_options import WeightSyncTransport
 from skyrl_train.weight_sync.expert_block.driver import ExpertBlockSync
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
-from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader
+from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader, async_step_metrics
 from skyrl_train.utils.logging_utils import log_exception_as_text
 from skyrl_train.trajectory_runners.trajectory_processing import (
     prepare_trajectory_request,
@@ -41,11 +44,20 @@ from typing import List, Literal, Tuple, TypeVar
 from enum import Enum, auto
 from omegaconf import OmegaConf
 from skyrl_train.telemetry import (
+    TRAINER_ROLE,
     critical_phase,
+    record_event,
     record_generated_work,
     record_policy_step,
     record_rollout_buffer,
     record_rollout_staleness,
+)
+from skyrl_train.rollout_observability import (
+    async_phase_window,
+    async_wait,
+    monitor_event_loop_lag,
+    observe_rollout_call,
+    record_group_disposition,
 )
 from skyrl_train.timing_observability import publish_step_timings
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
@@ -446,6 +458,7 @@ class _AsyncDataloader:
 
 
 class FullyAsyncRayPPOTrainer(RayPPOTrainer):
+    _async_telemetry_enabled: bool = False
     # Set at startup when generator.weight_sync_transport is expert_block.
     _expert_block_sync: ExpertBlockSync | None = None
 
@@ -458,6 +471,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.num_parallel_generation_workers = cfg.trainer.fully_async.num_parallel_generation_workers
         self.mini_batch_size = cfg.trainer.policy_mini_batch_size
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
+        self._async_telemetry_enabled: bool = cfg.trainer.async_spans
         self.group_admission_stall_timeout = cfg.trainer.algorithm.group_admission.stall_timeout
         self._group_selection_policy = GroupSelectionPolicy.for_fully_async(
             cfg.trainer.algorithm.dynamic_sampling.type,
@@ -682,6 +696,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         Main fully async training loop for PPO
         """
         self.global_step = 0
+        loop_monitor = (
+            asyncio.create_task(monitor_event_loop_lag(step_fn=lambda: self.global_step))
+            if self._async_telemetry_enabled
+            else None
+        )
 
         try:
             async_distillation_runtime = getattr(self, "_async_distillation_runtime", None)
@@ -693,11 +712,62 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             log_exception_as_text(f"Train loop failed at global_step {self.global_step}", e)
             raise
         finally:
+            if loop_monitor is not None:
+                loop_monitor.cancel()
             # Cancel any orphaned generation tasks that survived an early exit
             # (the per-epoch epilogue only runs on normal loop completion).
             self._cancel_trajectory_tasks()
 
             await self.shutdown()
+
+    def _record_async_run_configuration(self) -> None:
+        if not self._training_metrics_enabled:
+            return
+        placement = self.cfg.trainer.placement
+        megatron = self.cfg.trainer.policy.get("megatron_config", {})
+        record_event(
+            "async_run_configuration",
+            {
+                "strategy": self.cfg.trainer.strategy,
+                "policy_nodes": placement.policy_num_nodes,
+                "policy_gpus_per_node": placement.policy_num_gpus_per_node,
+                "policy_tp": megatron.get("tensor_model_parallel_size"),
+                "policy_pp": megatron.get("pipeline_model_parallel_size"),
+                "policy_cp": megatron.get("context_parallel_size"),
+                "policy_ep": megatron.get("expert_model_parallel_size"),
+                "generation_workers": self.num_parallel_generation_workers,
+                "mini_batch_size": self.mini_batch_size,
+                "max_staleness_steps": self.max_staleness_steps,
+            },
+            attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
+        )
+
+    def _update_async_step_metrics(
+        self, training_input: TrainingInputBatch, *, core_seconds: float, cycle_started: float
+    ) -> None:
+        if not self._training_metrics_enabled:
+            return
+        placement = self.cfg.trainer.placement
+        generator = self.cfg.generator
+        consumed = consumed_work(training_input)
+        self.all_metrics.update(
+            async_step_metrics(
+                core_seconds=core_seconds,
+                cycle_seconds=time.perf_counter() - cycle_started,
+                buffer_wait_seconds=self.all_timings["wait_for_generation_buffer"],
+                training_seconds=self.all_timings["run_training"],
+                sync_seconds=self.all_timings["sync_weights"],
+                consumed_loss_tokens=consumed.loss_tokens,
+                consumed_response_tokens=consumed.response_tokens,
+                policy_gpus=placement.policy_num_nodes * placement.policy_num_gpus_per_node,
+                inference_gpus=(
+                    generator.num_inference_engines
+                    * generator.inference_engine_tensor_parallel_size
+                    * generator.inference_engine_pipeline_parallel_size
+                    * generator.inference_engine_data_parallel_size
+                ),
+            )
+        )
 
     async def _train_loop(self):
         """
@@ -770,6 +840,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             return
 
         self._log_startup_timings()
+        self._record_async_run_configuration()
 
         # Create initial trainer state for on_train_begin callback
         start_epoch = self.global_step // self.num_steps_per_epoch
@@ -831,7 +902,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             trajectory_tasks = self._active_trajectory_tasks
 
             for _ in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
+                cycle_started = time.perf_counter()
                 with Timer("step", self.all_timings) as step_timer:
+                    core_started = time.perf_counter()
                     # 1. Discard every completed stale attempt and wait for a full fresh batch.
                     logger.info(
                         "Rollout batch started: step={} mode=fully_async required_groups={}",
@@ -841,6 +914,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     with (
                         Timer("wait_for_generation_buffer", self.all_timings) as rollout_wait_timer,
                         critical_phase("rollout_or_inference_wait", self.global_step),
+                        async_phase_window(
+                            "rollout_wait", step=self.global_step, enabled=self._async_telemetry_enabled
+                        ),
                     ):
                         cur_generation_group_mini_batch = await self._get_admitted_generation_group_mini_batch(
                             generation_queues,
@@ -852,6 +928,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             scored_distillation = await self._await_admitted_teacher_evidence(
                                 cur_generation_group_mini_batch
                             )
+
+                    if self._async_telemetry_enabled:
+                        for group in cur_generation_group_mini_batch:
+                            group.admitted_at = time.perf_counter()
 
                     # 2. Assemble, post-process, and convert the complete generated mini-batch.
                     training_input = await asyncio.to_thread(
@@ -911,7 +991,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         )
 
                     # 3. Run training and record consumed UIDs in the tracker.
-                    with Timer("run_training", self.all_timings):
+                    with (
+                        Timer("run_training", self.all_timings),
+                        async_phase_window("training", step=self.global_step, enabled=self._async_telemetry_enabled),
+                    ):
                         status = await self._run_training(training_input)
                     train_duration = self.all_timings["train_critic_and_policy"]
                     self._log_optimizer_step_completed(
@@ -920,6 +1003,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         duration_seconds=train_duration,
                     )
                     await self.data_tracker.mark_consumed([g.uid for g in cur_generation_group_mini_batch])
+                    for group in cur_generation_group_mini_batch:
+                        self._record_group_terminal(group, "consumed")
                     generation_queues.mark_admitted_consumed()
 
                     # 4. After training: sync weights to the inference engines.
@@ -937,18 +1022,26 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     #    max_staleness_steps accounting — exactly like stock
                     #    fully_async, which never drains trial orchestration. This
                     #    block is now byte-identical for fan-out ON and OFF.
-                    with Timer("sync_weights", self.all_timings) as weight_update_timer:
+                    with (
+                        Timer("sync_weights", self.all_timings) as weight_update_timer,
+                        async_phase_window("weight_sync", step=self.global_step, enabled=self._async_telemetry_enabled),
+                    ):
                         await self._sync_policy_weights_and_offload_optimizer(sync_phase="training_step")
                     self._log_weight_update_completed(
                         reason="training_step",
                         duration_seconds=weight_update_timer.duration,
                     )
 
+                    # The core wall excludes the step-end callbacks below.
+                    core_seconds = time.perf_counter() - core_started
+
                     # 5. Run callback-requested work before closing the inclusive step timer.
                     logger.info(status)
                     self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
                     step_state = self._create_trainer_state(epoch, active_step_duration=step_timer.elapsed)
                     await self._run_step_end_callbacks(step_state)
+
+                self._update_async_step_metrics(training_input, core_seconds=core_seconds, cycle_started=cycle_started)
 
                 # 6. Log metrics
                 if self._control.should_log:
@@ -1025,7 +1118,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             )
             # Drain any generation outputs that arrived after the training loop
             # stopped consuming (race between producer enqueue and consumer exit).
-            n_drained = len(_drain_queue(generation_queues.completed))
+            drained = _drain_queue(generation_queues.completed)
+            for group in drained:
+                self._record_group_terminal(group, "epoch_end_drain")
+            n_drained = len(drained)
             assert generation_queues.retries.empty(), (
                 f"Epoch ended with {generation_queues.retries.qsize()} stale-group retries still pending"
             )
@@ -1088,27 +1184,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     async def _run_training(self, training_input: TrainingInputBatch):
         # TODO(Charlie): share this code with the one-step-off async trainer.
-        # Drain the policy workers' event loops to a hard sync point IMMEDIATELY
-        # before dispatching this step's forward (the MoE-RL async-dispatch wedge
-        # fix, step-1 completion 2026-06-29). The existing post-weight-sync drains
-        # (after the initial and per-step weight syncs) leave a hazard at STEP 1:
-        # the initial drain fires at job start,
-        # then `wait_for_generation_buffer` blocks for HOURS (the fully-async rollout
-        # fill — 8813s / 2.45h on rl-131k-30b-drainfix) before this first forward is
-        # dispatched. By then the initial barrier is stale: the policy async actors'
-        # single event-loop thread has serviced other dispatched coroutines in the
-        # interim, so when the SYNC `forward.remote()` finally arrives only rank 0's
-        # loop is free and runs it (into a lonely mesh_fsdp param-unshard all-gather
-        # — FR-proven: ONLY rank 0 logged WORKER_FORWARD_ENTER at step 1, ranks
-        # 8/16/24 never scheduled their `forward` task → the embed-unshard
-        # `_all_gather_base` on mesh_fsdp deadlocks, NCCL watchdog aborts at 1800s,
-        # global_step never reaches 1). The per-step sync drain makes this barrier
-        # ADJACENT to the forward for steps 2+, which is why only step 1 wedged;
-        # doing it here makes the drain adjacent for EVERY step (step 1 included)
-        # regardless of how stale the preceding post-weight-sync drain is. Symmetric
-        # on every rank, changes no tensor values (correctness-neutral), strict no-op
-        # for single-rank / uninitialized runs. Idempotent with the sync drain (a
-        # second pass-through barrier on an already-free loop is a cheap no-op).
+        # The initial weight-sync drain can become stale while the rollout
+        # buffer fills. Align policy actor loops immediately before every forward.
         await self._drain_policy_event_loops()
         # inference and calculate values, log probs, rewards, kl divergence
         with Timer("fwd_logprobs_values_reward", self.all_timings):
@@ -1140,8 +1217,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         try:
             while True:
                 slot_acquired = False
-                rand_prompts = await self._next_generation_prompts(queues)
-                await self._staleness_manager.acquire_submission_slot()
+                with async_wait("prompt", step=self.global_step, enabled=self._async_telemetry_enabled):
+                    rand_prompts = await self._next_generation_prompts(queues)
+                with async_wait("slot", step=self.global_step, enabled=self._async_telemetry_enabled):
+                    await self._staleness_manager.acquire_submission_slot()
                 slot_acquired = True
                 assert len(rand_prompts) == 1
                 trajectory_request, uids = prepare_trajectory_request(
@@ -1159,9 +1238,18 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 global_step_at_start = self.global_step
 
                 # Disable each runner's progress bar so concurrent workers do not flood the console.
-                cur_trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(
-                    trajectory_request, disable_tqdm=True
-                )
+                with observe_rollout_call(
+                    step=global_step_at_start,
+                    mode="async",
+                    enabled=self._async_telemetry_enabled,
+                ) as observation:
+                    cur_trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(
+                        trajectory_request, disable_tqdm=True
+                    )
+                    if observation is not None:
+                        observation.response_tokens = sum(
+                            len(tokens) for tokens in cur_trajectory_batch["response_ids"]
+                        )
                 actual_step = cur_trajectory_batch.get("actual_global_step")
                 staleness_step = actual_step if actual_step is not None else global_step_at_start
 
@@ -1175,9 +1263,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     uid=uids[0],
                     earliest_model_step=staleness_step,
                     source_prompts=rand_prompts,
+                    completed_at=time.perf_counter() if observation is not None else None,
                 )
-                freshness = await self._enqueue_if_fresh(queues, completed_group)
+                with async_wait("enqueue", step=self.global_step, enabled=self._async_telemetry_enabled):
+                    freshness = await self._enqueue_if_fresh(queues, completed_group)
                 if freshness is _GroupFreshness.STALE:
+                    self._record_group_terminal(completed_group, "stale_enqueue")
                     await self._staleness_manager.cancel_submission_slot()
                     slot_acquired = False
                     self._record_admission_scan(
@@ -1249,16 +1340,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             return freshness
 
     async def async_sync_policy_weights_to_inference_engines(self):
-        # Pre-broadcast drain: hard-sync every policy shard rank's event loop BEFORE the
-        # weight-extract gather that broadcast_to_inference_engines runs. extract_weights
-        # fires mesh_fsdp `_all_gather_base` collectives (fsdp_worker._gather_tensor) on a
-        # submesh PG that inherits torch's default 600s timeout (WORLD PG is
-        # SKYRL_WORKER_NCCL_TIMEOUT_IN_S); pre-gather per-rank skew (the streamed extract's
-        # plan-build / a GDN backward slow-path) then makes a laggard miss the 600s window
-        # -> waiter ranks SIGABRT (the r4h gs1 death, #6936 _all_gather_base at the
-        # policy_train->sync_weights transition). Symmetric to the POST-broadcast drain at
-        # the call sites + the ppo_train entry barrier (worker.py); reuses the proven
-        # async-loop-safe barrier_all (WORLD PG >> the 600s submesh default).
+        # Align policy actors before the weight extraction collectives.
         await self._drain_policy_event_loops()
         if self._expert_block_sync is not None:
             timings = await self._expert_block_sync.sync(self.global_step)
@@ -1280,31 +1362,25 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
         )
 
+    def _record_group_terminal(self, group: GeneratedOutputGroup, disposition: str) -> None:
+        """Record the group's first disposition; a group still buffered at shutdown records none."""
+        if not self._async_telemetry_enabled or group.disposition_recorded:
+            return
+        record_group_disposition(
+            disposition=disposition,
+            tokens=sum(len(ids) for ids in group.trajectory_batch["response_ids"]),
+            step=self.global_step,
+            completed_at=group.completed_at,
+            admitted_at=group.admitted_at,
+        )
+        group.disposition_recorded = True
+
     async def _drain_policy_event_loops(self):
-        """Drain barrier before each forward (the MoE-RL async-dispatch wedge fix, 2026-06-29).
+        """Wait for every actor loop to finish pending weight-sync work.
 
-        FR-decode proved the gs-1 CoreWeave MoE wedge: the FSDP policy worker is a Ray
-        ASYNC actor (single event-loop thread, because it has `async def` methods like
-        `broadcast_to_inference_engines`). `worker.forward` is a plain SYNC method that
-        runs to completion on the loop thread WITHOUT yielding. After the disaggregated
-        per-step weight-sync, the peer ranks' loops were still occupied by the broadcast
-        coroutine task -> only rank 0's loop was free and ran the forward (into a lonely
-        mesh_fsdp unshard `_all_gather_base` -> 1800s NCCL watchdog); ranks 8/16/24's
-        queued `forward` task was never scheduled.
-
-        `barrier_all` is now an `async def` actor method (see worker.py). Dispatching it
-        and awaiting its refs GUARANTEES each peer's loop drained to idle (Ray cannot
-        resolve an async-method ObjectRef until the loop scheduled+ran the coroutine to
-        completion, and the coroutine `await`s a loop turn before its collective). So by
-        the time `await asyncio.gather(*refs)` returns, every policy shard rank's event
-        loop is provably free, and the subsequent sync `forward.remote()` can be scheduled
-        on every peer. Robust to BOTH M1 (loop busy with the sync forward HOL-block) and
-        M2 (broadcast coroutine not yet unwound) — the prior SYNC `barrier_all` was not,
-        because a sync drain method is HOL-blocked exactly like the sync forward it guards.
-
-        We `await asyncio.gather(*refs)` rather than a blocking `ray.get` so we don't
-        stall the async trainer's own event-loop thread; the driver coroutine still does
-        not advance to the forward dispatch until every rank's drain has completed.
+        The next synchronous forward requires all model ranks to enter its
+        collectives. An async barrier lets each actor finish its prior coroutine
+        before the driver sends that forward.
         """
         refs = self.policy_model.async_run_ray_method("pass_through", "barrier_all")
         await asyncio.gather(*refs)
@@ -1322,8 +1398,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         inspected_count: int,
     ) -> None:
         self._groups_rejected_since_step += len(rejected_groups)
-        for _, decision in rejected_groups:
+        for group, decision in rejected_groups:
             assert decision.primary_rejection is not None
+            self._record_group_terminal(group, decision.primary_rejection.value)
             self._rejection_reasons_since_step[decision.primary_rejection.value] += 1
         self._groups_inspected_since_step += inspected_count
 
@@ -1467,6 +1544,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 admitted_groups.append(group)
             else:
                 discarded_reasons[selection_result.value] += 1
+                self._record_group_terminal(group, selection_result.value)
 
         return _CandidateSelection(
             admitted_groups=admitted_groups,
@@ -1656,9 +1734,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             trajectory_batches = []
             uids = []
             stalenesses = []
+            staleness_by_uid: dict[str, int] = {}
             for cur_generated_output_group in cur_generation_group_mini_batch:
                 cur_staleness = self.global_step - cur_generated_output_group.earliest_model_step
                 stalenesses.append(cur_staleness)
+                staleness_by_uid[cur_generated_output_group.uid] = cur_staleness
                 trajectory_batches.append(cur_generated_output_group.trajectory_batch)
                 group_size = len(cur_generated_output_group.trajectory_batch["response_ids"])
                 uids.extend([cur_generated_output_group.uid] * group_size)
@@ -1693,13 +1773,29 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         with Timer("postprocess_trajectory_batch", self.all_timings):
             trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
             trajectory_batch, uids = self.select_trajectories(trajectory_batch, uids)
+        # Built after selection, because select_trajectories may drop rows.
+        rollout_staleness = [staleness_by_uid[uid] for uid in uids]
 
         # print example just for debugging
         vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
         logger.debug(f"Example generated: {vis}")
 
         with Timer("convert_to_training_input", self.all_timings):
-            return self.convert_to_training_input(trajectory_batch, uids)
+            training_input = self.convert_to_training_input(trajectory_batch, uids, rollout_staleness=rollout_staleness)
+        if self._training_metrics_enabled:
+            self._record_consumed_staleness(uids, rollout_staleness, training_input["response_mask"][: len(uids)])
+        return training_input
+
+    def _record_consumed_staleness(
+        self, uids: List[str], rollout_staleness: List[int], response_masks: torch.Tensor
+    ) -> None:
+        counts: dict[str, dict[str, int]] = {}
+        for uid, steps, mask in zip(uids, rollout_staleness, response_masks, strict=True):
+            group = counts.setdefault(uid, {"staleness": steps, "groups": 1, "sequences": 0, "response_tokens": 0})
+            group["sequences"] += 1
+            group["response_tokens"] += int(mask.sum().item())
+        for group in counts.values():
+            record_event("consumed_staleness", group, attributes={"role": TRAINER_ROLE, "step": str(self.global_step)})
 
     def load_checkpoints(self) -> Tuple[int, str]:
         """

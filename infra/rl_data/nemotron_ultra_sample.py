@@ -63,7 +63,7 @@ BLEND_SAMPLE_SPECS = (
 )
 
 
-def _range_rows(url: str, start: int) -> list[dict[str, Any]]:
+def range_rows(url: str, start: int) -> list[dict[str, Any]]:
     response = requests.get(
         url,
         headers={"Range": f"bytes={start}-{start + RANGE_BYTES - 1}"},
@@ -107,7 +107,7 @@ def sample_raw_generator_rows(
     for batch_start in range(0, len(offsets), RANGES_PER_BATCH):
         batch = offsets[batch_start : batch_start + RANGES_PER_BATCH]
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(batch)) as executor:
-            chunks = executor.map(lambda offset: _range_rows(url, offset), batch)
+            chunks = executor.map(lambda offset: range_rows(url, offset), batch)
             for rows in chunks:
                 for row in rows:
                     agent_ref = row.get("agent_ref")

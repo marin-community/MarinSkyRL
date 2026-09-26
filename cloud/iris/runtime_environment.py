@@ -16,10 +16,6 @@ CHECKPOINT_EXPORT_ENTRYPOINT = "skyrl_train.entrypoints.checkpoint_export"
 class RuntimeProfile(StrEnum):
     """Locked dependency set installed for training or checkpoint conversion."""
 
-    FSDP = "fsdp"
-    FSDP_EXPORT = "fsdp-export"
-    DEEPSPEED = "deepspeed"
-    DEEPSPEED_EXPORT = "deepspeed-export"
     MEGATRON = "megatron"
     MEGATRON_EXPORT = "megatron-export"
 
@@ -38,9 +34,9 @@ def runtime_profile_for_strategy(
     checkpoint_export = mode is RuntimeMode.CHECKPOINT_EXPORT
     if strategy == "megatron":
         return RuntimeProfile.MEGATRON_EXPORT if checkpoint_export else RuntimeProfile.MEGATRON
-    if strategy == "deepspeed":
-        return RuntimeProfile.DEEPSPEED_EXPORT if checkpoint_export else RuntimeProfile.DEEPSPEED
-    return RuntimeProfile.FSDP_EXPORT if checkpoint_export else RuntimeProfile.FSDP
+    if strategy is None:
+        return RuntimeProfile.MEGATRON_EXPORT if checkpoint_export else RuntimeProfile.MEGATRON
+    raise ValueError(f"Unsupported training strategy: {strategy}")
 
 
 def task_setup_script(commit: str, profile: RuntimeProfile) -> str:

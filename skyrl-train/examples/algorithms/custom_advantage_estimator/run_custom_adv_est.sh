@@ -14,13 +14,13 @@ LOGGER="wandb"  # change to "console" to print to stdout
 # Configure the advantage estimator to use
 ADV_EST="simple_baseline"
 
-uv run --isolated --extra vllm -m examples.algorithm.custom_advantage_estimator.main_custom_adv_est \
+uv run --isolated --extra megatron --extra vllm -m examples.algorithm.custom_advantage_estimator.main_custom_adv_est \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="$ADV_EST" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   generator.num_inference_engines=$NUM_GPUS \

@@ -51,6 +51,7 @@ from skyrl_train.training_batch import (
     TrainingOutputBatch,
     gradient_accumulation_steps,
 )
+from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
@@ -311,7 +312,7 @@ class MegatronWorker:
         """Install the MoE router replay controller when the role requests it.
 
         Called after ``self.model`` and ``self.actor_module`` exist. The knob
-        lives on ``trainer.<role>.fsdp_config.moe_router_replay``; for
+        lives on ``trainer.<role>.megatron_config.moe_router_replay``; for
         ``strategy=megatron`` the top-level config guard admits it only once
         the replay plumbing is complete, so tests enable it after
         ``validate_cfg``.
@@ -342,6 +343,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler = None
         self._warned_exact_unit_policy_ratio = False
+
+    def forward(self, data):
+        with self._memory.span("forward", step=data.metadata.get("global_step")):
+            return super().forward(data)
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self.strategy.offload_to_cpu(
@@ -478,8 +483,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
         self._maybe_install_router_replay("policy")
 
-        # The update whose weights this rank now holds; None until the first update.
-        self._model_version_step: int | None = None
         self._expert_block_sender = (
             ExpertBlockSender(self, mpu)
             if self.cfg.generator.weight_sync_transport == WeightSyncTransport.EXPERT_BLOCK
@@ -519,10 +522,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ),
         )
 
-    # This cannot inherit PolicyWorkerBase.ppo_train: Megatron Core must own
-    # pipeline scheduling and gradient accumulation, so only policy semantics
-    # are shared with the ordinary worker through backend-neutral utilities.
-    def ppo_train(self, train_data) -> "TrainingOutputBatch":
+    def _ppo_train_impl(self, train_data, timing: PhaseBreakdown) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
         self._drain_r3_decentral_stagger(train_data)
         if self.model.router_replay is not None and (
@@ -593,12 +593,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         seq_len=seq_len,
                         micro_batch_size=micro_bsz,
                         temperature=self.cfg.generator.sampling_params.temperature,
+                        timings=timing,
                     )
 
                     if self.empty_cuda_cache:
                         torch.cuda.empty_cache()
 
-                    grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+                    with timing.span("megatron_optimizer_step"):
+                        grad_norm = self.strategy.optimizer_step(
+                            self.optimizer, self.model, self.scheduler, name="actor"
+                        )
 
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
                     # the whole world size to get the metrics for the global micro batch
@@ -615,7 +619,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         # attach response_length
                         status["response_length"] = micro_buffer[i].num_actions
 
-                        status = self.strategy.all_reduce(status)
+                        with timing.span("megatron_world_metric_reduction"):
+                            status = self.strategy.all_reduce(status)
                         status_list.append(status)
                         for k, v in status.items():
                             all_metrics[k].append(v)
@@ -628,7 +633,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # drop any trailing micros that don't fill a mini-batch (keep behavior consistent)
             micro_buffer = []
 
-        torch.distributed.barrier()
+        with timing.span("megatron_final_barrier"):
+            torch.distributed.barrier()
         if self.profiler is not None:
             self.profiler.stop_and_save()
             self.profiler.stop_trace()
@@ -644,15 +650,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean}
-        # The update these weights belong to. The expert-block sender checks it before sending.
-        self._model_version_step = int(train_data.metadata["global_step"])
         return output
 
     async def expert_block_rpc(self, method: str, *args):
         """Call a method of this rank's expert-block sender."""
         return getattr(self._expert_block_sender, method)(*args)
 
-    async def broadcast_to_inference_engines(self, inference_engine_client):
+    async def _broadcast_to_inference_engines(self, inference_engine_client):
         from torch.multiprocessing.reductions import reduce_tensor
 
         use_prefix_cache = self.cfg.generator.enable_prefix_caching
@@ -665,8 +669,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         torch.cuda.empty_cache()
 
-        # #1685 fix ported from fsdp_worker.broadcast_to_inference_engines (FlashInfer-CUTLASS
-        # w13 gate/up swap skipped on the megatron RL update path -> MoE token-salad): bracket
+        # Bracket
         # the WHOLE multi-chunk sync with vLLM's layerwise reload so model.load_weights defers
         # processing and a single finalize re-runs process_weights_after_loading (re-applying
         # swap_w13_to_w31) EXACTLY once. This is required for both NCCL broadcast and colocated
