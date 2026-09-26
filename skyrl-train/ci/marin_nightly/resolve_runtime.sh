@@ -10,7 +10,7 @@ fi
 repository_root="$1"
 NIGHTLY_RL_ENV="$2"
 install_mode="$3"
-runtime_profile="${4:-fsdp}"
+runtime_profile="${4:-megatron}"
 RUNTIME_ENV_FILE="$NIGHTLY_RL_ENV/marinskyrl-runtime.sh"
 PYTHON="$NIGHTLY_RL_ENV/bin/python"
 

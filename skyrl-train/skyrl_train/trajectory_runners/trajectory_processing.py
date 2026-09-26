@@ -1498,7 +1498,7 @@ def extract_routed_experts_from_rollout_details(
     ``RolloutDetail.extra["routed_experts"]`` by turn. Decode each payload and
     select the response rows using that turn's exact prompt and completion IDs.
 
-    This is Stage 1 of the FSDP2 EP/router-replay port (R3 capture rail). No MoE
+    This records the R3 capture rail. No MoE
     math here — pure data-plane extraction. Returns None when absent so the field
     is treated as a sentinel-filled sample downstream (preempted requests, quant
     paths, and disabled-capture modes silently drop routing — see

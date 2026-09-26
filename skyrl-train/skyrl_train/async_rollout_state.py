@@ -8,12 +8,16 @@ from skyrl_train.trajectory_runners.base import TrajectoryBatch
 
 @dataclass
 class GeneratedOutputGroup:
-    """One prompt's rollout samples and the metadata needed to retry them."""
+    """Samples and metadata for one rollout batch."""
 
     trajectory_batch: TrajectoryBatch
     uid: str
     earliest_model_step: int
     source_prompts: List[dict]
+
+    admitted_at: float | None = None
+    completed_at: float | None = None
+    disposition_recorded: bool = False
 
 
 @dataclass
