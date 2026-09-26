@@ -28,7 +28,6 @@ TIS_LOG_RATIO_ABS_MEAN_KEYS = ("policy/tis/log_ratio_abs_mean", "tis/log_ratio_a
 TIS_IMPORTANCE_RATIO_MEAN_KEYS = (
     "policy/tis/imp_ratio_mean",
     "tis/imp_ratio_mean",
-    "policy/rollout_train_prob_diff_mean",
 )
 POLICY_LOG_RATIO_ABS_MEAN_KEYS = ("policy/log_ratio_abs_mean", "log_ratio_abs_mean")
 POLICY_LOG_RATIO_ABS_P99_KEYS = ("policy/log_ratio_abs_p99", "log_ratio_abs_p99")

@@ -1074,14 +1074,7 @@ def display_metric(value: Any | None, precision: int = 4) -> str:
 
 
 def tis_ratio_summary(metrics: dict[str, Any]) -> str:
-    """Render the best available TIS ratio diagnostic without mislabeling it.
-
-    Worker ``train_status`` keys are namespaced under ``policy/`` by the
-    trainer before they reach ``WANDB_MIRROR``. Older runs predate that worker
-    diagnostic but expose the inference/train importance-ratio mean directly.
-    That legacy value is useful, but it is not mean absolute log-ratio, so keep
-    the label distinct.
-    """
+    """Render TIS log-ratio or importance-ratio diagnostics without mixing their units."""
     log_ratio = metric_value(metrics, *TIS_LOG_RATIO_ABS_MEAN_KEYS)
     if log_ratio is not None:
         return f"TIS |log r|={display_metric(log_ratio)}"

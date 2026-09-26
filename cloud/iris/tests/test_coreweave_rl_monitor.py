@@ -722,10 +722,15 @@ def test_rl_report_row_flags_enabled_tis_without_diagnostics(tmp_path):
     assert "TIS enabled; metrics missing" in row[-1].value
 
 
-def test_tis_ratio_summary_uses_distinct_legacy_importance_ratio_label():
-    summary = watch_coreweave_rl.tis_ratio_summary({"policy/rollout_train_prob_diff_mean": 50_087_992.0})
+def test_tis_ratio_summary_uses_importance_ratio_not_probability_gap():
+    summary = watch_coreweave_rl.tis_ratio_summary(
+        {"policy/rollout_train_prob_diff_mean": 0.25, "policy/tis/imp_ratio_mean": 0.96}
+    )
 
-    assert summary == "TIS r=5.009e+07"
+    assert summary == "TIS r=0.96"
+    assert watch_coreweave_rl.tis_diagnostic_summaries({"policy/rollout_train_prob_diff_mean": 0.25}, True) == (
+        "TIS enabled; metrics missing",
+    )
 
 
 def test_rl_report_row_replaces_traceback_signal_with_error_report_pointer(tmp_path):

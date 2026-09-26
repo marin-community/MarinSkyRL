@@ -1068,6 +1068,16 @@ def test_required_rollout_logprobs_reject_partial_generation_batch():
         )
 
 
+def test_optional_rollout_logprobs_do_not_score_missing_trainable_rows_as_zero():
+    with_logprobs = {**_generated_group(1, 0), "rollout_logprobs": [[-0.1, -0.2]]}
+    without_logprobs = _generated_group(1, 0)
+
+    merged = concatenate_trajectory_batches([with_logprobs, without_logprobs], tis_lcs_alert_threshold=0.005)
+
+    assert merged["loss_masks"] == [[1, 1], [1, 1]]
+    assert merged["rollout_logprobs"] is None
+
+
 def test_required_rollout_logprobs_allow_fully_excluded_generation_batch():
     trainable = {**_generated_group(2, 0), "rollout_logprobs": [[-0.1, -0.2], [-0.3, -0.4]]}
     excluded = {

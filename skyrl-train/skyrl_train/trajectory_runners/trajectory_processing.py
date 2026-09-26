@@ -758,11 +758,14 @@ def concatenate_trajectory_batches(
     has_rollout_logprobs = _rollout_logprob_presence(trajectory_batches, required=require_rollout_logprobs)
     any_has_logprobs = any(has_rollout_logprobs)
 
-    # Handle mixed rollout_logprobs: if some batches have logprobs and others don't,
-    # fill in placeholder [0.0] values for the batches that don't have them.
-    # This can happen when all trials in a batch fail (returns None) while other batches succeed.
+    # A zero placeholder is valid only for rows excluded from the loss. Otherwise
+    # the trainer would report its own logprob versus zero as a serving mismatch.
+    missing_trainable_logprobs = any(
+        not has_logprobs and any(any(mask) for mask in output["loss_masks"])
+        for output, has_logprobs in zip(trajectory_batches, has_rollout_logprobs, strict=True)
+    )
     rollout_logprobs_concat = None
-    if any_has_logprobs:
+    if any_has_logprobs and not missing_trainable_logprobs:
         rollout_logprobs_concat = []
         for output in trajectory_batches:
             if output.get("rollout_logprobs") is not None:
