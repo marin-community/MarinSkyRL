@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, TypedDict, Any, Optional, Hashable, NotRequired
 
+from skyrl_train.policy_version import PolicyVersionSegment
+
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
 OnlineEagleResult = Dict[str, Any] | List[Dict[str, Any]]
@@ -48,11 +50,14 @@ class InferenceEngineOutput(TypedDict):
     # also be returned by vLLM, but is not forced into these top-K rows.
     student_topk_indices: NotRequired[List[List[List[int]]]]
     behavior_topk_logprobs: NotRequired[List[List[List[float]]]]
+    # Spans of response_ids, each with the policy version that sampled it.
+    response_policy_version_segments: NotRequired[List[List[PolicyVersionSegment]]]
     # prompt_logprobs: per-prompt-token top-K logprobs from vLLM (for teacher scoring).
     # Format: List[List[Optional[Dict[int, float]]]] — outer list is batch,
     # inner list is prompt positions, dict maps token_id → logprob.
     # Only populated when SamplingParams(prompt_logprobs=K) is used.
     prompt_logprobs: Optional[List[List[Optional[Dict[int, float]]]]]
+    # The prompt token IDs each response was sampled from, as served.
     prompt_ids: NotRequired[List[List[int]]]
     assistant_messages: NotRequired[List[Dict[str, Any]]]
 
@@ -167,15 +172,16 @@ class InferenceEngineInterface(ABC):
     @abstractmethod
     async def pause_generation(self) -> None:
         """
-        Pause the scheduler for a weight update after aborting all running and waiting
-        requests. Running requests return their generated tokens with stop_reason "abort";
-        waiting requests return zero completion tokens.
+        Pause the scheduler for a weight update. In abort mode running and waiting requests
+        are cancelled first: running requests return their generated tokens with stop_reason
+        "abort" and waiting requests return zero completion tokens. In keep mode they stay
+        queued and resume after the update.
         """
         raise NotImplementedError()
 
     @abstractmethod
-    async def resume_generation(self) -> None:
-        """Resume the scheduler after a weight update."""
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        """Resume after a weight update, optionally naming the installed policy."""
         raise NotImplementedError()
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> OnlineEagleResult:

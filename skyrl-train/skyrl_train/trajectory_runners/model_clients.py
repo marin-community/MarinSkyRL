@@ -16,8 +16,9 @@ from skyrl_train.inference_engines.chat_template import (
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.response_topk import select_chat_response_topk
+from skyrl_train.policy_version import RESPONSE_POLICY_VERSION_SEGMENTS_KEY, PolicyVersionSegment
 from skyrl_train.trajectory_runners.types import TokenProvenance
-from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
+from skyrl_train.inference_engines.routed_experts import choice_routes, normalize_routed_experts
 
 
 _CHAT_SAMPLING_EXCLUSIONS = frozenset({"max_generate_length", "logprobs", "stop"})
@@ -46,13 +47,13 @@ class _ChatResult:
     stop_reason: str
     assistant_message: dict[str, Any]
     routed_experts: list[list[list[int]]] | None = None
+    policy_version_segments: list[PolicyVersionSegment] | None = None
 
 
 def _choice_routed_experts(
     choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]
 ) -> list[list[list[int]]] | None:
-    provider_fields = choice.get("provider_specific_fields") or {}
-    routes = choice.get("routed_experts", provider_fields.get("routed_experts"))
+    routes = choice_routes(choice)
     if routes is None:
         return None
     return normalize_routed_experts(routes, prompt_ids, response_ids)
@@ -62,6 +63,7 @@ def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
     logprobs = [result.response_logprobs for result in results]
     selected_indices = [result.student_topk_indices for result in results]
     selected_scores = [result.behavior_topk_logprobs for result in results]
+    segments = [result.policy_version_segments for result in results]
     output = ModelClientOutput(
         prompt_ids=[result.prompt_ids for result in results],
         response_ids=[result.response_ids for result in results],
@@ -75,6 +77,8 @@ def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
     if all(rows is not None for rows in selected_indices):
         output["student_topk_indices"] = selected_indices
         output["behavior_topk_logprobs"] = selected_scores
+    if all(rows is not None for rows in segments):
+        output[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = segments
     if any(result.routed_experts is not None for result in results):
         output["routed_experts"] = [result.routed_experts for result in results]
     return output
@@ -247,6 +251,7 @@ class DirectModelClient:
                 choice["finish_reason"],
                 message,
                 _choice_routed_experts(choice, prompt_ids, response_ids),
+                choice.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY),
             )
 
         results = await asyncio.gather(

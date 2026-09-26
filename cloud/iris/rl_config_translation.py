@@ -23,7 +23,7 @@ from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT as CHECK
 from marinskyrl.environment_contract import TrainingType
 from marinskyrl.distillation import DistillationPlan, compile_distillation_plan, validate_distillation_runtime_support
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
-from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
+from marinskyrl.speculative_decoding import SYNC_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 from marinskyrl.remote_io import filesystem_and_path, open_output_stream
 
@@ -39,7 +39,7 @@ class RLEntrypoint(StrEnum):
     FULLY_ASYNC = "fully_async"
     GENERATE = "generate"
     MINI_SWE = "mini_swe"
-    STANDARD = "standard"
+    SYNC = "sync"
     TERMINAL_BENCH = "terminal_bench"
     TERMINAL_BENCH_GENERATE = "terminal_bench_generate"
 
@@ -49,7 +49,7 @@ RL_ENTRYPOINTS = MappingProxyType(
         RLEntrypoint.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async",
         RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
         RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
-        RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
+        RLEntrypoint.SYNC: SYNC_TRAINING_ENTRYPOINT,
         RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
         RLEntrypoint.TERMINAL_BENCH_GENERATE: "skyrl_train.entrypoints.terminal_bench_generate",
     }
@@ -58,8 +58,8 @@ CHECKPOINT_EXPORT_ENTRYPOINT = CHECKPOINT_EXPORT_MODULE
 
 
 def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
-    """Resolve one supported RL execution mode to its packaged module."""
-    name = RLEntrypoint.STANDARD if value is None else value
+    """Resolve one supported RL execution mode to its packaged module; ``standard`` names the synchronous loop too."""
+    name = RLEntrypoint.SYNC if value in (None, "standard") else value
     try:
         entrypoint = RLEntrypoint(name)
     except ValueError as error:

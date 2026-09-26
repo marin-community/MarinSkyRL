@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,13 @@ import pytest
 import yaml
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
-from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
+from cloud.iris.rl_config_translation import (
+    RL_CONFIG_PAYLOAD_ENV,
+    RL_ENTRYPOINTS,
+    RLEntrypoint,
+    materialize_launch_config,
+    parse_rl_config,
+)
 
 
 def _raw_config() -> dict[str, Any]:
@@ -116,7 +123,7 @@ def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) ->
     ("entrypoint", "colocate_all", "num_nodes", "expected"),
     [
         ("fully_async", True, 1, "async"),
-        ("standard", True, 1, "sync"),
+        ("sync", True, 1, "sync"),
         ("terminal_bench", True, 1, "sync"),
         ("terminal_bench", False, 2, "async"),
         ("terminal_bench", None, 1, "sync"),
@@ -194,3 +201,32 @@ def test_task_materializes_the_forwarded_launch_document(tmp_path: Path) -> None
 
     assert path == str(destination)
     assert destination.read_bytes() == contents
+
+
+def _launch_document(tmp_path: Path, entrypoint: str, *, recipe_only: bool = False) -> Path:
+    raw = _raw_config()
+    raw["skyrl"]["entrypoint"] = entrypoint
+    path = tmp_path / ("recipe.yaml" if recipe_only else "launch.yaml")
+    path.write_text(yaml.safe_dump(raw["skyrl"] if recipe_only else raw, sort_keys=False))
+    return path
+
+
+def test_a_composed_document_reports_only_non_default_fully_async_settings(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config = load_launch_config(_launch_document(tmp_path, "sync"))
+    config.skyrl.trainer.fully_async.pause_mode = "keep"
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger="cloud.iris.launch_config"):
+        validate_launch_config(config)
+
+    assert [record.args for record in caplog.records if record.levelno >= logging.WARNING] == [
+        ("smoke", "skyrl_train.entrypoints.main_base", "trainer.fully_async.pause_mode")
+    ]
+
+
+def test_the_standard_entrypoint_name_is_the_sync_loop(tmp_path: Path) -> None:
+    parsed = parse_rl_config(str(_launch_document(tmp_path, "standard", recipe_only=True)))
+
+    assert parsed.entrypoint == RL_ENTRYPOINTS[RLEntrypoint.SYNC]

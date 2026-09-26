@@ -1,5 +1,5 @@
 # Snowball Ultra-style RLVR phase 2: resume colocated64 at cumulative step 128.
-entrypoint: standard
+entrypoint: sync
 
 config_groups:
   terminal_bench_config: terminal_bench

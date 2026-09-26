@@ -30,10 +30,11 @@ from skyrl_train.config.trajectory_runner_capabilities import (
 )
 from marinskyrl.inference_placement import validate_expert_block_trainer
 from marinskyrl.speculative_decoding import (
-    STANDARD_TRAINING_ENTRYPOINT,
+    SYNC_TRAINING_ENTRYPOINT,
     parse_speculative_decoding_config,
     runai_model_uri,
 )
+from skyrl_train.inference_engines.vllm.utils import CLEAR_KV_CACHE_ON_WEIGHT_SYNC_KEY, PAUSE_MODE_KEY
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -115,7 +116,7 @@ def create_ray_wrapped_inference_engines_from_config(
     colocate_pg,
     tokenizer: PreTrainedTokenizerBase,
     *,
-    entrypoint: str = STANDARD_TRAINING_ENTRYPOINT,
+    entrypoint: str = SYNC_TRAINING_ENTRYPOINT,
     operation: EntrypointOperation = EntrypointOperation.TRAIN,
 ):
     from skyrl_train.inference_engines.configuration import (
@@ -144,6 +145,8 @@ def create_ray_wrapped_inference_engines_from_config(
     engine_init_kwargs = {
         **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
         "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
+        PAUSE_MODE_KEY: str(cfg.trainer.fully_async.pause_mode),
+        CLEAR_KV_CACHE_ON_WEIGHT_SYNC_KEY: bool(cfg.trainer.fully_async.clear_kv_cache_on_weight_sync),
     }
     engine_init_kwargs["tokenizer"] = cfg.trainer.policy.model.tokenizer_path
     tokenizer_revision = cfg.trainer.policy.model.get("tokenizer_revision")
@@ -184,7 +187,7 @@ def create_ray_wrapped_inference_engines_from_config(
         # engine, so flag-off engine init is byte-identical to today (G1). When > 1 it is
         # threaded into vllm.LLM / AsyncEngineArgs as a native EngineArgs kwarg. DCP rides
         # the TP GPUs and is NOT part of any GPU/placement math (G4). Reaches both the
-        # standard and terminal_bench entrypoints via this shared config-assembly seam (G5).
+        # sync and terminal_bench entrypoints via this shared config-assembly seam (G5).
         decode_context_parallel_size=cfg.generator.get("inference_engine_decode_context_parallel_size", 1),
         shared_pg=colocate_pg,
         inference_engine_enable_sleep=(cfg.trainer.placement.colocate_all and operation is EntrypointOperation.TRAIN),
@@ -285,7 +288,7 @@ class BasePPOExp:
         engine_mode = "local" if self.cfg.generator.run_engines_locally else "remote"
         logger.info("Starting inference engines: mode={}", engine_mode)
         if self.cfg.generator.run_engines_locally:
-            entrypoint = STANDARD_TRAINING_ENTRYPOINT if type(self) is BasePPOExp else type(self).__module__
+            entrypoint = SYNC_TRAINING_ENTRYPOINT if type(self) is BasePPOExp else type(self).__module__
             inference_engines = create_ray_wrapped_inference_engines_from_config(
                 self.cfg,
                 self.colocate_pg,
@@ -560,6 +563,9 @@ class BasePPOExp:
         Returns:
             RayPPOTrainer: The trainer.
         """
+        from skyrl_train.utils.utils import resolve_weight_sync_transport  # noqa: PLC0415
+
+        resolve_weight_sync_transport(self.cfg, uses_fully_async_trainer=self.uses_fully_async_trainer())
         validate_expert_block_trainer(self.cfg, uses_fully_async_trainer=self.uses_fully_async_trainer())
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)

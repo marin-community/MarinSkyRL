@@ -263,6 +263,14 @@ trainer:
     max_staleness_steps: 4
 
     num_parallel_generation_workers: 768
+    # Completed groups buffered before a worker waits; null = one per generation worker.
+    max_buffered_groups: null
+    # Charge staleness from the oldest policy version that sampled the group, plus one. Local vLLM only.
+    first_token_admission: false
+    # In-flight requests at a weight sync: abort (resubmit prompt + sampled tokens) or keep.
+    pause_mode: abort
+    # Clear vLLM's caches at each sync; also preempts requests kept by pause_mode=keep.
+    clear_kv_cache_on_weight_sync: true
 
     # Bound teacher-scoring work independently for each logical teacher. Queue
     # backpressure is applied when a rollout group is admitted, before learner
@@ -348,12 +356,8 @@ generator:
   backend: "vllm"
   vllm_attention_backend: null
   weight_sync_backend: "nccl"
-  # How weights reach the engines. "broadcast": trainer rank 0 sends every tensor to every engine.
-  # "expert_block": each MoE expert matrix is broadcast from a Megatron rank that holds it to the vLLM
-  # workers that serve it. Needs FullyAsyncRayPPOTrainer, a Grug MoE on the megatron strategy at TP=1
-  # and ETP=1, local vLLM engines at TP=1 with EP=DP>1, the NCCL weight-sync backend and vLLM's TRITON
-  # MoE backend.
-  weight_sync_transport: "broadcast"
+  # broadcast | expert_block (requirements in config.rst) | auto: expert_block when the run qualifies, else broadcast (logged).
+  weight_sync_transport: "auto"
   expert_block_sync:
     timeout_seconds: 600  # For creating the sync groups and for the broadcasts of each sync.
     verify: false  # If set, replay synchronization and verify it against the trainer values.

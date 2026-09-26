@@ -27,7 +27,7 @@ _DRAFT_REVISION = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
 
 def _base_config() -> dict:
     return {
-        "entrypoint": "standard",
+        "entrypoint": "sync",
         "context_budget": {
             "request_window_tokens": 2048,
             "max_new_tokens_per_turn": 512,

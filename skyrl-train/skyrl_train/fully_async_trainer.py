@@ -20,6 +20,7 @@ import time
 import torch
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from loguru import logger
+from skyrl_train.policy_version import BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY, trained_tokens_versioned
 from skyrl_train.trainer import RayPPOTrainer, consumed_work
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer, get_system_memory_metrics
@@ -42,7 +43,6 @@ from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpoint
 from torchdata.stateful_dataloader import StatefulDataLoader
 from typing import List, Literal, Tuple, TypeVar
 from enum import Enum, auto
-from omegaconf import OmegaConf
 from skyrl_train.telemetry import (
     TRAINER_ROLE,
     critical_phase,
@@ -82,6 +82,10 @@ from skyrl_train.group_admission import (
 )
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
 
+FIRST_TOKEN_VERSION_MISSING = (
+    "trainer.fully_async.first_token_admission=true needs the policy version of every trained token; "
+    "only local vLLM engines report it"
+)
 
 _QueueItem = TypeVar("_QueueItem")
 
@@ -472,6 +476,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.mini_batch_size = cfg.trainer.policy_mini_batch_size
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
         self._async_telemetry_enabled: bool = cfg.trainer.async_spans
+        self.first_token_admission = cfg.trainer.fully_async.first_token_admission
         self.group_admission_stall_timeout = cfg.trainer.algorithm.group_admission.stall_timeout
         self._group_selection_policy = GroupSelectionPolicy.for_fully_async(
             cfg.trainer.algorithm.dynamic_sampling.type,
@@ -512,10 +517,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # cap) workers may wait on the shared queue condition while each still holds ONE
         # completed group, so to fully bound the head-node footprint you should ALSO lower
         # num_parallel_generation_workers toward the engine working set.
-        self.max_buffered_groups = (
-            OmegaConf.select(cfg, "trainer.fully_async.max_buffered_groups", default=None)
-            or self.num_parallel_generation_workers
-        )
+        self.max_buffered_groups = cfg.trainer.fully_async.max_buffered_groups or self.num_parallel_generation_workers
 
         assert (
             # otherwise wasted throughput
@@ -1166,10 +1168,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     async def _sync_policy_weights_and_offload_optimizer(
         self, *, sync_phase: Literal["initial", "training_step"]
     ) -> None:
-        # Expert-block sync writes into live engine parameters, so the first sync pauses generation too.
-        pause = sync_phase == "training_step" or self._expert_block_sync is not None
-        if pause:
-            await self.inference_engine_client.pause_generation()
+        # Pause for the initial sync too, so every sync installs its version the same way.
+        await self.inference_engine_client.pause_generation()
         # The shared training path backloads optimizer state before every step when
         # offload_optimizer_during_rollouts is enabled. Offload after each update,
         # including the initial sync, so Megatron gradient buffers are not resized
@@ -1179,8 +1179,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         await self.async_sync_policy_weights_to_inference_engines()
         # A hard sync point leaves every policy rank free before the next forward.
         await self._drain_policy_event_loops()
-        if pause:
-            await self.inference_engine_client.resume_generation()
+        await self.inference_engine_client.resume_generation(
+            policy_version=self.global_step if self.first_token_admission else None
+        )
 
     async def _run_training(self, training_input: TrainingInputBatch):
         # TODO(Charlie): share this code with the one-step-off async trainer.
@@ -1211,6 +1212,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
 
         return status
+
+    def _admission_step(self, trajectory_batch: TrajectoryBatch, fallback_step: int) -> int:
+        """The step a completed group's staleness counts from."""
+        actual_step = trajectory_batch.get("actual_global_step")
+        captured_step = actual_step if actual_step is not None else fallback_step
+        if not self.first_token_admission or not any(trajectory_batch["response_ids"]):
+            return captured_step
+        rows = trajectory_batch.get(BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY)
+        versioned = rows is None or all(
+            trained_tokens_versioned(spans, mask)
+            for spans, mask in zip(rows, trajectory_batch["loss_masks"], strict=True)
+        )
+        oldest_version = trajectory_batch.get("oldest_policy_version")
+        if not versioned or oldest_version is None:
+            raise RuntimeError(FIRST_TOKEN_VERSION_MISSING)
+        return oldest_version + 1
 
     async def _run_generate_for_a_group_loop(self, queues: _GenerationQueues):
         """Generate dataset rows or retries and route only fresh groups to the completed queue."""
@@ -1250,8 +1267,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         observation.response_tokens = sum(
                             len(tokens) for tokens in cur_trajectory_batch["response_ids"]
                         )
-                actual_step = cur_trajectory_batch.get("actual_global_step")
-                staleness_step = actual_step if actual_step is not None else global_step_at_start
+                staleness_step = self._admission_step(cur_trajectory_batch, global_step_at_start)
 
                 record_generated_work(
                     cur_trajectory_batch["response_ids"],

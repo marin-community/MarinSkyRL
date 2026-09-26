@@ -20,6 +20,14 @@ from loguru import logger
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.rollout_observability import rollout_phase, rollout_wait, run_environment, time_tokenization
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
+from skyrl_train.policy_version import (
+    BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY,
+    RESPONSE_POLICY_VERSION_SEGMENTS_KEY,
+    PolicyVersionSegment,
+    append_span,
+    oldest_policy_version,
+    truncate_spans,
+)
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from skyrl_train.error_treatment import ErrorTreatment
@@ -43,7 +51,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     get_rollout_metrics,
     normalize_token_ids,
 )
-from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelClient
+from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelClient, ModelClientOutput
 from skyrl_train.trajectory_runners.selected_topk import align_student_topk
 from skyrl_train.trajectory_runners.collectors import RolloutCollector, collect_agent_loops
 from skyrl_train.trajectory_runners.projections import (
@@ -321,6 +329,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
               This will likely be deprecated soon.
             - When custom_chat_template = True and use_conversation_multi_turn = True, an environment
               without structured-chat metadata re-tokenizes the entire history every turn and at the end.
+              A lone assistant turn with no observation trains on the engine's served and sampled tokens.
             - When the inference backend canonicalizes a structured tool call while rendering the
               next turn, the re-rendered prior context is retained but excluded from optimization unless
               exact structured-chat transport is required.
@@ -428,6 +437,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         captured_global_step: Optional[int] = None
         token_provenance = TokenProvenance.ENGINE
         continuation_assistant_index: int | None = None
+        behavior_policy_version_segments: list[PolicyVersionSegment] | None = []
+        # Kept apart from the spans because re-tokenized history cannot align spans to tokens.
+        oldest_version: int | None = None
+        first_turn: ModelClientOutput | None = None
+        rewritten = False
 
         while not done:
             if len(input_ids) > max_input_length:
@@ -465,6 +479,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             if engine_output["token_provenance"] == TokenProvenance.RECONSTRUCTED:
                 self._reject_inexact_chat("the model client returned reconstructed token IDs")
                 token_provenance = TokenProvenance.RECONSTRUCTED
+                behavior_policy_version_segments = None
             # Capture global_step after first inference returns — at this point the vLLM
             # engine has definitively served the request with its current weights.
             if captured_global_step is None and global_step_fn is not None:
@@ -486,6 +501,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     generated_ids.extend(output_ids)
                     generated_topk_ids.extend(topk_ids)
                     generated_topk_scores.extend(topk_scores)
+            sampled_output_length = len(output_ids)
+            output_version_segments = engine_output.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY, [None])[0]
+            if oldest_version is None:
+                oldest_version = oldest_policy_version([output_version_segments or []])
             if chat_completion_params is not None:
                 rendered_prompt_ids = engine_output.get("prompt_ids")
                 if rendered_prompt_ids is None:
@@ -528,6 +547,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                         per_step_rewards = canonical_prefix.per_step_rewards
                         token_provenance = TokenProvenance.RECONSTRUCTED
                         selected_capture_possible = False
+                        behavior_policy_version_segments = None
                         rollout_routes = None
                         route_sentinel = None
                     else:
@@ -538,6 +558,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                         if rollout_routes is not None:
                             rollout_routes.extend([route_sentinel] * observation_token_count)
                 input_ids = rendered_prompt_ids[0]
+
+            if retokenize_chat_history and first_turn is None:
+                first_turn = copy.deepcopy(engine_output)
 
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
             # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
@@ -590,6 +613,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 initial_prompt_length = 0
                 loss_mask = []
                 rollout_logprobs = [] if collect_logprobs else None
+                behavior_policy_version_segments = []
                 rollout_routes = None
                 route_sentinel = None
                 per_step_rewards = []
@@ -620,13 +644,17 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     response_logprobs = None
                     rollout_logprobs = None
                 if postprocessed_output_ids != output_ids:
+                    rewritten = True
                     selected_capture_possible = False
+                    output_version_segments = None
+                    behavior_policy_version_segments = None
                     rollout_routes = None
                     route_sentinel = None
                     response_routes = None
                 output_ids = postprocessed_output_ids
 
             # 3. Update states: input ids, loss_mask, chat_history, etc.
+            response_offset = len(input_ids) - initial_prompt_length
             # Three ways of managing input
             previous_loss_mask_length = len(loss_mask)
             if chat_completion_params is not None:
@@ -659,6 +687,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 # Re-tokenizing text can change token boundaries, so engine logprobs no
                 # longer have an exact position in the returned response.
                 rollout_logprobs = None
+                behavior_policy_version_segments = None
                 # TODO(tgriggs): Support turn-level rewards for multi-turn chat template
                 per_step_rewards.append((step_reward, None))
             elif self.use_conversation_multi_turn:
@@ -691,6 +720,12 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 )
                 per_step_rewards.append((step_reward, response_end_idx))
 
+            if behavior_policy_version_segments is not None and output_version_segments is not None:
+                retained = min(sampled_output_length, response_end_idx + 1 - initial_prompt_length - response_offset)
+                for span in truncate_spans(output_version_segments, retained):
+                    start = response_offset + span["start"]
+                    append_span(behavior_policy_version_segments, start, span["token_count"], span["policy_version"])
+
             if chat_completion_params is None:
                 if retokenize_chat_history:
                     rollout_routes = None
@@ -708,7 +743,24 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         # Get environment-specific metrics after the episode is done
         env_metrics = environment_metrics_from_step(env_step_output, env.get_metrics())
         prompt_ids = input_ids[:initial_prompt_length]
-        if retokenize_chat_history:
+        sole_turn = (
+            first_turn is not None
+            and len(per_step_rewards) == 1
+            and not new_obs
+            and token_provenance is TokenProvenance.ENGINE
+            and not rewritten
+        )
+        if sole_turn:
+            prompt_ids, response_ids = first_turn["prompt_ids"][0], first_turn["response_ids"][0]
+            loss_mask = [1] * len(response_ids)
+            logprob_rows = first_turn.get("response_logprobs")
+            rollout_logprobs = logprob_rows[0] if collect_logprobs and logprob_rows is not None else None
+            behavior_policy_version_segments = first_turn.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY, [None])[0]
+            rollout_routes = first_turn.get("routed_experts", [None])[0]
+            if rollout_routes:
+                route_sentinel = _sentinel_routed_experts_row(rollout_routes[0])
+        elif retokenize_chat_history:
+            token_provenance = TokenProvenance.RECONSTRUCTED
             response_encodings = time_tokenization(
                 self.tokenizer.apply_chat_template,
                 chat_history[initial_chat_history_length : len(chat_history) - len(new_obs)],
@@ -802,6 +854,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             loss_mask=loss_mask,
             env_metrics=env_metrics,
             captured_global_step=captured_global_step,
+            oldest_policy_version=oldest_version,
+            behavior_policy_version_segments=(
+                tuple(behavior_policy_version_segments) if behavior_policy_version_segments else None
+            ),
             token_provenance=token_provenance,
         )
 
@@ -859,6 +915,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             len(selected_indices) != len(responses) or len(selected_logprobs) != len(responses)
         ):
             raise ValueError("Inference engine student top-K rows must align with responses")
+        version_rows = engine_output.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY)
 
         truncated_responses = []
         rewards = []
@@ -960,6 +1017,12 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         if selected_indices is not None:
             trajectory_batch["student_topk_indices"] = truncated_selected_indices
             trajectory_batch["behavior_topk_logprobs"] = truncated_selected_logprobs
+        if version_rows is not None:
+            trajectory_batch[BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY] = [
+                truncate_spans(spans, len(response))
+                for spans, response in zip(version_rows, truncated_responses, strict=True)
+            ]
+            trajectory_batch["oldest_policy_version"] = oldest_policy_version(version_rows)
         attach_unshaped_rewards(trajectory_batch, unshaped_rewards)
 
         return trajectory_batch

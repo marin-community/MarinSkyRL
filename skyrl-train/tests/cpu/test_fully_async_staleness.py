@@ -12,6 +12,7 @@ from skyrl_train.fully_async_trainer import (
     _AsyncDataloader,
     _AsyncStalenessManager,
     _GenerationQueues,
+    _GroupFreshness,
 )
 from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, resolve_dynamic_sampling_criteria
 from skyrl_train.group_admission import (
@@ -27,12 +28,15 @@ from skyrl_train.utils.data_tracker import DataConsumptionTracker
 
 @pytest.mark.parametrize("sync_phase", ["initial", "training_step"])
 @pytest.mark.parametrize("offload_enabled", [False, True])
-def test_async_weight_sync_respects_optimizer_offload_policy(sync_phase, offload_enabled):
+@pytest.mark.parametrize("first_token_admission", [False, True])
+def test_async_weight_sync_respects_optimizer_offload_policy(sync_phase, offload_enabled, first_token_admission):
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(offload_optimizer_during_rollouts=offload_enabled))
     trainer.colocate_all = False
     trainer.all_startup_timings = {}
     trainer.all_timings = {}
+    trainer.first_token_admission = first_token_admission
+    trainer.global_step = 0 if sync_phase == "initial" else 3
     events = []
 
     class Policy:
@@ -47,9 +51,9 @@ def test_async_weight_sync_respects_optimizer_offload_policy(sync_phase, offload
         async def pause_generation(self):
             events.append("pause")
 
-        async def resume_generation(self):
+        async def resume_generation(self, policy_version=None):
             assert trainer.policy_model.optimizer_on_gpu != offload_enabled
-            events.append("resume")
+            events.append(("resume", policy_version))
 
     async def sync_weights():
         events.append("sync")
@@ -65,10 +69,13 @@ def test_async_weight_sync_respects_optimizer_offload_policy(sync_phase, offload
     asyncio.run(trainer._sync_policy_weights_and_offload_optimizer(sync_phase=sync_phase))
 
     assert trainer.policy_model.optimizer_on_gpu != offload_enabled
-    assert events == (["pause"] if sync_phase == "training_step" else []) + (["offload"] if offload_enabled else []) + [
+    # Every sync, the initial one included, pauses before the copy and names the installed
+    # version on resume only when first-token admission is on.
+    assert events == ["pause"] + (["offload"] if offload_enabled else []) + [
         "sync",
         "drain",
-    ] + (["resume"] if sync_phase == "training_step" else [])
+        ("resume", trainer.global_step if first_token_admission else None),
+    ]
 
 
 def _generated_group(
@@ -292,6 +299,65 @@ async def test_staleness_manager_blocks_work_beyond_capacity_until_training_adva
 
     await manager.on_rollout_accepted()
     await manager.on_rollout_accepted()
+
+
+# A multi-turn row: two sampled turns around three observation tokens that carry no version.
+MULTI_TURN_SPANS = [
+    {"start": 0, "token_count": 2, "policy_version": 5},
+    {"start": 5, "token_count": 2, "policy_version": 6},
+]
+MULTI_TURN_LOSS_MASK = [1, 1, 0, 0, 0, 1, 1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_token_admission", "spans", "loss_mask", "oldest_version", "expected"),
+    [
+        (False, MULTI_TURN_SPANS, MULTI_TURN_LOSS_MASK, 5, _GroupFreshness.FRESH),
+        (True, MULTI_TURN_SPANS, MULTI_TURN_LOSS_MASK, 5, _GroupFreshness.STALE),
+        # Re-tokenized chat history carries only the oldest version that sampled it.
+        (True, None, [1, 1], 5, _GroupFreshness.STALE),
+        # Version 7 is the policy after update 7, so the group counts from step 8.
+        (True, None, [1, 1], 7, _GroupFreshness.FRESH),
+        (True, MULTI_TURN_SPANS[:1], MULTI_TURN_LOSS_MASK, 5, RuntimeError),
+        (True, None, [], None, _GroupFreshness.FRESH),
+    ],
+    ids=[
+        "off",
+        "multi_turn_spans",
+        "retokenized_oldest_only",
+        "charged_from_the_next_step",
+        "unversioned_sampled_token",
+        "nothing_sampled",
+    ],
+)
+async def test_a_group_sampled_by_an_old_version_is_stale_only_under_first_token_admission(
+    first_token_admission, spans, loss_mask, oldest_version, expected
+):
+    trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1)
+    trainer.first_token_admission = first_token_admission
+    batch = {
+        "response_ids": [[7] * len(loss_mask)],
+        "loss_masks": [loss_mask],
+        "actual_global_step": trainer.global_step,
+    }
+    if spans is not None:
+        batch["behavior_policy_version_segments"] = [spans]
+    if oldest_version is not None:
+        batch["oldest_policy_version"] = oldest_version
+    if expected is RuntimeError:
+        with pytest.raises(RuntimeError, match="first_token_admission"):
+            trainer._admission_step(batch, fallback_step=trainer.global_step)
+        return
+    group = GeneratedOutputGroup(
+        trajectory_batch=batch,
+        uid="group",
+        earliest_model_step=trainer._admission_step(batch, fallback_step=trainer.global_step),
+        source_prompts=[{"uid": "group"}],
+    )
+
+    assert await trainer._enqueue_if_fresh(queues, group) is expected
+    assert queues.completed.empty() is (expected is _GroupFreshness.STALE)
 
 
 @pytest.mark.asyncio

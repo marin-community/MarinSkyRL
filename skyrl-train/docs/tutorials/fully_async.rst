@@ -99,6 +99,8 @@ Following ``examples/fully_async/async_run_gsm8k.sh``, select the packaged entry
     uv run --isolated --extra vllm -m skyrl_train.entrypoints.fully_async \
     ...
 
+The RL config's ``entrypoint`` key names the training loop: ``sync`` (``standard`` is an alias) or ``fully_async``.
+
 For fully async specifically, the following are the main knobs to tune:
 
 - ``trainer.policy_mini_batch_size``: The mini-batch size for policy training. The trainer triggers a training step whenever the generation workers have generated this many groups of trajectories.
@@ -109,6 +111,18 @@ For fully async specifically, the following are the main knobs to tune:
   each worker works on a group of trajectories. It should be ``>= trainer.policy_mini_batch_size`` to avoid wasted throughput, 
   and ``<= trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)`` since it would be wasted due to capacity control.
   The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
+- ``trainer.fully_async.pause_mode``: What the engines do with requests in flight at a weight sync. ``abort`` (the
+  default) cancels them, and the client resubmits each prompt followed by its sampled tokens. ``keep`` holds them in the
+  scheduler; they keep the old weights' cache only with ``clear_kv_cache_on_weight_sync: false``.
+- ``trainer.fully_async.clear_kv_cache_on_weight_sync``: Clear vLLM's caches at each sync (default ``true``), which also
+  preempts requests kept by ``pause_mode: keep``.
+- ``trainer.fully_async.first_token_admission``: With ``false`` (the default), a group's staleness counts from the
+  trainer step when its first model call returned, which can under-count. ``true`` counts from the oldest policy version
+  that sampled any of the group's tokens, plus one. Only local vLLM engines report versions, and each EngineCore must run
+  on its engine actor's host.
+- ``trainer.fully_async.max_buffered_groups``: Completed groups buffered before a generation worker waits. ``null`` (the
+  default) means one per generation worker; ``trainer.policy_mini_batch_size`` bounds the head-node backlog to one
+  update's groups.
 - ``trainer.algorithm.group_admission.stall_timeout``: An optional maximum number of seconds without newly admitted groups while
   assembling a training batch. The same progress watchdog applies to synchronous and fully asynchronous entrypoints. The null
   default allows 30 minutes before any step timing exists, then adapts to ``max(5 * recent median step time, 10 minutes)``. Set a

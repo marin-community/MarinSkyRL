@@ -8,7 +8,7 @@ uv run --isolated --group dev --extra cpu pytest tests/cpu/inf_engines/test_infe
 
 from http import HTTPStatus
 import socket
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from transformers import AutoTokenizer
 from skyrl_train.inference_engines.utils import (
@@ -23,10 +23,14 @@ from skyrl_train.inference_engines.utils import (
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     ErrorResponse,
 )
+from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.trajectory_runners.model_clients import DirectModelClient
+from skyrl_train.inference_engines.routed_experts import encode_routed_experts
 from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
 from omegaconf import OmegaConf
 import asyncio
+import numpy as np
 import pytest
 from jinja2 import TemplateError
 import random
@@ -855,6 +859,7 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations():
     assert choice["logprobs"]["content"][0]["token"] == "token_id:11"
     assert choice["logprobs"]["content"][1]["token"] == "token_id:12"
     assert choice["token_ids"] == [11, 12]
+    assert "response_policy_version_segments" not in choice
 
     # usage: prompt_tokens from base (5), completion_tokens summed (2), total 7
     assert out["usage"]["prompt_tokens"] == 5
@@ -1102,6 +1107,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
                     response_ids=[[21, 22]],
                     stop_reasons=["abort"],
                     response_logprobs=[[-0.1, -0.2]],
+                    response_policy_version_segments=[[{"start": 0, "token_count": 2, "policy_version": 0}]],
                 ),
                 # 2) abort with 0 tokens (should be ignored)
                 InferenceEngineOutput(
@@ -1116,6 +1122,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
                     response_ids=[[23, 24]],
                     stop_reasons=["stop"],
                     response_logprobs=[[-0.3, -0.4]],
+                    response_policy_version_segments=[[{"start": 0, "token_count": 2, "policy_version": 1}]],
                 ),
             ]
 
@@ -1171,6 +1178,12 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
     assert out["response_ids"] == [expected_final_response_ids]
     assert out["stop_reasons"] == ["stop"]
     assert out["response_logprobs"] == [[-0.1, -0.2, -0.3, -0.4]]
+    assert out["response_policy_version_segments"] == [
+        [
+            {"start": 0, "token_count": 2, "policy_version": 0},
+            {"start": 2, "token_count": 2, "policy_version": 1},
+        ]
+    ]
 
 
 @pytest.mark.asyncio
@@ -1275,7 +1288,7 @@ async def test_generate_retry_no_gen_finish():
     assert first_call["sampling_params"]["max_tokens"] == 16
     assert second_call["sampling_params"]["max_tokens"] == 16
 
-    assert out == {**engines[0].responses[1], "prompt_logprobs": None}
+    assert out == {**engines[0].responses[1], "prompt_logprobs": None, "prompt_ids": [original_prompt_ids]}
 
 
 # -------------------------------------------
@@ -1292,7 +1305,7 @@ class _MockStreamEngine:
     async def pause_generation(self):
         pass
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_version=None):
         pass
 
     async def chat_completion_stream(self, request_payload):
@@ -1306,6 +1319,7 @@ class _MockWeightSyncEngine:
         self.scheduler_paused = False
         self.outstanding_requests = 388
         self.reloads = 0
+        self.resumed_policy_version = None
 
     async def pause_generation(self):
         self.scheduler_paused = True
@@ -1316,7 +1330,8 @@ class _MockWeightSyncEngine:
             raise RuntimeError("reshape_and_cache_flash attempted to run with Meta tensors")
         self.reloads += 1
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_version=None):
+        self.resumed_policy_version = policy_version
         self.scheduler_paused = False
 
 
@@ -1332,8 +1347,9 @@ async def test_weight_sync_pauses_loaded_scheduler_until_reload_finishes():
     assert engine.outstanding_requests == 0
     assert engine.reloads == 1
 
-    await client.resume_generation()
+    await client.resume_generation(policy_version=7)
     assert not engine.scheduler_paused
+    assert engine.resumed_policy_version == 7
 
 
 @pytest.mark.asyncio
@@ -1649,7 +1665,7 @@ class _MockGenerateEngine:
     async def pause_generation(self):
         self.scheduler_paused = True
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_version=None):
         self.scheduler_paused = False
 
 
@@ -1777,3 +1793,119 @@ def test_resume_wakes_a_request_parked_on_another_event_loop():
 
     assert engines[0].entered.is_set()
     assert any("[DONE]" in chunk for chunk in chunks)
+
+
+# -------------------------------------------
+# chat retries continue from the exact sampled tokens
+# --------------------------------------------
+
+
+SERVED_PROMPT = [1, 2, 3]
+
+
+def _chat_partial(content, finish_reason, token_ids):
+    return {
+        "id": "cmpl",
+        "object": "chat.completion",
+        "model": "dummy-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": finish_reason,
+                "token_ids": list(token_ids),
+            }
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": len(token_ids), "total_tokens": 5 + len(token_ids)},
+    }
+
+
+def _routes(rows):
+    return encode_routed_experts(np.asarray(rows, dtype=np.int16))
+
+
+def _exact_chat_partial(content, finish_reason, token_ids, logprobs, *, prompt_token_ids, routes):
+    response = _chat_partial(content, finish_reason, token_ids)
+    response["prompt_token_ids"] = list(prompt_token_ids)
+    response["choices"][0]["logprobs"] = {"content": [{"logprob": logprob} for logprob in logprobs]}
+    response["choices"][0]["routed_experts"] = _routes(routes)
+    return response
+
+
+class _ExactChatEngine:
+    def __init__(self, responses, during_attempt):
+        self.responses = list(responses)
+        self.calls = []
+        self.during_attempt = during_attempt
+
+    async def tokenize(self, request_payload):
+        return {"tokens": list(SERVED_PROMPT)}
+
+    async def chat_completion(self, request_payload):
+        self.calls.append(deepcopy(request_payload))
+        attempt = len(self.calls) - 1
+        await self.during_attempt(attempt)
+        return deepcopy(self.responses[attempt])
+
+    async def pause_generation(self):
+        pass
+
+    async def resume_generation(self, policy_version=None):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_a_structured_chat_response_spanning_an_abort_trains_on_the_exact_tokens():
+    client = None
+
+    async def sync_during(attempt):
+        if attempt == 0:
+            await client.pause_generation()
+            await client.resume_generation(policy_version=4)
+
+    # Attempt 1 forwards the served prompt: 3 + 1 - 1 route rows. Attempt 2's prompt is the served
+    # prompt plus token 11, so it forwards 4 + 2 - 1 rows.
+    engine = _ExactChatEngine(
+        [
+            _exact_chat_partial(
+                "A", "abort", [11], [-0.1], prompt_token_ids=SERVED_PROMPT, routes=[[[10]], [[11]], [[12]]]
+            ),
+            _exact_chat_partial(
+                " B",
+                "stop",
+                [12, 13],
+                [-0.2, -0.3],
+                prompt_token_ids=SERVED_PROMPT + [11],
+                routes=[[[40]], [[41]], [[42]], [[43]], [[44]]],
+            ),
+        ],
+        during_attempt=sync_during,
+    )
+    tokenizer = MagicMock()
+    tokenizer.decode.return_value = "A B"
+    client = InferenceEngineClient(engines=[engine], tokenizer=tokenizer, full_config=_make_min_cfg())
+    await client.pause_generation()
+    await client.resume_generation(policy_version=3)
+
+    output = await DirectModelClient(client).generate(
+        {
+            "prompts": [[{"role": "user", "content": "q"}]],
+            "session_ids": ["s"],
+            "sampling_params": {"max_generate_length": 16, "logprobs": 0},
+            "chat_completion_params": [{}],
+        }
+    )
+
+    retry = engine.calls[1]["json"]
+    assert retry[EXACT_PROMPT_TOKEN_IDS_KEY] == SERVED_PROMPT + [11]
+    assert "continue_final_message" not in retry
+    assert retry["max_completion_tokens"] == 15
+    assert output["prompt_ids"] == [SERVED_PROMPT]
+    assert output["response_ids"] == [[11, 12, 13]]
+    assert output["response_logprobs"] == [[-0.1, -0.2, -0.3]]
+    # One route per response token from the forward that consumed it; the last token was never
+    # forwarded and carries the sentinel.
+    assert output["routed_experts"] == [[[[43]], [[44]], [[0]]]]
+    assert output["response_policy_version_segments"] == [
+        [{"start": 0, "token_count": 1, "policy_version": 3}, {"start": 1, "token_count": 2, "policy_version": 4}]
+    ]

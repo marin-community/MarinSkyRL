@@ -13,7 +13,7 @@
 #
 # Only generators with in-process verifiers are routed: no judge key or sandbox is provisioned,
 # so the Nemotron Ultra environment runs with its defaults and no external services.
-entrypoint: standard
+entrypoint: sync
 
 context_budget:
   request_window_tokens: 8192

@@ -5,6 +5,8 @@ uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/te
 import pytest
 from typing import Dict, Any
 from unittest.mock import AsyncMock, MagicMock
+from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
 from omegaconf import OmegaConf
@@ -46,16 +48,30 @@ class CPUTestEnv(BaseTextEnv):
         )
 
 
+class CPUSingleTurnEnv(BaseTextEnv):
+    """A gsm8k-shaped environment: one answer, no observation, done."""
+
+    def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
+        super().__init__()
+
+    def init(self, prompt):
+        return prompt, {}
+
+    def step(self, action: str):
+        return BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+
+
 def _register_test_env_if_needed():
-    """Register the test env only if it's not already registered."""
-    try:
-        register(
-            id="cpu_test_env",
-            entry_point="tests.cpu.trajectory_runners.test_skyrl_gym_runner_chat_templating:CPUTestEnv",
-        )
-    except Exception:
-        # Environment already registered, ignore
-        pass
+    """Register the test envs only if they are not already registered."""
+    for env_id, class_name in (("cpu_test_env", "CPUTestEnv"), ("cpu_single_turn_env", "CPUSingleTurnEnv")):
+        try:
+            register(
+                id=env_id,
+                entry_point=f"tests.cpu.trajectory_runners.test_skyrl_gym_runner_chat_templating:{class_name}",
+            )
+        except Exception:
+            # Environment already registered, ignore
+            pass
 
 
 def _build_runner(
@@ -100,8 +116,11 @@ def _default_prompt_and_extras():
     return prompt, extras
 
 
-def _make_input_batch(prompt, extras):
-    return {"prompts": prompt, "env_extras": extras, "env_classes": ["cpu_test_env"]}
+def _make_input_batch(prompt, extras, env_class="cpu_test_env"):
+    return {"prompts": prompt, "env_extras": extras, "env_classes": [env_class]}
+
+
+QWEN3_WITHOUT_THINKING = {"source": "name", "name_or_path": "qwen3_without_thinking"}
 
 
 @pytest.mark.asyncio
@@ -410,3 +429,113 @@ async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepat
         last_token_id_false = out_false["response_ids"][0][-1]
         assert last_token_id_true == tokenizer.eos_token_id
         assert last_token_id_false == tokenizer.encode(mock_text, add_special_tokens=False)[-1]
+
+
+class _TokenEngine:
+    """A vLLM-shaped generate() engine: sampled ids, logprobs and version spans, with no prompt ids.
+
+    An aborted attempt installs the next policy version while it is in flight.
+    """
+
+    def __init__(self, tokenizer, attempts):
+        self.tokenizer = tokenizer
+        self.attempts = list(attempts)
+        self.served_prompts = []
+        self.client = None
+
+    async def generate(self, input_batch):
+        self.served_prompts.extend(input_batch["prompt_token_ids"])
+        ids, stop_reason, version = self.attempts[len(self.served_prompts) - 1]
+        if stop_reason == "abort":
+            await self.client.pause_generation()
+            await self.client.resume_generation(policy_version=version + 1)
+        return {
+            "responses": [self.tokenizer.decode(ids, skip_special_tokens=True)],
+            "stop_reasons": [stop_reason],
+            "response_ids": [list(ids)],
+            "response_logprobs": [_logprobs(ids)],
+            "response_policy_version_segments": [[{"start": 0, "token_count": len(ids), "policy_version": version}]],
+        }
+
+    async def pause_generation(self):
+        pass
+
+    async def resume_generation(self, policy_version=None):
+        pass
+
+
+def _logprobs(ids):
+    return [-0.01 * token for token in ids]
+
+
+def _client_runner(tokenizer, engine):
+    config = OmegaConf.create(
+        {
+            "trainer": {"policy": {"model": {"path": "Qwen/Qwen3-0.6B"}}},
+            "generator": {
+                "backend": "vllm",
+                "enable_http_endpoint": False,
+                "http_endpoint_host": "127.0.0.1",
+                "http_endpoint_port": 0,
+                "weight_sync_pause_timeout_seconds": 30.0,
+            },
+        }
+    )
+    engine.client = InferenceEngineClient(engines=[engine], tokenizer=tokenizer, full_config=config)
+    overrides = {"sampling_params": {"max_generate_length": 200, "logprobs": 0}}
+    return _build_runner(tokenizer, QWEN3_WITHOUT_THINKING, engine.client, overrides)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_reason", ["stop", "length"])
+async def test_single_turn_trajectory_through_the_client_trains_on_what_was_sampled_across_a_weight_sync(stop_reason):
+    _register_test_env_if_needed()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    # Re-rendering "b\n" through the template moves the end-of-turn token and, for a length stop,
+    # adds one the model never sampled.
+    sampled_ids = tokenizer.encode(
+        "b\n" + (tokenizer.eos_token if stop_reason == "stop" else ""), add_special_tokens=False
+    )
+    first, rest = sampled_ids[:1], sampled_ids[1:]
+    engine = _TokenEngine(tokenizer, [(first, "abort", 3), (rest, stop_reason, 4)])
+    runner = _client_runner(tokenizer, engine)
+    prompt, extras = _default_prompt_and_extras()
+
+    batch = await runner.run(_make_input_batch(prompt, extras, env_class="cpu_single_turn_env"))
+
+    served_prompt = engine.served_prompts[0]
+    assert engine.served_prompts[1] == served_prompt + first
+    assert batch["prompt_token_ids"][0] == served_prompt
+    assert batch["response_ids"][0] == sampled_ids
+    assert batch["loss_masks"][0] == [1] * len(sampled_ids)
+    assert batch["stop_reasons"] == [stop_reason]
+    assert batch["rollout_logprobs"][0] == _logprobs(first) + _logprobs(rest)
+    assert batch["behavior_policy_version_segments"] == [
+        [
+            {"start": 0, "token_count": 1, "policy_version": 3},
+            {"start": 1, "token_count": len(rest), "policy_version": 4},
+        ]
+    ]
+    assert batch["oldest_policy_version"] == 3
+    assert batch["rollout_metrics"][TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_a_trajectory_with_an_observation_still_re_renders_the_chat_history():
+    _register_test_env_if_needed()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    sampled_ids = tokenizer.encode("b" + tokenizer.eos_token, add_special_tokens=False)
+    engine = _TokenEngine(tokenizer, [(sampled_ids, "stop", 4)] * 3)
+    runner = _client_runner(tokenizer, engine)
+    prompt, extras = _default_prompt_and_extras()
+
+    batch = await runner.run(_make_input_batch(prompt, extras))
+
+    rendered = tokenizer.decode(batch["prompt_token_ids"][0]) + tokenizer.decode(batch["response_ids"][0])
+    assert rendered == tokenizer.apply_chat_template(
+        get_expected_chat_history("b"), chat_template=runner.custom_chat_template, tokenize=False
+    )
+    assert batch["rollout_logprobs"] is None
+    assert "behavior_policy_version_segments" not in batch
+    assert batch["oldest_policy_version"] == 4
+    assert batch["rollout_metrics"][TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC] == 1.0

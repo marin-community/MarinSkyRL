@@ -1,5 +1,5 @@
 # Snowball Ultra-style RLVR phase 1 with learner and rollout sharing 64 H100s.
-entrypoint: standard
+entrypoint: sync
 
 config_groups:
   terminal_bench_config: terminal_bench
