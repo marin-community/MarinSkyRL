@@ -7,13 +7,13 @@ import fnmatch
 import json
 import math
 from pathlib import Path, PurePosixPath
-import struct
 from typing import Iterable
 
 import torch
 
 from marinskyrl.resource_locator import join_resource_path
-from marinskyrl.model_manifest import HF_WEIGHT_INDEX_FILENAME
+from marinskyrl.model_manifest import HF_WEIGHT_INDEX_FILENAME, read_safetensors_header
+from skyrl_train.hf_model_io import HF_WEIGHT_FILENAME
 from skyrl_train.io import io
 
 
@@ -56,19 +56,32 @@ class RemoteSafetensorsTensorStore:
     ) -> None:
         self.source_uri = source_uri.rstrip("/")
         index_path = Path(metadata_dir) / HF_WEIGHT_INDEX_FILENAME
-        try:
-            index = json.loads(index_path.read_text())
-            weight_map = index["weight_map"]
-        except (FileNotFoundError, KeyError, TypeError, json.JSONDecodeError) as error:
-            raise ValueError(f"Invalid or missing safetensors weight index: {index_path}") from error
+        self._headers: dict[str, tuple[int, dict[str, object]]] = {}
+        initial_bytes_read = 0
+        if index_path.exists():
+            try:
+                index = json.loads(index_path.read_text())
+                weight_map = index["weight_map"]
+            except (KeyError, TypeError, json.JSONDecodeError) as error:
+                raise ValueError(f"Invalid safetensors weight index: {index_path}") from error
+        else:
+            # A single-file export maps every header key to model.safetensors.
+            shard = HF_WEIGHT_FILENAME
+            shard_uri = join_resource_path(self.source_uri, shard)
+            if not io.exists(shard_uri):
+                raise ValueError(f"Missing safetensors weight index and single-file shard: {index_path}")
+            with io.open_file(shard_uri, "rb") as source:
+                header_bytes, keys = read_safetensors_header(source, shard_uri)
+            initial_bytes_read = len(header_bytes)
+            self._headers[shard] = len(header_bytes), json.loads(header_bytes[8:])
+            weight_map = {key: shard for key in keys}
         if not isinstance(weight_map, dict) or not weight_map:
             raise ValueError(f"Safetensors weight index has an empty weight_map: {index_path}")
         self._weight_map = {str(key): _safe_relative_path(str(value)) for key, value in weight_map.items()}
         self._lazy_first_dim_keys = {
             key for key in self._weight_map if any(fnmatch.fnmatch(key, pattern) for pattern in lazy_first_dim_patterns)
         }
-        self._headers: dict[str, tuple[int, dict[str, object]]] = {}
-        self.bytes_read = 0
+        self.bytes_read = initial_bytes_read
 
     def get_all_keys(self) -> list[str]:
         return sorted(self._weight_map)
@@ -78,18 +91,9 @@ class RemoteSafetensorsTensorStore:
         if cached is not None:
             return cached
         source.seek(0)
-        prefix = source.read(8)
-        if len(prefix) != 8:
-            raise ValueError(f"Truncated safetensors header: {join_resource_path(self.source_uri, shard)}")
-        header_size = struct.unpack("<Q", prefix)[0]
-        header_bytes = source.read(header_size)
-        if len(header_bytes) != header_size:
-            raise ValueError(f"Truncated safetensors metadata: {join_resource_path(self.source_uri, shard)}")
-        header = json.loads(header_bytes)
-        if not isinstance(header, dict):
-            raise ValueError(f"Invalid safetensors metadata: {join_resource_path(self.source_uri, shard)}")
-        self.bytes_read += 8 + header_size
-        cached = 8 + header_size, header
+        header_bytes, _keys = read_safetensors_header(source, join_resource_path(self.source_uri, shard))
+        self.bytes_read += len(header_bytes)
+        cached = len(header_bytes), json.loads(header_bytes[8:])
         self._headers[shard] = cached
         return cached
 

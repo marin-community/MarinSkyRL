@@ -17,10 +17,87 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Mapping
+
 import torch
 from megatron.core.optimizer import OptimizerConfig
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
+from megatron.core.optimizer.emerging_optimizers import _EMERGING_OPTIMIZERS, EmergingOptimizerEntry
+from megatron.core.optimizer.optimizer_config import ParamKey, ParamWithNamePredicate
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from skyrl_train.distributed.megatron.grug_muonh import (
+    DEFAULT_BETAS,
+    DEFAULT_EPSILON,
+    DEFAULT_MOMENTUM,
+    DEFAULT_NESTEROV,
+    DEFAULT_NS_STEPS,
+    ADAMH_ROUTE,
+    ADAM_ROUTE,
+    GrugMegatronMuonH,
+    ROUTE_KEY,
+    grug_muonh_route,
+)
+
+_GRUG_MUONH_KEY = "grug_muonh"
+
+
+def _grug_muonh_kwargs(optim_config: dict) -> dict:
+    if float(optim_config.get("weight_decay", 0.0)) != 0.0:
+        raise ValueError("MuonH requires weight_decay=0")
+    extra = optim_config.get("optimizer_kwargs", {})
+    if not isinstance(extra, Mapping):
+        raise TypeError("MuonH optimizer_kwargs must be a mapping")
+    known = {"adam_lr", "momentum", "nesterov", "backend_steps", "epsilon", "muon_epsilon"}
+    unknown = sorted(set(extra) - known)
+    if unknown:
+        raise ValueError(f"Unknown MuonH optimizer_kwargs: {unknown}")
+    betas = tuple(float(value) for value in optim_config.get("adam_betas", DEFAULT_BETAS))
+    if len(betas) != 2:
+        raise ValueError("MuonH adam_betas must contain two values")
+    return {
+        "lr": float(optim_config["lr"]),
+        "adam_lr": float(extra["adam_lr"]) if "adam_lr" in extra else None,
+        "momentum": float(extra.get("momentum", DEFAULT_MOMENTUM)),
+        "nesterov": bool(extra.get("nesterov", DEFAULT_NESTEROV)),
+        "ns_steps": int(extra.get("backend_steps", DEFAULT_NS_STEPS)),
+        "betas": betas,
+        "eps": float(extra.get("epsilon", DEFAULT_EPSILON)),
+        "muon_eps": float(extra.get("muon_epsilon", DEFAULT_EPSILON)),
+    }
+
+
+def _register_grug_muonh() -> None:
+    if _GRUG_MUONH_KEY in _EMERGING_OPTIMIZERS:
+        return
+
+    _EMERGING_OPTIMIZERS[_GRUG_MUONH_KEY] = EmergingOptimizerEntry(
+        optimizer_cls=GrugMegatronMuonH,
+        init_state_fn=lambda optimizer, _config=None: optimizer.initialize_state(),
+        config_to_kwargs=lambda config, _chunks, _groups: config._grug_muonh_kwargs,
+        default_param_overrides={
+            # MCore matches checkpoint parameter groups by wd_mult/lr_mult, not
+            # by grug_route. Weight decay is zero for this recipe, so distinct
+            # wd_mult values preserve all update math while making route state
+            # unambiguous at checkpoint load.
+            ParamKey(
+                with_name_predicate=ParamWithNamePredicate(
+                    name="grug_muonh_adamh", fn=lambda parameter, name: grug_muonh_route(name, parameter) == ADAMH_ROUTE
+                )
+            ): {ROUTE_KEY: ADAMH_ROUTE, "wd_mult": 2.0},
+            ParamKey(
+                with_name_predicate=ParamWithNamePredicate(
+                    name="grug_muonh_adam_matrix",
+                    fn=lambda parameter, name: grug_muonh_route(name, parameter) == ADAM_ROUTE and parameter.ndim >= 2,
+                )
+            ): {ROUTE_KEY: ADAM_ROUTE, "wd_mult": 3.0},
+            ParamKey(
+                with_name_predicate=ParamWithNamePredicate(
+                    name="grug_muonh_adam_vector",
+                    fn=lambda parameter, name: grug_muonh_route(name, parameter) == ADAM_ROUTE and parameter.ndim < 2,
+                )
+            ): {ROUTE_KEY: ADAM_ROUTE},
+        },
+    )
 
 
 def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict) -> OptimizerConfig:
@@ -32,6 +109,8 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
     _optim_name = str(optim_config.get("optimizer", "adam")).lower()
     if _optim_name == "adamw":
         _optim_name = "adam"
+    if _optim_name == "muonh":
+        _optim_name = _GRUG_MUONH_KEY
     optim_args = {
         "optimizer": _optim_name,
         "lr": optim_config.get("lr"),
@@ -46,6 +125,8 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
     optim_args.update(optimizer_config_kwargs)
 
     config = OptimizerConfig(**optim_args)
+    if _optim_name == _GRUG_MUONH_KEY:
+        config._grug_muonh_kwargs = _grug_muonh_kwargs(optim_config)
     return config
 
 
@@ -70,6 +151,8 @@ def get_megatron_optimizer(
             "megatron-core 0.18.x's config_overrides mapping; only the defaults "
             "are supported."
         )
+    if config.optimizer == _GRUG_MUONH_KEY:
+        _register_grug_muonh()
     # Base optimizer.
     return get_megatron_optimizer_native(
         config=config,

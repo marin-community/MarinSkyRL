@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from safetensors.torch import save_file
 import torch
 
@@ -40,6 +41,40 @@ def test_loads_only_requested_tensor_range_without_local_weight_files(tmp_path: 
     torch.testing.assert_close(loaded["layer.0.weight"], torch.arange(8, dtype=torch.float32))
     assert store.bytes_read < (remote / "model-00001-of-00001.safetensors").stat().st_size
     assert not tuple(metadata.glob("*.safetensors"))
+
+
+def test_single_file_export_without_index_streams_only_requested_tensor(tmp_path: Path) -> None:
+    remote = tmp_path / "levanter-export"
+    remote.mkdir()
+    save_file(
+        {
+            "model.embed_tokens.weight": torch.arange(8, dtype=torch.float32),
+            "model.layers.0.weight": torch.arange(1_000_000, dtype=torch.float32),
+        },
+        remote / "model.safetensors",
+    )
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+
+    store = RemoteSafetensorsTensorStore(str(remote), metadata)
+    loaded = store.load_tensors(["model.embed_tokens.weight"])
+
+    assert store.get_all_keys() == ["model.embed_tokens.weight", "model.layers.0.weight"]
+    torch.testing.assert_close(loaded["model.embed_tokens.weight"], torch.arange(8, dtype=torch.float32))
+    assert store.bytes_read < (remote / "model.safetensors").stat().st_size
+    assert not tuple(metadata.glob("*.safetensors"))
+
+
+def test_invalid_index_is_not_replaced_by_single_file_fallback(tmp_path: Path) -> None:
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    save_file({"weight": torch.ones(2)}, remote / "model.safetensors")
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    (metadata / "model.safetensors.index.json").write_text("not JSON")
+
+    with pytest.raises(ValueError, match="Invalid safetensors weight index"):
+        RemoteSafetensorsTensorStore(str(remote), metadata)
 
 
 def test_auto_bridge_uses_registered_bridge_remote_slice_patterns(tmp_path: Path) -> None:

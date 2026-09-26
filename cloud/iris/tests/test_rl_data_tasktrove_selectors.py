@@ -8,6 +8,7 @@ from omegaconf import OmegaConf
 from cloud.iris import hf_datasets, rl_data
 from cloud.iris.training_driver import LocalRLConfig, LocalRLRunner
 from marinskyrl.resource_locator import HFDatasetSelector, is_hugging_face_repo_id, parse_hf_dataset_selector
+from marinskyrl.task_sources import data_source
 
 
 def test_dataset_selector_is_distinct_from_plain_repo_id():
@@ -26,6 +27,32 @@ def test_cache_names_do_not_confuse_repo_suffixes_with_subdirectories():
     subdirectory = HFDatasetSelector("fixture-org/a", revision="commit", subdir="b").cache_name()
 
     assert repo_suffix != subdirectory
+
+
+def test_packed_task_source_survives_omegaconf_round_trip():
+    source = {
+        "kind": "tasktrove_parquet",
+        "uri": "s3://artifacts/tasks/part-00000.parquet",
+        "identity": "tasktrove@v1",
+        "local_path": "/tmp/tasks",
+        "relative_path": "part-00000.parquet",
+        "verifier_ref": "abc123",
+        "selection": {
+            "sources": ["fixture"],
+            "tags": ["bash"],
+            "modes": ["script"],
+            "tag_match": "all",
+            "limit": 2,
+            "seed": 17,
+        },
+    }
+    resolved = rl_data.resolve_rl_train_data_with_sources([source], kind="tasks", verbose=False)
+    config = OmegaConf.create({"data": {"train_data": list(resolved.paths)}})
+    [materialized] = OmegaConf.to_container(config, resolve=True)["data"]["train_data"]
+
+    assert materialized["kind"] == "tasktrove_parquet"
+    assert materialized["selection"]["tag_match"] == "all"
+    assert data_source(materialized).verifier_ref == "abc123"
 
 
 def test_download_selects_only_the_requested_subdirectory(monkeypatch, tmp_path):

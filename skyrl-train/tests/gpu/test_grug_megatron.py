@@ -229,8 +229,7 @@ def _padded_batch(
     return batch
 
 
-@ray.remote(num_gpus=1)
-def _hf_response_logprobs(model_path: str, batch: TrainingInputBatch) -> torch.Tensor:
+def _hf_response_logprobs_direct(model_path: str, batch: TrainingInputBatch) -> torch.Tensor:
     model = GrugMoeForCausalLM.from_pretrained(model_path, dtype=torch.bfloat16, attn_implementation="eager")
     model.eval().to("cuda")
     sequences = batch["sequences"].to("cuda")
@@ -242,6 +241,11 @@ def _hf_response_logprobs(model_path: str, batch: TrainingInputBatch) -> torch.T
         logits = model(sequences, attention_mask=attention_mask, position_ids=position_ids).logits
         log_probs = logprobs_from_logits(logits, torch.roll(sequences, shifts=-1, dims=1))
     return log_probs[:, -num_actions - 1 : -1].float().cpu()
+
+
+@ray.remote(num_gpus=1)
+def _hf_response_logprobs(model_path: str, batch: TrainingInputBatch) -> torch.Tensor:
+    return _hf_response_logprobs_direct(model_path, batch)
 
 
 def _megatron_response_logprobs(policy, batch: TrainingInputBatch) -> torch.Tensor:
@@ -428,13 +432,23 @@ def test_grug_megatron_eval_forward_is_independent_of_peer_rank_batch(
         ray.shutdown()
 
 
-def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
-    world_size = 2
+@pytest.mark.parametrize(
+    ("world_size", "ep", "optimizer_name"),
+    [(2, 1, "AdamW"), (2, 1, "MuonH"), (4, 2, "MuonH")],
+    ids=["pp2_adamw", "pp2_muonh", "pp2_ep2_muonh"],
+)
+def test_grug_megatron_pp2_train_step_updates_weights_and_exports(
+    tmp_path, world_size: int, ep: int, optimizer_name: str
+):
     require_hoppers(world_size)
     model_path = tmp_path / "model"
     model_path.mkdir()
     _write_tiny_checkpoint(model_path)
-    cfg = _config(str(model_path), world_size=world_size, pp=2, ep=1)
+    cfg = _config(str(model_path), world_size=world_size, pp=2, ep=ep)
+    cfg.trainer.policy.optimizer_config.optimizer = optimizer_name
+    if optimizer_name == "MuonH":
+        cfg.trainer.policy.optimizer_config.weight_decay = 0.0
+        cfg.trainer.policy.optimizer_config.optimizer_kwargs = {"adam_lr": 0.004}
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     batch = _padded_batch(tokenizer.pad_token_id)
     export_dir = tmp_path / "export"
@@ -463,7 +477,8 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
         for name in names:
             torch.testing.assert_close(exported[name].float(), after[name], rtol=0, atol=0)
         assert all(exported[name].dtype == torch.float32 for name in BIAS_NAMES)
-        reloaded = ray.get(_hf_response_logprobs.remote(str(export_dir), batch))
+        policy.kill_actors()
+        reloaded = _hf_response_logprobs_direct(str(export_dir), batch)
         _assert_logprobs_close(post_update, reloaded, batch["response_mask"])
     finally:
         ray.shutdown()

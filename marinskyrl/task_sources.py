@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Mapping, TypeAlias
@@ -90,6 +90,15 @@ class TaskTroveParquetSource:
 
 
 DataSource: TypeAlias = DirectoryDataSource | TaskTroveParquetSource
+
+
+def data_source_dict(source: DataSource) -> dict[str, Any]:
+    """Serialize a source with wire-format enum values."""
+    value = asdict(source)
+    value["kind"] = source.kind.value
+    if isinstance(source, TaskTroveParquetSource):
+        value["selection"]["tag_match"] = source.selection.tag_match.value
+    return value
 
 
 def data_source(value: Mapping[str, Any]) -> DataSource:

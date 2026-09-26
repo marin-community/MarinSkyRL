@@ -14,7 +14,7 @@ import stat
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Mapping, Optional
 
@@ -22,7 +22,7 @@ from cloud.iris.hf_datasets import resolve_hf_dataset_selector
 from cloud.iris.tasks_parquet import from_parquet
 from marinskyrl.remote_io import filesystem_and_path
 from marinskyrl.resource_locator import parse_hf_dataset_selector
-from marinskyrl.task_sources import DirectoryDataSource, TaskTroveParquetSource, data_source
+from marinskyrl.task_sources import DirectoryDataSource, TaskTroveParquetSource, data_source, data_source_dict
 
 
 @dataclass(frozen=True)
@@ -127,7 +127,7 @@ def resolve_rl_train_data_with_sources(
                 if not isinstance(source, DirectoryDataSource):
                     raise ValueError(f"Structured parquet data must use a directory source, found {source.kind!r}")
                 resolved.append(source.resolved_path())
-                sources.append(asdict(source))
+                sources.append(data_source_dict(source))
                 continue
             # A local path or a bare HF dataset id is read directly by PromptDataset.
             if "://" not in entry or entry.startswith("file://"):
@@ -165,7 +165,7 @@ def resolve_rl_train_data_with_sources(
     for data_path in train_data:
         if isinstance(data_path, Mapping):
             source = data_source(data_path)
-            packed_source = asdict(source)
+            packed_source = data_source_dict(source)
             if isinstance(source, DirectoryDataSource):
                 resolved_paths.append(source.resolved_path())
             elif isinstance(source, TaskTroveParquetSource):

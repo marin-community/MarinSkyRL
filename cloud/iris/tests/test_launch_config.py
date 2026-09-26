@@ -149,6 +149,7 @@ def test_qwen_smoke_accepts_hugging_face_model_input(tmp_path: Path) -> None:
         "tokenizer_revision": "main",
     }
     config["inputs"]["data_kind"] = "parquet"
+    config["skyrl"]["generator"]["chat_template_kwargs"] = {"enable_thinking": False}
     path = tmp_path / "qwen-launch.yaml"
     path.write_text(yaml.safe_dump(config, sort_keys=False))
 
@@ -157,6 +158,7 @@ def test_qwen_smoke_accepts_hugging_face_model_input(tmp_path: Path) -> None:
     assert resolved.skyrl.trainer.policy.model.path == "Qwen/Qwen3-0.6B"
     assert resolved.skyrl.trainer.policy.model.source_uri is None
     assert resolved.runtime.entrypoint == "skyrl_train.entrypoints.main_base"
+    assert resolved.skyrl.generator.chat_template_kwargs.enable_thinking is False
 
 
 def test_launch_config_rejects_allocation_smaller_than_role_plan() -> None:
