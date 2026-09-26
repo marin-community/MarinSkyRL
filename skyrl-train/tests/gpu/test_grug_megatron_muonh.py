@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+from types import SimpleNamespace
+
 import pytest
 import torch
 from megatron.core import parallel_state
@@ -35,9 +37,23 @@ def distributed_parallel_state():
 class _TinyGrug(nn.Module):
     def __init__(self) -> None:
         super().__init__()
+        self.config = SimpleNamespace(
+            num_attention_heads=2,
+            num_query_groups=1,
+            kv_channels=2,
+            tensor_model_parallel_size=1,
+        )
         self.embedding = nn.Embedding(8, 4, device="cuda", dtype=torch.bfloat16)
         self.hidden = nn.Linear(4, 4, bias=False, device="cuda", dtype=torch.bfloat16)
         self.output_layer = nn.Linear(4, 8, bias=False, device="cuda", dtype=torch.bfloat16)
+        self.decoder = nn.Module()
+        self.decoder.layers = nn.ModuleList([nn.Module()])
+        layer = self.decoder.layers[0]
+        layer.self_attention = nn.Module()
+        layer.self_attention.linear_qkv = nn.Linear(4, 8, bias=False, device="cuda", dtype=torch.bfloat16)
+        layer.mlp = nn.Module()
+        layer.mlp.shared_experts = nn.Module()
+        layer.mlp.shared_experts.linear_fc1 = nn.Linear(4, 6, bias=False, device="cuda", dtype=torch.bfloat16)
 
 
 def test_megatron_wrapper_routes_updates_and_restores_muonh_state(distributed_parallel_state) -> None:
@@ -58,6 +74,7 @@ def test_megatron_wrapper_routes_updates_and_restores_muonh_state(distributed_pa
     base = optimizer.optimizer
     assert isinstance(base, GrugMegatronMuonH)
     assert {group["grug_route"] for group in base.param_groups} == {"muonh", "adamh", "adam"}
+    assert {group.get("grug_layout") for group in base.param_groups} == {None, "qkv", "gate_up"}
     initial = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
     for parameter in model.parameters():
         parameter.grad = torch.full_like(parameter, 0.125)

@@ -20,6 +20,7 @@
 from collections.abc import Mapping
 
 import torch
+from megatron.core.distributed import DistributedDataParallel
 from megatron.core.optimizer import OptimizerConfig
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
 from megatron.core.optimizer.emerging_optimizers import _EMERGING_OPTIMIZERS, EmergingOptimizerEntry
@@ -33,7 +34,11 @@ from skyrl_train.distributed.megatron.grug_muonh import (
     DEFAULT_NS_STEPS,
     ADAMH_ROUTE,
     ADAM_ROUTE,
+    GATE_UP_LAYOUT,
     GrugMegatronMuonH,
+    LAYOUT_KEY,
+    MUONH_ROUTE,
+    QKV_LAYOUT,
     ROUTE_KEY,
     grug_muonh_route,
 )
@@ -97,6 +102,16 @@ def _register_grug_muonh() -> None:
                     fn=lambda parameter, name: grug_muonh_route(name, parameter) == ADAM_ROUTE and parameter.ndim < 2,
                 )
             ): {ROUTE_KEY: ADAM_ROUTE},
+            ParamKey(
+                with_name_predicate=ParamWithNamePredicate(
+                    name="grug_muonh_qkv", fn=lambda parameter, name: ".linear_qkv.weight" in name
+                )
+            ): {ROUTE_KEY: MUONH_ROUTE, LAYOUT_KEY: QKV_LAYOUT, "wd_mult": 4.0},
+            ParamKey(
+                with_name_predicate=ParamWithNamePredicate(
+                    name="grug_muonh_gate_up", fn=lambda parameter, name: ".linear_fc1.weight" in name
+                )
+            ): {ROUTE_KEY: MUONH_ROUTE, LAYOUT_KEY: GATE_UP_LAYOUT, "wd_mult": 5.0},
         },
     )
 
@@ -154,6 +169,17 @@ def get_megatron_optimizer(
         )
     if config.optimizer == _GRUG_MUONH_KEY:
         _register_grug_muonh()
+        first_chunk = model[0]
+        base_model = first_chunk.module if isinstance(first_chunk, DistributedDataParallel) else first_chunk
+        model_config = base_model.config
+        if model_config.num_attention_heads % model_config.num_query_groups:
+            raise ValueError("Grug MuonH requires whole query heads per key/value group")
+        config._grug_muonh_kwargs.update(
+            qkv_num_query_groups=model_config.num_query_groups,
+            qkv_heads_per_group=model_config.num_attention_heads // model_config.num_query_groups,
+            qkv_head_dim=model_config.kv_channels,
+            tensor_model_parallel_size=model_config.tensor_model_parallel_size,
+        )
     # Base optimizer.
     return get_megatron_optimizer_native(
         config=config,

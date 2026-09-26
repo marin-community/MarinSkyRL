@@ -14,6 +14,9 @@ from torch.optim import Optimizer
 
 Route = Literal["muonh", "adamh", "adam"]
 ROUTE_KEY = "grug_route"
+LAYOUT_KEY = "grug_layout"
+QKV_LAYOUT = "qkv"
+GATE_UP_LAYOUT = "gate_up"
 MUONH_ROUTE: Route = "muonh"
 ADAMH_ROUTE: Route = "adamh"
 ADAM_ROUTE: Route = "adam"
@@ -95,7 +98,13 @@ class GrugMegatronMuonH(Optimizer):
         muon_eps: float = DEFAULT_EPSILON,
         adam_lr: float | None = None,
         min_lr: float = 0.0,
+        qkv_num_query_groups: int | None = None,
+        qkv_heads_per_group: int | None = None,
+        qkv_head_dim: int | None = None,
+        tensor_model_parallel_size: int = 1,
     ) -> None:
+        if tensor_model_parallel_size != 1:
+            raise ValueError("Grug MuonH requires tensor_model_parallel_size=1")
         if ns_steps < 1:
             raise ValueError("MuonH backend_steps must be positive")
         if adam_lr is not None and lr <= 0:
@@ -109,6 +118,9 @@ class GrugMegatronMuonH(Optimizer):
         self.eps = eps
         self.muon_eps = muon_eps
         self.adam_lr_mult = (adam_lr / lr) if adam_lr is not None else 1.0
+        self.qkv_num_query_groups = qkv_num_query_groups
+        self.qkv_heads_per_group = qkv_heads_per_group
+        self.qkv_head_dim = qkv_head_dim
         for group in self.param_groups:
             if group[ROUTE_KEY] == ADAM_ROUTE:
                 group["lr_mult"] = self.adam_lr_mult
@@ -118,8 +130,58 @@ class GrugMegatronMuonH(Optimizer):
                     group["min_lr"] = min_lr * self.adam_lr_mult
             elif group[ROUTE_KEY] not in (MUONH_ROUTE, ADAMH_ROUTE):
                 raise ValueError(f"Unknown Grug optimizer route: {group[ROUTE_KEY]}")
+            layout = group.get(LAYOUT_KEY)
+            if layout not in (None, QKV_LAYOUT, GATE_UP_LAYOUT):
+                raise ValueError(f"Unknown Grug fused layout: {layout}")
+            if layout == QKV_LAYOUT and not all(
+                value is not None for value in (qkv_num_query_groups, qkv_heads_per_group, qkv_head_dim)
+            ):
+                raise ValueError("Fused QKV MuonH requires attention group geometry")
+            if layout is not None and group[ROUTE_KEY] != MUONH_ROUTE:
+                raise ValueError("Grug fused layouts require the MuonH route")
             if group.get("weight_decay", 0.0) != 0.0:
                 raise ValueError("MuonH requires weight_decay=0 for every parameter group")
+
+    def _muonh_matrix_step_(self, parameter: Tensor, gradient: Tensor, momentum_buffer: Tensor, lr: float) -> None:
+        momentum_buffer.mul_(self.momentum).add_(gradient)
+        direction = gradient.add(momentum_buffer, alpha=self.momentum) if self.nesterov else momentum_buffer
+        direction = _newton_schulz_quintic(direction, steps=self.ns_steps, eps=self.muon_eps)
+        rows, columns = direction.shape[-2:]
+        direction.mul_(max(1.0, rows / columns) ** 0.5)
+        _hyperball_step_(parameter, direction, lr=lr, clamp_final_norm=True)
+
+    def _qkv_row_indices(self, parameter: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        num_groups = self.qkv_num_query_groups
+        heads_per_group = self.qkv_heads_per_group
+        head_dim = self.qkv_head_dim
+        if num_groups is None or heads_per_group is None or head_dim is None:
+            raise ValueError("Fused QKV MuonH requires attention group geometry")
+        rows_per_group = (heads_per_group + 2) * head_dim
+        if parameter.ndim != 2 or parameter.shape[0] != num_groups * rows_per_group:
+            raise ValueError(f"Fused QKV parameter has incompatible shape {tuple(parameter.shape)}")
+        offsets = torch.arange(num_groups, device=parameter.device)[:, None] * rows_per_group
+        q = (offsets + torch.arange(heads_per_group * head_dim, device=parameter.device)).reshape(-1)
+        k = (offsets + heads_per_group * head_dim + torch.arange(head_dim, device=parameter.device)).reshape(-1)
+        v = (offsets + (heads_per_group + 1) * head_dim + torch.arange(head_dim, device=parameter.device)).reshape(-1)
+        return q, k, v
+
+    def _fused_muonh_step_(
+        self, parameter: Tensor, gradient: Tensor, momentum_buffer: Tensor, lr: float, layout: str
+    ) -> None:
+        if layout == GATE_UP_LAYOUT:
+            if parameter.shape[-2] % 2:
+                raise ValueError(f"Fused gate/up parameter has incompatible shape {tuple(parameter.shape)}")
+            for part, grad_part, momentum_part in zip(
+                parameter.chunk(2, dim=-2), gradient.chunk(2, dim=-2), momentum_buffer.chunk(2, dim=-2)
+            ):
+                self._muonh_matrix_step_(part, grad_part, momentum_part, lr)
+            return
+        for indices in self._qkv_row_indices(parameter):
+            part = parameter.index_select(0, indices)
+            momentum_part = momentum_buffer.index_select(0, indices)
+            self._muonh_matrix_step_(part, gradient.index_select(0, indices), momentum_part, lr)
+            parameter.index_copy_(0, indices, part)
+            momentum_buffer.index_copy_(0, indices, momentum_part)
 
     def _initialize_parameter_state(self, parameter: Tensor, route: Route, *, prototype: Tensor | None = None) -> dict:
         state = self.state[parameter]
@@ -159,12 +221,11 @@ class GrugMegatronMuonH(Optimizer):
                 state = self._initialize_parameter_state(parameter, route, prototype=gradient)
                 if route == MUONH_ROUTE:
                     momentum_buffer = state["momentum_buffer"]
-                    momentum_buffer.mul_(self.momentum).add_(gradient)
-                    direction = gradient.add(momentum_buffer, alpha=self.momentum) if self.nesterov else momentum_buffer
-                    direction = _newton_schulz_quintic(direction, steps=self.ns_steps, eps=self.muon_eps)
-                    rows, columns = direction.shape[-2:]
-                    direction.mul_(max(1.0, rows / columns) ** 0.5)
-                    _hyperball_step_(parameter, direction, lr=lr, clamp_final_norm=True)
+                    layout = group.get(LAYOUT_KEY)
+                    if layout is None:
+                        self._muonh_matrix_step_(parameter, gradient, momentum_buffer, lr)
+                    else:
+                        self._fused_muonh_step_(parameter, gradient, momentum_buffer, lr, layout)
                     continue
                 beta1, beta2 = self.betas
                 state["step"].add_(1)

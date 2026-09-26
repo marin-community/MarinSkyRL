@@ -99,3 +99,67 @@ def test_embedding_gate_route_matches_hf_gated_norm_route() -> None:
         assert grug_muonh_route(f"embed_norm.{projection}.weight", matrix) == "muonh"
         assert grug_muonh_route(f"model.embed_gated_norm.{projection}.weight", matrix) == "muonh"
     assert grug_muonh_route("embed_norm.norm.weight", norm) == "adam"
+
+
+def test_fused_gate_up_matches_independent_projection_updates() -> None:
+    gate = torch.nn.Parameter(torch.linspace(-0.6, 0.8, 12).reshape(3, 4))
+    up = torch.nn.Parameter(torch.linspace(0.3, -0.7, 12).reshape(3, 4))
+    fused = torch.nn.Parameter(torch.cat((gate.detach(), up.detach())))
+    separate_optimizer = GrugMegatronMuonH(
+        [{"params": [gate], "grug_route": "muonh"}, {"params": [up], "grug_route": "muonh"}], lr=0.03
+    )
+    fused_optimizer = GrugMegatronMuonH([{"params": [fused], "grug_route": "muonh", "grug_layout": "gate_up"}], lr=0.03)
+
+    for step in range(2):
+        gate.grad = torch.linspace(-0.4, 0.5, 12).reshape(3, 4) + step * 0.1
+        up.grad = torch.linspace(0.6, -0.3, 12).reshape(3, 4) - step * 0.1
+        fused.grad = torch.cat((gate.grad, up.grad))
+        separate_optimizer.step()
+        fused_optimizer.step()
+
+    torch.testing.assert_close(fused, torch.cat((gate, up)), rtol=0, atol=0)
+
+
+def test_interleaved_qkv_matches_independent_projection_updates() -> None:
+    num_groups, heads_per_group, head_dim, hidden = 2, 2, 2, 4
+    q = torch.nn.Parameter(torch.linspace(-0.8, 0.7, 32).reshape(8, hidden))
+    k = torch.nn.Parameter(torch.linspace(0.4, -0.6, 16).reshape(4, hidden))
+    v = torch.nn.Parameter(torch.linspace(-0.3, 0.9, 16).reshape(4, hidden))
+
+    def interleave(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+        return torch.cat(
+            (
+                query.reshape(num_groups, heads_per_group * head_dim, hidden),
+                key.reshape(num_groups, head_dim, hidden),
+                value.reshape(num_groups, head_dim, hidden),
+            ),
+            dim=1,
+        ).reshape(-1, hidden)
+
+    fused = torch.nn.Parameter(interleave(q.detach(), k.detach(), v.detach()))
+    separate_optimizer = GrugMegatronMuonH(
+        [{"params": [parameter], "grug_route": "muonh"} for parameter in (q, k, v)], lr=0.03
+    )
+    fused_optimizer = GrugMegatronMuonH(
+        [{"params": [fused], "grug_route": "muonh", "grug_layout": "qkv"}],
+        lr=0.03,
+        qkv_num_query_groups=num_groups,
+        qkv_heads_per_group=heads_per_group,
+        qkv_head_dim=head_dim,
+    )
+
+    for step in range(2):
+        q.grad = torch.linspace(-0.6, 0.5, q.numel()).reshape_as(q) + step * 0.1
+        k.grad = torch.linspace(0.5, -0.4, k.numel()).reshape_as(k) - step * 0.1
+        v.grad = torch.linspace(-0.2, 0.7, v.numel()).reshape_as(v) + step * 0.05
+        fused.grad = interleave(q.grad, k.grad, v.grad)
+        separate_optimizer.step()
+        fused_optimizer.step()
+
+    torch.testing.assert_close(fused, interleave(q, k, v), rtol=0, atol=0)
+
+
+def test_muonh_requires_unsharded_tensor_parallelism() -> None:
+    parameter = torch.nn.Parameter(torch.ones(2, 2))
+    with pytest.raises(ValueError, match="tensor_model_parallel_size=1"):
+        GrugMegatronMuonH([{"params": [parameter]}], lr=0.03, tensor_model_parallel_size=2)
