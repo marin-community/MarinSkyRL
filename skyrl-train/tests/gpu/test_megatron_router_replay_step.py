@@ -22,13 +22,12 @@ import torch
 from transformers import AutoTokenizer
 
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
+from skyrl_train.fixtures.tiny_grug import NUM_EXPERTS, NUM_LAYERS
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_serving import rank0_validation_snapshot
 from tests.gpu.router_replay_fixtures import random_unique_routes
 from tests.gpu.test_grug_megatron import (
-    NUM_EXPERTS,
-    NUM_LAYERS,
     RESPONSE_LENGTH,
     _config,
     _padded_batch,
