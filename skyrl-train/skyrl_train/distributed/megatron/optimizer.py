@@ -59,9 +59,7 @@ class _GrugMuonHParamScheduler(OptimizerParamScheduler):
         return init_lr + (max_lr - init_lr) * self.num_steps / self.lr_warmup_steps
 
 
-def _grug_muonh_kwargs(optim_config: dict, config: OptimizerConfig) -> dict:
-    if float(config.weight_decay) != 0.0:
-        raise ValueError("MuonH requires weight_decay=0")
+def _grug_muonh_extra(optim_config: dict) -> Mapping:
     extra = optim_config.get("optimizer_kwargs", {})
     if not isinstance(extra, Mapping):
         raise TypeError("MuonH optimizer_kwargs must be a mapping")
@@ -69,6 +67,13 @@ def _grug_muonh_kwargs(optim_config: dict, config: OptimizerConfig) -> dict:
     unknown = sorted(set(extra) - known)
     if unknown:
         raise ValueError(f"Unknown MuonH optimizer_kwargs: {unknown}")
+    return extra
+
+
+def _grug_muonh_kwargs(optim_config: dict, config: OptimizerConfig) -> dict:
+    if float(config.weight_decay) != 0.0:
+        raise ValueError("MuonH requires weight_decay=0")
+    extra = _grug_muonh_extra(optim_config)
     return {
         "lr": float(config.lr),
         "min_lr": float(config.min_lr),
@@ -153,9 +158,7 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
         betas = tuple(float(value) for value in optim_config.get("adam_betas", DEFAULT_BETAS))
         if len(betas) != 2:
             raise ValueError("MuonH adam_betas must contain two values")
-        extra = optim_config.get("optimizer_kwargs", {})
-        if not isinstance(extra, Mapping):
-            raise TypeError("MuonH optimizer_kwargs must be a mapping")
+        extra = _grug_muonh_extra(optim_config)
         optim_args.update(
             adam_beta1=betas[0],
             adam_beta2=betas[1],
@@ -205,6 +208,7 @@ def get_megatron_optimizer(
             qkv_heads_per_group=model_config.num_attention_heads // model_config.num_query_groups,
             qkv_head_dim=model_config.kv_channels,
             tensor_model_parallel_size=model_config.tensor_model_parallel_size,
+            expert_tensor_parallel_size=model_config.expert_tensor_parallel_size,
         )
     # Base optimizer.
     return get_megatron_optimizer_native(

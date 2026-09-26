@@ -42,6 +42,7 @@ class _TinyGrug(nn.Module):
             num_query_groups=1,
             kv_channels=2,
             tensor_model_parallel_size=1,
+            expert_tensor_parallel_size=1,
         )
         self.embedding = nn.Embedding(8, 4, device="cuda", dtype=torch.bfloat16)
         self.hidden = nn.Linear(4, 4, bias=False, device="cuda", dtype=torch.bfloat16)
@@ -107,7 +108,9 @@ def test_megatron_wrapper_routes_updates_and_restores_muonh_state(distributed_pa
     restored_model = _TinyGrug()
     restored_model.load_state_dict(first_step_weights)
     restored_optimizer = get_megatron_optimizer([restored_model], config)
-    restored_optimizer.load_state_dict(state)
+    checkpoint_state = copy.deepcopy(state)
+    checkpoint_state["optimizer"]["state"]["common_step"] = torch.tensor(1)
+    restored_optimizer.load_state_dict(checkpoint_state)
     loaded = restored_optimizer.state_dict()
     for saved_group, loaded_group in zip(state["fp32_from_fp16_params"], loaded["fp32_from_fp16_params"]):
         for saved_parameter, loaded_parameter in zip(saved_group, loaded_group):
@@ -118,13 +121,19 @@ def test_megatron_wrapper_routes_updates_and_restores_muonh_state(distributed_pa
     for parameter_key in sorted(saved_states):
         saved_parameter_state = saved_states[parameter_key]
         loaded_parameter_state = loaded_states[parameter_key]
-        assert saved_parameter_state.keys() == loaded_parameter_state.keys()
+        assert saved_parameter_state.keys() | {"step"} == loaded_parameter_state.keys()
         for key, saved_value in saved_parameter_state.items():
-            torch.testing.assert_close(saved_value, loaded_parameter_state[key], rtol=0, atol=0)
+            if key == "step":
+                assert saved_value.item() == loaded_parameter_state[key].item()
+            else:
+                torch.testing.assert_close(saved_value, loaded_parameter_state[key], rtol=0, atol=0)
+        assert loaded_parameter_state["step"] == 1
     assert state["optimizer"]["param_groups"] == loaded["optimizer"]["param_groups"]
     for parameter in restored_model.parameters():
         parameter.grad = torch.full_like(parameter, -0.125)
     restored_optimizer.step()
+    resumed_state = restored_optimizer.state_dict()["optimizer"]
+    assert restored_optimizer._extract_common_per_param_step(resumed_state) == 2
     for name, parameter in restored_model.named_parameters():
         torch.testing.assert_close(parameter, expected[name], rtol=0, atol=0, msg=lambda error: f"{name}: {error}")
 

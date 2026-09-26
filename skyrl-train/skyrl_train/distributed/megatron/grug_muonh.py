@@ -103,9 +103,12 @@ class GrugMegatronMuonH(Optimizer):
         qkv_heads_per_group: int | None = None,
         qkv_head_dim: int | None = None,
         tensor_model_parallel_size: int = 1,
+        expert_tensor_parallel_size: int = 1,
     ) -> None:
         if tensor_model_parallel_size != 1:
             raise ValueError("Grug MuonH requires tensor_model_parallel_size=1")
+        if expert_tensor_parallel_size != 1:
+            raise ValueError("Grug MuonH requires expert_tensor_parallel_size=1")
         if ns_steps < 1:
             raise ValueError("MuonH backend_steps must be positive")
         if adam_lr is not None and lr <= 0:
@@ -227,6 +230,8 @@ class GrugMegatronMuonH(Optimizer):
                         self._muonh_matrix_step_(parameter, gradient, momentum_buffer, lr)
                     else:
                         self._fused_muonh_step_(parameter, gradient, momentum_buffer, lr, layout)
+                    if "step" in state:
+                        state["step"].add_(1)
                     continue
                 beta1, beta2 = self.betas
                 state["step"].add_(1)

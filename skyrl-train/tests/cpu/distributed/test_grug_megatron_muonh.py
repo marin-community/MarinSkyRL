@@ -163,3 +163,5 @@ def test_muonh_requires_unsharded_tensor_parallelism() -> None:
     parameter = torch.nn.Parameter(torch.ones(2, 2))
     with pytest.raises(ValueError, match="tensor_model_parallel_size=1"):
         GrugMegatronMuonH([{"params": [parameter]}], lr=0.03, tensor_model_parallel_size=2)
+    with pytest.raises(ValueError, match="expert_tensor_parallel_size=1"):
+        GrugMegatronMuonH([{"params": [parameter]}], lr=0.03, expert_tensor_parallel_size=2)
