@@ -142,12 +142,15 @@ def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path):
             "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=2, num_nodes=1, cfg=cfg
         )
         before = ray.get(policy.async_run_ray_method("pass_through", "probe_weights_digest"))
+        state_before = ray.get(policy.async_run_ray_method("pass_through", "probe_training_state_digests"))
         results = {
             mode: _probe_forward(policy, batch, mode, keep_fraction=1.0 if mode == "router_replay_filtered" else None)
             for mode in ("native", "repeat", "router_replay", "router_replay_filtered")
         }
         after = ray.get(policy.async_run_ray_method("pass_through", "probe_weights_digest"))
+        state_after = ray.get(policy.async_run_ray_method("pass_through", "probe_training_state_digests"))
         assert before == after
+        assert state_before == state_after
         for scores, observations in results.values():
             assert torch.isfinite(scores).all()
             positions = [(row["sample"], row["position"], row["layer"]) for row in observations]

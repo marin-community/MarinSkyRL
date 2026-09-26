@@ -300,6 +300,54 @@ class MegatronWorker:
                     digest.update(flat[offset : offset + 8 * 1024 * 1024].cpu().numpy().tobytes())
         return digest.hexdigest()
 
+    def probe_training_state_digests(self) -> dict[str, str]:
+        """Hash optimizer and RNG state for small-fixture scoring checks."""
+        if self.optimizer is None:
+            raise ValueError("probe state check requires an initialized optimizer")
+
+        def digest_value(value) -> str:
+            digest = hashlib.sha256()
+
+            def add(item):
+                if isinstance(item, torch.Tensor):
+                    digest.update(f"tensor:{item.dtype}:{tuple(item.shape)}\0".encode())
+                    flat = item.detach().contiguous().view(torch.uint8).flatten()
+                    for offset in range(0, flat.numel(), 8 * 1024 * 1024):
+                        digest.update(flat[offset : offset + 8 * 1024 * 1024].cpu().numpy().tobytes())
+                elif isinstance(item, np.ndarray):
+                    digest.update(f"array:{item.dtype}:{item.shape}\0".encode())
+                    digest.update(item.tobytes())
+                elif isinstance(item, dict):
+                    digest.update(b"mapping\0")
+                    for key in sorted(item, key=repr):
+                        add(key)
+                        add(item[key])
+                elif isinstance(item, (tuple, list)):
+                    digest.update(f"sequence:{len(item)}\0".encode())
+                    for member in item:
+                        add(member)
+                else:
+                    digest.update(f"scalar:{type(item).__name__}:{item!r}\0".encode())
+
+            add(value)
+            return digest.hexdigest()
+
+        return {
+            "optimizer": digest_value(self.optimizer.state_dict()),
+            "rng": digest_value(
+                (
+                    random.getstate(),
+                    np.random.get_state(),
+                    torch.get_rng_state(),
+                    torch.cuda.get_rng_state(),
+                    get_cuda_rng_tracker().get_states(),
+                )
+            ),
+            "module_modes": digest_value(
+                [module.training for chunk in self.actor_module for module in chunk.modules()]
+            ),
+        }
+
     def _log_forward_fingerprint(self, call: str, micro_payloads: List[MegatronForwardMicroBatch]) -> None:
         """Log checksums of this rank's inputs and parameters so two calls can be compared."""
         token_sum = sum(int(micro.sequences.long().sum().item()) for micro in micro_payloads)
