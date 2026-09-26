@@ -24,7 +24,6 @@ from cloud.iris.rl_config_translation import (
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.task_sources import data_source
-from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
 
 
 DEFAULT_DRAFT_MODEL_CACHE_TTL_DAYS = 14
@@ -300,6 +299,8 @@ def validate_iris_allocation(config: dict[str, Any]) -> IrisAllocationConfig:
 
 def validate_launch_config(config: DictConfig) -> LaunchTopology:
     """Validate launch semantics before an Iris job can be submitted."""
+    from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
+
     raw = _resolved_config(config)
     if raw["schema_version"] != 1:
         raise ValueError(f"unsupported SkyRL launch schema_version: {raw['schema_version']!r}")
