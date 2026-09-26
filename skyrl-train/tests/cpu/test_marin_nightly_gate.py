@@ -76,7 +76,7 @@ def trend_spec(window: int = 2, min_improvement: float = 0.03, min_train_steps: 
                 kind="train",
                 metric="reward/avg_raw_reward",
                 required=True,
-                min_observations=2 * window,
+                min_observations=min_train_steps,
                 trend=SeriesTrend(window, min_improvement),
             ),
         ),
@@ -309,12 +309,12 @@ def test_cat_count_series_requires_finite_learning_and_enough_train_and_eval_evi
 
     missing = [
         replace(step, values={key: value for key, value in step.values.items() if key != "environment/exact_n10"})
-        if step.kind == "train" and step.step in (3, 4)
+        if step.kind == "train" and step.step == 3
         else step
         for step in steps
     ]
     assert any(
-        "environment/exact_n10 has 3 finite observations" in failure for failure in check_run(missing, spec, 300)
+        "environment/exact_n10 has 4 finite observations" in failure for failure in check_run(missing, spec, 300)
     )
 
     flat_eval = [
