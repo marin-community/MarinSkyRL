@@ -211,7 +211,7 @@ def test_megatron_muonh_routes_hero_parameter_families():
     assert megatron_grug_route("decoder.layers.0.input_layernorm.weight", vector) == "adam"
 
 
-def test_megatron_muonh_rejects_gradient_clipping_in_mcore_config():
+def test_megatron_muonh_preserves_unclipped_zero_decay_recipe_in_mcore_config():
     try:
         from skyrl_train.distributed.megatron.optimizer import init_megatron_optim_config
     except ImportError:
@@ -220,7 +220,11 @@ def test_megatron_muonh_rejects_gradient_clipping_in_mcore_config():
     recipe = {"optimizer": "MuonH", "lr": 0.03, "weight_decay": 0.0, "max_grad_norm": 0.0}
     config = init_megatron_optim_config(recipe, {})
     assert config.clip_grad == 0.0
+    assert config.weight_decay == 0.0
+    assert not config.decoupled_weight_decay
     with pytest.raises(ValueError, match="max_grad_norm=0.0"):
         init_megatron_optim_config({**recipe, "max_grad_norm": 1.0}, {})
     with pytest.raises(ValueError, match="max_grad_norm=0.0"):
         init_megatron_optim_config(recipe, {"clip_grad": 1.0})
+    with pytest.raises(ValueError, match="weight_decay=0"):
+        init_megatron_optim_config(recipe, {"weight_decay": 0.01})
