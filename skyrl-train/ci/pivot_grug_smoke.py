@@ -49,7 +49,7 @@ def launch_config(
                 "cluster": CLUSTER,
                 "cluster_config": str(files("iris") / "config" / f"{CLUSTER}.yaml"),
                 "job_name": run_id,
-                "wandb_entity": "dogml",
+                "wandb_entity": "marin-community",
                 "max_retries": 0,
                 "timeout": 14400,
                 "allocation": {

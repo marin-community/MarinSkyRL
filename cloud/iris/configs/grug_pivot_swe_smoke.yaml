@@ -38,7 +38,7 @@ trainer:
   use_sample_packing: false
   resume_mode: none
   logger: wandb
-  project_name: pivot-grug-swe-smoke
+  project_name: pivot-rl
   policy:
     optimizer_config:
       optimizer: AdamW
