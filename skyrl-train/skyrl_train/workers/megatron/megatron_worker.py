@@ -68,7 +68,7 @@ from skyrl_train.utils.profiler import Profiler
 from marinskyrl.runtime_options import WeightSyncTransport
 from skyrl_train.weight_sync.expert_block.sender import ExpertBlockSender
 from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode
-from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor
+from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor, mapping_hf_names
 from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 
 
@@ -773,9 +773,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     expert = str(local_expert + ep_rank * experts_per_rank)
                     conversion_names.add(name[: match.start(1)] + expert + name[match.end(1) :])
         for task in self.bridge.get_conversion_tasks(self.actor_module):
-            hf_names = task.mapping.hf_param
-            hf_names = (hf_names,) if isinstance(hf_names, str) else hf_names.values()
-            if conversion_names.intersection(hf_names):
+            if conversion_names.intersection(mapping_hf_names(task.mapping)):
                 tasks.append(task)
         for name, tensor in self.bridge.export_hf_weights(
             self.actor_module, show_progress=False, conversion_tasks=tasks
