@@ -5,6 +5,7 @@ uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/te
 import pytest
 from types import SimpleNamespace
 
+from skyrl_train.batch_sampling import filter_trajectory_batch
 from skyrl_train.trajectory_runners.trajectory_processing import (
     AlignmentStats,
     TitoFullDeclineReason,
@@ -934,6 +935,27 @@ def test_failure_metrics_survive_concatenation():
     assert merged["rollout_metrics"]["generate/failed_trajectory_fraction"] == pytest.approx(4 / 6)
     assert merged["rollout_metrics"]["generate/errors/SandboxError"] == 3
     assert merged["rollout_metrics"]["generate/errors/ContextLengthExceededError"] == 1
+
+
+def test_environment_rates_use_per_n_contributors_after_filtering_and_repeated_concat():
+    n10 = _generated_group(3, 0)
+    n10["env_metrics"] = [{"exact_n10": 1.0}, {"exact_n10": 0.0}, {"exact_n10": 1.0}]
+    n10["env_classes"] = ["cat_count"] * 3
+    n20 = _generated_group(2, 0)
+    n20["env_metrics"] = [{"exact_n20": 1.0}, {"exact_n20": 0.0}]
+    n20["env_classes"] = ["cat_count"] * 2
+    n10_extra = _generated_group(1, 0)
+    n10_extra["env_metrics"] = [{"exact_n10": 0.0}]
+    n10_extra["env_classes"] = ["cat_count"]
+
+    first = concatenate_trajectory_batches([n10, n20], tis_lcs_alert_threshold=0.005)
+    merged = concatenate_trajectory_batches([first, n10_extra], tis_lcs_alert_threshold=0.005)
+
+    assert merged["rollout_metrics"]["environment/exact_n10"] == pytest.approx(0.5)
+    assert merged["rollout_metrics"]["environment/exact_n20"] == pytest.approx(0.5)
+    filtered = filter_trajectory_batch(merged, [0, 2, 3, 4])
+    assert filtered["rollout_metrics"]["environment/exact_n10"] == pytest.approx(1.0)
+    assert filtered["rollout_metrics"]["environment/exact_n20"] == pytest.approx(0.5)
 
 
 def test_unaligned_logprob_alert_survives_concatenation():

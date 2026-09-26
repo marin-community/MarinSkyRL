@@ -3,6 +3,11 @@
 from skyrl_gym.envs.registration import register
 
 register(
+    id="cat_count",
+    entry_point="skyrl_gym.envs.cat_count.env:CatCountEnv",
+)
+
+register(
     id="aime",
     entry_point="skyrl_gym.envs.aime.env:AIMEEnv",
 )

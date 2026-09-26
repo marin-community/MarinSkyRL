@@ -954,9 +954,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             "loss_masks": loss_masks,
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
+            "verification_successes": successes,
             "rollout_logprobs": truncated_logprobs,
             "exclude_from_baseline": exclude_from_baseline,
         }
+        if any(metrics for metrics in env_metrics):
+            trajectory_batch["env_metrics"] = env_metrics
+            trajectory_batch["env_classes"] = env_classes
         if selected_indices is not None:
             trajectory_batch["student_topk_indices"] = truncated_selected_indices
             trajectory_batch["behavior_topk_logprobs"] = truncated_selected_logprobs

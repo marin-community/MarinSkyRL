@@ -263,6 +263,7 @@ trainer:
     max_staleness_steps: 4
 
     num_parallel_generation_workers: 768
+    max_buffered_groups: null
 
     # Bound teacher-scoring work independently for each logical teacher. Queue
     # backpressure is applied when a rollout group is admitted, before learner

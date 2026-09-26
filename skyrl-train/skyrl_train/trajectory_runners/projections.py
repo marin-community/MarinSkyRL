@@ -73,12 +73,13 @@ class WholeTrajectoryProjection:
             candidate_logprobs if get_logprobs and all(x is not None for x in candidate_logprobs) else None
         )
 
+        verification_successes = _verification_successes(outputs)
         rollout_metrics = get_rollout_metrics(
             responses,
             rewards,
             [output.env_metrics for output in outputs],
             request["env_classes"],
-            successes=_verification_successes(outputs),
+            successes=verification_successes,
         )
         rollout_metrics.update(_token_provenance_metrics(outputs))
         batch = TrajectoryBatch(
@@ -88,10 +89,14 @@ class WholeTrajectoryProjection:
             loss_masks=loss_masks,
             stop_reasons=[output.evidence.stop_reason for output in outputs],
             rollout_metrics=rollout_metrics,
+            verification_successes=verification_successes,
             rollout_logprobs=rollout_logprobs,
             exclude_from_baseline=[not output.disposition.baseline_eligible for output in outputs],
             actual_global_step=minimum_captured_global_step(outputs),
         )
+        if request.get("env_classes") is not None and any(output.env_metrics for output in outputs):
+            batch["env_metrics"] = [output.env_metrics for output in outputs]
+            batch["env_classes"] = list(request["env_classes"])
         attach_student_topk(batch, outputs, responses, loss_masks)
         attach_routed_experts(batch, outputs, responses)
         attach_terminal_classifications(batch, outputs)
@@ -139,7 +144,8 @@ class StepWiseTrajectoryProjection:
             else None
         )
 
-        rollout_metrics = get_rollout_metrics(responses, rewards, successes=_verification_successes(steps))
+        verification_successes = _verification_successes(steps)
+        rollout_metrics = get_rollout_metrics(responses, rewards, successes=verification_successes)
         rollout_metrics.update(_token_provenance_metrics(steps))
         batch = TrajectoryBatch(
             prompt_token_ids=[list(step.evidence.prompt_token_ids) for step in steps],
@@ -148,6 +154,7 @@ class StepWiseTrajectoryProjection:
             loss_masks=loss_masks,
             stop_reasons=[step.evidence.stop_reason for step in steps],
             rollout_metrics=rollout_metrics,
+            verification_successes=verification_successes,
             rollout_logprobs=rollout_logprobs,
             trajectory_ids=projected_ids,
             is_last_step=is_last_step,

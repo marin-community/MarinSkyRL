@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
+from typing import Any, Dict, List, Literal, NotRequired, Optional, TypedDict, Union
 
 
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
@@ -106,6 +106,9 @@ class TrajectoryBatch(TypedDict):
     exception_types: Optional[List[Optional[str]]]
     error_treatments: Optional[List[Optional[str]]]
     rollout_metrics: Optional[Dict[str, Any]]
+    verification_successes: NotRequired[List[bool]]
+    env_metrics: NotRequired[List[Dict[str, Any]]]
+    env_classes: NotRequired[List[str]]
     rollout_logprobs: Optional[List[List[float]]]
     student_topk_indices: Optional[List[List[List[int]]]]
     behavior_topk_logprobs: Optional[List[List[List[float]]]]

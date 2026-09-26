@@ -3,8 +3,12 @@ from dataclasses import replace
 from omegaconf import OmegaConf
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 
+from skyrl_train.batch_sampling import filter_trajectory_batch
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
-from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    concatenate_trajectory_batches,
+    validate_trajectory_batch,
+)
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TrajectoryID
 
 
@@ -58,6 +62,37 @@ def test_whole_trajectory_projection_preserves_one_sample_per_trajectory():
     assert output["actual_global_step"] == 7
     assert output["rollout_metrics"]["generate/token_provenance/reconstructed_fraction"] == 0.0
     assert "trajectory_ids" not in output
+
+
+def test_whole_trajectory_projection_carries_environment_rates_into_async_batch():
+    n10_hit = replace(_step([3], 1.0), env_metrics={"exact_n10": 1.0})
+    n10_miss = replace(
+        _step([4, 6], 0.4725),
+        verification=VerificationResult.verified(0.0, passed=False),
+        env_metrics={"exact_n10": 0.0},
+    )
+    n20_miss = replace(_step([5, 7, 8], 0.0), env_metrics={"exact_n20": 0.0})
+    projection = WholeTrajectoryProjection(_config(), _Tokenizer())
+    easy_batch = projection.project(
+        [n10_hit, n10_miss],
+        {"env_classes": ["cat_count", "cat_count"], "sampling_params": {"logprobs": True}},
+    )
+    hard_batch = projection.project(
+        [n20_miss],
+        {"env_classes": ["cat_count"], "sampling_params": {"logprobs": True}},
+    )
+
+    joined = concatenate_trajectory_batches([easy_batch, hard_batch], tis_lcs_alert_threshold=0.005)
+
+    assert joined["rollout_metrics"]["environment/exact_n10"] == 0.5
+    assert joined["rollout_metrics"]["environment/exact_n20"] == 0.0
+    assert joined["rollout_metrics"]["generate/avg_tokens_non_zero_rewards"] == 1.0
+    assert joined["rollout_metrics"]["generate/avg_tokens_zero_rewards"] == 2.5
+
+    filtered = filter_trajectory_batch(joined, [0, 1])
+    assert filtered["rollout_metrics"]["generate/avg_tokens_non_zero_rewards"] == 1.0
+    assert filtered["rollout_metrics"]["generate/avg_tokens_zero_rewards"] == 2.0
+    assert "environment/exact_n20" not in filtered["rollout_metrics"]
 
 
 def test_whole_trajectory_projection_preserves_routes_and_fills_missing_rows():

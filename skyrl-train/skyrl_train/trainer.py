@@ -53,7 +53,7 @@ from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_m
 from skyrl_train.tensor_math import masked_mean
 from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
-from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
+from skyrl_train.utils.advantage_estimators import GRPO_FLAT_REWARD_STD_TOLERANCE, compute_advantages_and_returns
 from skyrl_train.utils.loss_reduction import (
     GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION,
     compute_global_loss_denom,
@@ -2154,6 +2154,17 @@ class RayPPOTrainer:
         num_samples = len(token_level_rewards)
 
         return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
+        if self.cfg.trainer.algorithm.advantage_estimator == "grpo" and not self.cfg.trainer.step_wise_training:
+            group_rewards: dict[str, list[torch.Tensor]] = {}
+            for uid, reward in zip(data.metadata["uids"][: num_samples - pad_size], return_sums, strict=True):
+                group_rewards.setdefault(uid, []).append(reward)
+            flat_groups = sum(
+                len(rewards) > 1 and torch.std(torch.stack(rewards)).item() <= GRPO_FLAT_REWARD_STD_TOLERANCE
+                for rewards in group_rewards.values()
+            )
+            self.all_metrics["reward/zero_std_group_fraction"] = (
+                flat_groups / len(group_rewards) if group_rewards else 0.0
+            )
         if self.cfg.trainer.step_wise_training:
             avg_rewards: float = return_sums[data["is_last_step"][: num_samples - pad_size]].mean().item()
         else:
