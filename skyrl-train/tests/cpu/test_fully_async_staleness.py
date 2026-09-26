@@ -302,7 +302,10 @@ async def test_staleness_manager_blocks_work_beyond_capacity_until_training_adva
 
 
 # A multi-turn row: two sampled turns around three observation tokens that carry no version.
-MULTI_TURN_SPANS = [{"start": 0, "token_count": 2, "policy_version": 5}, {"start": 5, "token_count": 2, "policy_version": 6}]
+MULTI_TURN_SPANS = [
+    {"start": 0, "token_count": 2, "policy_version": 5},
+    {"start": 5, "token_count": 2, "policy_version": 6},
+]
 MULTI_TURN_LOSS_MASK = [1, 1, 0, 0, 0, 1, 1]
 
 
@@ -314,17 +317,30 @@ MULTI_TURN_LOSS_MASK = [1, 1, 0, 0, 0, 1, 1]
         (True, MULTI_TURN_SPANS, MULTI_TURN_LOSS_MASK, 5, _GroupFreshness.STALE),
         # Re-tokenized chat history carries only the oldest version that sampled it.
         (True, None, [1, 1], 5, _GroupFreshness.STALE),
+        # Version 7 is the policy after update 7, so the group counts from step 8.
+        (True, None, [1, 1], 7, _GroupFreshness.FRESH),
         (True, MULTI_TURN_SPANS[:1], MULTI_TURN_LOSS_MASK, 5, RuntimeError),
         (True, None, [], None, _GroupFreshness.FRESH),
     ],
-    ids=["off", "multi_turn_spans", "retokenized_oldest_only", "unversioned_sampled_token", "nothing_sampled"],
+    ids=[
+        "off",
+        "multi_turn_spans",
+        "retokenized_oldest_only",
+        "charged_from_the_next_step",
+        "unversioned_sampled_token",
+        "nothing_sampled",
+    ],
 )
 async def test_a_group_sampled_by_an_old_version_is_stale_only_under_first_token_admission(
     first_token_admission, spans, loss_mask, oldest_version, expected
 ):
     trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1)
     trainer.first_token_admission = first_token_admission
-    batch = {"response_ids": [[7] * len(loss_mask)], "loss_masks": [loss_mask], "actual_global_step": trainer.global_step}
+    batch = {
+        "response_ids": [[7] * len(loss_mask)],
+        "loss_masks": [loss_mask],
+        "actual_global_step": trainer.global_step,
+    }
     if spans is not None:
         batch["behavior_policy_version_segments"] = [spans]
     if oldest_version is not None:
