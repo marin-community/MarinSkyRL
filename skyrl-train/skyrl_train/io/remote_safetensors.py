@@ -61,7 +61,7 @@ class RemoteSafetensorsTensorStore:
         self.source_uri = source_uri.rstrip("/")
         index_path = Path(metadata_dir) / HF_WEIGHT_INDEX_FILENAME
         self._headers: dict[str, tuple[int, dict[str, object]]] = {}
-        initial_bytes_read = 0
+        self.bytes_read = 0
         if index_path.exists():
             try:
                 index = json.loads(index_path.read_text())
@@ -75,17 +75,14 @@ class RemoteSafetensorsTensorStore:
             if not io.exists(shard_uri):
                 raise ValueError(f"Missing safetensors weight index and single-file shard: {index_path}")
             with io.open_file(shard_uri, "rb") as source:
-                header_bytes, keys = read_safetensors_header(source, shard_uri)
-            initial_bytes_read = len(header_bytes)
-            self._headers[shard] = len(header_bytes), json.loads(header_bytes[SAFETENSORS_LENGTH_PREFIX_BYTES:])
-            weight_map = {key: shard for key in keys}
+                _offset, header = self._header(shard, source)
+            weight_map = {key: shard for key in header if key != "__metadata__"}
         if not isinstance(weight_map, dict) or not weight_map:
             raise ValueError(f"Safetensors weight index has an empty weight_map: {index_path}")
         self._weight_map = {str(key): _safe_relative_path(str(value)) for key, value in weight_map.items()}
         self._lazy_first_dim_keys = {
             key for key in self._weight_map if any(fnmatch.fnmatch(key, pattern) for pattern in lazy_first_dim_patterns)
         }
-        self.bytes_read = initial_bytes_read
 
     def get_all_keys(self) -> list[str]:
         return sorted(self._weight_map)

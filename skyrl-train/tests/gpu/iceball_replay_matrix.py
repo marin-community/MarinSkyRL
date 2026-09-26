@@ -13,13 +13,16 @@ from pathlib import Path
 
 import torch
 from iceball_replay_benchmark import MEASURED_STEPS, _prepare
+from marinskyrl.model_manifest import HF_WEIGHT_INDEX_FILENAME
 from safetensors import safe_open
 from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore
+from skyrl_train.hf_model_io import HF_WEIGHT_FILENAME
 
 from cloud.iris.hf_model_cache import stage_artifact_model
 
 HISTORICAL_COMMIT = "72cc492d3ba03941715786f558d6be6ae1a52238"
 REPOSITORY = "https://github.com/marin-community/MarinSkyRL.git"
+HARNESS_RELATIVE_PATH = Path("skyrl-train/tests/gpu/iceball_replay_benchmark.py")
 CELL_BACKEND = {
     "old-fsdp2": "fsdp2",
     "old-fsdp2-fp32": "fsdp2",
@@ -74,8 +77,8 @@ def _historical_runtime(root: Path, output: Path) -> tuple[Path, Path]:
     actual = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
     if actual != HISTORICAL_COMMIT:
         raise RuntimeError(f"Historical runtime mismatch: {actual}")
-    harness = Path(__file__).with_name("iceball_replay_benchmark.py")
-    old_harness = checkout / "skyrl-train/tests/gpu/iceball_replay_benchmark.py"
+    harness = Path(__file__).with_name(HARNESS_RELATIVE_PATH.name)
+    old_harness = checkout / HARNESS_RELATIVE_PATH
     shutil.copy2(harness, old_harness)
     if hashlib.sha256(harness.read_bytes()).digest() != hashlib.sha256(old_harness.read_bytes()).digest():
         raise RuntimeError("Replay harness differs between runtime cells")
@@ -133,9 +136,7 @@ def main() -> None:
         "stage_seconds": stage_seconds,
         "historical_commit": HISTORICAL_COMMIT,
         "current_commit": source_head.stdout.strip() if source_head.returncode == 0 else "Iris workspace bundle",
-        "harness_sha256": hashlib.sha256(
-            Path(__file__).with_name("iceball_replay_benchmark.py").read_bytes()
-        ).hexdigest(),
+        "harness_sha256": hashlib.sha256(Path(__file__).with_name(HARNESS_RELATIVE_PATH.name).read_bytes()).hexdigest(),
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
         "gpu_names": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())],
@@ -147,14 +148,14 @@ def main() -> None:
     keys = store.get_all_keys()
     probe_key = next(key for key in keys if key.endswith("input_layernorm.weight"))
     remote_probe = store.load_tensors([probe_key])[probe_key]
-    with safe_open(model / "model.safetensors", framework="pt", device="cpu") as source:
+    with safe_open(model / HF_WEIGHT_FILENAME, framework="pt", device="cpu") as source:
         local_probe = source.get_tensor(probe_key)
     torch.testing.assert_close(remote_probe, local_probe, rtol=0, atol=0)
     remote_store = {
         "key_count": len(keys),
         "probe_key": probe_key,
         "bytes_read": store.bytes_read,
-        "single_file": not (model / "model.safetensors.index.json").exists(),
+        "single_file": not (model / HF_WEIGHT_INDEX_FILENAME).exists(),
     }
     (output / "remote-store.json").write_text(json.dumps(remote_store, indent=2, sort_keys=True))
     print(json.dumps({"event": "remote-store", **remote_store}, sort_keys=True), flush=True)
@@ -178,7 +179,7 @@ def main() -> None:
             command = [
                 str(python),
                 "-u",
-                "skyrl-train/tests/gpu/iceball_replay_benchmark.py",
+                str(HARNESS_RELATIVE_PATH),
                 "run",
                 "--model-path",
                 str(model),

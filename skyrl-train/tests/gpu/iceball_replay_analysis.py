@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import itertools
 import json
 import os
 import re
@@ -42,6 +43,33 @@ def _masked_difference(a: list[list[float]], b: list[list[float]], mask: list[li
     if not values:
         raise ValueError("Response probe contains no valid tokens")
     return {"mean_abs": statistics.mean(values), "max_abs": max(values)}
+
+
+def _compare_cells(cells: dict[str, list[dict]], response_mask: list[list[int]]) -> dict[str, list[dict]]:
+    pairs = {}
+    for left, right in itertools.combinations(sorted(cells), 2):
+        if len(cells[left]) != len(cells[right]):
+            raise RuntimeError(f"Repetition counts differ between {left} and {right}")
+        comparisons = []
+        for repeat, (left_row, right_row) in enumerate(zip(cells[left], cells[right])):
+            comparisons.append(
+                {
+                    "repetition": repeat,
+                    "time_ratio_right_over_left": right_row["total_train_seconds"] / left_row["total_train_seconds"],
+                    "initial_logprob": _masked_difference(
+                        left_row["initial_probe"], right_row["initial_probe"], response_mask
+                    ),
+                    "final_logprob": _masked_difference(
+                        left_row["final_probe"], right_row["final_probe"], response_mask
+                    ),
+                    "per_update_mean_abs": [
+                        _masked_difference(a, b, response_mask)["mean_abs"]
+                        for a, b in zip(left_row["update_probes"], right_row["update_probes"])
+                    ],
+                }
+            )
+        pairs[f"{left}_vs_{right}"] = comparisons
+    return pairs
 
 
 def analyze(uri: str) -> dict:
@@ -106,42 +134,14 @@ def analyze(uri: str) -> dict:
         }
     if len({result["cells"][cell]["fixture_sha256_tensors"] for cell in available_cells}) != 1:
         raise RuntimeError("Fixture differs across cells")
-    pairs = (
-        ("old-fsdp2", "old-megatron"),
-        ("old-fsdp2-fp32", "old-megatron"),
-        ("old-fsdp2", "old-fsdp2-fp32"),
-        ("old-megatron", "new-megatron"),
-    )
-    for left, right in pairs:
-        if left not in cells or right not in cells:
-            continue
-        if len(cells[left]) != len(cells[right]):
-            raise RuntimeError(f"Repetition counts differ between {left} and {right}")
-        comparisons = []
-        for repeat, (left_row, right_row) in enumerate(zip(cells[left], cells[right])):
-            comparisons.append(
-                {
-                    "repetition": repeat,
-                    "time_ratio_right_over_left": right_row["total_train_seconds"] / left_row["total_train_seconds"],
-                    "initial_logprob": _masked_difference(
-                        left_row["initial_probe"], right_row["initial_probe"], response_mask
-                    ),
-                    "final_logprob": _masked_difference(
-                        left_row["final_probe"], right_row["final_probe"], response_mask
-                    ),
-                    "per_update_mean_abs": [
-                        _masked_difference(a, b, response_mask)["mean_abs"]
-                        for a, b in zip(left_row["update_probes"], right_row["update_probes"])
-                    ],
-                }
-            )
-        result["pairs"][f"{left}_vs_{right}"] = comparisons
+    result["pairs"] = _compare_cells(cells, response_mask)
     return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("archive_uri", help="Full archive URI, or the task-output prefix through the job name")
+    parser.add_argument("--output", type=Path, help="Write the analysis JSON to this path")
     args = parser.parse_args()
     uri = args.archive_uri
     if not uri.endswith(".tar.zst"):
@@ -151,8 +151,12 @@ def main() -> None:
             raise RuntimeError(f"Expected one result archive for {uri}; found {len(matches)}")
         uri = fs.unstrip_protocol(matches[0])
     result = analyze(uri)
-    output = Path(os.environ.get("IRIS_OUTPUT_DIR", "/tmp")) / "iceball-replay-summary.json"
-    output.write_text(json.dumps(result, indent=2, sort_keys=True))
+    output = args.output
+    if output is None and "IRIS_OUTPUT_DIR" in os.environ:
+        output = Path(os.environ["IRIS_OUTPUT_DIR"]) / "iceball-replay-summary.json"
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(result, indent=2, sort_keys=True))
     print(json.dumps(result, sort_keys=True), flush=True)
 
 
