@@ -2190,6 +2190,23 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 tis_splice=self._tis_splice,
             )
 
+        if alignment_stats and alignment_stats.n_tito_full_successes and assistant_prompt_token_ids:
+            generation_prompt_ids = get_generation_prompt_ids(
+                self.tokenizer,
+                custom_chat_template=self.custom_chat_template_content,
+                chat_template_kwargs=self._chat_template_kwargs,
+            )
+            served_prompt_ids = assistant_prompt_token_ids[0][: -len(generation_prompt_ids)]
+            shared_prefix = next(
+                (i for i, (actual, expected) in enumerate(zip(served_prompt_ids, prompt_ids)) if actual != expected),
+                min(len(served_prompt_ids), len(prompt_ids)),
+            )
+            logger.info(
+                f"Trajectory {trajectory_id} initial_prompt_match={served_prompt_ids == prompt_ids} "
+                f"served_prompt_len={len(served_prompt_ids)} trainer_prompt_len={len(prompt_ids)} "
+                f"shared_prefix_len={shared_prefix}"
+            )
+
         # Prefer the agent's terminal reason when Harbor supplied one. The local
         # response limit remains authoritative when the reconstructed response
         # itself exceeds the configured budget.
