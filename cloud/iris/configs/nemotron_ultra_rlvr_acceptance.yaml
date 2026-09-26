@@ -59,6 +59,8 @@ trainer:
     use_tis: false
     loss_reduction: sequence_mean
   epochs: 1
+  # From the second step, Adam state stays on the GPU and these sequences no longer fit an H100 at
+  # tensor parallel size 1. Training longer needs trainer.policy.megatron_config.tensor_model_parallel_size: 2.
   max_steps: 1
   update_epochs_per_batch: 1
   train_batch_size: 48
