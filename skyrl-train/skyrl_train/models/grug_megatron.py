@@ -9,10 +9,12 @@ layer spec cannot express through configuration alone:
 * attention output is projected away from the value direction (XSA) and
   scaled by a per-head sigmoid gate computed from the attention input;
 * the router selects the top-(k+1) experts on biased logits, drops the last
-  one, and renormalizes sigmoid weights of the survivors.
+  one, and renormalizes sigmoid weights of the survivors;
+* Hero adds latent expert projections, separate shared experts, causal ShortConv,
+  and different key/value head counts on local and long-attention layers.
 
 Everything else (sliding window on local layers, RoPE skipped on long layers,
-half-RoPE, grouped-GEMM experts with a shared expert, GQA) maps onto stock
+half-RoPE, grouped-GEMM experts, GQA) maps onto stock
 Megatron-Core settings chosen by ``GrugModelProvider`` in
 ``grug_megatron_bridge``.
 """

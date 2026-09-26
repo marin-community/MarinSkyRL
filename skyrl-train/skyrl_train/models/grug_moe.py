@@ -74,7 +74,7 @@ def validate_grug_training_strategy(model_type: str | None, training_strategy: s
 def grug_long_layer_flags(num_layers: int, global_every: int = 4) -> tuple[bool, ...]:
     """Return which decoder layers use full causal attention without RoPE.
 
-    Grug makes every fourth layer and the final layer a "long" layer; the
+    Every ``global_every``-th layer and the final layer are "long" layers; the
     remaining layers use sliding-window attention with half-RoPE.
     """
 
