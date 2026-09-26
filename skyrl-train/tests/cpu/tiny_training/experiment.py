@@ -90,7 +90,7 @@ def tiny_training_config(root: Path, mode: TrainingMode, *, max_steps: int, num_
             # Each retention storage operation spawns a process that re-imports the entrypoint.
             "trajectory_retention": {"enabled": False},
         },
-        "trajectory_runner": {"process_pool": {"num_coordinators": 2, "cpus_per_coordinator": 1}},
+        "trajectory_runner": {"rollout_workers": {"num_workers": 2, "cpus_per_worker": 1}},
     }
     return OmegaConf.merge(cfg, overrides)
 

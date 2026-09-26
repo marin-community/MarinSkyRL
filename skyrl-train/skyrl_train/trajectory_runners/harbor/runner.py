@@ -359,6 +359,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         terminal_bench_cfg: DictConfig,
         tokenizer,
         tis_lcs_alert_threshold: float,
+        eval_concurrent_trials: int,
         moe_router_replay: bool = False,
         rollout_logprobs_required: bool = False,
         tito_full: Optional[bool] = None,
@@ -369,6 +370,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             trajectory_runner_cfg: trajectory-runner configuration
             terminal_bench_cfg: DictConfig object containing the terminal bench configuration
             tokenizer: tokenizer object for encoding and decoding text
+            eval_concurrent_trials: trial concurrency of each evaluation session's orchestrator.
             moe_router_replay: when True, capture per-token MoE routed_experts from
                 Harbor rollout_details and plumb them through to the training batch
                 for Megatron router replay. Default False keeps the
@@ -388,7 +390,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # The verifier + re-tokenize/TIS paths keep using self.base_url.
         #
         # SOURCE PRECEDENCE (cfg first, env fallback). This runner is constructed
-        # INSIDE a Ray task/actor (skyrl_entrypoint / RolloutCoordinator) that does NOT
+        # INSIDE a Ray task/actor (skyrl_entrypoint / rollout worker) that does NOT
         # inherit the run_rl driver's late HARBOR_MODEL_ENDPOINT env mutation (the runner
         # attaches to a Ray cluster started BEFORE the mint). run_rl therefore threads the
         # URL through the cfg as ``terminal_bench_config.agent_api_base``, which crosses the
@@ -453,6 +455,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         self._n_concurrent_trials = self._harbor_config_builder.get_n_concurrent_trials(
             default=16  # Reasonable default for parallel trial execution
         )
+        self._eval_concurrent_trials = eval_concurrent_trials
 
         # Reward shaping config (parses test output for partial credit)
         self._reward_shaping_config = self._harbor_config_builder.get_reward_shaping_config()
@@ -754,7 +757,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         run_name: str,
         eval_step: int,
         val_set_name: Optional[str] = None,
-        n_concurrent_trials: Optional[int] = None,
     ) -> None:
         """Start a fresh eval session with its own QueueOrchestrator.
 
@@ -766,7 +768,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             run_name: The job run name (from cfg.trainer.run_name).
             eval_step: The current global step (for unique naming).
             val_set_name: Optional name of the validation set being evaluated.
-            n_concurrent_trials: Optional eval-only concurrency override.
         """
         if self._eval_orchestrator_lock is None:
             self._eval_orchestrator_lock = asyncio.Lock()
@@ -803,17 +804,16 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             else:
                 self._eval_trials_dir = self.trials_dir
 
-            eval_concurrent_trials = self._n_concurrent_trials if n_concurrent_trials is None else n_concurrent_trials
             logger.info(
                 f"Starting eval session: {self._eval_session_name} "
                 f"(timeout={self._eval_timeout_override_sec}s, trials_dir={self._eval_trials_dir}, "
-                f"n_concurrent_trials={eval_concurrent_trials})"
+                f"n_concurrent_trials={self._eval_concurrent_trials})"
             )
 
             # Create fresh orchestrator for eval with eval-specific timeout
             self._eval_orchestrator = QueueOrchestrator(
                 trial_configs=[],  # We submit dynamically via submit_batch()
-                n_concurrent_trials=eval_concurrent_trials,
+                n_concurrent_trials=self._eval_concurrent_trials,
                 metrics={},  # SkyRL handles its own metrics
                 quiet=True,
                 retry_config=self._retry_config,
@@ -837,7 +837,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
 
             logger.info(
                 f"Eval session {self._eval_session_name} started with fresh QueueOrchestrator "
-                f"(n_concurrent_trials={eval_concurrent_trials}, rollback_hook registered)"
+                f"(n_concurrent_trials={self._eval_concurrent_trials}, rollback_hook registered)"
             )
 
     async def stop_eval_session(self) -> None:
@@ -2081,7 +2081,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # assistant_routed_experts=None makes get_response_ids_and_loss_mask_from_messages
         # return a 3-tuple, and unpacking 4 here raised
         # `ValueError: not enough values to unpack (expected 4, got 3)` — which crashed the
-        # RolloutCoordinator shard on the first completed 80B trial. The downstream batch
+        # rollout worker on the first completed 80B trial. The downstream batch
         # collation (trajectory_runners/trajectory_processing.py concatenate_trajectory_batches) already tolerates
         # mixed presence/absence of rollout_routed_experts across trials via its
         # has_routed_experts any-check + sentinel fill, so leaving this trial's

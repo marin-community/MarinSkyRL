@@ -11,7 +11,7 @@ from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMo
 from skyrl_train.entrypoints.main_base import BasePPOExp, build_gym_trajectory_runner, config_dir, run_ray_driver
 from skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.rollouts.workers import RolloutWorkerPool
+from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources, WorkerShard
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
 
 
@@ -22,7 +22,8 @@ class GymRunnerSpec:
     config: DictConfig
     engines: list[InferenceEngineInterface]
 
-    def build(self, tokenizer: PreTrainedTokenizerBase) -> TrajectoryRunner:
+    def build(self, tokenizer: PreTrainedTokenizerBase, shard: WorkerShard) -> TrajectoryRunner:
+        del shard
         # Only the trainer's client serves the HTTP endpoint.
         client_config = OmegaConf.merge(self.config, {"generator": {"enable_http_endpoint": False}})
         client = InferenceEngineClient(self.engines, tokenizer, client_config)
@@ -38,16 +39,11 @@ class GymWorkerPoolExp(BasePPOExp):
 
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
         """Returns the worker pool, which also serves evaluation requests."""
-        process_pool = cfg.trajectory_runner.process_pool
         spec = GymRunnerSpec(
             config=OmegaConf.create(OmegaConf.to_container(cfg, resolve=True)),
             engines=list(inference_engine_client.engines),
         )
-        return RolloutWorkerPool(
-            spec,
-            num_workers=process_pool.num_coordinators,
-            cpus_per_worker=process_pool.cpus_per_coordinator,
-        )
+        return RolloutWorkerPool(spec, RolloutWorkerResources.from_config(cfg))
 
 
 @ray.remote(num_cpus=1, max_retries=0)

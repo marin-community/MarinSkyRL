@@ -501,8 +501,10 @@ environment:
   env_class: "gsm8k"
 
 trajectory_runner:
-  process_pool:
-    num_coordinators: 4
-    cpus_per_coordinator: 8
-    executor_workers: 256
-    rpc_timeout_seconds: 21600
+  # Rollout worker processes for runners that generate outside the trainer process (Harbor, and SkyRL-Gym under
+  # the gym_worker_pool entrypoint). Every worker runs on the trainer's node.
+  rollout_workers:
+    num_workers: 4
+    cpus_per_worker: 8
+    executor_threads: 256 # width of each worker's default thread pool, which Harbor's model client runs on
+    progress_timeout_seconds: 21600 # fail a worker's requests when none of them completes for this long

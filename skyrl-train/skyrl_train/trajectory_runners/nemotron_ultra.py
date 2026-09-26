@@ -8,14 +8,15 @@ from pathlib import Path
 from typing import Any
 
 from skyrl_train.rollouts.buffer import RolloutTask, RolloutWriter
+from skyrl_train.rollouts.workers import RolloutWorkerPool
 from skyrl_train.trajectory_runners.base import (
     TrajectoryBatch,
     TrajectoryRequestBatch,
+    TrajectoryRunner,
     propagate_teacher_routes,
     run_rollout_task,
 )
 from skyrl_train.trajectory_runners.harbor.dataset import TerminalBenchTaskDataset
-from skyrl_train.trajectory_runners.harbor.execution import HarborRunner
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink, retain_trajectories
 
@@ -106,8 +107,8 @@ class NemotronUltraTrajectoryRouter:
     def __init__(
         self,
         *,
-        gym_runner: HarborRunner,
-        harbor_runner: HarborRunner,
+        gym_runner: TrajectoryRunner,
+        harbor_runner: RolloutWorkerPool,
         terminal_bench_data: list[str],
         require_rollout_logprobs: bool,
         tis_lcs_alert_threshold: float,
@@ -135,20 +136,17 @@ class NemotronUltraTrajectoryRouter:
         run_name: str,
         eval_step: int,
         val_set_name: str | None = None,
-        n_concurrent_trials: int | None = None,
     ) -> None:
         await asyncio.gather(
             self.gym_runner.start_eval_session(
                 run_name=run_name,
                 eval_step=eval_step,
                 val_set_name=val_set_name,
-                n_concurrent_trials=n_concurrent_trials,
             ),
             self.harbor_runner.start_eval_session(
                 run_name=run_name,
                 eval_step=eval_step,
                 val_set_name=val_set_name,
-                n_concurrent_trials=n_concurrent_trials,
             ),
         )
 

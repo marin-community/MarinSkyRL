@@ -122,7 +122,6 @@ class TrajectoryRunner(ABC):
         run_name: str,
         eval_step: int,
         val_set_name: str | None = None,
-        n_concurrent_trials: int | None = None,
     ) -> None:
         """Start an evaluation-scoped resource session when a runner needs one."""
 

@@ -231,9 +231,9 @@ data:
   val_data: []
 
 trajectory_runner:
-  process_pool:
-    num_coordinators: 4
-    cpus_per_coordinator: 8
+  rollout_workers:
+    num_workers: 4
+    cpus_per_worker: 8
 
 extra_env:
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

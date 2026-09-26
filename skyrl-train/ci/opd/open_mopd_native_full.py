@@ -108,8 +108,8 @@ def hydra_arguments(
         f"environment.skyrl_gym.aime.evaluation_token_budget={training.response_limit}",
         "environment.skyrl_gym.aime.strict_box_verify=true",
         f"environment.skyrl_gym.aime.max_gen_length={training.response_limit}",
-        "trajectory_runner.process_pool.num_coordinators=1",
-        "trajectory_runner.process_pool.cpus_per_coordinator=4",
+        "trajectory_runner.rollout_workers.num_workers=1",
+        "trajectory_runner.rollout_workers.cpus_per_worker=4",
     ]
     for teacher, target_share in zip(config.teachers, training.target_gradient_shares, strict=True):
         domain = teacher.domain
