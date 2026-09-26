@@ -6,6 +6,7 @@ import pytest
 import torch
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.fully_async_trainer import (
     FullyAsyncRayPPOTrainer,
     GeneratedOutputGroup,
@@ -189,6 +190,34 @@ def test_async_batch_conversion_reports_comparable_stage_timings(monkeypatch):
         "postprocess_trajectory_batch": 18.0,
         "convert_to_training_input": 3.0,
     }
+
+
+def test_async_batch_conversion_records_domain_reward_metrics():
+    trainer, _ = _batch_assembly_state(mini_batch_size=3, accepted=3)
+    trainer.cfg = get_default_config()
+    trainer.cfg.trainer.algorithm.policy_loss_type = "pg"
+    trainer.cfg.trainer.algorithm.tis_lcs_alert_threshold = 0.0
+    trainer.cfg.trainer.step_wise_training = False
+    trainer.cfg.generator.n_samples_per_prompt = 2
+    trainer.all_timings = {}
+    trainer.tokenizer = SimpleNamespace(decode=str, pad_token_id=0)
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.exact_physical(physical_group_size=2)
+    trainer.policy_model = SimpleNamespace(actor_infos=[SimpleNamespace(rank=SimpleNamespace(dp_size=1))])
+    trainer.critic_model = None
+    trainer.ref_model = None
+
+    math = _generated_group("math", 10, rewards=[0.2, 0.6])
+    tools = _generated_group("tools", 10, rewards=[0.6, 1.0])
+    missing = _generated_group("missing", 10, rewards=[0.4, 0.6])
+    math.trajectory_batch["data_sources"] = ["math", "math"]
+    tools.trajectory_batch["data_sources"] = ["tools", "tools"]
+
+    training_input = trainer.convert_generation_group_mini_batch_to_training_input([math, tools, missing])
+
+    assert training_input.metadata["uids"] == ["math", "math", "tools", "tools", "missing", "missing"]
+    assert trainer.all_metrics["reward/domain/math/avg_raw_reward"] == pytest.approx(0.4)
+    assert trainer.all_metrics["reward/domain/tools/avg_raw_reward"] == pytest.approx(0.8)
+    assert trainer.all_metrics["reward/domain/_missing/avg_raw_reward"] == pytest.approx(0.5)
 
 
 class _TeacherTicket:

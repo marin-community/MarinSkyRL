@@ -398,6 +398,16 @@ generator:
   weight_sync_pause_timeout_seconds: 30.0
   max_turns: 1
 
+  # Shared Harbor/Gym terminal-error taxonomy. Unknown Gym failures retain the
+  # previous masking behavior; context overflow and timeouts are agent errors.
+  error_handling:
+    enable_error_classification: true
+    passthrough_exceptions: []
+    mask_exceptions: []
+    zero_exceptions: []
+    default_error_treatment: mask
+    preserve_logprobs_on_timeout: true
+
   chat_template:
     source: "name"
     name_or_path: null
