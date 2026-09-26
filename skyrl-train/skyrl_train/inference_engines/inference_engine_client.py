@@ -18,7 +18,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
 )
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.inference_engines.chat_template import template_error_from_exception
-from skyrl_train.trajectory_runners.routed_experts import decode_routed_experts, encode_routed_experts
+from skyrl_train.trajectory_runners.routed_experts import choice_routes, decode_routed_experts, encode_routed_experts
 from transformers import PreTrainedTokenizerBase
 import asyncio
 from typing import List, Any, Optional, Dict, Union, Hashable
@@ -411,7 +411,9 @@ class InferenceEngineClient(InferenceEngineInterface):
             output["student_topk_indices"] = student_topk_indices
             output["behavior_topk_logprobs"] = behavior_topk_logprobs
         if any(segments is not None for segments in response_policy_version_segments):
-            output[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = [segments or [] for segments in response_policy_version_segments]
+            output[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = [
+                segments or [] for segments in response_policy_version_segments
+            ]
         return output
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> List[OnlineEagleResult]:
@@ -731,7 +733,6 @@ class InferenceEngineClient(InferenceEngineInterface):
                     partial_response=partial_response,
                     accum=accum,
                     response_role=response_role,
-                    original_request_json=original_request_json,
                 )
             )
 
@@ -1284,11 +1285,6 @@ def _exact_continuation_prefix(accum: AccumulatedResponse) -> Optional[List[int]
     return accum.served_prompt_token_ids + accum.token_ids
 
 
-def _choice_routes(choice: Dict[str, Any]) -> Any:
-    provider_fields = choice.get("provider_specific_fields") or {}
-    return choice.get("routed_experts", provider_fields.get("routed_experts"))
-
-
 def _prepare_retry_request(
     original_request_json: Dict[str, Any],
     accum: AccumulatedResponse,
@@ -1400,7 +1396,6 @@ def _parse_partial_response_and_inplace_update_accum(
     partial_response: Dict[str, Any],
     accum: AccumulatedResponse,
     response_role: Optional[str],
-    original_request_json: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, Optional[str], Optional[str], bool]:
     """Parse the partial response and in-place update accumulators.
 
@@ -1425,15 +1420,12 @@ def _parse_partial_response_and_inplace_update_accum(
     aborted_without_generating = finish_reason == ABORT_FINISH_REASON and new_completion_tokens == 0
     if not aborted_without_generating:
         if accum.completion_tokens == 0:
-            served = partial_response.get("prompt_token_ids")
-            if served is None and original_request_json is not None:
-                served = original_request_json.get(EXACT_PROMPT_TOKEN_IDS_KEY)
-            accum.served_prompt_token_ids = None if served is None else list(served)
+            accum.served_prompt_token_ids = partial_response.get("prompt_token_ids")
         exact_prefix = _exact_continuation_prefix(accum)
         if choice.get("token_ids") is not None:
             _accumulate_routed_experts(
                 accum,
-                _choice_routes(choice),
+                choice_routes(choice),
                 prompt_length=None if exact_prefix is None else len(exact_prefix),
                 new_tokens=len(choice["token_ids"]),
             )

@@ -8,6 +8,12 @@ from typing import Any
 import numpy as np
 
 
+def choice_routes(choice: dict[str, Any]) -> Any:
+    """The routes of one OpenAI chat choice, at the top level or under its provider fields."""
+    provider_fields = choice.get("provider_specific_fields") or {}
+    return choice.get("routed_experts", provider_fields.get("routed_experts"))
+
+
 def decode_routed_experts(routes: str) -> np.ndarray:
     """Decode vLLM's base64-encoded NumPy routes into a [token, layer, expert] array."""
     try:

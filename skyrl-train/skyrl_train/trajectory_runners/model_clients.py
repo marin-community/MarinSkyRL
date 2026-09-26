@@ -18,7 +18,7 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.response_topk import select_chat_response_topk
 from skyrl_train.policy_version import RESPONSE_POLICY_VERSION_SEGMENTS_KEY, PolicyVersionSegment
 from skyrl_train.trajectory_runners.types import TokenProvenance
-from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
+from skyrl_train.trajectory_runners.routed_experts import choice_routes, normalize_routed_experts
 
 
 _CHAT_SAMPLING_EXCLUSIONS = frozenset({"max_generate_length", "logprobs", "stop"})
@@ -53,8 +53,7 @@ class _ChatResult:
 def _choice_routed_experts(
     choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]
 ) -> list[list[list[int]]] | None:
-    provider_fields = choice.get("provider_specific_fields") or {}
-    routes = choice.get("routed_experts", provider_fields.get("routed_experts"))
+    routes = choice_routes(choice)
     if routes is None:
         return None
     return normalize_routed_experts(routes, prompt_ids, response_ids)
