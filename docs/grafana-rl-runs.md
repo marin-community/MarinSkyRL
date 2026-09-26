@@ -5,8 +5,8 @@ rollout engine publishes its own vLLM metrics, and the Ray head publishes the ra
 goes to the cluster's finelog, which forwards to the `marin` hub, which is what Grafana queries.
 Nothing is scraped from your logs and nothing is written to disk.
 
-Both trainers use that same contract, so one dashboard covers synchronous and fully asynchronous
-runs: **RL Post-training**, at <https://grafana.oa.dev/d/marin-rl-runs>.
+Synchronous and asynchronous runs share one training loop and that contract, so one dashboard covers
+both: **RL Post-training**, at <https://grafana.oa.dev/d/marin-rl-runs>.
 
 ## Finding it
 
@@ -85,10 +85,9 @@ trainer with `metric_source=vllm`, controller, and controller with `metric_sourc
 row is direct evidence that a producer never started -- most often the Ray one, which means the
 launch did not go through `task_runtime.py`.
 
-Four panels can be legitimately empty, for two unrelated reasons, and their titles say which.
-Rollout buffer occupancy and off-policy staleness are asynchronous-only: a synchronous run writes
-completed batches to FineStore but does not maintain an asynchronous queue. The two Ray panels need a
-launch that starts Ray itself, which is a launch-path question rather than a trainer-mode question.
+Two panels can be legitimately empty: the Ray panels need a launch that starts Ray itself, which is
+a launch-path question rather than a trainer-mode question. Every run fills the rollout buffer
+occupancy and off-policy staleness panels; a synchronous run's staleness is always 0.
 
 Two properties of the data mislead people. Work counters are deltas, so they sum; gauges such as
 `policy_step` are snapshots, so they do not. And the engine's metrics arrive under the same service
@@ -96,7 +95,7 @@ as the trainer's, told apart only by `metric_source`.
 
 ## Asynchronous runs
 
-A fully asynchronous run fills every panel here, plus the rollout buffer and staleness ones.
+An asynchronous run fills the same panels, with staleness up to its `max_staleness_steps`.
 
 There is also a deeper asynchronous view, **Async RL Training** (`/d/marin-async-rl`), with about
 sixty panels. **It is not merged and not on grafana.oa.dev.** It lives on
