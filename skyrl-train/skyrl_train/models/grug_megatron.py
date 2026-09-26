@@ -17,8 +17,15 @@ Megatron-Core settings chosen by ``GrugModelProvider`` in
 ``grug_megatron_bridge``.
 """
 
+from dataclasses import replace
+from functools import partial
+
 import torch
 import torch.nn.functional as F
+from megatron.core import tensor_parallel
+from megatron.core.tensor_parallel.mappings import all_gather_last_dim_from_tensor_parallel_region
+from megatron.core.transformer.moe.moe_layer import MoELayer
+from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.extensions.transformer_engine import TEColumnParallelLinear, TENorm
 from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
 from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
@@ -36,9 +43,11 @@ from megatron.core.transformer.transformer_block import (
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer, TransformerLayerSubmodules
+from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint, sharded_state_dict_default
 from megatron.core.typed_torch import apply_module
 from torch import nn
 
+from skyrl_train.models.grug_shortconv import causal_short_conv
 from skyrl_train.models.grug_moe import (
     GRUG_ATTN_GATE_SCALE,
     GRUG_GATED_NORM_RANK,
@@ -110,9 +119,34 @@ class GrugSelfAttention(SelfAttention):
             tp_comm_buffer_name="attn_gate",
             tp_group=self.pg_collection.tp,
         )
-        is_long = grug_long_layer_flags(config.num_layers)[layer_number - 1]
+        is_long = grug_long_layer_flags(config.num_layers, config.grug_global_every)[layer_number - 1]
         self.query_scale = config.grug_qk_mult * (config.grug_qk_mult_long_scale if is_long else 1.0)
         self.skip_rope = bool(config.no_rope_freq[layer_number - 1])
+        self.logical_kv_heads = config.grug_global_kv_heads if is_long else config.grug_local_kv_heads
+        self.sconv_k = None
+        self.sconv_attn = None
+        if "k" in config.grug_sconv_sites:
+            self.sconv_k = GrugShortConv(
+                config,
+                self.num_query_groups_per_partition * config.kv_channels,
+                self.pg_collection,
+                channel_parallel=True,
+            )
+            # K convolution precedes the weightless head norm.
+            self.k_layernorm = nn.Identity()
+        if "attn" in config.grug_sconv_sites:
+            self.sconv_attn = GrugShortConv(config, config.hidden_size, self.pg_collection)
+        if self.logical_kv_heads != config.num_query_groups:
+            attention_config = replace(config, num_query_groups=self.logical_kv_heads)
+            self.core_attention = submodules.core_attention(
+                config=attention_config,
+                layer_number=layer_number,
+                attn_mask_type=self.attn_mask_type,
+                attention_type="self",
+                cp_comm_type=kwargs.get("cp_comm_type"),
+                softmax_scale=config.softmax_scale,
+                pg_collection=self.pg_collection,
+            )
 
     def forward(
         self,
@@ -136,6 +170,11 @@ class GrugSelfAttention(SelfAttention):
             raise NotImplementedError("GrugSelfAttention applies RoPE from rotary_pos_emb only")
 
         query, key, value = self.get_query_key_value_tensors(hidden_states, key_value_states)
+        if self.sconv_k is not None:
+            key = self.sconv_k(key.flatten(-2), packed_seq_params).reshape(key.shape)
+            key = grug_rms_norm_no_weight(key)
+        if self.logical_kv_heads != self.config.num_query_groups:
+            key, value = (self._logical_kv(tensor) for tensor in (key, value))
 
         is_thd = packed_seq_params is not None and packed_seq_params.qkv_format == "thd"
         if is_thd:
@@ -189,7 +228,20 @@ class GrugSelfAttention(SelfAttention):
         gate, _ = self.attn_gate(hidden_states)
         core_attn_out = self._apply_head_gate(core_attn_out, gate)
         output, bias = apply_module(self.linear_proj)(core_attn_out)
+        if self.sconv_attn is not None:
+            output = self.sconv_attn(output, packed_seq_params)
         return output, bias
+
+    def _logical_kv(self, tensor):
+        # The checkpoint stores max(local, global) heads. Retain unused rows for
+        # lossless export, but attend only to the leading logical KV heads.
+        # A differentiable gather is needed: TP's stored and logical head owners differ.
+        gathered = all_gather_last_dim_from_tensor_parallel_region(
+            tensor.flatten(-2), group=self.pg_collection.tp
+        ).reshape(*tensor.shape[:2], self.config.num_query_groups, self.config.kv_channels)
+        count = self.logical_kv_heads // self.pg_collection.tp.size()
+        start = self.pg_collection.tp.rank() * count
+        return gathered[..., start : start + count, :].contiguous()
 
     def _apply_xsa(self, core_attn_out: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
         """Remove each head's component along its (GQA-expanded) value vector."""
@@ -299,14 +351,152 @@ class GrugGPTModel(GPTModel):
         return (self.embed_norm(decoder_input), *rest)
 
 
+class GrugShortConv(nn.Module):
+    """ShortConv on CP-local tokens with optional TP sequence or channel sharding."""
+
+    def __init__(self, config, channels, pg_collection, channel_parallel=False):
+        super().__init__()
+        self.pg_collection = pg_collection
+        self.channel_parallel = channel_parallel
+        self.sequence_parallel = config.sequence_parallel and not channel_parallel
+        self.weight = nn.Parameter(
+            torch.zeros(
+                config.grug_sconv_kernel, channels, device=torch.cuda.current_device(), dtype=config.params_dtype
+            )
+        )
+        with torch.no_grad():
+            self.weight[0].fill_(1)
+        # Output convolutions see the full TP sequence on every rank, so their
+        # weight gradients are already complete replicas, not SP partials.
+        self.weight.sequence_parallel = False
+        if channel_parallel:
+            tensor_parallel.set_tensor_model_parallel_attributes(self.weight, True, 1, 1)
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        return make_sharded_tensors_for_checkpoint(
+            self.state_dict(keep_vars=True),
+            prefix,
+            {"weight": 1} if self.channel_parallel else {},
+            sharded_offsets=sharded_offsets,
+            tp_group=self.pg_collection.tp,
+            dp_cp_group=metadata["dp_cp_group"],
+        )
+
+    def forward(self, hidden_states, packed_seq_params=None):
+        if self.sequence_parallel:
+            hidden_states = tensor_parallel.gather_from_sequence_parallel_region(
+                hidden_states, tensor_parallel_output_grad=False, group=self.pg_collection.tp
+            )
+        lengths = None
+        if packed_seq_params is not None and packed_seq_params.qkv_format == "thd":
+            cumulative = _first_present(packed_seq_params.cu_seqlens_q_padded, packed_seq_params.cu_seqlens_q)
+            lengths = tuple((cumulative[1:] - cumulative[:-1]).tolist())
+        result = causal_short_conv(hidden_states, self.weight, lengths, self.pg_collection.cp)
+        if self.sequence_parallel:
+            result = tensor_parallel.scatter_to_sequence_parallel_region(result, group=self.pg_collection.tp)
+        return result
+
+
+class GrugSharedExperts(nn.Module):
+    """Keep Hero's shared experts separate, including their ordered BF16 additions."""
+
+    def __init__(self, config, submodules, pg_collection, gate=False, name=None):
+        super().__init__()
+        self.experts = nn.ModuleList(
+            [
+                SharedExpertMLP(config=config, submodules=submodules, pg_collection=pg_collection, gate=gate)
+                for _ in range(config.grug_num_shared_experts)
+            ]
+        )
+
+    def forward(self, hidden_states):
+        return tuple(expert(hidden_states) for expert in self.experts)
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        state = {}
+        for index, expert in enumerate(self.experts):
+            state.update(sharded_state_dict_default(expert, f"{prefix}experts.{index}.", sharded_offsets, metadata))
+        return state
+
+    def backward_dw(self):
+        for expert in self.experts:
+            expert.backward_dw()
+
+
+class GrugMoELayer(MoELayer):
+    """Native Megatron latent dispatch, with Hero's pre-dispatch latent RMSNorm."""
+
+    def __init__(self, config, *args, **kwargs):
+        super().__init__(config, *args, **kwargs)
+        # MCore 0.18 marks expert parameters as dense when EP=1. With a
+        # smaller expert TP group, those replicas instead belong to expert DP
+        # (which includes the extra attention-TP ranks).
+        if (
+            config.expert_model_parallel_size == 1
+            and config.tensor_model_parallel_size != config.expert_tensor_parallel_size
+        ):
+            for param in self.experts.parameters():
+                param.allreduce = False
+        if config.moe_latent_size:
+            self.latent_norm = TENorm(config=config, hidden_size=config.moe_latent_size, eps=config.layernorm_epsilon)
+
+    def preprocess(self, hidden_states, probs, routing_map):
+        if not self.config.moe_latent_size:
+            return super().preprocess(hidden_states, probs, routing_map)
+        hidden_states, _ = self.fc1_latent_proj(hidden_states)
+        hidden_states = self.latent_norm(hidden_states)
+        return self.token_dispatcher.dispatch_preprocess(hidden_states, routing_map, probs)
+
+    def postprocess(self, output, shared_expert_output):
+        output = super().postprocess(output, None)
+        if shared_expert_output is not None:
+            for shared in shared_expert_output:
+                output = output + shared
+        return output
+
+
+class GrugTransformerLayer(TransformerLayer):
+    """Pass document metadata explicitly to the MLP branch's ShortConv."""
+
+    def __init__(self, config, *args, **kwargs):
+        super().__init__(config, *args, **kwargs)
+        self.sconv_mlp = GrugShortConv(config, config.hidden_size, self.pg_collection)
+
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        hidden_states, context = self._forward_attention(hidden_states, attention_mask, **kwargs)
+        normalized = self._forward_pre_mlp_layernorm(hidden_states)
+        padding_mask = kwargs.get("padding_mask")
+        packed_seq_params = kwargs.get("packed_seq_params")
+
+        def mlp_forward(x):
+            return self.mlp(x, padding_mask=padding_mask)
+
+        if self.recompute_mlp:
+            output, bias = tensor_parallel.checkpoint(mlp_forward, False, normalized)
+        else:
+            output, bias = mlp_forward(normalized)
+        if self.recompute_pre_mlp_layernorm:
+            self.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(output)
+        output = self.sconv_mlp(output, packed_seq_params)
+        with self.bias_dropout_add_exec_handler():
+            output = self.mlp_bda(self.training, self.config.bias_dropout_fusion)(
+                (output, bias), hidden_states, self.hidden_dropout
+            )
+        return output, context
+
+
 def grug_layer_spec(config: TransformerConfig) -> ModuleSpec:
     """Build the Transformer Engine layer spec for one Grug decoder layer."""
 
     backend = TESpecProvider()
     moe = get_moe_module_spec_for_backend(backend, num_experts=config.num_moe_experts, moe_grouped_gemm=True)
     moe.keywords["submodules"].router = GrugTopKRouter
+    if config.grug_hero:
+        shared = moe.keywords["submodules"].shared_experts
+        moe.keywords["submodules"].shared_experts = partial(GrugSharedExperts, **shared.keywords)
+        moe = partial(GrugMoELayer, **moe.keywords)
     return ModuleSpec(
-        module=TransformerLayer,
+        module=GrugTransformerLayer if "mlp" in config.grug_sconv_sites else TransformerLayer,
         submodules=TransformerLayerSubmodules(
             input_layernorm=GrugGatedRMSNorm,
             self_attention=ModuleSpec(
