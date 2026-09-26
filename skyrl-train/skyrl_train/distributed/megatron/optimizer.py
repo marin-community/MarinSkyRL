@@ -41,8 +41,8 @@ from skyrl_train.distributed.megatron.grug_muonh import (
 _GRUG_MUONH_KEY = "grug_muonh"
 
 
-def _grug_muonh_kwargs(optim_config: dict) -> dict:
-    if float(optim_config.get("weight_decay", 0.0)) != 0.0:
+def _grug_muonh_kwargs(optim_config: dict, config: OptimizerConfig) -> dict:
+    if float(config.weight_decay) != 0.0:
         raise ValueError("MuonH requires weight_decay=0")
     extra = optim_config.get("optimizer_kwargs", {})
     if not isinstance(extra, Mapping):
@@ -55,7 +55,8 @@ def _grug_muonh_kwargs(optim_config: dict) -> dict:
     if len(betas) != 2:
         raise ValueError("MuonH adam_betas must contain two values")
     return {
-        "lr": float(optim_config["lr"]),
+        "lr": float(config.lr),
+        "min_lr": float(config.min_lr),
         "adam_lr": float(extra["adam_lr"]) if "adam_lr" in extra else None,
         "momentum": float(extra.get("momentum", DEFAULT_MOMENTUM)),
         "nesterov": bool(extra.get("nesterov", DEFAULT_NESTEROV)),
@@ -126,7 +127,7 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
 
     config = OptimizerConfig(**optim_args)
     if _optim_name == _GRUG_MUONH_KEY:
-        config._grug_muonh_kwargs = _grug_muonh_kwargs(optim_config)
+        config._grug_muonh_kwargs = _grug_muonh_kwargs(optim_config, config)
     return config
 
 

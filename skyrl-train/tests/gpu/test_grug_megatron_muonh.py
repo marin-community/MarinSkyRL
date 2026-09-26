@@ -4,8 +4,13 @@ import copy
 import pytest
 import torch
 from megatron.core import parallel_state
+from omegaconf import OmegaConf
 from skyrl_train.distributed.megatron.grug_muonh import GrugMegatronMuonH
-from skyrl_train.distributed.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
+from skyrl_train.distributed.megatron.optimizer import (
+    get_megatron_optimizer,
+    get_megatron_optimizer_param_scheduler,
+    init_megatron_optim_config,
+)
 from torch import nn
 
 
@@ -93,3 +98,26 @@ def test_megatron_wrapper_routes_updates_and_restores_muonh_state(distributed_pa
     restored_optimizer.step()
     for name, parameter in restored_model.named_parameters():
         torch.testing.assert_close(parameter, expected[name], rtol=0, atol=0, msg=lambda error: f"{name}: {error}")
+
+
+def test_adam_route_keeps_its_rate_when_megatron_scheduler_steps() -> None:
+    muon = torch.nn.Parameter(torch.ones(4, 4, device="cuda"))
+    adam = torch.nn.Parameter(torch.ones(4, device="cuda"))
+    optimizer = GrugMegatronMuonH(
+        [{"params": [muon], "grug_route": "muonh"}, {"params": [adam], "grug_route": "adam"}],
+        lr=0.03,
+        adam_lr=0.004,
+    )
+    config = OmegaConf.create({"lr": 0.03, "num_warmup_steps": 0, "weight_decay": 0.0})
+    scheduler = get_megatron_optimizer_param_scheduler(optimizer, config, num_training_steps=3)
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.03, 0.004])
+    scheduler.step(1)
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.03, 0.004])
+
+
+def test_muonh_checks_effective_megatron_weight_decay() -> None:
+    policy = {"optimizer": "MuonH", "lr": 0.03, "weight_decay": 0.0}
+    with pytest.raises(ValueError, match="weight_decay=0"):
+        init_megatron_optim_config(policy, {"weight_decay": 0.01})
+    config = init_megatron_optim_config({**policy, "weight_decay": 0.01}, {"weight_decay": 0.0})
+    assert config.weight_decay == 0.0

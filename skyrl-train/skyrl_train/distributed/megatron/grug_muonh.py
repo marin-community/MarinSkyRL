@@ -94,6 +94,7 @@ class GrugMegatronMuonH(Optimizer):
         eps: float = DEFAULT_EPSILON,
         muon_eps: float = DEFAULT_EPSILON,
         adam_lr: float | None = None,
+        min_lr: float = 0.0,
     ) -> None:
         if ns_steps < 1:
             raise ValueError("MuonH backend_steps must be positive")
@@ -113,6 +114,8 @@ class GrugMegatronMuonH(Optimizer):
                 group["lr_mult"] = self.adam_lr_mult
                 if adam_lr is not None:
                     group["lr"] = adam_lr
+                    group["max_lr"] = adam_lr
+                    group["min_lr"] = min_lr * self.adam_lr_mult
             elif group[ROUTE_KEY] not in (MUONH_ROUTE, ADAMH_ROUTE):
                 raise ValueError(f"Unknown Grug optimizer route: {group[ROUTE_KEY]}")
             if group.get("weight_decay", 0.0) != 0.0:
