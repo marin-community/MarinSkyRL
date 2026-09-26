@@ -32,6 +32,7 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     unpack_packed_token_values,
 )
 from skyrl_train.models.megatron_router_replay import (
+    response_prediction_slice,
     sequence_major_flatten,
     slice_sequence_parallel,
     validate_replay_geometry,
@@ -209,7 +210,7 @@ class MegatronModelWrapper:
         dense, mask_BS = dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions)
         response_BS = torch.zeros_like(mask_BS)
         # A response token is scored from the preceding input position.
-        response_BS[:, seq_len - response_len - 1 : seq_len - 1] = True
+        response_BS[:, response_prediction_slice(seq_len, response_len)] = True
 
         if self.use_sample_packing:
             # The routes tensor is ours, not the pipeline's input: always run the

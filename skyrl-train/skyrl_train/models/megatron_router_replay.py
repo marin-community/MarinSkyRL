@@ -61,6 +61,13 @@ def require_scalar_num_actions(num_actions) -> None:
         )
 
 
+def response_prediction_slice(seq_len: int, response_len: int) -> slice:
+    """Input positions that predict the response at the right edge of a sequence."""
+    if response_len and seq_len <= response_len:
+        raise ValueError("router_replay needs at least one prompt token before the response")
+    return slice(seq_len - response_len - 1, seq_len - 1)
+
+
 def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions):
     """Build the dense per-position replay target and mask, layout-agnostic.
 
@@ -78,16 +85,13 @@ def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_action
     B, response_len, L, K = captured.shape
     assert B == batch_size, f"router_replay batch mismatch: {B} vs {batch_size}"
     assert response_len == num_actions, f"router_replay response_len {response_len} != num_actions {num_actions}"
-    if response_len and seq_len <= response_len:
-        raise ValueError("router_replay needs at least one prompt token before the response")
+    prediction_positions = response_prediction_slice(seq_len, response_len)
 
     full = torch.full((batch_size, seq_len, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)
-    prediction_start = seq_len - response_len - 1
-    prediction_end = seq_len - 1
-    full[:, prediction_start:prediction_end, :, :] = captured
+    full[:, prediction_positions, :, :] = captured
 
     response_pos = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
-    response_pos[:, prediction_start:prediction_end] = True
+    response_pos[:, prediction_positions] = True
     # Replay a prediction position only when every layer carries real data.
     non_sentinel = (full != SENTINEL_EXPERT_ID).any(dim=-1).all(dim=-1)  # [B, seq_len]
     return full, response_pos & non_sentinel
@@ -287,11 +291,14 @@ class MegatronRouterReplay:
             raise RuntimeError(f"router replay: recompute FIFO not drained: {outstanding}")
 
     def pop_metrics(self) -> dict[str, float]:
-        """Return ``hit_fraction`` / ``sentinel_fraction`` since the last pop.
+        """Return capture, native-routing, and executed-routing fractions since the last pop.
 
         ``hit_fraction`` is replayed rows over masked rows (1.0 unless a masked
         row carried an all-sentinel target — a layout bug). ``sentinel_fraction``
         is sentinel response rows over response rows (rollout capture loss).
+        Native mismatch counts disagreements before substitution, both ordered
+        and as sets. Executed match counts verified dispatch rows over masked
+        forward rows, excluding activation recomputation.
         """
         hit_fraction = self._hit_rows / self._masked_rows if self._masked_rows else 1.0
         sentinel_fraction = self._sentinel_rows / self._response_rows if self._response_rows else 0.0
