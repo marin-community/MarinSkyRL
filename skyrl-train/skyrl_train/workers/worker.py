@@ -309,6 +309,11 @@ class Worker(DistributedTorchRayActor):
         configure_progress(cfg.trainer.progress)
         enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
 
+    @property
+    def device(self) -> torch.device:
+        """Device that holds this worker's model and training tensors."""
+        return torch.device("cuda", torch.cuda.current_device())
+
     def init_model(self, *args, **kwargs):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
         raise NotImplementedError()
@@ -1077,7 +1082,7 @@ class PolicyWorkerBase(Worker):
         """
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.TRAINING_STEP_ENTER)
         self.model.train()
-        experience.to_device(torch.cuda.current_device())
+        experience.to_device(self.device)
 
         sequences = experience.sequences
         old_action_log_probs = experience.action_log_probs
@@ -1104,7 +1109,7 @@ class PolicyWorkerBase(Worker):
 
         # The model wrapper controls its own internal precision where needed.
         _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
-        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             # actor loss
             action_log_probs, output = self.model(
                 sequences,
@@ -1321,7 +1326,7 @@ class PolicyWorkerBase(Worker):
         )
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
-        device = torch.cuda.current_device()
+        device = self.device
         micro_batch.to(device)
         self.model.eval()
         sequences = micro_batch["sequences"]
@@ -1337,7 +1342,7 @@ class PolicyWorkerBase(Worker):
             micro_batch["rollout_routed_experts"] if "rollout_routed_experts" in micro_batch.keys() else None
         )
 
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             policy_logprob = self.model(
                 sequences,
                 response_length,
@@ -1386,13 +1391,13 @@ class CriticWorkerBase(Worker):
         micro_batch: TrainingInputBatch,
     ) -> TrainingOutputBatch:
         """Generates critic values."""
-        device = torch.cuda.current_device()
+        device = self.device
         micro_batch.to(device)
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
         self.model.eval()
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             value = self.model(
                 sequences,
                 response_length,
@@ -1463,7 +1468,7 @@ class CriticWorkerBase(Worker):
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
-        experience.to_device(torch.cuda.current_device())
+        experience.to_device(self.device)
 
         sequences = experience.sequences
         old_values = experience.values
@@ -1472,7 +1477,7 @@ class CriticWorkerBase(Worker):
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
 
-        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             # critic loss
             values, output = self.model(
                 sequences,
@@ -1539,7 +1544,7 @@ class RefWorkerBase(Worker):
         self.model: nn.Module = None
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
-        device = torch.cuda.current_device()
+        device = self.device
         micro_batch.to(device)
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
@@ -1551,7 +1556,7 @@ class RefWorkerBase(Worker):
         rollout_routed_experts = (
             micro_batch["rollout_routed_experts"] if "rollout_routed_experts" in micro_batch.keys() else None
         )
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             log_probs = self.model(
                 sequences,
                 response_length,

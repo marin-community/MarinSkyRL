@@ -570,10 +570,8 @@ def build_dataloader(
         shuffle=is_train and cfg.data.shuffle and sampler is None,
         sampler=sampler,
         collate_fn=dataset.collate_fn,
-        # Curriculum sampling stays single-process: worker prefetch would draw several
-        # batches of indices ahead of the per-step weight updates.
-        # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
-        num_workers=0 if (sampler is not None or cfg.generator.enable_http_endpoint) else 8,
+        # Items are in-memory row lookups; worker processes would cost more to start than they save.
+        num_workers=0,
         drop_last=True if is_train else False,
         generator=seeded_generator,
     )

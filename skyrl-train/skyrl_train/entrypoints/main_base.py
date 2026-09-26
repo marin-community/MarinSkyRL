@@ -537,6 +537,14 @@ class BasePPOExp:
             colocate_pg=colocate_pg,
         )
 
+    def get_worker_classes(self):
+        """Return the policy, critic, and reference Ray actor classes for the configured strategy."""
+        if self.cfg.trainer.strategy != "megatron":
+            raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
+        from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RefWorker  # noqa: PLC0415
+
+        return PolicyWorker, CriticWorker, RefWorker
+
     def get_tracker(self):
         """Initializes the tracker for experiment tracking.
 
@@ -565,10 +573,7 @@ class BasePPOExp:
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
-        if self.cfg.trainer.strategy == "megatron":
-            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RefWorker
-        else:
-            raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
+        PolicyWorker, CriticWorker, RefWorker = self.get_worker_classes()
 
         # NOTE (sumanthrh): Instantiate tracker before trainer init.
         # We have custom validation before this step to give better error messages.
