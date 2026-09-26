@@ -134,7 +134,7 @@ from skyrl_train.utils.importance_ratio_diagnostics import (
     absolute_probability_difference_metrics,
     mismatch_ratio_metrics,
 )
-from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
+from skyrl_train.timing_observability import StepWallTime, publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
     read_hf_export_request,
@@ -769,7 +769,8 @@ class RayPPOTrainer:
         task, state = pending
         self._pending_checkpoint_upload = None
         try:
-            duration, cleanup_duration = await task
+            with Timer("checkpoint_upload_blocking", self.all_timings, log_events=False):
+                duration, cleanup_duration = await task
         except OSError:
             self._record_checkpoint_save_failure(state)
             return False
@@ -784,16 +785,20 @@ class RayPPOTrainer:
         )
         return True
 
-    async def _run_step_end_callbacks(self, state: TrainerState) -> None:
+    async def _run_step_end_callbacks(self, state: TrainerState, *, step_wall: StepWallTime | None = None) -> None:
         """Run callback-requested work that belongs to the current training step."""
         self._control.reset()
         self._control = await self.callback_handler.call_event_async("on_step_end", state, self._control, trainer=self)
 
         if self._control.should_save:
+            if step_wall is not None:
+                step_wall.start("checkpoint_work")
             await self._save_intermediate_checkpoint(state)
             self._control.should_save = False
 
         if self._control.should_save_hf_model:
+            if step_wall is not None:
+                step_wall.start("checkpoint_work")
             # HF export reads the committed checkpoint. When checkpoint and HF
             # export share a cadence, wait for the background shard uploads and
             # marker publication before asking the exporter to consume it.
@@ -802,6 +807,8 @@ class RayPPOTrainer:
             self._control.should_save_hf_model = False
 
         if self._control.should_evaluate and self.eval_dataset is not None:
+            if step_wall is not None:
+                step_wall.start("evaluation")
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
                 self.all_metrics.update(eval_metrics)
@@ -809,6 +816,8 @@ class RayPPOTrainer:
                 "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
             )
             self._control.should_evaluate = False
+        if step_wall is not None:
+            step_wall.start("step_end_bookkeeping")
 
     async def _sync_weights_and_restore_rollout_residency(self) -> None:
         await self.inference_engine_client.wake_up(tags=["weights"])
