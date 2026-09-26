@@ -7,12 +7,12 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[2] / "examples/cat_count/cpu_canary.py"
 
 
-def _run(*arguments: str) -> subprocess.CompletedProcess[str]:
+def _run(*arguments: str, timeout_seconds: int = 1800) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SCRIPT), *arguments],
         text=True,
         capture_output=True,
-        timeout=1800,
+        timeout=timeout_seconds,
         check=False,
     )
 
@@ -23,7 +23,7 @@ def _records(output: str) -> list[dict]:
 
 def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path):
     checkpoint = str(tmp_path / "base")
-    pretrained = _run("pretrain", "--out", checkpoint)
+    pretrained = _run("pretrain", "--out", checkpoint, "--steps", "300")
     assert pretrained.returncode == 0, pretrained.stderr
 
     positive = _run("rl", "--ckpt", checkpoint, "--seed", "0")
@@ -36,7 +36,9 @@ def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path):
     assert positive_records[-1]["train_reward"][1] >= 0.9
     assert positive_records[-1]["heldout_reward"][1] >= 0.9
 
-    negative = _run("rl", "--ckpt", checkpoint, "--seed", "0", "--flip-advantage", "--max_steps", "20")
+    negative = _run(
+        "rl", "--ckpt", checkpoint, "--seed", "0", "--flip-advantage", "--max_steps", "20", timeout_seconds=120
+    )
     assert negative.returncode == 1, negative.stdout + negative.stderr
     negative_records = _records(negative.stdout)
     assert negative_records[-1]["verdict"] == "FAIL"
