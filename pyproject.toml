@@ -94,7 +94,7 @@ vllm = [
     "torch==2.13.0 ; sys_platform == 'linux'",
     "torchdata ; sys_platform == 'linux'",
     "torchvision==0.28.0 ; sys_platform == 'linux'",
-    "vllm==0.0.0.dev20260916+marin.70ea9ae8f260.cu132 ; sys_platform == 'linux'",
+    "vllm==0.0.0.dev20260924+marin.01911be34fac.cu132 ; sys_platform == 'linux'",
 ]
 megatron = [
     "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -225,8 +225,8 @@ torchvision = [
 ]
 flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 vllm = [
-    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-70ea9ae8f260/vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-70ea9ae8f260/vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260924-01911be34fac/vllm-0.0.0.dev20260924+marin.01911be34fac.cu132-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260924-01911be34fac/vllm-0.0.0.dev20260924+marin.01911be34fac.cu132-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
 transformer-engine-torch = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
