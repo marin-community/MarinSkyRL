@@ -393,7 +393,7 @@ class MegatronStrategy(DistributedStrategy):
                 )
                 if muonh:
                     _muonh_fp32_groups_as_mapping(sharded_state_dict["optimizer"])
-            # Load the checkpoint in parallel.
+            # Load checkpoint tensors into their destination shards.
             load_strategy = (
                 DirectS3TorchDistLoadShardedStrategy(ckpt_dir)
                 if ckpt_dir.startswith("s3://")
