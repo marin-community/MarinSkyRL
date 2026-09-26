@@ -35,6 +35,7 @@ from tests.cpu.tiny_training.tiny_model import build_tiny_policy, write_gsm8k_da
 
 LOGICAL_GPUS = 4
 METRICS_FILE = "metrics.jsonl"
+STALL_TIMEOUT_SECONDS = 30
 WORKER_ENV_VARS = {"HF_HUB_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false", "OMP_NUM_THREADS": "4"}
 
 
@@ -59,7 +60,8 @@ def tiny_training_config(root: Path, mode: TrainingMode, *, max_steps: int, num_
             "debug_mode": "off",
             "placement": {"colocate_all": False, "policy_num_gpus_per_node": 1},
             "policy": {"model": {"path": str(model_dir)}, "optimizer_config": {"lr": 1.0e-3}},
-            "algorithm": {"use_kl_loss": False},
+            # A stalled step fails with the buffer's state long before the test's subprocess timeout.
+            "algorithm": {"use_kl_loss": False, "group_admission": {"stall_timeout": STALL_TIMEOUT_SECONDS}},
             "rollout_buffer": {"max_staleness_steps": MAX_STALENESS_STEPS[mode], "max_in_flight": 8},
             "train_batch_size": 4,
             "policy_mini_batch_size": 4,

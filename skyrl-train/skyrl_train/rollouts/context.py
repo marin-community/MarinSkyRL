@@ -20,7 +20,7 @@ from skyrl_train.dynamic_sampling import (
     GroupSelectionPolicy,
     resolve_dynamic_sampling_criteria,
 )
-from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
+from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdmissionStalledError, GroupAdvantageInvariant
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.rollouts.buffer import (
     BufferSnapshot,
@@ -176,7 +176,8 @@ class TrainingContext:
         Groups reach ``on_admitted`` as they are admitted, before the batch is complete.
 
         Raises:
-            GroupAdmissionStalledError: No group was admitted for ``stall_timeout`` seconds.
+            GroupAdmissionStalledError: No group was admitted, or admitted payloads did not arrive, for
+                ``stall_timeout`` seconds.
         """
         loop = asyncio.get_running_loop()
         groups: list[RolloutGroup] = []
@@ -198,7 +199,14 @@ class TrainingContext:
                     )
             record_rollout_buffer(admission.ready_count, self.config.max_untrained_groups)
             if admission.payloads:
-                admitted = await self._until_failure(asyncio.gather(*admission.payloads))
+                try:
+                    async with asyncio.timeout(stall_timeout):
+                        admitted = await self._until_failure(asyncio.gather(*admission.payloads))
+                except TimeoutError as error:
+                    raise GroupAdmissionStalledError(
+                        f"{len(admission.payloads)} admitted rollout payloads did not arrive within "
+                        f"{stall_timeout:.0f}s: policy_step={self._policy_step} admitted={len(groups)}"
+                    ) from error
                 groups.extend(admitted)
                 await on_admitted(admitted)
                 deadline = loop.time() + stall_timeout
