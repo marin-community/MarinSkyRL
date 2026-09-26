@@ -175,10 +175,12 @@ def _run_bootstrap(
     )
 
 
-def test_policy_bootstrap_rejects_runtime_without_flash_attention_extension(tmp_path: Path) -> None:
+@pytest.mark.parametrize("architecture", ["x86_64", "aarch64"])
+def test_policy_bootstrap_rejects_runtime_without_flash_attention_extension(tmp_path: Path, architecture: str) -> None:
     environment, process_environment = _fake_frozen_runtime(tmp_path)
     site_packages = next((environment / "lib").glob("python*/site-packages"))
     (site_packages / "flash_attn_2_cuda.py").unlink()
+    _write_module(site_packages, "sitecustomize.py", f"import platform\nplatform.machine = lambda: {architecture!r}\n")
 
     result = _run_bootstrap(environment, process_environment, "megatron")
 

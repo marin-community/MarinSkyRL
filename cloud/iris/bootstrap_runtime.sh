@@ -72,10 +72,7 @@ fi
 # Keep the development linker name in this environment, outside uv's package cache.
 ln -sf "$CUDA_HOME/lib/libcudart.so.13" "$environment/lib/libcudart.so"
 ln -sf "$CUDA_HOME/lib/libnvrtc.so.13" "$environment/lib/libnvrtc.so"
-runtime_architecture="$("$python" -c 'import platform; print(platform.machine())')"
-if [[ "$runtime_architecture" != aarch64 ]]; then
-  "$python" -c "import flash_attn, flash_attn_2_cuda"
-fi
+"$python" -c "import flash_attn, flash_attn_2_cuda"
 if [[ "$profile" == megatron || "$profile" == megatron-export ]]; then
   "$python" -c "import transformer_engine.common; from megatron.bridge import AutoBridge"
 fi
