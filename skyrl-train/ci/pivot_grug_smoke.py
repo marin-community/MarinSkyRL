@@ -18,6 +18,7 @@ from cloud.iris.launch import LaunchState, execute_launch
 from cloud.iris.launch_config import compose_launch_config, load_launch_config
 from cloud.iris.runtime_bundle import resolve_launcher_source
 from infra.rl_data.pivot_swe import prepare_smoke_sample, write_smoke_report
+from skyrl_train.utils.utils import validate_cfg
 
 MODEL = "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21"
 MODEL_REVISION = "b8c07f7df1df65525abbfdbcd1572318ba11c42f"
@@ -109,6 +110,7 @@ def main() -> None:
         )
         OmegaConf.save(config, config_path)
         resolved = load_launch_config(config_path)
+        validate_cfg(resolved.skyrl)
         logger.info(
             "Preflight: {} GPUs, {} prefixes x {} responses, {} steps, runtime {}",
             resolved.iris.allocation.num_nodes * resolved.iris.allocation.gpus_per_node,
