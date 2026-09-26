@@ -49,6 +49,7 @@ def inference_bundle_nodes(
     """Return each replica's bundle nodes and check placement completeness and GPU capacity.
 
     Bundle ``dp * PP + pp`` of a replica's group belongs to stage ``pp`` of data-parallel rank ``dp``.
+    Each stage must fit on one node unless ``allow_cross_node_ep`` is enabled.
     """
     bundle_nodes = []
     per_replica = data_parallel_size * pipeline_parallel_size
