@@ -141,7 +141,7 @@ def _config(max_staleness_steps: int):
             "algorithm": {"use_kl_loss": False, "dynamic_sampling": {"type": "filter"}},
         },
     )
-    OmegaConf.update(cfg, "generator", {"n_samples_per_prompt": 2, "async_engine": True})
+    OmegaConf.update(cfg, "generator", {"n_samples_per_prompt": 2})
     OmegaConf.update(cfg, "data", {"shuffle": False})
     return cfg
 

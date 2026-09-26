@@ -18,7 +18,6 @@ async def test_generator_multi_turn_text2sql():
     initialize_ray(get_test_actor_config())
     try:
         await run_trajectory_runner_end_to_end(
-            use_async_engine=True,
             n_samples_per_prompt=5,
             num_inference_engines=2,
             tensor_parallel_size=2,

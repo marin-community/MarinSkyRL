@@ -228,8 +228,6 @@ class RayPPOTrainer:
         eval_dataset: Optional[PromptDataset] = None,
         callbacks: Optional[List[TrainerCallback]] = None,
     ):
-        if not cfg.generator.async_engine:
-            raise ValueError("the rollout-buffer training loop requires generator.async_engine=true")
         if cfg.trainer.placement.colocate_all and context.config.max_staleness_steps != 0:
             raise ValueError("colocate_all requires trainer.rollout_buffer.max_staleness_steps=0")
         self.cfg = cfg

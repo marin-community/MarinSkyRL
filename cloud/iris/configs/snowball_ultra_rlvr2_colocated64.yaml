@@ -120,7 +120,6 @@ generator:
   enforce_eager: false
   run_engines_locally: true
   weight_sync_backend: nccl
-  async_engine: true
   enable_http_endpoint: true
   sampling_params:
     temperature: 1.0

@@ -137,7 +137,6 @@ def create_ray_wrapped_inference_engines_from_config(
         num_inference_engines=cfg.generator.num_inference_engines,
         tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
         pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
-        async_engine=cfg.generator.async_engine,
         engine_init_kwargs=OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
     )
     engine_init_kwargs = {
@@ -158,8 +157,7 @@ def create_ray_wrapped_inference_engines_from_config(
     if speculative_decoding is not None:
         engine_init_kwargs["speculative_config"] = speculative_decoding.vllm_speculative_config()
         if speculative_decoding.training is not None:
-            # ``async_engine`` selects SkyRL's actor/API wrapper. vLLM separately
-            # enables its asynchronous scheduler by default, but online EAGLE
+            # vLLM enables its asynchronous scheduler by default, but online EAGLE
             # capture must reconcile each target forward before the next schedule.
             engine_init_kwargs["async_scheduling"] = False
             engine_init_kwargs["weight_transfer_config"] = {"backend": "runai_streamer"}

@@ -107,7 +107,6 @@ generator:
   enable_chunked_prefill: true
   run_engines_locally: true
   weight_sync_backend: nccl
-  async_engine: true
   enable_http_endpoint: true
   append_eos_token_after_stop_str_in_multi_turn: true
   sampling_params:

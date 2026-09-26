@@ -65,7 +65,6 @@ def get_test_actor_config(num_inference_engines: int, model: str) -> DictConfig:
         cfg.trainer.critic.model.path = ""
         cfg.trainer.flash_attn = True
         cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
-        cfg.generator.async_engine = True
         cfg.generator.num_inference_engines = num_inference_engines
         cfg.generator.inference_engine_tensor_parallel_size = TP_SIZE
         cfg.generator.run_engines_locally = True
@@ -194,7 +193,6 @@ def test_tokenize_matches_chat_prompt_ids_for_auto_content_format(ray_init_fixtu
         client, _ = init_inference_engines(
             cfg=cfg,
             use_local=True,
-            async_engine=True,
             tp_size=1,
             colocate_all=True,
             backend="vllm",
@@ -255,7 +253,6 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
         client, _ = init_inference_engines(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
@@ -327,7 +324,6 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
         client, pg = init_inference_engines(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
@@ -601,7 +597,6 @@ def test_structured_generation(ray_init_fixture):
         client, _ = init_inference_engines(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
@@ -673,7 +668,6 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         client, _ = init_inference_engines(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",

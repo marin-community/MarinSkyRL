@@ -443,7 +443,6 @@ Generator Configuration
     inference_engine_expert_parallel_size: 1  
     inference_engine_data_parallel_size: 1
     n_samples_per_prompt: 5
-    async_engine: true
     max_input_length: ${trainer.max_prompt_length} # max generator input length used for multi-turn conversations - for single turn set equal to max_prompt_length
     enable_prefix_caching: true
     enable_chunked_prefill: true
@@ -564,9 +563,8 @@ Inference Engine Configuration
 
 - ``generator.backend``: Backend to use for the inference engine. We support ``vllm`` and ``sglang``. ``sglang`` is supported only for remote inference engines at the moment.
 - ``generator.model_dtype``: Dtype used for the inference engine. This is also used during weight transfer - the policy model weights are casted to this dtype before being sent to the inference engine during weight transfer.
-- ``generator.async_engine``:  Whether to use an asynchronous/ offline inference engine. Applicable only when ``backend="vllm"``.
 - ``generator.inference_engine_tensor_parallel_size``: Tensor parallel size for the inference engine.
-- ``generator.inference_engine_pipeline_parallel_size``: Pipeline parallel size for the inference engine. Currently, PP is only supported for vLLM backend with async_engine=true.
+- ``generator.inference_engine_pipeline_parallel_size``: Pipeline parallel size for the inference engine. Currently, PP is only supported for vLLM backend.
 - ``generator.inference_engine_expert_parallel_size``: Expert parallel size for the inference engine. Currently, EP is only supported for vLLM backend and ep_size must equal dp_size * tp_size.
 - ``generator.inference_engine_data_parallel_size``: Data parallel size for the inference engine. Currently, DP is only supported for vLLM backend.
 - ``generator.gpu_memory_utilization``: GPU memory utilization for the inference engine. Applicable only for ``run_engines_locally=true``.

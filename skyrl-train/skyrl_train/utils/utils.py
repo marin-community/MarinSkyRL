@@ -817,8 +817,6 @@ def validate_generator_cfg(cfg: DictConfig):
             raise ValueError(
                 'generator.enable_http_endpoint is not supported for SGLang backend yet. Please set generator.backend="vllm".'
             )
-        if not cfg.generator.async_engine:
-            raise ValueError("generator.async_engine must be True when generator.enable_http_endpoint==True.")
 
     # Validate inference engine parallelism.
     ep_size = cfg.generator.inference_engine_expert_parallel_size

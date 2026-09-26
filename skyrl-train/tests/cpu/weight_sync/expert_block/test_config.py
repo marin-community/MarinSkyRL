@@ -18,7 +18,6 @@ def expert_block_config():
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = 8
     cfg.generator.update(
         backend="vllm",
-        async_engine=True,
         run_engines_locally=True,
         weight_sync_backend="nccl",
         weight_sync_transport="expert_block",
@@ -53,9 +52,8 @@ def test_the_default_transport_needs_nothing():
         ("trainer.policy.megatron_config.tensor_model_parallel_size", 2, "tensor_model_parallel_size 1"),
         ("trainer.policy.megatron_config.expert_tensor_parallel_size", 2, "expert_tensor_parallel_size 1"),
         ("trainer.policy.megatron_config.expert_model_parallel_size", 0, "must be positive"),
-        ("generator.backend", "sglang", "non-colocated async vLLM"),
-        ("generator.async_engine", False, "non-colocated async vLLM"),
-        ("trainer.placement.colocate_all", True, "non-colocated async vLLM"),
+        ("generator.backend", "sglang", "non-colocated vLLM"),
+        ("trainer.placement.colocate_all", True, "non-colocated vLLM"),
         ("generator.weight_sync_backend", "gloo", "must be nccl"),
         ("generator.inference_engine_tensor_parallel_size", 2, "TP=1"),
         ("generator.inference_engine_expert_parallel_size", 4, "EP equal to DP"),

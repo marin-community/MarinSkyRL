@@ -139,7 +139,6 @@ def test_online_eagle_training_uses_vllm_synchronous_scheduling(monkeypatch):
 
     cfg = get_default_config()
     cfg.trainer.placement.colocate_all = False
-    cfg.generator.async_engine = True
     cfg.generator.inference_engine_tensor_parallel_size = 1
     cfg.generator.speculative_decoding = {
         "method": "eagle3",
@@ -153,7 +152,6 @@ def test_online_eagle_training_uses_vllm_synchronous_scheduling(monkeypatch):
 
     main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
 
-    assert captured["async_engine"] is True
     assert captured["engine_init_kwargs"]["async_scheduling"] is False
     assert captured["engine_init_kwargs"]["weight_transfer_config"] == {"backend": "runai_streamer"}
 
@@ -332,7 +330,6 @@ def _run_create(
     monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
 
     fake_engine_mod = types.ModuleType("skyrl_train.inference_engines.vllm.vllm_engine")
-    fake_engine_mod.VLLMRayActor = capture.make_actor_class()
     fake_engine_mod.AsyncVLLMRayActor = capture.make_actor_class()
     fake_engine_mod.WorkerWrap = object
     monkeypatch.setitem(sys.modules, "skyrl_train.inference_engines.vllm.vllm_engine", fake_engine_mod)
@@ -385,7 +382,6 @@ def _run_create(
         shared_pg=None,
         gpu_memory_utilization=0.8,
         inference_engine_enable_sleep=False,
-        async_engine=False,
         backend="vllm",
         vllm_attention_backend=attention_backend,
         engine_init_timeout_seconds=60,

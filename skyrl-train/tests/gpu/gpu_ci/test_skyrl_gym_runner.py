@@ -63,7 +63,6 @@ MODEL_TO_GENERATION_PROMPT = {
 
 
 async def run_trajectory_runner_end_to_end(
-    use_async_engine,
     n_samples_per_prompt,
     num_inference_engines,
     tensor_parallel_size,
@@ -97,7 +96,6 @@ async def run_trajectory_runner_end_to_end(
         shared_pg=None,
         gpu_memory_utilization=0.8,
         inference_engine_enable_sleep=True,
-        async_engine=use_async_engine,
         max_num_batched_tokens=32768,
         max_num_seqs=1024,
         tokenizer=tokenizer,
@@ -181,7 +179,7 @@ async def run_trajectory_runner_end_to_end(
         ),
     )
 
-    with Timer(f"generate_responses_async_engine_{use_async_engine}"):
+    with Timer("generate_responses"):
         trajectory_batch = await trajectory_runner.run(input_batch)
 
     prompts_out = trajectory_batch["prompt_token_ids"]
@@ -231,7 +229,6 @@ async def test_trajectory_runner_single_turn_gsm8k():
     initialize_ray(get_test_actor_config())
     try:
         await run_trajectory_runner_end_to_end(
-            use_async_engine=True,
             n_samples_per_prompt=5,
             num_inference_engines=1,
             tensor_parallel_size=2,
@@ -248,7 +245,6 @@ async def test_trajectory_runner_multi_turn_search():
     initialize_ray(get_test_actor_config())
     try:
         await run_trajectory_runner_end_to_end(
-            use_async_engine=True,
             n_samples_per_prompt=5,
             num_inference_engines=2,
             tensor_parallel_size=2,
@@ -279,7 +275,6 @@ async def test_trajectory_runner_formatting_use_conversation_multi_turn(model_na
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         trajectory_batch = await run_trajectory_runner_end_to_end(
-            use_async_engine=True,
             n_samples_per_prompt=1,
             num_inference_engines=1,
             tensor_parallel_size=1,
@@ -354,7 +349,6 @@ async def test_trajectory_runner_formatting_no_use_conversation_multi_turn(model
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         trajectory_batch = await run_trajectory_runner_end_to_end(
-            use_async_engine=True,
             n_samples_per_prompt=1,
             num_inference_engines=1,
             tensor_parallel_size=1,

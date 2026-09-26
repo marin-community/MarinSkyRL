@@ -75,7 +75,6 @@ def _config():
                 "enforce_eager": False,
                 "engine_init_timeout_seconds": 30,
                 "gpu_memory_utilization": 0.5,
-                "async_engine": False,
                 "max_num_batched_tokens": 128,
                 "max_num_seqs": 4,
                 "engine_init_kwargs": {},

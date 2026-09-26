@@ -80,9 +80,7 @@ class TrajectoryPipeline(Generic[PipelineOutputT]):
 
 
 SkyRLGymPipeline = (
-    TrajectoryPipeline[Sequence[AgentLoopOutput]]
-    | TrajectoryPipeline[Sequence[Sequence[AgentLoopOutput]]]
-    | TrajectoryPipeline[TrajectoryBatch]
+    TrajectoryPipeline[Sequence[AgentLoopOutput]] | TrajectoryPipeline[Sequence[Sequence[AgentLoopOutput]]]
 )
 
 

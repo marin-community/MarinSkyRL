@@ -59,7 +59,6 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
         client, _ = init_inference_engines(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
@@ -203,7 +202,6 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
     client, _ = init_inference_engines(
         cfg=cfg,
         use_local=True,
-        async_engine=cfg.generator.async_engine,
         tp_size=cfg.generator.inference_engine_tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
         backend="vllm",
@@ -288,7 +286,6 @@ def test_pause_generation_vllm_engine(ray_init_fixture):
     client, _ = init_inference_engines(
         cfg=cfg,
         use_local=True,
-        async_engine=cfg.generator.async_engine,
         tp_size=cfg.generator.inference_engine_tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
         backend="vllm",
@@ -367,7 +364,6 @@ def test_weight_sync_with_inflight_decodes_keeps_engine_alive(ray_init_fixture):
     client, placement_group = init_inference_engines(
         cfg=cfg,
         use_local=True,
-        async_engine=True,
         tp_size=cfg.generator.inference_engine_tensor_parallel_size,
         colocate_all=True,
         backend="vllm",

@@ -87,8 +87,6 @@ Let's walk through configuration for running GRPO to train a 4-turn search agent
         generator.sampling_params.max_generate_length=500 \
 
         # - Generator multi-turn: async rollouts, sampling settings
-        # we need to make sure to set async_engine=true for async rollouts
-        generator.async_engine=true \
         generator.n_samples_per_prompt=5 \
         # this is used to set the max turns for the environment
         generator.max_turns=4 \

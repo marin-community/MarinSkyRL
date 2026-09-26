@@ -162,7 +162,6 @@ generator:
 
   run_engines_locally: true
   weight_sync_backend: nccl
-  async_engine: true
   enable_http_endpoint: true
   inference_stats_interval: 1
   append_eos_token_after_stop_str_in_multi_turn: true

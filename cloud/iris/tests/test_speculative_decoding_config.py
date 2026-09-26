@@ -227,7 +227,6 @@ def test_online_speculator_requires_explicit_single_rank_inference(tmp_path: Pat
         ({"num_inference_engines": 2}, "num_inference_engines=1"),
         ({"tensor_parallel_size": 2}, "tensor_parallel_size=1"),
         ({"pipeline_parallel_size": 2}, "pipeline_parallel_size=1"),
-        ({"async_engine": False}, "async_engine=true"),
         ({"engine_init_kwargs": {"async_scheduling": True}}, "async_scheduling"),
     ],
 )

@@ -32,7 +32,6 @@ uv run --isolated --extra megatron --extra vllm -m scripts.full_context.main_ful
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.async_engine=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \

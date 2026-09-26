@@ -27,7 +27,6 @@ def get_test_actor_config() -> DictConfig:
         cfg.trainer.critic.model.path = ""
         cfg.trainer.flash_attn = True
         cfg.trainer.placement.policy_num_gpus_per_node = 2
-        cfg.generator.async_engine = True
         cfg.generator.num_inference_engines = 1
         cfg.generator.run_engines_locally = True
 
@@ -61,7 +60,6 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
             model=MODEL,
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend=backend,

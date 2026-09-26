@@ -119,7 +119,6 @@ def engine_client(cfg, model_path: str, geometry: Geometry) -> InferenceEngineCl
         enforce_eager=False,
         engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
         gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
-        async_engine=True,
         max_num_batched_tokens=MAX_MODEL_LEN * geometry.engine_dp,
         max_num_seqs=cfg.trainer.train_batch_size,
         tokenizer=tokenizer,
