@@ -23,6 +23,7 @@ class _Grads:
 class _Optimizer:
     def __init__(self, grads: _Grads):
         self.grads = grads
+        self.optimizer = object()
         self.grads_resident_during = {}
 
     def sharded_state_dict(self, model_sharded_state_dict, *, is_loading, metadata):

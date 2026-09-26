@@ -106,6 +106,10 @@ def stub_megatron_modules() -> None:
             "ChainedOptimizer": type("ChainedOptimizer", (), {}),
             "DistributedOptimizer": type("DistributedOptimizer", (), {}),
         },
+        "megatron.core.optimizer.cpu_offloading": {},
+        "megatron.core.optimizer.cpu_offloading.hybrid_optimizer": {
+            "HybridDeviceOptimizer": type("HybridDeviceOptimizer", (), {}),
+        },
         "megatron.core.utils": {"get_attr_wrapped_model": lambda *args, **kwargs: None},
         "megatron.core.packed_seq_params": {
             "PackedSeqParams": type(
