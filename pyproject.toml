@@ -28,6 +28,7 @@ dependencies = [
     "loguru",
     "marin-finelog",
     "marin-finelog-server",
+    "marin-finestore @ git+https://github.com/marin-community/marin.git@8068a1c40dd303c254cacf73f4ef863120253435#subdirectory=lib/finestore",
     "marin-iris",
     "marin-iris-native",
     "marin-rigging[secrets]>=0.2.123.dev35633925924",
@@ -178,6 +179,8 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 override-dependencies = [
+    "marin-finestore @ git+https://github.com/marin-community/marin.git@8068a1c40dd303c254cacf73f4ef863120253435#subdirectory=lib/finestore",
+    "marin-rigging==0.2.123.dev35633925924",
     # Megatron Bridge declares this native extension but does not import or use it.
     "fast-hadamard-transform ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",
