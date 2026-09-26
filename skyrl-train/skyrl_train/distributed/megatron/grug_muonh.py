@@ -29,6 +29,7 @@ _QUINTIC_COEFFICIENTS = (
     (2.8769, -3.1427, 1.2046),
     (2.8366, -3.0525, 1.2012),
 )
+_MATRIX_RANKS = (2, 3)
 
 
 def grug_muonh_route(name: str, parameter: Tensor) -> Route:
@@ -46,7 +47,7 @@ def grug_muonh_route(name: str, parameter: Tensor) -> Route:
         return ADAM_ROUTE
     if "output_proj" in lower_name or "lm_head" in lower_name or "output_layer" in lower_name:
         return ADAMH_ROUTE
-    if parameter.ndim in (2, 3):
+    if parameter.ndim in _MATRIX_RANKS:
         return MUONH_ROUTE
     return ADAM_ROUTE
 
@@ -148,7 +149,7 @@ class GrugMegatronMuonH(Optimizer):
                     continue
                 if gradient.is_sparse:
                     raise RuntimeError("MuonH does not support sparse gradients")
-                if route != ADAM_ROUTE and parameter.ndim not in (2, 3):
+                if route != ADAM_ROUTE and parameter.ndim not in _MATRIX_RANKS:
                     raise RuntimeError(f"{route} received a rank-{parameter.ndim} parameter")
                 state = self._initialize_parameter_state(parameter, route, prototype=gradient)
                 if route == MUONH_ROUTE:
