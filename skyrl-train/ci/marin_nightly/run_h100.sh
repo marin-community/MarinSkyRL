@@ -41,6 +41,10 @@ N_SAMPLES="${N_SAMPLES:-8}"
 MAX_GEN_LEN="${MAX_GEN_LEN:-512}"
 MAX_PROMPT_LEN="${MAX_PROMPT_LEN:-512}"
 LR="${LR:-2.0e-6}"
+# The nightly trains synchronously with vLLM sharing the policy GPU. An asynchronous run
+# (MAX_STALENESS_STEPS >= 1) needs COLOCATE_ALL=false and a second GPU for the engine.
+MAX_STALENESS_STEPS="${MAX_STALENESS_STEPS:-0}"
+COLOCATE_ALL="${COLOCATE_ALL:-true}"
 
 # train_batch_size * MAX_STEPS prompts get consumed; keep some margin. Evaluation is off, but
 # data.val_data still has to resolve, so a handful of rows is enough.
@@ -79,8 +83,9 @@ for name, rows in (("train", int(os.environ["TRAIN_ROWS"])), ("validation", int(
     print(f"{path}: {frame.height} rows")
 PY
 
-echo "::: training ${MODEL} for ${MAX_STEPS} steps on one GPU"
+echo "::: training ${MODEL} for ${MAX_STEPS} steps"
 echo "::: shape: batch=${TRAIN_BATCH_SIZE} samples=${N_SAMPLES} gen_len=${MAX_GEN_LEN} lr=${LR}"
+echo "::: rollouts: max_staleness_steps=${MAX_STALENESS_STEPS} colocate_all=${COLOCATE_ALL}"
 # vLLM warms up DeepGEMM FP8 kernels whenever the GPU supports them (is_deep_gemm_supported() is
 # true on Hopper) regardless of whether the `deep_gemm` package actually imported -- and it is not
 # in this environment, so the warmup hard-fails at engine start. This is a bf16 model that never
@@ -104,7 +109,8 @@ START=$(date +%s)
   trainer.policy.model.path="$MODEL" \
   trainer.policy.optimizer_config.lr="$LR" \
   "${STRATEGY_ARGS[@]}" \
-  trainer.placement.colocate_all=true \
+  trainer.placement.colocate_all="$COLOCATE_ALL" \
+  trainer.rollout_buffer.max_staleness_steps="$MAX_STALENESS_STEPS" \
   trainer.placement.policy_num_gpus_per_node=1 \
   trainer.placement.critic_num_gpus_per_node=1 \
   trainer.placement.ref_num_gpus_per_node=1 \

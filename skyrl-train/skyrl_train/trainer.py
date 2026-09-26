@@ -228,8 +228,6 @@ class RayPPOTrainer:
         eval_dataset: Optional[PromptDataset] = None,
         callbacks: Optional[List[TrainerCallback]] = None,
     ):
-        if cfg.trainer.placement.colocate_all and context.config.max_staleness_steps != 0:
-            raise ValueError("colocate_all requires trainer.rollout_buffer.max_staleness_steps=0")
         self.cfg = cfg
         self.context = context
         self._training_metrics_enabled: bool = cfg.trainer.training_metrics

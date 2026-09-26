@@ -181,6 +181,18 @@ def test_colocated_config_rejects_non_node_atomic_tp_geometry():
         validate_cfg(cfg)
 
 
+def test_colocated_config_rejects_asynchronous_rollouts_before_allocation():
+    cfg = example_dummy_config()
+    cfg.trainer.train_batch_size = 4
+    cfg.trainer.policy_mini_batch_size = 4
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.trainer.placement.colocate_all = True
+    cfg.trainer.rollout_buffer.max_staleness_steps = 1
+
+    with pytest.raises(ValueError, match="colocate_all requires"):
+        validate_cfg(cfg)
+
+
 def test_config_rejects_nonpositive_engine_startup_timeout():
     cfg = example_dummy_config()
     cfg.trainer.train_batch_size = 4

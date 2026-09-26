@@ -669,6 +669,9 @@ def validate_cfg(cfg: DictConfig):
 
     # Validate placement
     validate_expert_block_transport(cfg)
+    if cfg.trainer.placement.colocate_all and cfg.trainer.rollout_buffer.max_staleness_steps != 0:
+        # Colocated engines sleep during training, so no rollout may run ahead of the trained policy.
+        raise ValueError("colocate_all requires trainer.rollout_buffer.max_staleness_steps=0")
     if cfg.trainer.placement.colocate_all:
         tp_pp_size = (
             cfg.generator.inference_engine_tensor_parallel_size * cfg.generator.inference_engine_pipeline_parallel_size
