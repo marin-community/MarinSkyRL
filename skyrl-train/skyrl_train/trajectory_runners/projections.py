@@ -86,6 +86,7 @@ class WholeTrajectoryProjection:
         attach_student_topk(batch, outputs, responses, loss_masks)
         attach_routed_experts(batch, outputs, responses)
         attach_terminal_classifications(batch, outputs)
+        attach_server_errors(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
         return batch
 
@@ -147,6 +148,7 @@ class StepWiseTrajectoryProjection:
         attach_student_topk(batch, steps, responses, loss_masks)
         attach_routed_experts(batch, steps, responses)
         attach_terminal_classifications(batch, steps)
+        attach_server_errors(batch, steps)
         _attach_reward_channels(batch, steps, responses)
         return batch
 
@@ -159,6 +161,25 @@ def attach_terminal_classifications(batch: TrajectoryBatch, outputs: Sequence[Tr
         batch["exception_types"] = exception_types
     if any(error_treatment is not None for error_treatment in error_treatments):
         batch["error_treatments"] = error_treatments
+
+
+def attach_server_errors(batch: TrajectoryBatch, outputs: Sequence[AgentLoopOutput]) -> None:
+    """Keep safe model-serving diagnostics with the corresponding trajectory row."""
+    errors = []
+    for output in outputs:
+        diagnostics = output.verification.diagnostics
+        if "error_category" in diagnostics:
+            errors.append(
+                {
+                    "category": diagnostics["error_category"],
+                    "request_id": diagnostics["request_id"],
+                    "status_code": diagnostics["status_code"],
+                }
+            )
+        else:
+            errors.append(None)
+    if any(error is not None for error in errors):
+        batch["server_errors"] = errors
 
 
 def attach_routed_experts(

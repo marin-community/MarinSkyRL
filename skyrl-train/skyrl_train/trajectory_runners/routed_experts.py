@@ -8,6 +8,22 @@ from typing import Any
 import numpy as np
 
 
+def decode_routed_experts(routes: str, expected_rows: int) -> np.ndarray:
+    """Decode the complete vLLM route array, including prompt rows."""
+    try:
+        payload = base64.b64decode(routes, validate=True)
+        if not payload.startswith(b"\x93NUMPY"):
+            raise ValueError("missing NumPy array header")
+        rows = np.load(io.BytesIO(payload), allow_pickle=False)
+    except (binascii.Error, EOFError, ValueError, OSError) as error:
+        raise ValueError("routed_experts must be a base64-encoded NumPy array") from error
+    if rows.ndim != 3:
+        raise ValueError("routed_experts must have [token, layer, expert] shape")
+    if rows.shape[0] != expected_rows:
+        raise ValueError(f"routed_experts has {rows.shape[0]} token rows; expected {expected_rows}")
+    return rows
+
+
 def normalize_routed_experts(
     routes: Any, prompt_ids: list[int] | None, response_ids: list[int]
 ) -> list[list[list[int]]]:
@@ -20,18 +36,8 @@ def normalize_routed_experts(
     if isinstance(routes, str):
         if prompt_ids is None:
             raise ValueError("encoded routed_experts requires exact prompt token IDs")
-        try:
-            payload = base64.b64decode(routes, validate=True)
-            if not payload.startswith(b"\x93NUMPY"):
-                raise ValueError("missing NumPy array header")
-            rows = np.load(io.BytesIO(payload), allow_pickle=False)
-        except (binascii.Error, EOFError, ValueError, OSError) as error:
-            raise ValueError("routed_experts must be a base64-encoded NumPy array") from error
         expected = len(prompt_ids) + len(response_ids) - 1
-        if rows.ndim != 3:
-            raise ValueError("routed_experts must have [token, layer, expert] shape")
-        if rows.shape[0] != expected:
-            raise ValueError(f"routed_experts has {rows.shape[0]} token rows; expected {expected}")
+        rows = decode_routed_experts(routes, expected)
         rows = rows[len(prompt_ids) :]
         if response_ids:
             rows = np.concatenate((rows, np.zeros((1, *rows.shape[1:]), dtype=rows.dtype)))

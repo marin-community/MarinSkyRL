@@ -49,7 +49,7 @@ from skyrl_train.io import io
 
 RETENTION_METRIC_PREFIX = "generate/trajectory_retention"
 RETENTION_SCHEMA_VERSION = 1
-TRAJECTORY_RECORD_SCHEMA_VERSION = 3
+TRAJECTORY_RECORD_SCHEMA_VERSION = 4
 _LEDGER_NAME = "_retention_ledger.json"
 _SELECTION_COUNT = "count"
 _SELECTION_FRACTION = "fraction"
@@ -192,6 +192,7 @@ class _RewardTrace:
 class _DispositionTrace:
     exception_type: str | None
     error_treatment: str | None
+    server_error: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -382,10 +383,13 @@ def build_trajectory_records(
     stop_reasons = output.get("stop_reasons") or [None] * len(output["response_ids"])
     exception_types = output.get("exception_types") or [None] * len(output["response_ids"])
     error_treatments = output.get("error_treatments") or [None] * len(output["response_ids"])
+    server_errors = output.get("server_errors") or [None] * len(output["response_ids"])
     if len(exception_types) != len(output["response_ids"]):
         raise ValueError("exception types must have one entry per trajectory row")
     if len(error_treatments) != len(output["response_ids"]):
         raise ValueError("error treatments must have one entry per trajectory row")
+    if len(server_errors) != len(output["response_ids"]):
+        raise ValueError("server errors must have one entry per trajectory row")
     unshaped = output.get("unshaped_rewards")
     components = output.get("reward_shaping_components")
     loop_spans = output.get("reward_shaping_loop_spans")
@@ -450,6 +454,7 @@ def build_trajectory_records(
             disposition=_DispositionTrace(
                 exception_type=exception_types[final_index],
                 error_treatment=error_treatments[final_index],
+                server_error=server_errors[final_index],
             ),
             verifier=None if verifier_tests is None else verifier_tests[final_index],
             metrics=to_jsonable(output.get("rollout_metrics") or {}),

@@ -1898,6 +1898,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
 
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
+        request_id = headers.get("x-request-id") or uuid4().hex
         exact_prompt_token_ids = body.pop(EXACT_PROMPT_TOKEN_IDS_KEY, None)
 
         # Apply configured sampling params from generator config.
@@ -1930,7 +1931,11 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             else:
                 generator = await self.openai_serving_completion.create_completion(request, minimal_request)
                 assert isinstance(generator, (CompletionResponse, ErrorResponse))
-            return generator.model_dump()
+            response = generator.model_dump()
+            if isinstance(generator, ErrorResponse):
+                response["request_id"] = request_id
+                response["error_category"] = "server_error"
+            return response
 
         except Exception as e:
             # Handle it here so we can surface the error from a ray worker.
@@ -1958,10 +1963,22 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
                 is_input_overflow = "input tokens" in str(e) and "context length" in str(e)
 
             status = HTTPStatus.BAD_REQUEST if is_input_overflow else HTTPStatus.INTERNAL_SERVER_ERROR
+            message = str(e)
+            category = (
+                "context_overflow"
+                if is_input_overflow
+                else "constrained_decoding"
+                if "Failed to advance FSM" in message or "grammar rejected tokens" in message
+                else "internal_error"
+            )
+            logger.opt(exception=e).error("vLLM {} request_id={} failed: {}", endpoint, request_id, category)
             if is_input_overflow:
                 logger.warning("Input-overflow rejected by vLLM serving (returning 400, non-retryable): %s", e)
 
-            return _build_error_response(str(e), status.phrase, status.value)
+            response = _build_error_response(message, status.phrase, status.value)
+            response["request_id"] = request_id
+            response["error_category"] = category
+            return response
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint for handling `/chat/completions` in Python vLLM engine.

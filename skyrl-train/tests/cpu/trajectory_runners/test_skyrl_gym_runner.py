@@ -25,6 +25,7 @@ from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput, BaseTextEnv
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, BatchMetadata, TokenProvenance
+from skyrl_train.trajectory_runners.model_clients import ModelServerError
 
 
 # Mock constants, where 4 is the eos token id
@@ -184,9 +185,122 @@ async def test_whole_trajectory_collector_masks_one_agent_loop_failure(generator
     assert batch["rollout_logprobs"] == [[-0.5], [0.0]]
     assert batch["student_topk_indices"] == [[[12, 13]], [[-1, -1]]]
     assert batch["behavior_topk_logprobs"][1] == [[0.0, 0.0]]
-    assert batch["exclude_from_baseline"] == [False, True]
-    assert batch["exception_types"] == [None, "TimeoutError"]
-    assert batch["error_treatments"] == [None, "mask"]
+    assert batch["exclude_from_baseline"] == [False, False]
+    assert batch["exception_types"] == [None, "AgentTimeoutError"]
+    assert batch["error_treatments"] == [None, "zero"]
+
+
+@pytest.mark.parametrize(
+    ("error", "exception_type"),
+    [
+        (ModelServerError("context_overflow", "request-123", 400), "ContextLengthExceededError"),
+        (TimeoutError("agent timed out"), "AgentTimeoutError"),
+    ],
+)
+def test_gym_terminal_errors_use_harbor_classification(generator_cfg, mock_tokenizer, error, exception_type):
+    from skyrl_train.utils.harbor_errors import classify_exception_type
+
+    runner = SkyRLGymTrajectoryRunner(generator_cfg, DictConfig({"max_env_workers": 0}), MagicMock(), mock_tokenizer)
+    output = runner.failed_agent_loop_output(_two_row_request("train"), 1, error)
+
+    assert output.disposition.exception_type == exception_type
+    assert output.error_treatment == classify_exception_type(exception_type, runner.error_handling).value
+    assert output.disposition.baseline_eligible
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+@pytest.mark.parametrize(
+    ("failure_phase", "treatment"),
+    [("generate", "zero"), ("step", "zero"), ("generate", "passthrough"), ("generate", "mask")],
+)
+async def test_gym_terminal_error_retains_only_completed_turn(
+    mock_make, generator_cfg, mock_tokenizer, mock_env, failure_phase, treatment
+):
+    generator_cfg.use_conversation_multi_turn = False
+    generator_cfg.sampling_params.logprobs = 1
+    if treatment == "passthrough":
+        generator_cfg.error_handling.passthrough_exceptions = ["ContextLengthExceededError"]
+    elif treatment == "mask":
+        generator_cfg.error_handling.mask_exceptions = ["ContextLengthExceededError"]
+    mock_env.init.return_value = ([{"role": "user", "content": "question"}], {})
+    mock_env.step.side_effect = [
+        BaseTextEnvStepOutput(observations=[{"role": "user", "content": "next"}], reward=1.0, done=False, metadata={}),
+        TimeoutError("step timed out") if failure_phase == "step" else None,
+    ]
+    mock_make.return_value = mock_env
+    model_client = AsyncMock()
+    successful_turn = {
+        "responses": ["answer"],
+        "response_ids": [[10, 12]],
+        "stop_reasons": ["stop"],
+        "response_logprobs": [[-0.1, -0.2]],
+        "routed_experts": [[[[1, 2]], [[3, 4]]]],
+        "token_provenance": "engine",
+    }
+    model_client.generate.side_effect = [
+        successful_turn,
+        ModelServerError("context_overflow", "request-123", 400) if failure_phase == "generate" else successful_turn,
+    ]
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg, DictConfig({"max_env_workers": 0}), MagicMock(), mock_tokenizer, model_client=model_client
+    )
+
+    output = await runner.agent_loop([{"role": "user", "content": "question"}], "test", {}, 8, 512)
+
+    assert output.evidence.response_token_ids[:2] == (10, 12)
+    assert output.evidence.behavior_logprobs[:2] == (-0.1, -0.2)
+    assert output.evidence.routed_experts[:2] == (((1, 2),), ((3, 4),))
+    assert output.evidence.generated_token_count == 2
+    assert output.verification.score == 1.0
+    if failure_phase == "generate":
+        assert output.verification.diagnostics["request_id"] == "request-123"
+    assert output.reward.unshaped_reward == 1.0
+    assert output.reward.optimization_reward == (1.0 if treatment == "passthrough" else 0.0)
+    assert output.disposition.exception_type == (
+        "ContextLengthExceededError" if failure_phase == "generate" else "AgentTimeoutError"
+    )
+    assert output.error_treatment == treatment
+    assert output.disposition.loss_eligible is (treatment != "mask")
+    assert output.disposition.baseline_eligible is (treatment != "mask")
+
+
+def test_gym_masked_server_failure_retains_safe_diagnostics(generator_cfg, mock_tokenizer):
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg,
+        DictConfig({"max_env_workers": 0}),
+        MagicMock(),
+        mock_tokenizer,
+    )
+    error = ModelServerError("constrained_decoding", "request-123", 500)
+
+    output = runner.failed_agent_loop_output(_two_row_request("train"), 1, error)
+
+    assert output.loss_mask == [0]
+    assert output.verification.diagnostics == {
+        "exception_type": "ModelServerError",
+        "error_category": "constrained_decoding",
+        "request_id": "request-123",
+        "status_code": 500,
+    }
+
+
+@pytest.mark.asyncio
+async def test_gym_server_failure_projects_safe_diagnostics(generator_cfg, mock_tokenizer):
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg,
+        DictConfig({"max_env_workers": 0}),
+        MagicMock(),
+        mock_tokenizer,
+    )
+    runner.agent_loop = _masking_agent_loop(ModelServerError("constrained_decoding", "request-123", 500))
+
+    batch = await runner._run(_two_row_request("train"), disable_tqdm=True)
+
+    assert batch["server_errors"] == [
+        None,
+        {"category": "constrained_decoding", "request_id": "request-123", "status_code": 500},
+    ]
 
 
 @pytest.mark.asyncio
@@ -258,7 +372,7 @@ async def test_agent_loop_failure_closes_environment_before_masking(generator_cf
     env.close.assert_called_once_with()
     assert batch["response_ids"] == [[0]]
     assert batch["loss_masks"] == [[0]]
-    assert batch["exception_types"] == ["TimeoutError"]
+    assert batch["exception_types"] == ["AgentTimeoutError"]
 
 
 def test_tis_config_does_not_select_a_generation_strategy():
@@ -1295,7 +1409,7 @@ async def test_generate_interface_compliance(
     trajectory_runner.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     prompts: List[ConversationType] = [[{"role": "user", "content": "What is 2 * 3?"}]]
-    env_extras: List[Dict[str, Any]] = [{"answer": "6"}]
+    env_extras: List[Dict[str, Any]] = [{"answer": "6", "data_source": "math"}]
     env_classes = [mock_env_cfg.env_class for _ in prompts]
 
     input_batch: TrajectoryRequestBatch = {
@@ -1318,6 +1432,7 @@ async def test_generate_interface_compliance(
     assert len(trajectory_batch["response_ids"]) == len(prompts), "Number of responses should match number of prompts"
     assert len(trajectory_batch["rewards"]) == len(prompts), "Number of rewards should match number of prompts"
     assert len(trajectory_batch["loss_masks"]) == len(prompts), "Number of loss masks should match number of prompts"
+    assert trajectory_batch["data_sources"] == [extras["data_source"] for extras in env_extras]
 
 
 @pytest.mark.asyncio

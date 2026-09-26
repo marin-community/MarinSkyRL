@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.rollouts.buffer import RolloutGroup
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.trajectory_runners.base import TrajectoryID
@@ -109,6 +110,31 @@ def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatc
         "postprocess_trajectory_batch": 18.0,
         "convert_to_training_input": 3.0,
     }
+
+
+def test_rollout_batch_conversion_records_domain_reward_metrics():
+    trainer = object.__new__(RayPPOTrainer)
+    trainer.context = SimpleNamespace(config=SimpleNamespace(batch_size=3, max_staleness_steps=0))
+    trainer.cfg = get_default_config()
+    trainer.cfg.trainer.algorithm.policy_loss_type = "pg"
+    trainer.cfg.generator.n_samples_per_prompt = 2
+    trainer.global_step = 0
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer.tokenizer = SimpleNamespace(decode=str)
+    trainer.select_trajectories = lambda batch, uids: (batch, uids)
+    trainer.convert_to_training_input = lambda batch, uids, *, rollout_staleness: batch
+    math = _group("math", 0, rewards=[0.2, 0.6])
+    tools = _group("tools", 0, rewards=[0.6, 1.0])
+    missing = _group("missing", 0, rewards=[0.4, 0.6])
+    math.trajectory_batch["data_sources"] = ["math", "math"]
+    tools.trajectory_batch["data_sources"] = ["tools", "tools"]
+
+    trainer.convert_rollout_groups_to_training_input([math, tools, missing])
+
+    assert trainer.all_metrics["reward/domain/math/avg_raw_reward"] == pytest.approx(0.4)
+    assert trainer.all_metrics["reward/domain/tools/avg_raw_reward"] == pytest.approx(0.8)
+    assert trainer.all_metrics["reward/domain/_missing/avg_raw_reward"] == pytest.approx(0.5)
 
 
 class _RecordingDistillationRuntime:

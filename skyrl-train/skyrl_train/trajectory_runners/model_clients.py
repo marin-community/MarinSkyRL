@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
+from uuid import uuid4
 
 
 from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInput, InferenceEngineOutput
@@ -33,6 +34,20 @@ class ModelClient(Protocol):
     """Transport-neutral model request boundary for trajectory runners."""
 
     async def generate(self, request: InferenceEngineInput) -> ModelClientOutput: ...
+
+
+class ModelServerError(RuntimeError):
+    """A model-serving failure with safe diagnostics for retained trajectories."""
+
+    def __init__(self, category: str, request_id: str | None, status_code: int | None):
+        self.category = category
+        self.request_id = request_id
+        self.status_code = status_code
+        super().__init__(f"Model server error: {category}; request_id={request_id}")
+
+
+class ContextLengthExceededError(ModelServerError):
+    """A serving rejection caused by an overlong model context."""
 
 
 @dataclass(frozen=True)
@@ -217,9 +232,20 @@ class DirectModelClient:
                 # vLLM may include the sampled token outside the natural top K.
                 body["top_logprobs"] = requested_top_k + 1
                 body["return_tokens_as_token_ids"] = True
-            response = await self._client.chat_completion({"json": body, "headers": {}})
+            request_id = uuid4().hex
+            response = await self._client.chat_completion({"json": body, "headers": {"x-request-id": request_id}})
             if "choices" not in response:
-                raise RuntimeError(f"vLLM chat completion failed: {response}")
+                error = response.get("error") or {}
+                error_type = (
+                    ContextLengthExceededError
+                    if response.get("error_category") == "context_overflow"
+                    else ModelServerError
+                )
+                raise error_type(
+                    category=response.get("error_category", "server_error"),
+                    request_id=response.get("request_id", request_id),
+                    status_code=error.get("code") if isinstance(error, dict) else None,
+                )
             choice = response["choices"][0]
             response_ids = choice.get("token_ids")
             if not isinstance(response_ids, list) or not all(isinstance(token, int) for token in response_ids):

@@ -4,6 +4,7 @@ import io as stdlib_io
 import json
 import math
 import os
+import re
 import shutil
 import threading
 import time
@@ -151,6 +152,47 @@ class CheckpointSnapshot:
 
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
+
+MAX_DOMAIN_REWARD_METRICS = 32
+
+
+def _domain_metric_source_key(source: str | None) -> str:
+    """Encode one source as a distinct, tracker-safe metric path segment.
+
+    Lowercase ASCII names stay readable. ``_missing`` denotes absent metadata;
+    other names use fixed-width UTF-8 byte escapes under ``_source_``.
+    """
+    if source is None:
+        return "_missing"
+    if re.fullmatch(r"[a-z_][a-z0-9_]*", source) and source != "_missing" and not source.startswith("_source_"):
+        return source
+    encoded = "".join(
+        chr(byte) if byte in b"abcdefghijklmnopqrstuvwxyz0123456789" else f"_{byte:02x}"
+        for byte in source.encode("utf-8")
+    )
+    return f"_source_{encoded}"
+
+
+def _domain_reward_metrics(data_sources: List[str | None], rewards: List[float]) -> Dict[str, float]:
+    """Return bounded per-source means with distinct, stable metric names."""
+    if len(data_sources) != len(rewards):
+        raise ValueError(
+            f"Expected one data source per reward, got {len(data_sources)} sources and {len(rewards)} rewards"
+        )
+
+    rewards_by_source: Dict[str, List[float]] = defaultdict(list)
+    for source, reward in zip(data_sources, rewards, strict=True):
+        rewards_by_source[_domain_metric_source_key(source)].append(reward)
+
+    sources = sorted(rewards_by_source)
+    metrics = {
+        f"reward/domain/{source}/avg_raw_reward": float(np.mean(rewards_by_source[source]))
+        for source in sources[:MAX_DOMAIN_REWARD_METRICS]
+    }
+    if len(sources) > MAX_DOMAIN_REWARD_METRICS:
+        overflow = [reward for source in sources[MAX_DOMAIN_REWARD_METRICS:] for reward in rewards_by_source[source]]
+        metrics["reward/domain_overflow/avg_raw_reward"] = float(np.mean(overflow))
+    return metrics
 
 
 def _active_online_eagle_results(results: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -2138,6 +2180,14 @@ class RayPPOTrainer:
                 max(values) > min(values) for values in grouped_rewards.values()
             ) / len(grouped_rewards)
         self.all_metrics.update(reward_metrics)
+        data_sources = trajectory_batch_for_metrics.get("data_sources")
+        if data_sources is not None:
+            self.all_metrics.update(
+                _domain_reward_metrics(
+                    data_sources,
+                    [float(sum(reward) if isinstance(reward, list) else reward) for reward in step_rewards],
+                )
+            )
         logger.info(f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, reward/avg_raw_reward: {mean_reward}")
 
         # re-assign reward but now it's per token rewards
