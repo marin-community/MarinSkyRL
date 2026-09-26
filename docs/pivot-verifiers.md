@@ -127,6 +127,39 @@ for action datasets and `metadata.source_trajectory_uid` for Terminal. Split by
 this field before creating training and evaluation sets. The preparation command
 does not create a split or filter for prompt length.
 
+## Grug smoke preflight
+
+The SWE smoke for `open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21`
+uses 32 learner GPUs at TP1/PP2/CP1/EP8 and 32 rollout GPUs. Sample packing is
+disabled. CP1 keeps each sequence on one rank and avoids the pinned Transformer
+Engine 2.11 restrictions on context parallelism across multiple ranks:
+
+- p2p rejects sliding-window attention.
+- All-gather rejects packed sequences, which the trainer requires for CP > 1.
+- All-to-all CP2 requires an even split of KV heads; the smoke model has five.
+
+These restrictions are enforced in
+[Transformer Engine's context-parallel attention](https://github.com/NVIDIA/TransformerEngine/blob/v2.11/transformer_engine/pytorch/attention/dot_product_attention/context_parallel.py).
+
+Run the launcher without `--run` to validate the recipe locally:
+
+```bash
+PYTHONPATH=skyrl-train:skyrl-gym:. uv run --no-sync skyrl-train/ci/pivot_grug_smoke.py \
+  --run-id grug-preflight \
+  --output-root /tmp/grug-preflight/output \
+  --temporary-root /tmp/grug-preflight/temporary
+```
+
+This checks the launch topology, trainer configuration, and this smoke's CP1
+requirement before dataset preparation, model caching, or Iris submission.
+It runs on CPU and does not load model weights. Passing does not establish CUDA
+kernel compatibility or sufficient GPU memory.
+
+For a smaller GPU check, the existing
+`skyrl-train/tests/gpu/test_grug_megatron.py::test_grug_megatron_pp2_train_step_updates_weights_and_exports`
+test uses two H100s and a tiny Grug checkpoint to exercise a training step and
+export. It does not validate the full 64-GPU placement or the 67B model's memory use.
+
 ## Tests
 
 ```bash

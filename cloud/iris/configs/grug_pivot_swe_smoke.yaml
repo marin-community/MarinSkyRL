@@ -1,4 +1,4 @@
-# Two-step SWE Pivot smoke using the Snowball split64 PP2/CP2/EP8 placement.
+# Two-step SWE Pivot smoke using the Snowball split64 PP2/CP1/EP8 placement.
 # Mini-batches count prefixes: 64 prefixes x 16 responses = 1024 trajectories.
 # The 16K window and 512-token cap bound startup cost; this is not the full-context arm.
 entrypoint: standard
@@ -35,7 +35,7 @@ trainer:
   eval_batch_size: 16
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
-  use_sample_packing: true
+  use_sample_packing: false
   resume_mode: none
   logger: console
   project_name: pivot-grug-swe-smoke
@@ -48,7 +48,7 @@ trainer:
     megatron_config:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 2
-      context_parallel_size: 2
+      context_parallel_size: 1
       expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
       optimizer_checkpoint_sharding_type: dp_reshardable
@@ -60,7 +60,7 @@ trainer:
     megatron_config:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 2
-      context_parallel_size: 2
+      context_parallel_size: 1
       expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
   placement:
