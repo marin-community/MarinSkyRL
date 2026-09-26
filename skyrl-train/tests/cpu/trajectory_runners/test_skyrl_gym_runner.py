@@ -11,7 +11,6 @@ from omegaconf import DictConfig
 
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.distillation_adapters import build_teacher_scoring_work
-from skyrl_train.policy_version import policy_version_bounds
 
 from skyrl_train.rollout_observability import observe_rollout_call
 from skyrl_train.trajectory_runners.skyrl_gym import ExactChatTransportError, SkyRLGymTrajectoryRunner
@@ -907,58 +906,6 @@ async def test_non_batched_terminal_assembly_masks_unsampled_tokens(
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
-async def test_generate_non_batched_multiturn_keeps_the_oldest_version(
-    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
-):
-    generator_cfg.batched = False
-    generator_cfg.use_conversation_multi_turn = True
-    generator_cfg.max_turns = 3
-    mock_make.return_value = mock_env
-    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
-    mock_env.step.side_effect = [
-        BaseTextEnvStepOutput(observations=[{"role": "user", "content": "again"}], reward=0.0, done=False, metadata={}),
-        BaseTextEnvStepOutput(observations=[{"role": "user", "content": "again"}], reward=0.0, done=False, metadata={}),
-        BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={}),
-    ]
-    mock_llm.generate.side_effect = [
-        {"responses": [""], "stop_reasons": ["stop"], "response_ids": [[]], "response_policy_version_segments": [[]]},
-        {
-            "responses": ["first"],
-            "stop_reasons": ["stop"],
-            "response_ids": [[10, 4]],
-            "response_policy_version_segments": [[{"start": 0, "token_count": 2, "policy_version": 2}]],
-        },
-        {
-            "responses": ["second"],
-            "stop_reasons": ["stop"],
-            "response_ids": [[20, 4]],
-            "response_policy_version_segments": [[{"start": 0, "token_count": 2, "policy_version": 3}]],
-        },
-    ]
-
-    trajectory_runner = SkyRLGymTrajectoryRunner(
-        trajectory_runner_cfg=generator_cfg,
-        skyrl_gym_cfg=mock_env_cfg,
-        inference_engine_client=mock_llm,
-        tokenizer=mock_tokenizer,
-    )
-    trajectory_runner.base_conversation_token_ids = []
-    output = await trajectory_runner.run(
-        {
-            "prompts": [[{"role": "user", "content": "question"}]],
-            "env_extras": [{}],
-            "env_classes": [mock_env_cfg.env_class],
-        }
-    )
-
-    rows = output["behavior_policy_version_segments"]
-    assert [segment["policy_version"] for segment in rows[0]] == [2, 3]
-    assert policy_version_bounds(rows) == (2, 3)
-    assert output["oldest_policy_version"] == 2
-
-
-@pytest.mark.asyncio
-@patch("skyrl_gym.make")
 async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
     mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
 ):
@@ -1045,6 +992,7 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
             {"start": 6, "token_count": 2, "policy_version": 1},
         ]
     ]
+    assert output["oldest_policy_version"] == 0
 
 
 @pytest.mark.asyncio

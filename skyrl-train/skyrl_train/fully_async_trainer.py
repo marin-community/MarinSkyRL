@@ -20,11 +20,7 @@ import time
 import torch
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from loguru import logger
-from skyrl_train.policy_version import (
-    BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY,
-    policy_version_bounds,
-    validate_policy_version_segments,
-)
+from skyrl_train.policy_version import BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY, trained_tokens_versioned
 from skyrl_train.trainer import RayPPOTrainer, consumed_work
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer, get_system_memory_metrics
@@ -87,10 +83,8 @@ from skyrl_train.group_admission import (
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
 
 FIRST_TOKEN_VERSION_MISSING = (
-    "trainer.fully_async.first_token_admission=true needs the policy version that sampled every trained token; "
-    "local vLLM engines report it through InferenceEngineClient for token generation and for chat completions "
-    "(called directly or through its HTTP endpoint), while SGLang, remote engines and external OpenAI-compatible "
-    "servers report none"
+    "trainer.fully_async.first_token_admission=true needs the policy version of every trained token; "
+    "only local vLLM engines report it"
 )
 
 _QueueItem = TypeVar("_QueueItem")
@@ -1229,36 +1223,18 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         return status
 
     def _admission_step(self, trajectory_batch: TrajectoryBatch, fallback_step: int) -> int:
-        """Return the step a completed group is charged to for staleness: the captured step, or the oldest
-        sampled policy version plus one under first-token admission."""
+        """The step a completed group's staleness counts from."""
         actual_step = trajectory_batch.get("actual_global_step")
         captured_step = actual_step if actual_step is not None else fallback_step
-        rows = trajectory_batch.get(BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY)
-        bounds = policy_version_bounds(rows) if rows is not None else None
-        if bounds is not None and bounds[1] > self.global_step:
-            raise RuntimeError(f"sampled policy version {bounds[1]} is newer than the installed policy")
         if not self.first_token_admission or not any(trajectory_batch["response_ids"]):
             return captured_step
+        rows = trajectory_batch.get(BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY)
+        versioned = rows is None or all(
+            trained_tokens_versioned(spans, mask)
+            for spans, mask in zip(rows, trajectory_batch["loss_masks"], strict=True)
+        )
         oldest_version = trajectory_batch.get("oldest_policy_version")
-        if oldest_version is not None and oldest_version > self.global_step:
-            raise RuntimeError(f"oldest policy version {oldest_version} is newer than the installed policy")
-        if rows is not None:
-            try:
-                for ids, loss_mask, segments in zip(
-                    trajectory_batch["response_ids"], trajectory_batch["loss_masks"], rows, strict=True
-                ):
-                    validate_policy_version_segments(
-                        segments,
-                        response_length=len(ids),
-                        require_known=True,
-                        # Only sampled tokens need a version; observation tokens carry none.
-                        required_mask=[bool(m) for m in loss_mask],
-                    )
-            except ValueError as error:
-                raise RuntimeError(f"{FIRST_TOKEN_VERSION_MISSING} ({error})") from error
-            return bounds[0] + 1
-        # Re-tokenized chat history carries no spans, only the oldest version that sampled it.
-        if oldest_version is None:
+        if not versioned or oldest_version is None:
             raise RuntimeError(FIRST_TOKEN_VERSION_MISSING)
         return oldest_version + 1
 

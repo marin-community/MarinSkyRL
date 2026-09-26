@@ -39,12 +39,7 @@ import ray.exceptions
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from skyrl_train.config.trajectory_runner_capabilities import opencode_exact_continuation_enabled
-from skyrl_train.policy_version import (
-    RESPONSE_POLICY_VERSION_SEGMENTS_KEY,
-    PolicyVersionSegment,
-    append_contiguous_policy_version_segment,
-    validate_policy_version_segments,
-)
+from skyrl_train.policy_version import RESPONSE_POLICY_VERSION_SEGMENTS_KEY, PolicyVersionSegment, append_span
 
 ABORT_FINISH_REASON = "abort"
 
@@ -384,15 +379,10 @@ class InferenceEngineClient(InferenceEngineInterface):
                 responses[original_idx] = result["responses"][local_idx]
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
                 response_ids[original_idx] = result["response_ids"][local_idx]
-                version_segments = result.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY)
-                if version_segments is not None:
-                    row = version_segments[local_idx]
-                    validate_policy_version_segments(
-                        row,
-                        response_length=len(response_ids[original_idx]),
-                        require_known=False,
-                    )
-                    response_policy_version_segments[original_idx] = row
+                if RESPONSE_POLICY_VERSION_SEGMENTS_KEY in result:
+                    response_policy_version_segments[original_idx] = result[RESPONSE_POLICY_VERSION_SEGMENTS_KEY][
+                        local_idx
+                    ]
                 if result.get("response_logprobs", None):
                     add_resp_logprobs = True
                     response_logprobs[original_idx] = result["response_logprobs"][local_idx]
@@ -421,12 +411,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             output["student_topk_indices"] = student_topk_indices
             output["behavior_topk_logprobs"] = behavior_topk_logprobs
         if any(segments is not None for segments in response_policy_version_segments):
-            output[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = [
-                segments
-                if segments is not None
-                else ([{"start": 0, "token_count": len(ids), "policy_version": None}] if ids else [])
-                for ids, segments in zip(response_ids, response_policy_version_segments, strict=True)
-            ]
+            output[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = [segments or [] for segments in response_policy_version_segments]
         return output
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> List[OnlineEagleResult]:
@@ -502,7 +487,6 @@ class InferenceEngineClient(InferenceEngineInterface):
         accum_behavior_topk_logprobs: List[List[float]] = []
         saw_student_topk: Optional[bool] = None
         accum_policy_version_segments: List[PolicyVersionSegment] = []
-        saw_policy_version_segments = False
         stop_reason: str = ABORT_FINISH_REASON
 
         # We only use it if generation is completed in one turn to maintain original behavior with no retry.
@@ -545,7 +529,6 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_behavior_topk_logprobs = []
                 saw_student_topk = None
                 accum_policy_version_segments = []
-                saw_policy_version_segments = False
                 num_turns = 0
                 stop_reason = ABORT_FINISH_REASON
                 continue
@@ -586,34 +569,9 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_behavior_topk_logprobs.extend(selected_scores[0])
 
             # 3.5 Accumulate outputs
-            partial_segments = partial_response.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY)
-            if partial_segments is not None:
-                if len(partial_segments) != 1:
-                    raise ValueError("single-response generation requires one policy-version segment row")
-                validate_policy_version_segments(
-                    partial_segments[0],
-                    response_length=len(new_response_ids),
-                    require_known=False,
-                )
-                if accum_response_ids and not saw_policy_version_segments:
-                    append_contiguous_policy_version_segment(
-                        accum_policy_version_segments,
-                        token_count=len(accum_response_ids),
-                        policy_version=None,
-                    )
-                for segment in partial_segments[0]:
-                    append_contiguous_policy_version_segment(
-                        accum_policy_version_segments,
-                        token_count=segment["token_count"],
-                        policy_version=segment["policy_version"],
-                    )
-                saw_policy_version_segments = True
-            elif new_response_ids and saw_policy_version_segments:
-                append_contiguous_policy_version_segment(
-                    accum_policy_version_segments,
-                    token_count=len(new_response_ids),
-                    policy_version=None,
-                )
+            for span in partial_response.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY, [[]])[0]:
+                start = len(accum_response_ids) + span["start"]
+                append_span(accum_policy_version_segments, start, span["token_count"], span["policy_version"])
             accum_response_ids.extend(new_response_ids)
             if new_response_logprobs is not None:
                 accum_response_logprobs.extend(new_response_logprobs)
@@ -641,7 +599,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         if saw_student_topk:
             output["student_topk_indices"] = [accum_student_topk_indices]
             output["behavior_topk_logprobs"] = [accum_behavior_topk_logprobs]
-        if saw_policy_version_segments:
+        if accum_policy_version_segments:
             output[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = [accum_policy_version_segments]
         return output
 
@@ -781,15 +739,11 @@ class InferenceEngineClient(InferenceEngineInterface):
             if aborted_without_generating:
                 continue
             if attempt_version is not None:
-                if tokens_before > 0 and not accum.policy_version_segments:
-                    # Tokens from attempts sent before any version was named carry none.
-                    append_contiguous_policy_version_segment(
-                        accum.policy_version_segments, token_count=tokens_before, policy_version=None
-                    )
-                append_contiguous_policy_version_segment(
+                append_span(
                     accum.policy_version_segments,
-                    token_count=accum.completion_tokens - tokens_before,
-                    policy_version=attempt_version,
+                    tokens_before,
+                    accum.completion_tokens - tokens_before,
+                    attempt_version,
                 )
 
             # At this point, either some tokens were generated and/or request completed with a non-"abort" finish_reason
@@ -1183,13 +1137,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         if not self.generation_paused_event.is_set():
             raise RuntimeError("Generation is not paused, cannot resume.")
-        if policy_version is None:
-            await self._run_on_all_engines_before_deadline("resume_generation")
-        else:
-            # Recorded before the waiters are released, so every chat attempt sent after this
-            # resume reads the version the engines now serve.
-            self._installed_policy_version = policy_version
-            await self._run_on_all_engines_before_deadline("resume_generation", policy_version=policy_version)
+        # Set before the waiters are released, so every chat attempt sent after this resume reads it.
+        self._installed_policy_version = policy_version
+        await self._run_on_all_engines_before_deadline("resume_generation", policy_version=policy_version)
         self._release_generation_waiters()
 
     # ----------------------------

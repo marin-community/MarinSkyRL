@@ -1913,21 +1913,21 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         returned_at = time.monotonic()
         result = self._postprocess_outputs(outputs, self._response_top_k(sampling_params))
-        # RequestOutput.metrics is populated only while vLLM keeps request stats, which the
-        # custom interval logger keeps on even though disable_log_stats is set at engine start.
-        first_token_times = [
-            output.metrics.first_token_ts if output is not None and output.metrics is not None else None
-            for output in outputs
-        ]
-        for first_token_ts in first_token_times:
-            self._policy_versions.check_same_clock(first_token_ts, submitted_at=submitted_at, returned_at=returned_at)
-        # The whole request is stamped with the version installed at its first token; a request
-        # kept across a weight sync (pause_mode=keep) is charged to that older version.
-        versions = [self._policy_versions.at_first_token(first_token_ts) for first_token_ts in first_token_times]
-        result[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = [
-            ([{"start": 0, "token_count": len(token_ids), "policy_version": policy_version}] if token_ids else [])
-            for token_ids, policy_version in zip(result["response_ids"], versions, strict=True)
-        ]
+        if self._policy_versions.boundaries:
+            # The version at the first token stamps the whole request, including tokens kept across a sync.
+            # RequestOutput.metrics exists because the custom stats logger keeps request stats on.
+            versions = [
+                self._policy_versions.version_at(
+                    None if output is None or output.metrics is None else output.metrics.first_token_ts,
+                    submitted_at=submitted_at,
+                    returned_at=returned_at,
+                )
+                for output in outputs
+            ]
+            result[RESPONSE_POLICY_VERSION_SEGMENTS_KEY] = [
+                [{"start": 0, "token_count": len(ids), "policy_version": version}] if ids else []
+                for ids, version in zip(result["response_ids"], versions, strict=True)
+            ]
         return result
 
     async def wake_up(self, *args: Any, **kwargs: Any):

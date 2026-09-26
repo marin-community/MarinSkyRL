@@ -16,7 +16,7 @@ from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 from skyrl_gym.envs import register
-from skyrl_train.policy_version import validate_policy_version_segments
+from skyrl_train.policy_version import trained_tokens_versioned
 from skyrl_train.trajectory_runners.trajectory_processing import get_custom_chat_template, normalize_token_ids
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.trajectory_runners.trajectory_processing import CUSTOM_CHAT_TEMPLATES
@@ -538,12 +538,7 @@ async def test_single_turn_chat_trajectory_trains_on_the_engines_tokens():
     spans = batch["behavior_policy_version_segments"][0]
     assert spans == [{"start": 0, "token_count": len(sampled_ids), "policy_version": 5}]
     # The trainer's admission check: every loss-bearing token carries a known sampled version.
-    validate_policy_version_segments(
-        spans,
-        response_length=len(batch["response_ids"][0]),
-        require_known=True,
-        required_mask=[bool(m) for m in batch["loss_masks"][0]],
-    )
+    assert trained_tokens_versioned(spans, batch["loss_masks"][0])
 
 
 class _TokenEngine:

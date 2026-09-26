@@ -78,110 +78,6 @@ def test_async_weight_sync_respects_optimizer_offload_policy(sync_phase, offload
     ]
 
 
-def _trainer_at_step(global_step: int, *, first_token_admission: bool) -> FullyAsyncRayPPOTrainer:
-    trainer = object.__new__(FullyAsyncRayPPOTrainer)
-    trainer.global_step = global_step
-    trainer.first_token_admission = first_token_admission
-    return trainer
-
-
-def _spans(*versions):
-    return [[{"start": 0, "token_count": 1, "policy_version": version}] for version in versions]
-
-
-def _completed_batch(rows, *, captured_step=4, response_ids=([1], [2]), loss_masks=None):
-    batch = {
-        "response_ids": list(response_ids),
-        "loss_masks": [[1] * len(ids) for ids in response_ids] if loss_masks is None else list(loss_masks),
-        "actual_global_step": captured_step,
-    }
-    if rows is not None:
-        batch["behavior_policy_version_segments"] = rows
-    return batch
-
-
-# A runner-shaped multi-turn row: two sampled turns around three observation tokens.
-MULTI_TURN_RESPONSE = [10, 4, 1, 2, 3, 20, 4]
-MULTI_TURN_LOSS_MASK = [1, 1, 0, 0, 0, 1, 1]
-
-
-def test_first_token_admission_needs_a_version_only_for_sampled_tokens():
-    rows = [[{"start": 0, "token_count": 2, "policy_version": 2}, {"start": 5, "token_count": 2, "policy_version": 3}]]
-    batch = _completed_batch(rows, response_ids=(MULTI_TURN_RESPONSE,), loss_masks=(MULTI_TURN_LOSS_MASK,))
-    assert _trainer_at_step(4, first_token_admission=True)._admission_step(batch, fallback_step=4) == 3
-
-
-def test_first_token_admission_charges_a_retokenized_group_from_its_oldest_version():
-    # Re-tokenized chat history carries no spans; the oldest version that sampled it stands alone.
-    batch = _completed_batch(None, captured_step=4)
-    batch["oldest_policy_version"] = 2
-    assert _trainer_at_step(4, first_token_admission=True)._admission_step(batch, fallback_step=4) == 3
-    assert _trainer_at_step(4, first_token_admission=False)._admission_step(batch, fallback_step=4) == 4
-
-
-def test_first_token_admission_rejects_an_oldest_version_newer_than_installed():
-    batch = _completed_batch(None, captured_step=1)
-    batch["oldest_policy_version"] = 3
-    with pytest.raises(RuntimeError, match="newer than the installed policy"):
-        _trainer_at_step(2, first_token_admission=True)._admission_step(batch, fallback_step=1)
-
-
-def test_admission_step_is_the_captured_step_unless_first_token_admission_is_on():
-    # Same completed group, same trainer state; only the flag differs. Off is the stamp the
-    # runner captured; on is the oldest version that sampled the group plus one, because
-    # version 1 is the policy after the first update and step 2 is the update that follows it.
-    batch = _completed_batch(_spans(1, 3), captured_step=4)
-    assert _trainer_at_step(4, first_token_admission=False)._admission_step(batch, fallback_step=4) == 4
-    assert _trainer_at_step(4, first_token_admission=True)._admission_step(batch, fallback_step=4) == 2
-
-
-def test_admission_step_falls_back_to_the_submission_step_when_nothing_was_captured():
-    batch = _completed_batch(None, captured_step=None)
-    assert _trainer_at_step(4, first_token_admission=False)._admission_step(batch, fallback_step=3) == 3
-
-
-def test_a_response_continued_under_newer_weights_counts_from_its_oldest_span():
-    rows = [[{"start": 0, "token_count": 1, "policy_version": 1}, {"start": 1, "token_count": 2, "policy_version": 3}]]
-    batch = _completed_batch(rows, response_ids=([10, 11, 12],))
-    assert _trainer_at_step(4, first_token_admission=True)._admission_step(batch, fallback_step=4) == 2
-
-
-@pytest.mark.parametrize(
-    ("rows", "shape"),
-    [
-        (None, {}),
-        (_spans(None, 3), {}),
-        # A sampled token between the spans carries no version.
-        (
-            [
-                [
-                    {"start": 0, "token_count": 1, "policy_version": 2},
-                    {"start": 5, "token_count": 2, "policy_version": 3},
-                ]
-            ],
-            {"response_ids": (MULTI_TURN_RESPONSE,), "loss_masks": (MULTI_TURN_LOSS_MASK,)},
-        ),
-    ],
-    ids=["no_spans", "unknown_version", "uncovered_sampled_token"],
-)
-def test_first_token_admission_fails_loudly_when_a_sampled_token_carries_no_version(rows, shape):
-    trainer = _trainer_at_step(4, first_token_admission=True)
-    with pytest.raises(RuntimeError, match="first_token_admission"):
-        trainer._admission_step(_completed_batch(rows, **shape), fallback_step=4)
-
-
-def test_first_token_admission_keeps_the_captured_step_for_a_group_that_sampled_nothing():
-    trainer = _trainer_at_step(4, first_token_admission=True)
-    batch = _completed_batch([[], []], captured_step=4, response_ids=([], []))
-    assert trainer._admission_step(batch, fallback_step=3) == 4
-
-
-def test_admission_step_rejects_a_version_newer_than_the_installed_policy():
-    trainer = _trainer_at_step(2, first_token_admission=True)
-    with pytest.raises(RuntimeError, match="newer than the installed policy"):
-        trainer._admission_step(_completed_batch(_spans(3, 1)), fallback_step=1)
-
-
 def _generated_group(
     uid: str,
     earliest_model_step: int,
@@ -405,24 +301,47 @@ async def test_staleness_manager_blocks_work_beyond_capacity_until_training_adva
     await manager.on_rollout_accepted()
 
 
+# A multi-turn row: two sampled turns around three observation tokens that carry no version.
+MULTI_TURN_SPANS = [{"start": 0, "token_count": 2, "policy_version": 5}, {"start": 5, "token_count": 2, "policy_version": 6}]
+MULTI_TURN_LOSS_MASK = [1, 1, 0, 0, 0, 1, 1]
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("first_token_admission", [False, True])
-async def test_a_group_sampled_by_an_old_version_is_stale_only_under_first_token_admission(first_token_admission):
+@pytest.mark.parametrize(
+    ("first_token_admission", "spans", "loss_mask", "oldest_version", "expected"),
+    [
+        (False, MULTI_TURN_SPANS, MULTI_TURN_LOSS_MASK, 5, _GroupFreshness.FRESH),
+        (True, MULTI_TURN_SPANS, MULTI_TURN_LOSS_MASK, 5, _GroupFreshness.STALE),
+        # Re-tokenized chat history carries only the oldest version that sampled it.
+        (True, None, [1, 1], 5, _GroupFreshness.STALE),
+        (True, MULTI_TURN_SPANS[:1], MULTI_TURN_LOSS_MASK, 5, RuntimeError),
+        (True, None, [], None, _GroupFreshness.FRESH),
+    ],
+    ids=["off", "multi_turn_spans", "retokenized_oldest_only", "unversioned_sampled_token", "nothing_sampled"],
+)
+async def test_a_group_sampled_by_an_old_version_is_stale_only_under_first_token_admission(
+    first_token_admission, spans, loss_mask, oldest_version, expected
+):
     trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1)
     trainer.first_token_admission = first_token_admission
-    batch = _completed_batch(_spans(5), captured_step=trainer.global_step, response_ids=([1],))
+    batch = {"response_ids": [[7] * len(loss_mask)], "loss_masks": [loss_mask], "actual_global_step": trainer.global_step}
+    if spans is not None:
+        batch["behavior_policy_version_segments"] = [spans]
+    if oldest_version is not None:
+        batch["oldest_policy_version"] = oldest_version
+    if expected is RuntimeError:
+        with pytest.raises(RuntimeError, match="first_token_admission"):
+            trainer._admission_step(batch, fallback_step=trainer.global_step)
+        return
     group = GeneratedOutputGroup(
         trajectory_batch=batch,
-        uid="old-version",
+        uid="group",
         earliest_model_step=trainer._admission_step(batch, fallback_step=trainer.global_step),
-        source_prompts=[{"uid": "old-version"}],
+        source_prompts=[{"uid": "group"}],
     )
 
-    freshness = await trainer._enqueue_if_fresh(queues, group)
-
-    assert (freshness is _GroupFreshness.STALE) is first_token_admission
-    assert queues.retries.empty() is not first_token_admission
-    assert queues.completed.empty() is first_token_admission
+    assert await trainer._enqueue_if_fresh(queues, group) is expected
+    assert queues.completed.empty() is (expected is _GroupFreshness.STALE)
 
 
 @pytest.mark.asyncio

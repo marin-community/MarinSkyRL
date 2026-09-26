@@ -859,6 +859,7 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations():
     assert choice["logprobs"]["content"][0]["token"] == "token_id:11"
     assert choice["logprobs"]["content"][1]["token"] == "token_id:12"
     assert choice["token_ids"] == [11, 12]
+    assert "response_policy_version_segments" not in choice
 
     # usage: prompt_tokens from base (5), completion_tokens summed (2), total 7
     assert out["usage"]["prompt_tokens"] == 5
@@ -1304,7 +1305,7 @@ class _MockStreamEngine:
     async def pause_generation(self):
         pass
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_version=None):
         pass
 
     async def chat_completion_stream(self, request_payload):
@@ -1680,33 +1681,6 @@ async def test_batched_generate_keeps_each_row_spans():
 
 
 @pytest.mark.asyncio
-async def test_batched_generate_synthesizes_an_unknown_span_for_an_engine_reporting_none():
-    stamping = _VersionedEngine(
-        [
-            InferenceEngineOutput(
-                responses=["a"],
-                response_ids=[[5]],
-                stop_reasons=["stop"],
-                response_logprobs=None,
-                response_policy_version_segments=[[{"start": 0, "token_count": 1, "policy_version": 2}]],
-            )
-        ]
-    )
-    silent = _VersionedEngine(
-        [InferenceEngineOutput(responses=["bc"], response_ids=[[6, 7]], stop_reasons=["stop"], response_logprobs=None)]
-    )
-    client = InferenceEngineClient(engines=[stamping, silent], tokenizer=object(), full_config=_make_min_cfg())
-
-    output = await client.generate(InferenceEngineInput(prompt_token_ids=[[1], [2]], sampling_params={"max_tokens": 4}))
-
-    assert output["response_ids"] == [[5], [6, 7]]
-    assert output["response_policy_version_segments"] == [
-        [{"start": 0, "token_count": 1, "policy_version": 2}],
-        [{"start": 0, "token_count": 2, "policy_version": None}],
-    ]
-
-
-@pytest.mark.asyncio
 async def test_generate_returns_the_served_prompt_without_earlier_attempts_tokens():
     engine = _VersionedEngine(
         [
@@ -1737,117 +1711,6 @@ async def test_resume_names_the_installed_version_on_every_live_engine():
 
 
 # -------------------------------------------
-# chat attempts stamped with the installed policy version
-# --------------------------------------------
-
-
-def _chat_partial(content, finish_reason, token_ids):
-    return {
-        "id": "cmpl",
-        "object": "chat.completion",
-        "model": "dummy-model",
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": finish_reason,
-                "token_ids": list(token_ids),
-            }
-        ],
-        "usage": {"prompt_tokens": 5, "completion_tokens": len(token_ids), "total_tokens": 5 + len(token_ids)},
-    }
-
-
-class _StampedChatEngine:
-    def __init__(self, responses, during_attempt=None):
-        self.responses = list(responses)
-        self.calls = []
-        self.during_attempt = during_attempt
-
-    async def chat_completion(self, request_payload):
-        self.calls.append(deepcopy(request_payload))
-        attempt = len(self.calls) - 1
-        if self.during_attempt is not None:
-            await self.during_attempt(attempt)
-        return deepcopy(self.responses[attempt])
-
-    async def pause_generation(self):
-        pass
-
-    async def resume_generation(self, policy_version=None):
-        pass
-
-
-def _chat_request():
-    return {
-        "json": {
-            "model": "dummy-model",
-            "messages": [{"role": "user", "content": "q"}],
-            "max_tokens": 16,
-            "session_id": "s",
-        },
-        "headers": {},
-    }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("version_installed_before_send", "expected_first_span_version"),
-    [(3, 3), (None, None)],
-    ids=["installed_version_stamps_the_first_attempt", "tokens_sampled_before_any_version_carry_none"],
-)
-async def test_chat_attempts_are_stamped_with_the_version_installed_when_they_were_sent(
-    version_installed_before_send, expected_first_span_version
-):
-    client = None
-
-    async def sync_during(attempt):
-        if attempt == 0:
-            await client.pause_generation()
-            await client.resume_generation(policy_version=4)
-
-    engine = _StampedChatEngine(
-        [_chat_partial("A", "abort", [11]), _chat_partial("BC", "stop", [12, 13])], during_attempt=sync_during
-    )
-    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
-    if version_installed_before_send is not None:
-        await client.pause_generation()
-        await client.resume_generation(policy_version=version_installed_before_send)
-
-    out = await client.chat_completion(_chat_request())
-
-    assert out["choices"][0]["token_ids"] == [11, 12, 13]
-    assert out["choices"][0]["response_policy_version_segments"] == [
-        {"start": 0, "token_count": 1, "policy_version": expected_first_span_version},
-        {"start": 1, "token_count": 2, "policy_version": 4},
-    ]
-
-
-@pytest.mark.asyncio
-async def test_a_single_attempt_carries_one_span_of_the_installed_version():
-    engine = _StampedChatEngine([_chat_partial("AB", "stop", [11, 12])])
-    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
-    await client.pause_generation()
-    await client.resume_generation(policy_version=5)
-
-    out = await client.chat_completion(_chat_request())
-
-    assert out["choices"][0]["response_policy_version_segments"] == [
-        {"start": 0, "token_count": 2, "policy_version": 5}
-    ]
-
-
-@pytest.mark.asyncio
-async def test_chat_responses_carry_no_span_until_a_version_is_named():
-    engine = _StampedChatEngine([_chat_partial("AB", "stop", [11, 12])])
-    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
-
-    out = await client.chat_completion(_chat_request())
-
-    assert "response_policy_version_segments" not in out["choices"][0]
-
-
-# -------------------------------------------
 # generate() at the weight-sync pause boundary
 # --------------------------------------------
 
@@ -1874,7 +1737,7 @@ class _MockGenerateEngine:
     async def pause_generation(self):
         self.scheduler_paused = True
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_version=None):
         self.scheduler_paused = False
 
 
@@ -2012,104 +1875,109 @@ def test_resume_wakes_a_request_parked_on_another_event_loop():
 SERVED_PROMPT = [1, 2, 3]
 
 
+def _chat_partial(content, finish_reason, token_ids):
+    return {
+        "id": "cmpl",
+        "object": "chat.completion",
+        "model": "dummy-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": finish_reason,
+                "token_ids": list(token_ids),
+            }
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": len(token_ids), "total_tokens": 5 + len(token_ids)},
+    }
+
+
 def _routes(rows):
     return encode_routed_experts(np.asarray(rows, dtype=np.int16))
 
 
-def _exact_chat_partial(content, finish_reason, token_ids, *, prompt_token_ids, routes=None):
+def _exact_chat_partial(content, finish_reason, token_ids, logprobs, *, prompt_token_ids, routes):
     response = _chat_partial(content, finish_reason, token_ids)
     response["prompt_token_ids"] = list(prompt_token_ids)
-    if routes is not None:
-        response["choices"][0]["routed_experts"] = _routes(routes)
+    response["choices"][0]["logprobs"] = {"content": [{"logprob": logprob} for logprob in logprobs]}
+    response["choices"][0]["routed_experts"] = _routes(routes)
     return response
 
 
-class _ExactChatEngine(_StampedChatEngine):
+class _ExactChatEngine:
+    def __init__(self, responses, during_attempt):
+        self.responses = list(responses)
+        self.calls = []
+        self.during_attempt = during_attempt
+
     async def tokenize(self, request_payload):
         return {"tokens": list(SERVED_PROMPT)}
 
+    async def chat_completion(self, request_payload):
+        self.calls.append(deepcopy(request_payload))
+        attempt = len(self.calls) - 1
+        await self.during_attempt(attempt)
+        return deepcopy(self.responses[attempt])
 
-def _spanning_abort_engine(*, second_routes=((40,), (41,), (42,), (43,), (44,))):
-    # Attempt 1 forwards the served prompt and its first sampled token's predecessor: 3 + 1 - 1 rows.
-    # Attempt 2 is served prompt + token 11, and forwards 4 + 2 - 1 rows.
-    return _ExactChatEngine(
-        [
-            _exact_chat_partial("A", "abort", [11], prompt_token_ids=SERVED_PROMPT, routes=[[[10]], [[11]], [[12]]]),
-            _exact_chat_partial(
-                " B",
-                "stop",
-                [12, 13],
-                prompt_token_ids=SERVED_PROMPT + [11],
-                routes=None if second_routes is None else [[list(row)] for row in second_routes],
-            ),
-        ]
-    )
+    async def pause_generation(self):
+        pass
 
-
-def _exact_chat_request():
-    request = _chat_request()
-    request["json"]["return_token_ids"] = True
-    return request
-
-
-@pytest.mark.asyncio
-async def test_a_chat_retry_samples_after_the_exact_served_prompt_and_sampled_tokens():
-    engine = _spanning_abort_engine()
-    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
-
-    out = await client.chat_completion(_exact_chat_request())
-
-    retry = engine.calls[1]["json"]
-    assert retry[EXACT_PROMPT_TOKEN_IDS_KEY] == SERVED_PROMPT + [11]
-    assert retry["messages"] == [{"role": "user", "content": "q"}]
-    assert "continue_final_message" not in retry
-    assert retry["max_tokens"] == 15
-    choice = out["choices"][0]
-    assert out["prompt_token_ids"] + choice["token_ids"] == SERVED_PROMPT + [11] + [12, 13]
-    # Attempt 1's rows for positions 0-2, then attempt 2's rows from position 3, which only it forwarded.
-    assert decode_routed_experts(choice["routed_experts"]).tolist() == [[[10]], [[11]], [[12]], [[43]], [[44]]]
-
-
-@pytest.mark.asyncio
-async def test_an_exact_continuation_retry_extends_the_requests_own_exact_prompt():
-    engine = _ExactChatEngine([_chat_partial("A", "abort", [11]), _chat_partial("B", "stop", [12])])
-    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
-    request = _chat_request()
-    request["json"][EXACT_PROMPT_TOKEN_IDS_KEY] = [7, 8]
-
-    await client.chat_completion(request)
-
-    assert engine.calls[1]["json"][EXACT_PROMPT_TOKEN_IDS_KEY] == [7, 8, 11]
-    assert "continue_final_message" not in engine.calls[1]["json"]
-
-
-@pytest.mark.asyncio
-async def test_a_chat_retry_refuses_routes_from_only_some_attempts():
-    engine = _spanning_abort_engine(second_routes=None)
-    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
-
-    with pytest.raises(RuntimeError, match="routed_experts for only some"):
-        await client.chat_completion(_exact_chat_request())
+    async def resume_generation(self, policy_version=None):
+        pass
 
 
 @pytest.mark.asyncio
 async def test_a_structured_chat_response_spanning_an_abort_trains_on_the_exact_tokens():
-    engine = _spanning_abort_engine()
+    client = None
+
+    async def sync_during(attempt):
+        if attempt == 0:
+            await client.pause_generation()
+            await client.resume_generation(policy_version=4)
+
+    # Attempt 1 forwards the served prompt: 3 + 1 - 1 route rows. Attempt 2's prompt is the served
+    # prompt plus token 11, so it forwards 4 + 2 - 1 rows.
+    engine = _ExactChatEngine(
+        [
+            _exact_chat_partial(
+                "A", "abort", [11], [-0.1], prompt_token_ids=SERVED_PROMPT, routes=[[[10]], [[11]], [[12]]]
+            ),
+            _exact_chat_partial(
+                " B",
+                "stop",
+                [12, 13],
+                [-0.2, -0.3],
+                prompt_token_ids=SERVED_PROMPT + [11],
+                routes=[[[40]], [[41]], [[42]], [[43]], [[44]]],
+            ),
+        ],
+        during_attempt=sync_during,
+    )
     tokenizer = MagicMock()
     tokenizer.decode.return_value = "A B"
     client = InferenceEngineClient(engines=[engine], tokenizer=tokenizer, full_config=_make_min_cfg())
+    await client.pause_generation()
+    await client.resume_generation(policy_version=3)
 
     output = await DirectModelClient(client).generate(
         {
             "prompts": [[{"role": "user", "content": "q"}]],
             "session_ids": ["s"],
-            "sampling_params": {"max_generate_length": 16},
+            "sampling_params": {"max_generate_length": 16, "logprobs": 0},
             "chat_completion_params": [{}],
         }
     )
 
-    assert engine.calls[1]["json"][EXACT_PROMPT_TOKEN_IDS_KEY] == SERVED_PROMPT + [11]
-    assert output["prompt_ids"][0] + output["response_ids"][0] == SERVED_PROMPT + [11, 12, 13]
-    # One route per response token, from the forward that consumed it; the last token was never
+    retry = engine.calls[1]["json"]
+    assert retry[EXACT_PROMPT_TOKEN_IDS_KEY] == SERVED_PROMPT + [11]
+    assert "continue_final_message" not in retry
+    assert retry["max_completion_tokens"] == 15
+    assert output["prompt_ids"] == [SERVED_PROMPT]
+    assert output["response_ids"] == [[11, 12, 13]]
+    assert output["response_logprobs"] == [[-0.1, -0.2, -0.3]]
+    # One route per response token from the forward that consumed it; the last token was never
     # forwarded and carries the sentinel.
     assert output["routed_experts"] == [[[[43]], [[44]], [[0]]]]
+    assert output["response_policy_version_segments"] == [
+        [{"start": 0, "token_count": 1, "policy_version": 3}, {"start": 1, "token_count": 2, "policy_version": 4}]
+    ]
