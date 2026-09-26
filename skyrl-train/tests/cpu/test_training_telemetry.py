@@ -14,6 +14,7 @@ from skyrl_train.distributed.dispatch import ActorInfo, MeshRank
 from skyrl_train.rollouts.context import TrainingContext
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingOutputBatch
+from skyrl_train.timing_observability import STEP_WALL_PHASES
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
 from tests.cpu.util import example_dummy_config
 
@@ -120,8 +121,11 @@ class FakeEngines:
 
 
 class FakeTracker:
+    def __init__(self):
+        self.logs = []
+
     def log(self, metrics, step, commit=True):
-        pass
+        self.logs.append((dict(metrics), step))
 
 
 def _config(max_staleness_steps: int):
@@ -195,7 +199,7 @@ async def _train_two_steps(monkeypatch, max_staleness_steps: int) -> RayPPOTrain
 async def test_two_steps_deliver_every_record_the_dashboard_reads(
     ray_module, delivered_telemetry, monkeypatch, max_staleness_steps
 ):
-    await _train_two_steps(monkeypatch, max_staleness_steps)
+    trainer = await _train_two_steps(monkeypatch, max_staleness_steps)
     rows = delivered_telemetry.flush()
 
     # The launch environment names the training type, and every record carries it.
@@ -228,3 +232,10 @@ async def test_two_steps_deliver_every_record_the_dashboard_reads(
     assert delivered_telemetry.select("event_loop_lag_seconds")
     metrics = {row["attributes"]["metric"] for row in delivered_telemetry.select("training_metric_value")}
     assert PERFORMANCE_METRICS | MISMATCH_METRICS | {"consumed/length_stop_fraction"} <= metrics
+    step_logs = [(payload, step) for payload, step in trainer.tracker.logs if "timing/step" in payload]
+    assert [step for _, step in step_logs] == [1, 2]
+    for payload, _ in step_logs:
+        assert sum(payload[f"timing/step_wall/{phase}"] for phase in STEP_WALL_PHASES) == pytest.approx(
+            payload["timing/step"], abs=0.01
+        )
+        assert all(f"timing/step_wall_overrun/{phase}" in payload for phase in STEP_WALL_PHASES)

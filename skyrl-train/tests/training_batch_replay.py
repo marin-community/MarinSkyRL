@@ -14,6 +14,7 @@ from typing import Any, TypedDict
 
 from omegaconf import DictConfig, OmegaConf
 
+from skyrl_train.timing_observability import StepWallTime
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
 
@@ -200,14 +201,14 @@ class CapturingRayPPOTrainer(RayPPOTrainer):
         self.capture_provenance = capture_provenance
         super().__init__(*args, **kwargs)
 
-    async def _run_training(self, training_input: TrainingInputBatch):
+    async def _run_training(self, training_input: TrainingInputBatch, *, step_wall: StepWallTime | None = None):
         if self.global_step == self.capture_provenance.target_step:
             save_training_batch_artifact(
                 self.capture_artifact_path,
                 training_input,
                 self.capture_provenance,
             )
-        return await super()._run_training(training_input)
+        return await super()._run_training(training_input, step_wall=step_wall)
 
 
 class _PolicyForwardComplete(Exception):

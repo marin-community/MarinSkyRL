@@ -120,7 +120,7 @@ from skyrl_train.telemetry import (
 )
 from skyrl_train.rollout_observability import async_phase_window, monitor_event_loop_lag
 from skyrl_train.utils.importance_ratio_diagnostics import mismatch_ratio_metrics
-from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
+from skyrl_train.timing_observability import StepWallTime, publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
     read_hf_export_request,
@@ -766,7 +766,8 @@ class RayPPOTrainer:
         task, state = pending
         self._pending_checkpoint_upload = None
         try:
-            duration, cleanup_duration = await task
+            with Timer("checkpoint_upload_blocking", self.all_timings, log_events=False):
+                duration, cleanup_duration = await task
         except OSError:
             self._record_checkpoint_save_failure(state)
             return False
@@ -781,16 +782,20 @@ class RayPPOTrainer:
         )
         return True
 
-    async def _run_step_end_callbacks(self, state: TrainerState) -> None:
+    async def _run_step_end_callbacks(self, state: TrainerState, *, step_wall: StepWallTime | None = None) -> None:
         """Run callback-requested work that belongs to the current training step."""
         self._control.reset()
         self._control = await self.callback_handler.call_event_async("on_step_end", state, self._control, trainer=self)
 
         if self._control.should_save:
+            if step_wall is not None:
+                step_wall.start("checkpoint_work")
             await self._save_intermediate_checkpoint(state)
             self._control.should_save = False
 
         if self._control.should_save_hf_model:
+            if step_wall is not None:
+                step_wall.start("checkpoint_work")
             # HF export reads the committed checkpoint. When checkpoint and HF
             # export share a cadence, wait for the background shard uploads and
             # marker publication before asking the exporter to consume it.
@@ -799,6 +804,8 @@ class RayPPOTrainer:
             self._control.should_save_hf_model = False
 
         if self._control.should_evaluate and self.eval_dataset is not None:
+            if step_wall is not None:
+                step_wall.start("evaluation")
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
                 self.all_metrics.update(eval_metrics)
@@ -806,6 +813,8 @@ class RayPPOTrainer:
                 "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
             )
             self._control.should_evaluate = False
+        if step_wall is not None:
+            step_wall.start("step_end_bookkeeping")
 
     async def _start_draft_trainer(self) -> None:
         """Start the independent one-GPU draft trainer when online updates are enabled."""
@@ -1236,10 +1245,7 @@ class RayPPOTrainer:
             trainer=self,
         )
         if self._control.should_evaluate and self.eval_dataset is not None:
-            with Timer("eval", self.all_timings):
-                eval_metrics = await self.eval()
-                self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
-                self.tracker.log(eval_metrics, step=self.global_step, commit=True)
+            await self._run_pretraining_evaluation()
             self._control.should_evaluate = False
 
         self.context.start()
@@ -1251,12 +1257,17 @@ class RayPPOTrainer:
             self.global_step += 1
             epoch = (self.global_step - 1) // self.num_steps_per_epoch
             cycle_started = time.perf_counter()
+            step_wall = StepWallTime(OmegaConf.to_container(self.cfg.trainer.step_phase_budgets))
             with Timer("step", self.all_timings) as step_timer:
-                training_input = await self._train_step(epoch)
+                training_input = await self._train_step(epoch, step_wall)
                 # The core wall excludes the step-end callbacks below.
                 core_seconds = time.perf_counter() - cycle_started
+                step_wall.start("step_end_bookkeeping")
                 step_state = self._create_trainer_state(epoch, active_step_duration=step_timer.elapsed)
-                await self._run_step_end_callbacks(step_state)
+                await self._run_step_end_callbacks(step_state, step_wall=step_wall)
+            self.all_metrics.update(
+                step_wall.finish(step_timer.duration, ended_at=step_timer.start_time + step_timer.duration)
+            )
             self._update_step_performance_metrics(
                 training_input, core_seconds=core_seconds, cycle_started=cycle_started
             )
@@ -1366,8 +1377,9 @@ class RayPPOTrainer:
         await self._begin_speculator_capture(step)
         await self.context.publish(step)
 
-    async def _train_step(self, epoch: int) -> TrainingInputBatch:
+    async def _train_step(self, epoch: int, step_wall: StepWallTime) -> TrainingInputBatch:
         """Read this step's batch from the rollout buffer, train on it, sync the new weights, and return the batch."""
+        step_wall.start("group_admission")
         logger.info(
             "Rollout batch started: step={} required_groups={}", self.global_step, self.context.config.batch_size
         )
@@ -1395,6 +1407,7 @@ class RayPPOTrainer:
             with Timer("wait_for_teacher_evidence", self.all_timings):
                 scored_distillation = await self._await_admitted_teacher_evidence(groups)
 
+        step_wall.start("batch_assembly")
         training_input = await asyncio.to_thread(self.convert_rollout_groups_to_training_input, groups)
         if scored_distillation is not None:
             self._attach_teacher_evidence(training_input, scored_distillation)
@@ -1402,11 +1415,13 @@ class RayPPOTrainer:
         if self.cfg.trainer.algorithm.use_tis:
             self._record_tis_skip()
 
+        step_wall.start("training_preparation")
         with (
             Timer("run_training", self.all_timings),
             async_phase_window("training", step=self.global_step, enabled=self._rollout_spans_enabled),
         ):
-            status = await self._run_training(training_input)
+            status = await self._run_training(training_input, step_wall=step_wall)
+        step_wall.start("group_bookkeeping")
         self._log_optimizer_step_completed(
             epoch=epoch,
             training_input=training_input,
@@ -1414,6 +1429,7 @@ class RayPPOTrainer:
         )
 
         await self._poll_speculator_lifecycle()
+        step_wall.start("weight_sync")
         with async_phase_window("weight_sync", step=self.global_step, enabled=self._rollout_spans_enabled):
             await self._sync_policy_for_rollouts(reason="training_step")
 
@@ -1478,7 +1494,17 @@ class RayPPOTrainer:
             with Timer("update_ref_with_policy", self.all_timings):
                 await asyncio.to_thread(self.update_ref_with_policy)
 
-    async def _run_training(self, training_input: TrainingInputBatch):
+    async def _run_pretraining_evaluation(self) -> None:
+        # Pre-step evaluation must not be mixed into the first optimizer step's inclusive timers.
+        with Timer("eval_before_train") as pretrain_eval_timer:
+            eval_metrics = await self.eval()
+            self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
+            self.tracker.log(eval_metrics, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
+        startup_eval = {"startup/eval_before_train": pretrain_eval_timer.duration}
+        self._log_metrics_stdout(startup_eval, step=self.global_step, kind="startup")
+        self.tracker.log(startup_eval, step=self.global_step, commit=False)
+
+    async def _run_training(self, training_input: TrainingInputBatch, *, step_wall: StepWallTime | None = None):
         # The drain after the last weight sync can go stale while the rollout buffer fills, so align the
         # policy actor loops immediately before every forward.
         await self._drain_policy_event_loops()
@@ -1489,14 +1515,21 @@ class RayPPOTrainer:
             with Timer("apply_reward_kl_penalty", self.all_timings):
                 training_input = self.apply_reward_kl_penalty(training_input)
 
+        # Batch replay runs this prefix outside an optimizer step, without a step wall clock.
+        if step_wall is not None:
+            step_wall.start("advantages")
         with Timer("compute_advantages_and_returns", self.all_timings):
             training_input = self.compute_advantages_and_returns(training_input)
             training_input = self.finalize_advantages_for_training(training_input)
 
         if self.cfg.trainer.dump_data_batch:
+            if step_wall is not None:
+                step_wall.start("training_preparation")
             with Timer("dump_data_batch", self.all_timings):
                 self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
 
+        if step_wall is not None:
+            step_wall.start("policy_training")
         with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step", self.global_step):
             status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
 
