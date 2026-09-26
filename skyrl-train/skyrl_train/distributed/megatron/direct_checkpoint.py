@@ -1,3 +1,8 @@
+import fcntl
+import os
+import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from megatron.core.dist_checkpointing.dict_utils import nested_values
@@ -48,6 +53,38 @@ class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
         )
 
 
+@contextmanager
+def _local_checkpoint_load_slot():
+    """Optionally bound simultaneous DCP tensor reads in one pod."""
+    slots = int(os.environ.get("SKYRL_MEGATRON_LOCAL_DCP_LOAD_SLOTS", "0"))
+    if slots == 0:
+        yield
+        return
+    if slots < 0:
+        raise ValueError(f"Invalid local DCP load slot count: {slots}")
+    waiting_since = time.monotonic()
+    while True:
+        for slot in range(slots):
+            with open(Path(tempfile.gettempdir()) / f"skyrl-megatron-dcp-load-{slot}.lock", "a+") as lock:
+                try:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                acquired_at = time.monotonic()
+                try:
+                    yield
+                finally:
+                    print(
+                        f"Local DCP load pid={os.getpid()} slot={slot} "
+                        f"wait={acquired_at - waiting_since:.2f}s "
+                        f"read={time.monotonic() - acquired_at:.2f}s",
+                        flush=True,
+                    )
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                return
+        time.sleep(0.1)
+
+
 class DirectS3TorchDistLoadShardedStrategy(TorchDistLoadShardedStrategy):
     """Read only the DCP tensor byte ranges assigned to this rank from S3."""
 
@@ -67,19 +104,20 @@ class DirectS3TorchDistLoadShardedStrategy(TorchDistLoadShardedStrategy):
         reader.fs = FsspecFileSystem()
         reader.fs.fs = filesystem
         reader.path = self.checkpoint_dir
-        checkpoint.load(
-            pytorch_state_dict,
-            storage_reader=reader,
-            planner=MCoreLoadPlanner(
-                shapes_validation_sharded_tensors=[value for value in tensors if not value.allow_shape_mismatch],
-                allow_shape_mismatch_sharded_tensors={
-                    value.key: value for value in tensors if value.allow_shape_mismatch
-                },
-                flatten_state_dict=False,
-                flatten_sharded_tensors=False,
-            ),
-            no_dist=True,
-        )
+        with _local_checkpoint_load_slot():
+            checkpoint.load(
+                pytorch_state_dict,
+                storage_reader=reader,
+                planner=MCoreLoadPlanner(
+                    shapes_validation_sharded_tensors=[value for value in tensors if not value.allow_shape_mismatch],
+                    allow_shape_mismatch_sharded_tensors={
+                        value.key: value for value in tensors if value.allow_shape_mismatch
+                    },
+                    flatten_state_dict=False,
+                    flatten_sharded_tensors=False,
+                ),
+                no_dist=True,
+            )
         restored = {name: _unwrap_pyt_sharded_tensor(value) for name, value in pytorch_state_dict.items()}
         restored = _replace_sharded_keys_with_state_dict_keys(restored, flat_mapping, rename_mapping)
         _restore_dict_types(restored, original)
