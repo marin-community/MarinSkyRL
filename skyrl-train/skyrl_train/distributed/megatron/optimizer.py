@@ -149,6 +149,7 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
     }
 
     if _optim_name == _GRUG_MUONH_KEY:
+        optim_args["use_distributed_optimizer"] = False
         betas = tuple(float(value) for value in optim_config.get("adam_betas", DEFAULT_BETAS))
         if len(betas) != 2:
             raise ValueError("MuonH adam_betas must contain two values")
@@ -165,6 +166,8 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
 
     config = OptimizerConfig(**optim_args)
     if _optim_name == _GRUG_MUONH_KEY:
+        if config.use_distributed_optimizer:
+            raise ValueError("Grug MuonH requires all-reduced data-parallel gradients")
         config._grug_muonh_kwargs = _grug_muonh_kwargs(optim_config, config)
     return config
 

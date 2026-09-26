@@ -17,7 +17,7 @@ from omegaconf import OmegaConf
 
 from megatron.bridge import AutoBridge
 import megatron.core.parallel_state as mpu
-from megatron.core.optimizer import DistributedOptimizer
+from megatron.core.optimizer import DistributedOptimizer, OptimizerConfig
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
 from skyrl_train.distributed.megatron.optimizer import (
@@ -400,7 +400,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             pp_size=mpu.get_pipeline_model_parallel_world_size(),
         )
 
-    def _initialize_policy_modules(self, model_path: str, *, mode: _MegatronInitMode) -> None:
+    def _initialize_policy_modules(
+        self, model_path: str, *, mode: _MegatronInitMode, optimizer_config: OptimizerConfig | None = None
+    ) -> None:
         """Construct the shared Megatron model graph at the checkpoint geometry."""
         for_training = mode is _MegatronInitMode.TRAINING
         self.init_configs(
@@ -416,9 +418,19 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             tokenizer_revision=self.cfg.trainer.policy.model.get("tokenizer_revision"),
         )
 
+        ddp_config = None
+        if for_training:
+            if optimizer_config is None:
+                raise ValueError("Training Megatron policy requires an optimizer config")
+            ddp_config = dict(self.cfg.trainer.policy.megatron_config.ddp_config)
+            configured_sharding = ddp_config.get("use_distributed_optimizer")
+            if configured_sharding is not None and configured_sharding != optimizer_config.use_distributed_optimizer:
+                raise ValueError("Megatron DDP gradient sharding must match the optimizer")
+            ddp_config["use_distributed_optimizer"] = optimizer_config.use_distributed_optimizer
+
         self.actor_module = self.make_megatron_module(
             wrap_with_ddp=for_training,
-            ddp_config=self.cfg.trainer.policy.megatron_config.ddp_config if for_training else None,
+            ddp_config=ddp_config,
             bf16=self.cfg.trainer.bf16,
         )
 
@@ -437,16 +449,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
     def init_model(self, model_path, num_training_steps: int = 1e9):
         """Initialize the model, optimizer, and scheduler for the policy worker."""
-        self._initialize_policy_modules(model_path, mode=_MegatronInitMode.TRAINING)
+        optim_config = init_megatron_optim_config(
+            self.cfg.trainer.policy.optimizer_config, self.cfg.trainer.policy.megatron_config.optimizer_config_kwargs
+        )
+        self._initialize_policy_modules(model_path, mode=_MegatronInitMode.TRAINING, optimizer_config=optim_config)
 
         # create profiler
         if self.cfg.trainer.policy.megatron_config.torch_profiler_config.enable:
             self.profiler = Profiler(self.cfg.trainer.policy.megatron_config.torch_profiler_config)
 
         # create optimizer
-        optim_config = init_megatron_optim_config(
-            self.cfg.trainer.policy.optimizer_config, self.cfg.trainer.policy.megatron_config.optimizer_config_kwargs
-        )
         self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
 
         self._normalize_mini_batch_size()

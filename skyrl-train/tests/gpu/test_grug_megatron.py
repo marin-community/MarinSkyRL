@@ -270,7 +270,7 @@ def _init_policy(cfg, world_size: int):
 
 
 def _train_step(policy, batch: TrainingInputBatch) -> dict[str, float]:
-    train_output = ray.get(policy.async_run_ray_method("pass_through", "ppo_train", batch))[0]
+    train_output = ray.get(policy.async_run_ray_method("mesh", "ppo_train", batch))[0]
     status = train_output.metadata["train_status"]
     assert math.isfinite(status["policy_loss"])
     return status
