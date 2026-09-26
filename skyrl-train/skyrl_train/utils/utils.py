@@ -40,8 +40,7 @@ from marinskyrl.distillation import (
     validate_distillation_runtime_support,
 )
 from marinskyrl.inference_placement import (
-    expert_block_engine_problems,
-    expert_block_model_problems,
+    expert_block_auto_problems,
     expert_block_transport_problems,
     validate_expert_block_transport,
 )
@@ -731,12 +730,7 @@ def policy_model_config(model: DictConfig) -> dict | None:
 
 
 def resolve_weight_sync_transport(cfg: DictConfig, *, uses_fully_async_trainer: bool) -> None:
-    """Write the transport that ``auto`` stands for, and log the choice.
-
-    ``auto`` becomes ``expert_block`` when the trainer and engine config, the entrypoint's trainer,
-    the engine arguments and the policy's model config meet every requirement of the transport.
-    Explicit values stay as written.
-    """
+    """Replace ``auto`` with ``expert_block`` when the run meets every requirement of it, else with ``broadcast``."""
     generator = cfg.generator
     if generator.weight_sync_transport != WeightSyncTransport.AUTO:
         logger.info(f"generator.weight_sync_transport={generator.weight_sync_transport}")
@@ -744,9 +738,8 @@ def resolve_weight_sync_transport(cfg: DictConfig, *, uses_fully_async_trainer: 
     problems = expert_block_transport_problems(cfg)
     if not uses_fully_async_trainer:
         problems.append("the entrypoint must run FullyAsyncRayPPOTrainer")
-    problems.extend(expert_block_engine_problems(OmegaConf.to_container(generator.engine_init_kwargs, resolve=True)))
-    model = cfg.trainer.policy.model
-    problems.extend(expert_block_model_problems(policy_model_config(model), model.path))
+    engine_init_kwargs = OmegaConf.to_container(generator.engine_init_kwargs, resolve=True)
+    problems.extend(expert_block_auto_problems(engine_init_kwargs, policy_model_config(cfg.trainer.policy.model)))
     if problems:
         generator.weight_sync_transport = WeightSyncTransport.BROADCAST.value
         logger.info(

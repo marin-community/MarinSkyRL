@@ -5,6 +5,7 @@ import subprocess
 import sys
 
 import pytest
+from omegaconf import OmegaConf
 
 from marinskyrl.inference_placement import validate_expert_block_trainer, validate_expert_block_transport
 from skyrl_train.entrypoints.main_base import BasePPOExp
@@ -53,117 +54,45 @@ def test_the_default_transport_validates_without_a_readable_model():
     validate_cfg(cfg)
 
 
-def write_model_config(directory, **overrides):
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / "config.json").write_text(json.dumps({"model_type": "grug_moe", **overrides}))
-
-
-def auto_config(tmp_path):
+def _auto_config(tmp_path, *, model_type="grug_moe"):
     cfg = expert_block_config()
     cfg.generator.weight_sync_transport = "auto"
     cfg.generator.engine_init_kwargs = {"moe_backend": "triton"}
-    write_model_config(tmp_path / "model")
-    cfg.trainer.policy.model.path = str(tmp_path / "model")
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": model_type}))
+    cfg.trainer.policy.model.path = str(tmp_path)
     return cfg
 
 
-def test_auto_picks_expert_block_for_a_qualifying_run(tmp_path):
-    cfg = auto_config(tmp_path)
-    resolve_weight_sync_transport(cfg, uses_fully_async_trainer=True)
-    assert cfg.generator.weight_sync_transport == "expert_block"
-
-
-def test_auto_accepts_the_moe_backend_under_kernel_config(tmp_path):
-    cfg = auto_config(tmp_path)
-    cfg.generator.engine_init_kwargs = {"kernel_config": {"moe_backend": "triton"}}
-    resolve_weight_sync_transport(cfg, uses_fully_async_trainer=True)
-    assert cfg.generator.weight_sync_transport == "expert_block"
-
-
-def fsdp_policy(cfg, tmp_path):
-    cfg.trainer.strategy = "fsdp2"
-
-
-def tensor_parallel_policy(cfg, tmp_path):
-    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
-
-
-def engine_ep_differs_from_dp(cfg, tmp_path):
-    cfg.generator.inference_engine_expert_parallel_size = 4
-
-
-def colocated_engines(cfg, tmp_path):
-    cfg.trainer.placement.colocate_all = True
-
-
-def cutlass_moe_backend(cfg, tmp_path):
-    cfg.generator.engine_init_kwargs = {"moe_backend": "flashinfer_cutlass"}
-
-
-def unpinned_moe_backend(cfg, tmp_path):
-    cfg.generator.engine_init_kwargs = {}
-
-
-def quantised_engines(cfg, tmp_path):
-    cfg.generator.engine_init_kwargs = {"moe_backend": "triton", "quantization": "fp8"}
-
-
-def dense_model(cfg, tmp_path):
-    write_model_config(tmp_path / "model", model_type="qwen3")
-
-
-def quantised_model(cfg, tmp_path):
-    write_model_config(tmp_path / "model", quantization_config={"quant_method": "fp8"})
-
-
-def missing_model_config(cfg, tmp_path):
-    cfg.trainer.policy.model.path = str(tmp_path / "absent")
-
-
-def remote_model_config(cfg, tmp_path):
-    cfg.trainer.policy.model.path = "gs://bucket/model"
-
-
 @pytest.mark.parametrize(
-    "unmet",
+    ("change", "fully_async", "expected"),
     [
-        fsdp_policy,
-        tensor_parallel_policy,
-        engine_ep_differs_from_dp,
-        colocated_engines,
-        cutlass_moe_backend,
-        unpinned_moe_backend,
-        quantised_engines,
-        dense_model,
-        quantised_model,
-        missing_model_config,
-        remote_model_config,
+        ({}, True, "expert_block"),
+        ({"generator.engine_init_kwargs": {"kernel_config": {"moe_backend": "triton"}}}, True, "expert_block"),
+        ({"trainer.strategy": "fsdp2"}, True, "broadcast"),
+        ({"generator.engine_init_kwargs": {}}, True, "broadcast"),
+        ({"model_type": "qwen3"}, True, "broadcast"),
+        ({"trainer.policy.model.path": "gs://bucket/model"}, True, "broadcast"),
+        ({}, False, "broadcast"),
+        ({"generator.weight_sync_transport": "broadcast"}, True, "broadcast"),
+    ],
+    ids=[
+        "qualifying",
+        "kernel_config_backend",
+        "non_megatron",
+        "unpinned_backend",
+        "dense_model",
+        "object_store_path",
+        "sync_entrypoint",
+        "explicit",
     ],
 )
-def test_auto_falls_back_to_broadcast_when_a_requirement_is_unmet(tmp_path, unmet):
-    cfg = auto_config(tmp_path)
-    unmet(cfg, tmp_path)
-    resolve_weight_sync_transport(cfg, uses_fully_async_trainer=True)
-    assert cfg.generator.weight_sync_transport == "broadcast"
-
-
-def test_auto_falls_back_to_broadcast_on_the_synchronous_entrypoint(tmp_path):
-    cfg = auto_config(tmp_path)
-    resolve_weight_sync_transport(cfg, uses_fully_async_trainer=False)
-    assert cfg.generator.weight_sync_transport == "broadcast"
-
-
-@pytest.mark.parametrize("explicit", ["broadcast", "expert_block"])
-def test_explicit_transports_are_left_as_written(tmp_path, explicit):
-    qualifying = auto_config(tmp_path)
-    qualifying.generator.weight_sync_transport = explicit
-    resolve_weight_sync_transport(qualifying, uses_fully_async_trainer=True)
-    assert qualifying.generator.weight_sync_transport == explicit
-    unmet = auto_config(tmp_path)
-    unmet.generator.weight_sync_transport = explicit
-    unmet.trainer.strategy = "fsdp2"
-    resolve_weight_sync_transport(unmet, uses_fully_async_trainer=False)
-    assert unmet.generator.weight_sync_transport == explicit
+def test_auto_resolves_to_expert_block_only_for_a_qualifying_fully_async_run(tmp_path, change, fully_async, expected):
+    change = dict(change)
+    cfg = _auto_config(tmp_path, model_type=change.pop("model_type", "grug_moe"))
+    for key, value in change.items():
+        OmegaConf.update(cfg, key, value, merge=False)
+    resolve_weight_sync_transport(cfg, uses_fully_async_trainer=fully_async)
+    assert cfg.generator.weight_sync_transport == expected
 
 
 @pytest.mark.parametrize(
