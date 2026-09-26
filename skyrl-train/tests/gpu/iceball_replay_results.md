@@ -30,11 +30,38 @@ worker state per repetition. The cells alternated backend order on the same
 node. The predeclared maximum absolute starting-logprob guard was 0.05; all
 FSDP2 repetitions passed, with an observed maximum of 0.01563.
 
-| Trainer | Eight-update totals (s) | Median total (range, s) | Sample standard deviation (s) | Mean valid tokens/s |
-| --- | --- | --- | --- | --- |
-| Historical FSDP2 | 14.8797, 15.1318, 14.7991 | 14.8797 (14.7991–15.1318) | 0.1736 | 376.7 |
-| Historical Megatron | 13.5509, 13.4628, 13.4564 | 13.4628 (13.4564–13.5509) | 0.0528 | 417.0 |
-| Merged-source Megatron | 14.0604, 14.4646, 14.3569 | 14.3569 (14.0604–14.4646) | 0.2093 | 393.6 |
+| Trainer | Eight-update totals (s) | Median total (range, s) | Median step (s) | Sample standard deviation (s) | Mean valid tokens/s |
+| --- | --- | --- | --- | --- | --- |
+| Historical FSDP2 | 14.8797, 15.1318, 14.7991 | 14.8797 (14.7991–15.1318) | 1.6378 | 0.1736 | 376.7 |
+| Historical Megatron | 13.5509, 13.4628, 13.4564 | 13.4628 (13.4564–13.5509) | 1.1797 | 0.0528 | 417.0 |
+| Merged-source Megatron | 14.0604, 14.4646, 14.3569 | 14.3569 (14.0604–14.4646) | 1.1948 | 0.2093 | 393.6 |
+
+The median step is the median of the three per-repetition medians. Each row
+below lists the eight synchronized maximum-rank step intervals in seconds,
+in input-batch order, for one repetition. The CPU receipt reader
+`/atqamar/atqamar-iceball-replay-step-summary-aa4d-r2-20260926` recovered
+these intervals from the same replay archive; its three row sums per trainer
+match the eight-update totals above.
+
+```text
+Historical FSDP2
+  repeat 0: 2.200282, 1.586276, 1.626606, 2.968094, 1.597196, 1.601588, 1.650768, 1.648922
+  repeat 1: 2.299258, 1.623723, 1.626902, 2.913246, 1.661402, 1.664640, 1.677664, 1.665003
+  repeat 2: 2.225748, 1.623446, 1.594413, 2.873038, 1.599744, 1.641774, 1.622051, 1.618931
+Historical Megatron
+  repeat 0: 5.397574, 1.168758, 1.158373, 1.166758, 1.161368, 1.155693, 1.159161, 1.183256
+  repeat 1: 5.203210, 1.175787, 1.167121, 1.178718, 1.175840, 1.187517, 1.193979, 1.180666
+  repeat 2: 5.128379, 1.221276, 1.209177, 1.204128, 1.197716, 1.171269, 1.159443, 1.165062
+Merged-source Megatron
+  repeat 0: 5.766933, 1.186481, 1.191898, 1.180673, 1.177790, 1.181914, 1.186809, 1.187909
+  repeat 1: 6.098037, 1.206045, 1.194713, 1.194452, 1.194983, 1.188716, 1.192068, 1.195598
+  repeat 2: 5.719162, 1.261116, 1.226376, 1.231127, 1.226613, 1.226934, 1.238131, 1.227475
+```
+
+The first measured Megatron update took 5.1284–6.0980 s; the first FSDP2
+update took 2.2003–2.2993 s, and its fourth took 2.8730–2.9681 s. These
+intervals are included in the eight-update totals. Their causes were not
+isolated, so the median step does not replace the total-time comparison.
 
 The historical FSDP2/Megatron median-total ratio was 1.105. The ratio against
 the merged-source Megatron runtime was 1.036. Merged-source Megatron's median
