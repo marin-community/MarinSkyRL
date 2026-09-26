@@ -362,6 +362,7 @@ class MegatronStrategy(DistributedStrategy):
         if scheduler and load_training_state:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
+        muonh = self.optimizer_config is not None and str(self.optimizer_config.optimizer).lower() == "muonh"
         read_context = (
             remote_checkpoint_metadata(ckpt_dir)
             if ckpt_dir.startswith("s3://")
@@ -370,7 +371,6 @@ class MegatronStrategy(DistributedStrategy):
         with read_context as read_dir:
             if optimizer and load_training_state:
                 common_state = dist_checkpointing.load_common_state_dict(read_dir)
-                muonh = self.optimizer_config is not None and str(self.optimizer_config.optimizer).lower() == "muonh"
                 if muonh and common_state.get("optimizer_recipe") != _MUONH_CHECKPOINT_RECIPE:
                     raise ValueError("Checkpoint does not contain Hero MuonH optimizer state")
                 if muonh and "optimizer_recipe_step" not in common_state:
@@ -399,9 +399,14 @@ class MegatronStrategy(DistributedStrategy):
                 if ckpt_dir.startswith("s3://")
                 else get_default_load_sharded_strategy(read_dir)
             )
-            load_strategy = FullyParallelLoadStrategyWrapper(
-                load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
-            )
+            if not muonh:
+                load_strategy = FullyParallelLoadStrategyWrapper(
+                    load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
+                )
+            # MuonH's CPU moments are already allocated in the load template.
+            # MCore's parallel exchange stages them through CUDA and returns new
+            # CPU tensors, retaining both copies until the whole load finishes.
+            # Direct reads fill each rank's existing destinations in place.
             state_dict = dist_checkpointing.load(
                 sharded_state_dict=sharded_state_dict, checkpoint_dir=read_dir, sharded_strategy=load_strategy
             )
