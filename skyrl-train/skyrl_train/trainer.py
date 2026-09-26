@@ -9,7 +9,7 @@ import shutil
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
+from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
@@ -55,6 +55,7 @@ from skyrl_train.tensor_math import masked_mean
 from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
 from skyrl_train.utils.advantage_estimators import GRPO_FLAT_REWARD_STD_TOLERANCE, compute_advantages_and_returns
+from skyrl_train.utils.algorithm_registry import AdvantageEstimator
 from skyrl_train.utils.loss_reduction import (
     GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION,
     compute_global_loss_denom,
@@ -251,6 +252,19 @@ def consumed_work(training_input: TrainingInputBatch) -> ConsumedWork:
         response_tokens=int(training_input["response_mask"][:real_rows].sum().item()),
         loss_tokens=int(training_input["loss_mask"][:real_rows].sum().item()),
     )
+
+
+def _zero_std_group_fraction(uids: Sequence[str], rewards: torch.Tensor) -> float:
+    group_rewards: dict[str, list[torch.Tensor]] = {}
+    for uid, reward in zip(uids, rewards, strict=True):
+        group_rewards.setdefault(uid, []).append(reward)
+    if not group_rewards:
+        return 0.0
+    flat_groups = sum(
+        len(group) > 1 and torch.std(torch.stack(group)).item() <= GRPO_FLAT_REWARD_STD_TOLERANCE
+        for group in group_rewards.values()
+    )
+    return flat_groups / len(group_rewards)
 
 
 class RayPPOTrainer:
@@ -2204,16 +2218,12 @@ class RayPPOTrainer:
         num_samples = len(token_level_rewards)
 
         return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
-        if self.cfg.trainer.algorithm.advantage_estimator == "grpo" and not self.cfg.trainer.step_wise_training:
-            group_rewards: dict[str, list[torch.Tensor]] = {}
-            for uid, reward in zip(data.metadata["uids"][: num_samples - pad_size], return_sums, strict=True):
-                group_rewards.setdefault(uid, []).append(reward)
-            flat_groups = sum(
-                len(rewards) > 1 and torch.std(torch.stack(rewards)).item() <= GRPO_FLAT_REWARD_STD_TOLERANCE
-                for rewards in group_rewards.values()
-            )
-            self.all_metrics["reward/zero_std_group_fraction"] = (
-                flat_groups / len(group_rewards) if group_rewards else 0.0
+        if (
+            self.cfg.trainer.algorithm.advantage_estimator == AdvantageEstimator.GRPO
+            and not self.cfg.trainer.step_wise_training
+        ):
+            self.all_metrics["reward/zero_std_group_fraction"] = _zero_std_group_fraction(
+                data.metadata["uids"][: num_samples - pad_size], return_sums
             )
         if self.cfg.trainer.step_wise_training:
             avg_rewards: float = return_sums[data["is_last_step"][: num_samples - pad_size]].mean().item()
