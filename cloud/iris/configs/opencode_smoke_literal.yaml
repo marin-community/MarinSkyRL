@@ -152,7 +152,9 @@ generator:
   n_samples_per_prompt: 1
   eval_n_samples_per_prompt: 1
 
-  gpu_memory_utilization: 0.85
+  # Colocated Megatron keeps its optimizer state on the same H100s; 0.85 leaves too little
+  # headroom for vLLM to wake its KV cache.
+  gpu_memory_utilization: 0.7
 
   max_num_seqs: 24
   max_num_batched_tokens: 16384
