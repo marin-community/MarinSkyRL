@@ -141,7 +141,14 @@ Engine 2.11 restrictions on context parallelism across multiple ranks:
 These restrictions are enforced in
 [Transformer Engine's context-parallel attention](https://github.com/NVIDIA/TransformerEngine/blob/v2.11/transformer_engine/pytorch/attention/dot_product_attention/context_parallel.py).
 
-Run the launcher without `--run` to validate the recipe locally:
+The policy and reference log-probability paths use 128-token chunks. The
+64-GPU smoke failed during the first policy backward pass with a 1024-token
+chunk: the policy and colocated reference processes left less than 1 GiB free
+on an H100. The smoke logs to the `dogml/pivot-grug-swe-smoke` W&B project.
+Set `WANDB_API_KEY` in the launch environment; the launcher forwards it to
+the GPU job.
+
+With `WANDB_API_KEY` set, run the launcher without `--run` to validate the recipe locally:
 
 ```bash
 PYTHONPATH=skyrl-train:skyrl-gym:. uv run --no-sync skyrl-train/ci/pivot_grug_smoke.py \
