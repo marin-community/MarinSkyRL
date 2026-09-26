@@ -15,6 +15,8 @@ from transformers import AutoTokenizer, Qwen2Config, Qwen2ForCausalLM
 
 TOKENIZER_SOURCE = "Qwen/Qwen2.5-0.5B-Instruct"
 GROUND_TRUTH = "1"
+# Dataset bins for curriculum sampling, in grade order.
+CURRICULUM_BINS = ("g0-even", "g1-odd")
 HIDDEN_SIZE = 16
 DISALLOWED_LOGIT = -8.0
 ALLOWED_LOGIT_OFFSET = 8.0
@@ -80,14 +82,19 @@ def build_tiny_policy(output_dir: Path) -> Path:
 
 
 def write_gsm8k_dataset(path: Path, num_prompts: int) -> Path:
-    """Write ``num_prompts`` GSM8K-environment rows whose ground truth is always ``1``."""
+    """Write ``num_prompts`` GSM8K-environment rows whose ground truth is always ``1``.
+
+    Rows alternate between the two ``CURRICULUM_BINS``, so curriculum sampling can read the dataset.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as handle:
         for index in range(num_prompts):
+            grade = index % len(CURRICULUM_BINS)
             row = {
                 "prompt": [{"role": "user", "content": f"Question {index}: what is one? End with '#### 1'."}],
                 "env_class": "gsm8k",
                 "reward_spec": {"method": "rule", "ground_truth": GROUND_TRUTH},
+                "extra_info": {"data_source": CURRICULUM_BINS[grade], "grade": grade},
             }
             handle.write(json.dumps(row) + "\n")
     return path

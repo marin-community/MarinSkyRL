@@ -1,4 +1,4 @@
-from skyrl_train.rollouts.loader import GroupLoader
+from skyrl_train.rollouts.loader import GroupLoader, SeededPasses
 
 
 class _Prompts:
@@ -15,31 +15,35 @@ class _Prompts:
         return [{"uid": uid} for uid in items]
 
 
+def _loader(count: int, *, seed: int, shuffle: bool) -> GroupLoader:
+    return GroupLoader(_Prompts(count), SeededPasses(count, seed=seed, shuffle=shuffle))
+
+
 def _take(loader: GroupLoader, count: int) -> list[str]:
     return [loader.next_group()["uid"] for _ in range(count)]
 
 
 def test_each_pass_visits_every_prompt_in_a_fresh_seeded_order():
-    uids = _take(GroupLoader(_Prompts(8), seed=3, shuffle=True), 16)
+    uids = _take(_loader(8, seed=3, shuffle=True), 16)
 
     assert sorted(uids[:8]) == sorted(uids[8:]) == [str(index) for index in range(8)]
     assert uids[:8] != uids[8:]
-    assert _take(GroupLoader(_Prompts(8), seed=3, shuffle=True), 16) == uids
-    assert _take(GroupLoader(_Prompts(8), seed=4, shuffle=True), 16) != uids
+    assert _take(_loader(8, seed=3, shuffle=True), 16) == uids
+    assert _take(_loader(8, seed=4, shuffle=True), 16) != uids
 
 
 def test_unshuffled_passes_follow_dataset_order():
-    assert _take(GroupLoader(_Prompts(3), seed=0, shuffle=False), 6) == ["0", "1", "2", "0", "1", "2"]
+    assert _take(_loader(3, seed=0, shuffle=False), 6) == ["0", "1", "2", "0", "1", "2"]
 
 
 def test_retries_come_first_and_resume_continues_the_same_sequence():
-    loader = GroupLoader(_Prompts(4), seed=0, shuffle=True)
+    loader = _loader(4, seed=0, shuffle=True)
     _take(loader, 3)
     loader.retry({"uid": "retry"})
     state = loader.state_dict()
     expected = _take(loader, 6)
 
-    resumed = GroupLoader(_Prompts(4), seed=0, shuffle=True)
+    resumed = _loader(4, seed=0, shuffle=True)
     resumed.load_state_dict(state)
 
     assert expected[0] == "retry"

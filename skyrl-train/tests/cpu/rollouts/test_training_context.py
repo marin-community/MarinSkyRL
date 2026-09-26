@@ -15,7 +15,7 @@ from skyrl_train.rollouts.buffer import (
     RolloutWriter,
 )
 from skyrl_train.rollouts.context import RolloutRequestSpec, TrainingContext
-from skyrl_train.rollouts.loader import GroupLoader
+from skyrl_train.rollouts.loader import GroupLoader, JudgedGroup, PromptOrder, SeededPasses
 
 SAMPLES_PER_PROMPT = 2
 STALL_TIMEOUT = 10.0
@@ -72,9 +72,32 @@ class _Workers:
         return SAMPLES_PER_PROMPT
 
 
-def _context(uids: list[str], workers: _Workers, *, batch_size: int, max_in_flight: int) -> TrainingContext:
+class _RecordingOrder:
+    """Dataset order that records the judged groups of each step."""
+
+    def __init__(self, num_rows: int):
+        self._passes = SeededPasses(num_rows, seed=0, shuffle=False)
+        self.observed: list[list[JudgedGroup]] = []
+
+    def next_index(self) -> int:
+        return self._passes.next_index()
+
+    def observe(self, groups):
+        self.observed.append(list(groups))
+        return {"order/groups": float(len(groups))}
+
+    def state_dict(self):
+        return self._passes.state_dict()
+
+    def load_state_dict(self, state) -> None:
+        self._passes.load_state_dict(state)
+
+
+def _context(
+    uids: list[str], workers: _Workers, *, batch_size: int, max_in_flight: int, order: PromptOrder | None = None
+) -> TrainingContext:
     return TrainingContext(
-        GroupLoader(_Prompts(uids), seed=0, shuffle=False),
+        GroupLoader(_Prompts(uids), order or SeededPasses(len(uids), seed=0, shuffle=False)),
         RolloutBufferConfig(batch_size, max_in_flight, 1, None, None),
         CONTENT_POLICY,
         RolloutRequestSpec(samples_per_prompt=SAMPLES_PER_PROMPT, sampling_params={}, environment_class="test"),
@@ -105,6 +128,21 @@ async def test_slow_rollout_does_not_block_training_at_positive_staleness(ray_mo
         assert "slow" in workers.started
     finally:
         await context.close()
+
+
+@pytest.mark.asyncio
+async def test_each_batch_reports_its_judged_groups_to_the_prompt_order(ray_module):
+    order = _RecordingOrder(3)
+    context = _context(["a", "b", "c"], _Workers(), batch_size=2, max_in_flight=2, order=order)
+    context.start()
+    try:
+        await context.publish(1)
+        groups, metrics = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
+    finally:
+        await context.close()
+
+    assert order.observed == [[JudgedGroup(group.uid, (0.0, 1.0)) for group in groups]]
+    assert metrics["order/groups"] == 2.0
 
 
 @pytest.mark.asyncio

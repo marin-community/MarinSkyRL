@@ -7,13 +7,14 @@ import pytest
 from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionResult
 from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionStalledError
 from skyrl_train.rollouts.buffer import GroupRewards, RolloutBuffer, RolloutBufferConfig, RolloutVerdict
+from skyrl_train.rollouts.loader import JudgedGroup
 from skyrl_train.telemetry import GeneratedWork
 
 # Long enough that an expected admission never times out, short enough that a blocked lease fails fast.
 PROGRESS_TIMEOUT = 5.0
 BLOCKED_TIMEOUT = 0.05
-UNIFORM_REWARDS = GroupRewards(sample_count=2, optimization_reward_sum=0.0, outcome_reward_sum=0.0, passed=False)
-SPREAD_REWARDS = GroupRewards(sample_count=2, optimization_reward_sum=1.0, outcome_reward_sum=1.0, passed=True)
+UNIFORM_REWARDS = GroupRewards(optimization=(0.0, 0.0), outcome=(0.0, 0.0))
+SPREAD_REWARDS = GroupRewards(optimization=(0.0, 1.0), outcome=(0.0, 1.0))
 
 
 def _buffer(
@@ -34,10 +35,11 @@ def _verdict(
     *,
     rejection: AdmissionRejection | None = None,
     selection: GroupSelectionResult = GroupSelectionResult.KEEP,
-    rewards: GroupRewards | None = None,
+    rewards: GroupRewards = SPREAD_REWARDS,
 ) -> RolloutVerdict:
-    rejections = (rejection,) if rejection is not None else ()
-    return RolloutVerdict(uid, rejections, selection, rewards, GeneratedWork(2, 2, 8))
+    if rejection is not None:
+        return RolloutVerdict(uid, (rejection,), None, None, GeneratedWork(2, 2, 8))
+    return RolloutVerdict(uid, (), selection, rewards, GeneratedWork(2, 2, 8))
 
 
 async def _commit(buffer: RolloutBuffer, lease_id: str, uid: str, **verdict) -> None:
@@ -56,8 +58,8 @@ async def _take_batch(buffer: RolloutBuffer) -> tuple[list[str], dict[str, float
     while True:
         admission = await buffer.admit(PROGRESS_TIMEOUT)
         payloads.extend(admission.payloads)
-        if admission.metrics is not None:
-            return payloads, admission.metrics
+        if admission.selection is not None:
+            return payloads, admission.selection.metrics
 
 
 async def _lease_is_blocked(buffer: RolloutBuffer) -> bool:
@@ -131,12 +133,12 @@ async def test_groups_stream_to_the_trainer_before_the_batch_completes():
     await buffer.publish(1)
     await _generate(buffer, "a")
     first = await buffer.admit(PROGRESS_TIMEOUT)
-    assert (first.payloads, first.metrics) == (["a"], None)
+    assert (first.payloads, first.selection) == (["a"], None)
 
     await _generate(buffer, "b")
     second = await buffer.admit(PROGRESS_TIMEOUT)
     assert second.payloads == ["b"]
-    assert second.metrics is not None
+    assert second.selection is not None
 
 
 @pytest.mark.asyncio
@@ -183,7 +185,7 @@ async def test_dynamic_sampling_filter_discards_uninformative_groups():
     await buffer.publish(1)
     uniform = {"selection": GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD, "rewards": UNIFORM_REWARDS}
     await _generate(buffer, "uniform", **uniform)
-    await _generate(buffer, "informative", rewards=SPREAD_REWARDS)
+    await _generate(buffer, "informative")
 
     payloads, metrics = await _take_batch(buffer)
     assert payloads == ["informative"]
@@ -191,6 +193,27 @@ async def test_dynamic_sampling_filter_discards_uninformative_groups():
     assert metrics["async/dynamic_sampling/discarded_count"] == 1
     assert metrics["async/dynamic_sampling/candidate_outcome_reward_mean"] == 0.25
     assert metrics["async/dynamic_sampling/candidate_pass_at_2"] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_batch_selection_reports_kept_and_discarded_groups_with_their_rewards():
+    buffer = _buffer(batch_size=2, dynamic_sampling=DynamicSamplingType.FILTER)
+    await buffer.publish(1)
+    await _generate(buffer, "a")
+    await _generate(
+        buffer, "uniform", selection=GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD, rewards=UNIFORM_REWARDS
+    )
+    await _generate(buffer, "masked", rejection=AdmissionRejection.FULLY_MASKED)
+    await _generate(buffer, "a")
+    await _generate(buffer, "b")
+
+    while (admission := await buffer.admit(PROGRESS_TIMEOUT)).selection is None:
+        pass
+    assert admission.selection.judged == [
+        JudgedGroup("a", (0.0, 1.0)),
+        JudgedGroup("uniform", (0.0, 0.0)),
+        JudgedGroup("b", (0.0, 1.0)),
+    ]
 
 
 @pytest.mark.asyncio
@@ -239,18 +262,18 @@ async def test_every_judged_group_reports_one_disposition_with_its_dwell():
     stale = await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT)
     dispositions = []
     for step, uid in enumerate(["a", "b"], start=2):
-        await _generate(buffer, uid, rewards=SPREAD_REWARDS)
-        while (admission := await buffer.admit(PROGRESS_TIMEOUT)).metrics is None:
+        await _generate(buffer, uid)
+        while (admission := await buffer.admit(PROGRESS_TIMEOUT)).selection is None:
             dispositions.extend(admission.dispositions)
         dispositions.extend(admission.dispositions)
         await buffer.publish(step)
 
-    await _commit(buffer, stale.lease_id, "stale", rewards=SPREAD_REWARDS)
+    await _commit(buffer, stale.lease_id, "stale")
     await _generate(buffer, "masked", rejection=AdmissionRejection.FULLY_MASKED)
     uniform = {"selection": GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD, "rewards": UNIFORM_REWARDS}
     await _generate(buffer, "uniform", **uniform)
-    await _generate(buffer, "c", rewards=SPREAD_REWARDS)
-    while (admission := await buffer.admit(PROGRESS_TIMEOUT)).metrics is None:
+    await _generate(buffer, "c")
+    while (admission := await buffer.admit(PROGRESS_TIMEOUT)).selection is None:
         dispositions.extend(admission.dispositions)
     dispositions.extend(admission.dispositions)
 

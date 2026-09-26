@@ -32,7 +32,7 @@ from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 NUM_GPUS = 2
-ROLLOUT_STATE = TrainingContextState(loader=GroupLoaderState(epoch=0, position=2, retries=[]), ready=[])
+ROLLOUT_STATE = TrainingContextState(loader=GroupLoaderState(order={"epoch": 0, "position": 2}, retries=[]), ready=[])
 
 
 class DummyDataset(Dataset):

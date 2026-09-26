@@ -36,6 +36,7 @@ from tests.cpu.tiny_training.tiny_model import build_tiny_policy, write_gsm8k_da
 LOGICAL_GPUS = 4
 METRICS_FILE = "metrics.jsonl"
 STALL_TIMEOUT_SECONDS = 30
+TRAIN_BATCH_SIZE = 4
 WORKER_ENV_VARS = {"HF_HUB_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false", "OMP_NUM_THREADS": "4"}
 
 
@@ -45,6 +46,8 @@ class TrainingMode(StrEnum):
 
 
 MAX_STALENESS_STEPS = {TrainingMode.SYNC: 0, TrainingMode.ASYNC: 1}
+# The async run draws prompts from an adaptive curriculum; the sync run reads the dataset in seeded passes.
+SAMPLING_KIND = {TrainingMode.SYNC: None, TrainingMode.ASYNC: "thompson"}
 
 
 def tiny_training_config(root: Path, mode: TrainingMode, *, max_steps: int, num_prompts: int = 64) -> DictConfig:
@@ -55,6 +58,7 @@ def tiny_training_config(root: Path, mode: TrainingMode, *, max_steps: int, num_
         "data": {
             "train_data": [str(write_gsm8k_dataset(root / "data" / "train.jsonl", num_prompts))],
             "val_data": [str(write_gsm8k_dataset(root / "data" / "validation.jsonl", 8))],
+            "sampling": {"kind": SAMPLING_KIND[mode]},
         },
         "trainer": {
             "debug_mode": "off",
@@ -63,8 +67,8 @@ def tiny_training_config(root: Path, mode: TrainingMode, *, max_steps: int, num_
             # A stalled step fails with the buffer's state long before the test's subprocess timeout.
             "algorithm": {"use_kl_loss": False, "group_admission": {"stall_timeout": STALL_TIMEOUT_SECONDS}},
             "rollout_buffer": {"max_staleness_steps": MAX_STALENESS_STEPS[mode], "max_in_flight": 8},
-            "train_batch_size": 4,
-            "policy_mini_batch_size": 4,
+            "train_batch_size": TRAIN_BATCH_SIZE,
+            "policy_mini_batch_size": TRAIN_BATCH_SIZE,
             "micro_train_batch_size_per_gpu": 8,
             "micro_forward_batch_size_per_gpu": 8,
             "use_sample_packing": False,

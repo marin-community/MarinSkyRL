@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from tests.cpu.tiny_training.experiment import MAX_STALENESS_STEPS, TrainingMode, read_metrics
+from tests.cpu.tiny_training.experiment import (
+    MAX_STALENESS_STEPS,
+    SAMPLING_KIND,
+    TRAIN_BATCH_SIZE,
+    TrainingMode,
+    read_metrics,
+)
+from tests.cpu.tiny_training.tiny_model import CURRICULUM_BINS
 
 SKYRL_TRAIN_DIR = Path(__file__).parents[3]
 NUM_STEPS = 3
@@ -36,3 +43,7 @@ def test_tiny_policy_trains_to_max_steps(tmp_path: Path, mode: TrainingMode):
     assert [record["trainer/global_step"] for record in steps] == list(range(1, NUM_STEPS + 1))
     assert all(record["policy/raw_grad_norm"] > 0 for record in steps)
     assert max(record["async/staleness_max"] for record in steps) <= MAX_STALENESS_STEPS[mode]
+    if SAMPLING_KIND[mode] is not None:
+        # Without dynamic sampling, the groups each step judged are exactly its batch.
+        for record in steps:
+            assert sum(record[f"curriculum/{name}/groups"] for name in CURRICULUM_BINS) == TRAIN_BATCH_SIZE

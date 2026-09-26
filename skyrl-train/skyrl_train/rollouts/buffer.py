@@ -26,6 +26,7 @@ from skyrl_train.group_admission import (
     GroupAdmissionStalledError,
     TrainingGroupInvariantError,
 )
+from skyrl_train.rollouts.loader import JudgedGroup
 from skyrl_train.telemetry import GeneratedWork
 from skyrl_train.trajectory_runners.trajectory_processing import get_outcome_rewards
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import NormalizedReward
@@ -90,21 +91,16 @@ class RolloutGroup:
 
 @dataclass(frozen=True)
 class GroupRewards:
-    """Reward totals of one group, reported as dynamic-sampling candidate metrics."""
+    """Per-sample rewards of one group: each sample's optimization reward total and its outcome reward."""
 
-    sample_count: int
-    optimization_reward_sum: float
-    outcome_reward_sum: float
-    passed: bool
+    optimization: tuple[float, ...]
+    outcome: tuple[float, ...]
 
     @classmethod
     def from_batch(cls, batch: TrajectoryBatch) -> GroupRewards:
-        outcomes = get_outcome_rewards(batch)
         return cls(
-            sample_count=len(outcomes),
-            optimization_reward_sum=sum(NormalizedReward.from_output(reward).total for reward in batch["rewards"]),
-            outcome_reward_sum=sum(outcomes),
-            passed=any(reward > 0.0 for reward in outcomes),
+            optimization=tuple(NormalizedReward.from_output(reward).total for reward in batch["rewards"]),
+            outcome=tuple(get_outcome_rewards(batch)),
         )
 
 
@@ -144,14 +140,7 @@ class RolloutContentPolicy:
         work = GeneratedWork.from_batch(batch["response_ids"], batch.get("is_last_step"))
         if not decision.accepted:
             return RolloutVerdict(group.uid, decision.rejections, None, None, work)
-        filtering = self.selection.sampling_type is DynamicSamplingType.FILTER
-        return RolloutVerdict(
-            group.uid,
-            (),
-            self.selection.evaluate(group),
-            GroupRewards.from_batch(batch) if filtering else None,
-            work,
-        )
+        return RolloutVerdict(group.uid, (), self.selection.evaluate(group), GroupRewards.from_batch(batch), work)
 
 
 class RolloutWriter(Protocol):
@@ -210,10 +199,18 @@ class BufferSnapshot:
 
 
 @dataclass(frozen=True)
+class BatchSelection:
+    """How a completed batch was selected: its metrics and every group judged for it, kept or discarded."""
+
+    metrics: dict[str, float]
+    judged: list[JudgedGroup]
+
+
+@dataclass(frozen=True)
 class Admission:
     """Progress toward the current batch since the previous ``admit`` call.
 
-    ``metrics`` is set only on the call that completes the batch.
+    ``selection`` is set only on the call that completes the batch.
     """
 
     payloads: list
@@ -221,7 +218,7 @@ class Admission:
     generated: list[tuple[int, GeneratedWork]]
     dispositions: list[GroupDisposition]
     ready_count: int
-    metrics: dict[str, float] | None
+    selection: BatchSelection | None
 
 
 @dataclass
@@ -237,24 +234,26 @@ class _SelectionStats:
     outcome_reward_sum: float = 0.0
     passed: int = 0
     dynamic_discarded: int = 0
+    judged: list[JudgedGroup] = field(default_factory=list)
 
     def reject(self, rejection: AdmissionRejection) -> None:
         self.inspected += 1
         self.rejections[rejection] += 1
 
     def observe_candidate(self, rewards: GroupRewards) -> None:
+        sample_count = len(rewards.optimization)
         if self.samples_per_group is None:
-            self.samples_per_group = rewards.sample_count
-        elif self.samples_per_group != rewards.sample_count:
+            self.samples_per_group = sample_count
+        elif self.samples_per_group != sample_count:
             raise ValueError(
                 "dynamic sampling candidates must have a consistent physical group size: "
-                f"got {self.samples_per_group} and {rewards.sample_count}"
+                f"got {self.samples_per_group} and {sample_count}"
             )
         self.candidates += 1
-        self.candidate_samples += rewards.sample_count
-        self.optimization_reward_sum += rewards.optimization_reward_sum
-        self.outcome_reward_sum += rewards.outcome_reward_sum
-        self.passed += int(rewards.passed)
+        self.candidate_samples += sample_count
+        self.optimization_reward_sum += sum(rewards.optimization)
+        self.outcome_reward_sum += sum(rewards.outcome)
+        self.passed += int(any(reward > 0.0 for reward in rewards.outcome))
 
     def metrics(self, dynamic_sampling: DynamicSamplingType | None) -> dict[str, float]:
         rejected = sum(self.rejections.values())
@@ -353,7 +352,7 @@ class RolloutBuffer:
         """Wait up to ``timeout`` seconds for the current batch to progress.
 
         Returns newly admitted payloads and prompts to regenerate. The call that completes the batch also
-        returns its selection metrics; the batch then counts as taken until the next ``publish``.
+        returns how the batch was selected; the batch then counts as taken until the next ``publish``.
 
         Raises:
             GroupAdmissionStalledError: Nothing was admitted or returned for regeneration within ``timeout``.
@@ -375,11 +374,11 @@ class RolloutBuffer:
                     f"admitted={len(self._admitted)}/{self.config.batch_size} leases={len(self._leases)} "
                     f"ready={len(self._ready)} rejections={dict(self._stats.rejections)}"
                 ) from error
-            metrics = None
+            selection = None
             if self._batch_complete():
                 for rollout in self._admitted:
                     self._dispose(rollout, "consumed")
-                metrics = self._stats.metrics(self.config.dynamic_sampling)
+                selection = BatchSelection(self._stats.metrics(self.config.dynamic_sampling), self._stats.judged)
                 self._stats = _SelectionStats()
                 self._batch_taken = True
             elif self._over_budget():
@@ -394,7 +393,7 @@ class RolloutBuffer:
                 generated=self._generated,
                 dispositions=self._dispositions,
                 ready_count=len(self._ready),
-                metrics=metrics,
+                selection=selection,
             )
             self._unreported, self._retries, self._generated, self._dispositions = [], [], [], []
             self._changed.notify_all()
@@ -449,7 +448,8 @@ class RolloutBuffer:
                 self._reject(rollout, AdmissionRejection.DUPLICATE_UID)
             else:
                 self._stats.inspected += 1
-                if verdict.rewards is not None:
+                self._stats.judged.append(JudgedGroup(verdict.uid, verdict.rewards.optimization))
+                if self.config.dynamic_sampling is DynamicSamplingType.FILTER:
                     self._stats.observe_candidate(verdict.rewards)
                 if verdict.selection is not GroupSelectionResult.KEEP:
                     self._stats.dynamic_discarded += 1

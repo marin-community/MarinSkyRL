@@ -15,6 +15,9 @@ from omegaconf import DictConfig
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from marinskyrl.environment_contract import TrainingType
+from skyrl_train.curriculum import CurriculumConfig, CurriculumOrder, SamplingKind
+from skyrl_train.dataset import PromptDataset
+from skyrl_train.domain_sampling import DomainWeightedOrder
 from skyrl_train.dynamic_sampling import (
     DynamicSamplingType,
     GroupSelectionPolicy,
@@ -32,7 +35,7 @@ from skyrl_train.rollouts.buffer import (
     RolloutGroup,
     RolloutTask,
 )
-from skyrl_train.rollouts.loader import GroupLoader, GroupLoaderState, PromptGroupDataset
+from skyrl_train.rollouts.loader import GroupLoader, GroupLoaderState, PromptGroupDataset, PromptOrder, SeededPasses
 from skyrl_train.rollout_observability import dispatch_wait, observe_rollout_call, record_group_disposition
 from skyrl_train.rollouts.workers import RolloutWorkers
 from skyrl_train.telemetry import record_generated_work, record_rollout_buffer
@@ -77,6 +80,23 @@ class TrainingContextState:
     ready: list[ReadyRollout]
 
 
+def prompt_order_from_config(config: DictConfig, dataset: PromptGroupDataset) -> PromptOrder:
+    """Build the loader's prompt order: seeded passes by default, or the ``data.sampling`` order."""
+    sampling = config.data.sampling
+    if sampling.kind is None:
+        return SeededPasses(len(dataset), seed=config.trainer.seed, shuffle=config.data.shuffle)
+    if config.trainer.step_wise_training:
+        raise ValueError("data.sampling.kind requires one group per prompt; step_wise_training is not supported")
+    if not isinstance(dataset, PromptDataset):
+        raise ValueError(f"data.sampling.kind requires a prompt dataset, got {type(dataset).__name__}")
+    seed = sampling.seed if sampling.seed is not None else config.trainer.seed
+    batch_size = config.trainer.train_batch_size
+    if SamplingKind(sampling.kind) is SamplingKind.DOMAIN_WEIGHTED:
+        return DomainWeightedOrder(dataset.dataframe, sampling.domain_weights, seed=seed, window_size=batch_size)
+    curriculum = CurriculumConfig.from_dict_config(sampling, group_size=config.generator.n_samples_per_prompt)
+    return CurriculumOrder(dataset, curriculum, seed=seed, window_size=batch_size)
+
+
 class TrainingContext:
     """The group loader, the rollout buffer, and the rollout tasks in flight between them.
 
@@ -114,10 +134,6 @@ class TrainingContext:
 
     @classmethod
     def from_config(cls, config: DictConfig, dataset: PromptGroupDataset, workers: RolloutWorkers) -> TrainingContext:
-        if config.data.sampling.kind is not None:
-            raise ValueError(
-                "data.sampling.kind is not supported: the rollout-buffer loader reads the dataset in seeded passes"
-            )
         algorithm = config.trainer.algorithm
         dynamic_sampling = algorithm.dynamic_sampling
         selection = GroupSelectionPolicy(
@@ -140,7 +156,7 @@ class TrainingContext:
             rollout_logprobs_required=policy_loss_requires_rollout_logprobs(algorithm.policy_loss_type),
         )
         return cls(
-            GroupLoader(dataset, seed=config.trainer.seed, shuffle=config.data.shuffle),
+            GroupLoader(dataset, prompt_order_from_config(config, dataset)),
             buffer_config,
             RolloutContentPolicy(admission, selection),
             RolloutRequestSpec.from_config(config),
@@ -171,9 +187,10 @@ class TrainingContext:
         stall_timeout: float,
         on_admitted: Callable[[list[RolloutGroup]], Awaitable[None]],
     ) -> tuple[list[RolloutGroup], dict[str, float]]:
-        """Wait for the current step's batch and return its groups with selection metrics.
+        """Wait for the current step's batch and return its groups with selection and prompt-order metrics.
 
-        Groups reach ``on_admitted`` as they are admitted, before the batch is complete.
+        Groups reach ``on_admitted`` as they are admitted, before the batch is complete. Every group judged for
+        the batch, kept or discarded, then updates the loader's prompt order.
 
         Raises:
             GroupAdmissionStalledError: No group was admitted, or admitted payloads did not arrive, for
@@ -210,8 +227,8 @@ class TrainingContext:
                 groups.extend(admitted)
                 await on_admitted(admitted)
                 deadline = loop.time() + stall_timeout
-            if admission.metrics is not None:
-                return groups, admission.metrics
+            if admission.selection is not None:
+                return groups, {**admission.selection.metrics, **self.loader.observe(admission.selection.judged)}
 
     async def state_dict(self) -> TrainingContextState:
         """Capture every dispatched group that no trained batch has consumed.

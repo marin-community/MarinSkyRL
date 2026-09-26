@@ -4,14 +4,14 @@ import numpy as np
 import pytest
 from datasets import Dataset
 
-from skyrl_train.curriculum import CurriculumConfig, CurriculumSampler, SamplingKind, WeightingKind, dataset_bins
+from skyrl_train.curriculum import CurriculumConfig, CurriculumOrder, SamplingKind, WeightingKind, dataset_bins
+from skyrl_train.rollouts.loader import JudgedGroup
 
 
 class _StubCurriculumDataset:
     """Minimal PromptDataset stand-in: a dataframe with `extra_info` plus map-style access.
 
-    Module scope so DataLoader pickling would work if needed; bins maps
-    data_source name -> (grade, row_count), rows laid out in insertion order.
+    bins maps data_source name -> (grade, row_count), rows laid out in insertion order.
     """
 
     def __init__(self, bins: dict[str, tuple[int, int]]):
@@ -32,76 +32,78 @@ class _StubCurriculumDataset:
         return batch
 
 
-def _sampler(bins, kind, seed=0, batch_size=2, **overrides):
+def _order(bins, kind, seed=0, window_size=2, **overrides):
     dataset = _StubCurriculumDataset(bins)
     config = CurriculumConfig(kind=SamplingKind(kind), **overrides)
-    return CurriculumSampler(dataset, config, seed, batch_size=batch_size)
+    return CurriculumOrder(dataset, config, seed=seed, window_size=window_size)
+
+
+def _observe(order, uids, rewards):
+    """Report one step's groups, given one uid and one reward per sample."""
+    groups: dict[str, list[float]] = {}
+    for uid, reward in zip(uids, rewards, strict=True):
+        groups.setdefault(uid, []).append(reward)
+    return order.observe([JudgedGroup(uid, tuple(group)) for uid, group in groups.items()])
+
+
+def _draws(order, count):
+    return [order.next_index() for _ in range(count)]
 
 
 TWO_BINS = {"g0-easy": (0, 1), "g1-hard": (1, 1)}
 
 
-def test_one_pass_yields_len_dataset_indices():
-    sampler = _sampler({"g0-easy": (0, 3), "g1-hard": (1, 7)}, "thompson")
-    indices = list(iter(sampler))
-    assert len(sampler) == 10
-    assert len(indices) == 10
-    assert all(0 <= i < 10 for i in indices)
-
-
 def test_draws_deterministic_given_seed():
     bins = {"g0-easy": (0, 5), "g1-hard": (1, 5)}
-    draws_a = list(iter(_sampler(bins, "thompson", seed=7)))
-    draws_b = list(iter(_sampler(bins, "thompson", seed=7)))
-    draws_c = list(iter(_sampler(bins, "thompson", seed=8)))
+    draws_a = _draws(_order(bins, "thompson", seed=7), 10)
+    draws_b = _draws(_order(bins, "thompson", seed=7), 10)
+    draws_c = _draws(_order(bins, "thompson", seed=8), 10)
     assert draws_a == draws_b
     assert draws_a != draws_c
 
 
 def test_state_dict_roundtrip_resumes_identical_draws():
     bins = {"g0-easy": (0, 15), "g1-hard": (1, 15)}
-    sampler = _sampler(bins, "thompson", seed=3)
-    it = iter(sampler)
-    [next(it) for _ in range(5)]
-    sampler.update(["0", "0", "20", "20"], [0.0, 1.0, 1.0, 1.0], 2)
-    [next(it) for _ in range(2)]
+    order = _order(bins, "thompson", seed=3)
+    _draws(order, 5)
+    _observe(order, ["0", "0", "20", "20"], [0.0, 1.0, 1.0, 1.0])
+    _draws(order, 2)
 
-    snapshot = sampler.state_dict()
-    expected = [next(it) for _ in range(10)]
+    snapshot = order.state_dict()
+    expected = _draws(order, 10)
 
-    restored = _sampler(bins, "thompson", seed=99)
+    restored = _order(bins, "thompson", seed=99)
     restored.load_state_dict(snapshot)
-    restored_it = iter(restored)
-    assert [next(restored_it) for _ in range(10)] == expected
-    np.testing.assert_allclose(restored.stats.informative, sampler.stats.informative)
-    np.testing.assert_allclose(restored.stats.total, sampler.stats.total)
-    np.testing.assert_allclose(restored.stats.solved, sampler.stats.solved)
-    np.testing.assert_allclose(restored.stats.samples, sampler.stats.samples)
+    assert _draws(restored, 10) == expected
+    np.testing.assert_allclose(restored.stats.informative, order.stats.informative)
+    np.testing.assert_allclose(restored.stats.total, order.stats.total)
+    np.testing.assert_allclose(restored.stats.solved, order.stats.solved)
+    np.testing.assert_allclose(restored.stats.samples, order.stats.samples)
 
 
 def test_update_informative_accounting_with_decay():
-    sampler = _sampler(TWO_BINS, "naive", decay=0.5)
+    order = _order(TWO_BINS, "naive", decay=0.5)
     # Row 0 is the g0 bin, row 1 the g1 bin. One informative group each for bin 0, none for bin 1.
-    sampler.update(["0", "0", "1", "1"], [0.0, 1.0, 1.0, 1.0], 2)
-    np.testing.assert_allclose(sampler.stats.informative, [1.0, 0.0])
-    np.testing.assert_allclose(sampler.stats.total, [1.0, 1.0])
+    _observe(order, ["0", "0", "1", "1"], [0.0, 1.0, 1.0, 1.0])
+    np.testing.assert_allclose(order.stats.informative, [1.0, 0.0])
+    np.testing.assert_allclose(order.stats.total, [1.0, 1.0])
 
-    sampler.update(["0", "0"], [1.0, 1.0], 2)
-    np.testing.assert_allclose(sampler.stats.informative, [0.5, 0.0])
-    np.testing.assert_allclose(sampler.stats.total, [1.5, 0.5])
-    metrics = sampler.metrics()
+    _observe(order, ["0", "0"], [1.0, 1.0])
+    np.testing.assert_allclose(order.stats.informative, [0.5, 0.0])
+    np.testing.assert_allclose(order.stats.total, [1.5, 0.5])
+    metrics = order.metrics()
     assert metrics["curriculum/g0-easy/informative_frac"] == pytest.approx(0.5 / 1.5)
     assert metrics["curriculum/g0-easy/groups"] == 1.0
     assert metrics["curriculum/g1-hard/groups"] == 0.0
 
 
 def test_row_stats_track_per_visit_decay_and_recency():
-    sampler = _sampler(TWO_BINS, "naive", instance_decay=0.5)
-    sampler.update(["0", "0"], [1.0, 0.0], 2)
-    sampler.update(["1", "1"], [1.0, 1.0], 2)
+    order = _order(TWO_BINS, "naive", instance_decay=0.5)
+    _observe(order, ["0", "0"], [1.0, 0.0])
+    _observe(order, ["1", "1"], [1.0, 1.0])
     # Row 0's second visit decays its earlier counts by 0.5 before adding the new group.
-    sampler.update(["0", "0"], [1.0, 1.0], 2)
-    rows = sampler.rows
+    _observe(order, ["0", "0"], [1.0, 1.0])
+    rows = order.rows
     np.testing.assert_array_equal(rows.visits, [2, 1])
     np.testing.assert_array_equal(rows.last_step, [3, 2])
     np.testing.assert_allclose(rows.samples, [0.5 * 2 + 2, 2.0])
@@ -109,12 +111,12 @@ def test_row_stats_track_per_visit_decay_and_recency():
 
 
 def test_row_stats_summary_metrics():
-    sampler = _sampler({"g0-easy": (0, 4)}, "naive")
+    order = _order({"g0-easy": (0, 4)}, "naive")
     for _ in range(2):
         # Row 0 always passes (mastered), row 1 always fails (dead).
-        sampler.update(["0", "0", "1", "1"], [1.0, 1.0, 0.0, 0.0], 2)
-    sampler.update(["2", "2"], [1.0, 0.0], 2)  # row 2: one mixed visit
-    metrics = sampler.metrics()
+        _observe(order, ["0", "0", "1", "1"], [1.0, 1.0, 0.0, 0.0])
+    _observe(order, ["2", "2"], [1.0, 0.0])  # row 2: one mixed visit
+    metrics = order.metrics()
     assert metrics["curriculum/instances/visited_frac"] == pytest.approx(3 / 4)
     assert metrics["curriculum/instances/mean_pass"] == pytest.approx((1.0 + 0.0 + 0.5) / 3)
     assert metrics["curriculum/instances/mastered_frac"] == pytest.approx(1 / 3)
@@ -122,64 +124,58 @@ def test_row_stats_summary_metrics():
 
 
 def test_row_stats_checkpoint_roundtrip():
-    sampler = _sampler(TWO_BINS, "naive")
-    sampler.update(["0", "0"], [1.0, 0.0], 2)
-    restored = _sampler(TWO_BINS, "naive")
-    restored.load_state_dict(sampler.state_dict())
+    order = _order(TWO_BINS, "naive")
+    _observe(order, ["0", "0"], [1.0, 0.0])
+    restored = _order(TWO_BINS, "naive")
+    restored.load_state_dict(order.state_dict())
     assert restored.update_count == 1
-    np.testing.assert_array_equal(restored.rows.visits, sampler.rows.visits)
-    np.testing.assert_array_equal(restored.rows.last_step, sampler.rows.last_step)
-    np.testing.assert_allclose(restored.rows.samples, sampler.rows.samples)
-    np.testing.assert_allclose(restored.rows.solved, sampler.rows.solved)
-
-
-def test_update_rejects_partial_groups():
-    sampler = _sampler(TWO_BINS, "naive")
-    with pytest.raises(ValueError, match="not a multiple"):
-        sampler.update(["0", "0", "0"], [0.0, 1.0, 0.0], 2)
+    np.testing.assert_array_equal(restored.rows.visits, order.rows.visits)
+    np.testing.assert_array_equal(restored.rows.last_step, order.rows.last_step)
+    np.testing.assert_allclose(restored.rows.samples, order.rows.samples)
+    np.testing.assert_allclose(restored.rows.solved, order.rows.solved)
 
 
 def test_naive_weights_match_row_counts():
-    sampler = _sampler({"g0-easy": (0, 2), "g1-hard": (1, 18)}, "naive")
-    np.testing.assert_allclose(sampler.weights, [0.1, 0.9])
+    order = _order({"g0-easy": (0, 2), "g1-hard": (1, 18)}, "naive")
+    np.testing.assert_allclose(order.weights, [0.1, 0.9])
 
 
 def test_grade_uniform_equalizes_grades():
-    sampler = _sampler({"g0-a": (0, 2), "g0-b": (0, 2), "g1-c": (1, 12)}, "grade-uniform")
-    np.testing.assert_allclose(sampler.weights, [0.25, 0.25, 0.5])
+    order = _order({"g0-a": (0, 2), "g0-b": (0, 2), "g1-c": (1, 12)}, "grade-uniform")
+    np.testing.assert_allclose(order.weights, [0.25, 0.25, 0.5])
 
 
 def test_thompson_concentrates_on_informative_bins():
-    sampler = _sampler(TWO_BINS, "thompson", seed=0)
+    order = _order(TWO_BINS, "thompson", seed=0)
     for _ in range(30):
         # Bin 0 (row 0) yields informative groups; bin 1 (row 1) is always all-pass.
-        sampler.update(["0", "0", "1", "1"], [0.0, 1.0, 1.0, 1.0], 2)
-    assert sampler.weights[0] > 0.7
-    assert sampler.weights[1] >= 0.05 / 2  # epsilon floor
+        _observe(order, ["0", "0", "1", "1"], [0.0, 1.0, 1.0, 1.0])
+    assert order.weights[0] > 0.7
+    assert order.weights[1] >= 0.05 / 2  # epsilon floor
 
 
 def test_learnability_concentrates_on_mid_pass_rate_bin():
     bins = {"g0-easy": (0, 1), "g1-mid": (1, 1), "g2-hard": (2, 1)}
-    sampler = _sampler(bins, "learnability", seed=0)
+    order = _order(bins, "learnability", seed=0)
     for _ in range(30):
         # Bin 0 (row 0) all-pass, bin 1 (row 1) 50% pass, bin 2 (row 2) all-fail.
-        sampler.update(["0", "0", "1", "1", "2", "2"], [1.0, 1.0, 0.0, 1.0, 0.0, 0.0], 2)
-    assert sampler.weights[1] > 0.5
-    assert sampler.weights[1] > sampler.weights[0]
-    assert sampler.weights[1] > sampler.weights[2]
+        _observe(order, ["0", "0", "1", "1", "2", "2"], [1.0, 1.0, 0.0, 1.0, 0.0, 0.0])
+    assert order.weights[1] > 0.5
+    assert order.weights[1] > order.weights[0]
+    assert order.weights[1] > order.weights[2]
 
 
 def _starved_bin_weights(reversion_mass):
     """Drive bin 0 at a 50% pass rate and bin 1 with one all-fail group of 8 rollouts per
     step — the epsilon-floor trickle of a starved bin. Returns per-bin weights averaged
     over the last 10 of 20 steps."""
-    sampler = _sampler({"g0-mid": (0, 4), "g1-dead": (1, 4)}, "learnability", seed=2, reversion_mass=reversion_mass)
+    order = _order({"g0-mid": (0, 4), "g1-dead": (1, 4)}, "learnability", seed=2, reversion_mass=reversion_mass)
     mid, dead = [1.0] * 4 + [0.0] * 4, [0.0] * 8
     weight_sum = np.zeros(2)
     for step in range(20):
-        sampler.update(["0"] * 8 + ["4"] * 8, mid + dead, 8)
+        _observe(order, ["0"] * 8 + ["4"] * 8, mid + dead)
         if step >= 10:
-            weight_sum += sampler.weights
+            weight_sum += order.weights
     return weight_sum / 10
 
 
@@ -196,15 +192,15 @@ def test_reversion_mass_recovers_starved_bin():
 
 def test_reversion_mass_barely_moves_actively_sampled_bin():
     def run(reversion_mass):
-        sampler = _sampler({"g0-mid": (0, 5), "g1-low": (1, 5)}, "learnability", seed=0, reversion_mass=reversion_mass)
+        order = _order({"g0-mid": (0, 5), "g1-low": (1, 5)}, "learnability", seed=0, reversion_mass=reversion_mass)
         # 50 rollouts/step per bin: bin 0 (rows 0-4) at pass 0.5, bin 1 (rows 5-9) at 0.2.
         uids = [str(row) for row in range(10) for _ in range(10)]
         rewards = ([1.0] * 5 + [0.0] * 5) * 5 + ([1.0] * 2 + [0.0] * 8) * 5
         weight_sum = np.zeros(2)
         for step in range(30):
-            sampler.update(uids, rewards, 10)
+            _observe(order, uids, rewards)
             if step >= 20:
-                weight_sum += sampler.weights
+                weight_sum += order.weights
         return weight_sum / 10
 
     # Real counts dominate: 2.0 pseudo-rollouts against 50 real ones move the actively
@@ -214,20 +210,20 @@ def test_reversion_mass_barely_moves_actively_sampled_bin():
 
 
 def test_pass_rate_metric_tracks_solved_samples():
-    sampler = _sampler(TWO_BINS, "naive")
-    sampler.update(["0", "0", "0", "0"], [1.0, 0.0, 0.0, 0.0], 2)
-    metrics = sampler.metrics()
+    order = _order(TWO_BINS, "naive")
+    _observe(order, ["0", "0", "0", "0"], [1.0, 0.0, 0.0, 0.0])
+    metrics = order.metrics()
     assert metrics["curriculum/g0-easy/pass_rate"] == pytest.approx(0.25)
     assert metrics["curriculum/g1-hard/pass_rate"] == 0.0  # no samples yet
 
 
 def test_grade_prior_prefers_easy_then_follows_evidence():
     bins = {"g0-easy": (0, 1), "g2-hard": (2, 1)}
-    sampler = _sampler(bins, "grade-prior", seed=1)
+    order = _order(bins, "grade-prior", seed=1)
     weight_sum = np.zeros(2)
     for _ in range(300):
-        sampler.update([], [], 1)  # no evidence; redraws weights from the grade-seeded prior
-        weight_sum += sampler.weights
+        _observe(order, [], [])  # no evidence; redraws weights from the grade-seeded prior
+        weight_sum += order.weights
     # Prior mean pass rate 0.85 at the low grade vs 0.05 at the high grade: the easy
     # bin's p*(1-p) learnability is larger in expectation until evidence says otherwise.
     assert weight_sum[0] > weight_sum[1]
@@ -235,34 +231,34 @@ def test_grade_prior_prefers_easy_then_follows_evidence():
     for _ in range(30):
         # Evidence flips: the easy bin (row 0) saturates at 100% pass, the hard bin
         # (row 1) sits at the 50% learnability peak.
-        sampler.update(["0", "0", "1", "1"], [1.0, 1.0, 0.0, 1.0], 2)
-    assert sampler.weights[1] > sampler.weights[0]
+        _observe(order, ["0", "0", "1", "1"], [1.0, 1.0, 0.0, 1.0])
+    assert order.weights[1] > order.weights[0]
 
 
 def test_grade_adaptive_advances_after_low_signal_window():
-    sampler = _sampler(
+    order = _order(
         TWO_BINS, "grade-adaptive", adaptive_window=3, adaptive_min_informative=0.1, adaptive_exploration=0.2
     )
-    np.testing.assert_allclose(sampler.weights, [0.8, 0.2])
+    np.testing.assert_allclose(order.weights, [0.8, 0.2])
     for _ in range(3):
-        sampler.update(["0", "0"], [1.0, 1.0], 2)  # level-0 bin saturated: all-pass groups
-    assert sampler.metrics()["curriculum/level"] == 1.0
-    np.testing.assert_allclose(sampler.weights, [0.2, 0.8])
+        _observe(order, ["0", "0"], [1.0, 1.0])  # level-0 bin saturated: all-pass groups
+    assert order.metrics()["curriculum/level"] == 1.0
+    np.testing.assert_allclose(order.weights, [0.2, 0.8])
 
     # At the max grade the level stays put even under sustained low signal.
     for _ in range(5):
-        sampler.update(["1", "1"], [0.0, 0.0], 2)
-    assert sampler.metrics()["curriculum/level"] == 1.0
+        _observe(order, ["1", "1"], [0.0, 0.0])
+    assert order.metrics()["curriculum/level"] == 1.0
 
 
 def test_grade_adaptive_informative_signal_resets_window():
-    sampler = _sampler(TWO_BINS, "grade-adaptive", adaptive_window=3, adaptive_min_informative=0.1)
+    order = _order(TWO_BINS, "grade-adaptive", adaptive_window=3, adaptive_min_informative=0.1)
     for _ in range(2):
-        sampler.update(["0", "0"], [1.0, 1.0], 2)
-    sampler.update(["0", "0"], [0.0, 1.0], 2)  # informative group resets the counter
+        _observe(order, ["0", "0"], [1.0, 1.0])
+    _observe(order, ["0", "0"], [0.0, 1.0])  # informative group resets the counter
     for _ in range(2):
-        sampler.update(["0", "0"], [1.0, 1.0], 2)
-    assert sampler.metrics()["curriculum/level"] == 0.0
+        _observe(order, ["0", "0"], [1.0, 1.0])
+    assert order.metrics()["curriculum/level"] == 0.0
 
 
 def test_dataset_bins_requires_consistent_metadata():
@@ -279,11 +275,10 @@ def test_dataset_bins_requires_consistent_metadata():
         dataset_bins(inconsistent)
 
 
-def test_draws_are_unique_within_each_batch():
+def test_draws_are_unique_within_each_window():
     bins = {"g0-easy": (0, 8), "g1-hard": (1, 8)}
-    sampler = _sampler(bins, "thompson", batch_size=4)
-    indices = list(iter(sampler))
-    assert len(indices) == 16
+    order = _order(bins, "thompson", window_size=4)
+    indices = _draws(order, 16)
     for start in range(0, 16, 4):
         batch = indices[start : start + 4]
         assert len(set(batch)) == len(batch)
@@ -296,22 +291,22 @@ def test_group_informative_weights_low_pass_bin_near_mid_bin():
     group-informative curve keeps it above 60%.
     """
     bins = {"g0-easy": (0, 1), "g1-low": (1, 1), "g2-mid": (2, 1), "g3-dead": (3, 1)}
-    sampler = _sampler(bins, "learnability", seed=0, weighting=WeightingKind.GROUP_INFORMATIVE, group_size=16)
+    order = _order(bins, "learnability", seed=0, weighting=WeightingKind.GROUP_INFORMATIVE, group_size=16)
     low = [1.0] + [0.0] * 15
     mid = [1.0] * 8 + [0.0] * 8
     for _ in range(60):
-        sampler.update(
+        _observe(
+            order,
             ["0"] * 16 + ["1"] * 16 + ["2"] * 16 + ["3"] * 16,
             [1.0] * 16 + low + mid + [0.0] * 16,
-            16,
         )
-    assert sampler.weights[1] > 0.6 * sampler.weights[2]
-    assert sampler.weights[1] > 3 * sampler.weights[0]
-    assert sampler.weights[1] > 3 * sampler.weights[3]
+    assert order.weights[1] > 0.6 * order.weights[2]
+    assert order.weights[1] > 3 * order.weights[0]
+    assert order.weights[1] > 3 * order.weights[3]
 
 
 def test_group_informative_requires_group_size():
-    # The guard lives in the curve builder, so a sampler with group-informative
+    # The guard lives in the curve builder, so a order with group-informative
     # weighting still fails fast at construction when group_size is missing.
     with pytest.raises(ValueError, match="group_size"):
-        _sampler(TWO_BINS, "learnability", weighting=WeightingKind.GROUP_INFORMATIVE)
+        _order(TWO_BINS, "learnability", weighting=WeightingKind.GROUP_INFORMATIVE)

@@ -1055,7 +1055,7 @@ def test_load_checkpoints_restores_rollout_state_only_when_requested(tmp_path, d
     checkpoint_path.mkdir()
     torch.save({"global_step": 12}, checkpoint_path / "trainer_state.pt")
     rollout_state = TrainingContextState(
-        loader=GroupLoaderState(epoch=0, position=7, retries=[{"uid": "prompt-3"}]), ready=[]
+        loader=GroupLoaderState(order={"epoch": 0, "position": 7}, retries=[{"uid": "prompt-3"}]), ready=[]
     )
     torch.save(rollout_state, checkpoint_path / "data.pt")
 
