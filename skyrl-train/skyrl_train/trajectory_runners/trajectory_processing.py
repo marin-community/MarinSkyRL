@@ -811,8 +811,8 @@ def concatenate_trajectory_batches(
                 )
             ]
 
-    disposition_channels: dict[str, list[str | None]] = {}
-    for key in ("exception_types", "error_treatments"):
+    disposition_channels: dict[str, list[Any]] = {}
+    for key in ("exception_types", "error_treatments", "server_errors"):
         if any(output.get(key) is not None for output in trajectory_batches):
             disposition_channels[key] = [
                 value

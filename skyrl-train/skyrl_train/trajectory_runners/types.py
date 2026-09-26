@@ -106,6 +106,7 @@ class TrajectoryBatch(TypedDict):
     stop_reasons: Optional[List[str]]
     exception_types: Optional[List[Optional[str]]]
     error_treatments: Optional[List[Optional[str]]]
+    server_errors: Optional[List[Optional[Dict[str, Any]]]]
     rollout_metrics: Optional[Dict[str, Any]]
     rollout_logprobs: Optional[List[List[float]]]
     student_topk_indices: Optional[List[List[List[int]]]]
