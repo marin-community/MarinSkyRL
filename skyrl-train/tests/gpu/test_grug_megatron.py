@@ -11,8 +11,10 @@ serving: rollout, PP2 update, weight broadcast, serving readback, rollout.
 from __future__ import annotations
 
 import asyncio
+import copy
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import ray
@@ -21,6 +23,8 @@ from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
+from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH, _offloaded_muon_direction_in_grad_
+from skyrl_train.distributed.megatron.megatron_utils import load_megatron_optimizer, offload_megatron_optimizer
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX, GrugMoeConfig, GrugMoeForCausalLM
@@ -601,3 +605,78 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
     finally:
         ray.util.remove_placement_group(shared_pg)
         ray.shutdown()
+
+
+@pytest.mark.parametrize("nesterov", [False, True])
+def test_megatron_muonh_offloaded_direction_matches_cuda_reference(nesterov):
+    require_hoppers(1)
+    torch.manual_seed(11)
+    shape = (1025, 4096)  # Crosses the 16 MiB transfer-chunk boundary.
+    gradient = torch.randn(shape, device="cuda")
+    momentum = torch.randn(shape, device="cuda")
+    expected_momentum = momentum.clone().mul_(0.95).add_(gradient)
+    expected_direction = gradient.clone()
+    if nesterov:
+        expected_direction.add_(expected_momentum, alpha=0.95)
+    else:
+        expected_direction.copy_(expected_momentum)
+
+    actual_direction = gradient.clone()
+    actual_momentum = momentum.cpu().pin_memory()
+    _offloaded_muon_direction_in_grad_(actual_direction, actual_momentum, beta=0.95, nesterov=nesterov)
+
+    torch.testing.assert_close(actual_direction, expected_direction, rtol=0, atol=0)
+    torch.testing.assert_close(actual_momentum, expected_momentum.cpu(), rtol=0, atol=0)
+
+
+def test_megatron_muonh_momentum_stays_on_cpu_after_rollout_backload_and_resume():
+    require_hoppers(1)
+    torch.manual_seed(17)
+    parameters = [torch.nn.Parameter(torch.randn(4, 8, device="cuda")) for _ in range(2)]
+
+    def new_optimizer(weights):
+        return MegatronGrugMuonH(
+            [
+                {"params": [weights[0]], "optimizer": "grug_muonh"},
+                {"params": [weights[1]], "optimizer": "grug_adamh"},
+            ],
+            lr=1e-3,
+            betas=(0.9, 0.95),
+            momentum=0.95,
+            nesterov=True,
+            ns_steps=5,
+            eps=1e-8,
+            muon_eps=1e-8,
+            qkv_split_shapes=(4, 2, 2),
+            offload_momentum=True,
+        )
+
+    optimizer = new_optimizer(parameters)
+    for parameter in parameters:
+        parameter.grad = torch.randn_like(parameter)
+    optimizer.step()
+    saved_parameters = [parameter.detach().clone() for parameter in parameters]
+    saved_state = copy.deepcopy(optimizer.state_dict())
+
+    megatron_optimizer = SimpleNamespace(optimizer=optimizer)
+    offload_megatron_optimizer(megatron_optimizer)
+    load_megatron_optimizer(megatron_optimizer)
+    assert optimizer.state[parameters[0]]["momentum_buffer"].device.type == "cpu"
+    assert optimizer.state[parameters[0]]["momentum_buffer"].is_pinned()
+    assert optimizer.state[parameters[1]]["exp_avg"].device.type == "cuda"
+    assert optimizer.state[parameters[1]]["exp_avg_sq"].device.type == "cuda"
+
+    restored_parameters = [torch.nn.Parameter(parameter.clone()) for parameter in saved_parameters]
+    restored_optimizer = new_optimizer(restored_parameters)
+    restored_optimizer.initialize_state()
+    restored_optimizer.load_state_dict(saved_state)
+    assert restored_optimizer.state[restored_parameters[0]]["momentum_buffer"].device.type == "cpu"
+
+    for parameter, restored in zip(parameters, restored_parameters, strict=True):
+        gradient = torch.randn_like(parameter)
+        parameter.grad = gradient.clone()
+        restored.grad = gradient.clone()
+    optimizer.step()
+    restored_optimizer.step()
+    for parameter, restored in zip(parameters, restored_parameters, strict=True):
+        torch.testing.assert_close(parameter, restored, rtol=0, atol=0)
