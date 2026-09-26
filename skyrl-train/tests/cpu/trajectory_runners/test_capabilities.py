@@ -81,6 +81,12 @@ def test_harbor_behavior_logprobs_accept_tested_opencode_bridge():
     validate_trajectory_runner_capabilities(_harbor_config("opencode", version="1.18.2"), TrajectoryRunnerMode.HARBOR)
 
 
+def test_fully_async_single_turn_accepts_exact_behavior_evidence():
+    cfg = _skyrl_config(policy_loss_type="behavior_clip")
+    cfg.generator.use_conversation_multi_turn = False
+    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM)
+
+
 def test_harbor_behavior_logprobs_require_vllm_for_opencode():
     cfg = _harbor_config("opencode", version="1.18.2")
     cfg.generator.backend = "sglang"

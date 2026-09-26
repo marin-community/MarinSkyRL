@@ -210,6 +210,13 @@ def trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRunnerMode) 
     if mode is TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM and exact_chat_requested:
         return exact_chat_capabilities("fully-async SkyRL Gym exact chat")
     if mode is TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM:
+        if not cfg.generator.use_conversation_multi_turn:
+            return TrajectoryRunnerCapabilities(
+                runner="fully-async SkyRL Gym direct token generation",
+                sampled_completion=EvidenceFidelity.EXACT,
+                full_context_continuation=EvidenceFidelity.UNAVAILABLE,
+                action_tokens=ActionTokenHandling.RUNTIME_VALIDATED,
+            )
         return TrajectoryRunnerCapabilities(
             runner="fully-async SkyRL Gym",
             sampled_completion=EvidenceFidelity.RETOKENIZED,
