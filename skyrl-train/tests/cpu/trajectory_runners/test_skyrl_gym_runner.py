@@ -3,6 +3,7 @@ uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/te
 """
 
 import pytest
+from concurrent.futures import Executor, Future
 from typing import List, Dict, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
@@ -11,6 +12,7 @@ from omegaconf import DictConfig
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.distillation_adapters import build_teacher_scoring_work
 
+from skyrl_train.rollout_observability import observe_rollout_call
 from skyrl_train.trajectory_runners.skyrl_gym import ExactChatTransportError, SkyRLGymTrajectoryRunner
 from skyrl_train.trajectory_runners.base import ConversationType, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.trajectory_processing import (
@@ -2282,3 +2284,52 @@ def test_rollout_metrics_skip_unstepped_episode_metrics():
     )
 
     assert metrics["environment/acc"] == 1.0
+
+
+class _InlineExecutor(Executor):
+    """Run each environment call as it is submitted, through the runner's executor path."""
+
+    def submit(self, fn, /, *args, **kwargs):
+        future = Future()
+        future.set_result(fn(*args, **kwargs))
+        return future
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_a_rollout_call_publishes_its_phases_and_waits(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg, delivered_telemetry
+):
+    generator_cfg.batched = False
+    generator_cfg.use_conversation_multi_turn = False
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    runner = SkyRLGymTrajectoryRunner(
+        trajectory_runner_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    runner.env_executor = _InlineExecutor()
+    request = {"prompts": [[{"role": "user", "content": "2 + 2?"}]], "env_extras": [{}], "env_classes": ["gsm8k"]}
+
+    with observe_rollout_call(step=3, mode="async", enabled=True):
+        await runner.run(request)
+
+    phases = {
+        row["attributes"]["phase"]: row["attributes"].get("parent")
+        for row in delivered_telemetry.select("phase_duration_seconds", root="rollout_call", step="3")
+    }
+    assert phases == {
+        "rollout_call": None,
+        "rollout_collect": "rollout_call",
+        "rollout_tokenize": "rollout_collect",
+        "rollout_assemble": "rollout_call",
+        "rollout_finalize": "rollout_call",
+        "rollout_call_residual": "rollout_call",
+    }
+    waits = {row["attributes"]["wait"]: row["value"] for row in delivered_telemetry.select("rollout_waits", step="3")}
+    # One model call; the environment's init, step and close each take the executor path.
+    assert waits == {"model_client_await": 1, "env_await": 3, "env_queue": 3, "env_exec": 3, "env_resume": 3}
+    (call,) = delivered_telemetry.select("rollout_call", step="3")
+    assert call["attributes"]["outcome"] == "success"

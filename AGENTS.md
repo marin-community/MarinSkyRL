@@ -24,7 +24,7 @@ lockfiles and virtualenvs.
 
 | package | status | what it is |
 | --- | --- | --- |
-| repository root | **primary** | The `marinskyrl` launcher and trainer distribution. Its frozen lock owns the CPU launcher, vLLM/FSDP2, and Megatron closures. |
+| repository root | **primary** | The `marinskyrl` launcher and trainer distribution. Its frozen lock owns the CPU launcher, vLLM, and Megatron closures. |
 | `skyrl-train/` | bundled | Trainer source, examples, and CPU/GPU tests included in the root wheel. |
 | `skyrl-gym/` | bundled + independent | Gymnasium-style RL environments included in the root wheel; its standalone package remains independently testable. |
 | `skyrl-tx/` | active | A JAX/Flax inference + fine-tuning engine (`tx`), independent of the trainer. Has its own CI. |
@@ -40,12 +40,9 @@ profile only when resolving a training environment.
 uv sync --frozen --group dev --group harbor-test --extra cpu --extra telemetry
 uv run --frozen pytest cloud/iris/tests/ skyrl-train/tests/cpu/
 
-# FSDP2/vLLM runtime closure (GPU tests need an 8-GPU node; not run in PR CI)
-uv sync --frozen --extra fsdp --extra vllm --group dev
-uv run --frozen pytest -s skyrl-train/tests/gpu/gpu_ci -m "not (integrations or megatron)"
-
-# Megatron runtime closure (select it together with the common training closure)
+# Megatron/vLLM runtime closure (GPU tests need an 8-GPU node; not run in PR CI)
 uv sync --frozen --extra vllm --extra megatron --group dev
+uv run --frozen pytest -s skyrl-train/tests/gpu/gpu_ci -m "not integrations"
 
 # skyrl-gym
 cd skyrl-gym
@@ -66,8 +63,8 @@ NUM_GPUS=8 LOGGER=console bash examples/gsm8k/run_gsm8k.sh
 ```
 
 `cpu` and `cuda` are mutually exclusive PyTorch wheel profiles because Python extras cannot replace a base
-dependency. GPU-only component extras such as `vllm`, `megatron`, and `deepspeed` imply `cuda`, so callers name
-the component rather than its hardware consequence. `fsdp` adds TorchTitan for the expert-parallel FSDP path.
+dependency. GPU-only component extras such as `vllm` and `megatron` imply `cuda`, so callers name
+the component rather than its hardware consequence.
 The Iris launcher installs the selected GPU profile from `uv.lock` in the standard task image. Native
 artifacts must be available from the configured wheel sources for every supported architecture; do not
 hide missing wheels in a custom runtime image.

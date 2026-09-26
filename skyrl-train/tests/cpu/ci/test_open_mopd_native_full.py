@@ -35,8 +35,9 @@ def test_full_schedule_preserves_released_objective_and_every_checkpoint():
         "s3://bucket/users/operator/exports",
     )
 
+    # Keep the released objective while avoiding the GPU-only FlashAttention import in CPU CI.
     with initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
-        config = compose(config_name="ppo_base_config", overrides=list(arguments))
+        config = compose(config_name="ppo_base_config", overrides=[*arguments, "trainer.flash_attn=false"])
     validate_cfg(config)
     assert config.trainer.max_steps == 200
     assert config.trainer.train_batch_size == 1024

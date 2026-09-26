@@ -116,6 +116,8 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
 
     if _optim_name == _GRUG_MUONH_NAME:
         extra = _grug_muonh_extra(optim_config)
+        if float(optim_args["weight_decay"]) != 0.0:
+            raise ValueError("MuonH requires weight_decay=0, including Megatron overrides")
         if optim_args["clip_grad"] is None or float(optim_args["clip_grad"]) != 0.0:
             raise ValueError("Hero MuonH requires max_grad_norm=0.0 (unclipped gradients)")
         if optimizer_config_kwargs.get("use_distributed_optimizer", False):

@@ -6,8 +6,7 @@ strategy-owned converter, validates the result, and optionally publishes it.
 
 The exporter deliberately does not construct datasets, rollout engines, generators, tracking, reference or
 critic models, optimizers, schedulers, profilers, or weight-sync clients. Its frozen runtime profiles similarly
-omit vLLM, Harbor, Daytona, and telemetry extras. FSDP2, DeepSpeed, and Megatron still use their production model
-builders and conversion implementations so checkpoint and Hugging Face formats retain one owner.
+omit vLLM, Harbor, Daytona, and telemetry extras. Megatron uses its production model builder and conversion implementation so checkpoint and Hugging Face formats retain one owner.
 
 An export is valid only when the requested checkpoint contains a completed trainer-state marker for the exact
 step and the policy checkpoint subtree exists. Model-only loading does not read optimizer, scheduler, RNG, or

@@ -68,7 +68,7 @@ def _layout_config(tmp_path, layout) -> tuple:
     cfg.trainer.use_sample_packing = packing
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
-    cfg.trainer.policy.fsdp_config.moe_router_replay = True
+    cfg.trainer.policy.megatron_config.moe_router_replay = True
     return cfg, model_path
 
 

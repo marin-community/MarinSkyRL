@@ -14,7 +14,7 @@ profile="$4"
 install_mode="$5"
 
 case "$profile" in
-  fsdp|deepspeed|megatron|fsdp-export|deepspeed-export|megatron-export) ;;
+  megatron|megatron-export) ;;
   *)
     echo "unsupported runtime profile: $profile" >&2
     exit 2
@@ -33,9 +33,6 @@ esac
 if [[ "$profile" == *-export ]]; then
   strategy="${profile%-export}"
   runtime_extras=(--extra "$strategy")
-  if [[ "$strategy" == fsdp ]]; then
-    runtime_extras=(--extra cuda "${runtime_extras[@]}")
-  fi
 else
   runtime_extras=(--extra "$profile" --extra vllm --extra telemetry)
 fi
@@ -76,9 +73,7 @@ fi
 ln -sf "$CUDA_HOME/lib/libcudart.so.13" "$environment/lib/libcudart.so"
 ln -sf "$CUDA_HOME/lib/libnvrtc.so.13" "$environment/lib/libnvrtc.so"
 runtime_architecture="$("$python" -c 'import platform; print(platform.machine())')"
-# The GB200 FSDP lane uses eager Grug attention and has no ARM FlashAttention wheel.
-# Megatron and every x86 policy runtime still validate their compiled extension here.
-if [[ "$profile" == megatron* || ( "$profile" == fsdp* && "$runtime_architecture" != aarch64 ) ]]; then
+if [[ "$runtime_architecture" != aarch64 ]]; then
   "$python" -c "import flash_attn, flash_attn_2_cuda"
 fi
 if [[ "$profile" == megatron || "$profile" == megatron-export ]]; then
@@ -86,9 +81,6 @@ if [[ "$profile" == megatron || "$profile" == megatron-export ]]; then
 fi
 if [[ "$profile" == *-export ]]; then
   "$python" -c "import ray, torch; from skyrl_train.checkpoint_exporter import CheckpointExporter"
-  if [[ "$profile" == deepspeed-export ]]; then
-    "$python" -c "import deepspeed"
-  fi
   exit 0
 fi
 "$python" - <<'PY'

@@ -115,7 +115,7 @@ def test_selected_topk_rollouts_require_matching_teacher_width():
     [
         ("trainer.use_sample_packing", True),
         ("trainer.policy.sequence_parallel_size", 2),
-        ("trainer.policy.fsdp_config.context_parallel_size", 2),
+        ("trainer.policy.megatron_config.context_parallel_size", 2),
     ],
 )
 def test_selected_topk_rejects_unsupported_policy_geometry_before_allocation(path, value):

@@ -1,4 +1,11 @@
-"""Hero's MuonH and AdamH updates for Megatron's FP32 master parameters."""
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Hero's MuonH and AdamH updates for Megatron's FP32 master parameters.
+
+The BF16 Newton--Schulz transform is adapted from NVIDIA NeMo
+Emerging-Optimizers at 6ef41445b246d2c64c2e6f82cc56fbc9c9c07937.
+"""
 
 from collections.abc import Iterable
 from typing import Any, Literal
@@ -7,11 +14,63 @@ import torch
 from torch import Tensor
 from torch.optim import Optimizer
 
-from skyrl_train.distributed.grug_muonh import _matrix_step_
-
-
 type MegatronGrugRoute = Literal["grug_muonh", "grug_muonh_qkv", "grug_muonh_gate_up", "grug_adamh", "adam"]
 _ADAMH_SCRATCH_BYTES = 16 * 1024 * 1024
+
+_QUINTIC_COEFFICIENTS = (
+    (4.0848, -6.8946, 2.9270),
+    (3.9505, -6.3029, 2.6377),
+    (3.7418, -5.5913, 2.3037),
+    (2.8769, -3.1427, 1.2046),
+    (2.8366, -3.0525, 1.2012),
+)
+_HYPERBALL_EPS = 1e-10
+
+
+def _muon_direction(matrix: Tensor, *, steps: int, eps: float) -> Tensor:
+    """Return Marin's BF16 quintic direction with its matrix shape scale."""
+    original_dtype = matrix.dtype
+    x = matrix.to(torch.bfloat16)
+    x = x / (torch.linalg.vector_norm(x, dim=(-2, -1), keepdim=True) + eps)
+    transposed = x.shape[-2] > x.shape[-1]
+    if transposed:
+        x = x.mT
+    for index in range(steps):
+        a, b, c = _QUINTIC_COEFFICIENTS[index % len(_QUINTIC_COEFFICIENTS)]
+        gram = x @ x.mT
+        polynomial = b * gram + c * (gram @ gram)
+        x = a * x + polynomial @ x
+    if transposed:
+        x = x.mT
+    # PyTorch Linear matrices are (fan_out, fan_in); Marin stores the transpose.
+    rows, columns = matrix.shape[-2:]
+    return x.to(original_dtype).mul_(max(1.0, rows / columns) ** 0.5)
+
+
+def _matrix_norm(value: Tensor) -> Tensor:
+    return torch.linalg.vector_norm(value, dim=(-2, -1), keepdim=True, dtype=torch.float32).square_().sqrt_()
+
+
+def _matrix_step_(
+    parameter: Tensor,
+    direction: Tensor,
+    *,
+    lr: float,
+    ns_steps: int | None = None,
+    muon_eps: float = 1e-8,
+    clamp_final_norm: bool,
+) -> None:
+    """Apply HyperBall to each complete matrix, consuming direction as scratch."""
+    if ns_steps is not None:
+        direction = _muon_direction(direction, steps=ns_steps, eps=muon_eps)
+    parameter_norm = _matrix_norm(parameter)
+    direction_norm = _matrix_norm(direction).clamp_min_(_HYPERBALL_EPS)
+    direction.mul_(parameter_norm / direction_norm).mul_(-lr).add_(parameter)
+    candidate_norm = _matrix_norm(direction)
+    if clamp_final_norm:
+        candidate_norm.clamp_min_(_HYPERBALL_EPS)
+    direction.mul_(parameter_norm / candidate_norm)
+    parameter.copy_(direction)
 
 
 def megatron_grug_route(name: str, parameter: Tensor) -> MegatronGrugRoute:
