@@ -44,8 +44,10 @@ def _runner(shaper: str | None = None):
 
 
 class _Tokenizer:
-    def apply_chat_template(self, *_args, **_kwargs):
-        return [1]
+    eos_token_id = 99
+
+    def apply_chat_template(self, *_args, add_generation_prompt=False, **_kwargs):
+        return [1, 2] if add_generation_prompt else [1]
 
 
 def _trial_runner() -> HarborTrajectoryRunner:
@@ -120,6 +122,39 @@ def test_verified_harbor_result_preserves_terminal_disposition(
     assert output.disposition.baseline_eligible
     assert output.disposition.exception_type == expected_exception
     assert output.error_treatment == expected_treatment
+
+
+def test_full_tito_scores_against_the_served_initial_prompt():
+    runner = _trial_runner()
+    runner._rollout_logprobs_required = True
+    result = SimpleNamespace(
+        verifier_result=SimpleNamespace(rewards={"reward": 1.0}, stdout="passed"),
+        exception_info=None,
+        agent_result=SimpleNamespace(
+            metadata={
+                "all_messages": [
+                    {"role": "user", "content": "solve it"},
+                    {"role": "assistant", "content": "done"},
+                ],
+                "summarization_count": 0,
+                "stop_reason": "complete",
+            },
+            rollout_details=[
+                {
+                    "prompt_token_ids": [[7, 8, 2]],
+                    "completion_token_ids": [[10]],
+                    "logprobs": [[-0.25]],
+                }
+            ],
+        ),
+    )
+
+    output = runner._process_trial_result(result, TrajectoryID(instance_id="task", repetition_id=0))
+
+    assert output.evidence.prompt_token_ids == (7, 8)
+    assert output.evidence.response_token_ids == (2, 10)
+    assert output.loss_mask == [0, 1]
+    assert output.evidence.behavior_logprobs == (0.0, -0.25)
 
 
 def test_harbor_runner_applies_identity_aware_shaping_as_the_default(verifier_test_collection_factory):
