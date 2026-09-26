@@ -16,45 +16,21 @@ class GroupAdmissionStalledError(RuntimeError):
     """Admission made no progress before its shared deadline."""
 
 
-@dataclass
-class AdmissionProgressWatchdog:
-    """Track the shared sync/async deadline since the last admitted-group progress."""
+def admission_stall_timeout(*, recent_step_times: Sequence[float], timeout_override: float | None) -> float:
+    """Seconds admission may go without progress before training fails.
 
-    last_progress_at: float
-    timeout: float
-
-    @classmethod
-    def start(
-        cls,
-        *,
-        now: float,
-        recent_step_times: Sequence[float],
-        timeout_override: float | None,
-    ) -> AdmissionProgressWatchdog:
-        if timeout_override is not None:
-            if timeout_override <= 0:
-                raise ValueError(f"group admission stall_timeout must be positive, got {timeout_override}")
-            timeout = float(timeout_override)
-        elif not recent_step_times:
-            timeout = _INITIAL_ADMISSION_STALL_TIMEOUT
-        else:
-            sorted_times = sorted(recent_step_times)
-            median = sorted_times[len(sorted_times) // 2]
-            timeout = max(median * _STEP_TIME_MULTIPLIER, _MINIMUM_ADMISSION_STALL_TIMEOUT)
-        return cls(last_progress_at=now, timeout=timeout)
-
-    def observe(self, *, now: float, progressed: bool) -> None:
-        if progressed:
-            self.last_progress_at = now
-
-    def elapsed(self, *, now: float) -> float:
-        return now - self.last_progress_at
-
-    def remaining(self, *, now: float) -> float:
-        return self.timeout - self.elapsed(now=now)
-
-    def stalled(self, *, now: float) -> bool:
-        return self.remaining(now=now) <= 0
+    An explicit override is returned unchanged. Otherwise the deadline is a multiple of the recent median step
+    time, at least 10 minutes; before any step has been timed, it is 30 minutes.
+    """
+    if timeout_override is not None:
+        if timeout_override <= 0:
+            raise ValueError(f"group admission stall_timeout must be positive, got {timeout_override}")
+        return float(timeout_override)
+    if not recent_step_times:
+        return _INITIAL_ADMISSION_STALL_TIMEOUT
+    sorted_times = sorted(recent_step_times)
+    median = sorted_times[len(sorted_times) // 2]
+    return max(median * _STEP_TIME_MULTIPLIER, _MINIMUM_ADMISSION_STALL_TIMEOUT)
 
 
 class GroupAdvantageKind(StrEnum):

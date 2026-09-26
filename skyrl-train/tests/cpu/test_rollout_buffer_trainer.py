@@ -1,5 +1,4 @@
 import asyncio
-import collections
 from types import SimpleNamespace
 
 import pytest
@@ -110,22 +109,6 @@ def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatc
         "postprocess_trajectory_batch": 18.0,
         "convert_to_training_input": 3.0,
     }
-
-
-@pytest.mark.parametrize(
-    ("history", "expected"),
-    [
-        ([], 1800.0),
-        ([100.0, 200.0, 300.0], 1000.0),
-        ([1.0, 2.0, 3.0], 600.0),
-    ],
-)
-def test_rollout_stall_timeout_scales_with_recent_step_times(history, expected):
-    trainer = object.__new__(RayPPOTrainer)
-    trainer._step_time_history = collections.deque(history, maxlen=5)
-    trainer.group_admission_stall_timeout = None
-
-    assert trainer._rollout_stall_timeout() == expected
 
 
 class _RecordingDistillationRuntime:

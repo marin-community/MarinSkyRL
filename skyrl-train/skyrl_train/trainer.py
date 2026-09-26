@@ -75,8 +75,8 @@ from skyrl_train.draft_trainer import (
     read_latest_draft_checkpoint,
 )
 from skyrl_train.group_admission import (
-    AdmissionProgressWatchdog,
     GroupAdvantageInvariant,
+    admission_stall_timeout,
     assert_training_groups_eligible,
 )
 from marinskyrl.checkpoint_paths import (
@@ -259,6 +259,10 @@ class RayPPOTrainer:
         self.all_timings = {}
         self.all_startup_timings = {}
         self._checkpoint_save_failures = 0.0
+        # Whether the last converted batch lacked rollout logprobs, and the run's TIS skip counts.
+        self._tis_batch_skipped_no_logprobs = 0.0
+        self._tis_skipped_count = 0.0
+        self._tis_total_count = 0.0
         self._shutdown_complete = False
         self._restored_rollout_state: TrainingContextState | None = None
         self.global_step = 0
@@ -1332,7 +1336,10 @@ class RayPPOTrainer:
             async_phase_window("rollout_wait", step=self.global_step, enabled=self._rollout_spans_enabled),
         ):
             groups, selection_metrics = await self.context.next_batch(
-                stall_timeout=self._rollout_stall_timeout(),
+                stall_timeout=admission_stall_timeout(
+                    recent_step_times=self._step_time_history,
+                    timeout_override=self.group_admission_stall_timeout,
+                ),
                 on_admitted=self._submit_admitted_groups_for_teacher_scoring,
             )
         self.all_metrics.update(selection_metrics)
@@ -1349,44 +1356,10 @@ class RayPPOTrainer:
 
         training_input = await asyncio.to_thread(self.convert_rollout_groups_to_training_input, groups)
         if scored_distillation is not None:
-            self.all_metrics.update(
-                self._distillation_runtime.attach_to_training_input(training_input, scored_distillation)
-            )
-            self.all_metrics.update(
-                {
-                    "distillation/teacher_count": float(
-                        len({route.teacher_id for scored in scored_distillation for route in scored.routes})
-                    ),
-                    DISTILLATION_SCORED_TOKENS_METRIC: float(
-                        sum(scored.distillation.valid_mask.sum().item() for scored in scored_distillation)
-                    ),
-                }
-            )
-        response_ids = [response for group in groups for response in group.trajectory_batch["response_ids"]]
-        logger.info(
-            "Rollout batch completed: step={} groups={} trajectories={} response_tokens={} staleness_mean={:.3f} "
-            "staleness_max={} duration_seconds={:.3f}",
-            self.global_step,
-            len(groups),
-            len(response_ids),
-            sum(len(response) for response in response_ids),
-            self.all_metrics["async/staleness_mean"],
-            self.all_metrics["async/staleness_max"],
-            rollout_wait_timer.duration,
-        )
-
-        # Records whether this batch lacked rollout logprobs, so TIS fell back to the standard policy loss.
-        # A skipped fraction near 1.0 means rollout-logprob capture is broken.
+            self._attach_teacher_evidence(training_input, scored_distillation)
+        self._log_rollout_batch_completed(groups, duration_seconds=rollout_wait_timer.duration)
         if self.cfg.trainer.algorithm.use_tis:
-            batch_skipped = float(getattr(self, "_tis_batch_skipped_no_logprobs", 0.0))
-            self._tis_skipped_count = getattr(self, "_tis_skipped_count", 0.0) + batch_skipped
-            self._tis_total_count = getattr(self, "_tis_total_count", 0.0) + 1.0
-            self.all_metrics.update(
-                {
-                    "tis/batch_skipped_no_logprobs": batch_skipped,
-                    "tis/skipped_fraction": self._tis_skipped_count / self._tis_total_count,
-                }
-            )
+            self._record_tis_skip()
 
         with (
             Timer("run_training", self.all_timings),
@@ -1406,6 +1379,51 @@ class RayPPOTrainer:
         logger.info(status)
         self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
         return training_input
+
+    def _attach_teacher_evidence(
+        self, training_input: TrainingInputBatch, scored_distillation: tuple[RoutedScoredDistillationBatch, ...]
+    ) -> None:
+        self.all_metrics.update(
+            self._distillation_runtime.attach_to_training_input(training_input, scored_distillation)
+        )
+        self.all_metrics.update(
+            {
+                "distillation/teacher_count": float(
+                    len({route.teacher_id for scored in scored_distillation for route in scored.routes})
+                ),
+                DISTILLATION_SCORED_TOKENS_METRIC: float(
+                    sum(scored.distillation.valid_mask.sum().item() for scored in scored_distillation)
+                ),
+            }
+        )
+
+    def _log_rollout_batch_completed(self, groups: List[RolloutGroup], *, duration_seconds: float) -> None:
+        response_ids = [response for group in groups for response in group.trajectory_batch["response_ids"]]
+        logger.info(
+            "Rollout batch completed: step={} groups={} trajectories={} response_tokens={} staleness_mean={:.3f} "
+            "staleness_max={} duration_seconds={:.3f}",
+            self.global_step,
+            len(groups),
+            len(response_ids),
+            sum(len(response) for response in response_ids),
+            self.all_metrics["async/staleness_mean"],
+            self.all_metrics["async/staleness_max"],
+            duration_seconds,
+        )
+
+    def _record_tis_skip(self) -> None:
+        """Record whether this batch lacked rollout logprobs, so TIS fell back to the standard policy loss.
+
+        A skipped fraction near 1.0 means rollout-logprob capture is broken.
+        """
+        self._tis_skipped_count += self._tis_batch_skipped_no_logprobs
+        self._tis_total_count += 1.0
+        self.all_metrics.update(
+            {
+                "tis/batch_skipped_no_logprobs": self._tis_batch_skipped_no_logprobs,
+                "tis/skipped_fraction": self._tis_skipped_count / self._tis_total_count,
+            }
+        )
 
     async def _end_epoch(self, epoch: int) -> None:
         self._control.reset()
@@ -1442,19 +1460,6 @@ class RayPPOTrainer:
             status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
 
         return status
-
-    def _rollout_stall_timeout(self) -> float:
-        """Adaptive deadline between admitted groups.
-
-        An explicit timeout is returned unchanged. Otherwise the deadline is a
-        multiple of the recent median step time (at least 10 minutes); before
-        step timing exists, it is 30 minutes.
-        """
-        return AdmissionProgressWatchdog.start(
-            now=0.0,
-            recent_step_times=self._step_time_history,
-            timeout_override=self.group_admission_stall_timeout,
-        ).timeout
 
     def _group_for_teacher_scoring(self, group: RolloutGroup) -> TrajectoryBatch:
         """Apply the learner's row selector without duplicating its metric side effects."""

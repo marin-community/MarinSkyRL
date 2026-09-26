@@ -10,11 +10,11 @@ from skyrl_train.dynamic_sampling import (
 )
 from skyrl_train.group_admission import (
     AdmissionDecision,
-    AdmissionProgressWatchdog,
     AdmissionRejection,
     GroupAdmissionPolicy,
     GroupAdvantageInvariant,
     TrainingGroupInvariantError,
+    admission_stall_timeout,
     assert_training_groups_eligible,
     resolve_group_advantage_invariant,
 )
@@ -54,21 +54,12 @@ def _group(
         ([1.0, 2.0, 3.0], 600.0),
     ],
 )
-def test_admission_watchdog_uses_shared_adaptive_timeout(history, expected):
-    watchdog = AdmissionProgressWatchdog.start(now=10.0, recent_step_times=history, timeout_override=None)
-
-    assert watchdog.timeout == expected
-    assert watchdog.remaining(now=11.0) == expected - 1.0
+def test_admission_stall_timeout_scales_with_recent_step_times(history, expected):
+    assert admission_stall_timeout(recent_step_times=history, timeout_override=None) == expected
 
 
-def test_admission_watchdog_resets_only_when_admission_progresses():
-    watchdog = AdmissionProgressWatchdog.start(now=10.0, recent_step_times=[], timeout_override=20.0)
-
-    watchdog.observe(now=15.0, progressed=False)
-    assert watchdog.elapsed(now=18.0) == 8.0
-
-    watchdog.observe(now=18.0, progressed=True)
-    assert watchdog.elapsed(now=20.0) == 2.0
+def test_admission_stall_timeout_override_ignores_step_times():
+    assert admission_stall_timeout(recent_step_times=[100.0, 200.0, 300.0], timeout_override=20.0) == 20.0
 
 
 @pytest.mark.parametrize(

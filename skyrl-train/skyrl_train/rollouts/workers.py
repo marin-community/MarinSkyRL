@@ -56,8 +56,20 @@ class RolloutWorker:
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
         return await self._runner.run_task(task, writer)
 
-    async def start_eval_session(self, **session: Any) -> None:
-        await self._runner.start_eval_session(**session)
+    async def start_eval_session(
+        self,
+        *,
+        run_name: str,
+        eval_step: int,
+        val_set_name: str | None,
+        n_concurrent_trials: int | None,
+    ) -> None:
+        await self._runner.start_eval_session(
+            run_name=run_name,
+            eval_step=eval_step,
+            val_set_name=val_set_name,
+            n_concurrent_trials=n_concurrent_trials,
+        )
 
     async def stop_eval_session(self) -> None:
         await self._runner.stop_eval_session()
@@ -92,9 +104,13 @@ class RolloutWorkerPool:
 
     async def shutdown(self) -> None:
         actors, self._actors = self._actors, []
-        await asyncio.gather(*(actor.shutdown.remote() for actor in actors), return_exceptions=True)
+        # Kill every worker before reporting any that failed to shut down cleanly.
+        results = await asyncio.gather(*(actor.shutdown.remote() for actor in actors), return_exceptions=True)
         for actor in actors:
             ray.kill(actor)
+        errors = [result for result in results if isinstance(result, Exception)]
+        if errors:
+            raise ExceptionGroup("rollout worker shutdown failed", errors)
 
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         return await self._submit(lambda actor: actor.run.remote(input_batch))
@@ -110,13 +126,17 @@ class RolloutWorkerPool:
         val_set_name: str | None = None,
         n_concurrent_trials: int | None = None,
     ) -> None:
-        session = {
-            "run_name": run_name,
-            "eval_step": eval_step,
-            "val_set_name": val_set_name,
-            "n_concurrent_trials": n_concurrent_trials,
-        }
-        await asyncio.gather(*(actor.start_eval_session.remote(**session) for actor in self._actors))
+        await asyncio.gather(
+            *(
+                actor.start_eval_session.remote(
+                    run_name=run_name,
+                    eval_step=eval_step,
+                    val_set_name=val_set_name,
+                    n_concurrent_trials=n_concurrent_trials,
+                )
+                for actor in self._actors
+            )
+        )
 
     async def stop_eval_session(self) -> None:
         await asyncio.gather(*(actor.stop_eval_session.remote() for actor in self._actors))
