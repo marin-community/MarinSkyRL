@@ -958,6 +958,17 @@ def test_environment_rates_use_per_n_contributors_after_filtering_and_repeated_c
     assert filtered["rollout_metrics"]["environment/exact_n20"] == pytest.approx(0.5)
 
 
+def test_server_error_identity_stays_with_its_row_after_concatenation():
+    failed = _generated_group(1, 1)
+    failed["server_errors"] = [{"category": "constrained_decoding", "request_id": "request-123", "status_code": 500}]
+    merged = concatenate_trajectory_batches([failed, _generated_group(1, 0)], tis_lcs_alert_threshold=0.005)
+
+    assert merged["server_errors"] == [
+        {"category": "constrained_decoding", "request_id": "request-123", "status_code": 500},
+        None,
+    ]
+
+
 def test_unaligned_logprob_alert_survives_concatenation():
     groups = [_generated_group(1, 0), _generated_group(1, 0)]
     clean = AlignmentStats()

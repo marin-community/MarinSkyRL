@@ -25,6 +25,7 @@ from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput, BaseTextEnv
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, BatchMetadata, TokenProvenance
+from skyrl_train.trajectory_runners.model_clients import ModelServerError
 
 
 # Mock constants, where 4 is the eos token id
@@ -189,6 +190,45 @@ async def test_whole_trajectory_collector_masks_one_agent_loop_failure(generator
     assert batch["exclude_from_baseline"] == [False, True]
     assert batch["exception_types"] == [None, "TimeoutError"]
     assert batch["error_treatments"] == [None, "mask"]
+
+
+def test_gym_masked_server_failure_retains_safe_diagnostics(generator_cfg, mock_tokenizer):
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg,
+        DictConfig({"max_env_workers": 0}),
+        MagicMock(),
+        mock_tokenizer,
+    )
+    error = ModelServerError("constrained_decoding", "request-123", 500)
+
+    output = runner.failed_agent_loop_output(_two_row_request("train"), 1, error)
+
+    assert output.loss_mask == [0]
+    assert output.verification.diagnostics == {
+        "exception_type": "ModelServerError",
+        "error_category": "constrained_decoding",
+        "request_id": "request-123",
+        "status_code": 500,
+    }
+
+
+@pytest.mark.asyncio
+async def test_gym_server_failure_projects_safe_diagnostics(generator_cfg, mock_tokenizer):
+    generator_cfg.batched = False
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg,
+        DictConfig({"max_env_workers": 0}),
+        MagicMock(),
+        mock_tokenizer,
+    )
+    runner.agent_loop = _masking_agent_loop(ModelServerError("constrained_decoding", "request-123", 500))
+
+    batch = await runner._run(_two_row_request("train"), disable_tqdm=True)
+
+    assert batch["server_errors"] == [
+        None,
+        {"category": "constrained_decoding", "request_id": "request-123", "status_code": 500},
+    ]
 
 
 @pytest.mark.asyncio
