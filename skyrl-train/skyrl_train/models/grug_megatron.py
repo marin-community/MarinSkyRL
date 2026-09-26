@@ -49,6 +49,7 @@ from skyrl_train.models.grug_moe import (
     grug_rms_norm_no_weight,
     jax_top_k,
 )
+from skyrl_train.models.megatron_router_replay import LayerReplayHandle
 
 
 def _first_present(preferred: torch.Tensor | None, fallback: torch.Tensor | None) -> torch.Tensor | None:
@@ -257,6 +258,8 @@ class GrugTopKRouter(TopKRouter):
         combine = combine * (GRUG_ROUTING_RENORM_SUM / (combine.sum(dim=-1, keepdim=True) + GRUG_ROUTER_RENORM_EPS))
         probs = torch.zeros_like(logits).scatter(1, selected, combine)
         routing_map = torch.zeros_like(logits, dtype=torch.bool).scatter(1, selected, True)
+        if isinstance(self.router_replay, LayerReplayHandle):
+            self.router_replay.observe_executed_routing_map(selected, routing_map)
         return probs, routing_map
 
     def forward(self, input: torch.Tensor, padding_mask: torch.Tensor | None = None):

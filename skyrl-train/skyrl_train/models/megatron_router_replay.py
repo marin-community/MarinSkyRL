@@ -65,12 +65,12 @@ def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_action
     """Build the dense per-position replay target and mask, layout-agnostic.
 
     ``rollout_routed_experts`` is ``[B, response_len, L, K]`` on the response
-    axis. Returns ``(full, mask)`` where ``full`` is a ``[B, seq_len, L, K]``
-    long tensor sentinel-filled outside the response window and ``mask`` is a
-    ``[B, seq_len]`` bool tensor True only on response positions whose captured
-    row is non-sentinel (a row is sentinel iff all K captured experts equal
-    ``SENTINEL_EXPERT_ID``). Prompt / pad / sentinel rows fall through to
-    native routing.
+    axis, but each row belongs to the input token that *predicted* that
+    response token. The first row therefore belongs to the final prompt token,
+    and the last belongs to the penultimate response token. Returns
+    ``(full, mask)`` with sentinel targets outside those prediction positions.
+    A captured row is sentinel iff all K captured experts equal
+    ``SENTINEL_EXPERT_ID``. Uncaptured positions fall through to native routing.
     """
     require_scalar_num_actions(num_actions)
     device = rollout_routed_experts.device
@@ -78,14 +78,17 @@ def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_action
     B, response_len, L, K = captured.shape
     assert B == batch_size, f"router_replay batch mismatch: {B} vs {batch_size}"
     assert response_len == num_actions, f"router_replay response_len {response_len} != num_actions {num_actions}"
+    if response_len and seq_len <= response_len:
+        raise ValueError("router_replay needs at least one prompt token before the response")
 
     full = torch.full((batch_size, seq_len, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)
-    full[:, seq_len - response_len : seq_len, :, :] = captured
+    prediction_start = seq_len - response_len - 1
+    prediction_end = seq_len - 1
+    full[:, prediction_start:prediction_end, :, :] = captured
 
     response_pos = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
-    response_pos[:, seq_len - response_len : seq_len] = True
-    # non-sentinel per [B, seq_len, L]; collapse over L: a position is valid
-    # for replay only where every layer carries real data, then AND with response_pos.
+    response_pos[:, prediction_start:prediction_end] = True
+    # Replay a prediction position only when every layer carries real data.
     non_sentinel = (full != SENTINEL_EXPERT_ID).any(dim=-1).all(dim=-1)  # [B, seq_len]
     return full, response_pos & non_sentinel
 
@@ -207,6 +210,10 @@ class MegatronRouterReplay:
         self._hit_rows = 0
         self._response_rows = 0
         self._sentinel_rows = 0
+        self._native_mismatch_rows = 0
+        self._native_set_mismatch_rows = 0
+        self._executed_rows = 0
+        self._forward_masked_rows = 0
 
     # ------------------------------------------------------------- drivers
 
@@ -288,11 +295,40 @@ class MegatronRouterReplay:
         """
         hit_fraction = self._hit_rows / self._masked_rows if self._masked_rows else 1.0
         sentinel_fraction = self._sentinel_rows / self._response_rows if self._response_rows else 0.0
+        native_mismatch_fraction = self._native_mismatch_rows / self._masked_rows if self._masked_rows else 0.0
+        native_set_mismatch_fraction = self._native_set_mismatch_rows / self._masked_rows if self._masked_rows else 0.0
+        executed_route_match_fraction = (
+            self._executed_rows / self._forward_masked_rows if self._forward_masked_rows else 1.0
+        )
         self._masked_rows = 0
         self._hit_rows = 0
         self._response_rows = 0
         self._sentinel_rows = 0
-        return {"hit_fraction": hit_fraction, "sentinel_fraction": sentinel_fraction}
+        self._native_mismatch_rows = 0
+        self._native_set_mismatch_rows = 0
+        self._executed_rows = 0
+        self._forward_masked_rows = 0
+        return {
+            "hit_fraction": hit_fraction,
+            "sentinel_fraction": sentinel_fraction,
+            "native_mismatch_fraction": native_mismatch_fraction,
+            "native_set_mismatch_fraction": native_set_mismatch_fraction,
+            "executed_route_match_fraction": executed_route_match_fraction,
+        }
+
+    def observe_executed_routing_map(self, layer_idx: int, selected: torch.Tensor, routing_map: torch.Tensor) -> None:
+        """Check the Grug dispatch map against the captured expert set."""
+        expected_map = torch.zeros_like(routing_map).scatter(1, selected, True)
+        if not torch.equal(routing_map, expected_map):
+            raise RuntimeError(f"router replay: layer {layer_idx} dispatch map differs from selected experts")
+        if self._phase is not _Phase.FORWARD:
+            return
+        targets, mask = self._current[layer_idx]
+        mask = mask.to(device=routing_map.device, dtype=torch.bool)
+        target_map = torch.zeros_like(routing_map).scatter(1, targets.to(routing_map.device).clamp_min(0), True)
+        if not torch.equal(routing_map[mask], target_map[mask]):
+            raise RuntimeError(f"router replay: layer {layer_idx} did not execute captured expert set")
+        self._executed_rows += mask.sum().item()
 
     # ------------------------------------------------------ router-side entry
 
@@ -336,6 +372,12 @@ class MegatronRouterReplay:
         probs = scores.gather(1, idx)
 
         replayed = mask.sum().item()
+        self._native_mismatch_rows += (mask & (targets != native_idx).any(dim=-1)).sum().item()
+        self._native_set_mismatch_rows += (
+            (mask & (targets.sort(dim=-1).values != native_idx.sort(dim=-1).values).any(dim=-1)).sum().item()
+        )
+        if self._phase is _Phase.FORWARD:
+            self._forward_masked_rows += replayed
         # A masked row whose target is all-sentinel means the mask and the
         # target tensor disagree (layout bug): count it so hit_fraction < 1.0
         # surfaces it as a hard error at mini-batch end.
@@ -385,6 +427,9 @@ class LayerReplayHandle:
     def __init__(self, controller: MegatronRouterReplay, layer_idx: int) -> None:
         self._controller = controller
         self.layer_idx = layer_idx
+
+    def observe_executed_routing_map(self, selected: torch.Tensor, routing_map: torch.Tensor) -> None:
+        self._controller.observe_executed_routing_map(self.layer_idx, selected, routing_map)
 
     def get_replay_topk(
         self,
