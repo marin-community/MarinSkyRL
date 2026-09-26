@@ -23,7 +23,7 @@ def _exception_names(value: Any) -> frozenset[str]:
 
 @dataclass(frozen=True)
 class ErrorHandlingConfig:
-    """Typed training treatment for Harbor trial failures."""
+    """Typed training treatment for terminal agent and serving failures."""
 
     enable_error_classification: bool = False
     passthrough_exceptions: frozenset[str] = field(default_factory=frozenset)
@@ -85,7 +85,7 @@ _CATEGORY_TREATMENTS = {
 
 
 def classify_exception_type(exception_type: str, config: ErrorHandlingConfig) -> ErrorTreatment:
-    """Classify a persisted Harbor exception name, honoring campaign overrides."""
+    """Classify a persisted terminal exception name, honoring overrides."""
     override_fields = (
         (config.passthrough_exceptions, ErrorTreatment.PASSTHROUGH),
         (config.mask_exceptions, ErrorTreatment.MASK),
@@ -100,7 +100,7 @@ def classify_exception_type(exception_type: str, config: ErrorHandlingConfig) ->
         return _CATEGORY_TREATMENTS[category]
 
     logger.error(
-        "Unknown Harbor exception type {}; applying explicit default_error_treatment={}",
+        "Unknown terminal exception type {}; applying explicit default_error_treatment={}",
         exception_type,
         config.default_error_treatment.value,
     )

@@ -46,6 +46,10 @@ class ModelServerError(RuntimeError):
         super().__init__(f"Model server error: {category}; request_id={request_id}")
 
 
+class ContextLengthExceededError(ModelServerError):
+    """A serving rejection caused by an overlong model context."""
+
+
 @dataclass(frozen=True)
 class _ChatResult:
     prompt_ids: list[int]
@@ -232,7 +236,12 @@ class DirectModelClient:
             response = await self._client.chat_completion({"json": body, "headers": {"x-request-id": request_id}})
             if "choices" not in response:
                 error = response.get("error") or {}
-                raise ModelServerError(
+                error_type = (
+                    ContextLengthExceededError
+                    if response.get("error_category") == "context_overflow"
+                    else ModelServerError
+                )
+                raise error_type(
                     category=response.get("error_category", "server_error"),
                     request_id=response.get("request_id", request_id),
                     status_code=error.get("code") if isinstance(error, dict) else None,
