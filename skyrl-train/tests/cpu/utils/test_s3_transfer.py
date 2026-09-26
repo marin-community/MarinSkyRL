@@ -23,7 +23,8 @@ from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
 
 
 _MULTIPART_TEST_FILE_SIZE = 100 * 2**20
-_UPLOAD_PROCESS_TIMEOUT = 10
+_UPLOAD_PROCESS_TIMEOUT = 30
+_UPLOAD_OPERATION_TIMEOUT = 10
 _UPLOAD_REQUEST_TIMEOUT = 0.2
 
 
@@ -216,7 +217,7 @@ def test_s3_multipart_upload_fails_when_peer_withholds_continue(tmp_path):
     assert result.error_type in {"FSTimeoutError", "ReadTimeoutError", "TimeoutError"}
     assert any(str(checkpoint_shard) in note for note in result.error_notes)
     assert any("s3://bucket/checkpoint.distcp" in note for note in result.error_notes)
-    assert 0.1 < result.elapsed < _UPLOAD_PROCESS_TIMEOUT
+    assert 0.1 < result.elapsed < _UPLOAD_OPERATION_TIMEOUT
 
 
 def test_streaming_dcp_upload_fails_and_aborts_when_peer_withholds_continue():
@@ -229,7 +230,7 @@ def test_streaming_dcp_upload_fails_and_aborts_when_peer_withholds_continue():
     assert result.failed_ranks == (0,)
     assert any("s3://bucket/checkpoint/__0_0.distcp" in note for note in result.error_notes)
     assert any("upload_id=withheld-upload part=" in note for note in result.error_notes)
-    assert 0.1 < result.elapsed < _UPLOAD_PROCESS_TIMEOUT
+    assert 0.1 < result.elapsed < _UPLOAD_OPERATION_TIMEOUT
 
 
 def test_abort_multipart_uploads_limits_cleanup_to_checkpoint_prefix(monkeypatch):
