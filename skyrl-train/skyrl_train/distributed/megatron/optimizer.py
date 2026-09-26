@@ -56,9 +56,6 @@ def _grug_muonh_kwargs(optim_config: dict, config: OptimizerConfig) -> dict:
     unknown = sorted(set(extra) - known)
     if unknown:
         raise ValueError(f"Unknown MuonH optimizer_kwargs: {unknown}")
-    betas = tuple(float(value) for value in optim_config.get("adam_betas", DEFAULT_BETAS))
-    if len(betas) != 2:
-        raise ValueError("MuonH adam_betas must contain two values")
     return {
         "lr": float(config.lr),
         "min_lr": float(config.min_lr),
@@ -66,8 +63,8 @@ def _grug_muonh_kwargs(optim_config: dict, config: OptimizerConfig) -> dict:
         "momentum": float(extra.get("momentum", DEFAULT_MOMENTUM)),
         "nesterov": bool(extra.get("nesterov", DEFAULT_NESTEROV)),
         "ns_steps": int(extra.get("backend_steps", DEFAULT_NS_STEPS)),
-        "betas": betas,
-        "eps": float(extra.get("epsilon", DEFAULT_EPSILON)),
+        "betas": (float(config.adam_beta1), float(config.adam_beta2)),
+        "eps": float(config.adam_eps),
         "muon_eps": float(extra.get("muon_epsilon", DEFAULT_EPSILON)),
     }
 
@@ -137,6 +134,19 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
         "params_dtype": torch.bfloat16,
         "use_distributed_optimizer": True,
     }
+
+    if _optim_name == _GRUG_MUONH_KEY:
+        betas = tuple(float(value) for value in optim_config.get("adam_betas", DEFAULT_BETAS))
+        if len(betas) != 2:
+            raise ValueError("MuonH adam_betas must contain two values")
+        extra = optim_config.get("optimizer_kwargs", {})
+        if not isinstance(extra, Mapping):
+            raise TypeError("MuonH optimizer_kwargs must be a mapping")
+        optim_args.update(
+            adam_beta1=betas[0],
+            adam_beta2=betas[1],
+            adam_eps=float(extra.get("epsilon", DEFAULT_EPSILON)),
+        )
 
     optim_args.update(optimizer_config_kwargs)
 

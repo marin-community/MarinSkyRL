@@ -1,6 +1,6 @@
 # Iceball fixed-input H100 trainer replay
 
-The final-revision replay ran on 2026-09-26 as Iris job
+The bd8a-revision replay ran on 2026-09-26 as Iris job
 `/atqamar/atqamar-iceball-replay-final-bd8a-20260926` on one non-preemptible
 RNO node with eight H100 80 GB GPUs. It used local-bundle MarinSkyRL source
 `bd8a9dee466afd3277282321b151bbc9b29da3be` and historical source

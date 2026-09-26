@@ -68,16 +68,25 @@ def test_megatron_wrapper_routes_updates_and_restores_muonh_state(distributed_pa
             "optimizer_kwargs": {"adam_lr": 0.004},
             "max_grad_norm": 0.0,
         },
-        {},
+        {"adam_beta1": 0.73, "adam_beta2": 0.82, "adam_eps": 0.005},
     )
     optimizer = get_megatron_optimizer([model], config)
     base = optimizer.optimizer
     assert isinstance(base, GrugMegatronMuonH)
     assert {group["grug_route"] for group in base.param_groups} == {"muonh", "adamh", "adam"}
     assert {group.get("grug_layout") for group in base.param_groups} == {None, "qkv", "gate_up"}
+    adam_parameter = next(
+        parameter for group in base.param_groups if group["grug_route"] == "adam" for parameter in group["params"]
+    )
+    reference_parameter = nn.Parameter(adam_parameter.detach().clone())
+    reference_optimizer = torch.optim.AdamW(
+        [reference_parameter], lr=0.004, betas=(0.73, 0.82), eps=0.005, weight_decay=0.0
+    )
     initial = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
     for parameter in model.parameters():
         parameter.grad = torch.full_like(parameter, 0.125)
+    reference_parameter.grad = torch.full_like(reference_parameter, 0.125)
+    reference_optimizer.step()
     success, _, _ = optimizer.step()
     assert success
     assert all(not torch.equal(parameter, initial[name]) for name, parameter in model.named_parameters())
@@ -89,8 +98,11 @@ def test_megatron_wrapper_routes_updates_and_restores_muonh_state(distributed_pa
     )
     for parameter in model.parameters():
         parameter.grad = torch.full_like(parameter, -0.125)
+    reference_parameter.grad = torch.full_like(reference_parameter, -0.125)
+    reference_optimizer.step()
     success, _, _ = optimizer.step()
     assert success
+    torch.testing.assert_close(adam_parameter, reference_parameter, rtol=1e-6, atol=1e-6)
     expected = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
     restored_model = _TinyGrug()
     restored_model.load_state_dict(first_step_weights)

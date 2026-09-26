@@ -25,6 +25,7 @@ DEFAULT_NESTEROV = True
 DEFAULT_NS_STEPS = 5
 DEFAULT_BETAS = (0.9, 0.95)
 DEFAULT_EPSILON = 1e-8
+_NORM_FLOOR = 1e-10
 _QUINTIC_COEFFICIENTS = (
     (4.0848, -6.8946, 2.9270),
     (3.9505, -6.3029, 2.6377),
@@ -75,10 +76,10 @@ def _newton_schulz_quintic(matrix: Tensor, *, steps: int, eps: float) -> Tensor:
 def _hyperball_step_(parameter: Tensor, direction: Tensor, *, lr: float, clamp_final_norm: bool) -> None:
     parameter_norm = torch.linalg.vector_norm(parameter, dim=(-2, -1), keepdim=True, dtype=torch.float32)
     direction_norm = torch.linalg.vector_norm(direction, dim=(-2, -1), keepdim=True, dtype=torch.float32)
-    direction.mul_(parameter_norm / direction_norm.clamp_min_(1e-10)).mul_(-lr).add_(parameter)
+    direction.mul_(parameter_norm / direction_norm.clamp_min_(_NORM_FLOOR)).mul_(-lr).add_(parameter)
     candidate_norm = torch.linalg.vector_norm(direction, dim=(-2, -1), keepdim=True, dtype=torch.float32)
     if clamp_final_norm:
-        candidate_norm.clamp_min_(1e-10)
+        candidate_norm.clamp_min_(_NORM_FLOOR)
     parameter.copy_(direction.mul_(parameter_norm / candidate_norm))
 
 
