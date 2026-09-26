@@ -1,10 +1,10 @@
 """Rollout buffer: leases generation capacity to rollout workers and selects training batches.
 
 A rollout worker writes each completed prompt group through a ``RolloutWriter``. The writer checks the
-group's content where the payload already is and commits a small verdict together with a reference to the
-payload, so the buffer selects batches without reading payloads. In memory mode ``RolloutBuffer`` runs as a
-Ray actor and payloads stay in Ray's object store, owned by that actor so they outlive the worker that
-wrote them. The trainer fetches only the payloads it trains on.
+group's content where the payload already is, stores the payload in the run's payload store
+(``skyrl_train.rollouts.payloads``), and commits a small verdict together with a reference to the payload, so
+the buffer, a Ray actor, selects batches without reading payloads. The trainer fetches only the payloads it
+trains on.
 """
 
 from __future__ import annotations
@@ -15,9 +15,6 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Protocol
-
-import ray
-from ray.actor import ActorHandle
 
 from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, GroupSelectionResult
 from skyrl_train.group_admission import (
@@ -147,27 +144,12 @@ class RolloutWriter(Protocol):
     async def write_rollout(self, lease: RolloutLease, group: RolloutGroup) -> None: ...
 
 
-@dataclass(frozen=True)
-class MemoryRolloutWriter:
-    """Store payloads in Ray's object store, owned by the buffer actor, and commit their verdicts."""
-
-    buffer: ActorHandle
-    content_policy: RolloutContentPolicy
-
-    async def write_rollout(self, lease: RolloutLease, group: RolloutGroup) -> None:
-        verdict = self.content_policy.verdict(group)
-        payload = []
-        if verdict.trainable:
-            payload.append(await asyncio.to_thread(ray.put, group, _owner=self.buffer))
-        # Nested in a list so Ray passes the reference instead of resolving it.
-        await self.buffer.commit.remote(lease.lease_id, group.prompt, verdict, payload)
-
-
 @dataclass
 class ReadyRollout:
     """A committed group that no batch has taken yet.
 
-    ``payload`` holds a reference to the ``RolloutGroup``; it is empty when the verdict excludes the group.
+    ``payload`` holds the payload store's reference to the ``RolloutGroup``; it is empty when the verdict
+    excludes the group.
     ``committed_at`` is the buffer process's monotonic time at commit, and None for a group restored from a
     checkpoint.
     """

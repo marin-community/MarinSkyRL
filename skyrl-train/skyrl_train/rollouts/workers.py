@@ -126,8 +126,8 @@ class RolloutWorkerPool:
     training continues on the other workers, or waits when there is only one. A request fails with
     ``RolloutWorkerStalledError`` when its worker completes nothing for the progress timeout.
 
-    Workers run on the driver's node, beside the rollout buffer actor that owns their payloads and the Harbor
-    proxy whose node-local log they read. They start one at a time.
+    Workers run on the driver's node, beside the rollout buffer actor they commit to and the Harbor proxy whose
+    node-local log they read. They start one at a time.
     """
 
     def __init__(self, spec: RunnerSpec, resources: RolloutWorkerResources):
@@ -244,26 +244,30 @@ class RolloutWorkerPool:
         """Wait for one request, failing it when its worker completes nothing for the progress timeout."""
         loop = asyncio.get_running_loop()
         result = asyncio.ensure_future(request)
-        while True:
-            observed = self._last_progress[index]
-            assert observed is not None
-            deadline = asyncio.timeout_at(observed + self._resources.progress_timeout_seconds)
-            try:
-                async with deadline:
-                    output = await asyncio.shield(result)
-            except TimeoutError as error:
-                if not deadline.expired():
-                    raise
-                if self._last_progress[index] != observed:
-                    # Another request on this worker completed while this one waited, so the worker is live.
-                    continue
-                # Cancel the remote request too, so the runner unwinds its work instead of leaving it detached.
-                ray.cancel(request, force=False, recursive=True)
-                raise RolloutWorkerStalledError(
-                    f"rollout worker {index} completed no request for {self._resources.progress_timeout_seconds:g}s"
-                ) from error
-            self._last_progress[index] = loop.time()
-            return output
+        try:
+            while True:
+                observed = self._last_progress[index]
+                assert observed is not None
+                deadline = asyncio.timeout_at(observed + self._resources.progress_timeout_seconds)
+                try:
+                    async with deadline:
+                        output = await asyncio.shield(result)
+                except TimeoutError as error:
+                    if not deadline.expired():
+                        raise
+                    if self._last_progress[index] != observed:
+                        # Another request on this worker completed while this one waited, so the worker is live.
+                        continue
+                    # Cancel the remote request too, so the runner unwinds its work instead of leaving it detached.
+                    ray.cancel(request, force=False, recursive=True)
+                    raise RolloutWorkerStalledError(
+                        f"rollout worker {index} completed no request for {self._resources.progress_timeout_seconds:g}s"
+                    ) from error
+                self._last_progress[index] = loop.time()
+                return output
+        finally:
+            # An abandoned request's result would otherwise surface later as an unretrieved error.
+            result.cancel()
 
 
 def _training_phase(input_batch: TrajectoryRequestBatch) -> TrainingPhase:

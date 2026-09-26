@@ -3,7 +3,8 @@
 The experiments swap only the Megatron policy worker and the vLLM engines for the CPU backend.
 Ray runs locally with logical GPUs so placement code runs unchanged. Synchronous training runs the standard
 entrypoint at staleness 0; asynchronous training runs the Gym worker-pool entrypoint at positive staleness, so
-the two modes also cover both rollout-worker topologies.
+the two modes also cover both rollout-worker topologies. The asynchronous run also keeps its rollout payloads in
+a FineStore archive.
 
 Usage::
 
@@ -48,6 +49,8 @@ class TrainingMode(StrEnum):
 MAX_STALENESS_STEPS = {TrainingMode.SYNC: 0, TrainingMode.ASYNC: 1}
 # The async run draws prompts from an adaptive curriculum; the sync run reads the dataset in seeded passes.
 SAMPLING_KIND = {TrainingMode.SYNC: None, TrainingMode.ASYNC: "thompson"}
+# The async run's worker processes commit payloads to a FineStore archive; the sync run keeps them in Ray.
+FINESTORE_ARCHIVE = {TrainingMode.SYNC: False, TrainingMode.ASYNC: True}
 
 
 def tiny_training_config(root: Path, mode: TrainingMode, *, max_steps: int, num_prompts: int = 64) -> DictConfig:
@@ -66,7 +69,11 @@ def tiny_training_config(root: Path, mode: TrainingMode, *, max_steps: int, num_
             "policy": {"model": {"path": str(model_dir)}, "optimizer_config": {"lr": 1.0e-3}},
             # A stalled step fails with the buffer's state long before the test's subprocess timeout.
             "algorithm": {"use_kl_loss": False, "group_admission": {"stall_timeout": STALL_TIMEOUT_SECONDS}},
-            "rollout_buffer": {"max_staleness_steps": MAX_STALENESS_STEPS[mode], "max_in_flight": 8},
+            "rollout_buffer": {
+                "max_staleness_steps": MAX_STALENESS_STEPS[mode],
+                "max_in_flight": 8,
+                "finestore_root": str(root / "rollouts") if FINESTORE_ARCHIVE[mode] else None,
+            },
             "train_batch_size": TRAIN_BATCH_SIZE,
             "policy_mini_batch_size": TRAIN_BATCH_SIZE,
             "micro_train_batch_size_per_gpu": 8,

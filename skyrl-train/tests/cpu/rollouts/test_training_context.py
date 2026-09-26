@@ -16,6 +16,7 @@ from skyrl_train.rollouts.buffer import (
 )
 from skyrl_train.rollouts.context import RolloutRequestSpec, TrainingContext
 from skyrl_train.rollouts.loader import GroupLoader, JudgedGroup, PromptOrder, SeededPasses
+from skyrl_train.rollouts.payloads import FineStorePayloads, MemoryPayloads, PayloadStore
 
 SAMPLES_PER_PROMPT = 2
 STALL_TIMEOUT = 10.0
@@ -94,7 +95,13 @@ class _RecordingOrder:
 
 
 def _context(
-    uids: list[str], workers: _Workers, *, batch_size: int, max_in_flight: int, order: PromptOrder | None = None
+    uids: list[str],
+    workers: _Workers,
+    *,
+    batch_size: int,
+    max_in_flight: int,
+    order: PromptOrder | None = None,
+    payloads: PayloadStore | None = None,
 ) -> TrainingContext:
     return TrainingContext(
         GroupLoader(_Prompts(uids), order or SeededPasses(len(uids), seed=0, shuffle=False)),
@@ -102,8 +109,16 @@ def _context(
         CONTENT_POLICY,
         RolloutRequestSpec(samples_per_prompt=SAMPLES_PER_PROMPT, sampling_params={}, environment_class="test"),
         workers,
+        payloads or MemoryPayloads(),
         rollout_spans=False,
     )
+
+
+@pytest.fixture(params=["memory", "finestore"])
+def payloads(request, tmp_path) -> PayloadStore:
+    if request.param == "memory":
+        return MemoryPayloads()
+    return FineStorePayloads(str(tmp_path / "rollouts"))
 
 
 async def _ignore(groups: list[RolloutGroup]) -> None:
@@ -146,9 +161,9 @@ async def test_each_batch_reports_its_judged_groups_to_the_prompt_order(ray_modu
 
 
 @pytest.mark.asyncio
-async def test_resume_regenerates_uncommitted_prompts_and_keeps_committed_groups(ray_module):
+async def test_resume_regenerates_uncommitted_prompts_and_keeps_committed_groups(ray_module, payloads):
     workers = _Workers(blocked=frozenset({"b"}))
-    context = _context(["a", "b", "c"], workers, batch_size=1, max_in_flight=2)
+    context = _context(["a", "b", "c"], workers, batch_size=1, max_in_flight=2, payloads=payloads)
     context.start()
     try:
         await context.publish(1)
@@ -159,11 +174,11 @@ async def test_resume_regenerates_uncommitted_prompts_and_keeps_committed_groups
     finally:
         await context.close()
 
-    assert [rollout.payload[0].uid for rollout in state.ready] == ["c"]
+    assert [rollout.verdict.uid for rollout in state.ready] == ["c"]
     assert [prompt["uid"] for prompt in state.loader.retries] == ["b"]
 
     resumed_workers = _Workers()
-    resumed = _context(["a", "b", "c"], resumed_workers, batch_size=1, max_in_flight=2)
+    resumed = _context(["a", "b", "c"], resumed_workers, batch_size=1, max_in_flight=2, payloads=payloads)
     await resumed.load_state_dict(state)
     resumed.start()
     try:
@@ -184,3 +199,26 @@ async def test_failed_rollout_fails_the_next_batch(ray_module):
             await _next_uids(context)
     finally:
         await context.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_committed_groups_from_another_payload_store(ray_module, tmp_path):
+    workers = _Workers(blocked=frozenset({"b"}))
+    archive = FineStorePayloads(str(tmp_path / "rollouts"))
+    context = _context(["a", "b", "c"], workers, batch_size=1, max_in_flight=2, payloads=archive)
+    context.start()
+    try:
+        await context.publish(1)
+        await _next_uids(context)
+        await context.publish(2)
+        await asyncio.wait_for(workers.written["c"].wait(), STALL_TIMEOUT)
+        state = await context.state_dict()
+    finally:
+        await context.close()
+
+    resumed = _context(["a", "b", "c"], _Workers(), batch_size=1, max_in_flight=2)
+    try:
+        with pytest.raises(ValueError, match="finestore_root"):
+            await resumed.load_state_dict(state)
+    finally:
+        await resumed.close()

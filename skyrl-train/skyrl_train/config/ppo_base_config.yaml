@@ -264,6 +264,9 @@ trainer:
     max_staleness_steps: 0
     # Cap on prompt groups generating at once; null bounds generation only by staleness.
     max_in_flight: null
+    # FineStore archive that keeps every trainable group, and lets a checkpoint record URIs instead of copying
+    # groups. Resuming requires the same archive. null keeps payloads only in Ray's object store.
+    finestore_root: null
 
   # Bound teacher-scoring work independently for each logical teacher. Queue
   # backpressure is applied when a rollout group is admitted, before learner

@@ -27,7 +27,6 @@ from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdmissionStal
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.rollouts.buffer import (
     BufferSnapshot,
-    MemoryRolloutWriter,
     ReadyRollout,
     RolloutBuffer,
     RolloutBufferConfig,
@@ -36,6 +35,7 @@ from skyrl_train.rollouts.buffer import (
     RolloutTask,
 )
 from skyrl_train.rollouts.loader import GroupLoader, GroupLoaderState, PromptGroupDataset, PromptOrder, SeededPasses
+from skyrl_train.rollouts.payloads import FineStorePayloads, MemoryPayloads, PayloadStore
 from skyrl_train.rollout_observability import dispatch_wait, observe_rollout_call, record_group_disposition
 from skyrl_train.rollouts.workers import RolloutWorkers
 from skyrl_train.telemetry import record_generated_work, record_rollout_buffer
@@ -73,11 +73,13 @@ class RolloutRequestSpec:
 class TrainingContextState:
     """Checkpointed rollout state: the loader, including prompts to regenerate, and committed groups.
 
-    Each ready rollout's ``payload`` holds its ``RolloutGroup`` rather than an object reference.
+    Each ready rollout's ``payload`` holds the durable form its payload store checkpoints: the ``RolloutGroup``
+    for payloads in memory, or its URI in the FineStore archive at ``archive_root``.
     """
 
     loader: GroupLoaderState
     ready: list[ReadyRollout]
+    archive_root: str | None
 
 
 def prompt_order_from_config(config: DictConfig, dataset: PromptGroupDataset) -> PromptOrder:
@@ -113,6 +115,7 @@ class TrainingContext:
         content_policy: RolloutContentPolicy,
         request_spec: RolloutRequestSpec,
         workers: RolloutWorkers,
+        payloads: PayloadStore,
         *,
         rollout_spans: bool,
     ):
@@ -126,7 +129,8 @@ class TrainingContext:
         # The trainer reads every payload through this actor; keep it beside the trainer.
         node = NodeAffinitySchedulingStrategy(node_id=ray.get_runtime_context().get_node_id(), soft=False)
         self._buffer = ray.remote(RolloutBuffer).options(num_cpus=0, scheduling_strategy=node).remote(config)
-        self._writer = MemoryRolloutWriter(self._buffer, content_policy)
+        self._payloads = payloads
+        self._writer = payloads.writer(self._buffer, content_policy)
         self._in_flight: dict[str, RolloutTask] = {}
         self._running: set[asyncio.Task] = set()
         self._dispatcher: asyncio.Task | None = None
@@ -155,12 +159,14 @@ class TrainingContext:
             GroupAdvantageInvariant.from_config(algorithm.resolved_group_advantage),
             rollout_logprobs_required=policy_loss_requires_rollout_logprobs(algorithm.policy_loss_type),
         )
+        archive_root = config.trainer.rollout_buffer.finestore_root
         return cls(
             GroupLoader(dataset, prompt_order_from_config(config, dataset)),
             buffer_config,
             RolloutContentPolicy(admission, selection),
             RolloutRequestSpec.from_config(config),
             workers,
+            FineStorePayloads(archive_root) if archive_root is not None else MemoryPayloads(),
             rollout_spans=config.trainer.rollout_spans,
         )
 
@@ -218,7 +224,7 @@ class TrainingContext:
             if admission.payloads:
                 try:
                     async with asyncio.timeout(stall_timeout):
-                        admitted = await self._until_failure(asyncio.gather(*admission.payloads))
+                        admitted = await self._until_failure(self._payloads.fetch(admission.payloads))
                 except TimeoutError as error:
                     raise GroupAdmissionStalledError(
                         f"{len(admission.payloads)} admitted rollout payloads did not arrive within "
@@ -240,24 +246,29 @@ class TrainingContext:
         loader = self.loader.state_dict()
         snapshot: BufferSnapshot = await self._buffer.snapshot.remote()
         uncommitted = [task.prompt for lease_id, task in in_flight.items() if lease_id in snapshot.leases]
-        payloads = await asyncio.gather(*(asyncio.gather(*rollout.payload) for rollout in snapshot.ready))
+        payloads = await asyncio.gather(*(self._payloads.checkpoint(rollout.payload) for rollout in snapshot.ready))
         ready = [
             # The buffer's clock does not carry across processes.
-            dataclasses.replace(rollout, payload=list(payload), committed_at=None)
+            dataclasses.replace(rollout, payload=payload, committed_at=None)
             for rollout, payload in zip(snapshot.ready, payloads, strict=True)
         ]
         retries = [*loader.retries, *snapshot.retries, *uncommitted]
-        return TrainingContextState(dataclasses.replace(loader, retries=retries), ready)
+        return TrainingContextState(dataclasses.replace(loader, retries=retries), ready, self._payloads.archive_root)
 
     async def load_state_dict(self, state: TrainingContextState) -> None:
         """Restore a checkpoint's rollout state before ``start``."""
         if self._dispatcher is not None:
             raise RuntimeError("rollout state must be restored before dispatching starts")
+        if state.ready and state.archive_root != self._payloads.archive_root:
+            raise ValueError(
+                f"the checkpoint's rollout payloads are in {state.archive_root or 'memory'}, but this run keeps them "
+                f"in {self._payloads.archive_root or 'memory'}; set trainer.rollout_buffer.finestore_root to match"
+            )
         self.loader.load_state_dict(state.loader)
         # Ray aborts the process when an object's owner is an actor that has not started yet.
         await self._buffer.__ray_ready__.remote()
         ready = [
-            dataclasses.replace(rollout, payload=[ray.put(group, _owner=self._buffer) for group in rollout.payload])
+            dataclasses.replace(rollout, payload=self._payloads.restore(rollout.payload, self._buffer))
             for rollout in state.ready
         ]
         await self._buffer.restore.remote(BufferSnapshot(ready=ready, retries=[], leases=frozenset()))

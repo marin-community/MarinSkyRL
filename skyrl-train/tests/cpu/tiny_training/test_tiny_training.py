@@ -6,8 +6,12 @@ import sys
 from pathlib import Path
 
 import pytest
+from finestore.layout import BlobTables
+from finestore.reader import ReadView
 
+from skyrl_train.rollouts.payloads import ROLLOUT_OBJECT_PREFIX
 from tests.cpu.tiny_training.experiment import (
+    FINESTORE_ARCHIVE,
     MAX_STALENESS_STEPS,
     SAMPLING_KIND,
     TRAIN_BATCH_SIZE,
@@ -47,3 +51,7 @@ def test_tiny_policy_trains_to_max_steps(tmp_path: Path, mode: TrainingMode):
         # Without dynamic sampling, the groups each step judged are exactly its batch.
         for record in steps:
             assert sum(record[f"curriculum/{name}/groups"] for name in CURRICULUM_BINS) == TRAIN_BATCH_SIZE
+    if FINESTORE_ARCHIVE[mode]:
+        # Every trained group was read back from the archive, which also keeps groups generated but not trained.
+        names = ReadView(str(tmp_path / "rollouts")).keys(BlobTables.DESCRIPTORS)
+        assert sum(name.startswith(ROLLOUT_OBJECT_PREFIX) for (name,) in names) >= NUM_STEPS * TRAIN_BATCH_SIZE

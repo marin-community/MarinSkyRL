@@ -45,6 +45,8 @@ LR="${LR:-2.0e-6}"
 # (MAX_STALENESS_STEPS >= 1) needs COLOCATE_ALL=false and a second GPU for the engine.
 MAX_STALENESS_STEPS="${MAX_STALENESS_STEPS:-0}"
 COLOCATE_ALL="${COLOCATE_ALL:-true}"
+# A FineStore archive for rollout payloads, in the cluster's own region; unset keeps them in Ray's object store.
+FINESTORE_ROOT="${FINESTORE_ROOT:-null}"
 
 # train_batch_size * MAX_STEPS prompts get consumed; keep some margin. Evaluation is off, but
 # data.val_data still has to resolve, so a handful of rows is enough.
@@ -85,7 +87,7 @@ PY
 
 echo "::: training ${MODEL} for ${MAX_STEPS} steps"
 echo "::: shape: batch=${TRAIN_BATCH_SIZE} samples=${N_SAMPLES} gen_len=${MAX_GEN_LEN} lr=${LR}"
-echo "::: rollouts: max_staleness_steps=${MAX_STALENESS_STEPS} colocate_all=${COLOCATE_ALL}"
+echo "::: rollouts: max_staleness_steps=${MAX_STALENESS_STEPS} colocate_all=${COLOCATE_ALL} finestore_root=${FINESTORE_ROOT}"
 # vLLM warms up DeepGEMM FP8 kernels whenever the GPU supports them (is_deep_gemm_supported() is
 # true on Hopper) regardless of whether the `deep_gemm` package actually imported -- and it is not
 # in this environment, so the warmup hard-fails at engine start. This is a bf16 model that never
@@ -111,6 +113,7 @@ START=$(date +%s)
   "${STRATEGY_ARGS[@]}" \
   trainer.placement.colocate_all="$COLOCATE_ALL" \
   trainer.rollout_buffer.max_staleness_steps="$MAX_STALENESS_STEPS" \
+  trainer.rollout_buffer.finestore_root="$FINESTORE_ROOT" \
   trainer.placement.policy_num_gpus_per_node=1 \
   trainer.placement.critic_num_gpus_per_node=1 \
   trainer.placement.ref_num_gpus_per_node=1 \
