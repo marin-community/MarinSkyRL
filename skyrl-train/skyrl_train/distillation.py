@@ -326,6 +326,16 @@ def _validate_masked_logprobs(logprobs: torch.Tensor, valid_mask: torch.Tensor, 
         raise ValueError(f"invalid {label} must be NaN, not plausible scores")
 
 
+def _all_masked_loss(reference: torch.Tensor) -> torch.Tensor:
+    """Zero loss, attached to the graph, for a micro-batch whose rows are all masked.
+
+    A trajectory that failed in the agent loop arrives as a fully masked row. With a
+    micro-batch of one, that row is the whole batch; it contributes nothing, exactly as
+    it contributes nothing to the plain policy loss through ``masked_mean``.
+    """
+    return reference.sum() * 0.0
+
+
 def _validate_loss_weights(loss_weights: torch.Tensor, label: str) -> None:
     if not torch.is_floating_point(loss_weights):
         raise ValueError(f"{label} must have floating-point dtype")
@@ -759,7 +769,7 @@ def sampled_reverse_kl_loss(
             raise ValueError(f"loss_mask must be on the action_log_probs device {expected_device}")
         effective_mask = effective_mask & loss_mask.to(torch.bool)
     if not torch.any(effective_mask):
-        raise ValueError("sampled reverse KL has no valid training tokens")
+        return _all_masked_loss(action_log_probs)
 
     teacher_logprobs = torch.where(
         effective_mask,
@@ -808,8 +818,6 @@ def _validate_student_topk_surrogate_input(
         if loss_mask.shape != response_shape or loss_mask.device != indices.device:
             raise ValueError("student-top-K loss_mask must match response coordinates and device")
         effective_mask = effective_mask & loss_mask.to(torch.bool)
-    if not torch.any(effective_mask):
-        raise ValueError("student-top-K OPD has no valid training tokens")
     return effective_mask
 
 
@@ -835,7 +843,14 @@ def student_topk_policy_surrogate_loss(
         raise ValueError("student-top-K OPD requires 0 <= clip_low < 1, clip_high >= 0, clip_ratio_c > 1")
 
     effective_mask = _validate_student_topk_surrogate_input(student_selected_logprobs, distillation, loss_mask)
-
+    if not torch.any(effective_mask):
+        # Same keys as the populated path: the worker all-reduces metric dicts across ranks.
+        return _all_masked_loss(student_selected_logprobs), {
+            DISTILLATION_TOPK_METRIC: float(distillation.student_topk_indices.shape[-1]),
+            "distillation_student_retained_mass_mean": 0.0,
+            "distillation_clip_fraction": 0.0,
+            "distillation_dual_clip_fraction": 0.0,
+        }
     current = student_selected_logprobs[effective_mask]
     behavior = distillation.behavior_topk_logprobs[effective_mask]
     teacher = distillation.teacher_on_student_logprobs[effective_mask]
@@ -929,7 +944,12 @@ def sparse_forward_kl_loss(
             raise ValueError("loss_mask must match sparse forward KL response coordinates and device")
         effective_mask = effective_mask & loss_mask.to(torch.bool)
     if not torch.any(effective_mask):
-        raise ValueError("sparse forward KL has no valid training tokens")
+        # Same keys as the populated path: the worker all-reduces metric dicts across ranks.
+        return _all_masked_loss(student_topk_log_probs), {
+            "distillation_retained_mass_mean": 0.0,
+            "distillation_retained_mass_min": 0.0,
+            DISTILLATION_TOPK_METRIC: float(expected_shape[-1]),
+        }
 
     teacher_logprobs = distillation.teacher_topk_logprobs[effective_mask].float()
     student_logprobs = student_topk_log_probs[effective_mask].float()

@@ -20,7 +20,7 @@ from skyrl_train.models.megatron_router_replay import (  # noqa: E402
     LayerReplayHandle,
     MegatronRouterReplay,
 )
-from skyrl_train.models.router_replay import SENTINEL_EXPERT_ID  # noqa: E402
+from skyrl_train.models.megatron_router_replay import SENTINEL_EXPERT_ID  # noqa: E402
 from skyrl_train.workers.megatron import megatron_model_wrapper as mmw  # noqa: E402
 
 BATCH_SIZE = 2

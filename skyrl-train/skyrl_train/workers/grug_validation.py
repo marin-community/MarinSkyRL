@@ -1,4 +1,4 @@
-"""Test-only snapshot type shared by the FSDP2 and Megatron Grug policy workers."""
+"""Test-only snapshot type used by the Megatron Grug policy worker."""
 
 from dataclasses import dataclass
 
