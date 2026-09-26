@@ -90,6 +90,18 @@ def launch_config(
     )
 
 
+def validate_smoke_config(config: DictConfig) -> None:
+    """Check the pinned Grug recipe on CPU before preparing data or allocating GPUs."""
+    for role in ("policy", "ref"):
+        if config.trainer[role].megatron_config.context_parallel_size != 1:
+            raise ValueError(
+                f"Grug Pivot smoke requires trainer.{role}.megatron_config.context_parallel_size=1: "
+                "Transformer Engine 2.11 p2p CP does not support Grug sliding-window attention; "
+                "all_gather CP rejects packed sequences, and a2a CP2 cannot split Grug's five KV heads."
+            )
+    validate_cfg(config)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", required=True)
@@ -110,7 +122,7 @@ def main() -> None:
         )
         OmegaConf.save(config, config_path)
         resolved = load_launch_config(config_path)
-        validate_cfg(resolved.skyrl)
+        validate_smoke_config(resolved.skyrl)
         logger.info(
             "Preflight: {} GPUs, {} prefixes x {} responses, {} steps, runtime {}",
             resolved.iris.allocation.num_nodes * resolved.iris.allocation.gpus_per_node,

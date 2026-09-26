@@ -463,6 +463,9 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
         for name in names:
             torch.testing.assert_close(exported[name].float(), after[name], rtol=0, atol=0)
         assert all(exported[name].dtype == torch.float32 for name in BIAS_NAMES)
+        # Release the two-GPU policy placement before scheduling the HF reload worker.
+        ray.shutdown()
+        initialize_ray(cfg)
         reloaded = ray.get(_hf_response_logprobs.remote(str(export_dir), batch))
         _assert_logprobs_close(post_update, reloaded, batch["response_mask"])
     finally:

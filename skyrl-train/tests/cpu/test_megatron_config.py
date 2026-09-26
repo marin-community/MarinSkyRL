@@ -2,6 +2,8 @@ from unittest import mock
 
 from omegaconf import OmegaConf
 import pytest
+from ci.pivot_grug_smoke import MODEL_REVISION, launch_config, validate_smoke_config
+from cloud.iris.launch_config import load_launch_config
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.utils.utils import validate_cfg
 
@@ -45,3 +47,23 @@ def test_megatron_router_replay_rejects_fused_router():
 
     with pytest.raises(ValueError, match="moe_router_fusion"):
         validate_cfg(cfg)
+
+
+@pytest.mark.parametrize("role", ["policy", "ref"])
+def test_grug_smoke_rejects_context_parallel_sliding_window_before_launch(tmp_path, role):
+    config = launch_config(
+        "grug-cp-regression",
+        str(tmp_path / "output"),
+        str(tmp_path / "temporary"),
+        "s3://marin-us-east-02a/preflight/grug",
+        MODEL_REVISION,
+    )
+    # Packing passed the generic CP check but then failed inside TE attention on the GPUs.
+    config.skyrl.trainer.use_sample_packing = True
+    config.skyrl.trainer[role].megatron_config.context_parallel_size = 2
+    path = tmp_path / "launch.yaml"
+    OmegaConf.save(config, path)
+    resolved = load_launch_config(path)
+
+    with pytest.raises(ValueError, match=rf"trainer\.{role}\.megatron_config\.context_parallel_size=1"):
+        validate_smoke_config(resolved.skyrl)
