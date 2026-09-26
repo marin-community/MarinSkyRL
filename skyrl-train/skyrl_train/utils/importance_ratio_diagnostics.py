@@ -44,6 +44,17 @@ LOG_RATIO_BASE_METRIC_KEYS = (
 )
 
 
+def absolute_probability_difference_metrics(
+    rollout_logprobs: torch.Tensor, trainer_logprobs: torch.Tensor, loss_mask: torch.Tensor
+) -> tuple[float, float]:
+    """Mean and population standard deviation of the selected tokens' absolute probability gap."""
+    selected = loss_mask > 0
+    difference = (rollout_logprobs[selected].float().exp() - trainer_logprobs[selected].float().exp()).abs()
+    if difference.numel() == 0:
+        return 0.0, 0.0
+    return difference.mean().item(), difference.std(unbiased=False).item()
+
+
 def linear_quantiles(values: torch.Tensor, probabilities: tuple[float, ...]) -> list[float]:
     """Linear-interpolated quantiles of a finite 1-D tensor; torch.quantile refuses more than 2**24 values."""
     count = values.numel()

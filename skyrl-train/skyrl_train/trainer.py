@@ -130,7 +130,10 @@ from skyrl_train.telemetry import (
     record_training_metrics,
 )
 from skyrl_train.rollout_observability import observe_rollout_call
-from skyrl_train.utils.importance_ratio_diagnostics import mismatch_ratio_metrics
+from skyrl_train.utils.importance_ratio_diagnostics import (
+    absolute_probability_difference_metrics,
+    mismatch_ratio_metrics,
+)
 from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
@@ -2462,13 +2465,9 @@ class RayPPOTrainer:
             # here is what crashed the 80B R3+TIS train loop at global_step 1
             # ('NoneType' object is not subscriptable). Skip the inference/train prob-diff
             # diagnostic for that batch; the batch still trains as standard (non-TIS) loss.
-            logprobs_diff = (
-                training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
-                - action_log_probs[training_input["loss_mask"] > 0]
+            prob_diff_mean, prob_diff_std = absolute_probability_difference_metrics(
+                training_input["rollout_logprobs"], action_log_probs, training_input["loss_mask"]
             )
-            prob_diff = logprobs_diff.exp().abs()
-            prob_diff_mean = prob_diff.mean().item()
-            prob_diff_std = prob_diff.std().item()
             self.all_metrics.update(
                 {
                     "policy/rollout_train_prob_diff_mean": prob_diff_mean,

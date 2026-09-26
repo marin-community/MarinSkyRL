@@ -7,12 +7,31 @@ import pytest
 import torch
 
 from skyrl_train.utils.importance_ratio_diagnostics import (
+    absolute_probability_difference_metrics,
     LogRatioMonitor,
     linear_quantiles,
     mismatch_ratio_metrics,
     ratio_statistics,
     gather_ratio_tensor,
 )
+
+
+def test_absolute_probability_difference_metrics_reports_probability_gap():
+    rollout = torch.log(torch.tensor([[0.25, 0.5, 0.25]]))
+    trainer = torch.log(torch.tensor([[0.5, 0.25, 1.0]]))
+    mask = torch.tensor([[1, 1, 0]])
+
+    mean, std = absolute_probability_difference_metrics(rollout, trainer, mask)
+
+    assert mean == pytest.approx(0.25)
+    assert std == pytest.approx(0.0)
+    assert absolute_probability_difference_metrics(rollout, rollout, mask) == (0.0, 0.0)
+
+    tail_mean, tail_std = absolute_probability_difference_metrics(
+        torch.tensor([[-1.0]]), torch.tensor([[-40.0]]), torch.ones(1, 1)
+    )
+    assert tail_mean == pytest.approx(math.exp(-1) - math.exp(-40))
+    assert tail_std == 0.0
 
 
 def test_ratio_statistics_match_hand_values_and_clamp_only_exponentials():
