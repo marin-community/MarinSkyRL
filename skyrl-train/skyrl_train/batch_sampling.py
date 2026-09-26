@@ -23,7 +23,7 @@ class RowOwnership(StrEnum):
     BORROWED = "borrowed"
 
 
-def _refresh_filtered_rollout_metrics(filtered: dict[str, Any]) -> None:
+def _refresh_filtered_rollout_metrics(filtered: TrajectoryBatch) -> None:
     if "env_metrics" not in filtered and "verification_successes" not in filtered:
         return
     metrics = dict(filtered.get("rollout_metrics") or {})
@@ -59,9 +59,10 @@ def filter_trajectory_batch(
             filtered[key] = [deepcopy(row) for row in rows] if row_ownership is RowOwnership.ISOLATED else rows
         else:
             filtered[key] = value
-    _refresh_filtered_rollout_metrics(filtered)
-    refresh_trajectory_reward_shaping_metrics(filtered)
-    return cast(TrajectoryBatch, filtered)
+    result = cast(TrajectoryBatch, filtered)
+    _refresh_filtered_rollout_metrics(result)
+    refresh_trajectory_reward_shaping_metrics(result)
+    return result
 
 
 def _rekey_uid_collisions(uids: list[str], collected_uids: list[str], sample_batch_count: int) -> list[str]:
