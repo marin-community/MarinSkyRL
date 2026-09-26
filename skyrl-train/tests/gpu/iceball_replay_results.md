@@ -1,12 +1,14 @@
 # Iceball fixed-input H100 trainer replay
 
-The replay ran on 2026-09-26 as Iris job
-`/atqamar/atqamar-iceball-replay-matrix-guarded-rno-20260926` on one
-non-preemptible node with eight H100 80 GB GPUs. It succeeded with zero failures
-and preemptions. Raw task output had seven-day retention; the fixed fixture
-hash, measurement protocol, numerical comparison, and timing table are retained
-below. The analysis job was
-`/atqamar/atqamar-iceball-replay-analysis-detail-20260926`.
+The final-revision replay ran on 2026-09-26 as Iris job
+`/atqamar/atqamar-iceball-replay-final-bd8a-20260926` on one non-preemptible
+RNO node with eight H100 80 GB GPUs. It used local-bundle MarinSkyRL source
+`bd8a9dee466afd3277282321b151bbc9b29da3be` and historical source
+`72cc492d3ba03941715786f558d6be6ae1a52238`. The job and its analysis
+job `/atqamar/atqamar-iceball-replay-analysis-final-bd8a-20260926` succeeded
+with zero failures and preemptions. The [raw output archive](s3://marin-us-east-02a/tmp/ttl=7d/iris/task-outputs/atqamar/atqamar-iceball-replay-final-bd8a-20260926/0/4f7db232d6ef9093/outputs.tar.zst)
+has seven-day retention; the fixed fixture hash, measurement protocol,
+numerical comparison, and timing table are retained below.
 
 Run `iceball_replay_matrix.sh` in the frozen CUDA runtime with
 `--model-uri s3://marin-us-east-02a/marin/checkpoints/iceball-micro-sft/2026.09.26/hf/step-7`,
@@ -28,20 +30,32 @@ worker state per repetition. The cells alternated backend order on the same
 node. The predeclared maximum absolute starting-logprob guard was 0.05; all
 FSDP2 repetitions passed, with an observed maximum of 0.01563.
 
-| Trainer | Eight-update totals (s) | Median total (range, s) | Median step (s) | Mean valid tokens/s |
+| Trainer | Eight-update totals (s) | Median total (range, s) | Sample standard deviation (s) | Mean valid tokens/s |
 | --- | --- | --- | --- | --- |
-| Historical FSDP2 | 15.6417, 15.7410, 15.5528 | 15.6417 (15.5528–15.7410) | 1.8973 | 359.6 |
-| Historical Megatron | 13.4708, 13.5637, 13.2575 | 13.4708 (13.2575–13.5637) | 1.1724 | 418.9 |
-| Current Megatron | 14.2812, 14.1712, 14.0508 | 14.1712 (14.0508–14.2812) | 1.1966 | 397.1 |
+| Historical FSDP2 | 14.6441, 14.5953, 14.5415 | 14.5953 (14.5415–14.6441) | 0.0513 | 385.5 |
+| Historical Megatron | 13.4403, 13.5245, 13.3830 | 13.4403 (13.3830–13.5245) | 0.0712 | 418.3 |
+| Current Megatron | 14.0007, 14.1197, 14.3674 | 14.1197 (14.0007–14.3674) | 0.1871 | 397.2 |
 
-The historical FSDP2/Megatron median-total ratio was 1.161. The ratio against
-the current Megatron runtime was 1.104. The current Megatron median was 5.2%
+The historical FSDP2/Megatron median-total ratio was 1.086. The ratio against
+the current Megatron runtime was 1.034. The current Megatron median was 5.1%
 slower than historical Megatron; this compares runtime revisions and
 dependencies, not trainer backends. Historical and current Megatron had
 identical policy probes, policy losses, and gradient-norm receipts at every
 update. Timed intervals sum synchronized maximum-rank `ppo_train` calls;
 staging, startup, rollout, probes, checkpoints, export, and evaluation are
 outside the timed region.
+
+An earlier independent matrix job,
+`/atqamar/atqamar-iceball-replay-matrix-guarded-rno-20260926`, used the same
+fixture, harness, and historical source on another RNO H100 node. Its
+historical FSDP2 totals were 15.6417, 15.7410, and 15.5528 s; historical
+Megatron totals were 13.4708, 13.5637, and 13.2575 s; its earlier current
+Megatron bundle totals were 14.2812, 14.1712, and 14.0508 s. The historical
+backend ratio was 1.161 in that job. The difference between its FSDP2 times
+and the final job's FSDP2 times exceeds the within-job repeat spread, so these
+measurements support a modest within-job backend advantage but not one fixed
+speedup across nodes and launches. The earlier [raw archive](s3://marin-us-east-02a/tmp/ttl=7d/iris/task-outputs/atqamar/atqamar-iceball-replay-matrix-guarded-rno-20260926/0/85f3b4b40a99be0a/outputs.tar.zst)
+has the full receipts.
 
 Historical FSDP2 and Megatron starting response-token logprobs differed by
 mean absolute 0.000164 and maximum absolute 0.01559. After eight updates,
