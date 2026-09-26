@@ -51,7 +51,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     get_rollout_metrics,
     normalize_token_ids,
 )
-from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelClient
+from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelClient, ModelClientOutput
 from skyrl_train.trajectory_runners.selected_topk import align_student_topk
 from skyrl_train.trajectory_runners.collectors import RolloutCollector, collect_agent_loops
 from skyrl_train.trajectory_runners.projections import (
@@ -137,15 +137,18 @@ class ExactChatTransportError(RuntimeError):
     """The configured exact structured-chat contract was violated at runtime."""
 
 
-@dataclass(frozen=True)
-class _SampledTurn:
-    """One chat turn as the engine served and sampled it, with the logprobs and version spans it stamped."""
-
-    prompt_ids: list[int] | None
-    response_ids: list[int]
-    response_logprobs: list[float] | None
-    policy_version_segments: list[PolicyVersionSegment] | None
-    routed_experts: list[list[list[int]]] | None
+def _sole_turn_training_view(first_turn: ModelClientOutput, collect_logprobs: bool):
+    """The served prompt and sampled tokens of a lone assistant turn, with its logprobs, spans and routes."""
+    logprobs = first_turn.get("response_logprobs")
+    spans = first_turn.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY)
+    routes = first_turn.get("routed_experts")
+    return (
+        first_turn["prompt_ids"][0],
+        first_turn["response_ids"][0],
+        logprobs[0] if collect_logprobs and logprobs is not None else None,
+        None if spans is None else spans[0],
+        None if routes is None else routes[0],
+    )
 
 
 class SkyRLGymTrajectoryRunner(TrajectoryRunner):
@@ -340,9 +343,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
               This will likely be deprecated soon.
             - When custom_chat_template = True and use_conversation_multi_turn = True, an environment
               without structured-chat metadata re-tokenizes the entire history every turn and at the end.
-              A trajectory that ends after its only assistant turn without an observation instead
-              trains on exactly the tokens the engine served and sampled, so no template re-render
-              can alter them.
+              A lone assistant turn with no observation trains on the engine's served and sampled tokens.
             - When the inference backend canonicalizes a structured tool call while rendering the
               next turn, the re-rendered prior context is retained but excluded from optimization unless
               exact structured-chat transport is required.
@@ -453,10 +454,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         behavior_policy_version_segments: list[PolicyVersionSegment] | None = []
         # Kept apart from the spans because re-tokenized history cannot align spans to tokens.
         oldest_version: int | None = None
-        # On the re-tokenize path, the engine tokens of the only assistant turn. Kept while no
-        # observation has been appended, so a trajectory that never re-rendered trains on what
-        # the engine served and sampled; cleared by an observation, a second turn, or a rewrite.
-        sole_sampled_turn: _SampledTurn | None = None
+        first_turn: ModelClientOutput | None = None
+        rewritten = False
 
         while not done:
             if len(input_ids) > max_input_length:
@@ -574,19 +573,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                             rollout_routes.extend([route_sentinel] * observation_token_count)
                 input_ids = rendered_prompt_ids[0]
 
-            if retokenize_chat_history:
-                served_prompt_rows = engine_output.get("prompt_ids")
-                sole_sampled_turn = (
-                    _SampledTurn(
-                        prompt_ids=None if served_prompt_rows is None else list(served_prompt_rows[0]),
-                        response_ids=list(output_ids),
-                        response_logprobs=None if response_logprobs is None else list(response_logprobs),
-                        policy_version_segments=output_version_segments,
-                        routed_experts=None if response_routes is None else [list(token) for token in response_routes],
-                    )
-                    if not per_step_rewards and token_provenance == TokenProvenance.ENGINE
-                    else None
-                )
+            if retokenize_chat_history and first_turn is None:
+                first_turn = copy.deepcopy(engine_output)
 
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
             # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
@@ -622,8 +610,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             )
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             new_obs = env_step_output["observations"]
-            if new_obs:
-                sole_sampled_turn = None
             step_reward: float = env_step_output["reward"]
             verification_results.append(verification_from_env_step(env_step_output))
             done = env_step_output["done"]
@@ -672,10 +658,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     response_logprobs = None
                     rollout_logprobs = None
                 if postprocessed_output_ids != output_ids:
+                    rewritten = True
                     selected_capture_possible = False
                     output_version_segments = None
                     behavior_policy_version_segments = None
-                    sole_sampled_turn = None
                     rollout_routes = None
                     route_sentinel = None
                     response_routes = None
@@ -683,20 +669,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
             # 3. Update states: input ids, loss_mask, chat_history, etc.
             response_offset = len(input_ids) - initial_prompt_length
-            if behavior_policy_version_segments is not None and output_version_segments is not None:
-                retained_sampled_length = sampled_output_length
-                if (
-                    chat_completion_params is None
-                    and not retokenize_chat_history
-                    and not self.use_conversation_multi_turn
-                    and not done
-                    and output_ids
-                    and output_ids[-1] == self.tokenizer.eos_token_id
-                ):
-                    retained_sampled_length -= 1
-                for span in truncate_spans(output_version_segments, retained_sampled_length):
-                    start = response_offset + span["start"]
-                    append_span(behavior_policy_version_segments, start, span["token_count"], span["policy_version"])
             # Three ways of managing input
             previous_loss_mask_length = len(loss_mask)
             if chat_completion_params is not None:
@@ -762,6 +734,12 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 )
                 per_step_rewards.append((step_reward, response_end_idx))
 
+            if behavior_policy_version_segments is not None and output_version_segments is not None:
+                retained = min(sampled_output_length, response_end_idx + 1 - initial_prompt_length - response_offset)
+                for span in truncate_spans(output_version_segments, retained):
+                    start = response_offset + span["start"]
+                    append_span(behavior_policy_version_segments, start, span["token_count"], span["policy_version"])
+
             if chat_completion_params is None:
                 if retokenize_chat_history:
                     rollout_routes = None
@@ -779,21 +757,21 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         # Get environment-specific metrics after the episode is done
         env_metrics = environment_metrics_from_step(env_step_output, env.get_metrics())
         prompt_ids = input_ids[:initial_prompt_length]
-        if sole_sampled_turn is not None:
-            # Engine ids are the training ids: no re-render, so no second BOS, no fabricated
-            # end-of-turn token and no shifted token boundaries between sampling and training.
-            if sole_sampled_turn.prompt_ids is None:
-                raise RuntimeError("chat generation must return the served prompt token IDs")
-            prompt_ids = sole_sampled_turn.prompt_ids
-            response_ids = list(sole_sampled_turn.response_ids)
+        sole_turn = (
+            first_turn is not None
+            and len(per_step_rewards) == 1
+            and not new_obs
+            and token_provenance is TokenProvenance.ENGINE
+            and not rewritten
+        )
+        if sole_turn:
+            prompt_ids, response_ids, rollout_logprobs, behavior_policy_version_segments, rollout_routes = (
+                _sole_turn_training_view(first_turn, collect_logprobs)
+            )
             loss_mask = [1] * len(response_ids)
-            rollout_logprobs = sole_sampled_turn.response_logprobs if collect_logprobs else None
-            behavior_policy_version_segments = sole_sampled_turn.policy_version_segments
-            rollout_routes = sole_sampled_turn.routed_experts
             if rollout_routes:
                 route_sentinel = _sentinel_routed_experts_row(rollout_routes[0])
         elif retokenize_chat_history:
-            # An observation, a second turn or a rewrite forces the whole history to be re-rendered.
             token_provenance = TokenProvenance.RECONSTRUCTED
             response_encodings = time_tokenization(
                 self.tokenizer.apply_chat_template,

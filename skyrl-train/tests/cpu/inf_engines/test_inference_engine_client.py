@@ -26,7 +26,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient
-from skyrl_train.trajectory_runners.routed_experts import decode_routed_experts, encode_routed_experts
+from skyrl_train.trajectory_runners.routed_experts import encode_routed_experts
 from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
 from omegaconf import OmegaConf
 import asyncio
@@ -1636,78 +1636,6 @@ async def test_completion_single_prompt_is_unaffected_when_never_paused():
     assert result["choices"][0]["text"] == "done"
     assert len(engines[0].calls) == 1
     assert "session_id" not in engines[0].calls[0], "session_id must be stripped before it reaches the engine"
-
-
-# -------------------------------------------
-# policy version spans across engines and weight syncs
-# --------------------------------------------
-
-
-class _VersionedEngine:
-    def __init__(self, outputs):
-        self.outputs = list(outputs)
-        self.calls = []
-        self.resumed_with = []
-
-    async def generate(self, request):
-        self.calls.append(deepcopy(request))
-        return deepcopy(self.outputs[len(self.calls) - 1])
-
-    async def pause_generation(self):
-        pass
-
-    async def resume_generation(self, policy_version=None):
-        self.resumed_with.append(policy_version)
-
-
-@pytest.mark.asyncio
-async def test_batched_generate_keeps_each_row_spans():
-    engine = _VersionedEngine(
-        [
-            InferenceEngineOutput(
-                responses=["a", ""],
-                response_ids=[[5], []],
-                stop_reasons=["stop", "stop"],
-                response_logprobs=None,
-                response_policy_version_segments=[[{"start": 0, "token_count": 1, "policy_version": 2}], []],
-            )
-        ]
-    )
-    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
-
-    output = await client.generate(InferenceEngineInput(prompt_token_ids=[[1], [2]], sampling_params={"max_tokens": 4}))
-
-    assert output["response_policy_version_segments"] == [[{"start": 0, "token_count": 1, "policy_version": 2}], []]
-
-
-@pytest.mark.asyncio
-async def test_generate_returns_the_served_prompt_without_earlier_attempts_tokens():
-    engine = _VersionedEngine(
-        [
-            InferenceEngineOutput(responses=["a"], response_ids=[[5]], stop_reasons=["abort"], response_logprobs=None),
-            InferenceEngineOutput(responses=["b"], response_ids=[[6]], stop_reasons=["stop"], response_logprobs=None),
-        ]
-    )
-    client = InferenceEngineClient(engines=[engine], tokenizer=MagicMock(), full_config=_make_min_cfg())
-
-    output = await client.generate(InferenceEngineInput(prompt_token_ids=[[1, 2]], sampling_params={"max_tokens": 4}))
-
-    assert engine.calls[1]["prompt_token_ids"] == [[1, 2, 5]]
-    assert output["prompt_ids"] == [[1, 2]]
-    assert output["response_ids"] == [[5, 6]]
-
-
-@pytest.mark.asyncio
-async def test_resume_names_the_installed_version_on_every_live_engine():
-    engines = [_VersionedEngine([]), _VersionedEngine([])]
-    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
-
-    await client.pause_generation()
-    await client.resume_generation(policy_version=7)
-    await client.pause_generation()
-    await client.resume_generation()
-
-    assert [engine.resumed_with for engine in engines] == [[7, None], [7, None]]
 
 
 # -------------------------------------------

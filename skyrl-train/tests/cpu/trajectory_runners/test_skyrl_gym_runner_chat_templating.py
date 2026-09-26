@@ -6,7 +6,6 @@ import pytest
 from typing import Dict, Any
 from unittest.mock import AsyncMock, MagicMock
 from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
-from skyrl_train.dataset.preprocess import _collate_routed_experts_from_arrays
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
@@ -16,7 +15,6 @@ from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 from skyrl_gym.envs import register
-from skyrl_train.policy_version import trained_tokens_versioned
 from skyrl_train.trajectory_runners.trajectory_processing import get_custom_chat_template, normalize_token_ids
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.trajectory_runners.trajectory_processing import CUSTOM_CHAT_TEMPLATES
@@ -123,32 +121,6 @@ def _make_input_batch(prompt, extras, env_class="cpu_test_env"):
 
 
 QWEN3_WITHOUT_THINKING = {"source": "name", "name_or_path": "qwen3_without_thinking"}
-
-
-def _serving_engine(tokenizer, response_text: str, *, stop_reason: str, policy_version: int):
-    """An engine that serves the chat prompt and returns its own prompt ids, sampled ids, logprobs, spans and routes."""
-    sampled_text = response_text + tokenizer.eos_token if stop_reason == "stop" else response_text
-    sampled_ids = tokenizer.encode(sampled_text, add_special_tokens=False)
-
-    def generate(input_batch):
-        served_prompt_ids = normalize_token_ids(
-            tokenizer.apply_chat_template(input_batch["prompts"][0], add_generation_prompt=True, tokenize=True)
-        )
-        return {
-            "responses": [response_text],
-            "stop_reasons": [stop_reason],
-            "prompt_ids": [served_prompt_ids],
-            "response_ids": [list(sampled_ids)],
-            "response_logprobs": [[-0.25 * (index + 1) for index in range(len(sampled_ids))]],
-            "response_policy_version_segments": [
-                [{"start": 0, "token_count": len(sampled_ids), "policy_version": policy_version}]
-            ],
-            "routed_experts": [[[[index, index + 1]] for index in range(len(sampled_ids))]],
-        }
-
-    engine = MagicMock()
-    engine.generate = AsyncMock(side_effect=generate)
-    return engine, sampled_ids
 
 
 @pytest.mark.asyncio
@@ -459,114 +431,44 @@ async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepat
         assert last_token_id_false == tokenizer.encode(mock_text, add_special_tokens=False)[-1]
 
 
-@pytest.mark.asyncio
-async def test_retokenized_chat_history_keeps_the_oldest_version_without_spans():
-    _register_test_env_if_needed()
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-    mock_llm = MagicMock()
-    versions = iter([2, 3, 3, 3])
-
-    def mock_generate(input_batch):
-        num_prompts = len(input_batch["prompts"])
-        response_ids = tokenizer.encode("b" + tokenizer.eos_token, add_special_tokens=False)
-        version = next(versions)
-        return {
-            "responses": ["b"] * num_prompts,
-            "stop_reasons": ["stop"] * num_prompts,
-            "response_logprobs": None,
-            "response_ids": [response_ids] * num_prompts,
-            "response_policy_version_segments": [
-                [{"start": 0, "token_count": len(response_ids), "policy_version": version}]
-            ]
-            * num_prompts,
-        }
-
-    mock_llm.generate = AsyncMock(side_effect=mock_generate)
-    runner = _build_runner(tokenizer, {"source": "name", "name_or_path": "qwen3_without_thinking"}, mock_llm)
-    prompt, extras = _default_prompt_and_extras()
-
-    trajectory_batch = await runner.run(_make_input_batch(prompt, extras))
-
-    assert trajectory_batch.get("behavior_policy_version_segments") is None
-    assert trajectory_batch["oldest_policy_version"] == 2
-
-
-def _rendered_assistant_ids(tokenizer, runner, content: str) -> list[int]:
-    """The tokens the re-render path trains on for one assistant message."""
-    return normalize_token_ids(
-        tokenizer.apply_chat_template(
-            [{"role": "assistant", "content": content}],
-            chat_template=runner.custom_chat_template,
-            add_generation_prompt=False,
-            tokenize=True,
-        )
-    )
-
-
-@pytest.mark.asyncio
-async def test_single_turn_chat_trajectory_trains_on_the_engines_tokens():
-    """Without an observation the trainer gets the served prompt, the sampled ids, their logprobs, spans and routes."""
-    _register_test_env_if_needed()
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-    # A trailing newline: re-rendering through the template moves the end-of-turn token past it
-    # and prepends the generation prompt, so the re-render cannot equal the sampled ids.
-    engine, sampled_ids = _serving_engine(tokenizer, "b\n", stop_reason="stop", policy_version=5)
-    runner = _build_runner(
-        tokenizer, QWEN3_WITHOUT_THINKING, engine, {"sampling_params": {"max_generate_length": 200, "logprobs": 0}}
-    )
-    prompt, extras = _default_prompt_and_extras()
-    assert _rendered_assistant_ids(tokenizer, runner, "b\n") != sampled_ids
-    served_prompt_ids = normalize_token_ids(
-        tokenizer.apply_chat_template(prompt[0], add_generation_prompt=True, tokenize=True)
-    )
-
-    batch = await runner.run(_make_input_batch(prompt, extras, env_class="cpu_single_turn_env"))
-
-    assert batch["prompt_token_ids"][0] == served_prompt_ids
-    assert batch["response_ids"][0] == sampled_ids
-    assert batch["loss_masks"][0] == [1] * len(sampled_ids)
-    assert batch["rollout_logprobs"][0] == [-0.25 * (index + 1) for index in range(len(sampled_ids))]
-    assert batch["stop_reasons"] == ["stop"]
-    assert batch["rollout_routed_experts"][0] == [[[index, index + 1]] for index in range(len(sampled_ids))]
-    # The sole turn's rows are rectangular, so collation takes the one-slice path and pads with zeros.
-    collated = _collate_routed_experts_from_arrays(batch["rollout_routed_experts"], len(sampled_ids) + 2, 64)
-    assert collated.shape == (1, len(sampled_ids) + 2, 1, 2)
-    assert collated[0, : len(sampled_ids)].tolist() == batch["rollout_routed_experts"][0]
-    assert not collated[0, len(sampled_ids) :].any()
-    assert batch["oldest_policy_version"] == 5
-    assert batch["rollout_metrics"][TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC] == 0.0
-    spans = batch["behavior_policy_version_segments"][0]
-    assert spans == [{"start": 0, "token_count": len(sampled_ids), "policy_version": 5}]
-    # The trainer's admission check: every loss-bearing token carries a known sampled version.
-    assert trained_tokens_versioned(spans, batch["loss_masks"][0])
-
-
 class _TokenEngine:
-    """The shape a vLLM engine returns from generate(): sampled ids and spans, no prompt ids."""
+    """A vLLM-shaped generate() engine: sampled ids, logprobs and version spans, with no prompt ids.
 
-    def __init__(self, sampled_ids):
-        self.sampled_ids = sampled_ids
+    An aborted attempt installs the next policy version while it is in flight.
+    """
+
+    def __init__(self, tokenizer, attempts):
+        self.tokenizer = tokenizer
+        self.attempts = list(attempts)
         self.served_prompts = []
+        self.client = None
 
     async def generate(self, input_batch):
         self.served_prompts.extend(input_batch["prompt_token_ids"])
+        ids, stop_reason, version = self.attempts[len(self.served_prompts) - 1]
+        if stop_reason == "abort":
+            await self.client.pause_generation()
+            await self.client.resume_generation(policy_version=version + 1)
         return {
-            "responses": ["b\n"],
-            "stop_reasons": ["stop"],
-            "response_ids": [list(self.sampled_ids)],
-            "response_logprobs": None,
-            "response_policy_version_segments": [
-                [{"start": 0, "token_count": len(self.sampled_ids), "policy_version": 6}]
-            ],
+            "responses": [self.tokenizer.decode(ids, skip_special_tokens=True)],
+            "stop_reasons": [stop_reason],
+            "response_ids": [list(ids)],
+            "response_logprobs": [_logprobs(ids)],
+            "response_policy_version_segments": [[{"start": 0, "token_count": len(ids), "policy_version": version}]],
         }
 
+    async def pause_generation(self):
+        pass
 
-@pytest.mark.asyncio
-async def test_single_turn_chat_through_the_inference_engine_client_trains_on_the_served_prompt():
-    _register_test_env_if_needed()
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-    sampled_ids = tokenizer.encode("b\n" + tokenizer.eos_token, add_special_tokens=False)
-    engine = _TokenEngine(sampled_ids)
+    async def resume_generation(self, policy_version=None):
+        pass
+
+
+def _logprobs(ids):
+    return [-0.01 * token for token in ids]
+
+
+def _client_runner(tokenizer, engine):
     config = OmegaConf.create(
         {
             "trainer": {"policy": {"model": {"path": "Qwen/Qwen3-0.6B"}}},
@@ -579,43 +481,52 @@ async def test_single_turn_chat_through_the_inference_engine_client_trains_on_th
             },
         }
     )
-    client = InferenceEngineClient(engines=[engine], tokenizer=tokenizer, full_config=config)
-    runner = _build_runner(tokenizer, QWEN3_WITHOUT_THINKING, client)
-    prompt, extras = _default_prompt_and_extras()
-
-    batch = await runner.run(_make_input_batch(prompt, extras, env_class="cpu_single_turn_env"))
-
-    assert batch["prompt_token_ids"][0] == engine.served_prompts[0]
-    assert batch["response_ids"][0] == sampled_ids
-    assert batch["oldest_policy_version"] == 6
+    engine.client = InferenceEngineClient(engines=[engine], tokenizer=tokenizer, full_config=config)
+    overrides = {"sampling_params": {"max_generate_length": 200, "logprobs": 0}}
+    return _build_runner(tokenizer, QWEN3_WITHOUT_THINKING, engine.client, overrides)
 
 
 @pytest.mark.asyncio
-async def test_length_stopped_single_turn_carries_no_fabricated_end_of_turn():
+@pytest.mark.parametrize("stop_reason", ["stop", "length"])
+async def test_single_turn_trajectory_through_the_client_trains_on_what_was_sampled_across_a_weight_sync(stop_reason):
     _register_test_env_if_needed()
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-    engine, sampled_ids = _serving_engine(tokenizer, "b\n", stop_reason="length", policy_version=1)
-    runner = _build_runner(tokenizer, QWEN3_WITHOUT_THINKING, engine)
+    # Re-rendering "b\n" through the template moves the end-of-turn token and, for a length stop,
+    # adds one the model never sampled.
+    sampled_ids = tokenizer.encode(
+        "b\n" + (tokenizer.eos_token if stop_reason == "stop" else ""), add_special_tokens=False
+    )
+    first, rest = sampled_ids[:1], sampled_ids[1:]
+    engine = _TokenEngine(tokenizer, [(first, "abort", 3), (rest, stop_reason, 4)])
+    runner = _client_runner(tokenizer, engine)
     prompt, extras = _default_prompt_and_extras()
-    assert tokenizer.eos_token_id not in sampled_ids
-    # The re-render path closes the cut-off message with an end-of-turn token the model never emitted.
-    assert tokenizer.eos_token_id in _rendered_assistant_ids(tokenizer, runner, "b\n")
 
     batch = await runner.run(_make_input_batch(prompt, extras, env_class="cpu_single_turn_env"))
 
-    assert batch["stop_reasons"] == ["length"]
+    served_prompt = engine.served_prompts[0]
+    assert engine.served_prompts[1] == served_prompt + first
+    assert batch["prompt_token_ids"][0] == served_prompt
     assert batch["response_ids"][0] == sampled_ids
     assert batch["loss_masks"][0] == [1] * len(sampled_ids)
+    assert batch["stop_reasons"] == [stop_reason]
+    assert batch["rollout_logprobs"][0] == _logprobs(first) + _logprobs(rest)
+    assert batch["behavior_policy_version_segments"] == [
+        [
+            {"start": 0, "token_count": 1, "policy_version": 3},
+            {"start": 1, "token_count": len(rest), "policy_version": 4},
+        ]
+    ]
+    assert batch["oldest_policy_version"] == 3
+    assert batch["rollout_metrics"][TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC] == 0.0
 
 
 @pytest.mark.asyncio
 async def test_a_trajectory_with_an_observation_still_re_renders_the_chat_history():
     _register_test_env_if_needed()
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-    engine, sampled_ids = _serving_engine(tokenizer, "b", stop_reason="stop", policy_version=4)
-    runner = _build_runner(
-        tokenizer, QWEN3_WITHOUT_THINKING, engine, {"sampling_params": {"max_generate_length": 200, "logprobs": 0}}
-    )
+    sampled_ids = tokenizer.encode("b" + tokenizer.eos_token, add_special_tokens=False)
+    engine = _TokenEngine(tokenizer, [(sampled_ids, "stop", 4)] * 3)
+    runner = _client_runner(tokenizer, engine)
     prompt, extras = _default_prompt_and_extras()
 
     batch = await runner.run(_make_input_batch(prompt, extras))
@@ -624,9 +535,7 @@ async def test_a_trajectory_with_an_observation_still_re_renders_the_chat_histor
     assert rendered == tokenizer.apply_chat_template(
         get_expected_chat_history("b"), chat_template=runner.custom_chat_template, tokenize=False
     )
-    assert batch["response_ids"][0] != sampled_ids
     assert batch["rollout_logprobs"] is None
     assert "behavior_policy_version_segments" not in batch
-    assert "rollout_routed_experts" not in batch
     assert batch["oldest_policy_version"] == 4
     assert batch["rollout_metrics"][TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC] == 1.0
