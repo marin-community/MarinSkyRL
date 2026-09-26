@@ -35,7 +35,9 @@ _MATRIX_RANKS = (2, 3)
 def grug_muonh_route(name: str, parameter: Tensor) -> Route:
     """Classify the Megatron parameter using Marin's three optimizer routes."""
     lower_name = name.lower()
-    if "gated_norm" in lower_name:
+    if "gated_norm" in lower_name or (
+        "embed_norm." in lower_name and lower_name.endswith(("down_proj.weight", "up_proj.weight"))
+    ):
         return MUONH_ROUTE
     if (
         "embed" in lower_name

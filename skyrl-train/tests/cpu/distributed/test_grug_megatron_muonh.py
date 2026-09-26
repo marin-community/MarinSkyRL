@@ -90,3 +90,12 @@ def test_muonh_rejects_nonzero_weight_decay() -> None:
     parameter = torch.nn.Parameter(torch.ones(2, 2))
     with pytest.raises(ValueError, match="weight_decay=0"):
         GrugMegatronMuonH([{"params": [parameter], "weight_decay": 0.01}], lr=0.03)
+
+
+def test_embedding_gate_route_matches_hf_gated_norm_route() -> None:
+    matrix = torch.nn.Parameter(torch.ones(4, 4))
+    norm = torch.nn.Parameter(torch.ones(4))
+    for projection in ("down_proj", "up_proj"):
+        assert grug_muonh_route(f"embed_norm.{projection}.weight", matrix) == "muonh"
+        assert grug_muonh_route(f"model.embed_gated_norm.{projection}.weight", matrix) == "muonh"
+    assert grug_muonh_route("embed_norm.norm.weight", norm) == "adam"

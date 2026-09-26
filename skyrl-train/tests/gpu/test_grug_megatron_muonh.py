@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import pytest
 import torch
 from megatron.core import parallel_state
 from skyrl_train.distributed.megatron.grug_muonh import GrugMegatronMuonH
@@ -8,15 +9,22 @@ from skyrl_train.distributed.megatron.optimizer import get_megatron_optimizer, i
 from torch import nn
 
 
-def _init_distributed() -> None:
-    if torch.distributed.is_initialized():
-        return
+@pytest.fixture
+def distributed_parallel_state():
+    assert not torch.distributed.is_initialized()
     torch.distributed.init_process_group("nccl", store=torch.distributed.HashStore(), rank=0, world_size=1)
-    parallel_state.initialize_model_parallel(
-        tensor_model_parallel_size=1,
-        pipeline_model_parallel_size=1,
-        expert_model_parallel_size=1,
-    )
+    try:
+        parallel_state.initialize_model_parallel(
+            tensor_model_parallel_size=1,
+            pipeline_model_parallel_size=1,
+            expert_model_parallel_size=1,
+        )
+        yield
+    finally:
+        try:
+            parallel_state.destroy_model_parallel()
+        finally:
+            torch.distributed.destroy_process_group()
 
 
 class _TinyGrug(nn.Module):
@@ -27,8 +35,7 @@ class _TinyGrug(nn.Module):
         self.output_layer = nn.Linear(4, 8, bias=False, device="cuda", dtype=torch.bfloat16)
 
 
-def test_megatron_wrapper_routes_updates_and_restores_muonh_state() -> None:
-    _init_distributed()
+def test_megatron_wrapper_routes_updates_and_restores_muonh_state(distributed_parallel_state) -> None:
     torch.manual_seed(17)
     model = _TinyGrug()
     config = init_megatron_optim_config(
