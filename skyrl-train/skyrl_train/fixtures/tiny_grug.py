@@ -91,7 +91,7 @@ def write_tiny_probe_fixture(path: Path) -> None:
 
 
 def upload_tiny_probe_fixture(path: Path, prefix: str) -> dict[str, str]:
-    """Copy the generated fixture to durable storage and verify each uploaded file."""
+    """Copy and verify the fixture, returning SHA-256 digests by relative file path."""
     root = StoragePath(prefix)
     if (root / "fixture-sha256.json").isfile():
         raise FileExistsError(f"fixture prefix already has a completed upload: {prefix}")

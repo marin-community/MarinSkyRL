@@ -10,8 +10,12 @@ from skyrl_train.config.behavior_logprobs import (
     validate_behavior_logprob_sampling,
 )
 
-PROBE_MODES = frozenset({"router_replay", "router_replay_filtered"})
-ALL_TRAINER_PROBE_MODES = frozenset({"native", "repeat", *PROBE_MODES})
+NATIVE_MODE = "native"
+REPEAT_MODE = "repeat"
+REPLAY_MODE = "router_replay"
+FILTERED_REPLAY_MODE = "router_replay_filtered"
+PROBE_MODES = frozenset({REPLAY_MODE, FILTERED_REPLAY_MODE})
+ALL_TRAINER_PROBE_MODES = frozenset({NATIVE_MODE, REPEAT_MODE, *PROBE_MODES})
 CACHE_OFF = "off"
 CACHE_ON = "on"
 CACHE_BOTH = "both"
@@ -73,7 +77,7 @@ def validate_mismatch_probe_config(
         or not set(modes) <= PROBE_MODES
     ):
         raise ValueError("trainer.mismatch_probe.extra_trainer_modes contains an unsupported or repeated mode")
-    cache_mode = probe.get("rescore_prefix_cache", "off")
+    cache_mode = probe.get("rescore_prefix_cache", CACHE_OFF)
     if cache_mode not in PROBE_CACHE_MODES:
         raise ValueError("trainer.mismatch_probe.rescore_prefix_cache must be off, on or both")
     reuse = probe.get("reuse_probe")
@@ -108,7 +112,7 @@ def validate_mismatch_probe_config(
         topk = megatron.get("moe_router_topk")
         if topk is not None and topk < 2:
             raise ValueError("trainer.mismatch_probe replay modes require an MoE router with top-k >= 2")
-    if "router_replay_filtered" in modes:
+    if FILTERED_REPLAY_MODE in modes:
         fraction = (probe.get("filtered_replay") or {}).get("keep_fraction")
         if (
             isinstance(fraction, bool)

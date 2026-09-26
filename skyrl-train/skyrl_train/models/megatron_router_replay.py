@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from collections import deque
 from contextlib import contextmanager
-from skyrl_train.config.mismatch_probe import PROBE_MODES
+from skyrl_train.config.mismatch_probe import FILTERED_REPLAY_MODE, PROBE_MODES, REPLAY_MODE
 from enum import Enum
 import math
 from typing import Callable, Mapping, Optional, Sequence, Tuple
@@ -254,7 +254,7 @@ class MegatronRouterReplay:
         self._hit_rows = 0
         self._response_rows = 0
         self._sentinel_rows = 0
-        self._scoring_mode = "router_replay"
+        self._scoring_mode = REPLAY_MODE
         self._keep_fraction: float | None = None
 
     @contextmanager
@@ -264,7 +264,7 @@ class MegatronRouterReplay:
             raise RuntimeError("router replay: scoring mode requires an idle controller")
         if mode not in PROBE_MODES:
             raise ValueError(f"unsupported replay scoring mode: {mode}")
-        if mode == "router_replay_filtered" and keep_fraction is None:
+        if mode == FILTERED_REPLAY_MODE and keep_fraction is None:
             raise ValueError("filtered replay requires keep_fraction")
         previous = (self._scoring_mode, self._keep_fraction)
         self._scoring_mode, self._keep_fraction = mode, keep_fraction
@@ -292,6 +292,8 @@ class MegatronRouterReplay:
         sentinel exclusion and feeds the ``sentinel_fraction`` metric.
         ``record_recompute`` is true for training forwards whose backward will
         replay activation-checkpointed layers, even when forward runs under no_grad.
+        ``probe_positions`` holds ``[N, 2]`` sample and response positions;
+        non-response rows use -1 for the response position.
         """
         if self._phase is not _Phase.IDLE:
             raise RuntimeError("router replay: begin_forward while a forward is already armed (phase must be IDLE)")
@@ -410,7 +412,7 @@ class MegatronRouterReplay:
         mask = mask.to(device=scores.device, dtype=torch.bool)
         targets = targets.to(device=scores.device)
         replaced = torch.zeros_like(targets, dtype=torch.bool)
-        if self._scoring_mode == "router_replay_filtered":
+        if self._scoring_mode == FILTERED_REPLAY_MODE:
             idx, replaced = filtered_replay_topk(scores, native_idx, targets, mask, self._keep_fraction)
         else:
             idx = torch.where(mask.unsqueeze(-1), targets, native_idx)

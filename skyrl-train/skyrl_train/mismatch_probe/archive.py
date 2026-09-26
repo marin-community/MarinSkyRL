@@ -15,11 +15,6 @@ COMPLETE_STATUS = "complete"
 BUILDING_STATUS = "building"
 
 
-def mismatch_schema():
-    """Return the shared FineStore row contract used by writers and readers."""
-    return mismatch
-
-
 @dataclass(frozen=True)
 class FrozenProbeSource:
     """Completed source archive rows needed to reuse frozen tokens."""
@@ -33,29 +28,28 @@ class MismatchArchive:
     """Write each supplied group of archive rows in one transaction."""
 
     def __init__(self, uri: str, *, writer_id: str):
-        self.schema = mismatch_schema()
         self.uri = uri
         self.store = DataStore.open(uri, writer_id=writer_id)
-        self.schema.register_mismatch_tables(self.store)
+        mismatch.register_mismatch_tables(self.store)
 
     def write(
         self,
         *,
-        probes: Sequence | None = None,
-        scores: Sequence | None = None,
-        layers: Sequence | None = None,
-        manifest=None,
+        probes: Sequence[mismatch.ProbeRow] | None = None,
+        scores: Sequence[mismatch.ScoreRow] | None = None,
+        layers: Sequence[mismatch.LayerRow] | None = None,
+        manifest: mismatch.ManifestRow | None = None,
     ) -> None:
         with self.store.transaction() as transaction:
             for table, rows in (
-                (self.schema.PROBE_TABLE, probes),
-                (self.schema.SCORES_TABLE, scores),
-                (self.schema.LAYERS_TABLE, layers),
+                (mismatch.PROBE_TABLE, probes),
+                (mismatch.SCORES_TABLE, scores),
+                (mismatch.LAYERS_TABLE, layers),
             ):
                 for row in rows or ():
                     transaction.table(table).add(row.model_dump())
             if manifest is not None:
-                transaction.table(self.schema.MANIFEST_TABLE).add(manifest.model_dump())
+                transaction.table(mismatch.MANIFEST_TABLE).add(manifest.model_dump())
 
     def close(self) -> None:
         self.store.close()
@@ -63,13 +57,12 @@ class MismatchArchive:
 
 def read_frozen_probe(uri: str) -> FrozenProbeSource:
     """Read completed source rows, including their generation scores."""
-    schema = mismatch_schema()
     view = ReadView(uri)
-    manifests = [schema.ManifestRow.model_validate(row) for row in view.scan(schema.MANIFEST_TABLE).to_pylist()]
+    manifests = [mismatch.ManifestRow.model_validate(row) for row in view.scan(mismatch.MANIFEST_TABLE).to_pylist()]
     if len(manifests) != 1 or manifests[0].status != COMPLETE_STATUS:
         raise ValueError(f"reuse_probe source {uri} is not a single complete mismatch archive")
-    probes = [schema.ProbeRow.model_validate(row) for row in view.scan(schema.PROBE_TABLE).to_pylist()]
-    scores = [schema.ScoreRow.model_validate(row) for row in view.scan(schema.SCORES_TABLE).to_pylist()]
+    probes = [mismatch.ProbeRow.model_validate(row) for row in view.scan(mismatch.PROBE_TABLE).to_pylist()]
+    scores = [mismatch.ScoreRow.model_validate(row) for row in view.scan(mismatch.SCORES_TABLE).to_pylist()]
     generations = {row.sample_id: row for row in scores if row.scoring == GENERATION_SCORING}
     if not probes or len(generations) != len(probes):
         raise ValueError("reuse_probe source has incomplete generation-time scores")

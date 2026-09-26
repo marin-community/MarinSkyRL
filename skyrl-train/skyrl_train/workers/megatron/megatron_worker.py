@@ -34,7 +34,7 @@ from skyrl_train.distributed.megatron.optimizer import (
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
-from skyrl_train.config.mismatch_probe import ALL_TRAINER_PROBE_MODES
+from skyrl_train.config.mismatch_probe import ALL_TRAINER_PROBE_MODES, PROBE_MODES
 from skyrl_train.distributed.megatron.remote_model import install_remote_hf_state
 from skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
@@ -271,13 +271,13 @@ class MegatronWorker:
         controller = self.model.router_replay
         if mode not in ALL_TRAINER_PROBE_MODES:
             raise ValueError(f"unsupported probe mode: {mode}")
-        if mode.startswith("router_replay") and controller is None:
+        if mode in PROBE_MODES and controller is None:
             raise ValueError(f"probe mode {mode} requires an installed Megatron router replay controller")
         module_modes = [(module, module.training) for chunk in self.actor_module for module in chunk.modules()]
         rng_state = MegatronStrategy.get_rng_state()
         rng_tracker = get_cuda_rng_tracker()
         tracker_states = copy.deepcopy(rng_tracker.get_states())
-        scope = controller.scoring_mode(mode, keep_fraction) if mode.startswith("router_replay") else nullcontext()
+        scope = controller.scoring_mode(mode, keep_fraction) if mode in PROBE_MODES else nullcontext()
         try:
             with scope:
                 if controller is not None:

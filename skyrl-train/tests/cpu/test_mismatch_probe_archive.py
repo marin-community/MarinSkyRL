@@ -1,11 +1,12 @@
 import pytest
+from finestore import mismatch
 
 from skyrl_train.config.mismatch_probe import GENERATION_SCORING
-from skyrl_train.mismatch_probe.archive import MismatchArchive, mismatch_schema, read_frozen_probe
+from skyrl_train.mismatch_probe.archive import MismatchArchive, read_frozen_probe
 
 
 def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_path):
-    schema = mismatch_schema()
+    schema = mismatch
     uri = str(tmp_path / "probe")
     probe = schema.ProbeRow(
         probe_hash="probe-hash",

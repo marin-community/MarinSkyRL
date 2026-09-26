@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 import ray
 import torch
+from finestore import mismatch
 from loguru import logger
 from omegaconf import OmegaConf
 
@@ -30,7 +31,10 @@ from skyrl_train.config.mismatch_probe import (
     CACHE_BOTH,
     CACHE_OFF,
     CACHE_ON,
+    FILTERED_REPLAY_MODE,
     GENERATION_SCORING,
+    NATIVE_MODE,
+    REPEAT_MODE,
     rescore_scoring,
     trainer_scoring,
 )
@@ -42,7 +46,6 @@ from skyrl_train.mismatch_probe.archive import (
     BUILDING_STATUS,
     COMPLETE_STATUS,
     MismatchArchive,
-    mismatch_schema,
     read_frozen_probe,
 )
 from skyrl_train.mismatch_probe.protocol import (
@@ -281,7 +284,7 @@ class MismatchProbeCallback(TrainerCallback):
         if padded_count < 0 or padded_count != training_input.metadata.get("pad_size", 0):
             raise ValueError("mismatch probe training collation changed the number of frozen samples")
         rows = []
-        schema = mismatch_schema()
+        schema = mismatch
         for position, sample_id in enumerate(sample_ids):
             response_length = len(trajectory["response_ids"][position])
             prompt_tokens = training_input["sequences"][position, :prompt_width]
@@ -430,7 +433,7 @@ class MismatchProbeCallback(TrainerCallback):
                 if len(values) != len(row.vllm_output_ids):
                     raise ValueError(f"vLLM re-read returned incomplete scores for {row.sample_id}")
                 result.append(
-                    mismatch_schema().ScoreRow(
+                    mismatch.ScoreRow(
                         probe_hash=self.probe_hash,
                         sample_id=row.sample_id,
                         scoring=label,
@@ -502,21 +505,21 @@ class MismatchProbeCallback(TrainerCallback):
         rows = self.probes
         n = len(rows)
         route_tensor = training_input.get("rollout_routed_experts")
-        modes = ("native", "repeat", *self.spec.extra_trainer_modes)
+        modes = (NATIVE_MODE, REPEAT_MODE, *self.spec.extra_trainer_modes)
         result = []
         for mode in modes:
-            order = self.batch_layout["repeat_order"] if mode == "repeat" else self.batch_layout["native_order"]
+            order = self.batch_layout["repeat_order"] if mode == REPEAT_MODE else self.batch_layout["native_order"]
             data = training_input.select(
                 ["sequences", "attention_mask", *(["rollout_routed_experts"] if route_tensor is not None else [])],
                 ["response_length"],
             )
             data["probe_row_indices"] = torch.arange(n, dtype=torch.long)
-            if mode in {"native", "repeat"} and route_tensor is not None:
+            if mode in {NATIVE_MODE, REPEAT_MODE} and route_tensor is not None:
                 data["rollout_routed_experts"] = torch.zeros_like(route_tensor)
-            if mode == "repeat":
+            if mode == REPEAT_MODE:
                 data = _reorder_batch(data, order + list(range(n, data.batch_size)))
-            micro_batch_size = self.batch_layout["repeat_micro_batch_size"] if mode == "repeat" else None
-            fraction = float(self.spec.filtered_replay.keep_fraction) if mode == "router_replay_filtered" else None
+            micro_batch_size = self.batch_layout["repeat_micro_batch_size"] if mode == REPEAT_MODE else None
+            fraction = float(self.spec.filtered_replay.keep_fraction) if mode == FILTERED_REPLAY_MODE else None
             data.metadata.update(
                 probe_mode=mode,
                 probe_keep_fraction=fraction,
@@ -537,7 +540,7 @@ class MismatchProbeCallback(TrainerCallback):
                 if len(logprobs) != length or not all(math.isfinite(value) for value in logprobs):
                     raise ValueError(f"{label} returned incomplete or nonfinite scores for {row.sample_id}")
                 result.append(
-                    mismatch_schema().ScoreRow(
+                    mismatch.ScoreRow(
                         probe_hash=self.probe_hash,
                         sample_id=row.sample_id,
                         scoring=label,
@@ -562,7 +565,7 @@ class MismatchProbeCallback(TrainerCallback):
         return result
 
     def _manifest(self, trainer, *, status: str):
-        schema = mismatch_schema()
+        schema = mismatch
         return schema.ManifestRow(
             archive=self.archive_uri,
             status=status,
@@ -678,7 +681,7 @@ class MismatchProbeCallback(TrainerCallback):
         if update == 0 and self.source_manifest is None:
             for row, values in zip(self.probes, self.generation_scores, strict=True):
                 scores.append(
-                    mismatch_schema().ScoreRow(
+                    mismatch.ScoreRow(
                         probe_hash=self.probe_hash,
                         sample_id=row.sample_id,
                         scoring=GENERATION_SCORING,
@@ -701,7 +704,7 @@ class MismatchProbeCallback(TrainerCallback):
         if not reference:
             reference = {row.sample_id: row for row in scores if row.scoring == rescore_scoring(update, CACHE_ON)}
         if len(reference) == len(self.probes):
-            for mode in ("native", "repeat", *self.spec.extra_trainer_modes):
+            for mode in (NATIVE_MODE, REPEAT_MODE, *self.spec.extra_trainer_modes):
                 name = trainer_scoring(update, mode)
                 scored = {row.sample_id: row for row in scores if row.scoring == name}
                 if len(scored) != len(self.probes):
