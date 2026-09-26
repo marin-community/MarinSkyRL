@@ -20,6 +20,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from cloud.iris.paths import resolve_paths_in_dict
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT as CHECKPOINT_EXPORT_MODULE
+from marinskyrl.environment_contract import TrainingType
 from marinskyrl.distillation import DistillationPlan, compile_distillation_plan, validate_distillation_runtime_support
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
@@ -69,6 +70,20 @@ def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
         ) from error
 
     return RL_ENTRYPOINTS[entrypoint]
+
+
+_RL_ENTRYPOINTS_BY_MODULE = MappingProxyType({module: name for name, module in RL_ENTRYPOINTS.items()})
+
+
+def training_type_for_entrypoint(module: str, *, max_staleness_steps: int) -> TrainingType | None:
+    """How an entrypoint module trains, or None for a module that trains nothing.
+
+    Every training entrypoint runs the rollout-buffer loop, which is synchronous at staleness 0.
+    """
+    entrypoint = _RL_ENTRYPOINTS_BY_MODULE.get(module)
+    if entrypoint is None or entrypoint in (RLEntrypoint.GENERATE, RLEntrypoint.TERMINAL_BENCH_GENERATE):
+        return None
+    return TrainingType.SYNC if max_staleness_steps == 0 else TrainingType.ASYNC
 
 
 def registered_rl_entrypoint_module(module: str) -> str:

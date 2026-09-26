@@ -87,6 +87,8 @@ from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculativeDecodingConfig, runai_model_uri
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.utils.trainer_utils import (
+    async_step_metrics,
+    consumed_stop_metrics,
     cleanup_old_checkpoints,
     run_on_each_node,
     get_node_ids,
@@ -105,7 +107,18 @@ from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_lo
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
-from skyrl_train.telemetry import critical_phase, record_policy_step, record_rollout_staleness
+from skyrl_train.telemetry import (
+    TRAINER_ROLE,
+    ConsumedWork,
+    critical_phase,
+    record_consumed_work,
+    record_event,
+    record_policy_step,
+    record_rollout_staleness,
+    record_training_metrics,
+)
+from skyrl_train.rollout_observability import async_phase_window, monitor_event_loop_lag
+from skyrl_train.utils.importance_ratio_diagnostics import mismatch_ratio_metrics
 from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
@@ -176,6 +189,16 @@ def _validated_distillation_tensors(
     return distillation.training_tensors()
 
 
+def consumed_work(training_input: TrainingInputBatch) -> ConsumedWork:
+    """Count the rows and tokens an optimizer step consumed, excluding data-parallel padding."""
+    real_rows = training_input.batch_size - training_input.metadata.get("pad_size", 0)
+    return ConsumedWork(
+        sequences=real_rows,
+        response_tokens=int(training_input["response_mask"][:real_rows].sum().item()),
+        loss_tokens=int(training_input["loss_mask"][:real_rows].sum().item()),
+    )
+
+
 class RayPPOTrainer:
     """The rollout-buffer training loop.
 
@@ -188,6 +211,9 @@ class RayPPOTrainer:
 
     # Set at startup when generator.weight_sync_transport is expert_block.
     _expert_block_sync: ExpertBlockSync | None = None
+
+    _training_metrics_enabled: bool = False
+    _rollout_spans_enabled: bool = False
 
     def __init__(
         self,
@@ -208,6 +234,8 @@ class RayPPOTrainer:
             raise ValueError("colocate_all requires trainer.rollout_buffer.max_staleness_steps=0")
         self.cfg = cfg
         self.context = context
+        self._training_metrics_enabled: bool = cfg.trainer.training_metrics
+        self._rollout_spans_enabled: bool = cfg.trainer.rollout_spans
         self.group_advantage_invariant = GroupAdvantageInvariant.from_config(
             cfg.trainer.algorithm.resolved_group_advantage
         )
@@ -532,6 +560,11 @@ class RayPPOTrainer:
 
     async def train(self):
         """Run the rollout-buffer training loop, then release every resource it started."""
+        loop_monitor = (
+            asyncio.create_task(monitor_event_loop_lag(step_fn=lambda: self.global_step, mode=self.context.mode))
+            if self._rollout_spans_enabled
+            else None
+        )
         try:
             if self._distillation_runtime is not None:
                 await self._distillation_runtime.start()
@@ -541,6 +574,8 @@ class RayPPOTrainer:
             log_exception_as_text(f"Train loop failed at global_step {self.global_step}", e)
             raise
         finally:
+            if loop_monitor is not None:
+                loop_monitor.cancel()
             await self.shutdown()
 
     async def _startup_trajectory_runner(self) -> None:
@@ -1081,6 +1116,12 @@ class RayPPOTrainer:
                 self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
 
     def _log_weight_update_completed(self, *, reason: str, duration_seconds: float) -> None:
+        if self._training_metrics_enabled:
+            record_event(
+                "weight_sync_completed",
+                {"model_version_step": self.global_step, "duration_seconds": duration_seconds},
+                attributes={"role": TRAINER_ROLE, "step": str(self.global_step), "reason": reason},
+            )
         logger.info(
             "Policy weights updated: step={} reason={} duration_seconds={:.3f}",
             getattr(self, "global_step", None),
@@ -1095,6 +1136,9 @@ class RayPPOTrainer:
         training_input: TrainingInputBatch,
         duration_seconds: float,
     ) -> None:
+        self.all_metrics.update(training_input.metadata["consumed_stop_metrics"])
+        if self._training_metrics_enabled:
+            record_consumed_work(consumed_work(training_input), step=self.global_step)
         logger.info(
             "Optimizer step completed: step={} epoch={} sequences={} duration_seconds={:.3f}",
             self.global_step,
@@ -1137,6 +1181,7 @@ class RayPPOTrainer:
             return
 
         self._log_startup_timings()
+        self._record_run_configuration()
 
         if self.cfg.trainer.algorithm.use_kl_in_reward:
             self.reward_kl_controller = get_kl_controller(self.cfg.trainer.algorithm)
@@ -1163,10 +1208,16 @@ class RayPPOTrainer:
         while self.global_step < self.total_training_steps:
             self.global_step += 1
             epoch = (self.global_step - 1) // self.num_steps_per_epoch
+            cycle_started = time.perf_counter()
             with Timer("step", self.all_timings) as step_timer:
-                await self._train_step(epoch)
+                training_input = await self._train_step(epoch)
+                # The core wall excludes the step-end callbacks below.
+                core_seconds = time.perf_counter() - cycle_started
                 step_state = self._create_trainer_state(epoch, active_step_duration=step_timer.elapsed)
                 await self._run_step_end_callbacks(step_state)
+            self._update_step_performance_metrics(
+                training_input, core_seconds=core_seconds, cycle_started=cycle_started
+            )
 
             if self._control.should_log:
                 log_payload = {
@@ -1216,19 +1267,71 @@ class RayPPOTrainer:
             for phase, seconds in (await self._expert_block_sync.prepare()).items():
                 self.all_startup_timings[f"expert_block_sync/{phase}"] = seconds
 
+    def _record_run_configuration(self) -> None:
+        if not self._training_metrics_enabled:
+            return
+        placement = self.cfg.trainer.placement
+        megatron = self.cfg.trainer.policy.get("megatron_config", {})
+        buffer = self.context.config
+        # The field names are the ones the async dashboard reads.
+        record_event(
+            "async_run_configuration",
+            {
+                "strategy": self.cfg.trainer.strategy,
+                "policy_nodes": placement.policy_num_nodes,
+                "policy_gpus_per_node": placement.policy_num_gpus_per_node,
+                "policy_tp": megatron.get("tensor_model_parallel_size"),
+                "policy_pp": megatron.get("pipeline_model_parallel_size"),
+                "policy_cp": megatron.get("context_parallel_size"),
+                "policy_ep": megatron.get("expert_model_parallel_size"),
+                "generation_workers": buffer.max_in_flight,
+                "mini_batch_size": buffer.batch_size,
+                "max_staleness_steps": buffer.max_staleness_steps,
+            },
+            attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
+        )
+
+    def _update_step_performance_metrics(
+        self, training_input: TrainingInputBatch, *, core_seconds: float, cycle_started: float
+    ) -> None:
+        if not self._training_metrics_enabled:
+            return
+        placement = self.cfg.trainer.placement
+        generator = self.cfg.generator
+        consumed = consumed_work(training_input)
+        self.all_metrics.update(
+            async_step_metrics(
+                core_seconds=core_seconds,
+                cycle_seconds=time.perf_counter() - cycle_started,
+                buffer_wait_seconds=self.all_timings["wait_for_generation_buffer"],
+                training_seconds=self.all_timings["run_training"],
+                sync_seconds=self.all_timings["sync_weights"],
+                consumed_loss_tokens=consumed.loss_tokens,
+                consumed_response_tokens=consumed.response_tokens,
+                policy_gpus=placement.policy_num_nodes * placement.policy_num_gpus_per_node,
+                inference_gpus=(
+                    generator.num_inference_engines
+                    * generator.inference_engine_tensor_parallel_size
+                    * generator.inference_engine_pipeline_parallel_size
+                    * generator.inference_engine_data_parallel_size
+                ),
+            )
+        )
+
     async def _publish(self, step: int) -> None:
         """Open rollout leases for training step ``step``, whose policy weights the engines now hold."""
         await self._begin_speculator_capture(step)
         await self.context.publish(step)
 
-    async def _train_step(self, epoch: int) -> None:
-        """Read this step's batch from the rollout buffer, train on it, and sync the new weights."""
+    async def _train_step(self, epoch: int) -> TrainingInputBatch:
+        """Read this step's batch from the rollout buffer, train on it, sync the new weights, and return the batch."""
         logger.info(
             "Rollout batch started: step={} required_groups={}", self.global_step, self.context.config.batch_size
         )
         with (
             Timer("wait_for_generation_buffer", self.all_timings) as rollout_wait_timer,
             critical_phase("rollout_or_inference_wait", self.global_step),
+            async_phase_window("rollout_wait", step=self.global_step, enabled=self._rollout_spans_enabled),
         ):
             groups, selection_metrics = await self.context.next_batch(
                 stall_timeout=self._rollout_stall_timeout(),
@@ -1287,7 +1390,10 @@ class RayPPOTrainer:
                 }
             )
 
-        with Timer("run_training", self.all_timings):
+        with (
+            Timer("run_training", self.all_timings),
+            async_phase_window("training", step=self.global_step, enabled=self._rollout_spans_enabled),
+        ):
             status = await self._run_training(training_input)
         self._log_optimizer_step_completed(
             epoch=epoch,
@@ -1296,10 +1402,12 @@ class RayPPOTrainer:
         )
 
         await self._poll_speculator_lifecycle()
-        await self._sync_policy_for_rollouts(reason="training_step")
+        with async_phase_window("weight_sync", step=self.global_step, enabled=self._rollout_spans_enabled):
+            await self._sync_policy_for_rollouts(reason="training_step")
 
         logger.info(status)
         self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
+        return training_input
 
     async def _end_epoch(self, epoch: int) -> None:
         self._control.reset()
@@ -1398,6 +1506,7 @@ class RayPPOTrainer:
         with Timer("assemble_generation_group_mini_batch", self.all_timings):
             uids = [group.uid for group in groups for _ in group.trajectory_batch["response_ids"]]
             stalenesses = [self.global_step - group.policy_step for group in groups]
+            staleness_by_uid = {group.uid: staleness for group, staleness in zip(groups, stalenesses, strict=True)}
             record_rollout_staleness(stalenesses, self.global_step)
             assert max(stalenesses) <= max_staleness_steps, (
                 f"batch assembly returned staleness {max(stalenesses)} above max {max_staleness_steps}"
@@ -1424,11 +1533,27 @@ class RayPPOTrainer:
         with Timer("postprocess_trajectory_batch", self.all_timings):
             trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
             trajectory_batch, uids = self.select_trajectories(trajectory_batch, uids)
+        # Built after selection, because select_trajectories may drop rows.
+        rollout_staleness = [staleness_by_uid[uid] for uid in uids]
 
         logger.debug(f"Example generated: {self.tokenizer.decode(trajectory_batch['response_ids'][0])}")
 
         with Timer("convert_to_training_input", self.all_timings):
-            return self.convert_to_training_input(trajectory_batch, uids)
+            training_input = self.convert_to_training_input(trajectory_batch, uids, rollout_staleness=rollout_staleness)
+        if self._training_metrics_enabled:
+            self._record_consumed_staleness(uids, rollout_staleness, training_input["response_mask"][: len(uids)])
+        return training_input
+
+    def _record_consumed_staleness(
+        self, uids: List[str], rollout_staleness: List[int], response_masks: torch.Tensor
+    ) -> None:
+        counts: dict[str, dict[str, int]] = {}
+        for uid, steps, mask in zip(uids, rollout_staleness, response_masks, strict=True):
+            group = counts.setdefault(uid, {"staleness": steps, "groups": 1, "sequences": 0, "response_tokens": 0})
+            group["sequences"] += 1
+            group["response_tokens"] += int(mask.sum().item())
+        for group in counts.values():
+            record_event("consumed_staleness", group, attributes={"role": TRAINER_ROLE, "step": str(self.global_step)})
 
     def build_models(self, PolicyWorker, CriticWorker, RefWorker, policy_pg: Optional[PlacementGroup] = None):
         """
@@ -1767,7 +1892,13 @@ class RayPPOTrainer:
         self._num_experts_cache: Optional[int] = num_experts
         return num_experts
 
-    def convert_to_training_input(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrainingInputBatch:
+    def convert_to_training_input(
+        self,
+        trajectory_batch: TrajectoryBatch,
+        uids: List[str],
+        *,
+        rollout_staleness: List[int] | None = None,
+    ) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training"""
         assert_training_groups_eligible(trajectory_batch, uids, self.group_advantage_invariant)
         prompt_ids: List[List[int]] = trajectory_batch["prompt_token_ids"]
@@ -1870,6 +2001,10 @@ class RayPPOTrainer:
                 "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
+                "rollout_staleness": torch.tensor(
+                    rollout_staleness if rollout_staleness is not None else [0] * len(response_ids),
+                    dtype=torch.int32,
+                ),
                 "is_last_step": (
                     torch.tensor(trajectory_batch["is_last_step"], dtype=torch.bool)
                     if trajectory_batch.get("is_last_step", None) is not None
@@ -1903,6 +2038,9 @@ class RayPPOTrainer:
             training_input.metadata["exclude_from_baseline"] = np.array(
                 trajectory_batch["exclude_from_baseline"], dtype=bool
             )
+        training_input.metadata["consumed_stop_metrics"] = consumed_stop_metrics(
+            trajectory_batch.get("stop_reasons"), len(response_ids)
+        )
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         if self.cfg.trainer.step_wise_training:
@@ -1989,6 +2127,14 @@ class RayPPOTrainer:
             f"reward/avg_pass_at_{n_samples_per_prompt}": pass_at_n,
             "reward/avg_raw_reward": mean_reward,
         }
+        # A group whose rewards all tie carries no advantage signal.
+        grouped_rewards = defaultdict(list)
+        for uid, reward in zip(uids_for_metrics, step_rewards):
+            grouped_rewards[uid].append(float(np.sum(reward)))
+        if grouped_rewards:
+            reward_metrics["reward/informative_group_fraction"] = sum(
+                max(values) > min(values) for values in grouped_rewards.values()
+            ) / len(grouped_rewards)
         self.all_metrics.update(reward_metrics)
         logger.info(f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, reward/avg_raw_reward: {mean_reward}")
 
@@ -2322,6 +2468,18 @@ class RayPPOTrainer:
         training_input["base_action_log_probs"] = base_log_probs
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
+
+        if self._training_metrics_enabled and training_input.get("rollout_logprobs") is not None:
+            self.all_metrics.update(
+                mismatch_ratio_metrics(
+                    action_log_probs,
+                    training_input["rollout_logprobs"],
+                    training_input["loss_mask"],
+                    training_input["rollout_staleness"],
+                    eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
+                    eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
+                )
+            )
 
         if self.cfg.generator.sampling_params.logprobs is not None and training_input["rollout_logprobs"] is not None:
             # calculates the difference in probs between inference and trainer components
@@ -2840,11 +2998,15 @@ class RayPPOTrainer:
             except Exception:
                 return str(v)
 
+        values = {}
         try:
-            serialised = json.dumps({k: _coerce(v) for k, v in payload.items()}, sort_keys=True)
+            values = {k: _coerce(v) for k, v in payload.items()}
+            serialised = json.dumps(values, sort_keys=True)
         except Exception as e:
             serialised = f'{{"_serialize_error": "{e}"}}'
         logger.info(f"WANDB_MIRROR kind={kind} step={step} metrics={serialised}")
+        if self._training_metrics_enabled:
+            record_training_metrics(values, step=step, kind=kind)
 
     def update_ref_with_policy(self):
         """

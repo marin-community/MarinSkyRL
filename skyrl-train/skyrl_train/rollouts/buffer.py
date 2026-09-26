@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -178,6 +179,8 @@ class ReadyRollout:
     """A committed group that no batch has taken yet.
 
     ``payload`` holds a reference to the ``RolloutGroup``; it is empty when the verdict excludes the group.
+    ``committed_at`` is the buffer process's monotonic time at commit, and None for a group restored from a
+    checkpoint.
     """
 
     lease_id: str
@@ -185,6 +188,16 @@ class ReadyRollout:
     prompt: dict
     verdict: RolloutVerdict
     payload: list
+    committed_at: float | None
+
+
+@dataclass(frozen=True)
+class GroupDisposition:
+    """How one committed group left the buffer: ``consumed`` by a batch or an admission or selection outcome."""
+
+    disposition: str
+    tokens: int
+    dwell_seconds: float | None
 
 
 @dataclass(frozen=True)
@@ -206,6 +219,7 @@ class Admission:
     payloads: list
     retries: list[dict]
     generated: list[tuple[int, GeneratedWork]]
+    dispositions: list[GroupDisposition]
     ready_count: int
     metrics: dict[str, float] | None
 
@@ -291,6 +305,7 @@ class RolloutBuffer:
         self._batch_taken = False
         self._retries: list[dict] = []
         self._generated: list[tuple[int, GeneratedWork]] = []
+        self._dispositions: list[GroupDisposition] = []
         self._stats = _SelectionStats()
         self._changed = asyncio.Condition()
 
@@ -317,7 +332,7 @@ class RolloutBuffer:
         async with self._changed:
             policy_step = self._leases.pop(lease_id)
             self._generated.append((policy_step, verdict.work))
-            self._ready.append(ReadyRollout(lease_id, policy_step, prompt, verdict, payload))
+            self._ready.append(ReadyRollout(lease_id, policy_step, prompt, verdict, payload, time.monotonic()))
             self._select()
             self._changed.notify_all()
 
@@ -362,6 +377,8 @@ class RolloutBuffer:
                 ) from error
             metrics = None
             if self._batch_complete():
+                for rollout in self._admitted:
+                    self._dispose(rollout, "consumed")
                 metrics = self._stats.metrics(self.config.dynamic_sampling)
                 self._stats = _SelectionStats()
                 self._batch_taken = True
@@ -375,10 +392,11 @@ class RolloutBuffer:
                 payloads=[ref for rollout in self._unreported for ref in rollout.payload],
                 retries=self._retries,
                 generated=self._generated,
+                dispositions=self._dispositions,
                 ready_count=len(self._ready),
                 metrics=metrics,
             )
-            self._unreported, self._retries, self._generated = [], [], []
+            self._unreported, self._retries, self._generated, self._dispositions = [], [], [], []
             self._changed.notify_all()
             return admission
 
@@ -397,6 +415,14 @@ class RolloutBuffer:
             self._ready.extend(snapshot.ready)
             self._retries.extend(snapshot.retries)
 
+    def _reject(self, rollout: ReadyRollout, rejection: AdmissionRejection) -> None:
+        self._stats.reject(rejection)
+        self._dispose(rollout, rejection.value)
+
+    def _dispose(self, rollout: ReadyRollout, disposition: str) -> None:
+        dwell = None if rollout.committed_at is None else time.monotonic() - rollout.committed_at
+        self._dispositions.append(GroupDisposition(disposition, rollout.verdict.work.generated_token_count, dwell))
+
     def _batch_complete(self) -> bool:
         return len(self._admitted) == self.config.batch_size and not self._batch_taken
 
@@ -413,20 +439,21 @@ class RolloutBuffer:
         for rollout in self._ready:
             verdict = rollout.verdict
             if self._policy_step - rollout.policy_step > self.config.max_staleness_steps:
-                self._stats.reject(AdmissionRejection.STALE)
+                self._reject(rollout, AdmissionRejection.STALE)
                 self._retries.append(rollout.prompt)
             elif verdict.rejections:
-                self._stats.reject(verdict.rejections[0])
+                self._reject(rollout, verdict.rejections[0])
             elif self._batch_taken or len(self._admitted) == self.config.batch_size:
                 waiting.append(rollout)
             elif verdict.uid in batch_uids:
-                self._stats.reject(AdmissionRejection.DUPLICATE_UID)
+                self._reject(rollout, AdmissionRejection.DUPLICATE_UID)
             else:
                 self._stats.inspected += 1
                 if verdict.rewards is not None:
                     self._stats.observe_candidate(verdict.rewards)
                 if verdict.selection is not GroupSelectionResult.KEEP:
                     self._stats.dynamic_discarded += 1
+                    self._dispose(rollout, verdict.selection.value)
                     continue
                 self._admitted.append(rollout)
                 self._unreported.append(rollout)

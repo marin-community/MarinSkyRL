@@ -204,8 +204,8 @@ class RolloutCoordinator:
         """Run one group's generation locally and return the TrajectoryBatch."""
         return await self._runner.run(sub_batch)
 
-    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None:
-        await self._runner.run_task(task, writer)
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
+        return await self._runner.run_task(task, writer)
 
     # ---- Eval session passthrough (single-coordinator delegation) ----
     async def start_eval_session(
@@ -388,8 +388,8 @@ class RolloutDispatcher:
     async def _run_group(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
         return await self._dispatch_group(input_batch, lambda actor: actor.run_shard.remote(input_batch))
 
-    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None:
-        await self._dispatch_group(task.request, lambda actor: actor.run_task.remote(task, writer))
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
+        return await self._dispatch_group(task.request, lambda actor: actor.run_task.remote(task, writer))
 
     async def _dispatch_group(self, input_batch: TrajectoryRequestBatch, submit_rpc: Callable[[Any], Any]):
         metadata = input_batch.get("batch_metadata")

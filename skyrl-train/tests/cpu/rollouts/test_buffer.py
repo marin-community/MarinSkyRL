@@ -230,3 +230,36 @@ async def test_snapshot_restores_untaken_groups_and_reports_outstanding_leases()
     await restored.restore(snapshot)
     await restored.publish(1)
     assert (await _take_batch(restored))[0] == ["admitted", "extra"]
+
+
+@pytest.mark.asyncio
+async def test_every_judged_group_reports_one_disposition_with_its_dwell():
+    buffer = _buffer(batch_size=1, dynamic_sampling=DynamicSamplingType.FILTER)
+    await buffer.publish(1)
+    stale = await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT)
+    dispositions = []
+    for step, uid in enumerate(["a", "b"], start=2):
+        await _generate(buffer, uid, rewards=SPREAD_REWARDS)
+        while (admission := await buffer.admit(PROGRESS_TIMEOUT)).metrics is None:
+            dispositions.extend(admission.dispositions)
+        dispositions.extend(admission.dispositions)
+        await buffer.publish(step)
+
+    await _commit(buffer, stale.lease_id, "stale", rewards=SPREAD_REWARDS)
+    await _generate(buffer, "masked", rejection=AdmissionRejection.FULLY_MASKED)
+    uniform = {"selection": GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD, "rewards": UNIFORM_REWARDS}
+    await _generate(buffer, "uniform", **uniform)
+    await _generate(buffer, "c", rewards=SPREAD_REWARDS)
+    while (admission := await buffer.admit(PROGRESS_TIMEOUT)).metrics is None:
+        dispositions.extend(admission.dispositions)
+    dispositions.extend(admission.dispositions)
+
+    assert [outcome.disposition for outcome in dispositions] == [
+        "consumed",
+        "consumed",
+        "stale",
+        "fully_masked",
+        "insufficient_reward_spread",
+        "consumed",
+    ]
+    assert all(outcome.tokens == 8 and outcome.dwell_seconds >= 0 for outcome in dispositions)

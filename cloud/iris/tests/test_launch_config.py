@@ -112,6 +112,30 @@ def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) ->
     assert validate_launch_config(config).num_nodes == 1
 
 
+@pytest.mark.parametrize(
+    ("entrypoint", "max_staleness_steps", "expected"),
+    [
+        ("gym_worker_pool", 0, "sync"),
+        ("gym_worker_pool", 2, "async"),
+        ("standard", 0, "sync"),
+        ("terminal_bench", 1, "async"),
+        ("generate", 0, None),
+    ],
+)
+def test_composed_launch_records_whether_training_runs_ahead_of_its_updates(
+    tmp_path: Path, entrypoint: str, max_staleness_steps: int, expected: str | None
+) -> None:
+    raw = _raw_config()
+    raw["skyrl"]["entrypoint"] = entrypoint
+    raw["skyrl"]["trainer"]["placement"]["colocate_all"] = False
+    raw["skyrl"]["trainer"]["rollout_buffer"] = {"max_staleness_steps": max_staleness_steps}
+    raw["iris"]["allocation"]["num_nodes"] = 2
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    assert load_launch_config(path).runtime.training_type == expected
+
+
 def test_qwen_smoke_accepts_hugging_face_model_input(tmp_path: Path) -> None:
     config = _raw_config()
     config["skyrl"] = yaml.safe_load(

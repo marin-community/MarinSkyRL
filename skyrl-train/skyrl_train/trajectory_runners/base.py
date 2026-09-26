@@ -24,6 +24,7 @@ from skyrl_train.trajectory_runners.types import (
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutTask, RolloutWriter
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import shape_trajectory_rewards
 from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink, retain_trajectories
+from skyrl_train.rollout_observability import rollout_phase, rollout_wait
 
 
 def propagate_teacher_routes(input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> None:
@@ -53,11 +54,13 @@ class BatchRunner(Protocol):
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch: ...
 
 
-async def run_rollout_task(runner: BatchRunner, task: RolloutTask, writer: RolloutWriter) -> None:
-    """Generate one leased prompt group and write it to the rollout buffer."""
+async def run_rollout_task(runner: BatchRunner, task: RolloutTask, writer: RolloutWriter) -> int:
+    """Generate one leased prompt group, write it to the rollout buffer, and return its response token count."""
     output = await runner.run(task.request, disable_tqdm=True)
     group = RolloutGroup(output, task.prompt["uid"], task.lease.policy_step, task.prompt, task.request)
-    await writer.write_rollout(task.lease, group)
+    with rollout_wait("enqueue"):
+        await writer.write_rollout(task.lease, group)
+    return sum(len(response) for response in output["response_ids"])
 
 
 class TrajectoryRunner(ABC):
@@ -93,18 +96,20 @@ class TrajectoryRunner(ABC):
                 raise ValueError("trajectory runner output rows must align with request trajectory IDs")
             output["trajectory_ids"] = list(trajectory_ids)
         propagate_teacher_routes(input_batch, output)
-        return await self._finalize_output(input_batch, output)
+        with rollout_phase("finalize"):
+            return await self._finalize_output(input_batch, output)
 
     async def _finalize_output(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> TrajectoryBatch:
         """Apply runner-independent shaping, metrics, and retention."""
         shape_trajectory_rewards(output, self.trajectory_runner_cfg.get("trajectory_reward_shaping"))
         self._add_alignment_metrics(output)
         if self.trajectory_sink is not None:
-            await retain_trajectories(self.trajectory_sink, input_batch, output)
+            with rollout_phase("retain"):
+                await retain_trajectories(self.trajectory_sink, input_batch, output)
         return output
 
-    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None:
-        await run_rollout_task(self, task, writer)
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
+        return await run_rollout_task(self, task, writer)
 
     def set_trajectory_sink(self, sink: RetentionSink) -> None:
         """Attach the trainer-owned sink used by shared output finalization."""

@@ -51,7 +51,7 @@ class _Workers:
         self.started: list[str] = []
         self.written: defaultdict[str, asyncio.Event] = defaultdict(asyncio.Event)
 
-    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None:
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
         uid = task.prompt["uid"]
         self.started.append(uid)
         if uid in self._blocked:
@@ -69,6 +69,7 @@ class _Workers:
             task.lease, RolloutGroup(batch, uid, task.lease.policy_step, task.prompt, task.request)
         )
         self.written[uid].set()
+        return SAMPLES_PER_PROMPT
 
 
 def _context(uids: list[str], workers: _Workers, *, batch_size: int, max_in_flight: int) -> TrainingContext:
@@ -78,6 +79,7 @@ def _context(uids: list[str], workers: _Workers, *, batch_size: int, max_in_flig
         CONTENT_POLICY,
         RolloutRequestSpec(samples_per_prompt=SAMPLES_PER_PROMPT, sampling_params={}, environment_class="test"),
         workers,
+        rollout_spans=False,
     )
 
 

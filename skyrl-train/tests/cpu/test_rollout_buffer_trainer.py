@@ -88,9 +88,9 @@ def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatc
         now[0] += 11.0
         return batch, uids
 
-    def convert(batch, uids):
+    def convert(batch, uids, *, rollout_staleness):
         now[0] += 3.0
-        return {"rewards": batch["rewards"], "uids": uids}
+        return {"rewards": batch["rewards"], "uids": uids, "rollout_staleness": rollout_staleness}
 
     trainer.postprocess_trajectory_batch = postprocess
     trainer.select_trajectories = select
@@ -98,7 +98,11 @@ def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatc
 
     result = trainer.convert_rollout_groups_to_training_input([_group("fresh", 10), _group("stale", 8)])
 
-    assert result == {"rewards": [0.0, 1.0, 0.0, 1.0], "uids": ["fresh", "fresh", "stale", "stale"]}
+    assert result == {
+        "rewards": [0.0, 1.0, 0.0, 1.0],
+        "uids": ["fresh", "fresh", "stale", "stale"],
+        "rollout_staleness": [0, 0, 2, 2],
+    }
     assert trainer.all_metrics["async/staleness_max"] == 2
     assert trainer.all_metrics["async/staleness_ratio"] == 0.5
     assert trainer.all_timings == {

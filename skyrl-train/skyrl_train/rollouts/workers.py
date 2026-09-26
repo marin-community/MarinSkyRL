@@ -21,7 +21,9 @@ from skyrl_train.worker_setup import configure_worker_process
 class RolloutWorkers(Protocol):
     """The rollout processes a coordinator hands tasks to."""
 
-    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None: ...
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
+        """Generate and write one group, returning its response token count."""
+        ...
 
 
 class RunnerSpec(Protocol):
@@ -51,8 +53,8 @@ class RolloutWorker:
     async def run(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
         return await self._runner.run(input_batch, disable_tqdm=True)
 
-    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None:
-        await self._runner.run_task(task, writer)
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
+        return await self._runner.run_task(task, writer)
 
     async def start_eval_session(self, **session: Any) -> None:
         await self._runner.start_eval_session(**session)
@@ -97,8 +99,8 @@ class RolloutWorkerPool:
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         return await self._submit(lambda actor: actor.run.remote(input_batch))
 
-    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None:
-        await self._submit(lambda actor: actor.run_task.remote(task, writer))
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
+        return await self._submit(lambda actor: actor.run_task.remote(task, writer))
 
     async def start_eval_session(
         self,

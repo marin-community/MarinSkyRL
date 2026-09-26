@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
@@ -13,6 +14,7 @@ from loguru import logger
 from omegaconf import DictConfig
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+from marinskyrl.environment_contract import TrainingType
 from skyrl_train.dynamic_sampling import (
     DynamicSamplingType,
     GroupSelectionPolicy,
@@ -31,6 +33,7 @@ from skyrl_train.rollouts.buffer import (
     RolloutTask,
 )
 from skyrl_train.rollouts.loader import GroupLoader, GroupLoaderState, PromptGroupDataset
+from skyrl_train.rollout_observability import dispatch_wait, observe_rollout_call, record_group_disposition
 from skyrl_train.rollouts.workers import RolloutWorkers
 from skyrl_train.telemetry import record_generated_work, record_rollout_buffer
 from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request
@@ -79,7 +82,8 @@ class TrainingContext:
 
     ``start`` runs the coordinator loop: for every lease the buffer grants, it takes the next prompt group
     from the loader and hands one task to a rollout worker, which writes the result to the buffer. A failed
-    task fails training: the next ``next_batch`` or ``publish`` raises its error.
+    task fails training: the next ``next_batch`` or ``publish`` raises its error. With ``rollout_spans`` it
+    records each rollout call, the loop's waits, and every group's disposition.
     """
 
     def __init__(
@@ -89,11 +93,16 @@ class TrainingContext:
         content_policy: RolloutContentPolicy,
         request_spec: RolloutRequestSpec,
         workers: RolloutWorkers,
+        *,
+        rollout_spans: bool,
     ):
         self.loader = loader
         self.config = config
         self._request_spec = request_spec
         self._workers = workers
+        self._rollout_spans = rollout_spans
+        self.mode = TrainingType.SYNC if config.max_staleness_steps == 0 else TrainingType.ASYNC
+        self._policy_step = 0
         # The trainer reads every payload through this actor; keep it beside the trainer.
         node = NodeAffinitySchedulingStrategy(node_id=ray.get_runtime_context().get_node_id(), soft=False)
         self._buffer = ray.remote(RolloutBuffer).options(num_cpus=0, scheduling_strategy=node).remote(config)
@@ -136,6 +145,7 @@ class TrainingContext:
             RolloutContentPolicy(admission, selection),
             RolloutRequestSpec.from_config(config),
             workers,
+            rollout_spans=config.trainer.rollout_spans,
         )
 
     def start(self) -> None:
@@ -153,6 +163,7 @@ class TrainingContext:
     async def publish(self, policy_step: int) -> None:
         """Acknowledge the previous batch and lease rollouts at ``policy_step``, whose weights are now live."""
         await self._until_failure(self._buffer.publish.remote(policy_step))
+        self._policy_step = policy_step
 
     async def next_batch(
         self,
@@ -177,6 +188,14 @@ class TrainingContext:
                 self.loader.retry(prompt)
             for policy_step, work in admission.generated:
                 record_generated_work(work, policy_step)
+            if self._rollout_spans:
+                for outcome in admission.dispositions:
+                    record_group_disposition(
+                        disposition=outcome.disposition,
+                        tokens=outcome.tokens,
+                        step=self._policy_step,
+                        dwell_seconds=outcome.dwell_seconds,
+                    )
             record_rollout_buffer(admission.ready_count, self.config.max_untrained_groups)
             if admission.payloads:
                 admitted = await self._until_failure(asyncio.gather(*admission.payloads))
@@ -198,7 +217,8 @@ class TrainingContext:
         uncommitted = [task.prompt for lease_id, task in in_flight.items() if lease_id in snapshot.leases]
         payloads = await asyncio.gather(*(asyncio.gather(*rollout.payload) for rollout in snapshot.ready))
         ready = [
-            dataclasses.replace(rollout, payload=list(payload))
+            # The buffer's clock does not carry across processes.
+            dataclasses.replace(rollout, payload=list(payload), committed_at=None)
             for rollout, payload in zip(snapshot.ready, payloads, strict=True)
         ]
         retries = [*loader.retries, *snapshot.retries, *uncommitted]
@@ -225,8 +245,10 @@ class TrainingContext:
     async def _dispatch(self) -> None:
         try:
             while True:
-                lease = await self._buffer.acquire_lease.remote()
-                prompt = self.loader.next_group()
+                with self._wait("slot"):
+                    lease = await self._buffer.acquire_lease.remote()
+                with self._wait("prompt"):
+                    prompt = self.loader.next_group()
                 task = RolloutTask(lease, prompt, self._request_spec.request(prompt, lease.policy_step))
                 self._in_flight[lease.lease_id] = task
                 running = asyncio.create_task(self._run(task))
@@ -235,9 +257,17 @@ class TrainingContext:
         except Exception as error:
             self._fail(error)
 
+    def _wait(self, name: str) -> AbstractContextManager[None]:
+        return dispatch_wait(name, step=self._policy_step, mode=self.mode, enabled=self._rollout_spans)
+
     async def _run(self, task: RolloutTask) -> None:
         try:
-            await self._workers.run_task(task, self._writer)
+            with observe_rollout_call(
+                step=task.lease.policy_step, mode=self.mode, enabled=self._rollout_spans
+            ) as observation:
+                response_tokens = await self._workers.run_task(task, self._writer)
+                if observation is not None:
+                    observation.response_tokens = response_tokens
         except Exception as error:
             self._fail(error)
         finally:

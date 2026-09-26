@@ -155,8 +155,8 @@ class NemotronUltraTrajectoryRouter:
     async def stop_eval_session(self) -> None:
         await asyncio.gather(self.gym_runner.stop_eval_session(), self.harbor_runner.stop_eval_session())
 
-    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> None:
-        await run_rollout_task(self, task, writer)
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
+        return await run_rollout_task(self, task, writer)
 
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         env_extras = input_batch.get("env_extras")

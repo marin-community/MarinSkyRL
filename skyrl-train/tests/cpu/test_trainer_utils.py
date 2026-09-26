@@ -9,6 +9,7 @@ from skyrl_train.utils.trainer_utils import (
     validate_consistency_for_latest_checkpoint,
     sanitize_data_source,
     calculate_per_dataset_metrics,
+    evaluation_response_metrics,
     dump_per_dataset_eval_results,
     build_eval_dataloader,
 )
@@ -224,6 +225,34 @@ def test_sanitize_data_source_normal_string():
     """Test sanitize_data_source with normal string."""
     result = sanitize_data_source("normal_dataset")
     assert result == "normal_dataset"
+
+
+def test_evaluation_response_metrics_report_work_and_stop_contributions():
+    batch = {
+        "response_ids": [[1, 2, 3], [4], [5, 6]],
+        "rewards": [1.0, 0.0, 1.0],
+        "stop_reasons": ["stop", "length", "stop"],
+    }
+    metrics = evaluation_response_metrics(batch)
+    assert metrics["response_tokens"] == 6
+    assert metrics["response_tokens_mean"] == pytest.approx(2.0)
+    assert metrics["response_tokens_max"] == 3
+    assert metrics["stop_reason_coverage"] == 1
+    assert metrics["completed_stop_fraction"] == pytest.approx(2 / 3)
+    # Contributions divide by every evaluated response.
+    assert metrics["completed_stop_score_contribution"] == pytest.approx(2 / 3)
+    assert metrics["length_stop_score_contribution"] == 0
+
+
+def test_evaluation_response_metrics_suppress_fractions_without_full_stop_coverage():
+    batch = {"response_ids": [[1, 2], [3]], "rewards": [1.0, 1.0], "stop_reasons": ["stop", None]}
+    metrics = evaluation_response_metrics(batch)
+    assert metrics["stop_reason_coverage"] < 1
+    assert "completed_stop_fraction" not in metrics
+    assert "completed_stop_score_contribution" not in metrics
+    assert metrics["response_tokens"] == 3
+    with pytest.raises(ValueError):
+        evaluation_response_metrics({"response_ids": [], "rewards": []})
 
 
 def test_calculate_per_dataset_metrics_single_source():

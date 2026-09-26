@@ -9,13 +9,20 @@ store snapshots. A rollout is one completed trajectory; a sample is one generate
 response segment, so step-wise training counts only terminal segments as
 rollouts. Export is inert without a telemetry endpoint, run id, and execution uid.
 `cloud/iris/telemetry_env.py` resolves them inside the Iris task, and the task
-runtime exports them before Ray starts so its actors inherit them.
+runtime exports them before Ray starts so its actors inherit them. Rigging also
+discards records from a process that never configured it, so the trainer and
+driver configure it in the entrypoint and every worker actor configures it in its
+constructor.
 `SKYRL_EXECUTION_UID` can override the execution identity; otherwise each process
 uses its node-local `IRIS_ATTEMPT_UID`. The service is fixed to `marinskyrl`;
 `SKYRL_SERVING_JOB_ID` optionally joins a centralized serving job.
 
 Each row's resource carries `run_id`, which Finelog promotes to the column of the
-same name. It defaults to the Iris job id; `--run-id` sets an experiment identity.
+same name; the launch document's `run.id` sets it. Rows also carry the
+`training_type` (`sync` or `async`) of the launch document's
+`runtime.training_type`, which the task runtime exports as `SKYRL_TRAINING_TYPE`.
+`docs/design/async-rl-telemetry.md` at the repository root describes each metric
+family, its switch, its cost and the panels that read it.
 
 Export and shutdown failures do not change training results or W&B ownership.
 The Ray allowlist discards worker, address and task-name labels and never forwards
