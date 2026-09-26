@@ -234,9 +234,9 @@ class GrugMegatronMuonH(Optimizer):
                 exp_avg_sq = state["exp_avg_sq"]
                 exp_avg.mul_(beta1).add_(gradient, alpha=1 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(gradient, gradient, value=1 - beta2)
-                step = int(state["step"].item())
-                bias_corrected_mean = exp_avg / (1 - beta1**step)
-                bias_corrected_variance = exp_avg_sq / (1 - beta2**step)
+                step = state["step"]
+                bias_corrected_mean = exp_avg / (1 - torch.pow(beta1, step))
+                bias_corrected_variance = exp_avg_sq / (1 - torch.pow(beta2, step))
                 direction = bias_corrected_mean / (bias_corrected_variance.sqrt() + self.eps)
                 if route == ADAMH_ROUTE:
                     _hyperball_step_(parameter, direction, lr=lr, clamp_final_norm=False)

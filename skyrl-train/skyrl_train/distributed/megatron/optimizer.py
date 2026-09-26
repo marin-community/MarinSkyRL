@@ -46,6 +46,19 @@ from skyrl_train.distributed.megatron.grug_muonh import (
 _GRUG_MUONH_KEY = "grug_muonh"
 
 
+class _GrugMuonHParamScheduler(OptimizerParamScheduler):
+    def get_lr(self, param_group: dict) -> float:
+        if (
+            param_group.get(ROUTE_KEY) != ADAM_ROUTE
+            or self.lr_warmup_steps <= 0
+            or self.num_steps > self.lr_warmup_steps
+        ):
+            return super().get_lr(param_group)
+        init_lr = self.init_lr * param_group.get("lr_mult", 1.0)
+        max_lr = param_group.get("max_lr", self.max_lr)
+        return init_lr + (max_lr - init_lr) * self.num_steps / self.lr_warmup_steps
+
+
 def _grug_muonh_kwargs(optim_config: dict, config: OptimizerConfig) -> dict:
     if float(config.weight_decay) != 0.0:
         raise ValueError("MuonH requires weight_decay=0")
@@ -217,7 +230,12 @@ def get_megatron_optimizer_param_scheduler(
     ):
         lr_warmup_steps = int(config.lr_warmup_steps_ratio * lr_decay_steps)
 
-    opt_param_scheduler = OptimizerParamScheduler(
+    scheduler_cls = (
+        _GrugMuonHParamScheduler
+        if any(group.get(ROUTE_KEY) == ADAM_ROUTE for group in optimizer.param_groups)
+        else OptimizerParamScheduler
+    )
+    opt_param_scheduler = scheduler_cls(
         optimizer,
         init_lr=config.get("lr_warmup_init", 0.0),
         max_lr=config.lr,

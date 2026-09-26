@@ -137,9 +137,11 @@ def test_adam_route_keeps_its_rate_when_megatron_scheduler_steps() -> None:
         lr=0.03,
         adam_lr=0.004,
     )
-    config = OmegaConf.create({"lr": 0.03, "num_warmup_steps": 0, "weight_decay": 0.0})
+    config = OmegaConf.create({"lr": 0.03, "num_warmup_steps": 2, "lr_warmup_init": 0.006, "weight_decay": 0.0})
     scheduler = get_megatron_optimizer_param_scheduler(optimizer, config, num_training_steps=3)
-    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.03, 0.004])
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.006, 0.0008])
+    scheduler.step(1)
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.018, 0.0024])
     scheduler.step(1)
     assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.03, 0.004])
 
