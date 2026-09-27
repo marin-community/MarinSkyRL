@@ -17,6 +17,13 @@ torch_profiler_config:
   enable: false
   ranks: []
   save_path: null
+  # Zero-based PPO update index. One warm update runs before capture by default.
+  capture_update_index: 1
+  # Zero-based mini-batch index within the selected update.
+  capture_mini_batch_index: 0
+  record_shapes: false
+  with_stack: false
+  export_chrome_trace: false
 
 optimizer_config_kwargs:
   overlap_cpu_optimizer_d2h_h2d: false

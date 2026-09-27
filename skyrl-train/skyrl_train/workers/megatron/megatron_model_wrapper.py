@@ -414,6 +414,7 @@ class MegatronModelWrapper:
         micro_batch_size: int,
         temperature: float = 1.0,
         timings: PhaseBreakdown | None = None,
+        profiler=None,
     ) -> List[dict]:
         """
         Run forward-backward over a full mini-batch consisting of multiple micro-batches.
@@ -426,6 +427,7 @@ class MegatronModelWrapper:
             micro_batch_size: Micro-batch size per forward pass.
             temperature: Optional temperature for logits scaling.
             timings: Optional recorder for the forward-backward scheduler and pipeline metric broadcast.
+            profiler: Optional profiler stopped after the first forward micro-batch.
 
         Returns:
             List[dict]: one metrics dict per micro-batch in order.
@@ -510,6 +512,11 @@ class MegatronModelWrapper:
                 num_actions=batch.num_actions,
                 record_recompute=True,
             )
+
+            # A policy mini-batch can contain hundreds of pipeline micro-batches.
+            # Stop after one forward so operator collection stays bounded.
+            if profiler is not None:
+                profiler.stop_mini_batch()
 
             return outputs, partial(loss_func, data=batch, packed_seq_params=packed_seq_params)
 
