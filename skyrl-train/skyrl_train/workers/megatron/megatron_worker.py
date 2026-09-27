@@ -10,6 +10,7 @@ import importlib.util
 import os
 import re
 from enum import StrEnum
+from datetime import timedelta
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from loguru import logger
@@ -390,7 +391,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             optimizer_config=self.cfg.trainer.policy.optimizer_config,
             seed=self.cfg.trainer.seed,
         )
-        self.strategy.setup_distributed()
+        self.strategy.setup_distributed(
+            timeout=timedelta(seconds=self.cfg.trainer.distributed.worker_collective_timeout_seconds)
+        )
 
         self.mesh_rank = MeshRank(
             dp=mpu.get_data_parallel_rank(),
@@ -855,7 +858,9 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             optimizer_config=None,
             seed=self.cfg.trainer.seed,
         )
-        self.strategy.setup_distributed()
+        self.strategy.setup_distributed(
+            timeout=timedelta(seconds=self.cfg.trainer.distributed.worker_collective_timeout_seconds)
+        )
 
         self.mesh_rank = MeshRank(
             dp=mpu.get_data_parallel_rank(),

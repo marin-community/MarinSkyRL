@@ -168,3 +168,14 @@ at PP1, PP2, and PP2+EP2, a PP2 training step with an export round trip, and a
 four-H100 disaggregated cycle with Marin vLLM. Run it on Iris with
 `skyrl-train/ci/marin_nightly/run_grug_megatron.sh`, which resolves the frozen
 `megatron` runtime profile.
+
+## Restore memory and deadlines
+
+Set `SKYRL_MEGATRON_LOCAL_DCP_LOAD_SLOTS=1` to serialize the S3 tensor reads
+inside each pod. Larger positive values allow that many readers; zero keeps
+reads unrestricted. This bounds simultaneous reader scratch, while the model
+and optimizer destination tensors still need to fit in host and device memory.
+
+Serial reads can take longer than the default collective deadline. Set
+`trainer.distributed.worker_collective_timeout_seconds` before starting workers;
+WORLD and Megatron's model-parallel subgroups use the same configured deadline.

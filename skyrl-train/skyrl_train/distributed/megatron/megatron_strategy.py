@@ -192,6 +192,7 @@ class MegatronStrategy(DistributedStrategy):
             use_sharp=False,
             context_parallel_size=self.megatron_config.context_parallel_size,
             nccl_communicator_config_path=None,
+            distributed_timeout_minutes=timeout.total_seconds() / 60,
         )
         self.set_seed(self.seed)
         self.world_size = dist.get_world_size()
