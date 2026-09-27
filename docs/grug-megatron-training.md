@@ -3,8 +3,8 @@
 `trainer.strategy=megatron` trains Grug through Megatron-Core with pipeline
 parallelism as the primary geometry. Snowball's 26 layers split evenly across
 PP2 or PP13; TP must stay at one because the model has five KV heads, and
-expert parallelism may be layered on top of PP for the 256 experts. Sample
-packing is not yet validated and should stay disabled.
+expert parallelism may be layered on top of PP for the 256 experts. Hero
+packed training and context parallelism use the schema-specific path below.
 
 ## Hero architecture
 
@@ -54,12 +54,15 @@ selects the flash backend instead.
 
 ## Weights
 
-The HF checkpoint keeps its stacked `[E, ...]` expert tensors. The bridge maps
+Snowball HF checkpoints keep stacked `[E, ...]` expert tensors. The bridge maps
 each Megatron per-expert grouped-GEMM weight to one slice of the stacked tensor
 on import and re-stacks on export, so exported checkpoints and weight sync use
 the same names as vLLM serving. The router bias becomes
 Megatron's persistent fp32 `expert_bias` buffer and is sent to vLLM in fp32 in
 its own weight-sync bucket; every other tensor is sent in the generator dtype.
+With BF16 serving, router weights therefore travel as BF16 before vLLM copies
+them into its FP32 router parameters. Hero schema-v2 experts retain individual
+per-expert names rather than using the stacked Snowball format.
 
 Re-stacking gathers every expert of a layer onto each rank before the tensor
 is sent, which needs a few GiB of headroom beyond the resident model, gradient
