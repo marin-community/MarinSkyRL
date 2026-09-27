@@ -9,12 +9,13 @@ from skyrl_train.trajectory_runners.model_clients import DirectModelClient
 
 
 @pytest.mark.asyncio
-async def test_trajectory_runner_uses_direct_model_client_without_http(monkeypatch):
+@pytest.mark.parametrize("multi_turn", [False, True])
+async def test_trajectory_runner_uses_direct_model_client_without_http(monkeypatch, multi_turn):
     cfg = OmegaConf.create(
         {
             "generator": {
                 "enable_http_endpoint": False,
-                "use_conversation_multi_turn": True,
+                "use_conversation_multi_turn": multi_turn,
             },
             "environment": {"skyrl_gym": {}},
         }
@@ -25,12 +26,13 @@ async def test_trajectory_runner_uses_direct_model_client_without_http(monkeypat
             "responses": ["answer"],
             "response_ids": [[3]],
             "stop_reasons": ["stop"],
-            "response_logprobs": None,
+            "response_logprobs": [[-0.25]],
             "prompt_logprobs": None,
+            "routed_experts": [[[[3, 7]]]],
         }
     )
     tokenizer = MagicMock()
-    runner = MagicMock(custom_chat_template="template")
+    runner = MagicMock(custom_chat_template="template" if multi_turn else None)
     create_runner = MagicMock(return_value=runner)
     monkeypatch.setattr(fully_async, "SkyRLGymTrajectoryRunner", create_runner)
 
@@ -41,6 +43,8 @@ async def test_trajectory_runner_uses_direct_model_client_without_http(monkeypat
     assert isinstance(model_client, DirectModelClient)
     output = await model_client.generate({"prompt_token_ids": [[1, 2]]})
     assert output["response_ids"] == [[3]]
+    assert output["response_logprobs"] == [[-0.25]]
+    assert output["routed_experts"] == [[[[3, 7]]]]
     assert output["token_provenance"] == "engine"
 
 

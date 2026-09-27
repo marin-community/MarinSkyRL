@@ -44,9 +44,6 @@ class AsyncPPOExp(BasePPOExp):
         Returns:
             TrajectoryRunner: The runner.
         """
-        if not cfg.generator.use_conversation_multi_turn:
-            raise ValueError("the fully asynchronous Gym entrypoint requires multi-turn conversations")
-
         model_client = DirectModelClient(inference_engine_client)
         runner = SkyRLGymTrajectoryRunner(
             trajectory_runner_cfg=cfg.generator,
@@ -55,7 +52,7 @@ class AsyncPPOExp(BasePPOExp):
             tokenizer=tokenizer,
             model_client=model_client,
         )
-        if runner.custom_chat_template is None:
+        if cfg.generator.use_conversation_multi_turn and runner.custom_chat_template is None:
             raise ValueError("the fully asynchronous Gym entrypoint requires a custom chat template")
         return runner
 
