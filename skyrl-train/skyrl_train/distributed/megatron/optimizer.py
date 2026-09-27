@@ -20,13 +20,24 @@
 from collections.abc import Mapping
 
 import torch
-from megatron.core.optimizer import OptimizerConfig, ParamKey, ParamWithNamePredicate
+from megatron.core.optimizer import OptimizerConfig, ParamKey, ParamWithNamePredicate, clip_grads
+from transformer_engine.pytorch.optimizers import multi_tensor_applier, multi_tensor_l2norm, multi_tensor_scale
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
 from megatron.core.optimizer.emerging_optimizers import EmergingOptimizerEntry, _EMERGING_OPTIMIZERS
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from megatron.core.utils import get_model_config
 
 from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH, megatron_grug_route
+
+
+def use_transformer_engine_gradient_kernels() -> None:
+    """Use the native norm and clipping kernels in the pinned TE runtime."""
+    # MCore 0.18 imports these together with multi_tensor_scale_tensor, which
+    # TE 2.11 does not expose. That drops all three available kernels and makes
+    # clipping allocate a gradient-sized temporary through its Torch fallback.
+    clip_grads.multi_tensor_applier = multi_tensor_applier
+    clip_grads.l2_norm_impl = multi_tensor_l2norm
+    clip_grads.multi_tensor_scale_impl = multi_tensor_scale
 
 
 _GRUG_MUONH_NAME = "grug_muonh"
@@ -169,6 +180,7 @@ def get_megatron_optimizer(
             "megatron-core 0.18.x's config_overrides mapping; only the defaults "
             "are supported."
         )
+    use_transformer_engine_gradient_kernels()
     if config.optimizer == _GRUG_MUONH_NAME:
         if grug_optimizer_config is None:
             raise ValueError("Hero MuonH requires its original optimizer configuration")

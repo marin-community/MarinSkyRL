@@ -26,6 +26,7 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     offload_megatron_grads_to_cpu,
     load_megatron_grads_to_gpu,
     materialize_megatron_params,
+    restore_offloaded_optimizer_state,
 )
 from skyrl_train.distributed.megatron.direct_checkpoint import (
     DirectS3TorchDistLoadShardedStrategy,
@@ -427,6 +428,7 @@ class MegatronStrategy(DistributedStrategy):
             optimizer.load_state_dict(state_dict.pop("optimizer"))
             if muonh:
                 _restore_muonh_adamh_step(optimizer, common_state["optimizer_recipe_step"])
+            restore_offloaded_optimizer_state(optimizer)
             load_megatron_grads_to_gpu(model)
             self.log("Loaded optimizer state dict.")
 
