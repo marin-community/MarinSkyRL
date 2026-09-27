@@ -389,6 +389,8 @@ generator:
   inference_engine_expert_parallel_size: 1
   # TOPOLOGY-INPUT: DP multiplies the GPUs used by each engine. Combined rollout GPU demand is engines*TP*PP*DP.
   inference_engine_data_parallel_size: 1
+  # Opt in to a serving EP group spanning nodes. Requires non-colocated vLLM, TP=PP=1 and EP=DP>1.
+  inference_engine_allow_cross_node_ep: false
   # TOPOLOGY-INVARIANT: decode CP reuses the TP GPUs and must not increase the physical rollout allocation.
   inference_engine_decode_context_parallel_size: 1
   # PLACEMENT-SENSITIVE: this changes Ray actor and placement-group shape for each engine. It must remain compatible
