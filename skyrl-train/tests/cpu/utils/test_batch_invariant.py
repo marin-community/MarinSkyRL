@@ -17,7 +17,10 @@ def test_batch_invariant_is_disabled_by_default(monkeypatch):
     cfg = example_dummy_config()
 
     assert cfg.trainer.algorithm.batch_invariant is False
-    assert VLLM_BATCH_INVARIANT_ENV not in prepare_runtime_environment(cfg)
+    ray_environment = prepare_runtime_environment(cfg)
+    assert VLLM_BATCH_INVARIANT_ENV not in ray_environment
+    assert "NCCL_PROTO" not in ray_environment
+    assert "NCCL_MAX_NCHANNELS" not in ray_environment
 
 
 def test_batch_invariant_reaches_ray_and_nested_vllm_workers(monkeypatch):
@@ -29,7 +32,20 @@ def test_batch_invariant_reaches_ray_and_nested_vllm_workers(monkeypatch):
     monkeypatch.setenv(VLLM_BATCH_INVARIANT_ENV, ray_environment[VLLM_BATCH_INVARIANT_ENV])
 
     assert ray_environment[VLLM_BATCH_INVARIANT_ENV] == "1"
+    assert ray_environment["NCCL_PROTO"] == "Simple"
+    assert ray_environment["NCCL_ALGO"] == "allreduce:tree"
+    assert ray_environment["NCCL_MAX_NCHANNELS"] == "1"
     assert _build_inference_engine_runtime_env()["env_vars"][VLLM_BATCH_INVARIANT_ENV] == "1"
+
+
+def test_batch_invariant_launcher_flag_aligns_weight_sync_nccl(monkeypatch):
+    monkeypatch.setenv(VLLM_BATCH_INVARIANT_ENV, "1")
+    monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **_: True)
+
+    ray_environment = prepare_runtime_environment(example_dummy_config())
+
+    assert ray_environment["NCCL_PROTO"] == "Simple"
+    assert ray_environment["NCCL_ALGO"] == "allreduce:tree"
 
 
 def test_trainer_requires_registered_kernels_after_vllm_activation(monkeypatch):
