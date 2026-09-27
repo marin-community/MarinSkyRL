@@ -32,6 +32,7 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     unpack_packed_token_values,
 )
 from skyrl_train.models.megatron_router_replay import (
+    response_prediction_slice,
     sequence_major_flatten,
     slice_sequence_parallel,
     validate_replay_geometry,
@@ -208,7 +209,8 @@ class MegatronModelWrapper:
         device = sequences.device
         dense, mask_BS = dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions)
         response_BS = torch.zeros_like(mask_BS)
-        response_BS[:, seq_len - response_len :] = True
+        # A response token is scored from the preceding input position.
+        response_BS[:, response_prediction_slice(seq_len, response_len)] = True
 
         if self.use_sample_packing:
             # The routes tensor is ours, not the pipeline's input: always run the
@@ -540,6 +542,13 @@ class MegatronModelWrapper:
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
                 metrics_list[-1]["router_replay/hit_fraction"] = replay_metrics["hit_fraction"]
                 metrics_list[-1]["router_replay/sentinel_fraction"] = replay_metrics["sentinel_fraction"]
+                metrics_list[-1]["router_replay/native_mismatch_fraction"] = replay_metrics["native_mismatch_fraction"]
+                metrics_list[-1]["router_replay/native_set_mismatch_fraction"] = replay_metrics[
+                    "native_set_mismatch_fraction"
+                ]
+                metrics_list[-1]["router_replay/executed_route_match_fraction"] = replay_metrics[
+                    "executed_route_match_fraction"
+                ]
 
         # broadcast metrics to all pp ranks
         if not mpu.is_pipeline_last_stage(ignore_virtual=True):
