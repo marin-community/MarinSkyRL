@@ -159,6 +159,54 @@ The measurements use `cloud/iris/configs/snowball_megatron_full.yaml`, which
 overlaps gradient reduction and parameter gathering with compute and reduces
 gradients in bf16. Generation takes about 70% of the step.
 
+## Hero MuonH for RL
+
+Hero uses MuonH for matrix weights, AdamH for the output head, and Adam for
+embeddings, routers, ShortConv and other scalar or vector parameters. The
+optimizer classifies fused QKV and gate/up tensors into their logical matrices
+before applying the update. Tensor parallelism must stay at one.
+
+The qualified BF16 recipe uses fresh RL state and these settings:
+
+```yaml
+trainer:
+  strategy: megatron
+  bf16: true
+  offload_optimizer_during_rollouts: true
+  policy:
+    optimizer_config:
+      optimizer: MuonH
+      lr: 1.0e-6
+      adam_betas: [0.9, 0.95]
+      weight_decay: 0.0
+      max_grad_norm: 0.0
+      optimizer_kwargs:
+        adam_lr: 1.0e-6
+        offload_momentum: true
+    megatron_config:
+      tensor_model_parallel_size: 1
+      expert_tensor_parallel_size: 1
+      optimizer_checkpoint_sharding_type: dp_reshardable
+      ddp_config:
+        grad_reduce_in_fp32: true
+        use_distributed_optimizer: false
+        overlap_param_gather: false
+```
+
+MuonH keeps complete FP32 master matrices and gradients on each owning rank.
+`offload_momentum` keeps MuonH momentum on CPU between bounded transfers;
+AdamH and ordinary Adam use their normal state placement. Do not enable
+Megatron's native AdamW CPU-offload or precision-aware optimizer options for
+this recipe. Weight decay and gradient clipping must be zero; PPO clipping
+remains a separate policy-loss setting.
+
+A fresh run loads model weights without importing pretraining optimizer state.
+Resuming an RL checkpoint requires the MuonH checkpoint integration and restores
+master weights, moments and counters together. Keep the parallel layout fixed.
+The saved recipe marker prevents interpreting an AdamW checkpoint as MuonH.
+Query-balancing biases remain frozen. Full-size learning, replay and restore
+evidence is tracked in [issue #737](https://github.com/marin-community/MarinSkyRL/issues/737).
+
 ## Query bias
 
 Only the frozen query-bias mode is supported. The bias steers expert
