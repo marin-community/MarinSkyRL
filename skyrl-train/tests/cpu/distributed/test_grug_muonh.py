@@ -10,7 +10,11 @@ import pytest
 import torch
 from torch import nn
 
-from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH, megatron_grug_route
+from skyrl_train.distributed.megatron.grug_muonh import (
+    MegatronGrugMuonH,
+    _adamh_direction_in_grad_,
+    megatron_grug_route,
+)
 
 
 FIXTURE = Path(__file__).with_name("fixtures") / "grug_muonh_jax_golden.npz"
@@ -228,3 +232,16 @@ def test_megatron_muonh_preserves_unclipped_zero_decay_recipe_in_mcore_config():
         init_megatron_optim_config(recipe, {"clip_grad": 1.0})
     with pytest.raises(ValueError, match="weight_decay=0"):
         init_megatron_optim_config(recipe, {"weight_decay": 0.01})
+
+
+def test_megatron_adamh_reuses_gradient_across_scratch_chunks_without_changing_direction():
+    torch.manual_seed(11)
+    shape = (1025, 4096)  # Just over the 16 MiB scratch chunk boundary.
+    exp_avg = torch.randn(shape)
+    exp_avg_sq = torch.rand(shape).add_(0.01)
+    gradient = torch.empty_like(exp_avg)
+    expected = (exp_avg / (1 - 0.9**3)) / ((exp_avg_sq / (1 - 0.95**3)).sqrt() + 1e-8)
+
+    _adamh_direction_in_grad_(gradient, exp_avg, exp_avg_sq, step=3, betas=(0.9, 0.95), eps=1e-8)
+
+    torch.testing.assert_close(gradient, expected, rtol=0, atol=0)

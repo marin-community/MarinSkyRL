@@ -167,7 +167,8 @@ def offload_megatron_model_to_cpu(models):
                 for buffer in buffers:
                     # offload parameters
                     if buffer.param_data.storage().size() > 0:
-                        buffer.param_data.cpu_data = buffer.param_data.data.cpu().pin_memory()
+                        buffer.param_data.cpu_data = torch.empty_like(buffer.param_data, device="cpu", pin_memory=True)
+                        buffer.param_data.cpu_data.copy_(buffer.param_data)
                         buffer.param_data_size = buffer.param_data.storage().size()
                         buffer.param_data.storage().resize_(0)
 
@@ -191,12 +192,18 @@ def load_megatron_model_to_gpu(models):
                         buffer.param_data.storage().resize_(buffer.param_data_size)
                         # copy data from cpu to cuda
                         buffer.param_data.copy_(buffer.param_data.cpu_data, non_blocking=True)
+                        del buffer.param_data.cpu_data
         else:
             # we need this for ref module
             device_id = torch.cuda.current_device()
             for _, param in model_chunk.named_parameters():
                 param.data = param.data.to(device_id, non_blocking=True)
     gc.collect()
+    # The H2D copies must finish before returning their pinned staging memory
+    # to the host. Keeping it cached can exhaust host memory during later
+    # optimizer offload even though the model is already resident on the GPU.
+    torch.cuda.synchronize()
+    torch.accelerator.memory.empty_host_cache()
     torch.cuda.empty_cache()
 
 
