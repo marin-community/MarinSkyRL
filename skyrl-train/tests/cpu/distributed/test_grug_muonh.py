@@ -84,7 +84,8 @@ def _assert_close(actual: torch.Tensor, expected, *, muon_bf16: bool = False) ->
         torch.testing.assert_close(actual, _tensor(expected), rtol=2e-6, atol=5e-7)
 
 
-def test_megatron_muonh_matches_independent_jax_steps_after_own_state_resume():
+@pytest.mark.parametrize("offload_momentum", [False, True])
+def test_megatron_muonh_matches_independent_jax_steps_after_own_state_resume(offload_momentum):
     with np.load(FIXTURE, allow_pickle=False) as fixture:
         model = _TinyGrug(fixture)
         parameters = dict(model.named_parameters())
@@ -109,6 +110,7 @@ def test_megatron_muonh_matches_independent_jax_steps_after_own_state_resume():
                 eps=1e-8,
                 muon_eps=1e-8,
                 qkv_split_shapes=(4, 2, 2),
+                offload_momentum=offload_momentum,
             )
             adam_optimizer = torch.optim.Adam(
                 adam_parameters, lr=float(fixture["metadata_adam_lr"]), betas=(0.9, 0.95), eps=1e-8
