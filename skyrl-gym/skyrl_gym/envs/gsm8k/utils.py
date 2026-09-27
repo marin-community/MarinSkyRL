@@ -57,7 +57,8 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
     Args:
         solution_str: the solution text
         ground_truth: the ground truth
-        method: the method to extract the solution, choices are 'strict' and 'flexible'
+        method: 'strict', 'flexible', or 'final_line'. The final-line mode requires
+            a standalone final #### number line and compares decimal values.
         format_score: the score for the format
         score: the score for the correct answer
     """
