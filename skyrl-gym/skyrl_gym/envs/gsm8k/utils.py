@@ -13,10 +13,18 @@
 # limitations under the License.
 
 import re
+from decimal import Decimal
+
+FINAL_ANSWER = re.compile(r"#### (-?(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?)")
 
 
 def extract_solution(solution_str, method="strict"):
-    assert method in ["strict", "flexible"]
+    assert method in ["strict", "flexible", "final_line"]
+
+    if method == "final_line":
+        lines = solution_str.strip().splitlines()
+        match = FINAL_ANSWER.fullmatch(lines[-1]) if lines else None
+        return match.group(1).replace(",", "") if match is not None else None
 
     if method == "strict":
         # this also tests the formatting of the model
@@ -56,6 +64,8 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
     answer = extract_solution(solution_str=solution_str, method=method)
     if answer is None:
         return 0
+    if method == "final_line":
+        return score if Decimal(answer) == Decimal(ground_truth) else format_score
     else:
         if answer == ground_truth:
             return score
