@@ -596,7 +596,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                             )
                     finally:
                         if self.profiler is not None:
-                            self.profiler.stop_mini_batch()
+                            self.profiler.stop_capture()
 
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
                     # the whole world size to get the metrics for the global micro batch

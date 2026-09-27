@@ -62,7 +62,7 @@ class Profiler:
         self.prof.start()
         self.running = True
 
-    def stop_mini_batch(self) -> None:
+    def stop_capture(self) -> None:
         if not self.running:
             return
         stop_started = time.perf_counter()

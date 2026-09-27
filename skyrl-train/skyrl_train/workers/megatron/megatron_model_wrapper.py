@@ -19,6 +19,7 @@ from skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl_train.distillation import DistillationInput, student_topk_logprobs
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
+from skyrl_train.utils.profiler import Profiler
 from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor, gather_ratio_tensor
 
@@ -414,7 +415,7 @@ class MegatronModelWrapper:
         micro_batch_size: int,
         temperature: float = 1.0,
         timings: PhaseBreakdown | None = None,
-        profiler=None,
+        profiler: Profiler | None = None,
     ) -> List[dict]:
         """
         Run forward-backward over a full mini-batch consisting of multiple micro-batches.
@@ -516,7 +517,7 @@ class MegatronModelWrapper:
             # A policy mini-batch can contain hundreds of pipeline micro-batches.
             # Stop after one forward so operator collection stays bounded.
             if profiler is not None:
-                profiler.stop_mini_batch()
+                profiler.stop_capture()
 
             return outputs, partial(loss_func, data=batch, packed_seq_params=packed_seq_params)
 

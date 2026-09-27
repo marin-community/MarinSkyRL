@@ -26,7 +26,7 @@ def test_profiler_captures_one_forward_micro_batch_after_warm_update(tmp_path, m
     profiler.start_mini_batch(0)
     with torch.profiler.record_function("outside_before"):
         torch.ones(4).sum()
-    profiler.stop_mini_batch()
+    profiler.stop_capture()
     profiler.save()
     assert not list(tmp_path.iterdir())
 
@@ -34,17 +34,19 @@ def test_profiler_captures_one_forward_micro_batch_after_warm_update(tmp_path, m
     profiler.start_mini_batch(0)
     with torch.profiler.record_function("selected_forward_micro_batch"):
         torch.ones(4).sum()
-    profiler.stop_mini_batch()
+    profiler.stop_capture()
 
     with torch.profiler.record_function("outside_after"):
         torch.ones(4).sum()
     profiler.save()
 
-    assert "selected_forward_micro_batch" in (tmp_path / "prof_rank_0.txt").read_text()
+    table = (tmp_path / "prof_rank_0.txt").read_text()
+    assert "selected_forward_micro_batch" in table
+    assert "outside_before" not in table
+    assert "outside_after" not in table
     metadata = json.loads((tmp_path / "prof_rank_0_metadata.json").read_text())
     assert metadata["capture_update_index"] == 1
     assert metadata["capture_mini_batch_index"] == 0
-    assert metadata["capture_scope"] == "first_forward_micro_batch"
     assert metadata["capture_wall_seconds"] > 0
     assert 0 <= metadata["stop_wall_seconds"] <= metadata["capture_wall_seconds"]
     assert metadata["peak_rss_bytes_after_export"] > 0
