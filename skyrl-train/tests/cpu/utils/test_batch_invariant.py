@@ -49,7 +49,7 @@ def test_batch_invariant_launcher_flag_aligns_weight_sync_nccl(monkeypatch):
 
 
 def test_trainer_requires_registered_kernels_after_vllm_activation(monkeypatch):
-    batch_invariant_module = types.ModuleType("vllm.model_executor.layers.batch_invariant")
+    batch_invariant_module = types.ModuleType("vllm.model_executor.determinism.batch_invariant")
     batch_invariant_module.init_batch_invariance = lambda: None
     monkeypatch.setitem(sys.modules, batch_invariant_module.__name__, batch_invariant_module)
     monkeypatch.setenv(VLLM_BATCH_INVARIANT_ENV, "1")
