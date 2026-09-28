@@ -21,7 +21,7 @@ def _group(uid: str, policy_step: int, *, rewards: list[float] | None = None) ->
         "rollout_logprobs": None,
         "trajectory_ids": [TrajectoryID(instance_id=uid, repetition_id=index) for index in range(2)],
     }
-    return RolloutGroup(batch, uid, policy_step, {"uid": uid}, {})
+    return RolloutGroup(batch, uid, policy_step, {"uid": uid})
 
 
 @pytest.mark.parametrize("reason", ["initial", "training_step"])

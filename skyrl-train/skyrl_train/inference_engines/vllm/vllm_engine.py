@@ -1413,7 +1413,6 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         self._rendezvous_port_reservation = None
 
     def _preprocess_prompts(self, input_batch: InferenceEngineInput):
-        """Common prompt preprocessing logic."""
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
         request_sampling_params = input_batch.get("sampling_params")
@@ -1444,7 +1443,6 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         return first.logprobs
 
     def _postprocess_outputs(self, outputs, response_top_k: int | None = None):
-        """Common output processing logic."""
         responses: List[str] = []
         stop_reasons: List[str] = []
         response_ids: List[List[int]] = []

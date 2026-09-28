@@ -144,8 +144,8 @@ from skyrl_train.hf_export_schema import (
 class CheckpointSnapshot:
     step: int
     upload_started_at: float
-    dataloader_path: str
-    dataloader_payload: bytes
+    rollout_state_path: str
+    rollout_state_payload: bytes
     trainer_state_path: str
     trainer_state_payload: bytes
     marker_path: str
@@ -392,7 +392,7 @@ class RayPPOTrainer:
         Returns:
             TrainerState object with current training state
         """
-        num_steps_per_epoch = self._num_steps_per_epoch()
+        num_steps_per_epoch = self.num_steps_per_epoch
         timings = dict(self.all_timings)
         if active_step_duration is not None:
             timings["step"] = active_step_duration
@@ -406,9 +406,6 @@ class RayPPOTrainer:
             metrics=dict(self.all_metrics),
             timings=timings,
         )
-
-    def _num_steps_per_epoch(self) -> int:
-        return self.num_steps_per_epoch
 
     def _get_ref_update_callback(self) -> Optional[RefModelUpdateCallback]:
         """Get the RefModelUpdateCallback if one exists in the callback handler."""
@@ -745,7 +742,7 @@ class RayPPOTrainer:
         ray.get(actor_refs)
         if commit:
             io.write_bytes_atomic(snapshot.trainer_state_path, snapshot.trainer_state_payload)
-            io.write_bytes_atomic(snapshot.dataloader_path, snapshot.dataloader_payload)
+            io.write_bytes_atomic(snapshot.rollout_state_path, snapshot.rollout_state_payload)
             io.write_bytes_atomic(snapshot.marker_path, str(snapshot.step).encode())
             self._last_saved_step = snapshot.step
             cleanup_started = time.monotonic()
@@ -2815,10 +2812,9 @@ class RayPPOTrainer:
                 self.policy_model.backload_to_gpu()
 
         # Serialize rollout data state for publication after the rank uploads complete.
-        dataloader_save_path = os.path.join(global_step_folder, "data.pt")
-        dataloader_buffer = stdlib_io.BytesIO()
-        torch.save(rollout_state, dataloader_buffer)
-        dataloader_payload = dataloader_buffer.getvalue()
+        rollout_state_path = os.path.join(global_step_folder, "data.pt")
+        rollout_state_buffer = stdlib_io.BytesIO()
+        torch.save(rollout_state, rollout_state_buffer)
 
         # Save additional trainer state
         trainer_state = {
@@ -2834,8 +2830,8 @@ class RayPPOTrainer:
         return CheckpointSnapshot(
             step=step,
             upload_started_at=time.monotonic(),
-            dataloader_path=dataloader_save_path,
-            dataloader_payload=dataloader_payload,
+            rollout_state_path=rollout_state_path,
+            rollout_state_payload=rollout_state_buffer.getvalue(),
             trainer_state_path=trainer_state_path,
             trainer_state_payload=trainer_state_buffer.getvalue(),
             marker_path=latest_checkpoint_file,
@@ -2939,7 +2935,7 @@ class RayPPOTrainer:
         policy_ckpt_dir = os.path.join(checkpoint_path, POLICY_CHECKPOINT_SUBDIRECTORY)
         critic_ckpt_dir = os.path.join(checkpoint_path, "critic")
         trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
-        dataloader_state_path = os.path.join(checkpoint_path, "data.pt")
+        rollout_state_path = os.path.join(checkpoint_path, "data.pt")
 
         # Validate that required checkpoint files exist
         if not io.exists(trainer_state_path):
@@ -2962,18 +2958,16 @@ class RayPPOTrainer:
         if saved_global_step != global_step:
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
 
-        # 2. Load dataloader state if requested and available
+        # 2. Load rollout state if requested and available
         if not self.cfg.trainer.restore_dataloader_state:
-            logger.info("Dataloader state restoration disabled; starting the configured dataset from the beginning")
-        elif io.exists(dataloader_state_path):
-            with io.open_file(dataloader_state_path, "rb") as f:
-                dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
-            self._restore_rollout_state(dataloader_state)
-            logger.info("Successfully loaded dataloader state")
+            logger.info("Rollout state restoration disabled; starting the configured dataset from the beginning")
+        elif io.exists(rollout_state_path):
+            with io.open_file(rollout_state_path, "rb") as f:
+                rollout_state = torch.load(f, map_location="cpu", weights_only=False)
+            self._restore_rollout_state(rollout_state)
+            logger.info("Successfully loaded rollout state")
         else:
-            logger.warning(
-                f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
-            )
+            logger.warning(f"No rollout state found at {rollout_state_path}; the dataset will start from the beginning")
 
         # Match the optimizer residency used when disaggregated checkpoints are
         # saved. Megatron initializes restore buffers before reading checkpoint

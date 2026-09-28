@@ -630,8 +630,8 @@ def test_checkpoint_marker_waits_for_rank_uploads(monkeypatch, tmp_path):
     snapshot = CheckpointSnapshot(
         step=6,
         upload_started_at=0.0,
-        dataloader_path=str(tmp_path / "global_step_6" / "data.pt"),
-        dataloader_payload=b"data",
+        rollout_state_path=str(tmp_path / "global_step_6" / "data.pt"),
+        rollout_state_payload=b"data",
         trainer_state_path=str(tmp_path / "global_step_6" / "trainer_state.pt"),
         trainer_state_payload=b"trainer",
         marker_path=str(tmp_path / "latest_ckpt_global_step.txt"),
@@ -646,7 +646,7 @@ def test_checkpoint_marker_waits_for_rank_uploads(monkeypatch, tmp_path):
 
     asyncio.run(finish_upload())
 
-    assert Path(snapshot.dataloader_path).read_bytes() == b"data"
+    assert Path(snapshot.rollout_state_path).read_bytes() == b"data"
     assert Path(snapshot.trainer_state_path).read_bytes() == b"trainer"
     assert Path(snapshot.marker_path).read_text() == "6"
     assert trainer._last_saved_step == 6
@@ -669,8 +669,8 @@ def test_background_checkpoint_failure_does_not_advance_marker(monkeypatch, tmp_
     snapshot = CheckpointSnapshot(
         step=6,
         upload_started_at=0.0,
-        dataloader_path=str(tmp_path / "global_step_6" / "data.pt"),
-        dataloader_payload=b"data",
+        rollout_state_path=str(tmp_path / "global_step_6" / "data.pt"),
+        rollout_state_payload=b"data",
         trainer_state_path=str(tmp_path / "global_step_6" / "trainer_state.pt"),
         trainer_state_payload=b"trainer",
         marker_path=str(tmp_path / "latest_ckpt_global_step.txt"),

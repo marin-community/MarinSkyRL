@@ -6,11 +6,12 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Protocol, TypeVar
 
 import ray
 from loguru import logger
 from omegaconf import DictConfig
+from ray.actor import ActorHandle
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from transformers import PreTrainedTokenizerBase
 
@@ -21,6 +22,8 @@ from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink
 from skyrl_train.trajectory_runners.types import TrainingPhase, TrajectoryBatch, TrajectoryRequestBatch
 from skyrl_train.utils.fd_monitor import start_fd_monitor
 from skyrl_train.worker_setup import configure_worker_process
+
+_Result = TypeVar("_Result")
 
 # Each worker imports its runner stack and loads its tokenizer from a shared filesystem; spacing the starts keeps
 # those page-ins from overlapping each other and the engines' weight loads.
@@ -134,7 +137,7 @@ class RolloutWorkerPool:
         self._spec = spec
         self._resources = resources
         self._sink: RetentionSink | None = None
-        self._actors: list = []
+        self._actors: list[ActorHandle] = []
         # Ray async actors accept every request concurrently, and a runner may queue them behind its own limits, so
         # a worker is stalled only when none of its requests completes, not when one request is slow.
         self._pending = [0] * resources.num_workers
@@ -218,7 +221,7 @@ class RolloutWorkerPool:
         eligible = [index for index in range(len(self._actors)) if index not in reserved]
         return min(eligible, key=self._pending.__getitem__, default=None)
 
-    async def _dispatch(self, phase: TrainingPhase, submit: Callable[[Any], Awaitable[Any]]) -> Any:
+    async def _dispatch(self, phase: TrainingPhase, submit: Callable[[ActorHandle], Awaitable[_Result]]) -> _Result:
         async with self._routing:
             if phase == "eval":
                 if not self._eval_session_active:
@@ -240,7 +243,7 @@ class RolloutWorkerPool:
                     self._last_progress[index] = None
                 self._routing.notify_all()
 
-    async def _await_progress(self, index: int, request: Any) -> Any:
+    async def _await_progress(self, index: int, request: Awaitable[_Result]) -> _Result:
         """Wait for one request, failing it when its worker completes nothing for the progress timeout."""
         loop = asyncio.get_running_loop()
         result = asyncio.ensure_future(request)

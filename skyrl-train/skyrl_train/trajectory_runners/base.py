@@ -57,7 +57,7 @@ class BatchRunner(Protocol):
 async def run_rollout_task(runner: BatchRunner, task: RolloutTask, writer: RolloutWriter) -> int:
     """Generate one leased prompt group, write it to the rollout buffer, and return its response token count."""
     output = await runner.run(task.request, disable_tqdm=True)
-    group = RolloutGroup(output, task.prompt["uid"], task.lease.policy_step, task.prompt, task.request)
+    group = RolloutGroup(output, task.prompt["uid"], task.lease.policy_step, task.prompt)
     with rollout_wait("enqueue"):
         await writer.write_rollout(task.lease, group)
     return sum(len(response) for response in output["response_ids"])

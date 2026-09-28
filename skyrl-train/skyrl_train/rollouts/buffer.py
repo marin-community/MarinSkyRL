@@ -103,7 +103,6 @@ class RolloutGroup:
     uid: str
     policy_step: int
     prompt: dict
-    request: TrajectoryRequestBatch
 
 
 @dataclass(frozen=True)

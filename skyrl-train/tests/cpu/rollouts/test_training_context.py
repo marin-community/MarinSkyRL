@@ -97,7 +97,7 @@ class _Workers:
         masked = uid in self._masked_once
         self._masked_once.discard(uid)
         await writer.write_rollout(
-            task.lease, RolloutGroup(_batch(masked=masked), uid, task.lease.policy_step, task.prompt, task.request)
+            task.lease, RolloutGroup(_batch(masked=masked), uid, task.lease.policy_step, task.prompt)
         )
         self.written[uid].set()
         return SAMPLES_PER_PROMPT
@@ -230,7 +230,7 @@ async def test_a_rejected_row_is_generated_again_within_a_synchronous_step(ray_m
 
 @pytest.mark.asyncio
 async def test_resume_does_not_regenerate_a_committed_group(ray_module):
-    group = RolloutGroup(_batch(), "c", 1, _prompt("c"), {})
+    group = RolloutGroup(_batch(), "c", 1, _prompt("c"))
     committed = ReadyRollout("committed", 1, 1, group.prompt, CONTENT_POLICY.verdict(group), [group], None)
     # The order's next draw is row "c", which the checkpoint already holds.
     state = TrainingContextState(GroupLoaderState({"epoch": 0, "position": 2}, []), [committed], None)
