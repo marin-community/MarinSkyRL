@@ -83,10 +83,16 @@ def publish_wait(name: str, durations: Sequence[float], *, step: int, mode: str)
     waits.add(len(durations), attributes=attributes)
 
 
+@dataclass(frozen=True)
+class RolloutTimings:
+    """The waits and phase durations one process measured for a rollout call."""
+
+    waits: dict[str, list[float]]
+    phases: dict[str, float]
+
+
 @dataclass
 class RolloutObservation:
-    step: int
-    mode: str
     phases: PhaseBreakdown
     call_id: str = field(default_factory=lambda: uuid4().hex)
     waits: dict[str, list[float]] = field(default_factory=dict)
@@ -94,6 +100,36 @@ class RolloutObservation:
 
     def add_wait(self, name: str, seconds: float) -> None:
         self.waits.setdefault(name, []).append(seconds)
+
+    def timings(self) -> RolloutTimings:
+        return RolloutTimings(
+            {name: list(durations) for name, durations in self.waits.items()}, self.phases.durations()
+        )
+
+    def absorb(self, timings: RolloutTimings) -> None:
+        """Add what a rollout worker measured while serving this call."""
+        for name, durations in timings.waits.items():
+            self.waits.setdefault(name, []).extend(durations)
+        for phase, seconds in timings.phases.items():
+            self.phases.add(phase, seconds)
+
+
+def current_rollout_observation() -> RolloutObservation | None:
+    return _CURRENT.get()
+
+
+@contextlib.contextmanager
+def measure_rollout(*, enabled: bool) -> Iterator[RolloutObservation | None]:
+    """Measure a rollout call inside a rollout worker, which returns the timings to the caller's observation."""
+    if not enabled:
+        yield None
+        return
+    observation = RolloutObservation(PhaseBreakdown("rollout_call", _PARENTS, enabled=True))
+    token = _CURRENT.set(observation)
+    try:
+        yield observation
+    finally:
+        _CURRENT.reset(token)
 
 
 @contextlib.contextmanager
@@ -103,7 +139,7 @@ def observe_rollout_call(
     if not enabled:
         yield None
         return
-    observation = RolloutObservation(step, mode, PhaseBreakdown("rollout_call", _PARENTS, enabled=True, clock=clock))
+    observation = RolloutObservation(PhaseBreakdown("rollout_call", _PARENTS, enabled=True, clock=clock))
     token = _CURRENT.set(observation)
     outcome = "success"
     try:

@@ -15,6 +15,7 @@ from ray.actor import ActorHandle
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from transformers import PreTrainedTokenizerBase
 
+from skyrl_train.rollout_observability import RolloutTimings, current_rollout_observation, measure_rollout
 from skyrl_train.rollouts.buffer import RolloutTask, RolloutWriter
 from skyrl_train.tokenizer import tokenizer_from_config
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
@@ -103,11 +104,19 @@ class RolloutWorker:
     async def shutdown(self) -> None:
         await self._runner.shutdown()
 
-    async def run(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
-        return await self._runner.run(input_batch, disable_tqdm=True)
+    async def run(
+        self, input_batch: TrajectoryRequestBatch, observe: bool
+    ) -> tuple[TrajectoryBatch, RolloutTimings | None]:
+        with measure_rollout(enabled=observe) as observation:
+            output = await self._runner.run(input_batch, disable_tqdm=True)
+        return output, None if observation is None else observation.timings()
 
-    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
-        return await self._runner.run_task(task, writer)
+    async def run_task(
+        self, task: RolloutTask, writer: RolloutWriter, observe: bool
+    ) -> tuple[int, RolloutTimings | None]:
+        with measure_rollout(enabled=observe) as observation:
+            response_tokens = await self._runner.run_task(task, writer)
+        return response_tokens, None if observation is None else observation.timings()
 
     async def start_eval_session(
         self,
@@ -180,10 +189,14 @@ class RolloutWorkerPool:
 
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         del disable_tqdm
-        return await self._dispatch(_training_phase(input_batch), lambda actor: actor.run.remote(input_batch))
+        return await self._observed(
+            _training_phase(input_batch), lambda actor, observe: actor.run.remote(input_batch, observe)
+        )
 
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
-        return await self._dispatch(_training_phase(task.request), lambda actor: actor.run_task.remote(task, writer))
+        return await self._observed(
+            _training_phase(task.request), lambda actor, observe: actor.run_task.remote(task, writer, observe)
+        )
 
     async def start_eval_session(
         self,
@@ -222,6 +235,21 @@ class RolloutWorkerPool:
         reserved = {0} if self._eval_session_active else set()
         eligible = [index for index in range(len(self._actors)) if index not in reserved]
         return min(eligible, key=self._pending.__getitem__, default=None)
+
+    async def _observed(
+        self,
+        phase: TrainingPhase,
+        submit: Callable[[ActorHandle, bool], Awaitable[tuple[_Result, RolloutTimings | None]]],
+    ) -> _Result:
+        """Run one request on a worker, adding the waits and phases it measured to the caller's rollout observation.
+
+        Rollout waits happen inside the worker, but the caller's observation publishes them with the call.
+        """
+        observation = current_rollout_observation()
+        result, timings = await self._dispatch(phase, lambda actor: submit(actor, observation is not None))
+        if observation is not None and timings is not None:
+            observation.absorb(timings)
+        return result
 
     async def _dispatch(self, phase: TrainingPhase, submit: Callable[[ActorHandle], Awaitable[_Result]]) -> _Result:
         async with self._routing:
