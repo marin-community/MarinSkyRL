@@ -196,8 +196,9 @@ def test_insufficient_reward_improvement_fails_the_trend_gate(rewards, window):
     assert "expected at least +0.0300" in failures[0]
 
 
-def test_rising_reward_passes_the_trend_gate():
-    failures = check_run(parse_metrics(reward_log([0.05, 0.06, 0.20, 0.22])), trend_spec(), wall_clock_seconds=300)
+@pytest.mark.parametrize("rewards", [[0.05, 0.06, 0.20, 0.22], [-1e308, -1e308, 1e308, 1e308]])
+def test_rising_reward_passes_the_trend_gate(rewards):
+    failures = check_run(parse_metrics(reward_log(rewards)), trend_spec(), wall_clock_seconds=300)
     assert failures == []
 
 

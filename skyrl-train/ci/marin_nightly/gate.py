@@ -251,7 +251,7 @@ def _metric_series_failures(steps: list[StepMetrics], requirement: MetricSeries)
             early = math.fsum(value / trend.window for value in values[: trend.window])
             late = math.fsum(value / trend.window for value in values[-trend.window :])
             improvement = late - early
-            if not math.isfinite(improvement) or improvement < trend.min_improvement:
+            if not math.isfinite(early) or not math.isfinite(late) or improvement < trend.min_improvement:
                 failures.append(
                     f"{requirement.kind} {requirement.metric} rose by {improvement:+.4f}, "
                     f"expected at least +{trend.min_improvement:.4f}"
