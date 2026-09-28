@@ -8,6 +8,7 @@ import pytest
 from skyrl_train.dynamic_sampling import GroupSelectionPolicy
 from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.rollouts.buffer import (
+    BatchPolicy,
     ReadyRollout,
     RolloutBufferConfig,
     RolloutContentPolicy,
@@ -130,12 +131,13 @@ def _context(
     batch_size: int,
     max_in_flight: int,
     max_staleness_steps: int = 1,
+    batch_policy: BatchPolicy = BatchPolicy.FULL_BATCH,
     order: PromptOrder | None = None,
     payloads: PayloadStore | None = None,
 ) -> TrainingContext:
     return TrainingContext(
         GroupLoader(_Prompts(uids), order or SeededPasses(len(uids), seed=0, shuffle=False), batch_size=batch_size),
-        RolloutBufferConfig(batch_size, max_in_flight, max_staleness_steps, None, None),
+        RolloutBufferConfig(batch_size, max_in_flight, max_staleness_steps, batch_policy, None, None),
         CONTENT_POLICY,
         RolloutRequestSpec(samples_per_prompt=SAMPLES_PER_PROMPT, sampling_params={}, environment_class="test"),
         workers,
@@ -161,9 +163,9 @@ async def _next_uids(context: TrainingContext) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_slow_rollout_does_not_block_training_at_positive_staleness(ray_module):
+async def test_rolling_batches_do_not_wait_for_a_slow_rollout(ray_module):
     workers = _Workers(blocked=frozenset({"slow"}))
-    context = _context(["slow", "a", "b"], workers, batch_size=1, max_in_flight=2)
+    context = _context(["slow", "a", "b"], workers, batch_size=1, max_in_flight=2, batch_policy=BatchPolicy.ROLLING)
     context.start()
     try:
         await context.publish(1)
@@ -171,6 +173,22 @@ async def test_slow_rollout_does_not_block_training_at_positive_staleness(ray_mo
         await context.publish(2)
         assert await _next_uids(context) == ["b"]
         assert "slow" in workers.started
+    finally:
+        await context.close()
+
+
+@pytest.mark.asyncio
+async def test_full_batches_train_a_slow_rollout_in_its_own_step(ray_module):
+    workers = _Workers(blocked=frozenset({"slow"}))
+    context = _context(["slow", "a", "b"], workers, batch_size=1, max_in_flight=2)
+    context.start()
+    try:
+        await context.publish(1)
+        await asyncio.wait_for(workers.written["a"].wait(), STALL_TIMEOUT)
+        workers.unblocked["slow"].set()
+        assert await _next_uids(context) == ["slow"]
+        await context.publish(2)
+        assert await _next_uids(context) == ["a"]
     finally:
         await context.close()
 
@@ -213,7 +231,7 @@ async def test_a_rejected_row_is_generated_again_within_a_synchronous_step(ray_m
 @pytest.mark.asyncio
 async def test_resume_does_not_regenerate_a_committed_group(ray_module):
     group = RolloutGroup(_batch(), "c", 1, _prompt("c"), {})
-    committed = ReadyRollout("committed", 1, group.prompt, CONTENT_POLICY.verdict(group), [group], None)
+    committed = ReadyRollout("committed", 1, 1, group.prompt, CONTENT_POLICY.verdict(group), [group], None)
     # The order's next draw is row "c", which the checkpoint already holds.
     state = TrainingContextState(GroupLoaderState({"epoch": 0, "position": 2}, []), [committed], None)
     workers = _Workers()
@@ -273,7 +291,10 @@ async def test_resume_regenerates_uncommitted_prompts_and_keeps_committed_groups
     await resumed.load_state_dict(state)
     resumed.start()
     try:
+        # "b" was leased for step 2 and "c" for step 3, so each trains in its own step.
         await resumed.publish(2)
+        assert await _next_uids(resumed) == ["b"]
+        await resumed.publish(3)
         assert await _next_uids(resumed) == ["c"]
         assert resumed_workers.started[0] == "b"
     finally:
@@ -314,6 +335,8 @@ async def test_resume_under_a_new_object_store_root_trains_the_checkpointed_obje
     resumed.start()
     try:
         await resumed.publish(2)
+        await _next_uids(resumed)
+        await resumed.publish(3)
         assert await _next_uids(resumed) == ["c"]
     finally:
         await resumed.close()

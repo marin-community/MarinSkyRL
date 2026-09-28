@@ -119,7 +119,7 @@ async def test_training_tasks_avoid_the_eval_worker(spec):
         [_SessionWorker("eval", calls), _SessionWorker("train", calls)],
         spec,
     )
-    task = RolloutTask(RolloutLease("lease", 1), {"uid": "a"}, _request([TrajectoryID("a", 0)], "train"))
+    task = RolloutTask(RolloutLease("lease", 1, 1), {"uid": "a"}, _request([TrajectoryID("a", 0)], "train"))
 
     await pool.start_eval_session(run_name="run", eval_step=0)
     await pool.run_task(task, writer=None)
@@ -153,7 +153,7 @@ async def test_pool_isolates_eval_from_concurrent_training(spec):
 async def test_a_single_worker_defers_training_until_the_eval_session_ends(spec):
     calls: list[tuple[str, str]] = []
     pool = _pool([_SessionWorker("only", calls)], spec)
-    task = RolloutTask(RolloutLease("lease", 1), {"uid": "a"}, _request([TrajectoryID("a", 0)], "train"))
+    task = RolloutTask(RolloutLease("lease", 1, 1), {"uid": "a"}, _request([TrajectoryID("a", 0)], "train"))
 
     await pool.start_eval_session(run_name="run", eval_step=0)
     training = asyncio.create_task(pool.run_task(task, writer=None))

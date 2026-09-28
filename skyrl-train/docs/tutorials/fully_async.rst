@@ -8,9 +8,10 @@ generate prompt groups under leases from a rollout buffer. Each training step tr
 policy step to the buffer.
 
 A single setting, ``trainer.rollout_buffer.max_staleness_steps``, decides how far generation may run ahead of
-training. At ``0`` training is synchronous and on-policy. A positive value lets generation continue while the
-trainer trains, which removes the stalls that long or straggling rollouts cause in synchronous training. This is
-the in-flight weight update, or partial rollout, approach of AReal and PipelineRL.
+training. At ``0`` training is synchronous and on-policy. A positive value lets generation for later batches
+continue while the trainer trains, so the inference engines stay busy between steps. This is the in-flight weight
+update approach of AReal and PipelineRL. ``trainer.rollout_buffer.batch_policy`` decides whether a batch still
+waits for its slowest rollout.
 
 A group is the smallest unit of data in the loop: the ``generator.n_samples_per_prompt`` trajectories generated
 for one prompt.
@@ -27,9 +28,14 @@ Configuration
   which a group was leased from the step that trains on it. ``0`` is synchronous on-policy training, ``1`` is
   one-step off-policy pipelining, and larger values trade on-policy behavior for throughput. Colocated training
   (``trainer.placement.colocate_all=true``) shares GPUs between training and generation and requires ``0``.
+- ``trainer.rollout_buffer.batch_policy`` (default ``full_batch``): How committed groups form batches when
+  ``max_staleness_steps`` is positive. ``full_batch`` trains each step on exactly the groups leased for it;
+  ``rolling`` fills each batch in commit order. See `Batch policy`_.
 - ``trainer.rollout_buffer.max_in_flight`` (default ``null``): Maximum number of prompt groups generating at
   once. ``null`` bounds generation only by staleness. A value below ``trainer.train_batch_size`` generates each
   batch in several waves.
+- ``trainer.rollout_buffer.object_store_root`` (default ``null``): Directory, usually an S3 prefix, that holds
+  each trainable group as its own object. ``null`` keeps groups only in Ray's object store. See `Checkpointing`_.
 - ``trainer.algorithm.dynamic_sampling.type``: ``filter`` discards groups without enough reward spread as they
   arrive; ``null`` keeps every group. See `Dynamic sampling`_.
 - ``trainer.algorithm.group_admission.stall_timeout``: Seconds a training step may wait without admitting a group
@@ -73,19 +79,44 @@ A group leased at step ``t`` must be trained by step ``t + max_staleness_steps``
 produce stale work. At ``max_staleness_steps=0`` the buffer leases groups only for the current batch and, once
 that batch is full, grants nothing more until the trainer publishes the next step: synchronous training.
 
+Every lease also carries a batch id: the training step expected to train the group.
+
+Batch policy
+~~~~~~~~~~~~
+
+If each batch takes the first groups to commit, groups that generate quickly (short answers, easy prompts, few
+agent turns) train sooner and at lower staleness than slow ones. A slow group can also outlast the staleness window
+and be discarded; when its prompt is generated again, the group that finally trains is one that happened to
+finish quickly. The batch policy chooses between that bias and waiting for stragglers. The two policies are the
+same at ``max_staleness_steps=0``.
+
+``full_batch`` (the default)
+    Leases fill the earliest batch within the staleness window that has room, and each batch trains on exactly
+    the groups leased for it. Generation for the next ``max_staleness_steps`` batches runs while a batch
+    completes, but groups for later batches never join it, so a step waits for its slowest group. A group is
+    never discarded as stale, and neither whether nor when a group trains depends on how long it took to
+    generate. A group that the content checks or dynamic sampling reject is replaced by a new lease for the same
+    batch.
+
+``rolling``
+    Each committed group joins the earliest batch with room, in commit order, so a slow group never holds up
+    a step. A group whose batch would be more than ``max_staleness_steps`` steps past its lease is stale: its
+    prompt returns to the loader and is generated again. Prompts whose rollouts outlast the window never train.
+
 Admission
 ~~~~~~~~~
 
-The buffer judges every committed group immediately, in arrival order, against the current step's batch:
+The buffer assigns every committed group to a batch as it arrives, by the batch policy, and judges it against
+that batch immediately:
 
-1. A group whose lease is more than ``max_staleness_steps`` steps older than the current policy step is stale.
-   Its prompt returns to the loader and is generated again. Staleness is measured from the step at which the
-   group was leased, the oldest policy that could have contributed to it, even when later weights produced some
-   of its tokens. A slow group can become stale when groups leased after it fill the batches it could have joined.
-2. A group that violates the run's content checks, or repeats a prompt UID already in the batch, is dropped.
+1. Under ``rolling``, a group whose batch would be more than ``max_staleness_steps`` steps past its lease is
+   stale. Its prompt returns to the loader and is generated again. Staleness is measured from the step at which
+   the group was leased, the oldest policy that could have contributed to it, even when later weights produced
+   some of its tokens.
+2. A group that violates the run's content checks, or repeats a prompt UID already in its batch, is dropped.
 3. Dynamic sampling decides the rest (see below).
-4. The remaining groups join the batch. Groups that arrive after the batch is full wait and are judged again
-   against the next step.
+4. The remaining groups join their batch. Groups admitted to a later batch reach the trainer once it publishes
+   that step.
 
 Every step trains on exactly ``trainer.train_batch_size`` groups.
 
@@ -94,9 +125,9 @@ Dynamic sampling
 
 With ``trainer.algorithm.dynamic_sampling.type=filter``, the buffer applies the filter as each group arrives and
 discards groups whose rewards do not spread enough to carry a learning signal. The freed capacity leases a new
-prompt, so the batch keeps filling. ``trainer.algorithm.dynamic_sampling.max_sample_batches`` limits each step to
-``max_sample_batches * train_batch_size`` candidate groups; a step that reaches the limit without a full batch
-fails. ``-1`` removes the limit.
+prompt, so the batch keeps filling. ``trainer.algorithm.dynamic_sampling.max_sample_batches`` limits each batch to
+``max_sample_batches * train_batch_size`` candidate groups; a batch that reaches the limit without filling fails
+the run. ``-1`` removes the limit.
 
 Teacher scoring
 ~~~~~~~~~~~~~~~
@@ -122,7 +153,8 @@ Checkpointing
 A checkpoint saves the rollout state alongside the model:
 
 - the loader position in the current pass over the dataset,
-- committed groups that no trained batch has consumed, with their trajectories, and
+- committed groups that no trained batch has consumed, with their trajectories, or with their object URIs when
+  ``object_store_root`` is set, and
 - the prompts of uncommitted rollouts, together with prompts already awaiting regeneration.
 
 On resume, the committed groups return to the buffer and the saved prompts are generated again before the loader

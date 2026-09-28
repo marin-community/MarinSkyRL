@@ -7,7 +7,7 @@ from skyrl_gym.verification import VerificationResult
 
 from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionResult
 from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionStalledError
-from skyrl_train.rollouts.buffer import GroupRewards, RolloutBuffer, RolloutBufferConfig, RolloutVerdict
+from skyrl_train.rollouts.buffer import BatchPolicy, GroupRewards, RolloutBuffer, RolloutBufferConfig, RolloutVerdict
 from skyrl_train.rollouts.loader import JudgedGroup
 from skyrl_train.telemetry import GeneratedWork
 
@@ -18,7 +18,14 @@ UNIFORM_REWARDS = GroupRewards(optimization=(0.0, 0.0), outcome=(0.0, 0.0), pass
 SPREAD_REWARDS = GroupRewards(optimization=(0.0, 1.0), outcome=(0.0, 1.0), passed=True)
 
 
+@pytest.fixture(params=list(BatchPolicy))
+def batch_policy(request) -> BatchPolicy:
+    """Each batch policy, for behavior both share."""
+    return request.param
+
+
 def _buffer(
+    batch_policy: BatchPolicy,
     *,
     batch_size: int,
     max_in_flight: int = 4,
@@ -27,7 +34,9 @@ def _buffer(
     max_candidate_groups: int | None = None,
 ) -> RolloutBuffer:
     return RolloutBuffer(
-        RolloutBufferConfig(batch_size, max_in_flight, max_staleness_steps, dynamic_sampling, max_candidate_groups)
+        RolloutBufferConfig(
+            batch_size, max_in_flight, max_staleness_steps, batch_policy, dynamic_sampling, max_candidate_groups
+        )
     )
 
 
@@ -72,8 +81,8 @@ async def _lease_is_blocked(buffer: RolloutBuffer) -> bool:
 
 
 @pytest.mark.asyncio
-async def test_on_policy_leases_one_batch_per_published_step():
-    buffer = _buffer(batch_size=2, max_staleness_steps=0)
+async def test_on_policy_leases_one_batch_per_published_step(batch_policy):
+    buffer = _buffer(batch_policy, batch_size=2, max_staleness_steps=0)
     assert await _lease_is_blocked(buffer)
 
     await buffer.publish(1)
@@ -89,8 +98,8 @@ async def test_on_policy_leases_one_batch_per_published_step():
 
 
 @pytest.mark.asyncio
-async def test_off_policy_generation_runs_ahead_by_the_staleness_bound():
-    buffer = _buffer(batch_size=2, max_in_flight=8, max_staleness_steps=1)
+async def test_off_policy_generation_runs_ahead_by_the_staleness_bound(batch_policy):
+    buffer = _buffer(batch_policy, batch_size=2, max_in_flight=8, max_staleness_steps=1)
     await buffer.publish(1)
     for uid in "abcd":
         await _generate(buffer, uid)
@@ -105,8 +114,8 @@ async def test_off_policy_generation_runs_ahead_by_the_staleness_bound():
 
 
 @pytest.mark.asyncio
-async def test_leases_never_exceed_max_in_flight():
-    buffer = _buffer(batch_size=1, max_in_flight=2, max_staleness_steps=3)
+async def test_leases_never_exceed_max_in_flight(batch_policy):
+    buffer = _buffer(batch_policy, batch_size=1, max_in_flight=2, max_staleness_steps=3)
     await buffer.publish(1)
     lease = await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT)
     await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT)
@@ -117,8 +126,8 @@ async def test_leases_never_exceed_max_in_flight():
 
 
 @pytest.mark.asyncio
-async def test_surplus_groups_wait_for_the_next_step():
-    buffer = _buffer(batch_size=1)
+async def test_surplus_groups_wait_for_the_next_step(batch_policy):
+    buffer = _buffer(batch_policy, batch_size=1)
     await buffer.publish(1)
     await _generate(buffer, "a")
     await _generate(buffer, "b")
@@ -129,8 +138,8 @@ async def test_surplus_groups_wait_for_the_next_step():
 
 
 @pytest.mark.asyncio
-async def test_groups_stream_to_the_trainer_before_the_batch_completes():
-    buffer = _buffer(batch_size=2)
+async def test_groups_stream_to_the_trainer_before_the_batch_completes(batch_policy):
+    buffer = _buffer(batch_policy, batch_size=2)
     await buffer.publish(1)
     await _generate(buffer, "a")
     first = await buffer.admit(PROGRESS_TIMEOUT)
@@ -144,7 +153,7 @@ async def test_groups_stream_to_the_trainer_before_the_batch_completes():
 
 @pytest.mark.asyncio
 async def test_stale_group_returns_its_prompt_for_regeneration():
-    buffer = _buffer(batch_size=1)
+    buffer = _buffer(BatchPolicy.ROLLING, batch_size=1)
     await buffer.publish(1)
     stale = await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT)
     for step, uid in enumerate(["a", "b"], start=2):
@@ -164,8 +173,8 @@ async def test_stale_group_returns_its_prompt_for_regeneration():
 
 
 @pytest.mark.asyncio
-async def test_rejected_and_duplicate_groups_are_dropped_and_counted():
-    buffer = _buffer(batch_size=2)
+async def test_rejected_and_duplicate_groups_are_dropped_and_counted(batch_policy):
+    buffer = _buffer(batch_policy, batch_size=2)
     await buffer.publish(1)
     await _generate(buffer, "masked", rejection=AdmissionRejection.FULLY_MASKED)
     await _generate(buffer, "a")
@@ -181,8 +190,8 @@ async def test_rejected_and_duplicate_groups_are_dropped_and_counted():
 
 
 @pytest.mark.asyncio
-async def test_dynamic_sampling_filter_discards_uninformative_groups():
-    buffer = _buffer(batch_size=1, dynamic_sampling=DynamicSamplingType.FILTER)
+async def test_dynamic_sampling_filter_discards_uninformative_groups(batch_policy):
+    buffer = _buffer(batch_policy, batch_size=1, dynamic_sampling=DynamicSamplingType.FILTER)
     await buffer.publish(1)
     uniform = {"selection": GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD, "rewards": UNIFORM_REWARDS}
     await _generate(buffer, "uniform", **uniform)
@@ -216,8 +225,8 @@ def test_group_passes_by_verifier_verdict_rather_than_partial_credit(verdicts, p
 
 
 @pytest.mark.asyncio
-async def test_batch_selection_reports_kept_and_discarded_groups_with_their_rewards():
-    buffer = _buffer(batch_size=2, dynamic_sampling=DynamicSamplingType.FILTER)
+async def test_batch_selection_reports_kept_and_discarded_groups_with_their_rewards(batch_policy):
+    buffer = _buffer(batch_policy, batch_size=2, dynamic_sampling=DynamicSamplingType.FILTER)
     await buffer.publish(1)
     await _generate(buffer, "a")
     await _generate(
@@ -237,8 +246,8 @@ async def test_batch_selection_reports_kept_and_discarded_groups_with_their_rewa
 
 
 @pytest.mark.asyncio
-async def test_dynamic_sampling_fails_when_its_candidate_budget_is_exhausted():
-    buffer = _buffer(batch_size=1, dynamic_sampling=DynamicSamplingType.FILTER, max_candidate_groups=2)
+async def test_dynamic_sampling_fails_when_its_candidate_budget_is_exhausted(batch_policy):
+    buffer = _buffer(batch_policy, batch_size=1, dynamic_sampling=DynamicSamplingType.FILTER, max_candidate_groups=2)
     await buffer.publish(1)
     uniform = {"selection": GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD, "rewards": UNIFORM_REWARDS}
     await _generate(buffer, "first", **uniform)
@@ -249,17 +258,25 @@ async def test_dynamic_sampling_fails_when_its_candidate_budget_is_exhausted():
 
 
 @pytest.mark.asyncio
-async def test_admission_without_progress_raises_a_stall_error():
-    buffer = _buffer(batch_size=1)
+async def test_admission_without_progress_raises_a_stall_error(batch_policy):
+    buffer = _buffer(batch_policy, batch_size=1)
     await buffer.publish(1)
 
     with pytest.raises(GroupAdmissionStalledError, match="admitted=0/1 leases=0"):
         await buffer.admit(BLOCKED_TIMEOUT)
 
 
+@pytest.mark.parametrize(
+    ("batch_policy", "first_batch"),
+    [
+        # "extra" was leased for batch 2 once the outstanding lease and "admitted" filled batch 1.
+        (BatchPolicy.FULL_BATCH, ["admitted", "regenerated"]),
+        (BatchPolicy.ROLLING, ["admitted", "extra"]),
+    ],
+)
 @pytest.mark.asyncio
-async def test_snapshot_restores_untaken_groups_and_reports_outstanding_leases():
-    buffer = _buffer(batch_size=2)
+async def test_snapshot_restores_untaken_groups_and_reports_outstanding_leases(batch_policy, first_batch):
+    buffer = _buffer(batch_policy, batch_size=2)
     await buffer.publish(1)
     outstanding = await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT)
     await _generate(buffer, "admitted")
@@ -269,15 +286,67 @@ async def test_snapshot_restores_untaken_groups_and_reports_outstanding_leases()
     snapshot = buffer.snapshot()
     assert snapshot.leases == {outstanding.lease_id}
 
-    restored = _buffer(batch_size=2)
+    restored = _buffer(batch_policy, batch_size=2)
     await restored.restore(snapshot)
     await restored.publish(1)
-    assert (await _take_batch(restored))[0] == ["admitted", "extra"]
+    await _generate(restored, "regenerated")
+    assert (await _take_batch(restored))[0] == first_batch
+
+
+@pytest.mark.parametrize(
+    ("batch_policy", "batches"),
+    [
+        (BatchPolicy.FULL_BATCH, [["a", "b"], ["c", "d"]]),
+        (BatchPolicy.ROLLING, [["c", "d"], ["a", "b"]]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_batch_policy_decides_whether_groups_train_in_lease_or_commit_order(batch_policy, batches):
+    buffer = _buffer(batch_policy, batch_size=2, max_in_flight=4)
+    await buffer.publish(1)
+    leases = [await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT) for _ in range(4)]
+    assert [lease.batch_id for lease in leases] == [1, 1, 2, 2]
+
+    # The groups leased for batch 2 commit before the groups leased for batch 1.
+    for index, uid in [(2, "c"), (3, "d"), (0, "a"), (1, "b")]:
+        await _commit(buffer, leases[index].lease_id, uid)
+    trained = [sorted((await _take_batch(buffer))[0])]
+    await buffer.publish(2)
+    trained.append(sorted((await _take_batch(buffer))[0]))
+    assert trained == batches
 
 
 @pytest.mark.asyncio
-async def test_a_rejected_group_is_reported_before_the_batch_completes():
-    buffer = _buffer(batch_size=2)
+async def test_full_batch_waits_for_a_slow_group_instead_of_discarding_it():
+    buffer = _buffer(BatchPolicy.FULL_BATCH, batch_size=1, max_in_flight=2)
+    await buffer.publish(1)
+    slow = await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT)
+    await _generate(buffer, "quick")
+    with pytest.raises(GroupAdmissionStalledError):
+        await buffer.admit(BLOCKED_TIMEOUT)
+
+    await _commit(buffer, slow.lease_id, "slow")
+    assert (await _take_batch(buffer))[0] == ["slow"]
+    await buffer.publish(2)
+    assert (await _take_batch(buffer))[0] == ["quick"]
+
+
+@pytest.mark.asyncio
+async def test_full_batch_regenerates_a_rejected_group_for_the_same_batch():
+    buffer = _buffer(BatchPolicy.FULL_BATCH, batch_size=1, max_in_flight=4)
+    await buffer.publish(1)
+    masked = await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT)
+    await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT)
+    assert await _lease_is_blocked(buffer)
+
+    await _commit(buffer, masked.lease_id, "masked", rejection=AdmissionRejection.FULLY_MASKED)
+    replacement = await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT)
+    assert replacement.batch_id == masked.batch_id == 1
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_group_is_reported_before_the_batch_completes(batch_policy):
+    buffer = _buffer(batch_policy, batch_size=2)
     await buffer.publish(1)
     await _generate(buffer, "masked", rejection=AdmissionRejection.FULLY_MASKED)
 
@@ -288,7 +357,7 @@ async def test_a_rejected_group_is_reported_before_the_batch_completes():
 
 @pytest.mark.asyncio
 async def test_every_judged_group_reports_one_disposition_with_its_uid_and_dwell():
-    buffer = _buffer(batch_size=1, dynamic_sampling=DynamicSamplingType.FILTER)
+    buffer = _buffer(BatchPolicy.ROLLING, batch_size=1, dynamic_sampling=DynamicSamplingType.FILTER)
     await buffer.publish(1)
     stale = await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT)
     dispositions = []

@@ -118,7 +118,9 @@ Rollout Buffer Configuration
 
     rollout_buffer:
       max_staleness_steps: 0
+      batch_policy: full_batch
       max_in_flight: null
+      object_store_root: null
     teacher_scoring:
       max_queued_per_teacher: 8
       workers_per_teacher: 1
@@ -129,8 +131,14 @@ Rollout workers generate prompt groups under leases from a rollout buffer, and e
 - ``rollout_buffer.max_staleness_steps``: How many policy steps may separate the step at which a group was leased
   from the step that trains on it. ``0`` is synchronous on-policy training and is required when ``placement.colocate_all=true``.
   A positive value lets generation run ahead of training.
+- ``rollout_buffer.batch_policy``: How committed groups form batches when ``max_staleness_steps`` is positive.
+  ``full_batch`` trains each step on exactly the groups leased for it and waits for the slowest; ``rolling`` fills
+  each batch in commit order, so a slow group never blocks a step but quick groups train sooner and more often.
 - ``rollout_buffer.max_in_flight``: Maximum number of prompt groups generating at once. ``null`` bounds generation
   only by staleness. A value below ``train_batch_size`` generates each batch in several waves.
+- ``rollout_buffer.object_store_root``: Directory, usually an S3 prefix, that holds each trainable group as its own
+  object; a checkpoint then records the objects' URIs instead of copying the groups. Nothing deletes the objects,
+  so use an expiring prefix. ``null`` keeps groups only in Ray's object store.
 - ``teacher_scoring.max_queued_per_teacher``: Maximum number of score requests queued for each distillation teacher.
   A full queue holds back admission of further groups.
 - ``teacher_scoring.workers_per_teacher``: Number of score requests each teacher runs concurrently.

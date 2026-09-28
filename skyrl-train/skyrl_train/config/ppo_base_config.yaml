@@ -262,6 +262,11 @@ trainer:
   rollout_buffer:
     # How many steps the generating policy may lag the step that trains on its group. colocate_all requires 0.
     max_staleness_steps: 0
+    # How committed groups form batches when max_staleness_steps > 0. full_batch trains each step on exactly the
+    # groups leased for it, waiting for the slowest, so training never favors rollouts that finish quickly. rolling
+    # fills each batch in commit order and regenerates groups that miss the staleness window, so a slow rollout never
+    # blocks training, but quick rollouts train more often and at lower staleness.
+    batch_policy: full_batch
     # Cap on prompt groups generating at once; null bounds generation only by staleness.
     max_in_flight: null
     # Directory, usually an S3 prefix, that holds each trainable group as its own object; a checkpoint then

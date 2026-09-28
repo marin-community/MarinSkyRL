@@ -27,6 +27,7 @@ from skyrl_train.dynamic_sampling import (
 from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdmissionStalledError, GroupAdvantageInvariant
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.rollouts.buffer import (
+    BatchPolicy,
     Admission,
     BufferSnapshot,
     ReadyRollout,
@@ -160,6 +161,7 @@ class TrainingContext:
             batch_size=batch_size,
             max_in_flight=config.trainer.rollout_buffer.max_in_flight,
             max_staleness_steps=config.trainer.rollout_buffer.max_staleness_steps,
+            batch_policy=BatchPolicy(config.trainer.rollout_buffer.batch_policy),
             dynamic_sampling=selection.sampling_type,
             max_candidate_groups=max_sample_batches * batch_size if max_sample_batches > 0 else None,
         )
