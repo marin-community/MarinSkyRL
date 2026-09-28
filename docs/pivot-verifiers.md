@@ -132,8 +132,8 @@ does not create a split or filter for prompt length.
 ## Grug smoke preflight
 
 The SWE smoke for `open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21`
-uses 32 learner GPUs at TP1/PP2/CP1/EP8 and 32 rollout GPUs. Sample packing is
-disabled. CP1 keeps each sequence on one rank and avoids the pinned Transformer
+uses 32 learner GPUs at TP1/PP2/CP1/EP16 and 32 rollout GPUs. Sample packing is
+enabled. CP1 keeps each sequence on one rank and avoids the pinned Transformer
 Engine 2.11 restrictions on context parallelism across multiple ranks:
 
 - p2p rejects sliding-window attention.
@@ -146,7 +146,9 @@ These restrictions are enforced in
 The policy and reference log-probability paths use 128-token chunks. The
 64-GPU smoke failed during the first policy backward pass with a 1024-token
 chunk: the policy and colocated reference processes left less than 1 GiB free
-on an H100. The smoke logs to the `dogml/pivot-grug-swe-smoke` W&B project.
+on an H100. A subsequent 128-token run exhausted memory allocating the full
+logits gradient. EP16 shards expert weights across twice as many ranks while
+retaining the same 64-GPU allocation. The smoke logs to `marin-community/pivot-rl`.
 Set `WANDB_API_KEY` in the launch environment; the launcher forwards it to
 the GPU job.
 
@@ -163,6 +165,37 @@ This checks the launch topology, trainer configuration, and this smoke's CP1
 requirement before dataset preparation, model caching, or Iris submission.
 It runs on CPU and does not load model weights. Passing does not establish CUDA
 kernel compatibility or sufficient GPU memory.
+
+Use `--steps 10 --train-prefixes 512 --compare-sft` for the paired experiment.
+The coordinator prepares one dataset, then runs RL and reference-action SFT
+sequentially from the same pinned Grug checkpoint. Both arms use the same 512
+training prefixes, 128 held-out tasks, 10 updates, learning rate, and greedy
+evaluation at steps 0 and 10. Training and probes have disjoint
+trajectory and task IDs. Reference actions must fit the 512-token completion
+budget; this selects a bounded subset of the released dataset.
+
+Each update consumes all 512 training prefixes. RL samples 16 completions per
+prefix; SFT supervises one released action per prefix with token cross-entropy
+and no KL penalty. The arms match prefixes and updates, with different
+completion-token and compute budgets. SFT evaluation generates answers
+through the same inference engines and verifier as RL. Per-arm reports live
+under `rl/diagnostics` and `sft/diagnostics`; `diagnostics/comparison.jsonl`
+pairs their predictions and `diagnostics/summary.json` reports mean rewards
+and paired wins. The trainer masks generation server errors using its standard
+error handling. The paired comparison rejects evaluation responses with errors;
+training errors remain visible in the retained action metrics.
+
+Generation uses 64 concurrent sequences per engine and the frozen EAGLE-3
+draft `laion/snowball-64k-eagle3-draft-r2egym` at revision
+`4bdb47c08e5b5190bea3c7a93c3e14470230e469`, with three speculative tokens.
+The 32K request window, batch size, packing, and serving configuration match
+[the rollout-buffer experiment](https://echo.oa.dev/wiki/541). This comparison
+retains the Sept 21 model, synchronous trainer, GRPO objective, and Pivot SWE
+data; it does not adopt the training-loop refactor in PR #774.
+
+Both decoding configurations explicitly stop on Grug's end-of-text token
+128001 and end-of-turn token 128009. The latter terminates assistant messages
+in the pinned chat template and must also be recognized by constrained decoding.
 
 For a smaller GPU check, the existing
 `skyrl-train/tests/gpu/test_grug_megatron.py::test_grug_megatron_pp2_train_step_updates_weights_and_exports`

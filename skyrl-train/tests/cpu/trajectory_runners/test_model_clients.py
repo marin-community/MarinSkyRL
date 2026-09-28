@@ -116,7 +116,7 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
         {
             "prompts": [[{"role": "user", "content": "look it up"}]],
             "session_ids": ["trajectory-2"],
-            "sampling_params": {"temperature": 0.7, "logprobs": 0},
+            "sampling_params": {"temperature": 0.7, "logprobs": 0, "stop_token_ids": [128001, 128009]},
             "chat_completion_params": [
                 {
                     "tools": [
@@ -161,6 +161,7 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
         "messages": [{"role": "user", "content": "look it up"}],
         "session_id": "trajectory-2",
         "temperature": 0.7,
+        "stop_token_ids": [128001, 128009],
         "tools": expected_tools,
         "chat_template_kwargs": {"enable_thinking": False},
         "parallel_tool_calls": False,

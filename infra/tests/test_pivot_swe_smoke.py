@@ -1,3 +1,4 @@
+import asyncio
 import gzip
 import json
 from pathlib import Path
@@ -6,6 +7,15 @@ from zipfile import ZipFile
 from datasets import Dataset, load_dataset
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import WhitespaceSplit
+from transformers import PreTrainedTokenizerFast
+
+from ci.pivot_grug_smoke import compare_arms
+from skyrl_train.trajectory_runners.base import TrajectoryRunner
+from skyrl_train.trajectory_runners.pivot_reference import PivotReferenceRunner
+from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryID
 
 from infra.rl_data import pivot_swe
 from infra.rl_data.sources import prepare_pivot_row
@@ -225,3 +235,58 @@ def test_smoke_config_prepares_pivot_data_instead_of_inherited_gsm8k():
         cfg = compose(config_name="pivot_swe_smoke")
     assert list(cfg.data.train_data) == []
     assert list(cfg.data.val_data) == []
+
+
+def test_reference_sft_supervises_action_tokens_and_generates_held_out_answers():
+    backend = Tokenizer(
+        WordLevel(
+            {"UNK": 0, "USER": 1, "run": 2, "ASSISTANT": 3, "execute_bash": 4, "pwd": 5, "END": 6}, unk_token="UNK"
+        )
+    )
+    backend.pre_tokenizer = WhitespaceSplit()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="UNK", eos_token="END")
+    tokenizer.chat_template = """{% for m in messages %}{% if m.role == 'user' %}USER run {% else %}ASSISTANT {{ m.tool_calls[0].function.name }} {{ m.tool_calls[0].function.arguments.command }} END{% endif %}{% endfor %}{% if add_generation_prompt %}ASSISTANT {% endif %}"""
+
+    class EvaluationRunner(TrajectoryRunner):
+        async def _run(self, input_batch, disable_tqdm=False):
+            return {"prompt_token_ids": [[1, 2, 3]], "response_ids": [[0, 6]], "loss_masks": [[1, 1]], "rewards": [0.0]}
+
+    row = prepare_pivot_row(_raw_row(7), 0, dataset="swe")
+    config = OmegaConf.create({"max_input_length": 100, "sampling_params": {"max_generate_length": 16}})
+    runner = PivotReferenceRunner(EvaluationRunner(), tokenizer, config)
+    request = {
+        "prompts": [row["prompt"]],
+        "env_extras": [{"extra_info": row["extra_info"]}],
+        "env_classes": ["nemotron_ultra"],
+        "trajectory_ids": [TrajectoryID("7", 0)],
+        "batch_metadata": BatchMetadata(1, "train"),
+        "sampling_params": {},
+    }
+    training = asyncio.run(runner.run(request))
+    assert training["prompt_token_ids"] == [[1, 2, 3]]
+    assert training["response_ids"] == [[4, 5, 6]]
+    assert training["loss_masks"] == [[1, 1, 1]]
+    evaluation = asyncio.run(runner.run({**request, "batch_metadata": BatchMetadata(1, "eval")}))
+    assert evaluation["response_ids"] == [[0, 6]]
+    assert evaluation["rewards"] == [0.0]
+
+
+def test_comparison_pairs_rl_and_sft_scores_on_identical_probes(tmp_path):
+    for arm, scores in (("rl", [(0, 1), (1, 0)]), ("sft", [(0, 0), (1, 1)])):
+        path = tmp_path / arm / "diagnostics" / "comparison.jsonl"
+        path.parent.mkdir(parents=True)
+        rows = [
+            {
+                "trajectory_id": index,
+                "before": {"score": [before], "exception_type": None},
+                "after": {"score": [after], "exception_type": None},
+            }
+            for index, (before, after) in enumerate(scores)
+        ]
+        path.write_text("".join(json.dumps(row) + "\n" for row in reversed(rows)))
+    manifest = {"probe_trajectory_ids": [0, 1], "revision": "test", "train_prefixes": 64}
+    summary = compare_arms(str(tmp_path), manifest, 32)
+    assert summary["rl_after"] == summary["sft_after"] == 0.5
+    assert summary["rl_wins"] == summary["sft_wins"] == 1
+    paired = [json.loads(line) for line in (tmp_path / "diagnostics/comparison.jsonl").read_text().splitlines()]
+    assert [(row["trajectory_id"], row["rl_after"], row["sft_after"]) for row in paired] == [(0, 1, 0), (1, 0, 1)]

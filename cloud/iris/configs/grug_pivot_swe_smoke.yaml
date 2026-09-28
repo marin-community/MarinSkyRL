@@ -1,9 +1,9 @@
-# Two-step SWE Pivot smoke using the Snowball split64 PP2/CP1/EP8 placement.
-# Mini-batches count prefixes: 64 prefixes x 16 responses = 1024 trajectories.
-# The 16K window and 512-token cap bound startup cost; this is not the full-context arm.
+# Ten-step SWE Pivot comparison using the rollout-buffer reference geometry.
+# Each update uses 512 prefixes x 16 responses = 8192 trajectories.
+# Keep the one-action 512-token cap within a 32K request window.
 entrypoint: standard
 context_budget:
-  request_window_tokens: 16384
+  request_window_tokens: 32768
   max_new_tokens_per_turn: 512
   max_turns: 1
   generated_budget_fraction: 1.0
@@ -27,15 +27,15 @@ trainer:
     kl_loss_coef: 0.001
     dynamic_sampling:
       type: null
-  epochs: 2
-  max_steps: 2
+  epochs: 10
+  max_steps: 10
   update_epochs_per_batch: 1
-  train_batch_size: 64
-  policy_mini_batch_size: 64
+  train_batch_size: 512
+  policy_mini_batch_size: 512
   eval_batch_size: 16
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
-  use_sample_packing: false
+  use_sample_packing: true
   resume_mode: none
   logger: wandb
   project_name: pivot-rl
@@ -49,7 +49,7 @@ trainer:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 2
       context_parallel_size: 1
-      expert_model_parallel_size: 8
+      expert_model_parallel_size: 16
       expert_tensor_parallel_size: 1
       logprob_chunk_size: 128
       optimizer_checkpoint_sharding_type: dp_reshardable
@@ -62,7 +62,7 @@ trainer:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 2
       context_parallel_size: 1
-      expert_model_parallel_size: 8
+      expert_model_parallel_size: 16
       expert_tensor_parallel_size: 1
       logprob_chunk_size: 128
   placement:
@@ -75,8 +75,8 @@ trainer:
   enable_db_registration: false
   dump_eval_results: true
   eval_before_train: true
-  eval_interval: 2
-  ckpt_interval: 2
+  eval_interval: 10
+  ckpt_interval: 10
   max_ckpts_to_keep: 1
 generator:
   backend: vllm
@@ -89,7 +89,7 @@ generator:
   n_samples_per_prompt: 16
   eval_n_samples_per_prompt: 1
   gpu_memory_utilization: 0.8
-  max_num_seqs: 16
+  max_num_seqs: 64
   max_num_batched_tokens: 16384
   enable_prefix_caching: true
   enable_chunked_prefill: true
@@ -100,15 +100,23 @@ generator:
   batched: false
   enable_http_endpoint: true
   sampling_params:
+    stop_token_ids: [128001, 128009]
     temperature: 1.0
     top_p: 1.0
     top_k: -1
+  speculative_decoding:
+    method: eagle3
+    model:
+      source_uri: hf://laion/snowball-64k-eagle3-draft-r2egym
+      source_identity: 4bdb47c08e5b5190bea3c7a93c3e14470230e469
+    num_speculative_tokens: 3
   engine_init_kwargs:
     enable_auto_tool_choice: true
     tool_call_parser: hermes
   chat_template_kwargs:
     enable_thinking: false
   eval_sampling_params:
+    stop_token_ids: [128001, 128009]
     max_generate_length: 512
     temperature: 0.0
     top_p: 1.0
@@ -116,8 +124,10 @@ generator:
     enabled: true
     phases:
     - train
-    sample_count_per_step: 1024
+    sample_count_per_step: 8192
     sample_fraction: 1.0
+    max_bytes_per_step: 5368709120
+    max_bytes_per_run: 53687091200
     required: true
 environment:
   env_class: nemotron_ultra

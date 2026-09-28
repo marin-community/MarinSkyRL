@@ -454,6 +454,7 @@ generator:
     top_k: -1
     logprobs: null
     stop: null
+    stop_token_ids: null
 
   use_conversation_multi_turn: true
 
@@ -468,6 +469,7 @@ generator:
     top_k: -1
     logprobs: null
     stop: null
+    stop_token_ids: null
 
   eval_n_samples_per_prompt: 1
 

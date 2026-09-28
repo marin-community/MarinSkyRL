@@ -42,6 +42,8 @@ def prepare_smoke_sample(
     source_path: Path | None = None,
     max_source_rows: int = MAX_CANDIDATES,
     stop_when_ready: bool = False,
+    max_reference_tokens: int | None = None,
+    max_prompt_tokens: int = MAX_PROMPT_TOKENS,
 ) -> dict[str, Any]:
     """Write candidate pivots and trajectory-ID-stratified held-out probes."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -77,8 +79,12 @@ def prepare_smoke_sample(
             )
             if isinstance(prompt_tokens, Mapping):
                 prompt_tokens = prompt_tokens["input_ids"]
-            if len(prompt_tokens) > MAX_PROMPT_TOKENS:
+            if len(prompt_tokens) > max_prompt_tokens:
                 continue
+            if max_reference_tokens is not None:
+                prefix, completion = reference_action_tokens(prepared["prompt"], prepared["extra_info"], tokenizer)
+                if len(prefix) > max_prompt_tokens or len(completion) > max_reference_tokens:
+                    continue
             trajectory_ids.add(trajectory_id)
             instance_ids.add(instance_id)
             eligible.append((trajectory_id, prepared))
@@ -108,6 +114,8 @@ def prepare_smoke_sample(
         "tokenizer": tokenizer_name,
         "tokenizer_revision": tokenizer_revision,
         "chat_template_kwargs": template_kwargs,
+        "max_reference_tokens": max_reference_tokens,
+        "max_prompt_tokens": max_prompt_tokens,
         "train_trajectory_ids": train_trajectory_ids,
         "probe_trajectory_ids": probe_trajectory_ids,
         "train_prefixes": len(train),
@@ -115,6 +123,44 @@ def prepare_smoke_sample(
     }
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return manifest
+
+
+def reference_action_tokens(
+    prompt: list[dict[str, Any]], extra_info: dict[str, Any], tokenizer: Any
+) -> tuple[list[int], list[int]]:
+    """Render the released tool action with the same template used for rollouts."""
+    pivot = extra_info["nemotron_ultra"]
+    record = json.loads(pivot["record_json"])
+    request = json.loads(pivot["request_json"])
+    action = record["expected_action"]
+    if action["type"] != "function_call":
+        raise ValueError(f"SWE SFT requires a function call, got {action['type']}")
+    arguments = action["arguments"]
+    if isinstance(arguments, str):
+        arguments = json.loads(arguments)
+    assistant = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {"id": "reference", "type": "function", "function": {"name": action["name"], "arguments": arguments}}
+        ],
+    }
+    # Responses-format tools become Chat Completions tools at the serving boundary.
+    tools = [
+        {"type": "function", "function": {key: value for key, value in tool.items() if key != "type"}}
+        for tool in request.get("tools", [])
+    ]
+    kwargs = {"tools": tools, **request.get("chat_template_kwargs", {})}
+    prefix = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True, **kwargs)
+    full = tokenizer.apply_chat_template([*prompt, assistant], add_generation_prompt=False, tokenize=True, **kwargs)
+    if isinstance(prefix, Mapping):
+        prefix = prefix["input_ids"]
+    if isinstance(full, Mapping):
+        full = full["input_ids"]
+    prefix, full = list(prefix), list(full)
+    if full[: len(prefix)] != prefix or len(full) == len(prefix):
+        raise ValueError(f"Reference action does not extend its prompt: trajectory {record['trajectory_id']}")
+    return prefix, full[len(prefix) :]
 
 
 def build_qwen_pivot_dataset(
