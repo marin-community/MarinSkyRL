@@ -463,7 +463,11 @@ class DummyDataset:
 
 
 def _stub_context(cfg) -> SimpleNamespace:
-    return SimpleNamespace(config=SimpleNamespace(max_staleness_steps=0, batch_size=cfg.trainer.train_batch_size))
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            max_staleness_steps=0, batch_size=cfg.trainer.train_batch_size, first_token_admission=False
+        )
+    )
 
 
 class _CapturingPolicyGroup:

@@ -7,6 +7,7 @@ import binascii
 import copy
 from importlib.resources import files
 import json
+import logging
 import math
 import os
 from dataclasses import dataclass, field
@@ -23,12 +24,13 @@ from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT as CHECK
 from marinskyrl.environment_contract import TrainingType
 from marinskyrl.distillation import DistillationPlan, compile_distillation_plan, validate_distillation_runtime_support
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
-from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
+from marinskyrl.speculative_decoding import SYNC_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 from marinskyrl.remote_io import filesystem_and_path, open_output_stream
 
 # Directory containing the bundled example RL config YAML files.
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
+logger = logging.getLogger(__name__)
 RL_CONFIG_TASK_DIR = "/tmp/marin-rl-configs"
 RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
 
@@ -39,7 +41,7 @@ class RLEntrypoint(StrEnum):
     GENERATE = "generate"
     GYM_WORKER_POOL = "gym_worker_pool"
     MINI_SWE = "mini_swe"
-    STANDARD = "standard"
+    SYNC = "sync"
     TERMINAL_BENCH = "terminal_bench"
     TERMINAL_BENCH_GENERATE = "terminal_bench_generate"
 
@@ -49,7 +51,7 @@ RL_ENTRYPOINTS = MappingProxyType(
         RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
         RLEntrypoint.GYM_WORKER_POOL: "skyrl_train.entrypoints.gym_worker_pool",
         RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
-        RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
+        RLEntrypoint.SYNC: SYNC_TRAINING_ENTRYPOINT,
         RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
         RLEntrypoint.TERMINAL_BENCH_GENERATE: "skyrl_train.entrypoints.terminal_bench_generate",
     }
@@ -58,8 +60,10 @@ CHECKPOINT_EXPORT_ENTRYPOINT = CHECKPOINT_EXPORT_MODULE
 
 
 def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
-    """Resolve one supported RL execution mode to its packaged module."""
-    name = RLEntrypoint.STANDARD if value is None else value
+    """Resolve one supported RL execution mode to its packaged module; ``standard`` names the synchronous loop too."""
+    if value == "standard":
+        logger.warning("%s: entrypoint standard is deprecated; use sync", config_path)
+    name = RLEntrypoint.SYNC if value in (None, "standard") else value
     try:
         entrypoint = RLEntrypoint(name)
     except ValueError as error:

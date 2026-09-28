@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,13 @@ import pytest
 import yaml
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
-from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
+from cloud.iris.rl_config_translation import (
+    RL_CONFIG_PAYLOAD_ENV,
+    RL_ENTRYPOINTS,
+    RLEntrypoint,
+    materialize_launch_config,
+    parse_rl_config,
+)
 
 
 def _raw_config() -> dict[str, Any]:
@@ -197,3 +204,21 @@ def test_task_materializes_the_forwarded_launch_document(tmp_path: Path) -> None
 
     assert path == str(destination)
     assert destination.read_bytes() == contents
+
+
+def _launch_document(tmp_path: Path, entrypoint: str, *, recipe_only: bool = False) -> Path:
+    raw = _raw_config()
+    raw["skyrl"]["entrypoint"] = entrypoint
+    path = tmp_path / ("recipe.yaml" if recipe_only else "launch.yaml")
+    path.write_text(yaml.safe_dump(raw["skyrl"] if recipe_only else raw, sort_keys=False))
+    return path
+
+
+def test_the_standard_entrypoint_name_warns_and_uses_the_sync_loop(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="cloud.iris.rl_config_translation"):
+        parsed = parse_rl_config(str(_launch_document(tmp_path, "standard", recipe_only=True)))
+
+    assert parsed.entrypoint == RL_ENTRYPOINTS[RLEntrypoint.SYNC]
+    assert any("entrypoint standard is deprecated" in record.message for record in caplog.records)

@@ -4,7 +4,7 @@
 # checkpoint writer keeps optimizer state sharded across data-parallel ranks and
 # streams one bounded multipart rank shard directly to S3. Resume with
 # the same tensor, pipeline, context, and expert geometry.
-entrypoint: standard
+entrypoint: sync
 
 context_budget:
   request_window_tokens: 2048

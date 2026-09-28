@@ -24,6 +24,7 @@ from skyrl_train.group_admission import (
     GroupAdmissionStalledError,
     TrainingGroupInvariantError,
 )
+from skyrl_train.policy_version import BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY, trained_tokens_versioned
 from skyrl_train.rollouts.loader import JudgedGroup
 from skyrl_train.telemetry import GeneratedWork
 from skyrl_train.trajectory_runners.trajectory_processing import get_outcome_rewards, get_trajectory_passes
@@ -52,6 +53,7 @@ class RolloutBufferConfig:
     batch_policy: BatchPolicy
     dynamic_sampling: DynamicSamplingType | None
     max_candidate_groups: int | None
+    first_token_admission: bool = False
 
     def __post_init__(self) -> None:
         if self.batch_size < 1:
@@ -137,6 +139,7 @@ class RolloutVerdict:
     selection: GroupSelectionResult | None
     rewards: GroupRewards | None
     work: GeneratedWork
+    oldest_policy_version: int | None = None
 
     @property
     def trainable(self) -> bool:
@@ -149,6 +152,7 @@ class RolloutContentPolicy:
 
     admission: GroupAdmissionPolicy
     selection: GroupSelectionPolicy
+    first_token_admission: bool = False
 
     def verdict(self, group: RolloutGroup) -> RolloutVerdict:
         """Judge one group, raising when it violates the run's structural contract."""
@@ -161,7 +165,19 @@ class RolloutContentPolicy:
         work = GeneratedWork.from_batch(batch["response_ids"], batch.get("is_last_step"))
         if not decision.accepted:
             return RolloutVerdict(group.uid, decision.rejections, None, None, work)
-        return RolloutVerdict(group.uid, (), self.selection.evaluate(group), GroupRewards.from_batch(batch), work)
+        oldest_version = batch.get("oldest_policy_version")
+        if self.first_token_admission:
+            rows = batch.get(BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY)
+            spans_incomplete = rows is not None and not all(
+                trained_tokens_versioned(spans, mask) for spans, mask in zip(rows, batch["loss_masks"], strict=True)
+            )
+            if oldest_version is None or spans_incomplete:
+                raise RuntimeError(
+                    "trainer.rollout_buffer.first_token_admission needs a sampled policy version for each group"
+                )
+        return RolloutVerdict(
+            group.uid, (), self.selection.evaluate(group), GroupRewards.from_batch(batch), work, oldest_version
+        )
 
 
 class RolloutWriter(Protocol):
@@ -364,7 +380,10 @@ class RollingBatchPolicy:
         batch_id = open_batch
         while admitted[batch_id] >= self.config.batch_size:
             batch_id += 1
-        if batch_id - rollout.policy_step > self.config.max_staleness_steps:
+        policy_step = rollout.policy_step
+        if self.config.first_token_admission and rollout.verdict.oldest_policy_version is not None:
+            policy_step = rollout.verdict.oldest_policy_version + 1
+        if batch_id - policy_step > self.config.max_staleness_steps:
             return None
         return batch_id
 
@@ -562,6 +581,12 @@ class RolloutBuffer:
                 self._reject(self._stats[open_batch], rollout, AdmissionRejection.STALE)
                 self._retries.append(rollout.prompt)
                 continue
+            if self.config.first_token_admission and not verdict.rejections:
+                assert verdict.oldest_policy_version is not None
+                if batch_id - (verdict.oldest_policy_version + 1) > self.config.max_staleness_steps:
+                    self._reject(self._stats[batch_id], rollout, AdmissionRejection.STALE)
+                    self._retries.append(rollout.prompt)
+                    continue
             stats = self._stats[batch_id]
             batch = self._admitted[batch_id]
             if verdict.rejections:

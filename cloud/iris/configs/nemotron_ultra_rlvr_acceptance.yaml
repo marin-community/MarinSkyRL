@@ -1,6 +1,6 @@
 # One-off acceptance run for every generator in both released blends.
 # The sample and exact TaskTrove proxy sidechannel are immutable campaign artifacts.
-entrypoint: standard
+entrypoint: sync
 
 config_groups:
   terminal_bench_config: terminal_bench

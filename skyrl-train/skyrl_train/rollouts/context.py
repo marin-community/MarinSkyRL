@@ -164,6 +164,7 @@ class TrainingContext:
             batch_policy=BatchPolicy(config.trainer.rollout_buffer.batch_policy),
             dynamic_sampling=selection.sampling_type,
             max_candidate_groups=max_sample_batches * batch_size if max_sample_batches > 0 else None,
+            first_token_admission=bool(config.trainer.rollout_buffer.first_token_admission),
         )
         admission = GroupAdmissionPolicy(
             GroupAdvantageInvariant.from_config(algorithm.resolved_group_advantage),
@@ -173,7 +174,7 @@ class TrainingContext:
         return cls(
             PromptLoader(dataset, prompt_order_from_config(config, dataset), batch_size=batch_size),
             buffer_config,
-            RolloutContentPolicy(admission, selection),
+            RolloutContentPolicy(admission, selection, buffer_config.first_token_admission),
             RolloutRequestSpec.from_config(config),
             workers,
             ObjectStorePayloads(object_store_root) if object_store_root is not None else MemoryPayloads(),

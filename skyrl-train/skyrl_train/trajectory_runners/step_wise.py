@@ -20,6 +20,7 @@ from skyrl_train.trajectory_runners.skyrl_gym_contracts import (
     reward_from_env_step,
     verification_from_env_step,
 )
+from skyrl_train.policy_version import RESPONSE_POLICY_VERSION_SEGMENTS_KEY, oldest_policy_version
 from skyrl_train.trajectory_runners.trajectory_processing import normalize_token_ids
 from skyrl_train.trajectory_runners.collectors import collect_agent_loops
 from skyrl_train.trajectory_runners.selected_topk import align_student_topk
@@ -174,6 +175,8 @@ class StepWiseRolloutCollector:
             engine_output = await self.model_client.generate(engine_input)
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
+            version_segments = engine_output.get(RESPONSE_POLICY_VERSION_SEGMENTS_KEY, [None])[0]
+            step_version = oldest_policy_version([version_segments or []])
             sampled_ids = list(output_ids)
             topk_ids_batch = engine_output.get("student_topk_indices")
             topk_scores_batch = engine_output.get("behavior_topk_logprobs")
@@ -259,6 +262,8 @@ class StepWiseRolloutCollector:
                 disposition=TrainingDisposition.train(),
                 loss_mask=copy.deepcopy(loss_mask),
                 env_metrics=environment_metrics_from_step(env_step_output, env.get_metrics() if done else {}),
+                oldest_policy_version=step_version,
+                behavior_policy_version_segments=(tuple(version_segments) if version_segments else None),
                 token_provenance=engine_output["token_provenance"],
             )
 

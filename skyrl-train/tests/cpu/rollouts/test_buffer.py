@@ -32,10 +32,17 @@ def _buffer(
     max_staleness_steps: int = 1,
     dynamic_sampling: DynamicSamplingType | None = None,
     max_candidate_groups: int | None = None,
+    first_token_admission: bool = False,
 ) -> RolloutBuffer:
     return RolloutBuffer(
         RolloutBufferConfig(
-            batch_size, max_in_flight, max_staleness_steps, batch_policy, dynamic_sampling, max_candidate_groups
+            batch_size,
+            max_in_flight,
+            max_staleness_steps,
+            batch_policy,
+            dynamic_sampling,
+            max_candidate_groups,
+            first_token_admission,
         )
     )
 
@@ -46,10 +53,11 @@ def _verdict(
     rejection: AdmissionRejection | None = None,
     selection: GroupSelectionResult = GroupSelectionResult.KEEP,
     rewards: GroupRewards = SPREAD_REWARDS,
+    oldest_policy_version: int | None = None,
 ) -> RolloutVerdict:
     if rejection is not None:
         return RolloutVerdict(uid, (rejection,), None, None, GeneratedWork(2, 2, 8))
-    return RolloutVerdict(uid, (), selection, rewards, GeneratedWork(2, 2, 8))
+    return RolloutVerdict(uid, (), selection, rewards, GeneratedWork(2, 2, 8), oldest_policy_version)
 
 
 async def _commit(buffer: RolloutBuffer, lease_id: str, uid: str, **verdict) -> None:
@@ -170,6 +178,24 @@ async def test_stale_group_returns_its_prompt_for_regeneration():
     payloads, metrics = await _take_batch(buffer)
     assert payloads == ["fresh"]
     assert metrics["async/rejected_count/stale"] == 1
+
+
+@pytest.mark.asyncio
+async def test_first_token_admission_rejects_a_group_from_an_older_installed_policy():
+    buffer = _buffer(BatchPolicy.ROLLING, batch_size=1, first_token_admission=True)
+    await buffer.publish(1)
+    old = await buffer.acquire_lease()
+    await _generate(buffer, "a", oldest_policy_version=0)
+    assert (await _take_batch(buffer))[0] == ["a"]
+    await buffer.publish(2)
+    await _generate(buffer, "b", oldest_policy_version=1)
+    assert (await _take_batch(buffer))[0] == ["b"]
+    await buffer.publish(3)
+
+    await _commit(buffer, old.lease_id, "old", oldest_policy_version=0)
+    rejected = await buffer.admit(PROGRESS_TIMEOUT)
+    assert rejected.retries == [{"uid": "old"}]
+    assert [outcome.disposition for outcome in rejected.dispositions] == ["stale"]
 
 
 @pytest.mark.asyncio

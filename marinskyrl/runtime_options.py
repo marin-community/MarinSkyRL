@@ -10,8 +10,16 @@ class R3Transport(StrEnum):
 
 
 class WeightSyncTransport(StrEnum):
+    AUTO = "auto"
     BROADCAST = "broadcast"
     EXPERT_BLOCK = "expert_block"
+
+
+class PauseMode(StrEnum):
+    """What the engines do with in-flight requests while weights are reloaded."""
+
+    ABORT = "abort"
+    KEEP = "keep"
 
 
 class GDNBackend(StrEnum):

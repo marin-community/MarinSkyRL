@@ -7,6 +7,7 @@ from omegaconf import DictConfig
 
 from skyrl_train.distillation import INVALID_TOPK_INDEX
 from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
+from skyrl_train.policy_version import BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY
 from skyrl_gym.verification import RewardResult, TrainingDisposition
 from skyrl_train.trajectory_runners.types import (
     AgentLoopOutput,
@@ -18,6 +19,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     _sentinel_routed_experts_row,
     apply_overlong_filtering,
     get_rollout_metrics,
+    minimum_recorded,
     scalar_reward_token_credit,
 )
 
@@ -84,8 +86,10 @@ class WholeTrajectoryProjection:
             rollout_metrics=rollout_metrics,
             rollout_logprobs=rollout_logprobs,
             exclude_from_baseline=[not output.disposition.baseline_eligible for output in outputs],
+            oldest_policy_version=minimum_recorded(output.oldest_policy_version for output in outputs),
         )
         attach_student_topk(batch, outputs, responses, loss_masks)
+        _attach_behavior_policy_versions(batch, outputs)
         attach_routed_experts(batch, outputs, responses)
         attach_terminal_classifications(batch, outputs)
         attach_server_errors(batch, outputs)
@@ -148,8 +152,10 @@ class StepWiseTrajectoryProjection:
             trajectory_ids=projected_ids,
             is_last_step=is_last_step,
             exclude_from_baseline=[not step.disposition.baseline_eligible for step in steps],
+            oldest_policy_version=minimum_recorded(step.oldest_policy_version for step in steps),
         )
         attach_student_topk(batch, steps, responses, loss_masks)
+        _attach_behavior_policy_versions(batch, steps)
         attach_routed_experts(batch, steps, responses)
         attach_terminal_classifications(batch, steps)
         attach_server_errors(batch, steps)
@@ -267,6 +273,15 @@ def _loss_masks(outputs, responses, runner_cfg: DictConfig, tokenizer):
     if runner_cfg.apply_overlong_filtering:
         return apply_overlong_filtering(loss_masks, responses, tokenizer.eos_token_id)
     return loss_masks
+
+
+def _attach_behavior_policy_versions(batch: TrajectoryBatch, outputs: Sequence[AgentLoopOutput]) -> None:
+    """Attach spans only where the engine reported them; other transports leave the key absent."""
+
+    rows = [output.behavior_policy_version_segments for output in outputs]
+    if not any(row is not None for row in rows):
+        return
+    batch[BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY] = [list(row) if row is not None else [] for row in rows]
 
 
 def project_loss_mask(output: TrainableInteraction, response: Sequence[int]) -> list[int]:

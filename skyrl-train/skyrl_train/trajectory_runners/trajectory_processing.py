@@ -1,7 +1,7 @@
 import torch
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import List, Tuple, Union, Optional, Dict, Any, Sequence
+from typing import List, Tuple, Union, Optional, Dict, Any, Sequence, Iterable
 from collections import defaultdict
 from enum import StrEnum
 import numpy as np
@@ -39,6 +39,7 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
 )
 from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
+from skyrl_train.trajectory_runners.marin_tokenizer_chat_template import MARIN_TOKENIZER_CHAT_TEMPLATE
 from omegaconf import DictConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
@@ -414,6 +415,8 @@ def _apply_alignment_validity(
 
 
 CUSTOM_CHAT_TEMPLATES = {
+    # the Snowball policies' own template, with generation blocks for the assistant mask
+    "marin_tokenizer": MARIN_TOKENIZER_CHAT_TEMPLATE,
     # chat template for qwen3 that preserves thinking tokens
     "qwen3_with_thinking": (
         "{% for message in messages %}"
@@ -1305,6 +1308,11 @@ def prepare_trajectory_request(
     }
 
     return trajectory_request, uids
+
+
+def minimum_recorded(values: Iterable[int | None]) -> int | None:
+    """Return the smallest recorded version across a rollout group."""
+    return min((value for value in values if value is not None), default=None)
 
 
 def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None, chat_template_kwargs=None):

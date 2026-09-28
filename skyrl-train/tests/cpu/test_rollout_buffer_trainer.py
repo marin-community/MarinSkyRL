@@ -10,7 +10,9 @@ from skyrl_train.trajectory_runners.base import TrajectoryID
 from skyrl_train.trajectory_selection import BestOfNTrajectorySelector
 
 
-def _group(uid: str, policy_step: int, *, rewards: list[float] | None = None) -> RolloutGroup:
+def _group(
+    uid: str, policy_step: int, *, rewards: list[float] | None = None, oldest_policy_version: int | None = None
+) -> RolloutGroup:
     batch = {
         "prompt_token_ids": [[1], [1]],
         "response_ids": [[2], [3]],
@@ -21,6 +23,8 @@ def _group(uid: str, policy_step: int, *, rewards: list[float] | None = None) ->
         "rollout_logprobs": None,
         "trajectory_ids": [TrajectoryID(instance_id=uid, repetition_id=index) for index in range(2)],
     }
+    if oldest_policy_version is not None:
+        batch["oldest_policy_version"] = oldest_policy_version
     return RolloutGroup(batch, uid, policy_step, {"uid": uid})
 
 
@@ -28,7 +32,12 @@ def _group(uid: str, policy_step: int, *, rewards: list[float] | None = None) ->
 @pytest.mark.parametrize("offload_enabled", [False, True])
 def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
     trainer = object.__new__(RayPPOTrainer)
-    trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(offload_optimizer_during_rollouts=offload_enabled))
+    trainer.cfg = SimpleNamespace(
+        trainer=SimpleNamespace(
+            offload_optimizer_during_rollouts=offload_enabled,
+            rollout_buffer=SimpleNamespace(first_token_admission=True),
+        )
+    )
     trainer.colocate_all = False
     trainer.global_step = 0
     trainer.all_startup_timings = {}
@@ -47,8 +56,9 @@ def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
         async def pause_generation(self):
             events.append("pause")
 
-        async def resume_generation(self):
+        async def resume_generation(self, policy_version=None):
             assert trainer.policy_model.optimizer_on_gpu != offload_enabled
+            assert policy_version == 0
             events.append("resume")
 
     async def sync_weights():
@@ -61,15 +71,15 @@ def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
     asyncio.run(trainer._sync_policy_for_rollouts(reason=reason))
 
     assert trainer.policy_model.optimizer_on_gpu != offload_enabled
-    paused = reason == "training_step"
-    assert events == (["pause"] if paused else []) + (["offload"] if offload_enabled else []) + ["sync"] + (
-        ["resume"] if paused else []
-    )
+    assert events == ["pause"] + (["offload"] if offload_enabled else []) + ["sync", "resume"]
 
 
-def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatch):
+@pytest.mark.parametrize(("first_token_admission", "stale_steps"), [(False, 2), (True, 1)])
+def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatch, first_token_admission, stale_steps):
     trainer = object.__new__(RayPPOTrainer)
-    trainer.context = SimpleNamespace(config=SimpleNamespace(batch_size=2, max_staleness_steps=2))
+    trainer.context = SimpleNamespace(
+        config=SimpleNamespace(batch_size=2, max_staleness_steps=2, first_token_admission=first_token_admission)
+    )
     trainer.cfg = SimpleNamespace(
         trainer=SimpleNamespace(algorithm=SimpleNamespace(policy_loss_type="pg", tis_lcs_alert_threshold=0.0))
     )
@@ -96,14 +106,16 @@ def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatc
     trainer.select_trajectories = select
     trainer.convert_to_training_input = convert
 
-    result = trainer.convert_rollout_groups_to_training_input([_group("fresh", 10), _group("stale", 8)])
+    result = trainer.convert_rollout_groups_to_training_input(
+        [_group("fresh", 10, oldest_policy_version=9), _group("stale", 8, oldest_policy_version=8)]
+    )
 
     assert result == {
         "rewards": [0.0, 1.0, 0.0, 1.0],
         "uids": ["fresh", "fresh", "stale", "stale"],
-        "rollout_staleness": [0, 0, 2, 2],
+        "rollout_staleness": [0, 0, stale_steps, stale_steps],
     }
-    assert trainer.all_metrics["async/staleness_max"] == 2
+    assert trainer.all_metrics["async/staleness_max"] == stale_steps
     assert trainer.all_metrics["async/staleness_ratio"] == 0.5
     assert trainer.all_timings == {
         "assemble_generation_group_mini_batch": 0.0,
@@ -114,7 +126,9 @@ def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatc
 
 def test_rollout_batch_conversion_records_domain_reward_metrics():
     trainer = object.__new__(RayPPOTrainer)
-    trainer.context = SimpleNamespace(config=SimpleNamespace(batch_size=3, max_staleness_steps=0))
+    trainer.context = SimpleNamespace(
+        config=SimpleNamespace(batch_size=3, max_staleness_steps=0, first_token_admission=False)
+    )
     trainer.cfg = get_default_config()
     trainer.cfg.trainer.algorithm.policy_loss_type = "pg"
     trainer.cfg.generator.n_samples_per_prompt = 2

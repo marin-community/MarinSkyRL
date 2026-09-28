@@ -269,6 +269,13 @@ trainer:
     batch_policy: full_batch
     # Cap on prompt groups generating at once; null bounds generation only by staleness.
     max_in_flight: null
+    # Charge staleness from the oldest policy version that sampled a group's tokens, plus one.
+    # Requires local vLLM engines and a positive staleness window.
+    first_token_admission: false
+    # At weight sync, abort requests and retry their sampled prefix, or keep them in flight.
+    pause_mode: abort
+    # Clear the vLLM KV cache at weight sync; this also preempts requests kept by pause_mode=keep.
+    clear_kv_cache_on_weight_sync: true
     # Directory, usually an S3 prefix, that holds each trainable group as its own object; a checkpoint then
     # records URIs instead of copying groups. Nothing deletes the objects, so use an expiring prefix. null keeps
     # payloads only in Ray's object store.
@@ -373,12 +380,8 @@ generator:
   backend: "vllm"
   vllm_attention_backend: null
   weight_sync_backend: "nccl"
-  # How weights reach the engines. "broadcast": trainer rank 0 sends every tensor to every engine.
-  # "expert_block": each MoE expert matrix is broadcast from a Megatron rank that holds it to the vLLM
-  # workers that serve it. Needs engines that are not colocated with training, a Grug MoE on the megatron
-  # strategy at TP=1 and ETP=1, local vLLM engines at TP=1 with EP=DP>1, the NCCL weight-sync backend and
-  # vLLM's TRITON MoE backend.
-  weight_sync_transport: "broadcast"
+  # broadcast | expert_block (requirements in config.rst) | auto: expert_block when the run qualifies.
+  weight_sync_transport: "auto"
   expert_block_sync:
     timeout_seconds: 600  # For creating the sync groups and for the broadcasts of each sync.
     verify: false  # If set, replay synchronization and verify it against the trainer values.

@@ -1108,18 +1108,16 @@ class RayPPOTrainer:
                 await asyncio.to_thread(self.policy_model.offload_to_cpu, offload_optimizer=False, offload_model=True)
                 await self.inference_engine_client.wake_up(tags=["kv_cache"])
             else:
-                # Expert-block sync writes into live engine parameters, so the initial sync pauses generation too.
-                pause = reason != "initial" or self._expert_block_sync is not None
-                if pause:
-                    await self.inference_engine_client.pause_generation()
+                await self.inference_engine_client.pause_generation()
                 # Training backloads the optimizer before every step. Offload it after every update, including
                 # the initial sync, so Megatron gradient buffers are not resized while still on the GPU.
                 await asyncio.to_thread(
                     self._offload_policy_optimizer, timings, timer_label="offload_policy_optimizer_to_cpu"
                 )
                 await self.sync_policy_weights_to_inference_engines()
-                if pause:
-                    await self.inference_engine_client.resume_generation()
+                await self.inference_engine_client.resume_generation(
+                    policy_version=self.global_step if self.cfg.trainer.rollout_buffer.first_token_admission else None
+                )
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
 
     async def sync_policy_weights_to_inference_engines(self) -> None:
@@ -1579,7 +1577,15 @@ class RayPPOTrainer:
         assert len(groups) == batch_size, f"Expected {batch_size} groups, got {len(groups)}"
         with Timer("assemble_generation_group_mini_batch", self.all_timings):
             uids = [group.uid for group in groups for _ in group.trajectory_batch["response_ids"]]
-            stalenesses = [self.global_step - group.policy_step for group in groups]
+            stalenesses = [
+                self.global_step
+                - (
+                    group.trajectory_batch["oldest_policy_version"] + 1
+                    if self.context.config.first_token_admission
+                    else group.policy_step
+                )
+                for group in groups
+            ]
             staleness_by_uid = {group.uid: staleness for group, staleness in zip(groups, stalenesses, strict=True)}
             record_rollout_staleness(stalenesses, self.global_step)
             assert max(stalenesses) <= max_staleness_steps, (

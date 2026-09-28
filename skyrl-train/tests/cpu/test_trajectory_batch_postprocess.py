@@ -61,7 +61,9 @@ def make_trainer(config) -> RayPPOTrainer:
         eval_dataset=None,
         inference_engine_client=None,
         trajectory_runner=MagicMock(),
-        context=SimpleNamespace(config=SimpleNamespace(max_staleness_steps=0, batch_size=batch_size)),
+        context=SimpleNamespace(
+            config=SimpleNamespace(max_staleness_steps=0, batch_size=batch_size, first_token_admission=False)
+        ),
     )
 
 

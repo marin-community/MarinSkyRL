@@ -13,16 +13,14 @@ from dataclasses import asdict
 
 import torch
 
+from marinskyrl.inference_placement import EXPERT_BLOCK_MODEL_TYPE, EXPERT_BLOCK_MOE_BACKEND
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, destroy_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, from_wire
 from skyrl_train.weight_sync.expert_block.source_views import LAYER_PREFIX, ROUTED_EXPERTS, dtype_name
 from skyrl_train.weight_sync.expert_block.stream import Stream, bind, storage_identity
 from skyrl_train.weight_sync.expert_block.verify_weights import replay
 
-SUPPORTED_MODEL_TYPE = "grug_moe"
-# The only backend tested. TRITON keeps the trainer's [gate;up] order in w13_weight. FlashInfer
-# CUTLASS swaps it to [up;gate] at load time. BATCHED_TRITON keeps the order but is untested.
-SUPPORTED_MOE_BACKEND = "TRITON"
+SUPPORTED_MOE_BACKEND = EXPERT_BLOCK_MOE_BACKEND.upper()
 
 
 def installable_parameters(model) -> dict[str, torch.Tensor]:
@@ -72,8 +70,8 @@ class ExpertBlockReceiver:
     def inventory(self) -> dict:
         """Check that this transport can write into the model, and report what this worker holds."""
         hf, parallel = self.vllm_config.model_config.hf_config, self.vllm_config.parallel_config
-        if hf.model_type != SUPPORTED_MODEL_TYPE:
-            raise ValueError(f"Expert-block sync supports {SUPPORTED_MODEL_TYPE}, not {hf.model_type}")
+        if hf.model_type != EXPERT_BLOCK_MODEL_TYPE:
+            raise ValueError(f"Expert-block sync supports {EXPERT_BLOCK_MODEL_TYPE}, not {hf.model_type}")
         if self.vllm_config.model_config.quantization is not None:
             raise ValueError("Expert-block sync requires unquantised weights")
         if parallel.tensor_parallel_size != 1:

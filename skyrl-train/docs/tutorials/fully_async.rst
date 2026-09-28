@@ -34,6 +34,14 @@ Configuration
 - ``trainer.rollout_buffer.max_in_flight`` (default ``null``): Maximum number of prompt groups generating at
   once. ``null`` bounds generation only by staleness. A value below ``trainer.train_batch_size`` generates each
   batch in several waves.
+- ``trainer.rollout_buffer.first_token_admission`` (default ``false``): Use the oldest version that sampled
+  a group's trained tokens when checking staleness. This requires separate, local vLLM engines and a positive
+  staleness window. The engine records each attempt's version at its first token, including attempts retried
+  across a weight sync. Syncs must preempt in-flight requests, using ``pause_mode=abort`` or cache clearing.
+- ``trainer.rollout_buffer.pause_mode`` (default ``abort``): At a weight sync, abort in-flight requests and
+  retry their sampled prefix, or keep them in flight with ``keep``.
+- ``trainer.rollout_buffer.clear_kv_cache_on_weight_sync`` (default ``true``): Clear vLLM's KV cache during
+  the pause. Clearing it also preempts requests when ``pause_mode=keep``.
 - ``trainer.rollout_buffer.object_store_root`` (default ``null``): Directory, usually an S3 prefix, that holds
   each trainable group as its own object. ``null`` keeps groups only in Ray's object store. See `Checkpointing`_.
 - ``trainer.algorithm.dynamic_sampling.type``: ``filter`` discards groups without enough reward spread as they

@@ -11,6 +11,7 @@ import ray
 import torch
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from transformers import PretrainedConfig
 from ray.util.placement_group import (
     placement_group,
     PlacementGroupSchedulingStrategy,
@@ -39,8 +40,13 @@ from marinskyrl.distillation import (
     compile_distillation_plan_from_config,
     validate_distillation_runtime_support,
 )
-from marinskyrl.inference_placement import validate_expert_block_transport
-from marinskyrl.runtime_options import GDNBackend, R3Transport
+from marinskyrl.inference_placement import (
+    expert_block_auto_problems,
+    expert_block_transport_problems,
+    validate_expert_block_transport,
+)
+from marinskyrl.resource_locator import is_cloud_uri
+from marinskyrl.runtime_options import GDNBackend, PauseMode, R3Transport, WeightSyncTransport
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from .algorithm_registry import (
@@ -625,6 +631,28 @@ def validate_cfg(cfg: DictConfig):
         algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
 
+    PauseMode(cfg.trainer.rollout_buffer.pause_mode)
+    max_in_flight = cfg.trainer.rollout_buffer.max_in_flight
+    if max_in_flight is not None and (type(max_in_flight) is not int or max_in_flight < 1):
+        raise ValueError("trainer.rollout_buffer.max_in_flight must be a positive integer or null")
+    if type(cfg.trainer.rollout_buffer.clear_kv_cache_on_weight_sync) is not bool:
+        raise ValueError("trainer.rollout_buffer.clear_kv_cache_on_weight_sync must be a boolean")
+    if type(cfg.trainer.rollout_buffer.first_token_admission) is not bool:
+        raise ValueError("trainer.rollout_buffer.first_token_admission must be a boolean")
+    if cfg.trainer.rollout_buffer.first_token_admission:
+        if cfg.trainer.rollout_buffer.max_staleness_steps < 1:
+            raise ValueError("first_token_admission requires trainer.rollout_buffer.max_staleness_steps >= 1")
+        if (
+            cfg.generator.backend != "vllm"
+            or not cfg.generator.run_engines_locally
+            or cfg.trainer.placement.colocate_all
+        ):
+            raise ValueError("first_token_admission requires local, non-colocated vLLM engines")
+        if (
+            cfg.trainer.rollout_buffer.pause_mode == PauseMode.KEEP
+            and not cfg.trainer.rollout_buffer.clear_kv_cache_on_weight_sync
+        ):
+            raise ValueError("first_token_admission requires weight syncs to preempt in-flight requests")
     behavior_clip = cfg.trainer.algorithm.policy_loss_type == "behavior_clip"
     if behavior_clip and cfg.trainer.algorithm.use_tis:
         raise ValueError(
@@ -707,6 +735,38 @@ def validate_cfg(cfg: DictConfig):
 
     if cfg.generator.engine_init_timeout_seconds <= 0:
         raise ValueError("generator.engine_init_timeout_seconds must be greater than zero")
+
+
+def policy_model_config(model: DictConfig) -> dict | None:
+    """The policy's parsed ``config.json``, or ``None`` when it sits in object storage or cannot be read."""
+    if is_cloud_uri(model.path):
+        return None
+    try:
+        config, _ = PretrainedConfig.get_config_dict(model.path, revision=model.get("revision"))
+    except OSError as error:
+        logger.warning(f"Cannot read the policy's config.json at {model.path!r}: {error}")
+        return None
+    return config
+
+
+def resolve_weight_sync_transport(cfg: DictConfig) -> None:
+    """Replace ``auto`` with ``expert_block`` when the run meets every requirement of it, else with ``broadcast``."""
+    generator = cfg.generator
+    if generator.weight_sync_transport != WeightSyncTransport.AUTO:
+        logger.info(f"generator.weight_sync_transport={generator.weight_sync_transport}")
+        return
+    problems = expert_block_transport_problems(cfg)
+    if not problems:
+        engine_init_kwargs = OmegaConf.to_container(generator.engine_init_kwargs, resolve=True)
+        problems.extend(expert_block_auto_problems(engine_init_kwargs, policy_model_config(cfg.trainer.policy.model)))
+    if problems:
+        generator.weight_sync_transport = WeightSyncTransport.BROADCAST.value
+        logger.info(
+            "generator.weight_sync_transport=auto resolved to broadcast; expert_block requires: " + "; ".join(problems)
+        )
+    else:
+        generator.weight_sync_transport = WeightSyncTransport.EXPERT_BLOCK.value
+        logger.info("generator.weight_sync_transport=auto resolved to expert_block")
 
 
 def validate_batch_invariant_config(cfg: DictConfig) -> None:
