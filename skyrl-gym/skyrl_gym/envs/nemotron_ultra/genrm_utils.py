@@ -183,6 +183,9 @@ def generate_comparison_pairs(strategy: str, num_responses: int) -> List[Tuple[i
 # =============================================================================
 
 
+_JUDGE_ERROR_PREVIEW_CHARACTERS = 2000
+
+
 def parse_genrm_output(output: str) -> Tuple[float, float, float]:
     """Read the final complete GenRM object and require finite numeric scores."""
     decoder = json.JSONDecoder()
@@ -192,19 +195,23 @@ def parse_genrm_output(output: str) -> Tuple[float, float, float]:
         try:
             parsed, consumed = decoder.raw_decode(output[start:])
         except json.JSONDecodeError as error:
-            raise GenRMOutputParseError(f"Incomplete GenRM JSON: {output[-2000:]}") from error
+            raise GenRMOutputParseError(
+                f"Incomplete GenRM JSON: {output[-_JUDGE_ERROR_PREVIEW_CHARACTERS:]}"
+            ) from error
         cursor = start + consumed
     if isinstance(parsed, dict) and isinstance(parsed.get("overall"), dict):
         parsed = parsed["overall"]
     keys = ("score_1", "score_2", "ranking")
     if not isinstance(parsed, dict) or not all(key in parsed for key in keys):
-        raise GenRMOutputParseError(f"Missing GenRM scores: {output[-2000:]}")
+        raise GenRMOutputParseError(f"Missing GenRM scores: {output[-_JUDGE_ERROR_PREVIEW_CHARACTERS:]}")
     values = tuple(parsed[key] for key in keys)
     if any(type(value) not in (int, float) or not math.isfinite(value) for value in values):
-        raise GenRMOutputParseError(f"Nonfinite or nonnumeric GenRM scores: {output[-2000:]}")
+        raise GenRMOutputParseError(
+            f"Nonfinite or nonnumeric GenRM scores: {output[-_JUDGE_ERROR_PREVIEW_CHARACTERS:]}"
+        )
     first, second, ranking = map(float, values)
     if not (1 <= first <= 5 and 1 <= second <= 5 and 1 <= ranking <= 6):
-        raise GenRMOutputParseError(f"GenRM scores outside their ranges: {output[-2000:]}")
+        raise GenRMOutputParseError(f"GenRM scores outside their ranges: {output[-_JUDGE_ERROR_PREVIEW_CHARACTERS:]}")
     return first, second, ranking
 
 

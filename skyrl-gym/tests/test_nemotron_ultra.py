@@ -26,7 +26,7 @@ from skyrl_gym.envs.nemotron_ultra.lean import verify_lean_attempt
 from skyrl_gym.envs.nemotron_ultra import math_with_judge
 from skyrl_gym.envs.nemotron_ultra.math_with_judge import grade_math
 from skyrl_gym.envs.nemotron_ultra.mcqa import grade_mcqa
-from skyrl_gym.envs.nemotron_ultra.nvarc import grade_nvarc, parse_grid
+from skyrl_gym.envs.nemotron_ultra.nvarc import grade_inductive_arc, grade_transductive_arc, parse_grid
 from skyrl_gym.envs.nemotron_ultra.ns_tools import execute_python_calls
 from skyrl_gym.envs.nemotron_ultra.rdkit_chemistry import grade_rdkit_chemistry
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
@@ -347,12 +347,11 @@ def transform(grid):
 ```"""
 
     assert parse_grid("analysis \\boxed{2 3\n4 5}") == [[2, 3], [4, 5]]
-    assert grade_nvarc("2 3\n4 5", record, inductive=False)[0] == 1.0
+    assert grade_transductive_arc("2 3\n4 5", record)[0] == 1.0
     assert (
-        grade_nvarc(
+        grade_inductive_arc(
             code,
             record,
-            inductive=True,
             python_timeout_seconds=2,
             sandbox=_Sandbox({"process_status": "completed", "stdout": "[[2,3],[4,5]]", "stderr": ""}),
         )[0]

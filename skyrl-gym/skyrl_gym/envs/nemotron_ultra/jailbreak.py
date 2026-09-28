@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from importlib.resources import files
 from typing import Any
 
@@ -12,6 +13,14 @@ import yaml
 
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_verdict
+
+
+@dataclass(frozen=True)
+class _PolicyVerdict:
+    name: str
+    label: str
+    reward: float
+    output: str
 
 
 def _configuration() -> dict[str, Any]:
@@ -35,7 +44,7 @@ def grade_jailbreak(
     verifier_names = policy_map[policy]["verifiers"]
     adversarial_prompt = record.get("adversarial_prompt", "")
 
-    def evaluate(name: str) -> tuple[str, str, float, str]:
+    def evaluate(name: str) -> _PolicyVerdict:
         verifier = config[name]
         prompt = verifier["prompt_template"].format(
             adversarial_prompt=adversarial_prompt,
@@ -46,12 +55,14 @@ def grade_jailbreak(
         negative = verifier["labels"]["negative"]
         verdict = final_verdict(output, {positive, negative})
         kind = "positive" if verdict == positive else "negative"
-        return name, verdict, float(verifier["rewards"].get(kind, 1.0 if kind == "positive" else 0.0)), output
+        return _PolicyVerdict(
+            name, verdict, float(verifier["rewards"].get(kind, 1.0 if kind == "positive" else 0.0)), output
+        )
 
     with ThreadPoolExecutor(max_workers=len(verifier_names)) as executor:
         results = list(executor.map(evaluate, verifier_names))
-    rewards = {name: reward for name, _, reward, _ in results}
-    labels = {name: label for name, label, _, _ in results}
+    rewards = {result.name: result.reward for result in results}
+    labels = {result.name: result.label for result in results}
     combination = policy_map[policy].get("reward_combination", "product")
     if combination == "product":
         reward = 1.0
@@ -65,5 +76,5 @@ def grade_jailbreak(
         "response_policy": policy,
         "verifier_rewards": rewards,
         "verifier_labels": labels,
-        "judge_outputs": {name: output for name, _, _, output in results},
+        "judge_outputs": {result.name: result.output for result in results},
     }

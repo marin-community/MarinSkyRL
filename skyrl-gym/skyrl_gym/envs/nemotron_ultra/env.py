@@ -25,7 +25,7 @@ from skyrl_gym.envs.nemotron_ultra.judge_verifiers import grade_abstention, grad
 from skyrl_gym.envs.nemotron_ultra.lean import verify_lean_attempt
 from skyrl_gym.envs.nemotron_ultra.math_with_judge import grade_math
 from skyrl_gym.envs.nemotron_ultra.mcqa import grade_mcqa
-from skyrl_gym.envs.nemotron_ultra.nvarc import grade_nvarc
+from skyrl_gym.envs.nemotron_ultra.nvarc import grade_inductive_arc, grade_transductive_arc
 from skyrl_gym.envs.nemotron_ultra.ns_tools import execute_python_calls
 from skyrl_gym.envs.nemotron_ultra.rdkit_chemistry import grade_rdkit_chemistry
 from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
@@ -214,13 +214,11 @@ class NemotronUltraEnv(BaseTextEnv):
         elif self.agent == "rdkit_chemistry_agent":
             reward, details = grade_rdkit_chemistry(action, self.record)
             diagnostics.update(details)
-        elif self.agent in {"nvarc_inductive_simple_agent", "nvarc_transductive_simple_agent"}:
-            reward, details = grade_nvarc(
-                action,
-                self.record,
-                inductive=self.agent.startswith("nvarc_inductive_"),
-                sandbox=self.sandbox,
-            )
+        elif self.agent == "nvarc_inductive_simple_agent":
+            reward, details = grade_inductive_arc(action, self.record, sandbox=self.sandbox)
+            diagnostics.update(details)
+        elif self.agent == "nvarc_transductive_simple_agent":
+            reward, details = grade_transductive_arc(action, self.record)
             diagnostics.update(details)
         elif self.agent == "code_gen_simple_agent":
             reward, details = grade_code(

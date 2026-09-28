@@ -1215,7 +1215,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     (dict(message) for message in reversed(messages) if message.get("role") == "assistant"),
                     {},
                 )
-                response_objects.append(response_object(assistant_message, outputs[index].evidence.response or ""))
+                response_objects.append(response_object(assistant_message))
             try:
                 rewards, metrics = await asyncio.to_thread(
                     grade_genrm_group,

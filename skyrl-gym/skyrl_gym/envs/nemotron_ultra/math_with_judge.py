@@ -8,6 +8,7 @@ import contextlib
 import multiprocessing as mp
 import re
 import threading
+from enum import StrEnum
 from io import StringIO
 from typing import Any, Protocol
 
@@ -47,10 +48,18 @@ def _strip_delimiters(value: str) -> str:
     return value
 
 
+class MathEquivalence(StrEnum):
+    EXACT = "exact"
+    UP_TO_CONSTANT = "up_to_constant"
+
+
+# Bound subprocesses across all environment instances in the driver.
 _SYMBOLIC_SLOTS = threading.BoundedSemaphore(8)
 
 
-def _library_child(expected: str, generated: str, connection, indefinite_integral: bool = False) -> None:
+def _library_child(
+    expected: str, generated: str, connection, equivalence: MathEquivalence = MathEquivalence.EXACT
+) -> None:
     verifier = math_metric(
         gold_extraction_target=(LatexExtractionConfig(),),
         pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
@@ -66,7 +75,7 @@ def _library_child(expected: str, generated: str, connection, indefinite_integra
                 (prediction for prediction in predictions if any(grader.verify(gold, prediction) for gold in golds)),
                 predictions[0] if predictions else None,
             )
-        if not score and indefinite_integral:
+        if not score and equivalence is MathEquivalence.UP_TO_CONSTANT:
             golds = parse(expected, extraction_config=[LatexExtractionConfig()])
             predictions = parse(generated, extraction_config=[LatexExtractionConfig()])
             for gold in golds:
@@ -83,13 +92,17 @@ def _library_child(expected: str, generated: str, connection, indefinite_integra
 
 
 def symbolic_math_reward(
-    expected: str, generated: str, *, timeout_seconds: float = 10.0, indefinite_integral: bool = False
+    expected: str,
+    generated: str,
+    *,
+    timeout_seconds: float = 10.0,
+    equivalence: MathEquivalence = MathEquivalence.EXACT,
 ) -> tuple[float, str | None]:
     # Verification runs from Ray worker threads. A fork server preserves
     # subprocess isolation without forking the multithreaded worker itself.
     context = mp.get_context("forkserver")
     receiving, sending = context.Pipe(duplex=False)
-    process = context.Process(target=_library_child, args=(expected, generated, sending, indefinite_integral))
+    process = context.Process(target=_library_child, args=(expected, generated, sending, equivalence))
     process.start()
     sending.close()
     process.join(timeout_seconds)
@@ -138,7 +151,7 @@ def grade_math(
                 record["expected_answer"],
                 symbolic_candidate,
                 timeout_seconds=timeout_seconds,
-                indefinite_integral=integration,
+                equivalence=MathEquivalence.UP_TO_CONSTANT if integration else MathEquivalence.EXACT,
             )
             if boxed is not None or pure_expression
             else (0.0, None)

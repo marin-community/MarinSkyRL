@@ -19,7 +19,7 @@ from skyrl_gym.envs.nemotron_ultra.genrm_utils import (
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
 
 
-def response_object(assistant_message: dict[str, Any], fallback_text: str) -> dict[str, Any]:
+def response_object(assistant_message: dict[str, Any]) -> dict[str, Any]:
     """Rebuild the Response-API fields consumed by NVIDIA's GenRM utilities."""
     output = []
     reasoning = assistant_message.get("reasoning_content")

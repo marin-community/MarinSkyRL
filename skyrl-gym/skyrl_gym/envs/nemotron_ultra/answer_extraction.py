@@ -2,6 +2,8 @@
 
 import re
 
+from skyrl_gym.envs.aime.utils import last_boxed_only_string, remove_boxed
+
 
 def final_answer_text(text: str) -> str:
     """Remove complete reasoning blocks; an unfinished block has no answer."""
@@ -15,16 +17,8 @@ def final_answer_text(text: str) -> str:
 
 
 def last_boxed_answer(text: str) -> str | None:
-    index = text.rfind(r"\boxed{")
-    if index < 0:
-        return None
-    start = index + len(r"\boxed{")
-    depth = 1
-    for cursor in range(start, len(text)):
-        depth += (text[cursor] == "{") - (text[cursor] == "}")
-        if depth == 0:
-            return text[start:cursor].strip()
-    return None
+    boxed = last_boxed_only_string(text)
+    return None if boxed is None else remove_boxed(boxed).strip()
 
 
 def final_verdict(text: str, labels: set[str]) -> str:

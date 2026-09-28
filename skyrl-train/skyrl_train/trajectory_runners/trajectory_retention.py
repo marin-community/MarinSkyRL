@@ -40,6 +40,7 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
     NormalizedReward,
     aggregate_reward_shaping_components,
 )
+from skyrl_gym.verification import VerificationResult
 from skyrl_train.json_serialization import canonical_json_bytes, to_jsonable
 from skyrl_train.io import io
 
@@ -219,7 +220,7 @@ class TrajectoryRecord:
     reward: _RewardTrace
     disposition: _DispositionTrace
     verifier: VerifierTestCollection | None
-    verification_result: dict[str, Any] | None
+    verification_result: VerificationResult | None
     metrics: dict[str, Any]
     provenance: _ProvenanceTrace
 

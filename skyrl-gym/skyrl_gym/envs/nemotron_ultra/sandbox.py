@@ -11,6 +11,8 @@ import requests
 import threading
 
 
+MAX_VERIFIER_OUTPUT_CHARACTERS = 65536
+# Share the limit across clients so increasing Gym workers cannot exhaust the sandbox.
 _SANDBOX_SLOTS = threading.BoundedSemaphore(16)
 
 
@@ -60,7 +62,7 @@ class SandboxClient:
         return value
 
     def close_session(self, session_id: str) -> None:
-        """Delete a used session through the same sticky worker route."""
+        """Release a used session; already-deleted sessions are accepted."""
         if session_id not in self._requested_sessions:
             return
         response = requests.delete(

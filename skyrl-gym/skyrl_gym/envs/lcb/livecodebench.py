@@ -830,7 +830,7 @@ def lcb_execution_result(
     execution_mode=TestExecutionMode.collect_all,
     limits=None,
 ):
-    """Return one pass/failure result per executed test case.
+    """Return per-test pass/failure results and execution diagnostics.
 
     A process-level timeout catches extreme cases not handled by the per-test alarms.
     Stop-on-failure mode preserves the binary scorer's original short circuit. Each

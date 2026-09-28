@@ -9,7 +9,7 @@ import re
 from typing import Any
 
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_answer_text, last_boxed_answer
-from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
+from skyrl_gym.envs.nemotron_ultra.sandbox import MAX_VERIFIER_OUTPUT_CHARACTERS, SandboxClient
 
 
 def _valid_grid(value: Any) -> bool:
@@ -58,7 +58,9 @@ def _execute_python(code: str, input_grid: list[list[int]], timeout_seconds: int
         + f"_arc_result = transform({input_grid!r})\n"
         + "print(json.dumps(_arc_result.tolist() if isinstance(_arc_result, __import__('numpy').ndarray) else _arc_result))"
     )
-    result = sandbox.execute(script, language="python", timeout_seconds=timeout_seconds, max_output_characters=65536)
+    result = sandbox.execute(
+        script, language="python", timeout_seconds=timeout_seconds, max_output_characters=MAX_VERIFIER_OUTPUT_CHARACTERS
+    )
     if result.get("process_status") in {"error", "unknown"}:
         raise RuntimeError(f"ARC sandbox unavailable: {result}")
     if result.get("process_status") != "completed":
@@ -70,29 +72,34 @@ def _execute_python(code: str, input_grid: list[list[int]], timeout_seconds: int
     return (value if _valid_grid(value) else None), result
 
 
-def grade_nvarc(
-    text: str,
-    record: dict[str, Any],
-    *,
-    inductive: bool,
-    python_timeout_seconds: int = 30,
-    sandbox: SandboxClient | None = None,
-) -> tuple[float, dict[str, Any]]:
-    if inductive:
-        code = _extract_python(text)
-        execution = None
-        predicted = None
-        if code is not None:
-            if sandbox is None:
-                raise ValueError("Inductive ARC requires a configured execution sandbox")
-            predicted, execution = _execute_python(code, record["test_input"], python_timeout_seconds, sandbox)
-    else:
-        predicted = parse_grid(text)
+def grade_transductive_arc(text: str, record: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    predicted = parse_grid(text)
     correct = predicted is not None and predicted == record["expected_output"]
     return float(correct), {
-        "agent_mode": "inductive" if inductive else "transductive",
+        "agent_mode": "transductive",
         "extraction_successful": predicted is not None,
         "exact_match": correct,
         "predicted_output": predicted,
-        **({"execution_output": execution} if inductive else {}),
+    }
+
+
+def grade_inductive_arc(
+    text: str,
+    record: dict[str, Any],
+    *,
+    sandbox: SandboxClient,
+    python_timeout_seconds: int = 30,
+) -> tuple[float, dict[str, Any]]:
+    code = _extract_python(text)
+    execution = None
+    predicted = None
+    if code is not None:
+        predicted, execution = _execute_python(code, record["test_input"], python_timeout_seconds, sandbox)
+    correct = predicted is not None and predicted == record["expected_output"]
+    return float(correct), {
+        "agent_mode": "inductive",
+        "extraction_successful": predicted is not None,
+        "exact_match": correct,
+        "predicted_output": predicted,
+        "execution_output": execution,
     }

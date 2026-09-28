@@ -1,3 +1,5 @@
+from dataclasses import asdict
+from skyrl_gym.verification import VerificationResult
 import gzip
 import json
 from pathlib import Path
@@ -797,20 +799,18 @@ def test_retained_record_preserves_calls_observations_and_verifier_diagnostics()
         },
         {"role": "tool", "tool_call_id": "call-1", "content": "Sandbox connection refused"},
     ]
-    verdict = {
-        "status": "error",
-        "score": None,
-        "reason": "verifier unavailable",
-        "diagnostics": {
+    verdict = VerificationResult.error(
+        "verifier unavailable",
+        diagnostics={
             "compiler_output": {"stderr": "error: bad tactic"},
             "judge_output": "malformed verdict",
         },
-    }
+    )
     output["evidence_messages"] = [messages, [], []]
     output["verification_results"] = [verdict, None, None]
     record = build_trajectory_records(
         _input(), output, _config(Path("/unused")), _Tokenizer(), runner_name="SkyRLGymTrajectoryRunner"
     )[0].to_json()
     assert record["response"]["messages"] == messages
-    assert record["verification_result"] == verdict
+    assert record["verification_result"] == asdict(verdict)
     assert record["response"]["token_ids"] == [10, 11]
