@@ -37,7 +37,7 @@ from skyrl_train.rollouts.buffer import (
     RolloutGroup,
     RolloutTask,
 )
-from skyrl_train.rollouts.loader import GroupLoader, GroupLoaderState, PromptGroupDataset, PromptOrder, SeededPasses
+from skyrl_train.rollouts.loader import PromptLoader, PromptLoaderState, PromptGroupDataset, PromptOrder, SeededPasses
 from skyrl_train.rollouts.payloads import MemoryPayloads, ObjectStorePayloads, PayloadStore
 from skyrl_train.rollout_observability import dispatch_wait, observe_rollout_call, record_group_disposition
 from skyrl_train.rollouts.workers import RolloutWorkers
@@ -51,7 +51,7 @@ _T = TypeVar("_T")
 
 @dataclass(frozen=True)
 class RolloutRequestSpec:
-    """How the coordinator turns one prompt group into a trajectory request."""
+    """How the coordinator turns one prompt into a trajectory request."""
 
     samples_per_prompt: int
     sampling_params: dict
@@ -80,7 +80,7 @@ class TrainingContextState:
     for payloads in memory, or the URI of its object under ``object_store_root``.
     """
 
-    loader: GroupLoaderState
+    loader: PromptLoaderState
     ready: list[ReadyRollout]
     object_store_root: str | None
 
@@ -103,9 +103,9 @@ def prompt_order_from_config(config: DictConfig, dataset: PromptGroupDataset) ->
 
 
 class TrainingContext:
-    """The group loader, the rollout buffer, and the rollout tasks in flight between them.
+    """The prompt loader, the rollout buffer, and the rollout tasks in flight between them.
 
-    ``start`` runs the coordinator loop: for every lease the buffer grants, it takes the next prompt group
+    ``start`` runs the coordinator loop: for every lease the buffer grants, it takes the next prompt
     from the loader and hands one task to a rollout worker, which writes the result to the buffer. A failed
     task fails training: the next ``next_batch`` or ``publish`` raises its error. With ``rollout_spans`` it
     records each rollout call, the loop's waits, and every group's disposition.
@@ -117,7 +117,7 @@ class TrainingContext:
 
     def __init__(
         self,
-        loader: GroupLoader,
+        loader: PromptLoader,
         config: RolloutBufferConfig,
         content_policy: RolloutContentPolicy,
         request_spec: RolloutRequestSpec,
@@ -171,7 +171,7 @@ class TrainingContext:
         )
         object_store_root = config.trainer.rollout_buffer.object_store_root
         return cls(
-            GroupLoader(dataset, prompt_order_from_config(config, dataset), batch_size=batch_size),
+            PromptLoader(dataset, prompt_order_from_config(config, dataset), batch_size=batch_size),
             buffer_config,
             RolloutContentPolicy(admission, selection),
             RolloutRequestSpec.from_config(config),
@@ -297,7 +297,7 @@ class TrainingContext:
                     lease = await self._buffer.acquire_lease.remote()
                 with self._wait("prompt"):
                     async with self._uids_released:
-                        prompt = await self._uids_released.wait_for(lambda: self.loader.next_group(self._live_uids))
+                        prompt = await self._uids_released.wait_for(lambda: self.loader.next_prompt(self._live_uids))
                         self._live_uids[prompt["uid"]] += 1
                 task = RolloutTask(lease, prompt, self._request_spec.request(prompt, lease.policy_step))
                 self._in_flight[lease.lease_id] = task

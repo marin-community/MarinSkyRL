@@ -631,6 +631,10 @@ def validate_cfg(cfg: DictConfig):
             "trainer.algorithm.policy_loss_type=behavior_clip cannot be combined with use_tis=true; "
             "behavior clipping already uses the full rollout importance ratio"
         )
+    assert cfg.trainer.rollout_buffer.max_staleness_steps == 0 or behavior_clip or cfg.trainer.algorithm.use_tis, (
+        "trainer.rollout_buffer.max_staleness_steps > 0 trains on rollouts from older policies and needs an "
+        "off-policy correction: set trainer.algorithm.use_tis=true or trainer.algorithm.policy_loss_type=behavior_clip"
+    )
 
     behavior_logprobs_required = rollout_logprobs_enabled(cfg.trainer.algorithm)
     if behavior_logprobs_required:

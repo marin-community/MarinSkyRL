@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 from transformers import AutoTokenizer
 
 from skyrl_train.rollouts.context import TrainingContextState
-from skyrl_train.rollouts.loader import GroupLoaderState
+from skyrl_train.rollouts.loader import PromptLoaderState
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.trainer import RayPPOTrainer
 from tests.gpu.utils import import_worker, ray_init_for_tests
@@ -33,7 +33,7 @@ from skyrl_train.entrypoints.main_base import config_dir
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 NUM_GPUS = 2
 ROLLOUT_STATE = TrainingContextState(
-    loader=GroupLoaderState(order={"epoch": 0, "position": 2}, retries=[]), ready=[], object_store_root=None
+    loader=PromptLoaderState(order={"epoch": 0, "position": 2}, retries=[]), ready=[], object_store_root=None
 )
 
 

@@ -64,7 +64,7 @@ How It Works
 Leases and the staleness bound
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The trainer's dispatcher asks the buffer for a lease, takes the next prompt from the group loader, and hands one
+The trainer's dispatcher asks the buffer for a lease, takes the next prompt from the prompt loader, and hands one
 task to a rollout worker. The worker generates the group and commits it to the buffer, which releases the lease.
 The loader walks the dataset in a seeded order and offers prompts awaiting regeneration before new ones.
 
@@ -141,11 +141,21 @@ Weight sync
 ~~~~~~~~~~~
 
 After each training step the trainer syncs the new weights to the inference engines and publishes the new policy
-step. While generation runs ahead of training, the sync pauses generation first. Pausing holds every engine's
-scheduler: in-flight requests stop where they are and later requests wait. On resume, in-flight requests continue
-from the tokens they already generated, now under the new weights. The runner never observes the pause, so any
-trajectory runner works without changes, whether a trajectory is mid-generation or interacting with its
-environment.
+step. While generation runs ahead of training, the sync pauses generation first. The vLLM engine aborts its
+in-flight requests, clears its KV and prefix caches, and holds its scheduler until the new weights are loaded.
+Requests that arrive during the pause wait for it to end.
+
+The inference engine client hides the abort from some requests but not all:
+
+- A non-streaming chat completion or a single-prompt ``generate`` call continues from the tokens it already
+  generated. Its response mixes tokens sampled before the pause under the old weights with tokens sampled after
+  it under the new ones.
+- A single-prompt ``/completions`` request is issued again from the start, once.
+- A streaming chat completion ends early with finish reason ``abort``, since a stream cannot be re-issued
+  mid-response. Agents that stream, such as OpenCode under Harbor, see that turn cut short.
+- A batched ``generate`` or ``/completions`` request has no pause handling and fails if it starts during a pause.
+
+A trajectory that is interacting with its environment when the sync happens is unaffected.
 
 Checkpointing
 ~~~~~~~~~~~~~

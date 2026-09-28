@@ -17,7 +17,7 @@ from skyrl_train.rollouts.buffer import (
     RolloutWriter,
 )
 from skyrl_train.rollouts.context import RolloutRequestSpec, TrainingContext, TrainingContextState
-from skyrl_train.rollouts.loader import GroupLoader, GroupLoaderState, JudgedGroup, PromptOrder, SeededPasses
+from skyrl_train.rollouts.loader import PromptLoader, PromptLoaderState, JudgedGroup, PromptOrder, SeededPasses
 from skyrl_train.rollouts.payloads import MemoryPayloads, ObjectStorePayloads, PayloadStore
 
 SAMPLES_PER_PROMPT = 2
@@ -136,7 +136,7 @@ def _context(
     payloads: PayloadStore | None = None,
 ) -> TrainingContext:
     return TrainingContext(
-        GroupLoader(_Prompts(uids), order or SeededPasses(len(uids), seed=0, shuffle=False), batch_size=batch_size),
+        PromptLoader(_Prompts(uids), order or SeededPasses(len(uids), seed=0, shuffle=False), batch_size=batch_size),
         RolloutBufferConfig(batch_size, max_in_flight, max_staleness_steps, batch_policy, None, None),
         CONTENT_POLICY,
         RolloutRequestSpec(samples_per_prompt=SAMPLES_PER_PROMPT, sampling_params={}, environment_class="test"),
@@ -233,7 +233,7 @@ async def test_resume_does_not_regenerate_a_committed_group(ray_module):
     group = RolloutGroup(_batch(), "c", 1, _prompt("c"))
     committed = ReadyRollout("committed", 1, 1, group.prompt, CONTENT_POLICY.verdict(group), [group], None)
     # The order's next draw is row "c", which the checkpoint already holds.
-    state = TrainingContextState(GroupLoaderState({"epoch": 0, "position": 2}, []), [committed], None)
+    state = TrainingContextState(PromptLoaderState({"epoch": 0, "position": 2}, []), [committed], None)
     workers = _Workers()
     context = _context(["a", "b", "c"], workers, batch_size=2, max_in_flight=4)
     await context.load_state_dict(state)

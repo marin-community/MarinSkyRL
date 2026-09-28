@@ -48,6 +48,8 @@ COLOCATE_ALL="${COLOCATE_ALL:-true}"
 # A directory for rollout payloads, one object per group, in the cluster's own region; unset keeps them in
 # Ray's object store.
 OBJECT_STORE_ROOT="${OBJECT_STORE_ROOT:-null}"
+# Positive staleness trains on rollouts from older policies, which needs an off-policy correction.
+if (( MAX_STALENESS_STEPS > 0 )); then POLICY_LOSS_TYPE=behavior_clip; else POLICY_LOSS_TYPE=regular; fi
 # Above 1, the run uses multi-turn GSM8K, which asks again after a wrong answer, and trains it step-wise.
 MAX_TURNS="${MAX_TURNS:-1}"
 if (( MAX_TURNS > 1 )); then
@@ -127,6 +129,7 @@ START=$(date +%s)
   "${STRATEGY_ARGS[@]}" \
   trainer.placement.colocate_all="$COLOCATE_ALL" \
   trainer.rollout_buffer.max_staleness_steps="$MAX_STALENESS_STEPS" \
+  trainer.algorithm.policy_loss_type="$POLICY_LOSS_TYPE" \
   trainer.rollout_buffer.object_store_root="$OBJECT_STORE_ROOT" \
   trainer.placement.policy_num_gpus_per_node=1 \
   trainer.placement.critic_num_gpus_per_node=1 \

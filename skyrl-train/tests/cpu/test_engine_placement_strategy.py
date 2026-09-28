@@ -188,6 +188,7 @@ def test_colocated_config_rejects_asynchronous_rollouts_before_allocation():
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.placement.colocate_all = True
     cfg.trainer.rollout_buffer.max_staleness_steps = 1
+    cfg.trainer.algorithm.policy_loss_type = "behavior_clip"
 
     with pytest.raises(ValueError, match="colocate_all requires"):
         validate_cfg(cfg)

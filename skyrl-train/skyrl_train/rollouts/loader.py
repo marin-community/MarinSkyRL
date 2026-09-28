@@ -1,4 +1,4 @@
-"""The training dataset as an endless sequence of prompt groups."""
+"""The training dataset as an endless sequence of prompts."""
 
 from __future__ import annotations
 
@@ -87,15 +87,15 @@ class SeededPasses:
 
 
 @dataclass(frozen=True)
-class GroupLoaderState:
+class PromptLoaderState:
     """The prompt order's position and the prompts awaiting regeneration."""
 
     order: dict[str, Any]
     retries: list[dict]
 
 
-class GroupLoader:
-    """Yield one prompt group at a time, re-offering prompts whose rollouts must be regenerated first.
+class PromptLoader:
+    """Yield one prompt at a time, re-offering prompts whose rollouts must be regenerated first.
 
     A batch trains at most one group per uid, so the loader never offers a uid that is live: already generating,
     or committed and not yet trained or discarded. A draw whose uid is live is dropped rather than generated as a
@@ -117,8 +117,8 @@ class GroupLoader:
         self._retries: collections.deque[dict] = collections.deque()
         self._scan_start = 0
 
-    def next_group(self, live: Collection[str]) -> dict | None:
-        """The next prompt group whose uid is not in ``live``, or None when every uid is live.
+    def next_prompt(self, live: Collection[str]) -> dict | None:
+        """The next prompt whose uid is not in ``live``, or None when every uid is live.
 
         Prompts awaiting regeneration come first, then up to two batches' worth of the prompt order's draws. If those
         draws find only live uids, a scan of the dataset from where the last scan stopped takes a free row, so an
@@ -150,10 +150,10 @@ class GroupLoader:
         """Report one training step's judged groups to the prompt order and return its metrics."""
         return self._order.observe(groups)
 
-    def state_dict(self) -> GroupLoaderState:
-        return GroupLoaderState(self._order.state_dict(), list(self._retries))
+    def state_dict(self) -> PromptLoaderState:
+        return PromptLoaderState(self._order.state_dict(), list(self._retries))
 
-    def load_state_dict(self, state: GroupLoaderState) -> None:
+    def load_state_dict(self, state: PromptLoaderState) -> None:
         self._order.load_state_dict(state.order)
         self._retries = collections.deque(state.retries)
 

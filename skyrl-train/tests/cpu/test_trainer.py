@@ -19,7 +19,7 @@ from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.group_admission import GroupAdvantageInvariant
 import skyrl_train.trainer as trainer_module
 from skyrl_train.rollouts.context import TrainingContextState
-from skyrl_train.rollouts.loader import GroupLoaderState
+from skyrl_train.rollouts.loader import PromptLoaderState
 from skyrl_train.trainer import CheckpointSnapshot, RayPPOTrainer
 from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.utils.policy_losses import ppo_policy_loss
@@ -1076,7 +1076,7 @@ def test_load_checkpoints_restores_rollout_state_only_when_requested(tmp_path, d
     checkpoint_path.mkdir()
     torch.save({"global_step": 12}, checkpoint_path / "trainer_state.pt")
     rollout_state = TrainingContextState(
-        loader=GroupLoaderState(order={"epoch": 0, "position": 7}, retries=[{"uid": "prompt-3"}]),
+        loader=PromptLoaderState(order={"epoch": 0, "position": 7}, retries=[{"uid": "prompt-3"}]),
         ready=[],
         object_store_root=None,
     )

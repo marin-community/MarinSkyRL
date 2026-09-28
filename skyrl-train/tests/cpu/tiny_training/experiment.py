@@ -52,6 +52,8 @@ class RolloutShape(StrEnum):
 
 
 MAX_STALENESS_STEPS = {TrainingMode.SYNC: 0, TrainingMode.ASYNC: 1}
+# Positive staleness needs an off-policy correction.
+POLICY_LOSS_TYPE = {TrainingMode.SYNC: "regular", TrainingMode.ASYNC: "behavior_clip"}
 MAX_TURNS = {RolloutShape.SINGLE_TURN: 1, RolloutShape.STEP_WISE: 2}
 N_SAMPLES_PER_PROMPT = 4
 # The async single-turn run draws prompts from an adaptive curriculum, which step-wise training does not support;
@@ -93,7 +95,11 @@ def tiny_training_config(
             "placement": {"colocate_all": False, "policy_num_gpus_per_node": 1},
             "policy": {"model": {"path": str(model_dir)}, "optimizer_config": {"lr": 1.0e-3}},
             # A stalled step fails with the buffer's state long before the test's subprocess timeout.
-            "algorithm": {"use_kl_loss": False, "group_admission": {"stall_timeout": STALL_TIMEOUT_SECONDS}},
+            "algorithm": {
+                "use_kl_loss": False,
+                "policy_loss_type": POLICY_LOSS_TYPE[mode],
+                "group_admission": {"stall_timeout": STALL_TIMEOUT_SECONDS},
+            },
             "rollout_buffer": {
                 "max_staleness_steps": MAX_STALENESS_STEPS[mode],
                 "max_in_flight": 8,

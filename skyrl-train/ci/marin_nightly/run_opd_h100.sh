@@ -16,6 +16,8 @@ SPEC="${SPEC:-ci/marin_nightly/specs/opd-qwen3-sync.json}"
 # so some trained groups come from an older policy than the one they train. The 8-row slice allows 4 steps.
 MAX_STEPS="${MAX_STEPS:-1}"
 MAX_STALENESS_STEPS="${MAX_STALENESS_STEPS:-0}"
+# Positive staleness trains on rollouts from older policies, which needs an off-policy correction.
+if (( MAX_STALENESS_STEPS > 0 )); then POLICY_LOSS_TYPE=behavior_clip; else POLICY_LOSS_TYPE=regular; fi
 source "$REPOSITORY_ROOT/skyrl-train/ci/marin_nightly/resolve_runtime.sh" \
   "$REPOSITORY_ROOT" "$NIGHTLY_RL_ENV" production
 
@@ -136,6 +138,7 @@ START=$(date +%s)
   trainer.epochs=1 \
   trainer.max_steps="$MAX_STEPS" \
   trainer.rollout_buffer.max_staleness_steps="$MAX_STALENESS_STEPS" \
+  trainer.algorithm.policy_loss_type="$POLICY_LOSS_TYPE" \
   trainer.train_batch_size=2 \
   trainer.policy_mini_batch_size=2 \
   trainer.micro_train_batch_size_per_gpu=1 \
