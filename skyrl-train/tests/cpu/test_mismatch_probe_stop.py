@@ -16,12 +16,14 @@ async def test_zero_update_probe_finalizes_without_training():
     trainer.colocate_all = False
     trainer.global_step = 0
     trainer.total_training_steps = 1
-    trainer.train_dataloader = [object()]
+    trainer.num_steps_per_epoch = 1
+    trainer.context = SimpleNamespace(start=MagicMock(side_effect=AssertionError("training batch was fetched")))
     trainer.all_startup_timings = {}
     trainer.all_timings = {}
     trainer.all_metrics = {}
     trainer._control = TrainerControl()
-    trainer.init_weight_sync_state = MagicMock()
+    trainer._init_weight_sync = AsyncMock()
+    trainer._record_run_configuration = MagicMock()
     trainer._start_draft_trainer = AsyncMock()
     trainer._sync_policy_for_rollouts = AsyncMock()
     trainer._log_startup_timings = MagicMock()

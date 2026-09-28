@@ -29,7 +29,6 @@ class AgentLoopOutput:
     disposition: TrainingDisposition
     loss_mask: List[int]
     env_metrics: Dict[str, Any]
-    captured_global_step: Optional[int] = None
     token_provenance: TokenProvenance = TokenProvenance.ENGINE
     error_treatment: Optional[str] = None
     engine_response_ids: Optional[List[int]] = None
@@ -104,6 +103,8 @@ class TrajectoryBatch(TypedDict):
     reward_shaping_loop_spans: Optional[List[List[RewardShapingLoopSpan]]]
     loop_advantages: Optional[List[List[float]]]
     reward_shaping_versions: Optional[List[int]]
+    verification_results: List[Optional[VerificationResult]]
+    evidence_messages: List[Optional[list[dict[str, Any]]]]
     verifier_tests: Optional[List[Optional[VerifierTestCollection]]]
     loss_masks: List[List[int]]
     stop_reasons: Optional[List[str]]
@@ -123,4 +124,3 @@ class TrajectoryBatch(TypedDict):
     teacher_route_keys: Optional[List[str]]
     is_last_step: Optional[List[bool]]
     exclude_from_baseline: Optional[List[bool]]
-    actual_global_step: Optional[int]

@@ -12,10 +12,10 @@ rollout_details and chat_history (see the two ``_maybe_*_opencode_*`` helpers).
 This module owns the *read* side. The log grows on every append during generation, so a
 naive cache re-parses the whole (10s-of-GB) file on every miss. ``LiteralLogStore`` reads
 only the bytes appended since the last call, but it must NOT retain the parsed rows
-either: every RolloutCoordinator ingests the ONE shared log, while ``release_trial`` can
-only drop the trials THIS process consumed. With K coordinators, the other (K-1)/K of the
+either: every rollout worker ingests the ONE shared log, while ``release_trial`` can
+only drop the trials THIS process consumed. With K workers, the other (K-1)/K of the
 log — parsed into Python objects at ~5x the raw bytes — was retained forever (measured:
-a 98 GB log became ~1.4 TiB of coordinator RSS across 4 coordinators in 17 h, ~85 GiB/h,
+a 98 GB log became ~1.4 TiB of worker RSS across 4 workers in 17 h, ~85 GiB/h,
 until the driver pod OOMed).
 
 So the index maps ``trial_id -> [(byte offset, length), ...]`` and payloads are parsed
@@ -231,7 +231,7 @@ class LiteralLogStore:
             state.spans.append(span)
             # trial_id is the string correlation id; ignore a malformed non-string (a
             # list/dict would be unhashable and crash the index build). The parsed
-            # ``entry`` is discarded here — retaining it is the RolloutCoordinator
+            # ``entry`` is discarded here — retaining it is the rollout worker
             # RSS leak this design exists to prevent.
             if isinstance(trial_id, str):
                 state.by_trial.setdefault(trial_id, []).append(span)

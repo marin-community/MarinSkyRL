@@ -194,7 +194,7 @@ class MismatchProbeCallback(TrainerCallback):
                 )
                 request["trajectory_ids"][0].repetition_id = repetition
                 request["probe_capture_token_identity"] = True
-                batches.append(await trainer.generate(request))
+                batches.append(await trainer.trajectory_runner.run(request))
                 seeds.append(seed)
                 sample_ids.append(f"{prompt['uid']}:{repetition}")
                 uids.append(prompt["uid"])

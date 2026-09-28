@@ -1,4 +1,4 @@
-"""Wall time and waits of each trajectory-runner call and of the async producer loop."""
+"""Wall time and waits of each rollout call and of the loop that dispatches rollout tasks."""
 
 import asyncio
 import contextlib
@@ -61,6 +61,7 @@ def async_phase_window(phase: str, *, step: int, enabled: bool) -> Iterator[None
 async def monitor_event_loop_lag(
     *,
     step_fn: Callable[[], int],
+    mode: str,
     interval: float = 1.0,
     clock: Callable[[], float] = time.perf_counter,
     wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -71,7 +72,7 @@ async def monitor_event_loop_lag(
         await wait(interval)
         event_loop_lag.record(
             max(0.0, clock() - expected),
-            attributes={"role": TRAINER_ROLE, "step": str(step_fn()), "mode": "async"},
+            attributes={"role": TRAINER_ROLE, "step": str(step_fn()), "mode": mode},
         )
 
 
@@ -152,8 +153,8 @@ def time_tokenization(func: Callable, *args, **kwargs):
 
 
 @contextlib.contextmanager
-def async_wait(name: str, *, step: int, enabled: bool) -> Iterator[None]:
-    """Measure a producer await outside the trajectory-runner call."""
+def dispatch_wait(name: str, *, step: int, mode: str, enabled: bool) -> Iterator[None]:
+    """Measure an await of the rollout dispatch loop outside the rollout call."""
     if not enabled:
         yield
         return
@@ -161,7 +162,7 @@ def async_wait(name: str, *, step: int, enabled: bool) -> Iterator[None]:
     try:
         yield
     finally:
-        publish_wait(name, [time.perf_counter() - started], step=step, mode="async")
+        publish_wait(name, [time.perf_counter() - started], step=step, mode=mode)
 
 
 async def run_environment(executor: Executor | None, func: Callable, *args, **kwargs):
@@ -192,12 +193,10 @@ async def run_environment(executor: Executor | None, func: Callable, *args, **kw
             observation.add_wait("env_resume", clock() - stamps[1])
 
 
-def record_group_disposition(
-    *, disposition: str, tokens: int, step: int, completed_at: float | None, admitted_at: float | None
-) -> None:
+def record_group_disposition(*, disposition: str, tokens: int, step: int, dwell_seconds: float | None) -> None:
+    """Count a group's fate and, when known, how long it waited in the buffer."""
     attributes = {"role": TRAINER_ROLE, "step": str(step), "disposition": disposition}
     groups.add(1, attributes=attributes)
     group_tokens.add(tokens, attributes=attributes)
-    if completed_at is not None:
-        finished = time.perf_counter() if admitted_at is None else admitted_at
-        buffer_dwell.record(finished - completed_at, attributes=attributes)
+    if dwell_seconds is not None:
+        buffer_dwell.record(dwell_seconds, attributes=attributes)
