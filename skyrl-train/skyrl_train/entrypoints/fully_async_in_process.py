@@ -1,11 +1,8 @@
 """Fully asynchronous training with the in-process SkyRL Gym trajectory runner.
 
-``skyrl_train.entrypoints.fully_async`` pairs ``FullyAsyncRayPPOTrainer`` with an
-HTTP-backed runner. That runner's plain chat path re-tokenizes generated text and
-returns neither behavior logprobs nor the student's top-k candidates, so it cannot
-feed ``student_selected_topk`` teacher evidence or truncated importance sampling.
-This entrypoint keeps the in-process runner ``main_base`` uses, which reports exact
-sampled token IDs, and changes only the trainer schedule.
+Keep the base entrypoint's runner selection, including the Nemotron router, and
+change only the trainer schedule. The separate ``fully_async`` entrypoint requires
+conversation multi-turn mode and a custom chat template.
 """
 
 import hydra
@@ -19,7 +16,6 @@ from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_dr
 class FullyAsyncInProcessExp(BasePPOExp):
     def uses_fully_async_trainer(self) -> bool:
         return True
-
 
 
 @ray.remote(num_cpus=1, max_retries=0)

@@ -172,7 +172,8 @@ def test_resume_requires_the_same_run_and_a_durable_checkpoint(native_run):
 
 def _compose(arguments):
     with initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
-        return compose(config_name="ppo_base_config", overrides=list(arguments))
+        # Exercise schedule validation without importing GPU-only FlashAttention in CPU CI.
+        return compose(config_name="ppo_base_config", overrides=[*arguments, "trainer.flash_attn=false"])
 
 
 def test_fully_async_schedule_keeps_the_per_prompt_cadence_of_the_synchronous_run():

@@ -29,7 +29,7 @@ from skyrl_train.io import io
 
 from cloud.iris.artifacts import fs_and_path
 from cloud.iris.open_mopd_fidelity import load_config
-from cloud.iris.rl_config_translation import RL_ENTRYPOINT_MODULES, RLEntrypoint
+from cloud.iris.rl_config_translation import RL_ENTRYPOINTS, RLEntrypoint
 from marinskyrl.checkpoint_paths import LATEST_CHECKPOINT_FILE
 from marinskyrl.resource_locator import join_resource_path
 
@@ -54,8 +54,8 @@ class Schedule(StrEnum):
 
 
 ENTRYPOINT_MODULES = {
-    Schedule.SYNC: RL_ENTRYPOINT_MODULES[RLEntrypoint.STANDARD],
-    Schedule.FULLY_ASYNC: RL_ENTRYPOINT_MODULES[RLEntrypoint.FULLY_ASYNC_IN_PROCESS],
+    Schedule.SYNC: RL_ENTRYPOINTS[RLEntrypoint.STANDARD],
+    Schedule.FULLY_ASYNC: RL_ENTRYPOINTS[RLEntrypoint.FULLY_ASYNC_IN_PROCESS],
 }
 
 
