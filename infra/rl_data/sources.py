@@ -1287,7 +1287,6 @@ def _iter_jsonl_rows(path: Path) -> Iterable[Mapping[str, Any]]:
 
 
 def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping[str, Any]):
-    import datasets
     from huggingface_hub import hf_hub_download
 
     # Local import breaks the source/sidechannel module cycle while keeping the
@@ -1304,7 +1303,15 @@ def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping
     rows = _skip_source_rows(source, _iter_jsonl_rows(Path(local_path)), parameters)
     rows = bind_tasktrove_swe_proxies(rows, load_tasktrove_swe_proxy_index())
 
-    placeholder_sources = {
+    placeholder_sources = load_nemotron_ultra_placeholder_sources()
+    return (restore_nemotron_ultra_placeholder(row, placeholder_sources) for row in rows)
+
+
+def load_nemotron_ultra_placeholder_sources() -> dict[tuple[str, str], Any]:
+    """Load the pinned datasets that NVIDIA's math placeholder rows point into."""
+    import datasets
+
+    return {
         (DAPO_MATH_DATASET, "train"): datasets.load_dataset(
             DAPO_MATH_DATASET,
             split="train",
@@ -1316,7 +1323,6 @@ def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping
             revision=NEMOTRON_ULTRA_SKYWORK_REVISION,
         ),
     }
-    return (_restore_nemotron_ultra_placeholder(row, placeholder_sources) for row in rows)
 
 
 def _unwrap_nemotron_answer(raw: Any) -> str:
@@ -1336,7 +1342,7 @@ def _unwrap_nemotron_answer(raw: Any) -> str:
     return stripped
 
 
-def _restore_nemotron_ultra_placeholder(
+def restore_nemotron_ultra_placeholder(
     row: Mapping[str, Any],
     sources: Mapping[tuple[str, str], Any],
 ) -> Mapping[str, Any]:
