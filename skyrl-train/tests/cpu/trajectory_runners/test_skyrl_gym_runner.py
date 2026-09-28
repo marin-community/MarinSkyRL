@@ -1524,6 +1524,26 @@ def test_pass_at_n_uses_unshaped_outcomes():
     assert first_pass_at_n == second_pass_at_n == 0.5
 
 
+def test_pass_at_n_honors_partial_credit_and_failed_verifiers():
+    batch: TrajectoryBatch = {
+        "rewards": [0.001, 0.3, 1.0, 1.0, 0.7, 0.8],
+        "verification_results": [
+            VerificationResult.verified(0.001, passed=False),
+            VerificationResult.verified(0.3, passed=False),
+            VerificationResult.verified(1.0, passed=True),
+            VerificationResult.error("judge unavailable"),
+            VerificationResult.verified(0.7),
+            None,
+        ],
+    }
+    mean_reward, pass_at_n = get_metrics_from_trajectory_batch(
+        batch, ["partial", "partial", "full", "error", "numeric", "harbor"]
+    )
+
+    assert mean_reward == pytest.approx(3.801 / 6)
+    assert pass_at_n == pytest.approx(3 / 5)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("batched", [True, False])
 @patch("skyrl_gym.make")
