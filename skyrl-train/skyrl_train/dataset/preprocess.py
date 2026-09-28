@@ -229,11 +229,7 @@ def convert_prompts_responses_to_batch_tensors(
 
     max_input_len, max_output_len = 0, 0
     prompt_token_lens, response_token_lens = [], []
-    inputs_token_ids, outputs_token_ids = [], []
     for prompt, response in zip(prompts, responses):
-        inputs_token_ids.append(prompt)
-        outputs_token_ids.append(response)
-
         prompt_token_len = len(prompt)
         response_token_len = len(response)
         prompt_token_lens.append(prompt_token_len)
@@ -242,29 +238,19 @@ def convert_prompts_responses_to_batch_tensors(
         max_input_len = max(max_input_len, prompt_token_len)
         max_output_len = max(max_output_len, response_token_len)
 
-    pad_token_id = tokenizer.pad_token_id
-    sequences = []
-    attention_masks = []
-    action_masks = []
-    for i, prompt in enumerate(prompts):
-        # left padding input
-        input_len = prompt_token_lens[i]
-        input_ids = [pad_token_id] * (max_input_len - input_len) + list(inputs_token_ids[i])
-        input_attention_mask = [0] * (max_input_len - input_len) + [1] * input_len
-
-        # right padding output
-        output_len = response_token_lens[i]
-        output_ids = list(outputs_token_ids[i]) + [pad_token_id] * (max_output_len - output_len)
-        output_attention_mask = [1] * output_len + [0] * (max_output_len - output_len)
-
-        # concat input and output
-        sequences.append(input_ids + output_ids)
-        attention_masks.append(input_attention_mask + output_attention_mask)
-        action_masks.append(output_attention_mask)
-
-    sequences = torch.tensor(sequences)
-    attention_mask = torch.tensor(attention_masks, dtype=torch.int64)
-    action_mask = torch.tensor(action_masks, dtype=torch.int64)
+    # Copy each row's tokens into preallocated tensors. Building the padded batch from nested Python lists would
+    # walk every padding element under the GIL, and padding dominates a batch with a long response window.
+    batch_size = len(prompts)
+    sequences = torch.full((batch_size, max_input_len + max_output_len), tokenizer.pad_token_id, dtype=torch.long)
+    attention_mask = torch.zeros((batch_size, max_input_len + max_output_len), dtype=torch.int64)
+    for i, (prompt, response) in enumerate(zip(prompts, responses)):
+        # Left-pad the prompt and right-pad the response.
+        prompt_start = max_input_len - prompt_token_lens[i]
+        response_end = max_input_len + response_token_lens[i]
+        sequences[i, prompt_start:max_input_len] = torch.as_tensor(prompt, dtype=torch.long)
+        sequences[i, max_input_len:response_end] = torch.as_tensor(response, dtype=torch.long)
+        attention_mask[i, prompt_start:response_end] = 1
+    action_mask = attention_mask[:, max_input_len:].clone()
 
     # initialize ret loss masks to be the same as action mask
     ret_loss_masks = torch.zeros_like(action_mask, dtype=torch.float)
@@ -280,11 +266,9 @@ def convert_prompts_responses_to_batch_tensors(
 
     logprobs_tensor = None
     if logprobs:
-        max_output_len = action_mask.size(1)
-        padded_logprobs = [
-            sample_logprobs + [0.0] * (max_output_len - len(sample_logprobs)) for sample_logprobs in logprobs
-        ]
-        logprobs_tensor = torch.tensor(padded_logprobs, dtype=torch.float)
+        logprobs_tensor = torch.zeros_like(action_mask, dtype=torch.float)
+        for i, sample_logprobs in enumerate(logprobs):
+            logprobs_tensor[i, : len(sample_logprobs)] = torch.as_tensor(sample_logprobs, dtype=torch.float)
 
     # MoE router-replay capture rail (Stage 1): right-pad routed_experts on the
     # response axis exactly like rollout_logprobs, but each per-token element is a
