@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from marinskyrl.distillation import DistillationPlan, TeacherEvidenceKind
 from skyrl_train.batch_sampling import RowOwnership, filter_trajectory_batch
 from skyrl_train.trajectory_runners.types import TrajectoryBatch
+
+
+ROUTE_ROWS_METRIC_PREFIX = "distillation/route_rows/"
+
+
+def route_row_metrics(routes: Iterable[TeacherRoute]) -> dict[str, float]:
+    """Count the trained trajectories each logical route contributed to one optimizer step."""
+    return {
+        f"{ROUTE_ROWS_METRIC_PREFIX}{route_id}": float(count)
+        for route_id, count in Counter(r.route_id for r in routes).items()
+    }
 
 
 @dataclass(frozen=True)
