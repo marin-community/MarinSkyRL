@@ -249,13 +249,14 @@ def test_normalized_output_produces_complete_core_trace_schema():
         "reward",
         "disposition",
         "verifier",
+        "verification_result",
         "metrics",
         "provenance",
     }
     assert record["prompt"]["messages"] == [{"role": "user", "content": "first"}]
     assert record["response"]["text"] == "10 11"
     assert record["verifier"] is None
-    assert record["schema_version"] == 4
+    assert record["schema_version"] == 5
     assert record["disposition"] == {"exception_type": None, "error_treatment": None, "server_error": None}
     assert record["provenance"]["runner"] == "SkyRLGymTrajectoryRunner"
 
@@ -778,3 +779,38 @@ def test_retention_counters_survive_group_concatenation():
     combined = concatenate_trajectory_batches(groups, tis_lcs_alert_threshold=1.0)
 
     assert combined["rollout_metrics"][f"{RETENTION_METRIC_PREFIX}/written"] == 5.0
+
+
+def test_retained_record_preserves_calls_observations_and_verifier_diagnostics():
+    output = _output()
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "analysis",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {"name": "python", "arguments": '{"code":"x=7"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "Sandbox connection refused"},
+    ]
+    verdict = {
+        "status": "error",
+        "score": None,
+        "reason": "verifier unavailable",
+        "diagnostics": {
+            "compiler_output": {"stderr": "error: bad tactic"},
+            "judge_output": "malformed verdict",
+        },
+    }
+    output["evidence_messages"] = [messages, [], []]
+    output["verification_results"] = [verdict, None, None]
+    record = build_trajectory_records(
+        _input(), output, _config(Path("/unused")), _Tokenizer(), runner_name="SkyRLGymTrajectoryRunner"
+    )[0].to_json()
+    assert record["response"]["messages"] == messages
+    assert record["verification_result"] == verdict
+    assert record["response"]["token_ids"] == [10, 11]

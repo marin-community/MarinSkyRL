@@ -401,3 +401,31 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
     assert output["student_topk_indices"] == [[[2, 3], [10, 11]]]
     assert output["behavior_topk_logprobs"] == [[[-0.1, -0.2], [-0.1, -0.2]]]
     assert output["routed_experts"] == [[[[4, 7]], [[0, 0]]]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content,expected", [("final answer", "final answer"), (None, "")])
+async def test_chat_grading_text_uses_parsed_final_content_and_preserves_raw_tokens(content, expected):
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "reasoning words and final answer"
+    engine.tokenize.return_value = {"tokens": [1, 2]}
+    engine.chat_completion.return_value = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": content, "reasoning_content": "reasoning words"},
+                "finish_reason": "stop",
+                "token_ids": [3, 4, 5],
+            }
+        ]
+    }
+    result = await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "question"}]],
+            "chat_completion_params": [{}],
+        }
+    )
+    assert result["responses"] == [expected]
+    assert result["response_ids"] == [[3, 4, 5]]
+    assert result["assistant_messages"][0]["reasoning_content"] == "reasoning words"

@@ -46,7 +46,7 @@ from skyrl_train.io import io
 
 RETENTION_METRIC_PREFIX = "generate/trajectory_retention"
 RETENTION_SCHEMA_VERSION = 1
-TRAJECTORY_RECORD_SCHEMA_VERSION = 4
+TRAJECTORY_RECORD_SCHEMA_VERSION = 5
 _LEDGER_NAME = "_retention_ledger.json"
 _SELECTION_COUNT = "count"
 _SELECTION_FRACTION = "fraction"
@@ -159,12 +159,6 @@ class _PromptTrace:
 
 
 @dataclass(frozen=True)
-class _TraceMessage:
-    role: str
-    content: str
-
-
-@dataclass(frozen=True)
 class _StepBoundary:
     row_index: int
     token_start: int
@@ -175,7 +169,7 @@ class _StepBoundary:
 
 @dataclass(frozen=True)
 class _ResponseTrace:
-    messages: tuple[_TraceMessage, ...] | None
+    messages: tuple[dict[str, Any], ...] | None
     text: str | None
     token_ids: tuple[int, ...]
     loss_mask: tuple[int, ...]
@@ -225,6 +219,7 @@ class TrajectoryRecord:
     reward: _RewardTrace
     disposition: _DispositionTrace
     verifier: VerifierTestCollection | None
+    verification_result: dict[str, Any] | None
     metrics: dict[str, Any]
     provenance: _ProvenanceTrace
 
@@ -440,7 +435,14 @@ def build_trajectory_records(
                 token_ids=tuple(prompt_ids),
             ),
             response=_ResponseTrace(
-                messages=None if response_text is None else (_TraceMessage(role="assistant", content=response_text),),
+                messages=(
+                    tuple(output["evidence_messages"][final_index])
+                    if output.get("evidence_messages") is not None
+                    and output["evidence_messages"][final_index] is not None
+                    else None
+                    if response_text is None
+                    else ({"role": "assistant", "content": response_text},)
+                ),
                 text=response_text,
                 token_ids=tuple(response_ids),
                 loss_mask=tuple(loss_mask),
@@ -463,6 +465,9 @@ def build_trajectory_records(
                 server_error=server_errors[final_index],
             ),
             verifier=None if verifier_tests is None else verifier_tests[final_index],
+            verification_result=(
+                output["verification_results"][final_index] if output.get("verification_results") is not None else None
+            ),
             metrics=to_jsonable(output.get("rollout_metrics") or {}),
             provenance=_ProvenanceTrace(
                 runner=runner_name,

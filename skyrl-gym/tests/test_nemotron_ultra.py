@@ -57,7 +57,7 @@ def test_genrm_agent_constructs_and_returns_pending_reward():
 
 def test_genrm_utilities_match_nvidia_circular_tiebreaker():
     assert generate_comparison_pairs("circular", 3) == [(0, 1), (1, 2), (2, 0)]
-    assert parse_genrm_output('{"score_1": 4, "score_2": 3, "ranking": 2}', 3.0, 3.5) == (
+    assert parse_genrm_output('{"score_1": 4, "score_2": 3, "ranking": 2}') == (
         4.0,
         3.0,
         2.0,
@@ -232,7 +232,7 @@ def test_tool_call_reward_requires_the_expected_tool_and_recursive_arguments():
                 "type": "function",
                 "function": {
                     "name": "search",
-                    "arguments": '{"scores":[1.0000001,2.0],"filters":{"year":2026},"query":"red blue green"}',
+                    "arguments": '{"scores":[1.0000001,2.0],"filters":{"year":2026},"query":"red green blue"}',
                 },
             }
         ],
@@ -247,8 +247,8 @@ def test_tool_call_reward_requires_the_expected_tool_and_recursive_arguments():
         ],
     }
 
-    assert grade_expected_action(expected, matching, word_count_similarity_threshold=0.1)[0] == 1.0
-    assert grade_expected_action(expected, wrong, word_count_similarity_threshold=0.1)[0] == 0.0
+    assert grade_expected_action(expected, matching)[0] == 1.0
+    assert grade_expected_action(expected, wrong)[0] == 0.0
 
 
 def test_tool_call_reward_accepts_any_text_when_a_message_is_expected():
@@ -300,9 +300,9 @@ def test_mcqa_reward_uses_custom_regex_before_strict_boxed_fallback():
     assert grade_mcqa(r"reasoning... \boxed{A}", {**record, "template_metadata": None})[0] == 0.0
 
 
-def test_structured_output_reward_parses_and_strictly_validates_text_formats():
+def test_structured_output_reward_validates_source_schema_across_text_formats():
     record = {
-        "schema_str": '{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"active":{"type":"boolean"}}}}',
+        "schema_str": '{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"active":{"type":"boolean"}},"required":["name","active"]}}',
         "schema_type": "yaml",
     }
 
@@ -348,7 +348,16 @@ def transform(grid):
 
     assert parse_grid("analysis \\boxed{2 3\n4 5}") == [[2, 3], [4, 5]]
     assert grade_nvarc("2 3\n4 5", record, inductive=False)[0] == 1.0
-    assert grade_nvarc(code, record, inductive=True, python_timeout_seconds=2)[0] == 1.0
+    assert (
+        grade_nvarc(
+            code,
+            record,
+            inductive=True,
+            python_timeout_seconds=2,
+            sandbox=_Sandbox({"process_status": "completed", "stdout": "[[2,3],[4,5]]", "stderr": ""}),
+        )[0]
+        == 1.0
+    )
 
 
 def test_code_gen_reward_runs_every_row_unit_test():
@@ -511,7 +520,7 @@ def test_multichallenge_averages_rubric_judgments():
                 {"question": "two", "pass_criteria": "YES"},
             ],
         },
-        _Judge(["analysis [[YES]]", "analysis [[NO]]"]),
+        _Judge(["analysis\n[[YES]]", "analysis\n[[NO]]"]),
     )
 
     assert reward == 0.5
@@ -522,7 +531,7 @@ def test_jailbreak_policy_multiplies_its_policy_specific_verifiers():
     reward, details = grade_jailbreak(
         "a safe but terse refusal",
         {"adversarial_prompt": "harmful request", "response_policy_mapped": "refusal_with_explanation"},
-        _Judge(["[[SAFE]] [[NO_EXPLANATION]]", "[[SAFE]] [[NO_EXPLANATION]]"]),
+        _Judge(["[[SAFE]]", "[[NO_EXPLANATION]]"]),
     )
 
     assert reward == 0.3

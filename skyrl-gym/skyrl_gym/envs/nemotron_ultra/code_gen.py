@@ -10,7 +10,7 @@ from typing import Any
 from skyrl_gym.envs.lcb.livecodebench import (
     VerifierLimits,
     extract_code_from_model,
-    lcb_check_correctness,
+    lcb_execution_result,
     normalize_lcb_ground_truth,
 )
 
@@ -42,11 +42,16 @@ def grade_code(
     if not code:
         return 0.0, {"extracted_model_code": None, "result": "missing_code"}
     tests = json.loads(normalize_lcb_ground_truth(record["verifier_metadata"]["unit_tests"]))
-    correct = lcb_check_correctness(tests, code, timeout=timeout_seconds, debug=False, limits=limits)
+    results, execution = lcb_execution_result(tests, code, timeout=timeout_seconds, debug=False, limits=limits)
+    if execution.get("execution_error"):
+        raise RuntimeError(f"Code verifier unavailable: {execution}")
+    correct = all(result is True for result in results)
     format_violation = _has_reasoning_format_violation(text, assistant_message)
     reward = reasoning_format_penalty if format_violation else float(correct)
     return reward, {
         "extracted_model_code": code,
+        "test_results": results,
+        "execution_output": execution,
         "result": "pass" if correct else "failed_tests",
         "reasoning_format_violation_rate": float(format_violation),
         "difficulty": record.get("verifier_metadata", {}).get("difficulty"),

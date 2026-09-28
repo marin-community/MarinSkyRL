@@ -929,6 +929,14 @@ def concatenate_trajectory_batches(
     if baseline_exclusions_concat is not None:
         result["exclude_from_baseline"] = baseline_exclusions_concat
 
+    for key in ("verification_results", "evidence_messages"):
+        if any(batch.get(key) is not None for batch in trajectory_batches):
+            result[key] = [
+                value
+                for batch in trajectory_batches
+                for value in (batch.get(key) or [None] * len(batch["response_ids"]))
+            ]
+
     # propagate additional keys with list values as-is
     additional_keys = [
         key for key in trajectory_batches[0] if key not in result and isinstance(trajectory_batches[0][key], list)
@@ -1038,7 +1046,15 @@ def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatc
         f"Mismatch between responses ({num_responses}) and prompt_token_ids ({num_prompt_tokens})"
     )
 
-    for key in ("response_ids", "loss_masks", "rewards", "rollout_logprobs", "verifier_tests"):
+    for key in (
+        "response_ids",
+        "loss_masks",
+        "rewards",
+        "rollout_logprobs",
+        "verifier_tests",
+        "verification_results",
+        "evidence_messages",
+    ):
         value = trajectory_batch.get(key)
         if isinstance(value, list):
             assert len(value) == num_responses, (

@@ -39,9 +39,11 @@ def verify_lean_attempt(
         predicted_proof,
         language="lean4",
         timeout_seconds=timeout_seconds,
-        max_output_characters=1000,
+        max_output_characters=65536,
     )
     status = determine_proof_status(compiler_output)
+    if status in {"error", "unknown", "output_truncated"}:
+        raise RuntimeError(f"Lean verification unavailable: {compiler_output}")
     details = {
         "proof_status": status,
         "predicted_proof": predicted_proof,

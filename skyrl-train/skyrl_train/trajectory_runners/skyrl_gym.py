@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import requests
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from uuid import uuid4
@@ -899,6 +900,12 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
         error_treatment = None
         disposition = TrainingDisposition.train()
+        if verification.status is not VerificationStatus.VERIFIED:
+            disposition = TrainingDisposition.mask("verifier unavailable", exception_type="VerifierUnavailable")
+            optimization_reward = 0.0
+            if token_rewards is not None:
+                token_rewards = tuple(0.0 for _ in token_rewards)
+            env_metrics["verifier_error"] = 1.0
         if terminal_error is not None:
             exception_type, treatment = self._classify_terminal_error(terminal_error)
             diagnostics = {**verification.diagnostics, "exception_type": exception_type}
@@ -1157,6 +1164,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         if batch_metadata is not None and batch_metadata.training_phase == "eval":
             for index in genrm_indices:
                 outputs[index].env_metrics["genrm/cohort_skipped_eval"] = 1.0
+                if outputs[index].verification.status is not VerificationStatus.VERIFIED:
+                    continue
+                outputs[index].verification = VerificationResult.unavailable(
+                    "GenRM evaluation needs a comparison cohort"
+                )
+                outputs[index].reward = RewardResult(unshaped_reward=None, optimization_reward=0.0)
+                outputs[index].disposition = TrainingDisposition.mask("GenRM evaluation has no comparison cohort")
             return
         if self.genrm_judge is None:
             raise RuntimeError("Nemotron Ultra GenRM rows require environment.skyrl_gym.nemotron_ultra.genrm.judge")
@@ -1173,6 +1187,21 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 raise ValueError(
                     f"GenRM cohort requires {expected_size} rollouts for a prompt, received {len(indices)}"
                 )
+            indices = [
+                index
+                for index in indices
+                if outputs[index].disposition.loss_eligible
+                and outputs[index].verification.status is VerificationStatus.VERIFIED
+            ]
+            if len(indices) < 2:
+                for index in indices:
+                    outputs[index].verification = VerificationResult.unavailable("Insufficient valid GenRM peers")
+                    outputs[index].reward = RewardResult(unshaped_reward=None, optimization_reward=0.0)
+                    outputs[index].disposition = TrainingDisposition.mask("Insufficient valid GenRM peers")
+                continue
+            histories = [input_batch["prompts"][index] for index in indices]
+            if any(history != histories[0] for history in histories):
+                raise ValueError("GenRM cohort rows must share the same conversation")
             records = [json.loads((ultra_at(index) or {})["record_json"]) for index in indices]
             if not all(isinstance(record, dict) for record in records):
                 raise TypeError("GenRM record_json must decode to an object")
@@ -1187,14 +1216,25 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     {},
                 )
                 response_objects.append(response_object(assistant_message, outputs[index].evidence.response or ""))
-            rewards, metrics = await asyncio.to_thread(
-                grade_genrm_group,
-                conversation_history=input_batch["prompts"][indices[0]],
-                response_objects=response_objects,
-                principle=next(iter(principles)),
-                judge=self.genrm_judge,
-                config=self.genrm_config,
-            )
+            try:
+                rewards, metrics = await asyncio.to_thread(
+                    grade_genrm_group,
+                    conversation_history=input_batch["prompts"][indices[0]],
+                    response_objects=response_objects,
+                    principle=next(iter(principles)),
+                    judge=self.genrm_judge,
+                    config=self.genrm_config,
+                )
+            except (RuntimeError, ValueError, requests.RequestException) as error:
+                for index in indices:
+                    outputs[index].verification = VerificationResult.error(
+                        "GenRM comparisons failed",
+                        diagnostics={"error_type": type(error).__name__, "error_message": str(error)},
+                    )
+                    outputs[index].reward = RewardResult(unshaped_reward=None, optimization_reward=0.0)
+                    outputs[index].disposition = TrainingDisposition.mask("GenRM comparisons failed")
+                    outputs[index].env_metrics["genrm/comparison_failure"] = 1.0
+                continue
             for index, reward in zip(indices, rewards, strict=True):
                 old_token_rewards = outputs[index].reward.token_rewards
                 token_rewards = None

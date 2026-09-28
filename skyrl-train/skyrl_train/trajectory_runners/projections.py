@@ -1,6 +1,7 @@
 """Projection of harness interaction records into trainer samples."""
 
 import copy
+import dataclasses
 from typing import Generic, Protocol, Sequence, TypeVar
 
 from omegaconf import DictConfig
@@ -85,6 +86,8 @@ class WholeTrajectoryProjection:
             prompt_token_ids=[list(output.evidence.prompt_token_ids) for output in outputs],
             response_ids=responses,
             rewards=rewards,
+            verification_results=[dataclasses.asdict(output.verification) for output in outputs],
+            evidence_messages=[[dict(message) for message in output.evidence.messages] for output in outputs],
             loss_masks=loss_masks,
             stop_reasons=[output.evidence.stop_reason for output in outputs],
             rollout_metrics=rollout_metrics,
@@ -146,6 +149,8 @@ class StepWiseTrajectoryProjection:
             prompt_token_ids=[list(step.evidence.prompt_token_ids) for step in steps],
             response_ids=responses,
             rewards=rewards,
+            verification_results=[dataclasses.asdict(step.verification) for step in steps],
+            evidence_messages=[[dict(message) for message in step.evidence.messages] for step in steps],
             loss_masks=loss_masks,
             stop_reasons=[step.evidence.stop_reason for step in steps],
             rollout_metrics=rollout_metrics,
