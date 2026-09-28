@@ -1,9 +1,12 @@
 import asyncio
 import gzip
+import importlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
 from zipfile import ZipFile
+
+import pytest
 
 from datasets import Dataset, load_dataset
 from hydra import compose, initialize_config_dir
@@ -13,10 +16,11 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 from transformers import PreTrainedTokenizerFast
 
-from ci.pivot_grug_smoke import compare_arms
-from skyrl_train.pivot_token_budget import select_token_budget_groups
+from ci.pivot_grug_smoke import compare_arms, launch_config, validate_smoke_config
+from cloud.iris.launch_config import load_launch_config
 from skyrl_train.batch_sampling import filter_trajectory_batch
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
+from skyrl_train.pivot_token_budget import select_token_budget_groups
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
 from skyrl_train.trajectory_runners.pivot_reference import PivotReferenceRunner
 from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryID
@@ -338,3 +342,19 @@ def test_token_budget_keeps_whole_groups_and_preserves_their_training_fields():
     assert tensors[0].numel() == 24
     assert int(tensors[1].sum()) == 18
     assert int(tensors[2].sum()) == 10
+
+
+@pytest.mark.parametrize("arm", ["rl", "sft"])
+def test_paired_smoke_preflight_rejects_entrypoint_without_iris_runner(monkeypatch, tmp_path, arm):
+    config = launch_config(
+        "paired-preflight", "/tmp/pivot-output", "/tmp/pivot-temporary",
+        "s3://models/grug", "test-revision", steps=10, arm=arm,
+    )
+    path = tmp_path / f"launch-{arm}.yaml"
+    OmegaConf.save(config, path)
+    resolved = load_launch_config(path)
+    module = importlib.import_module(str(resolved.runtime.entrypoint))
+    monkeypatch.delattr(module, "run")
+
+    with pytest.raises(ValueError, match=r"must expose run\(cfg\) for the Iris training driver"):
+        validate_smoke_config(resolved)

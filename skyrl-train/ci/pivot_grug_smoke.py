@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import get_context
 from dataclasses import asdict
@@ -119,14 +120,18 @@ def launch_config(
 
 def validate_smoke_config(config: DictConfig) -> None:
     """Check the pinned Grug recipe on CPU before preparing data or allocating GPUs."""
+    skyrl = config.skyrl
     for role in ("policy", "ref"):
-        if config.trainer[role].megatron_config.context_parallel_size != 1:
+        if skyrl.trainer[role].megatron_config.context_parallel_size != 1:
             raise ValueError(
                 f"Grug Pivot smoke requires trainer.{role}.megatron_config.context_parallel_size=1: "
                 "Transformer Engine 2.11 p2p CP does not support Grug sliding-window attention; "
                 "all_gather CP rejects packed sequences, and a2a CP2 cannot split Grug's five KV heads."
             )
-    validate_cfg(config)
+    validate_cfg(skyrl)
+    module_name = str(config.runtime.entrypoint)
+    if not callable(getattr(importlib.import_module(module_name), "run", None)):
+        raise ValueError(f"{module_name} must expose run(cfg) for the Iris training driver")
 
 
 def compare_arms(output_root: str, manifest: dict, arm_summaries: dict) -> dict:
@@ -215,7 +220,7 @@ def main() -> None:
             config_path = workdir / f"launch-{arm}.yaml"
             OmegaConf.save(config, config_path)
             resolved = load_launch_config(config_path)
-            validate_smoke_config(resolved.skyrl)
+            validate_smoke_config(resolved)
             if args.train_prefixes != int(resolved.skyrl.trainer.train_batch_size):
                 raise ValueError("The paired smoke requires one full pass through the prefix set per update")
             logger.info(
@@ -269,7 +274,7 @@ def main() -> None:
             config.inputs.model.identity = model_manifest.identity
             config.skyrl.trainer.pivot_token_budget = manifest["learner_token_budget"]
             OmegaConf.save(config, config_path)
-            validate_smoke_config(load_launch_config(config_path).skyrl)
+            validate_smoke_config(load_launch_config(config_path))
         logger.info(
             "Shared learner budget: {} tokens; launching {} GPU jobs", manifest["learner_token_budget"], len(configs)
         )

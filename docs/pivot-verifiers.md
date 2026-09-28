@@ -161,8 +161,9 @@ PYTHONPATH=skyrl-train:skyrl-gym:. uv run --no-sync skyrl-train/ci/pivot_grug_sm
   --temporary-root /tmp/grug-preflight/temporary
 ```
 
-This checks the launch topology, trainer configuration, and this smoke's CP1
-requirement before dataset preparation, model caching, or Iris submission.
+This checks the launch topology, trainer configuration, the Iris entrypoint
+function, and this smoke's CP1 requirement before dataset preparation, model
+caching, or Iris submission.
 It runs on CPU and does not load model weights. Passing does not establish CUDA
 kernel compatibility or sufficient GPU memory.
 
