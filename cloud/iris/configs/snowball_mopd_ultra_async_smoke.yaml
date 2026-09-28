@@ -1,0 +1,169 @@
+# Snowball 67B-A2B three-teacher on-policy distillation on the fully asynchronous trainer: the
+# #749 smoke (cloud/iris/configs/snowball_mopd_ultra_smoke.yaml) with the same eight nodes, data,
+# teachers, and 48-prompt batches, run by FullyAsyncRayPPOTrainer through the in-process SkyRL Gym
+# runner so rollout groups for the next update generate while the learner trains on the current one.
+#
+# Staleness is bounded at one update and nothing corrects for it: sampled_reverse_kl uses the
+# learner's pre-update log-probs as the behavior term, so a group sampled one update earlier is
+# scored as if the current policy drew it. Compare against the synchronous smoke at matched prompt
+# count and label the result as uncorrected staleness-1. The asynchronous trainer rejects
+# data.sampling.kind, so batches follow the subset's route mix instead of an exact third per route.
+entrypoint: fully_async_in_process
+
+context_budget:
+  request_window_tokens: 8192
+  max_new_tokens_per_turn: 2048
+  max_turns: 1
+
+environment:
+  env_class: nemotron_ultra
+
+trainer:
+  strategy: megatron
+  flash_attn: false
+  use_sample_packing: false
+  offload_optimizer_during_rollouts: true
+  gradient_checkpointing: true
+  algorithm:
+    # The distillation term replaces the reward-driven loss; the uniform estimator leaves
+    # the per-token teacher gap as the only advantage.
+    advantage_estimator: uniform
+    use_kl_loss: false
+    use_entropy_loss: false
+    loss_reduction: token_mean
+    distillation:
+      objective: sampled_reverse_kl
+      routing_plan: opd
+      coefficient: 1.0
+      reward_mode: replace
+  epochs: 1
+  max_steps: 4
+  update_epochs_per_batch: 1
+  train_batch_size: 48
+  policy_mini_batch_size: 48
+  eval_batch_size: 64
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+  eval_before_train: false
+  eval_interval: -1
+  ckpt_interval: 4
+  resume_mode: none
+  logger: console
+  fully_async:
+    max_staleness_steps: 1
+    # Two updates' worth of prompts: one batch training while the next generates.
+    num_parallel_generation_workers: 96
+  policy:
+    optimizer_config:
+      lr: 1.0e-6
+      max_grad_norm: 1.0
+    megatron_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 2
+      context_parallel_size: 1
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      optimizer_checkpoint_sharding_type: dp_reshardable
+  placement:
+    colocate_all: false
+    policy_num_nodes: 4
+    policy_num_gpus_per_node: 8
+
+generator:
+  backend: vllm
+  model_dtype: bfloat16
+  vllm_attention_backend: FLASH_ATTN
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_data_parallel_size: 8
+  inference_engine_expert_parallel_size: 8
+  num_inference_engines: 1
+  n_samples_per_prompt: 4
+  gpu_memory_utilization: 0.75
+  enforce_eager: false
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: false
+  sampling_params:
+    temperature: 1.0
+    top_p: 1.0
+  engine_init_kwargs:
+    enable_auto_tool_choice: true
+    tool_call_parser: hermes
+
+# The vLLM fork serves GrugMoE only as tensor-parallel 1 with expert parallelism across
+# the data-parallel ranks, so every teacher takes the rollout engine's layout on its own node.
+teachers:
+  math:
+    source: local_inference
+    placement: pinned
+    backend: vllm
+    evidence: chosen_token
+    model:
+      path: open-athena/Snowball-67B-A2B-Math-RL-E6-Step20-Repaired
+      revision: f8c394b378247d213e9b2d4768f13a47c81a41b7
+    resources:
+      num_nodes: 1
+      gpus_per_node: 8
+      tensor_parallel_size: 1
+      data_parallel_size: 8
+      expert_parallel_size: 8
+      colocation_group: teacher_math
+      gpu_memory_utilization: 0.75
+  swe:
+    source: local_inference
+    placement: pinned
+    backend: vllm
+    evidence: chosen_token
+    model:
+      path: laion/snowball-67b-a2b-rl-r2egym-newstack-step24
+      revision: cb75292c0e98fd66a8c50b482717bd35b664bed9
+    resources:
+      num_nodes: 1
+      gpus_per_node: 8
+      tensor_parallel_size: 1
+      data_parallel_size: 8
+      expert_parallel_size: 8
+      colocation_group: teacher_swe
+      gpu_memory_utilization: 0.75
+  terminal:
+    source: local_inference
+    placement: pinned
+    backend: vllm
+    evidence: chosen_token
+    model:
+      path: laion/snowball-67b-a2b-sft-s3-nemotron-terminal-step1888
+      revision: 680bec3ade494b61ead6861fa24fc4071f8dc294
+    resources:
+      num_nodes: 1
+      gpus_per_node: 8
+      tensor_parallel_size: 1
+      data_parallel_size: 8
+      expert_parallel_size: 8
+      colocation_group: teacher_terminal
+      gpu_memory_utilization: 0.75
+
+teacher_routing:
+  opd:
+    revision: snowball-mopd-ultra-async-smoke-v1
+    routes:
+      math:
+        teacher: math
+        weight: 1.0
+      swe:
+        teacher: swe
+        weight: 1.0
+      terminal:
+        teacher: terminal
+        weight: 1.0
+
+data:
+  kind: parquet
+  train_data: []
+  val_data: []
+
+# Not HF_HUB_OFFLINE: Megatron Bridge resolves a Hub model id through refs/main, which the
+# warm-synced node cache does not carry, so the Megatron policy worker fails offline. The
+# launcher pre-stages the teacher from the region cache in either mode.
+extra_env:
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
