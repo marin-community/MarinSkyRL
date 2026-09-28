@@ -51,6 +51,7 @@ _CONFIGS = {
     "tasktrove_dq_sweep_30b_cp6.yaml": (131072, 16384, 90),
     "tasktrove_dq_sweep_30b_ncclnet.yaml": (32768, 4096, 30),
     "tasktrove_dq_sweep_30b_terminus2.yaml": (32768, 4096, 30),
+    "vllm_pause_policy_smoke.yaml": (2048, 512, 1),
 }
 
 _FLASH_ATTN_CONFIGS = {
@@ -72,6 +73,7 @@ _FLASH_ATTN_CONFIGS = {
     "tasktrove_dq_sweep_30b_cp6.yaml",
     "tasktrove_dq_sweep_30b_ncclnet.yaml",
     "tasktrove_dq_sweep_30b_terminus2.yaml",
+    "vllm_pause_policy_smoke.yaml",
 }
 
 _SNOWBALL_ULTRA_CONFIGS = {
