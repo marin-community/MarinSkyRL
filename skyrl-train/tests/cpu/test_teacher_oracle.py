@@ -245,8 +245,8 @@ async def test_teacher_cleanup_cancellation_does_not_wait_for_remaining_oracles(
     try:
         await asyncio.wait_for(last.started.wait(), timeout=1)
         closing.cancel()
-        # asyncio.wait does not send a second cancellation that could hide a
-        # swallowed first cancellation and accidentally unblock the old code.
+        # A second cancellation could conceal a cleanup loop that swallowed the
+        # first. Wait for completion without injecting another cancellation.
         done, _ = await asyncio.wait({closing}, timeout=1)
         assert closing in done
         with pytest.raises(asyncio.CancelledError):
