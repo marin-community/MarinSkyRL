@@ -7,6 +7,12 @@ import torch
 from skyrl_train.utils.profiler import Profiler
 
 
+@pytest.mark.parametrize("save_path", [None, ""])
+def test_profiler_requires_save_path_when_enabled(save_path):
+    with pytest.raises(ValueError, match="save_path is required"):
+        Profiler(SimpleNamespace(enable=True, save_path=save_path))
+
+
 @pytest.mark.parametrize("export_chrome_trace", [False, True])
 def test_profiler_captures_one_forward_micro_batch_after_warm_update(tmp_path, monkeypatch, export_chrome_trace):
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
@@ -35,6 +41,9 @@ def test_profiler_captures_one_forward_micro_batch_after_warm_update(tmp_path, m
     with torch.profiler.record_function("selected_forward_micro_batch"):
         torch.ones(4).sum()
     profiler.stop_capture()
+    capture_wall_seconds = profiler.capture_wall_seconds
+    profiler.stop_capture()
+    assert profiler.capture_wall_seconds == capture_wall_seconds
 
     with torch.profiler.record_function("outside_after"):
         torch.ones(4).sum()

@@ -24,6 +24,8 @@ class Profiler:
         self.prof = None
         if not config.enable:
             return
+        if not config.save_path:
+            raise ValueError("Profiler save_path is required when profiling is enabled")
         self.save_path = config.save_path
         self.capture_update_index = config.capture_update_index
         self.capture_mini_batch_index = config.capture_mini_batch_index
