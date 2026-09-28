@@ -6,10 +6,15 @@ Run with: uv run --isolated --group dev --extra cpu pytest tests/cpu/test_buffer
 import asyncio
 import os
 import tempfile
+import threading
+import time
+from types import SimpleNamespace
 import pytest
 import torch
 
+from skyrl_train.callbacks.base import CallbackHandler
 from skyrl_train.callbacks.builtin import BufferCheckpointCallback
+from skyrl_train.trainer import CheckpointSnapshot, RayPPOTrainer
 from skyrl_train.async_rollout_state import GeneratedOutputGroup
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer, _GenerationQueues
 from skyrl_train.trajectory_runners.base import TrajectoryID
@@ -107,6 +112,7 @@ async def test_roundtrip_empty_buffer():
         cb = BufferCheckpointCallback()
         cb.bind_queues(trainer._generation_queues)
         await cb.on_save_async(_FakeState(10), _FakeControl(), trainer=trainer)
+        await cb.wait_for_pending_saves()
         assert not os.path.exists(os.path.join(step_dir, cb.ARTIFACT_NAME))
 
 
@@ -125,6 +131,7 @@ async def test_roundtrip_with_items():
         cb = BufferCheckpointCallback()
         cb.bind_queues(trainer._generation_queues)
         await cb.on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
+        await cb.wait_for_pending_saves()
 
         # Buffer should still have all 3 items (non-destructive)
         assert buf.qsize() == 3
@@ -160,6 +167,7 @@ async def test_roundtrip_preserves_admitted_groups_outside_completed_queue():
         callback.bind_queues(trainer._generation_queues)
 
         await callback.on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
+        await callback.wait_for_pending_saves()
 
         buffer_state = BufferCheckpointCallback.load_buffer_state(step_dir)
         assert [group.uid for group in buffer_state.admitted_groups] == ["admitted"]
@@ -215,6 +223,7 @@ async def test_roundtrip_with_pending_retry():
         cb.bind_queues(trainer._generation_queues)
 
         await cb.on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
+        await cb.wait_for_pending_saves()
         buffer_state = BufferCheckpointCallback.load_buffer_state(step_dir)
 
         assert buffer_state.completed_groups == []
@@ -233,10 +242,11 @@ async def test_save_failure_is_not_downgraded(monkeypatch, tmp_path):
     def fail_open(*args, **kwargs):
         raise OSError("storage unavailable")
 
-    monkeypatch.setattr(io, "open_file", fail_open)
+    monkeypatch.setattr(io, "write_bytes_atomic", fail_open)
 
     with pytest.raises(OSError, match="storage unavailable"):
         await callback.on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
+        await callback.wait_for_pending_saves()
 
 
 def test_load_missing_file():
@@ -263,3 +273,139 @@ async def test_no_trainer_in_kwargs():
     cb = BufferCheckpointCallback()
     with pytest.raises(RuntimeError, match="requires trainer context"):
         await cb.on_save_async(_FakeState(1), _FakeControl())
+
+
+@pytest.mark.asyncio
+async def test_buffer_save_returns_while_writer_is_blocked_and_preserves_snapshot(tmp_path, monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    original_write = io.write_bytes_atomic
+
+    def blocked_write(path, payload):
+        started.set()
+        if not release.wait(10):
+            raise TimeoutError("test writer was not released")
+        original_write(path, payload)
+
+    monkeypatch.setattr(io, "write_bytes_atomic", blocked_write)
+    buffer = asyncio.Queue(maxsize=4)
+    buffer.put_nowait(_make_item("before", step=5))
+    trainer = _FakeTrainer(str(tmp_path), buffer)
+    callback = BufferCheckpointCallback()
+    callback.bind_queues(trainer._generation_queues)
+    step_path = tmp_path / "global_step_5"
+    try:
+        await asyncio.wait_for(callback.on_save_async(_FakeState(5), _FakeControl(), trainer=trainer), timeout=2)
+        assert await asyncio.to_thread(started.wait, 5)
+        assert not (step_path / callback.ARTIFACT_NAME).exists()
+        buffer.get_nowait()
+        buffer.put_nowait(_make_item("after", step=6))
+    finally:
+        release.set()
+        await callback.wait_for_pending_saves()
+    restored = callback.load_buffer_state(str(step_path))
+    assert [group.uid for group in restored.completed_groups] == ["before"]
+    assert buffer.get_nowait().uid == "after"
+
+
+@pytest.mark.asyncio
+async def test_failed_buffer_save_preserves_previous_file_and_propagates(tmp_path, monkeypatch):
+    buffer = asyncio.Queue(maxsize=4)
+    buffer.put_nowait(_make_item("before", step=5))
+    trainer = _FakeTrainer(str(tmp_path), buffer)
+    callback = BufferCheckpointCallback()
+    callback.bind_queues(trainer._generation_queues)
+    await callback.on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
+    await callback.wait_for_pending_saves()
+
+    def failed_write(path, payload):
+        raise OSError("storage unavailable")
+
+    monkeypatch.setattr(io, "write_bytes_atomic", failed_write)
+    buffer.get_nowait()
+    buffer.put_nowait(_make_item("after", step=6))
+    await callback.on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
+    with pytest.raises(OSError, match="storage unavailable"):
+        await callback.wait_for_pending_saves()
+    restored = callback.load_buffer_state(str(tmp_path / "global_step_5"))
+    assert [group.uid for group in restored.completed_groups] == ["before"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_buffer", [False, True])
+async def test_checkpoint_marker_requires_successful_buffer_artifact(tmp_path, monkeypatch, fail_buffer):
+    buffer = asyncio.Queue(maxsize=1)
+    buffer.put_nowait(_make_item("saved", step=5))
+    source = _FakeTrainer(str(tmp_path), buffer)
+    callback = BufferCheckpointCallback()
+    callback.bind_queues(source._generation_queues)
+    marker = tmp_path / "latest_checkpointed_iteration.txt"
+    step_path = tmp_path / "global_step_5"
+    original_write = io.write_bytes_atomic
+
+    def write(path, payload):
+        if path.endswith(callback.ARTIFACT_NAME) and fail_buffer:
+            raise OSError("buffer upload failed")
+        if path == str(marker):
+            restored = callback.load_buffer_state(str(step_path))
+            assert [group.uid for group in restored.completed_groups] == ["saved"]
+        original_write(path, payload)
+
+    monkeypatch.setattr(io, "write_bytes_atomic", write)
+    monkeypatch.setattr("skyrl_train.trainer.ray.get", lambda references: None)
+    trainer = object.__new__(RayPPOTrainer)
+    trainer.callback_handler = CallbackHandler([callback])
+    trainer.policy_model = SimpleNamespace(async_run_ray_method=lambda *args: [])
+    trainer.critic_model = None
+    trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(max_ckpts_to_keep=-1))
+    snapshot = CheckpointSnapshot(
+        step=5,
+        upload_started_at=time.monotonic(),
+        dataloader_path=str(step_path / "dataloader.pt"),
+        dataloader_payload=b"data",
+        trainer_state_path=str(step_path / "trainer.pt"),
+        trainer_state_payload=b"trainer",
+        marker_path=str(marker),
+    )
+    await callback.on_save_async(_FakeState(5), _FakeControl(), trainer=source)
+    if fail_buffer:
+        with pytest.raises(OSError, match="buffer upload failed"):
+            await trainer._finish_checkpoint_upload(snapshot, commit=True)
+        assert not marker.exists()
+        assert not (step_path / "trainer.pt").exists()
+    else:
+        await trainer._finish_checkpoint_upload(snapshot, commit=True)
+        assert marker.read_text() == "5"
+        assert (step_path / "trainer.pt").read_bytes() == b"trainer"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiter_keeps_buffer_write_drainable(tmp_path, monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    original_write = io.write_bytes_atomic
+
+    def blocked_write(path, payload):
+        started.set()
+        if not release.wait(10):
+            raise TimeoutError("test writer was not released")
+        original_write(path, payload)
+
+    monkeypatch.setattr(io, "write_bytes_atomic", blocked_write)
+    buffer = asyncio.Queue(maxsize=1)
+    buffer.put_nowait(_make_item("survives-cancellation", step=5))
+    source = _FakeTrainer(str(tmp_path), buffer)
+    callback = BufferCheckpointCallback()
+    callback.bind_queues(source._generation_queues)
+    try:
+        await callback.on_save_async(_FakeState(5), _FakeControl(), trainer=source)
+        assert await asyncio.to_thread(started.wait, 5)
+        waiter = asyncio.create_task(callback.wait_for_pending_saves())
+        asyncio.get_running_loop().call_soon(waiter.cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+    finally:
+        release.set()
+        await callback.wait_for_pending_saves()
+    restored = callback.load_buffer_state(str(tmp_path / "global_step_5"))
+    assert [group.uid for group in restored.completed_groups] == ["survives-cancellation"]

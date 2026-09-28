@@ -1813,10 +1813,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self, uids: List[str], rollout_staleness: List[int], response_masks: torch.Tensor
     ) -> None:
         counts: dict[str, dict[str, int]] = {}
-        for uid, steps, mask in zip(uids, rollout_staleness, response_masks, strict=True):
+        token_counts = response_masks.sum(dim=-1).tolist()
+        for uid, steps, token_count in zip(uids, rollout_staleness, token_counts, strict=True):
             group = counts.setdefault(uid, {"staleness": steps, "groups": 1, "sequences": 0, "response_tokens": 0})
             group["sequences"] += 1
-            group["response_tokens"] += int(mask.sum().item())
+            group["response_tokens"] += int(token_count)
         for group in counts.values():
             record_event("consumed_staleness", group, attributes={"role": TRAINER_ROLE, "step": str(self.global_step)})
 
