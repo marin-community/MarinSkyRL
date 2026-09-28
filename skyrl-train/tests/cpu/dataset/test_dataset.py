@@ -2,7 +2,9 @@ import pytest
 from unittest.mock import patch
 from datasets import Dataset
 from transformers import BatchEncoding
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset import PromptDataset
+from skyrl_train.entrypoints.main_base import BasePPOExp
 
 
 class _StubTokenizer:
@@ -36,25 +38,26 @@ def sample_dataset():
     return Dataset.from_dict(data)
 
 
-@patch("datasets.load_dataset")
-def test_prompt_dataset_filtering(mock_load_dataset, mock_tokenizer, sample_dataset):
-    mock_load_dataset.return_value = {"train": sample_dataset}
+@pytest.mark.parametrize("probe_enabled", [False, True], ids=["evaluation", "probe_without_evaluation"])
+def test_eval_dataset_filtering(mock_tokenizer, sample_dataset, tmp_path, probe_enabled):
+    path = tmp_path / "validation.parquet"
+    sample_dataset.to_parquet(path)
+    experiment = object.__new__(BasePPOExp)
+    experiment.cfg = get_default_config()
+    experiment.cfg.data.val_data = [str(path)]
+    experiment.cfg.trainer.max_prompt_length = 150
+    experiment.cfg.trainer.eval_interval = -1 if probe_enabled else 1
+    experiment.cfg.trainer.mismatch_probe.enabled = probe_enabled
+    experiment.tokenizer = mock_tokenizer
 
-    dataset = PromptDataset(
-        datasets=["dummy1.parquet"],
-        tokenizer=mock_tokenizer,
-        max_prompt_length=150,  # should exclude third item
-        num_workers=1,
-        prompt_key="prompt",
-        env_class_key="env_class",
-    )
+    dataset = experiment.get_eval_dataset()
 
-    # Only first two prompts should remain
+    assert dataset is not None
     assert len(dataset) == 2
-    messages, env, extra, uid = dataset[0]
-    assert env is None
-    assert messages == "short prompt"
-    assert extra == {"answer": "a1"}
+    assert dataset.collate_fn([dataset[0], dataset[1]]) == [
+        {"prompt": "short prompt", "env_class": None, "env_extras": {"answer": "a1"}, "uid": "0"},
+        {"prompt": "a" * 120, "env_class": None, "env_extras": {"answer": "a2"}, "uid": "1"},
+    ]
 
 
 @patch("datasets.load_dataset")
