@@ -1305,8 +1305,9 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
 
     if env_vars.get(VLLM_BATCH_INVARIANT_ENV) == "1" or os.environ.get(VLLM_BATCH_INVARIANT_ENV) == "1":
         # Megatron and vLLM share a weight-update NCCL group; mismatched settings broke its first broadcast.
-        # Mirror pinned vLLM as a set; on upgrade, drop settings it drops and requalify publication.
-        # Remove this block if publication no longer joins their ranks; it also affects learner collectives.
+        # Mirror pinned vLLM as a set; recheck and requalify on each wheel upgrade.
+        # Replace this list via https://github.com/marin-community/vllm/issues/80.
+        # Remove it if their ranks stop sharing publication; it also affects learner collectives.
         env_vars.update(
             NCCL_LAUNCH_MODE="GROUP",  # Match vLLM's kernel launch mode.
             NCCL_COLLNET_ENABLE="0",  # Avoid CollNet reduction offload.
