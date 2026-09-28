@@ -29,6 +29,8 @@ TIMING_PARENTS: dict[str, str | None] = {
     "policy_critic_overlap_train": "train_critic_and_policy",
     "backload_policy_optimizer_to_gpu": "train_critic_and_policy",
     "sync_weights": "step",
+    "inference_engine_sleep": "step",
+    "inference_engine_wake": "step",
     "offload_policy_model_to_cpu": "step",
     "dump_data_batch": "run_training",
     "init_weight_sync_state": None,
