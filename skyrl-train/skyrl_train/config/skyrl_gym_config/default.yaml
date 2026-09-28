@@ -1,5 +1,5 @@
 # @package environment.skyrl_gym
-max_env_workers: 32
+max_env_workers: 32 # environment threads in each rollout worker
 
 text2sql:
   db_path: "/home/ray/default/sql_data"
