@@ -185,6 +185,11 @@ def determine_proof_status(compiler_output: Dict[str, Any]) -> str:
     elif process_status != "completed":
         return process_status
 
+    if compiler_output.get("output_truncated") or compiler_output.get("truncated"):
+        return "output_truncated"
+    if compiler_output.get("returncode", compiler_output.get("exit_code", 0)) != 0:
+        return "failed"
+
     # Check stdout and stderr for proof status indicators
     stdout = compiler_output.get("stdout", "").lower()
     stderr = compiler_output.get("stderr", "").lower()
@@ -194,5 +199,6 @@ def determine_proof_status(compiler_output: Dict[str, Any]) -> str:
     if re.search(r"\bsorry\b", combined) is not None:
         return "has_sorry"
 
-    # If process completed without errors, consider it successful
+    if re.search(r"\berror\b", combined):
+        return "failed"
     return "completed"

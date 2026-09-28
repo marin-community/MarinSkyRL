@@ -19,16 +19,14 @@ MAX_GENERATE_LENGTH=3000
 TRAIN_BATCH_SIZE=256
 MAX_TURNS=6
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra megatron --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.policy.model.path="Qwen/Qwen2.5-Coder-7B-Instruct" \
   trainer.epochs=30 \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
-  trainer.policy.fsdp_config.cpu_offload=false \
-  trainer.ref.fsdp_config.cpu_offload=true \
+  trainer.strategy=megatron \
   trainer.policy.optimizer_config.max_grad_norm=0.5 \
   trainer.policy.sequence_parallel_size=1 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
@@ -36,7 +34,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$TP_SIZE \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
-  trainer.micro_forward_batch_size_per_gpu=8 \
+  trainer.micro_forward_batch_size_per_gpu=2 \
   trainer.micro_train_batch_size_per_gpu=2 \
   trainer.max_prompt_length=6000 \
   generator.max_input_length=$MAX_INPUT_LENGTH \

@@ -47,7 +47,7 @@ python -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.policy_loss_type=$POLICY_LOSS \
   trainer.policy.model.path=$STUDENT_MODEL \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$INFERENCE_ENGINE_TP_SIZE \

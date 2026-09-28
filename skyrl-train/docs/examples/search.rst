@@ -55,12 +55,10 @@ Let's walk through configuration for running GRPO to train a 4-turn search agent
         trainer.algorithm.use_kl_loss=true \
         trainer.algorithm.kl_loss_coef=0.001 \
 
-        # - Model: model path, placement, FSDP settings
+        # - Model: model path, placement, Megatron settings
         trainer.policy.model.path="Qwen/Qwen2.5-3B-Instruct" \
         trainer.placement.colocate_all=true \
-        trainer.strategy=fsdp2 \
-        trainer.policy.fsdp_config.cpu_offload=false \
-        trainer.ref.fsdp_config.cpu_offload=true \
+        trainer.strategy=megatron \
         trainer.placement.policy_num_gpus_per_node=8 \
         trainer.placement.ref_num_gpus_per_node=8 \
 

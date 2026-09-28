@@ -14,13 +14,13 @@ LOGGER="wandb"  # change to "console" to print to stdout
 # Configure the policy loss to use
 POLICY_LOSS="reinforce"
 
-uv run --isolated --extra vllm -m examples.algorithm.custom_policy_loss.main_custom_policy_loss \
+uv run --isolated --extra megatron --extra vllm -m examples.algorithm.custom_policy_loss.main_custom_policy_loss \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.policy_loss_type="$POLICY_LOSS" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   generator.num_inference_engines=$NUM_GPUS \

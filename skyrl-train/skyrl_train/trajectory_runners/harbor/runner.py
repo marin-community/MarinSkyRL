@@ -373,7 +373,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             tokenizer: tokenizer object for encoding and decoding text
             moe_router_replay: when True, capture per-token MoE routed_experts from
                 Harbor rollout_details and plumb them through to the training batch
-                (Stage 1 of the FSDP2 EP/router-replay port). Default False keeps the
+                for Megatron router replay. Default False keeps the
                 TrajectoryBatch byte-identical to today.
             rollout_logprobs_required: Whether the selected policy objective consumes
                 behavior-policy logprobs. Full-TITO rollout assembly defaults to this.
@@ -2189,6 +2189,20 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 tito_full=self._tito_full,
                 tis_splice=self._tis_splice,
             )
+
+        if alignment_stats and alignment_stats.n_tito_full_successes:
+            assert assistant_prompt_token_ids
+            generation_prompt_ids = get_generation_prompt_ids(
+                self.tokenizer,
+                custom_chat_template=self.custom_chat_template_content,
+                chat_template_kwargs=self._chat_template_kwargs,
+            )
+            # OpenAI tool schemas and other request fields can change the served prompt
+            # without appearing in the reconstructed chat history.
+            prompt_ids = assistant_prompt_token_ids[0][
+                : len(assistant_prompt_token_ids[0]) - len(generation_prompt_ids)
+            ]
+            initial_prompt_length = len(prompt_ids)
 
         # Prefer the agent's terminal reason when Harbor supplied one. The local
         # response limit remains authoritative when the reconstructed response

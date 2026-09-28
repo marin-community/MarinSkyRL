@@ -16,7 +16,7 @@ set -x
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 DATA_DIR="$HOME/data/searchR1"
 
-uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --frozen --extra megatron --extra vllm -m skyrl_train.entrypoints.main_base \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -27,9 +27,7 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.kl_loss_coef=0.001 \
   trainer.policy.model.path="Qwen/Qwen2.5-3B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
-  trainer.policy.fsdp_config.cpu_offload=false \
-  trainer.ref.fsdp_config.cpu_offload=true \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_gpus_per_node=8 \
   trainer.placement.ref_num_gpus_per_node=8 \
   generator.num_inference_engines=4 \

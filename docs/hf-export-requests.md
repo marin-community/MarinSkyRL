@@ -75,9 +75,7 @@ upload callback on the training ranks.
 
 ## Failure boundary
 
-The export job has its own timeout and exit status. FSDP2 and Megatron conversion
-still require a distributed GPU gang at the saved policy geometry because their
-checkpoint formats are sharded. The export-specific runtime profiles install the
-selected FSDP2, DeepSpeed, or Megatron strategy without vLLM, Harbor, Daytona, or training telemetry.
+The export job has its own timeout and exit status. Megatron conversion still requires a distributed GPU gang at the saved policy geometry because their
+checkpoint formats are sharded. The export-specific runtime profile installs Megatron without vLLM, Harbor, Daytona, or training telemetry.
 Conversion does not hold unrelated training or rollout ranks while one rank
 serializes or uploads the model.

@@ -75,6 +75,14 @@ class TeacherResourceSpec:
     colocation_group: str
     max_num_batched_tokens: int | None = None
     gpu_memory_utilization: float | None = None
+    # One engine spans tensor_parallel_size x data_parallel_size GPUs. Expert parallelism shards MoE
+    # experts across that engine's GPUs; the vLLM fork serves GrugMoE only with tensor_parallel_size=1.
+    data_parallel_size: int = 1
+    expert_parallel_size: int = 1
+
+    @property
+    def gpus_per_engine(self) -> int:
+        return self.tensor_parallel_size * self.data_parallel_size
 
 
 class TeacherSpec(Protocol):
@@ -198,10 +206,17 @@ def validate_distillation_runtime_support(plan: DistillationPlan | None) -> None
         if teacher.resources is None:
             raise ValueError(f"teachers.{teacher.id}.resources is required for a local teacher runtime")
         total_gpus = teacher.resources.num_nodes * teacher.resources.gpus_per_node
-        if total_gpus % teacher.resources.tensor_parallel_size != 0:
+        if total_gpus % teacher.resources.gpus_per_engine != 0:
             raise ValueError(
                 f"teachers.{teacher.id}.resources reserves {total_gpus} GPUs, which is not divisible by "
-                f"tensor_parallel_size={teacher.resources.tensor_parallel_size}"
+                f"tensor_parallel_size={teacher.resources.tensor_parallel_size} x "
+                f"data_parallel_size={teacher.resources.data_parallel_size}"
+            )
+        expert_parallel = teacher.resources.expert_parallel_size
+        if expert_parallel not in (1, teacher.resources.gpus_per_engine):
+            raise ValueError(
+                f"teachers.{teacher.id}.resources.expert_parallel_size must be 1 or equal to "
+                f"tensor_parallel_size x data_parallel_size ({teacher.resources.gpus_per_engine}); got {expert_parallel}"
             )
 
         group = teacher.resources.colocation_group
@@ -333,6 +348,8 @@ def _teacher_resources(config: Mapping[str, object], path: str) -> TeacherResour
                 "colocation_group",
                 "max_num_batched_tokens",
                 "gpu_memory_utilization",
+                "data_parallel_size",
+                "expert_parallel_size",
             }
         ),
         f"{path}.resources",
@@ -351,6 +368,16 @@ def _teacher_resources(config: Mapping[str, object], path: str) -> TeacherResour
             None
             if resources.get("gpu_memory_utilization") is None
             else _gpu_memory_utilization(resources, f"{path}.resources")
+        ),
+        data_parallel_size=(
+            1
+            if resources.get("data_parallel_size") is None
+            else _positive_integer(resources, "data_parallel_size", f"{path}.resources")
+        ),
+        expert_parallel_size=(
+            1
+            if resources.get("expert_parallel_size") is None
+            else _positive_integer(resources, "expert_parallel_size", f"{path}.resources")
         ),
     )
 

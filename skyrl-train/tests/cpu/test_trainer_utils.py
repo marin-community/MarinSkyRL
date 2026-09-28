@@ -12,6 +12,7 @@ from skyrl_train.utils.trainer_utils import (
     validate_consistency_for_latest_checkpoint,
     sanitize_data_source,
     calculate_per_dataset_metrics,
+    evaluation_response_metrics,
     dump_per_dataset_eval_results,
     handle_dynamic_sampling,
     handle_replace_sampling,
@@ -233,6 +234,34 @@ def test_sanitize_data_source_normal_string():
     assert result == "normal_dataset"
 
 
+def test_evaluation_response_metrics_report_work_and_stop_contributions():
+    batch = {
+        "response_ids": [[1, 2, 3], [4], [5, 6]],
+        "rewards": [1.0, 0.0, 1.0],
+        "stop_reasons": ["stop", "length", "stop"],
+    }
+    metrics = evaluation_response_metrics(batch)
+    assert metrics["response_tokens"] == 6
+    assert metrics["response_tokens_mean"] == pytest.approx(2.0)
+    assert metrics["response_tokens_max"] == 3
+    assert metrics["stop_reason_coverage"] == 1
+    assert metrics["completed_stop_fraction"] == pytest.approx(2 / 3)
+    # Contributions divide by every evaluated response.
+    assert metrics["completed_stop_score_contribution"] == pytest.approx(2 / 3)
+    assert metrics["length_stop_score_contribution"] == 0
+
+
+def test_evaluation_response_metrics_suppress_fractions_without_full_stop_coverage():
+    batch = {"response_ids": [[1, 2], [3]], "rewards": [1.0, 1.0], "stop_reasons": ["stop", None]}
+    metrics = evaluation_response_metrics(batch)
+    assert metrics["stop_reason_coverage"] < 1
+    assert "completed_stop_fraction" not in metrics
+    assert "completed_stop_score_contribution" not in metrics
+    assert metrics["response_tokens"] == 3
+    with pytest.raises(ValueError):
+        evaluation_response_metrics({"response_ids": [], "rewards": []})
+
+
 def test_calculate_per_dataset_metrics_single_source():
     """Test calculate_per_dataset_metrics with single data source."""
     # Create test data
@@ -397,6 +426,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
             4.0,
         ],  # uid1: [1.0, 2.0] (good), uid2: [1.0, 1.0] (bad), uid3: [3.0, 4.0] (good)
         "unshaped_rewards": [0.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+        "data_sources": ["math", "math", "unused", "unused", "code", "code"],
         "loss_masks": [[1, 1]] * 6,
         "stop_reasons": ["length"] * 6,
         "rollout_metrics": None,
@@ -426,6 +456,9 @@ def test_handle_replace_sampling_sufficient_good_samples():
     # After replacement, uid2 indices should now contain UIDs from good samples
     assert len(uid2_indices) == 0  # uid2 should be completely replaced
     assert result_output["unshaped_rewards"][2:4] in ([0.0, 1.0], [1.0, 0.0])
+    assert all(
+        result_output["data_sources"][index] == {"uid1": "math", "uid3": "code"}[result_uids[index]] for index in (2, 3)
+    )
 
 
 def test_handle_replace_sampling_insufficient_good_samples():

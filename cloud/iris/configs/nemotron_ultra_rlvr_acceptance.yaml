@@ -50,7 +50,7 @@ terminal_bench:
     cleanup: true
 
 trainer:
-  strategy: fsdp2
+  strategy: megatron
   seed: 1729
   algorithm:
     advantage_estimator: reinforce++
@@ -85,13 +85,7 @@ trainer:
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
       max_grad_norm: 1.0
-    fsdp_config:
-      cpu_offload: false
-      reshard_after_forward: true
   ref:
-    fsdp_config:
-      cpu_offload: false
-      reshard_after_forward: true
   placement:
     colocate_all: true
     policy_num_nodes: null

@@ -105,7 +105,7 @@ The training configuration uses GRPO with colocated training and generation. Key
      
      # Placement and strategy
      trainer.placement.colocate_all=true \
-     trainer.strategy=fsdp2 \
+     trainer.strategy=megatron \
      trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
      
      # Generator configuration
@@ -138,7 +138,6 @@ What's Next?
 
 Now that you've seen how to use LLM as a judge for reward computation, you might want to explore:
 
-- :doc:`ppo`: Compare with rule-based PPO training on GSM8K
 - :doc:`multi_turn_text2sql`: Explore multi-turn training with async rollouts
 - :doc:`search`: Learn about multi-turn search agent training
 - :doc:`../tutorials/new_env`: Learn how to build your own custom environments

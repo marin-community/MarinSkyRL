@@ -40,13 +40,14 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
     NormalizedReward,
     aggregate_reward_shaping_components,
 )
+from skyrl_gym.verification import VerificationResult
 from skyrl_train.json_serialization import canonical_json_bytes, to_jsonable
 from skyrl_train.io import io
 
 
 RETENTION_METRIC_PREFIX = "generate/trajectory_retention"
 RETENTION_SCHEMA_VERSION = 1
-TRAJECTORY_RECORD_SCHEMA_VERSION = 3
+TRAJECTORY_RECORD_SCHEMA_VERSION = 5
 _LEDGER_NAME = "_retention_ledger.json"
 _SELECTION_COUNT = "count"
 _SELECTION_FRACTION = "fraction"
@@ -159,12 +160,6 @@ class _PromptTrace:
 
 
 @dataclass(frozen=True)
-class _TraceMessage:
-    role: str
-    content: str
-
-
-@dataclass(frozen=True)
 class _StepBoundary:
     row_index: int
     token_start: int
@@ -175,7 +170,7 @@ class _StepBoundary:
 
 @dataclass(frozen=True)
 class _ResponseTrace:
-    messages: tuple[_TraceMessage, ...] | None
+    messages: tuple[dict[str, Any], ...] | None
     text: str | None
     token_ids: tuple[int, ...]
     loss_mask: tuple[int, ...]
@@ -197,6 +192,7 @@ class _RewardTrace:
 class _DispositionTrace:
     exception_type: str | None
     error_treatment: str | None
+    server_error: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -224,6 +220,7 @@ class TrajectoryRecord:
     reward: _RewardTrace
     disposition: _DispositionTrace
     verifier: VerifierTestCollection | None
+    verification_result: VerificationResult | None
     metrics: dict[str, Any]
     provenance: _ProvenanceTrace
 
@@ -387,10 +384,13 @@ def build_trajectory_records(
     stop_reasons = output.get("stop_reasons") or [None] * len(output["response_ids"])
     exception_types = output.get("exception_types") or [None] * len(output["response_ids"])
     error_treatments = output.get("error_treatments") or [None] * len(output["response_ids"])
+    server_errors = output.get("server_errors") or [None] * len(output["response_ids"])
     if len(exception_types) != len(output["response_ids"]):
         raise ValueError("exception types must have one entry per trajectory row")
     if len(error_treatments) != len(output["response_ids"]):
         raise ValueError("error treatments must have one entry per trajectory row")
+    if len(server_errors) != len(output["response_ids"]):
+        raise ValueError("server errors must have one entry per trajectory row")
     unshaped = output.get("unshaped_rewards")
     components = output.get("reward_shaping_components")
     loop_spans = output.get("reward_shaping_loop_spans")
@@ -436,7 +436,14 @@ def build_trajectory_records(
                 token_ids=tuple(prompt_ids),
             ),
             response=_ResponseTrace(
-                messages=None if response_text is None else (_TraceMessage(role="assistant", content=response_text),),
+                messages=(
+                    tuple(output["evidence_messages"][final_index])
+                    if output.get("evidence_messages") is not None
+                    and output["evidence_messages"][final_index] is not None
+                    else None
+                    if response_text is None
+                    else ({"role": "assistant", "content": response_text},)
+                ),
                 text=response_text,
                 token_ids=tuple(response_ids),
                 loss_mask=tuple(loss_mask),
@@ -456,8 +463,12 @@ def build_trajectory_records(
             disposition=_DispositionTrace(
                 exception_type=exception_types[final_index],
                 error_treatment=error_treatments[final_index],
+                server_error=server_errors[final_index],
             ),
             verifier=None if verifier_tests is None else verifier_tests[final_index],
+            verification_result=(
+                output["verification_results"][final_index] if output.get("verification_results") is not None else None
+            ),
             metrics=to_jsonable(output.get("rollout_metrics") or {}),
             provenance=_ProvenanceTrace(
                 runner=runner_name,

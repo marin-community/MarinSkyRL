@@ -143,6 +143,7 @@ trainer:
       optimizer_kwargs:
         foreach: false
     megatron_config:
+      moe_router_replay: true
       tensor_model_parallel_size: 4
       pipeline_model_parallel_size: 2
       context_parallel_size: 1
@@ -150,22 +151,11 @@ trainer:
       expert_tensor_parallel_size: 1
       transformer_config_kwargs:
         gradient_accumulation_fusion: false
-    fsdp_config:
-      cpu_offload: true
-      reshard_after_forward: true
-      fsdp_size: 4
-      expert_model_parallel_size: 4
-      context_parallel_size: 1
-      cp_style: ring_sdpa
-      cp_rotate_method: allgather
-      moe_router_replay: true
-      moe_grouped_gemm: true
-      use_grouped_mm: true
-      ep_comm_backend: torch
   ref:
     model:
       path: Qwen/Qwen3-Coder-30B-A3B-Instruct
     megatron_config:
+      moe_router_replay: true
       tensor_model_parallel_size: 4
       pipeline_model_parallel_size: 2
       context_parallel_size: 1
@@ -173,19 +163,6 @@ trainer:
       expert_tensor_parallel_size: 1
       transformer_config_kwargs:
         gradient_accumulation_fusion: false
-    fsdp_config:
-      cpu_offload: true
-      reshard_after_forward: true
-      fsdp_size: 4
-      expert_model_parallel_size: 4
-      context_parallel_size: 1
-      cp_style: ring_sdpa
-      cp_rotate_method: allgather
-      moe_router_replay: true
-      moe_grouped_gemm: true
-      use_grouped_mm: true
-      ep_comm_backend: torch
-
   placement:
     colocate_all: false
     policy_num_nodes: 2

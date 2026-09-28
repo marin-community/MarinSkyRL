@@ -11,7 +11,7 @@ NUM_GPUS=1
 LOGGER="console"  # change to "console" to print to stdout
 SANDBOXES_DIR="sandboxes" # TODO: For now, `sandboxes` is cloned into SkyRL/skyrl-train.
 
-uv run --isolated --extra vllm --with "litellm[proxy]>=1.67.5" --with "sandbox@./sandboxes" -m skyrl_train.entrypoints.terminal_bench \
+uv run --isolated --extra megatron --extra vllm --with "litellm[proxy]>=1.67.5" --with "sandbox@./sandboxes" -m skyrl_train.entrypoints.terminal_bench \
   data.train_data="['$DATA_DIR']" \
   data.val_data="['$DATA_DIR']" \
   +terminal_bench_config=terminal_bench \
@@ -20,7 +20,7 @@ uv run --isolated --extra vllm --with "litellm[proxy]>=1.67.5" --with "sandbox@.
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   generator.num_inference_engines=$NUM_GPUS \

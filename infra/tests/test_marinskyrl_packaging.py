@@ -62,11 +62,10 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
     extras = set(metadata.get_all("Provides-Extra", []))
     requirements = metadata.get_all("Requires-Dist", [])
 
-    assert {"cpu", "cuda", "fsdp", "vllm", "megatron", "telemetry"}.issubset(extras)
+    assert {"cpu", "cuda", "vllm", "megatron", "telemetry"}.issubset(extras)
     assert "agentic" not in extras
     assert any(requirement.startswith("torch==") and "extra == 'cpu'" in requirement for requirement in requirements)
     assert any(requirement.startswith("torch==") and "extra == 'cuda'" in requirement for requirement in requirements)
-    assert any(requirement.startswith("torchtitan") and "extra == 'fsdp'" in requirement for requirement in requirements)
     assert any(requirement.startswith("vllm==") and "extra == 'vllm'" in requirement for requirement in requirements)
     assert any(
         requirement.startswith("harbor[analysis,datasets,daytona]") and "extra == 'vllm'" in requirement
@@ -129,7 +128,7 @@ def _exported_requirements(extras: tuple[str, ...]) -> list[Requirement]:
     return [Requirement(line) for line in exported if line and not line.startswith(("#", "-e "))]
 
 
-@pytest.mark.parametrize("extras", [("cuda",), ("deepspeed",), ("fsdp", "vllm"), ("megatron", "vllm")])
+@pytest.mark.parametrize("extras", [("cuda",), ("megatron", "vllm")])
 def test_gpu_profiles_use_one_cuda132_runtime(extras: tuple[str, ...]) -> None:
     platform = {"sys_platform": "linux", "platform_machine": "x86_64"}
     requirements = _exported_requirements(extras)
@@ -146,8 +145,6 @@ def test_gpu_profiles_use_one_cuda132_runtime(extras: tuple[str, ...]) -> None:
 @pytest.mark.parametrize(
     ("extras", "architecture", "required", "forbidden"),
     [
-        (("fsdp", "vllm"), "x86_64", {"flash-attn", "torchtitan"}, set()),
-        (("fsdp", "vllm"), "aarch64", set(), {"flash-attn", "torchtitan"}),
         (
             ("megatron", "vllm"),
             "x86_64",

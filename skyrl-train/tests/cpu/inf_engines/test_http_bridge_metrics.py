@@ -14,7 +14,13 @@ TEST_MODEL_NAME = "test-model"
 class _Backend:
     model_name = TEST_MODEL_NAME
 
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
     async def chat_completion(self, _request):
+        self.started.set()
+        await self.release.wait()
         return {"choices": [{"message": {"content": "ok"}}]}
 
     async def completion(self, _request):
@@ -24,7 +30,9 @@ class _Backend:
         yield "data: [DONE]\n\n"
 
     async def tokenize(self, _request):
-        raise AssertionError("tokenization is not expected in this test")
+        self.started.set()
+        await self.release.wait()
+        return {"tokens": [1, 2]}
 
 
 class _NativeTokenizationBackend(_Backend):
@@ -107,9 +115,10 @@ async def test_tokenize_preserves_native_vllm_validation_error():
 
 
 @pytest.mark.asyncio
-async def test_real_uvicorn_bridge_records_96_concurrent_requests():
+async def test_real_uvicorn_bridge_handles_mixed_load_with_responsive_health():
     accumulator = HTTPBridgeStatsAccumulator()
-    set_global_state(_Backend(), None)
+    backend = _Backend()
+    set_global_state(backend, None)
     app = create_app(accumulator, event_loop_lag_interval_seconds=0.001)
     server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="on"))
     listener = socket.socket()
@@ -120,21 +129,37 @@ async def test_real_uvicorn_bridge_records_96_concurrent_requests():
     try:
         await asyncio.wait_for(_wait_until_started(server), timeout=5)
         async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", timeout=10) as client:
-            responses = await asyncio.gather(
-                *(
+            requests = [
+                asyncio.create_task(
                     client.post(
-                        "/v1/chat/completions",
+                        "/tokenize" if index % 2 else "/v1/chat/completions",
                         json={"model": "test-model", "messages": [{"role": "user", "content": str(index)}]},
                     )
-                    for index in range(96)
                 )
-            )
+                for index in range(96)
+            ]
+            try:
+                await asyncio.wait_for(backend.started.wait(), timeout=5)
+                started = asyncio.get_running_loop().time()
+                health = await asyncio.wait_for(client.get("/health"), timeout=1)
+                assert health.status_code == 200
+                assert asyncio.get_running_loop().time() - started < 1
+            finally:
+                backend.release.set()
+            responses = await asyncio.wait_for(asyncio.gather(*requests), timeout=10)
         assert all(response.status_code == 200 for response in responses)
 
         snapshot = accumulator.snapshot(IntervalReadMode.PEEK)
         assert snapshot.response_bytes.count == 96
         assert snapshot.json_serialization_seconds.count == 96
         assert snapshot.event_loop_lag_seconds.count > 0
+        assert snapshot.event_loop_lag_seconds.maximum < 1
+        outcomes = {
+            (item.attributes["endpoint"], item.attributes["reason"]): item.count
+            for item in snapshot.histograms
+            if item.name == "request_outcome"
+        }
+        assert outcomes == {("/tokenize", "completed"): 48, ("/v1/chat/completions", "completed"): 48}
     finally:
         server.should_exit = True
         await asyncio.wait_for(server_task, timeout=5)

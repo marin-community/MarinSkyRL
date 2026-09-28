@@ -16,7 +16,7 @@ ADV_ESTIMATOR="reinforce++"
 USE_KL_IN_REWARD=true
 KL_ESTIMATOR_TYPE="k2"
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra megatron --extra vllm -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="$ADV_ESTIMATOR" \
@@ -25,7 +25,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.kl_estimator_type=$KL_ESTIMATOR_TYPE \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   generator.num_inference_engines=$NUM_GPUS \

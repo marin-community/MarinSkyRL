@@ -30,7 +30,7 @@ from cloud.iris.rl_data import (
     resolve_rl_train_data_with_sources,
 )
 from marinskyrl.process_diagnostics import ProcessOutcomeKind, write_process_outcome
-from marinskyrl.resource_locator import model_source_for_path
+from marinskyrl.resource_locator import is_cloud_uri, model_source_for_path
 from cloud.iris.launch_config import RunMode, load_launch_config
 from cloud.iris.rl_config_translation import TaskLocalSkyRLValues, apply_task_local_values
 
@@ -277,7 +277,7 @@ class LocalRLRunner:
             register_controller_endpoint,
         )
         from cloud.iris.literal_proxy_utils import (
-            DEFAULT_LITERAL_PROXY_HOST,
+            CONTROLLER_INGRESS_PROXY_HOST,
             maybe_serve_literal_proxy,
             select_literal_proxy_port,
         )
@@ -301,7 +301,7 @@ class LocalRLRunner:
                     "--parent_controller_config); needed to mint at iris.oa.dev."
                 )
 
-        proxy_port = select_literal_proxy_port(self.config.job_name, host=DEFAULT_LITERAL_PROXY_HOST)
+        proxy_port = select_literal_proxy_port(self.config.job_name, host=CONTROLLER_INGRESS_PROXY_HOST)
         endpoint_name, register_address = controller_registration_plan(
             self.config.job_name,
             record_literal=self.config.record_literal,
@@ -309,7 +309,7 @@ class LocalRLRunner:
             vllm_port=self.config.vllm_http_port,
         )
         vllm_local = f"http://localhost:{self.config.vllm_http_port}/v1"
-        # RecordProxy binds 0.0.0.0 so the (remote) controller reaches it at
+        # The RecordProxy listens on every interface so the remote controller reaches it at
         # IRIS_ADVERTISE_HOST; record_literal off => maybe_serve_literal_proxy is a null
         # CM and the plan registered raw vLLM's port instead.
         with maybe_serve_literal_proxy(
@@ -317,7 +317,7 @@ class LocalRLRunner:
             vllm_local,
             experiments_dir=self.config.experiments_dir,
             job_name=self.config.job_name,
-            host=DEFAULT_LITERAL_PROXY_HOST,
+            host=CONTROLLER_INGRESS_PROXY_HOST,
             port=proxy_port,
         ):
             registration = register_controller_endpoint(endpoint_name, register_address)
@@ -459,11 +459,13 @@ def main() -> None:
     args = create_parser().parse_args()
     launch_config = load_launch_config(args.config)
     allocation = launch_config.iris.allocation
+    model_uri = str(launch_config.inputs.model.uri)
+    model_is_cloud = is_cloud_uri(model_uri)
     config = LocalRLConfig(
         job_name=str(launch_config.iris.job_name),
         model_path=str(launch_config.skyrl.trainer.policy.model.path),
-        model_source_uri=str(launch_config.inputs.model.uri),
-        model_source_identity=str(launch_config.inputs.model.identity),
+        model_source_uri=model_uri if model_is_cloud else None,
+        model_source_identity=str(launch_config.inputs.model.identity) if model_is_cloud else None,
         train_data=list(launch_config.inputs.train_data),
         val_data=list(launch_config.inputs.validation_data),
         experiments_dir=str(launch_config.runtime.experiments_dir),

@@ -31,7 +31,7 @@ python -m skyrl_train.entrypoints.terminal_bench \
   trainer.ckpt_path=$CKPTS_DIR \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_nodes=1 \
   trainer.placement.ref_num_nodes=1 \
   trainer.placement.policy_num_gpus_per_node=8 \

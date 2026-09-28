@@ -75,25 +75,6 @@ cuda = [
     "torchdata ; sys_platform == 'linux'",
     "torchvision==0.28.0 ; sys_platform == 'linux'",
 ]
-deepspeed = [
-    "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux'",
-    "accelerate>=1.14,<2 ; sys_platform == 'linux'",
-    "deepspeed==0.17.6 ; sys_platform == 'linux'",
-    "harbor-config ; sys_platform == 'linux'",
-    "peft>=0.19 ; sys_platform == 'linux'",
-    "tensordict ; sys_platform == 'linux'",
-    "torch==2.13.0 ; sys_platform == 'linux'",
-    "torchdata ; sys_platform == 'linux'",
-    "torchvision==0.28.0 ; sys_platform == 'linux'",
-]
-fsdp = [
-    "causal-conv1d>=1.5,<2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    # Match the Megatron pin below so combined installs resolve one wheel.
-    "flash-attn==2.8.3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flash-linear-attention==0.4.2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "torch==2.13.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "torchtitan ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-]
 vllm = [
     # The CPU audio wheel uses Torch for GPU resampling without loading a cu132 extension.
     "torchaudio==2.11.0+cpu ; sys_platform == 'linux'",
@@ -184,8 +165,6 @@ prerelease = "allow"
 required-version = ">=0.8.10"
 conflicts = [
     [{ extra = "cpu" }, { extra = "cuda" }],
-    [{ extra = "cpu" }, { extra = "deepspeed" }],
-    [{ extra = "cpu" }, { extra = "fsdp" }],
     [{ extra = "cpu" }, { extra = "megatron" }],
     [{ extra = "cpu" }, { extra = "vllm" }],
 ]
@@ -236,14 +215,11 @@ speculators = { git = "https://github.com/lukedhlee/speculators.git", rev = "649
 torch = [
     { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { index = "pytorch-cu132", extra = "cuda" },
-    { index = "pytorch-cu132", extra = "deepspeed" },
-    { index = "pytorch-cu132", extra = "fsdp" },
     { index = "pytorch-cu132", extra = "megatron" },
     { index = "pytorch-cu132", extra = "vllm" },
 ]
 torchvision = [
     { index = "pytorch-cu132", extra = "cuda" },
-    { index = "pytorch-cu132", extra = "deepspeed" },
     { index = "pytorch-cu132", extra = "megatron" },
     { index = "pytorch-cu132", extra = "vllm" },
 ]
@@ -252,7 +228,6 @@ vllm = [
     { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-70ea9ae8f260/vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-70ea9ae8f260/vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
-torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 transformer-engine-torch = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
@@ -294,10 +269,6 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"skyrl-train/tests/gpu/test_e2e_moe_rl_step.py" = ["E402"]
-"skyrl-train/tests/gpu/test_e2e_moe_rl_step_80b.py" = ["E402"]
-"skyrl-train/tests/cpu/distributed/test_muon_hybrid.py" = ["E402"]
-"skyrl-train/tests/cpu/models/test_moe_weight_remap.py" = ["E402"]
 "skyrl-train/tests/cpu/models/test_models.py" = ["E402"]
 "skyrl-train/tests/cpu/test_ray_metrics.py" = ["E402"]
 "skyrl-train/skyrl_train/trajectory_runners/harbor/_harbor_compat.py" = ["F401"]

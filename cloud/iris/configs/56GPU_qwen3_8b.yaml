@@ -142,10 +142,6 @@ trainer:
       context_parallel_size: 1
       expert_model_parallel_size: 1
       expert_tensor_parallel_size: 1
-    fsdp_config:
-      cpu_offload: false
-      reshard_after_forward: true
-      fsdp_size: 4
   ref:
     megatron_config:
       tensor_model_parallel_size: 2
@@ -153,11 +149,6 @@ trainer:
       context_parallel_size: 1
       expert_model_parallel_size: 1
       expert_tensor_parallel_size: 1
-    fsdp_config:
-      cpu_offload: false
-      reshard_after_forward: true
-      fsdp_size: 4
-
   placement:
     colocate_all: false
     policy_num_nodes: 1

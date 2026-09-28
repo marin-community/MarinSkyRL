@@ -1,4 +1,5 @@
 import asyncio
+import threading
 
 import pytest
 
@@ -36,6 +37,18 @@ class RemoteMethod:
         self.result = result
 
     def remote(self, *args, **kwargs):
+        return self.result
+
+
+class BlockingRemoteMethod(RemoteMethod):
+    def __init__(self, result):
+        super().__init__(result)
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def remote(self, *args, **kwargs):
+        self.started.set()
+        assert self.release.wait(timeout=2)
         return self.result
 
 
@@ -109,6 +122,32 @@ async def test_cancelled_request_cancels_ray_actor_task(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert reference.cancelled
+
+
+@pytest.mark.asyncio
+async def test_slow_ray_submission_does_not_block_bridge_loop_and_cancels_abandoned_work(monkeypatch):
+    reference = ResolvedReference({"tokens": [1]})
+    method = BlockingRemoteMethod(reference)
+    actor = InferenceActor(tokenize_result=reference)
+    actor.tokenize = method
+    engine = RayWrappedInferenceEngine(actor)
+    cancelled = threading.Event()
+    monkeypatch.setattr(
+        "skyrl_train.inference_engines.ray_wrapped_inference_engine.ray.cancel", lambda _: cancelled.set()
+    )
+
+    started_at = asyncio.get_running_loop().time()
+    task = asyncio.create_task(engine.tokenize({"json": {"messages": []}}))
+    try:
+        assert await asyncio.wait_for(asyncio.to_thread(method.started.wait, 1), timeout=1)
+        assert asyncio.get_running_loop().time() - started_at < 0.5
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        method.release.set()
+
+    assert await asyncio.wait_for(asyncio.to_thread(cancelled.wait, 1), timeout=1)
 
 
 @pytest.mark.asyncio

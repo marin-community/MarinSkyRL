@@ -20,6 +20,7 @@ from skyrl_train.trajectory_runners.types import (
 )
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import shape_trajectory_rewards
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
+from skyrl_train.rollout_observability import rollout_phase
 
 
 def propagate_teacher_routes(input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> None:
@@ -43,6 +44,36 @@ def propagate_teacher_routes(input_batch: TrajectoryRequestBatch, output: Trajec
     if output_route_keys is not None and output_route_keys != route_keys:
         raise ValueError("trajectory runner output teacher_route_keys do not match request metadata")
     output["teacher_route_keys"] = route_keys
+
+
+def propagate_data_sources(input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> None:
+    """Keep request source labels aligned with whole or step-wise rollout rows."""
+    env_extras = input_batch.get("env_extras")
+    if env_extras is None:
+        return
+    sources = []
+    for extras in env_extras:
+        extra_info = extras.get("extra_info")
+        source = extra_info.get("data_source") if isinstance(extra_info, dict) else None
+        if source is None:
+            source = extras.get("data_source")
+        sources.append(source if isinstance(source, str) else None)
+
+    request_ids = input_batch.get("trajectory_ids")
+    output_ids = output.get("trajectory_ids")
+    if request_ids is None or output_ids is None:
+        if len(sources) == len(output["response_ids"]):
+            output["data_sources"] = sources
+        return
+    if len(request_ids) != len(sources) or len(output_ids) != len(output["response_ids"]):
+        raise ValueError("trajectory IDs and source labels must align with their rows")
+    sources_by_id = {(item.instance_id, item.repetition_id): source for item, source in zip(request_ids, sources)}
+    if len(sources_by_id) != len(request_ids):
+        raise ValueError("request trajectory IDs must be unique to map source labels")
+    try:
+        output["data_sources"] = [sources_by_id[(item.instance_id, item.repetition_id)] for item in output_ids]
+    except KeyError as error:
+        raise ValueError("output trajectory ID has no matching request source label") from error
 
 
 class TrajectoryRunner(ABC):
@@ -78,14 +109,16 @@ class TrajectoryRunner(ABC):
                 raise ValueError("trajectory runner output rows must align with request trajectory IDs")
             output["trajectory_ids"] = list(trajectory_ids)
         propagate_teacher_routes(input_batch, output)
-        return await self._finalize_output(input_batch, output)
+        with rollout_phase("finalize"):
+            return await self._finalize_output(input_batch, output)
 
     async def _finalize_output(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> TrajectoryBatch:
         """Apply runner-independent shaping, metrics, and retention."""
         shape_trajectory_rewards(output, self.trajectory_runner_cfg.get("trajectory_reward_shaping"))
         self._add_alignment_metrics(output)
         if self.trajectory_sink is not None:
-            await retain_trajectories(self.trajectory_sink, input_batch, output)
+            with rollout_phase("retain"):
+                await retain_trajectories(self.trajectory_sink, input_batch, output)
         return output
 
     def set_trajectory_sink(self, sink: TrajectorySink) -> None:

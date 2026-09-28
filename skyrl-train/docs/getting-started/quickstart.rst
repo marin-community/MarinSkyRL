@@ -31,7 +31,7 @@ Next, let's set up the training configuration. You can find a complete example i
       trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
       
       # Model placement and training strategy (colocate or disaggregate, sharding, etc.)
-      trainer.strategy=fsdp2 \
+      trainer.strategy=megatron \
       trainer.placement.colocate_all=true \
       trainer.placement.policy_num_gpus_per_node=4 \
 

@@ -388,7 +388,7 @@ def test_global_loss_denom_driver_matches_allreduce_sum():
     torch.manual_seed(0)
     max_seq_len = 4096
     # A range of (world_size, dp_size) mesh geometries, including the 80B
-    # EP8xFSDP8xCP1 = 64-rank shape that hit the wedge.
+    # EP8xDP8xCP1 = 64-rank shape that hit the wedge.
     for world_size, dp_size in [(64, 2), (64, 8), (64, 16), (8, 4), (16, 16), (4, 1)]:
         ranks_per_dp_group = world_size // dp_size
         # Synthetic full-batch advantages: rows divisible by dp_size, with a deterministic
@@ -981,7 +981,7 @@ def test_registry_reconnects_after_ray_shutdown():
 
 # ---------------------------------------------------------------------------
 # compute_tis_diagnostics — the shared TIS importance-ratio diagnostics used by
-# both the FSDP (PolicyWorkerBase.training_step) and Megatron
+# the Megatron
 # (MegatronModelWrapper.forward_backward_mini_batch) backends.
 # ---------------------------------------------------------------------------
 

@@ -1,6 +1,17 @@
 """Scalar metric aggregation."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from operator import itemgetter
+
+# How a step combines its optimizer windows' values; every other metric takes the mean.
+METRIC_REDUCTION: dict[str, Callable[[Sequence[float]], float]] = {
+    "log_ratio_abs_max": max,
+    "log_ratio_diagnostics_failed": max,
+    "n_tokens_dp_gt_1pct": sum,
+    "n_tokens_dp_gt_10pct": sum,
+    "n_tokens_dp_gt_50pct": sum,
+    "policy_lr": itemgetter(-1),
+}
 
 
 def mean_metrics(metrics: Mapping[str, Sequence[float]]) -> dict[str, float]:
@@ -19,10 +30,10 @@ def policy_training_metrics(
     metrics: Mapping[str, Sequence[float]],
     policy_update_steps: float,
 ) -> dict[str, float]:
-    """Reduce policy metrics, preserving the latest optimizer learning rate."""
+    """Reduce policy metrics over a step's optimizer windows."""
     status = mean_metrics({name: values for name, values in metrics.items() if name != "response_length"})
-    if learning_rates := metrics.get("policy_lr"):
-        status["policy_lr"] = learning_rates[-1]
+    for name in METRIC_REDUCTION.keys() & status.keys():
+        status[name] = METRIC_REDUCTION[name](metrics[name])
     status["policy_update_steps"] = policy_update_steps
     return status
 

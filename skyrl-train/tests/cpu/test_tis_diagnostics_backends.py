@@ -1,7 +1,6 @@
 """Backend-parity contracts for policy objectives and diagnostics.
 
-These tests pin the ordinary/FSDP training-step status and Megatron pipeline
-metrics for TIS, clipping, think-token weighting, global normalization, and
+These tests pin Megatron pipeline metrics for TIS, clipping, think-token weighting, global normalization, and
 cross-microbatch log-ratio diagnostics.
 
 `megatron_model_wrapper` imports `megatron.core` submodules at module load, but
@@ -10,9 +9,16 @@ env) we stub those submodules via the shared tests/cpu/util.py helper — only i
 megatron is genuinely absent, so a real-megatron env is left untouched.
 """
 
+import asyncio
+
 import pytest
 import torch
 from omegaconf import OmegaConf
+
+from skyrl_train.learner_memory import LearnerCudaMetrics
+from skyrl_train.timing_observability import PhaseBreakdown
+from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.workers.worker import PolicyWorkerBase
 
 from skyrl_train.utils.importance_ratio_diagnostics import (
     TIS_DIAG_KEYS,
@@ -24,10 +30,8 @@ from tests.cpu.util import stub_megatron_modules
 
 stub_megatron_modules()
 
-from skyrl_train.dataset.replay_buffer import Experience  # noqa: E402
 from skyrl_train.distillation import SparseForwardKLInput  # noqa: E402
 from skyrl_train.workers.megatron import megatron_model_wrapper as mmw  # noqa: E402
-from skyrl_train.workers.worker import PolicyWorkerBase  # noqa: E402
 
 BATCH_SIZE = 2
 SEQ_LEN = 6
@@ -108,172 +112,6 @@ def _globally_normalized_mask_sum(
     return loss_mask.sum() / global_loss_denom, {}
 
 
-# ---------------------------------------------------------------------------
-# FSDP path: PolicyWorkerBase.training_step
-# ---------------------------------------------------------------------------
-
-
-class _FakeHFModel:
-    """Callable standing in for the HF actor: returns (action_log_probs, output)."""
-
-    def __init__(self, action_log_probs: torch.Tensor, logits: torch.Tensor | None = None):
-        self._action_log_probs = action_log_probs
-        self._logits = logits
-
-    def train(self):
-        pass
-
-    def __call__(self, sequences, num_actions, **kwargs):
-        entropy = torch.zeros(sequences.shape[0], sequences.shape[1])
-        output = {"entropy": entropy}
-        if self._logits is not None:
-            output["logits"] = self._logits
-        return self._action_log_probs, output
-
-
-class _FakeStrategy:
-    def backward(self, loss, model, optimizer):
-        pass
-
-
-class _FakeScheduler:
-    def get_last_lr(self):
-        return [1e-6]
-
-
-def _fsdp_training_step_status(use_tis: bool, monkeypatch, policy_loss_type: str = "regular") -> dict:
-    old_lp, rollout_lp, loss_mask = _tis_tensors()
-    worker = object.__new__(PolicyWorkerBase)
-    worker.cfg = _algorithm_cfg(use_tis, policy_loss_type)
-    worker.model = _FakeHFModel(action_log_probs=old_lp + 0.01)
-    worker.policy_loss_fn = _fake_policy_loss_fn
-    worker.strategy = _FakeStrategy()
-    worker.optimizer = None
-    worker.scheduler = _FakeScheduler()
-    worker.record_memory = False
-    worker._grug_query_bias_window = None
-
-    experience = Experience(
-        sequences=torch.randint(0, 100, (BATCH_SIZE, SEQ_LEN)),
-        action_log_probs=old_lp,
-        base_action_log_probs=None,
-        values=None,
-        returns=None,
-        advantages=torch.zeros(BATCH_SIZE, NUM_ACTIONS),
-        attention_mask=torch.ones(BATCH_SIZE, SEQ_LEN),
-        loss_mask=loss_mask,
-        action_mask=torch.ones(BATCH_SIZE, NUM_ACTIONS),
-        num_actions=NUM_ACTIONS,
-        rollout_logprobs=rollout_lp,
-        info={},
-    )
-
-    # CPU test: the step opens with experience.to_device(torch.cuda.current_device()).
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: "cpu")
-    # local_step + 1 < accumulation_steps => the optimizer-step branch is skipped.
-    return worker.training_step(experience, global_step=0, local_step=0, accumulation_steps=2)
-
-
-def test_fsdp_training_step_emits_tis_diagnostics(monkeypatch):
-    old_lp, rollout_lp, loss_mask = _tis_tensors()
-    expected = compute_tis_diagnostics(old_lp, rollout_lp, loss_mask, cap=CAP)
-    status = _fsdp_training_step_status(use_tis=True, monkeypatch=monkeypatch)
-    for key in TIS_DIAG_KEYS:
-        assert status[key] == pytest.approx(expected[key])
-
-
-def test_fsdp_training_step_no_tis_keys_when_disabled(monkeypatch):
-    status = _fsdp_training_step_status(use_tis=False, monkeypatch=monkeypatch)
-    assert not any(key.startswith("tis/") for key in status)
-
-
-def test_fsdp_behavior_clip_keeps_rollout_divergence_diagnostics(monkeypatch):
-    old_lp, rollout_lp, loss_mask = _tis_tensors()
-    expected = compute_tis_diagnostics(old_lp, rollout_lp, loss_mask, cap=CAP)
-    status = _fsdp_training_step_status(
-        use_tis=False,
-        policy_loss_type="behavior_clip",
-        monkeypatch=monkeypatch,
-    )
-
-    for key in TIS_DIAG_KEYS:
-        assert status[key] == pytest.approx(expected[key])
-
-
-def test_fsdp_training_step_completes_clip_metric_contract(monkeypatch):
-    status = _fsdp_training_step_status(use_tis=False, monkeypatch=monkeypatch)
-    assert {key: status[key] for key in POLICY_CLIP_METRIC_KEYS} == dict.fromkeys(POLICY_CLIP_METRIC_KEYS, 0.0)
-
-
-def test_fsdp_training_step_gathers_sparse_teacher_tokens_from_student_logits(monkeypatch):
-    teacher_probs = torch.tensor([[[0.7, 0.2]], [[0.6, 0.3]]])
-    teacher_indices = torch.tensor([[[1, 2]], [[2, 3]]])
-    retained_mass = teacher_probs.sum(dim=-1)
-    student_logits = torch.zeros(BATCH_SIZE, SEQ_LEN, 5)
-    student_logits[0, -NUM_ACTIONS - 1, 1] = 2.0
-    student_logits[0, -NUM_ACTIONS - 1, 2] = -1.0
-    student_logits[1, -NUM_ACTIONS - 1, 2] = -0.5
-    student_logits[1, -NUM_ACTIONS - 1, 3] = 1.0
-    student_logits.requires_grad_()
-    old_lp, rollout_lp, _ = _tis_tensors()
-    worker = object.__new__(PolicyWorkerBase)
-    worker.cfg = _algorithm_cfg(use_tis=False)
-    worker.cfg.trainer.algorithm.distillation = {"reward_mode": "add"}
-    worker.cfg.trainer.policy = {"fsdp_config": {"context_parallel_size": 1}}
-    worker.model = _FakeHFModel(action_log_probs=old_lp + 0.01, logits=student_logits)
-    worker.policy_loss_fn = _fake_policy_loss_fn
-    worker.strategy = _FakeStrategy()
-    worker.optimizer = None
-    worker.scheduler = _FakeScheduler()
-    worker.record_memory = False
-    worker.sequence_parallel_size = 1
-    worker._grug_query_bias_window = None
-    valid_mask = torch.tensor([[True, False, False, False], [True, False, False, False]])
-    padded_indices = torch.full((BATCH_SIZE, NUM_ACTIONS, 2), -1, dtype=torch.long)
-    padded_indices[:, :1] = teacher_indices
-    padded_logprobs = torch.full((BATCH_SIZE, NUM_ACTIONS, 2), torch.nan)
-    padded_logprobs[:, :1] = teacher_probs.log()
-    padded_mass = torch.full((BATCH_SIZE, NUM_ACTIONS), torch.nan)
-    padded_mass[:, :1] = retained_mass
-    experience = Experience(
-        sequences=torch.randint(0, 5, (BATCH_SIZE, SEQ_LEN)),
-        action_log_probs=old_lp,
-        base_action_log_probs=None,
-        values=None,
-        returns=None,
-        advantages=torch.zeros(BATCH_SIZE, NUM_ACTIONS),
-        attention_mask=torch.ones(BATCH_SIZE, SEQ_LEN),
-        loss_mask=valid_mask,
-        action_mask=valid_mask,
-        num_actions=NUM_ACTIONS,
-        rollout_logprobs=rollout_lp,
-        info={},
-        distillation=SparseForwardKLInput(
-            teacher_topk_indices=padded_indices,
-            teacher_topk_logprobs=padded_logprobs,
-            retained_mass=padded_mass,
-            valid_mask=valid_mask,
-            loss_weights=torch.ones(BATCH_SIZE, NUM_ACTIONS),
-        ),
-    )
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: "cpu")
-
-    status = worker.training_step(experience, global_step=0, local_step=0, accumulation_steps=2)
-
-    selected_student = student_logits[:, -NUM_ACTIONS - 1 : -1].log_softmax(dim=-1)[:, :1].gather(-1, teacher_indices)
-    conditional_teacher = teacher_probs / retained_mass.unsqueeze(-1)
-    expected_loss = torch.sum(conditional_teacher * (conditional_teacher.log() - selected_student), dim=-1).mean()
-    assert status["distillation_loss"] == pytest.approx(expected_loss.item())
-    assert status["final_loss"] == pytest.approx(0.25 + expected_loss.item())
-    assert status["distillation_topk"] == 2
-    assert status["distillation_retained_mass_mean"] == pytest.approx(0.9)
-
-
-# ---------------------------------------------------------------------------
-# Megatron path: MegatronModelWrapper.forward_backward_mini_batch
-# ---------------------------------------------------------------------------
-
-
 class _FakeMegatronModule:
     """Stands in for a Megatron model chunk inside forward_step."""
 
@@ -342,6 +180,7 @@ def _megatron_mini_batch_metrics(
     global_loss_denom=None,
     policy_loss_fn=_fake_policy_loss_fn,
     log_ratio_offsets=(0.0, 0.0),
+    timings: PhaseBreakdown | None = None,
 ) -> list[dict]:
     old_lp, _, loss_mask = _tis_tensors()
 
@@ -385,6 +224,9 @@ def _megatron_mini_batch_metrics(
     monkeypatch.setattr(
         mmw.mpu, "get_pipeline_model_parallel_group", lambda: torch.distributed.group.WORLD, raising=False
     )
+    monkeypatch.setattr(
+        mmw.mpu, "get_data_parallel_group", lambda **kwargs: torch.distributed.group.WORLD, raising=False
+    )
 
     def micro_batch(offset: float) -> mmw.MegatronPolicyMicroBatch:
         sequences = torch.zeros(BATCH_SIZE, SEQ_LEN)
@@ -408,6 +250,7 @@ def _megatron_mini_batch_metrics(
         seq_len=SEQ_LEN,
         micro_batch_size=BATCH_SIZE,
         temperature=1.0,
+        timings=timings,
     )
 
 
@@ -520,3 +363,43 @@ def test_log_ratio_monitor_marks_failed_diagnostics():
 
     assert metrics["log_ratio_diagnostics_failed"] == 1.0
     assert metrics["log_ratio_abs_mean"] == 0.0
+
+
+def test_a_policy_update_publishes_its_megatron_phases_and_memory(
+    single_rank_group, fake_cuda, delivered_telemetry, monkeypatch
+):
+    class Policy(PolicyWorkerBase):
+        def _ppo_train_impl(self, train_data, timing):
+            fake_cuda.use_memory(600, 700)
+            _megatron_mini_batch_metrics(use_tis=False, rollout_lp=None, monkeypatch=monkeypatch, timings=timing)
+            fake_cuda.use_memory(150, 200)
+            return TrainingOutputBatch()
+
+        async def _broadcast_to_inference_engines(self, inference_engine_client):
+            fake_cuda.use_memory(400, 500)
+
+    worker = object.__new__(Policy)
+    worker._rank, worker._policy_train_spans, worker._model_version_step = 0, True, None
+    worker._memory = LearnerCudaMetrics(enabled=True, rank=0)
+    batch = TrainingInputBatch({"sequences": torch.zeros(1, 1)})
+    batch.metadata = {"global_step": 7}
+
+    worker.ppo_train(batch)
+    asyncio.run(worker.broadcast_to_inference_engines(None))
+
+    phases = {
+        row["attributes"]["phase"]: row["attributes"].get("parent")
+        for row in delivered_telemetry.select("phase_duration_seconds", root="ppo_train", backend="megatron")
+    }
+    assert phases == {
+        "ppo_train": None,
+        "megatron_forward_backward_scheduler": "ppo_train",
+        "megatron_pipeline_metric_broadcast": "ppo_train",
+        "ppo_train_residual": "ppo_train",
+    }
+    exits = delivered_telemetry.select("cuda_memory_observation", boundary="exit", step="7")
+    assert {row["attributes"]["phase"]: row["body"]["peak_allocated_bytes"] for row in exits} == {
+        "ppo_train": 600,
+        "broadcast_to_inference_engines": 400,
+    }
+    assert all(row["attributes"]["worker_role"] == "policy" and row["attributes"]["rank"] == "0" for row in exits)

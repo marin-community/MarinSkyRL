@@ -128,35 +128,11 @@ Logging and Debugging Configuration
 - ``dump_data_batch``: Whether to dump the data batch to a file. This is useful for debugging. When ``true``, the data batch will be dumped to a file in the ``export_path`` directory. The training batch at global step ``N`` is saved to ``self.cfg.trainer.export_path / "dumped_data" / global_step_N_training_input``
 - ``dump_eval_results``: Whether to dump the evaluation results to a file. When ``true``, the full evaluation results will be dumped to a file in the ``export_path`` directory. The evaluation results at global step ``N`` is saved to ``self.cfg.trainer.export_path / "dumped_eval" / global_step_N_eval_results``
 
-Training Backends
------------------
+Training Backend
+----------------
 
-We support four backends: FSDP1, FSDP2, Megatron, and DeepSpeed. The backend can be chosen with ``trainer.strategy`` field.
-
-.. _fsdp-configurations:
-
-FSDP Configuration
-~~~~~~~~~~~~~~~~~~
-
-We use the same configuration group for FSDP1 and FSDP2
-
-.. code-block:: yaml
-
-    fsdp_config:
-        cpu_offload: false # offload params + optimizer state to cpu during fwd pass
-        reshard_after_forward: true # fsdp2 only, [True, False, int between 1 and fsdp_size]
-        fsdp_size: -1
-
-- ``cpu_offload``: Whether to train with CPU offloading (i.e., offload state during forward pass). This corresponds to `cpu_offload <https://docs.pytorch.org/docs/stable/fsdp.html#torch.distributed.fsdp.FullyShardedDataParallel>`_  parameter in FSDP1 and `offload_policy <https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.fully_shard>`_ in FSDP2.
-- ``reshard_after_forward``: Whether to re-shard FSDP model after forward pass. This is a FSDP2 specific configuration, please refer to the `FSDP2 docs <https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.fully_shard>`_ for more details. If set to ``false``, this would retain the full model parameters on each worker (similar to DeepSpeed's ZeRO stage 2).
-- ``fsdp_size``: The group size within which worker state is sharded with FSDP. This is a parameter to be used for hybrid sharding in multi-node settings. For example, if the number of workers in the actor group is 8, with 4 in each node, and ``fsdp_size`` is 4, then the training state will be fully sharded across 4 ranks in each node, but replicated (DP) across nodes.
-
-.. note::
-    ``cpu_offload`` is different from worker state offloading with model colocation.
-
-    In FSDP, ``cpu_offload`` will offload parameter and optimizer state to CPU memory and only copy over model parameters to GPU during model forward pass.
-
-    In `skyrl-train`, we offload worker state in certain colocation settings - however this happens only after the training step/ log probability computation - thus optimizer step and model forward pass happen as usual with sharded parameters on GPU. For more details, refer to the guide on :doc:`model placement and colocation <placement>`
+Megatron is the supported training backend. Set ``trainer.strategy=megatron`` and configure
+policy and reference parallelism under ``trainer.<role>.megatron_config``.
 
 .. _megatron-configurations:
 
@@ -197,7 +173,7 @@ reads each checkpoint's recorded format, so a run can resume an older ``fully_re
 new ``dp_reshardable`` checkpoints.
 
 
-- ``megatron_config.tensor_model_parallel_size``: Tensor model parallel size for reducing memory across model parameters and activations. Sequence parallelism (unrelated to ulysses sequence parallelism) is also enabled by default if tensor parallel size is greater than 1.
+- ``megatron_config.tensor_model_parallel_size``: Tensor model parallel size for reducing memory across model parameters and activations. Megatron sequence parallelism is also enabled by default if tensor parallel size is greater than 1.
 - ``megatron_config.pipeline_model_parallel_size``: Pipeline model parallel size for sharding model layers across multiple GPUs.
 - ``megatron_config.context_parallel_size``: Context parallel size for reducing activation memory across the sequence length dimension.
 - ``megatron_config.expert_model_parallel_size``: The expert parallel size for sharding expert modules across multiple GPUs.
@@ -216,17 +192,6 @@ Some rules for configuring these parameters:
 
   We recommend leaving this setting to ``false``
 
-
-.. _deepspeed-configurations:
-
-DeepSpeed Configuration
-~~~~~~~~~~~~~~~~~~~~~~~
-
-For DeepSpeed, please refer to DeepSpeed's `configuration guide <https://www.deepspeed.ai/docs/config-json/>`_ for more details. In general, the user experience with DeepSpeed is better and most parameters can set to ``auto`` for DeepSpeed to automatically configure. Here are a couple of important parameters:
-
-- ``deepspeed_config.zero_optimization.stage``: Which ZeRO stage to use. Currently, we only support stage 3.
-- ``deepspeed_config.zero_optimization.zero_hpz_partition_size``: Hierarchical Partitioning size. This is similar (although not equivalent) to hybrid sharding in FSDP.
-- ``deepspeed_config.gradient_clipping``: This should not be set during training. We instead provide a common optimizer config ``optimizer_config.max_grad_norm`` that will handle gradient clipping configuration for all training backends.
 
 Optimizer Configuration
 -----------------------
@@ -251,122 +216,15 @@ For both the critic and policy model, we provide a common optimizer configuratio
 - ``optimizer_config.num_warmup_steps``: Number of mini-batch steps to warmup the optimizer for.
 - ``optimizer_config.scheduler``: Which learning rate scheduler to use. Intended to align with ``transformers.SchedulerType`` from `Huggingface <https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.SchedulerType>`_.
 
-Policy Configuration
---------------------
+Policy and Reference Configuration
+----------------------------------
 
-This section configures the policy model used for training, including optimizer, FSDP, sequence parallelism, and LoRA options.
+Set ``trainer.policy.model.path`` to the Hugging Face model identifier or local model directory.
+The policy optimizer uses ``trainer.policy.optimizer_config``. Policy and reference model parallelism,
+router replay, and Megatron runtime settings live under ``trainer.policy.megatron_config`` and
+``trainer.ref.megatron_config`` respectively. See :ref:`megatron-configurations`.
 
-.. code-block:: yaml
-
-   policy:
-     grug_query_bias_update_mode: "frozen"
-     grug_query_bias_interpolation_weight: null
-     grug_query_bias_update_rate: null
-     model:
-       path: "Qwen/Qwen2.5-1.5B-Instruct"  # Hugging Face model path for the policy model
-       lora:
-         rank: 0                    # LoRA rank (0 = disabled)
-         alpha: 16                  # LoRA scaling parameter
-         dropout: 0                 # LoRA dropout rate
-         lora_sync_path: "/tmp/skyrl_lora_sync"  # Path for LoRA adapter sync
-         target_modules: "all-linear"  # Apply to all linear layers OR
-         # specify specific modules as a list
-         exclude_modules: null  # Modules to exclude from LoRA
-     deepspeed_config: ${deepspeed_config.train}  # Reference to default deepspeed config
-
-     optimizer_config:
-       lr: 1.0e-6  # Learning rate
-       adam_betas: [0.9, 0.999]  # Betas for Adam optimizer
-       weight_decay: 1e-2  # L2 regularization strength
-       max_grad_norm: 1.0  # Gradient clipping
-       offload_after_step: true  # Offload optimizer state to CPU after step (if colocated)
-
-     fsdp_config:
-       cpu_offload: false  # Offload model params to CPU during forward
-       reshard_after_forward: true  # Re-shard FSDP model after forward pass
-       fsdp_size: -1  # Auto FSDP group sizing
-
-     sequence_parallel_size: 1  # sequence parallel size
-
-     use_torch_compile: false  # Enable torch compile for the entropy calculation
-     record_memory: false  # Dump memory snapshot for debugging
-
-- ``policy.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
-- ``policy.grug_query_bias_update_mode``: Grug's external router-bias update. ``frozen`` preserves the checkpoint bias, ``replace`` and ``interpolate`` apply Quantile Balancing, and ``loss_free`` applies the signed load-error update from `Loss-Free Balancing <https://arxiv.org/abs/2408.15664>`_. This option applies only to Grug under FSDP2.
-- ``policy.grug_query_bias_interpolation_weight``: Fraction of the Quantile Balancing target applied after each successful optimizer step. Required only for ``interpolate``.
-- ``policy.grug_query_bias_update_rate``: Positive bias step size used by ``loss_free``. Required only for that mode; the reference implementation uses ``0.001``.
-- ``policy.optimizer_config``: Optimizer configuration for the policy model
-- ``policy.fsdp_config``: FSDP configuration, applicable if ``trainer.strategy='fsdp'``.
-- ``policy.sequence_parallel_size``: Sequence parallel size. We implement `Ulysses sequence parallelism <https://arxiv.org/abs/2309.14509>`_
-- ``policy.use_torch_compile``: Whether to enable torch compile for entropy calculation
-- ``policy.record_memory``: Whether to record memory usage. If ``True``, this will use PyTorch's `memory snapshotting utility <https://docs.pytorch.org/docs/stable/torch_cuda_memory.html>`_ to record memory usage and dump memory snapshots after each policy model training step.
-
-LoRA Configuration
-~~~~~~~~~~~~~~~~~~
-
-LoRA (Low-Rank Adaptation) enables parameter-efficient fine-tuning by training only a small number of additional low-rank matrices instead of the full model weights:
-
-- ``policy.model.lora.rank``: LoRA rank for low-rank decomposition. Set to 0 to disable LoRA. Higher values increase model capacity but also memory usage. Common values include 8, 16, 32, or 64.
-- ``policy.model.lora.alpha``: Scaling factor for LoRA updates.
-- ``policy.model.lora.dropout``: Dropout probability applied to LoRA layers. Helps prevent overfitting during training.
-- ``policy.model.lora.lora_sync_path``: Directory path where LoRA adapter weights are saved and synchronized between training and inference processes. Must be accessible to all workers in distributed setups.
-
-
-Critic Configuration
---------------------
-
-We support similar configuration options as the policy model, including LoRA.
-
-.. code-block:: yaml
-
-    critic:
-      model:
-        path: null
-        lora:
-          rank: 0                    # LoRA rank (0 = disabled)
-          alpha: 16                  # LoRA scaling parameter
-          dropout: 0                 # LoRA dropout rate
-          target_modules: "all-linear"
-          exclude_modules: null  # Modules to exclude from LoRA
-      deepspeed_config: ${deepspeed_config.train}
-      optimizer_config:
-        lr: 5.0e-6
-        adam_betas: [0.9, 0.999]
-        weight_decay: 1e-2
-        max_grad_norm: 1.0 # gradient clipping
-        offload_after_step: true # offload optimizer state to cpu after each step. Applicable only when `colocate_all=true`
-      fsdp_config:
-        cpu_offload: false
-        reshard_after_forward: true
-        fsdp_size: -1
-      sequence_parallel_size: 1
-
-
-Reference Model Configuration
------------------------------
-
-
-.. code-block:: yaml
-
-    ref:
-      model:
-        path: ${trainer.policy.model.path}
-      deepspeed_config: ${deepspeed_config.eval}
-      fsdp_config:
-        cpu_offload: false
-        reshard_after_forward: true
-        fsdp_size: -1
-      sequence_parallel_size: 1
-
-- ``ref.model.path``: Path to the reference model. Defaults to the policy model path, but can be separately set (i.e. for distillation based approaches, the reference model can be a different model than the policy model).
-- ``ref.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
-- ``ref.fsdp_config``: FSDP configuration, applicable if ``trainer.strategy='fsdp'``.
-- ``ref.sequence_parallel_size``: Sequence parallel size. We implement `Ulysses sequence parallelism <https://arxiv.org/abs/2309.14509>`_
-
-.. note::
-
-  The reference model is used only if the base model log probabilities are required either as a part of the training loss or as a part of the reward. Thus, ``trainer.algorithm.use_kl_in_reward`` or ``trainer.algorithm.use_kl_loss`` should be set to ``true`` to use the reference model. If both are ``false``, then the reference model is not instantiated.
-
+Megatron training currently requires ``trainer.critic.model.path=null`` and does not support LoRA.
 
 Algorithm Configuration
 -----------------------

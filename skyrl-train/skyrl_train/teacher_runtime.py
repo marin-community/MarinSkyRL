@@ -173,7 +173,7 @@ async def _start_local_teacher_pool(
 
     resources = teacher.resources
     total_gpus = resources.num_nodes * resources.gpus_per_node
-    engine_count = total_gpus // resources.tensor_parallel_size
+    engine_count = total_gpus // resources.gpus_per_engine
     max_logprobs = teacher.top_k if teacher.top_k is not None else 1
     engine_init_kwargs = dict(OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True))
     engine_init_kwargs.pop("openai_sampling_params", None)
@@ -185,8 +185,8 @@ async def _start_local_teacher_pool(
         num_inference_engines=engine_count,
         tensor_parallel_size=resources.tensor_parallel_size,
         pipeline_parallel_size=1,
-        data_parallel_size=1,
-        expert_parallel_size=1,
+        data_parallel_size=resources.data_parallel_size,
+        expert_parallel_size=resources.expert_parallel_size,
         decode_context_parallel_size=1,
         shared_pg=None,
         inference_engine_enable_sleep=False,

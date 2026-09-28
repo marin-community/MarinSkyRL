@@ -55,29 +55,6 @@ def test_s3_policy_stages_metadata_without_materializing_weights(monkeypatch) ->
     assert staged == [("s3://models/policy", manifest, policy_model.local_path)]
 
 
-def test_fsdp_policy_materializes_weights_at_the_declared_local_path(monkeypatch) -> None:
-    staged = []
-    monkeypatch.setattr(
-        task_runtime,
-        "stage_artifact_model",
-        lambda uri, identity, path: staged.append((uri, identity, path)) or 1024,
-    )
-    args = Namespace(
-        model_source_uri="s3://models/policy",
-        model_source_identity="artifact@v1:abc123",
-        prestage_model="",
-        model_revision="",
-        runtime_profile="fsdp",
-        model_local_path="/tmp/materialized-model",
-    )
-
-    policy_model = prepare_policy_model(args)
-
-    assert policy_model is not None
-    assert policy_model.local_path == "/tmp/materialized-model"
-    assert staged == [("s3://models/policy", "artifact@v1:abc123", "/tmp/materialized-model")]
-
-
 def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(monkeypatch) -> None:
     revision = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
     identity = "sha256:" + "a" * 64
@@ -155,3 +132,32 @@ def test_staged_models_are_written_as_structured_config(tmp_path, monkeypatch) -
     assert resolved.skyrl.trainer.ref.model.tokenizer_path == "/tmp/tokenizer-metadata"
     assert resolved.skyrl.trainer.ref.model.tokenizer_revision is None
     assert resolved.skyrl.generator.speculative_decoding.model.source_uri == draft.source_uri
+
+
+def test_staged_policy_model_supplies_its_embedded_tokenizer(tmp_path, monkeypatch) -> None:
+    policy = task_runtime.PreparedPolicyModel("s3://models/policy", "step-630", "/tmp/policy-metadata")
+    launch = OmegaConf.create(
+        {
+            "run": {"id": "run", "attempt_id": "attempt"},
+            "inputs": {"model": {"uri": "s3://models/policy"}},
+            "skyrl": {
+                "trainer": {
+                    "policy": {"model": {"path": "/tmp/stale-model", "tokenizer_path": "/tmp/stale-model"}},
+                    "ref": {"model": {"path": "/tmp/stale-model", "tokenizer_path": "/tmp/stale-model"}},
+                },
+                "generator": {"engine_init_kwargs": {"served_model_name": "policy"}},
+                "data": {"train_data": [], "val_data": [], "terminal_bench_data": []},
+                "terminal_bench_config": {"agent_api_base": None, "literal_log_path": None},
+            },
+        }
+    )
+    monkeypatch.setattr(task_runtime.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    path = _write_final_config(launch, policy_model=policy, policy_tokenizer=None, draft_model=None)
+    resolved = OmegaConf.load(path)
+
+    for role in ("policy", "ref"):
+        model = resolved.skyrl.trainer[role].model
+        assert model.path == "/tmp/policy-metadata"
+        assert model.tokenizer_path == "/tmp/policy-metadata"
+        assert model.tokenizer_revision is None

@@ -18,11 +18,11 @@ class FakeProcessGroup:
 
 
 class FakeDeviceMesh:
-    mesh_dim_names = ("fsdp", "ep")
+    mesh_dim_names = ("dp", "ep")
     shape = (2, 2)
 
-    def __init__(self, fsdp_group: FakeProcessGroup, ep_group: FakeProcessGroup):
-        self.groups = {"fsdp": fsdp_group, "ep": ep_group}
+    def __init__(self, dp_group: FakeProcessGroup, ep_group: FakeProcessGroup):
+        self.groups = {"dp": dp_group, "ep": ep_group}
 
     def get_coordinate(self) -> list[int]:
         return [1, 0]
@@ -34,9 +34,9 @@ class FakeDeviceMesh:
 def test_phase_record_includes_world_and_mesh_group_sequences(monkeypatch):
     monkeypatch.setenv("SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS", "1")
     world = FakeProcessGroup(31)
-    fsdp = FakeProcessGroup(17)
+    dp = FakeProcessGroup(17)
     ep = FakeProcessGroup(23)
-    mesh = FakeDeviceMesh(fsdp, ep)
+    mesh = FakeDeviceMesh(dp, ep)
     monkeypatch.setattr(collective_phase_diagnostics, "_default_process_group", lambda: world)
 
     with collective_phase_diagnostics.region(
@@ -55,10 +55,10 @@ def test_phase_record_includes_world_and_mesh_group_sequences(monkeypatch):
         assert payload["rank"] == 2
         assert payload["phase"] == "model_forward_enter"
         assert payload["metadata"] == {"global_step": 3, "local_step": 7}
-        assert payload["snapshot"]["mesh_dim_names"] == ["fsdp", "ep"]
+        assert payload["snapshot"]["mesh_dim_names"] == ["dp", "ep"]
         assert payload["snapshot"]["mesh_shape"] == [2, 2]
         assert payload["snapshot"]["mesh_coordinate"] == [1, 0]
-        assert payload["snapshot"]["sequence_numbers"] == {"world": 31, "fsdp": 17, "ep": 23}
+        assert payload["snapshot"]["sequence_numbers"] == {"world": 31, "dp": 17, "ep": 23}
 
     collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.FORWARD_EXIT)
     assert len(messages) == 1
@@ -102,9 +102,9 @@ def test_moe_boundary_guard_crosses_asyncio_to_thread_and_resets_by_phase(monkey
 def test_disabled_diagnostics_do_not_read_process_groups(monkeypatch):
     monkeypatch.delenv("SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS", raising=False)
     world = FakeProcessGroup(1)
-    fsdp = FakeProcessGroup(2)
+    dp = FakeProcessGroup(2)
     ep = FakeProcessGroup(3)
-    mesh = FakeDeviceMesh(fsdp, ep)
+    mesh = FakeDeviceMesh(dp, ep)
     monkeypatch.setattr(collective_phase_diagnostics, "_default_process_group", lambda: world)
 
     messages: list[str] = []
@@ -117,7 +117,7 @@ def test_disabled_diagnostics_do_not_read_process_groups(monkeypatch):
         collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
         collective_phase_diagnostics.log_moe_ep_boundary_once()
 
-    assert [world.reads, fsdp.reads, ep.reads] == [0, 0, 0]
+    assert [world.reads, dp.reads, ep.reads] == [0, 0, 0]
     assert messages == []
 
 

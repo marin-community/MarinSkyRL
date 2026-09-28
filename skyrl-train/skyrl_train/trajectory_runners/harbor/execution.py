@@ -112,7 +112,7 @@ class HarborRunnerSpec:
             trajectory_runner_cfg=self.runner_config,
             terminal_bench_cfg=self.terminal_bench_config,
             tokenizer=tokenizer,
-            moe_router_replay=bool(self.config.trainer.policy.fsdp_config.get("moe_router_replay", False)),
+            moe_router_replay=bool(self.config.trainer.policy.megatron_config.get("moe_router_replay", False)),
             rollout_logprobs_required=rollout_logprobs_enabled(algorithm),
             tito_full=algorithm.get("tito_full", None),
             tis_splice=bool(algorithm.tis_splice),

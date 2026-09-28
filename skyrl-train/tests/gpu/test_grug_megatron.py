@@ -330,7 +330,7 @@ def test_grug_megatron_train_forward_matches_eval_forward(
     """The training forward must reproduce the eval-mode log-probs it is scored against.
 
     With one update per batch the PPO ratio is exp(train_logprob - eval_logprob), so any
-    train/eval drift shows up as spurious clipping. FSDP2 reports exactly zero here. Top-4
+    train/eval drift shows up as spurious clipping. Top-4
     routing exposed Megatron's unfused, atomic unpermute (the bridge now forces the fused
     kernels), and Snowball's width exposed cuBLAS kernel selection changing with the
     micro-batch shape (the two passes must use equal micro-batch sizes).

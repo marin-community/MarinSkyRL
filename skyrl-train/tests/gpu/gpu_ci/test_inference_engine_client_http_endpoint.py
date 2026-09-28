@@ -190,7 +190,7 @@ def test_tokenize_matches_chat_prompt_ids_for_auto_content_format(ray_init_fixtu
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
-        cfg.trainer.strategy = "fsdp2"
+        cfg.trainer.strategy = "megatron"
         client, _ = init_inference_engines(
             cfg=cfg,
             use_local=True,
@@ -250,7 +250,7 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
-        cfg.trainer.strategy = "fsdp2"
+        cfg.trainer.strategy = "megatron"
         sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
         client, _ = init_inference_engines(
             cfg=cfg,
@@ -323,7 +323,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
-        cfg.trainer.strategy = "fsdp2"
+        cfg.trainer.strategy = "megatron"
         client, pg = init_inference_engines(
             cfg=cfg,
             use_local=True,
@@ -596,7 +596,7 @@ def test_structured_generation(ray_init_fixture):
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
         cfg.generator.weight_sync_backend = "nccl"
-        cfg.trainer.strategy = "fsdp2"
+        cfg.trainer.strategy = "megatron"
 
         client, _ = init_inference_engines(
             cfg=cfg,
@@ -668,7 +668,7 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
-        cfg.trainer.strategy = "fsdp2"
+        cfg.trainer.strategy = "megatron"
 
         client, _ = init_inference_engines(
             cfg=cfg,
