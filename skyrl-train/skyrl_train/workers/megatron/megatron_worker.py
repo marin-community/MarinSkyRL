@@ -518,9 +518,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             raise ValueError("moe_router_replay is on but the batch carries no rollout_routed_experts")
         dataloader = TrainingBatchIterator(train_data, self.cfg.trainer.micro_train_batch_size_per_gpu)
 
-        micro_batches_per_mini_batch = gradient_accumulation_steps(
-            self.policy_mini_batch_size_per_gpu,
-            self.cfg.trainer.micro_train_batch_size_per_gpu,
+        micro_batches_per_mini_batch = min(
+            len(dataloader),
+            gradient_accumulation_steps(
+                self.policy_mini_batch_size_per_gpu,
+                self.cfg.trainer.micro_train_batch_size_per_gpu,
+            ),
         )
 
         status_list = []

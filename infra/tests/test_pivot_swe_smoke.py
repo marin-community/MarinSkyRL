@@ -2,6 +2,7 @@ import asyncio
 import gzip
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from zipfile import ZipFile
 
 from datasets import Dataset, load_dataset
@@ -13,6 +14,9 @@ from tokenizers.pre_tokenizers import WhitespaceSplit
 from transformers import PreTrainedTokenizerFast
 
 from ci.pivot_grug_smoke import compare_arms
+from skyrl_train.pivot_token_budget import select_token_budget_groups
+from skyrl_train.batch_sampling import filter_trajectory_batch
+from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
 from skyrl_train.trajectory_runners.pivot_reference import PivotReferenceRunner
 from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryID
@@ -207,6 +211,8 @@ def test_report_pairs_probe_results_and_persists_training_errors(tmp_path):
     assert summary["after_mean_reward"] == 1.0
     assert summary["mixed_reward_groups"] == 0
     assert summary["training_responses_per_step"] == {1: 1, 8: 1}
+    assert summary["training_input_tokens"] == 8
+    assert summary["training_response_tokens"] == 4
     assert comparison["before"]["output_response"] == "action-0"
     assert comparison["after"]["output_response"] == tool_call
     assert len(training) == 2
@@ -220,6 +226,12 @@ def test_report_pairs_probe_results_and_persists_training_errors(tmp_path):
         ("eval", 8),
     }
     assert all(not row["group_mixed"] for row in action_rows if row["phase"] == "train")
+    consumed_report = pivot_swe.write_smoke_report(
+        str(export_root), str(root / "consumed"), str(retention_root), {"probe_trajectory_ids": [7]},
+        final_step=8, training_completed=True, consumed_trajectories={(8, "pivot-7", 0)},
+    )
+    assert consumed_report["training_input_tokens"] == 4
+    assert consumed_report["training_responses_per_step"] == {8: 1}
     after = next(row for row in action_rows if row["phase"] == "eval" and row["step"] == 8)
     assert after["delta_vs_baseline"] == 1.0
     assert after["rendered_tool_matches_reference"] is True
@@ -284,9 +296,45 @@ def test_comparison_pairs_rl_and_sft_scores_on_identical_probes(tmp_path):
             for index, (before, after) in enumerate(scores)
         ]
         path.write_text("".join(json.dumps(row) + "\n" for row in reversed(rows)))
-    manifest = {"probe_trajectory_ids": [0, 1], "revision": "test", "train_prefixes": 64}
-    summary = compare_arms(str(tmp_path), manifest, 32)
+    manifest = {"probe_trajectory_ids": [0, 1], "revision": "test", "train_prefixes": 64, "learner_token_budget": 1000}
+    arms = {
+        "rl": {"training_input_tokens": 999, "training_response_tokens": 99, "training_responses_per_step": {1: 4, 2: 2}},
+        "sft": {"training_input_tokens": 1000, "training_response_tokens": 80, "training_responses_per_step": {1: 4, 2: 4}},
+    }
+    summary = compare_arms(str(tmp_path), manifest, arms)
+    assert summary["token_match_relative_error"] == 0.001
+    assert summary["training_input_tokens"] == {"rl": 999, "sft": 1000}
     assert summary["rl_after"] == summary["sft_after"] == 0.5
     assert summary["rl_wins"] == summary["sft_wins"] == 1
     paired = [json.loads(line) for line in (tmp_path / "diagnostics/comparison.jsonl").read_text().splitlines()]
     assert [(row["trajectory_id"], row["rl_after"], row["sft_after"]) for row in paired] == [(0, 1, 0), (1, 0, 1)]
+
+
+def test_token_budget_keeps_whole_groups_and_preserves_their_training_fields():
+    # Interleaved groups: the long group does not fit, but two shorter groups do.
+    uids = ["a", "b", "a", "b", "c", "c"]
+    lengths = [5, 30, 6, 30, 3, 4]
+    batch = {
+        "prompt_token_ids": [[1, 2]] * 6,
+        "response_ids": [[3] * (length - 2) for length in lengths],
+        "rewards": [0, 1, 1, 0, 0, 1],
+        "loss_masks": [[1] * (length - 2) for length in lengths],
+        "trajectory_ids": [TrajectoryID(uid, repetition) for uid, repetition in zip(uids, [0, 0, 1, 1, 0, 1])],
+    }
+    selection = select_token_budget_groups(lengths, uids, remaining_tokens=20, group_size=2)
+    selected = filter_trajectory_batch(batch, selection.indices)
+    assert selection.indices == [0, 2, 4, 5]
+    assert selection.input_tokens == 18
+    assert selected["rewards"] == [0, 1, 0, 1]
+    assert [len(tokens) for tokens in selected["response_ids"]] == [3, 4, 1, 2]
+    assert [(item.instance_id, item.repetition_id) for item in selected["trajectory_ids"]] == [("a", 0), ("a", 1), ("c", 0), ("c", 1)]
+
+    tensors = convert_prompts_responses_to_batch_tensors(
+        SimpleNamespace(pad_token_id=0),
+        selected["prompt_token_ids"], selected["response_ids"],
+        [[0.0] * len(tokens) for tokens in selected["response_ids"]], selected["loss_masks"],
+    )
+    # Tensor padding adds positions but must not inflate the admitted learner tokens.
+    assert tensors[0].numel() == 24
+    assert int(tensors[1].sum()) == 18
+    assert int(tensors[2].sum()) == 10

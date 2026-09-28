@@ -167,23 +167,41 @@ It runs on CPU and does not load model weights. Passing does not establish CUDA
 kernel compatibility or sufficient GPU memory.
 
 Use `--steps 10 --train-prefixes 512 --compare-sft` for the paired experiment.
-The coordinator prepares one dataset, then runs RL and reference-action SFT
-sequentially from the same pinned Grug checkpoint. Both arms use the same 512
-training prefixes, 128 held-out tasks, 10 updates, learning rate, and greedy
-evaluation at steps 0 and 10. Training and probes have disjoint
-trajectory and task IDs. Reference actions must fit the 512-token completion
+The coordinator prepares one dataset, computes a shared learner token budget,
+and submits separate RL and SFT jobs concurrently. Each job requests 64 H100s;
+concurrent execution needs 128 H100s. Both start from the same pinned Grug
+checkpoint and use 512 training prefixes and 128 held-out tasks. A prefix is
+the conversation before one tool action. Training and held-out data have
+disjoint trajectory and task IDs. Reference actions must fit the 512-token completion
 budget; this selects a bounded subset of the released dataset.
 
-Each update consumes all 512 training prefixes. RL samples 16 completions per
-prefix; SFT supervises one released action per prefix with token cross-entropy
-and no KL penalty. The arms match prefixes and updates, with different
-completion-token and compute budgets. SFT evaluation generates answers
-through the same inference engines and verifier as RL. Per-arm reports live
-under `rl/diagnostics` and `sft/diagnostics`; `diagnostics/comparison.jsonl`
-pairs their predictions and `diagnostics/summary.json` reports mean rewards
-and paired wins. The trainer masks generation server errors using its standard
-error handling. The paired comparison rejects evaluation responses with errors;
-training errors remain visible in the retained action metrics.
+The token budget is the number of nonpadding prompt and reference-completion
+tokens in ten full SFT updates, with 16 copies per prefix. Both arms normally
+train on 512 × 16 sequences per update. RL samples fresh actions; SFT uses the
+released actions with token cross-entropy and no KL penalty. The learning rate,
+optimizer, gradient clipping, packing, context window, and learner topology are shared.
+Generation, reference scoring, evaluation, and repeated auxiliary forward passes
+are excluded from the token counter; total FLOPs and wall time can differ.
+
+Each arm stops within 0.1% of the common budget, without exceeding it. A final
+partial batch admits only complete 16-sequence groups and complete actions.
+The update count can differ between arms; twice the nominal update count is a
+safety limit, and reaching it before the token target fails the run. The
+learner writes `exports/learner-token-budget.json` after completed optimizer
+updates, recording actual attention-mask token counts and admitted trajectory
+IDs. Reports verify these counts against retained trajectories and exclude
+unused final-batch rollouts. No padding or discarded rollout is credited toward
+the learner token budget.
+
+Both arms generate greedy held-out answers before training and at their final
+update using the same engines and verifier. Per-arm reports live under
+`rl/diagnostics` and `sft/diagnostics`; `diagnostics/comparison.jsonl` pairs their
+predictions and `diagnostics/summary.json` reports mean rewards, paired wins,
+actual token counts, update counts, and token-budget mismatch. The trainer masks
+generation server errors using its standard error handling. The paired
+comparison fails if any evaluation response has an error. Failed training
+generations have their loss masked; any admitted input tokens still count
+because the learner processes them. Errors remain visible in retained action metrics.
 
 Generation uses 64 concurrent sequences per engine and the frozen EAGLE-3
 draft `laion/snowball-64k-eagle3-draft-r2egym` at revision

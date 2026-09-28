@@ -382,6 +382,7 @@ def write_smoke_report(
     *,
     final_step: int,
     training_completed: bool,
+    consumed_trajectories: set[tuple[int, str, int]] | None = None,
 ) -> dict[str, Any]:
     """Persist paired probe predictions and all retained training actions."""
     data_source = "nemotron_swe_pivot.jsonl"
@@ -420,8 +421,11 @@ def write_smoke_report(
             with ZipFile(BytesIO(file.read())) as archive:
                 for name in archive.namelist():
                     if name.startswith("records/") and name.endswith(".json.gz"):
-                        training_records.append(json.loads(gzip.decompress(archive.read(name))))
-                        records_per_step[step] += 1
+                        record = json.loads(gzip.decompress(archive.read(name)))
+                        identity = (step, str(record["trajectory"]["instance_id"]), record["trajectory"]["repetition_id"])
+                        if consumed_trajectories is None or identity in consumed_trajectories:
+                            training_records.append(record)
+                            records_per_step[step] += 1
     with fsspec.open(f"{diagnostics_root}/training.jsonl", "w") as file:
         for row in training_records:
             file.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -438,6 +442,10 @@ def write_smoke_report(
         "training_completed": training_completed,
         "before_probe_count": len(before),
         "after_probe_count": len(after),
+        "training_input_tokens": sum(
+            len(row["prompt"]["token_ids"]) + len(row["response"]["token_ids"]) for row in training_records
+        ),
+        "training_response_tokens": sum(len(row["response"]["token_ids"]) for row in training_records),
         "training_response_count": len(training_records),
         "training_responses_per_step": dict(sorted(records_per_step.items())),
         "mixed_reward_groups": sum(len(rewards) > 1 for rewards in reward_groups.values()),

@@ -40,6 +40,7 @@ class RLEntrypoint(StrEnum):
     GENERATE = "generate"
     MINI_SWE = "mini_swe"
     PIVOT_SFT = "pivot_sft"
+    PIVOT_RL = "pivot_rl"
     STANDARD = "standard"
     TERMINAL_BENCH = "terminal_bench"
     TERMINAL_BENCH_GENERATE = "terminal_bench_generate"
@@ -52,6 +53,7 @@ RL_ENTRYPOINTS = MappingProxyType(
         RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
         RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
         RLEntrypoint.PIVOT_SFT: "skyrl_train.entrypoints.pivot_reference_sft",
+        RLEntrypoint.PIVOT_RL: "skyrl_train.entrypoints.pivot_token_budget",
         RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
         RLEntrypoint.TERMINAL_BENCH_GENERATE: "skyrl_train.entrypoints.terminal_bench_generate",
     }

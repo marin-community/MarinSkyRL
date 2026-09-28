@@ -1156,6 +1156,8 @@ class RayPPOTrainer:
         duration_seconds: float,
     ) -> None:
         self.all_metrics.update(training_input.metadata["consumed_stop_metrics"])
+        real_rows = training_input.batch_size - training_input.metadata.get("pad_size", 0)
+        self.all_metrics["consumed/input_tokens"] = int(training_input["attention_mask"][:real_rows].sum().item())
         if self._training_metrics_enabled:
             record_consumed_work(consumed_work(training_input), step=self.global_step)
         logger.info(

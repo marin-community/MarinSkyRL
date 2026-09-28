@@ -5,11 +5,12 @@ import ray
 from omegaconf import DictConfig
 
 from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
+from skyrl_train.entrypoints.main_base import config_dir, run_ray_driver
+from skyrl_train.entrypoints.pivot_token_budget import PivotTokenExp
 from skyrl_train.trajectory_runners.pivot_reference import PivotReferenceRunner
 
 
-class PivotSFTExp(BasePPOExp):
+class PivotSFTExp(PivotTokenExp):
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
         if cfg.trainer.algorithm.policy_loss_type != "sft" or cfg.trainer.algorithm.use_kl_loss:
             raise ValueError("Pivot SFT requires supervised loss without a KL penalty")

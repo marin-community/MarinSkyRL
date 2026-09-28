@@ -295,6 +295,7 @@ trainer:
   resume_mode: latest
   resume_path: null
   restore_dataloader_state: true
+  pivot_token_budget: null # Shared nonpadding prompt + completion budget for Pivot RL/SFT.
   # Optional OPD stage boundary. Stops after the first optimizer batch whose
   # cumulative teacher-scored tokens reach the budget.
   distillation_token_budget: null
