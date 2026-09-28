@@ -28,11 +28,6 @@ import types
 import pytest
 
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.config.weight_sync_pause import (
-    DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
-    WeightSyncPauseMode,
-    WeightSyncPausePolicy,
-)
 
 DCP_KEY = "inference_engine_decode_context_parallel_size"
 
@@ -68,8 +63,6 @@ def test_from_config_forwards_vllm_engine_options(monkeypatch):
     assert captured["decode_context_parallel_size"] == 1
     assert captured["inference_engine_enable_sleep"] is True
     assert captured["vllm_attention_backend"] is None
-    assert captured["weight_sync_pause_policy"].mode is WeightSyncPauseMode.ABORT
-    assert captured["weight_sync_pause_policy"].clear_cache is True
     assert "speculative_config" not in captured["engine_init_kwargs"]
     assert "weight_transfer_config" not in captured["engine_init_kwargs"]
 
@@ -79,13 +72,9 @@ def test_from_config_forwards_vllm_engine_options(monkeypatch):
     cfg2.generator.inference_engine_tensor_parallel_size = 8
     cfg2.generator[DCP_KEY] = 2
     cfg2.generator.vllm_attention_backend = "FLASH_ATTN"
-    cfg2.generator.weight_sync_pause.mode = "keep"
-    cfg2.generator.weight_sync_pause.clear_cache = False
     main_base.create_ray_wrapped_inference_engines_from_config(cfg2, colocate_pg=None, tokenizer=None)
     assert captured["decode_context_parallel_size"] == 2
     assert captured["vllm_attention_backend"] == "FLASH_ATTN"
-    assert captured["weight_sync_pause_policy"].mode is WeightSyncPauseMode.KEEP
-    assert captured["weight_sync_pause_policy"].clear_cache is False
 
     captured.clear()
     main_base.create_ray_wrapped_inference_engines_from_config(
@@ -323,7 +312,6 @@ def _run_create(
     *,
     startup_failure: BaseException | None = None,
     removed_placement_groups: list | None = None,
-    weight_sync_pause_policy: WeightSyncPausePolicy = DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
 ):
     """Drive the real create_ray_wrapped_inference_engines with Ray/PG/actor mocked.
 
@@ -397,7 +385,6 @@ def _run_create(
         backend="vllm",
         vllm_attention_backend=attention_backend,
         engine_init_timeout_seconds=60,
-        weight_sync_pause_policy=weight_sync_pause_policy,
     )
     capture.resolved_max_model_len = engines[0].max_model_len
     return capture
@@ -467,12 +454,6 @@ def test_attention_backend_absent_by_default(monkeypatch):
 def test_attention_backend_forwarded_to_vllm_actor(monkeypatch):
     capture = _run_create(monkeypatch, dcp=1, attention_backend="FLASH_ATTN")
     assert capture.remote_calls[0]["attention_backend"] == "FLASH_ATTN"
-
-
-def test_pause_policy_reaches_vllm_actor(monkeypatch):
-    policy = WeightSyncPausePolicy(mode=WeightSyncPauseMode.KEEP, clear_cache=True)
-    capture = _run_create(monkeypatch, dcp=1, weight_sync_pause_policy=policy)
-    assert capture.remote_calls[0]["weight_sync_pause_policy"] == policy
 
 
 def test_wrapper_records_the_limit_resolved_by_vllm(monkeypatch):
