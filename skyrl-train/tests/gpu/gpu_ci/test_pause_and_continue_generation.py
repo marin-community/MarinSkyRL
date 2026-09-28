@@ -441,7 +441,9 @@ def test_streaming_chat_completion_crosses_weight_sync(ray_init_fixture, mode, e
         cfg=cfg,
     )
     ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
-    messages: List[ConversationType] = get_test_prompts(MODEL, num_samples=1)[0]
+    messages: ConversationType = [
+        {"role": "user", "content": "List the positive integers in order, separated by commas."}
+    ]
 
     async def stream_across_sync():
         first_token = asyncio.Event()
