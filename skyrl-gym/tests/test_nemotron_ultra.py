@@ -374,6 +374,22 @@ def test_code_gen_reward_runs_every_row_unit_test():
     assert grade_code("```python\nprint(int(input()) + 2)\n```", record, timeout_seconds=2)[0] == 0.0
 
 
+def test_code_gen_repeated_candidate_timeouts_are_verified_failures():
+    record = {"verifier_metadata": {"unit_tests": {"inputs": ["1\n"] * 20, "outputs": ["1\n"] * 20, "fn_name": None}}}
+    reward, details = grade_code(
+        "```python\nwhile True: pass\n```",
+        record,
+        timeout_seconds=1,
+        limits=VerifierLimits(total_timeout_seconds=8, max_memory_bytes=None),
+    )
+
+    assert reward == 0.0
+    assert details["result"] == "failed_tests"
+    assert details["executed_tests"] == 1
+    assert details["total_tests"] == 20
+    assert details["execution_output"].get("execution_error") is None
+
+
 def test_code_gen_verifier_bounds_come_from_env_config(monkeypatch):
     captured = {}
 
