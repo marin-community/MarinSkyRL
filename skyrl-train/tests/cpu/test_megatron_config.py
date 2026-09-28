@@ -66,4 +66,4 @@ def test_grug_smoke_rejects_context_parallel_sliding_window_before_launch(tmp_pa
     resolved = load_launch_config(path)
 
     with pytest.raises(ValueError, match=rf"trainer\.{role}\.megatron_config\.context_parallel_size=1"):
-        validate_smoke_config(resolved.skyrl)
+        validate_smoke_config(resolved)

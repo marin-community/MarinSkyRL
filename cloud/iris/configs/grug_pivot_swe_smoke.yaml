@@ -1,9 +1,9 @@
-# Ten-step SWE Pivot comparison using the rollout-buffer reference geometry.
+# Ten-step SWE Pivot comparison. PP4/EP8 and a 16K window reduce peak H100 memory.
 # Each update uses 512 prefixes x 16 responses = 8192 trajectories.
-# Keep the one-action 512-token cap within a 32K request window.
+# Keep the one-action 512-token cap within a 16K request window.
 entrypoint: standard
 context_budget:
-  request_window_tokens: 32768
+  request_window_tokens: 16384
   max_new_tokens_per_turn: 512
   max_turns: 1
   generated_budget_fraction: 1.0
@@ -47,9 +47,9 @@ trainer:
       max_grad_norm: 0.5
     megatron_config:
       tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 2
+      pipeline_model_parallel_size: 4
       context_parallel_size: 1
-      expert_model_parallel_size: 16
+      expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
       logprob_chunk_size: 128
       optimizer_checkpoint_sharding_type: dp_reshardable
@@ -60,9 +60,9 @@ trainer:
   ref:
     megatron_config:
       tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 2
+      pipeline_model_parallel_size: 4
       context_parallel_size: 1
-      expert_model_parallel_size: 16
+      expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
       logprob_chunk_size: 128
   placement:
