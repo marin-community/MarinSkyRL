@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-from collections import Counter
 from enum import StrEnum
 from typing import Any
 
@@ -32,7 +31,6 @@ def _compare_arguments(
     expected: Any,
     actual: Any,
     *,
-    word_count_similarity_threshold: float,
     floating_point_comparison_threshold: float = 1e-6,
 ) -> tuple[bool, StepRewardCategory | None]:
     if not isinstance(actual, type(expected)):
@@ -44,7 +42,6 @@ def _compare_arguments(
             matches, category = _compare_arguments(
                 value,
                 actual[key],
-                word_count_similarity_threshold=word_count_similarity_threshold,
                 floating_point_comparison_threshold=floating_point_comparison_threshold,
             )
             if not matches:
@@ -57,7 +54,6 @@ def _compare_arguments(
             matches, category = _compare_arguments(
                 expected_item,
                 actual_item,
-                word_count_similarity_threshold=word_count_similarity_threshold,
                 floating_point_comparison_threshold=floating_point_comparison_threshold,
             )
             if not matches:
@@ -67,17 +63,6 @@ def _compare_arguments(
         if abs(actual - expected) < floating_point_comparison_threshold:
             return True, None
         return False, StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
-    if isinstance(expected, str):
-        expected_counts = Counter(expected.strip().lower().split())
-        actual_counts = Counter(actual.strip().lower().split())
-        if expected_counts.total() < 2 or actual_counts.total() < 2:
-            if expected != actual:
-                return False, StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
-        else:
-            similarity = (expected_counts & actual_counts).total() / (expected_counts.total() + actual_counts.total())
-            if similarity < word_count_similarity_threshold:
-                return False, StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
-        return True, None
     if expected == actual:
         return True, None
     return False, StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
@@ -86,15 +71,13 @@ def _compare_arguments(
 def grade_expected_action(
     expected_action: dict[str, Any],
     assistant_message: dict[str, Any],
-    *,
-    word_count_similarity_threshold: float = 0.1,
 ) -> tuple[float, StepRewardCategory]:
     """Return the exact binary reward and diagnostic category used by NeMo Gym."""
     tool_calls = assistant_message.get("tool_calls") or []
     content = assistant_message.get("content")
     expected_type = expected_action.get("type")
     if expected_type == "message":
-        if isinstance(content, str):
+        if isinstance(content, str) and content.strip() and not tool_calls:
             return 1.0, StepRewardCategory.EXPECTED_CHAT_MESSAGE_FOUND
         return 0.0, StepRewardCategory.NO_EXPECTED_CHAT_MESSAGE
     if expected_type != "function_call":
@@ -103,6 +86,9 @@ def grade_expected_action(
         return 0.0, (
             StepRewardCategory.NO_EXPECTED_TOOL_CALL if isinstance(content, str) else StepRewardCategory.NO_ACTION_FOUND
         )
+
+    if len(tool_calls) != 1:
+        return 0.0, StepRewardCategory.NO_EXPECTED_TOOL_CALL
 
     actual = tool_calls[0].get("function") or {}
     if expected_action.get("name") != actual.get("name"):
@@ -115,7 +101,6 @@ def grade_expected_action(
     matches, category = _compare_arguments(
         expected_arguments,
         actual_arguments,
-        word_count_similarity_threshold=word_count_similarity_threshold,
     )
     if matches:
         return 1.0, StepRewardCategory.EXPECTED_TOOL_CALL

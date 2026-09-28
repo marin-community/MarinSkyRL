@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import math
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -32,7 +33,9 @@ TIMING_PARENTS: dict[str, str | None] = {
     "dump_data_batch": "run_training",
     "init_weight_sync_state": None,
     "save_checkpoints": "step",
-    "checkpoint_upload": "step",
+    # Background elapsed time may span several steps; only the await is step-blocking.
+    "checkpoint_upload": None,
+    "checkpoint_upload_blocking": "step",
     "cleanup_old_checkpoints": "save_checkpoints",
     "save_hf_model": "step",
     "queue_hf_export": "step",
@@ -99,6 +102,69 @@ class PhaseBreakdown:
                 },
             )
         return total
+
+
+STEP_WALL_PHASES = (
+    "group_admission",
+    "batch_assembly",
+    "training_preparation",
+    "advantages",
+    "policy_training",
+    "group_bookkeeping",
+    "weight_sync",
+    "step_end_bookkeeping",
+    "checkpoint_work",
+    "evaluation",
+    "unaccounted",
+)
+
+
+class StepWallTime:
+    """Exclusive optimizer-step wall clock; legacy inclusive timers are not additive."""
+
+    def __init__(self, budgets: Mapping[str, float], *, clock: Callable[[], float] | None = None) -> None:
+        if set(budgets) != set(STEP_WALL_PHASES):
+            raise ValueError(f"Step phase budgets must name exactly {STEP_WALL_PHASES}")
+        self.budgets = {name: float(budgets[name]) for name in STEP_WALL_PHASES}
+        if any(not math.isfinite(value) or value < 0 for value in self.budgets.values()):
+            raise ValueError("Step phase budgets must be finite nonnegative seconds")
+        self.clock = clock or time.monotonic
+        self.durations = {name: 0.0 for name in STEP_WALL_PHASES}
+        self._active: str | None = None
+        self._started: float | None = None
+
+    def start(self, phase: str) -> None:
+        if phase not in self.durations or phase == "unaccounted":
+            raise ValueError(f"Invalid step wall phase: {phase}")
+        now = self.clock()
+        if self._active is not None:
+            assert self._started is not None
+            self.durations[self._active] += now - self._started
+        self._active, self._started = phase, now
+
+    def finish(
+        self, step_seconds: float, *, ended_at: float | None = None, tolerance: float = 0.01
+    ) -> dict[str, float]:
+        if self._active is None:
+            raise ValueError("Step wall clock was not started")
+        now = self.clock() if ended_at is None else ended_at
+        assert self._started is not None
+        self.durations[self._active] += now - self._started
+        residual = step_seconds - sum(self.durations.values())
+        if residual < -tolerance:
+            raise ValueError(f"Step phases exceed timing/step by {-residual:.3f}s")
+        if residual > 0:
+            self.durations["unaccounted"] = residual
+        self._active = None
+        return {
+            key: value
+            for phase in STEP_WALL_PHASES
+            for key, value in (
+                (f"timing/step_wall/{phase}", self.durations[phase]),
+                (f"timing/step_wall_budget/{phase}", self.budgets[phase]),
+                (f"timing/step_wall_overrun/{phase}", max(0.0, self.durations[phase] - self.budgets[phase])),
+            )
+        }
 
 
 class TimingSink(Protocol):

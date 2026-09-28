@@ -44,13 +44,8 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
         problems.append("generator.weight_sync_backend must be nccl")
     # The transport matches trainer ranks to the checked worker placements, which the engine
     # factory records for local TP=1 vLLM engines with DP>1.
-    if (
-        generator["backend"] != "vllm"
-        or not generator["async_engine"]
-        or not generator["run_engines_locally"]
-        or trainer["placement"]["colocate_all"]
-    ):
-        problems.append("the engines must be local, non-colocated async vLLM engines")
+    if generator["backend"] != "vllm" or not generator["run_engines_locally"] or trainer["placement"]["colocate_all"]:
+        problems.append("the engines must be local, non-colocated vLLM engines")
     tp_pp_size = (
         generator["inference_engine_tensor_parallel_size"] * generator["inference_engine_pipeline_parallel_size"]
     )
@@ -66,21 +61,6 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
         problems.append("generator.expert_block_sync.timeout_seconds must be positive")
     if problems:
         raise ValueError("generator.weight_sync_transport=expert_block requires: " + "; ".join(problems))
-
-
-def validate_expert_block_trainer(config: Mapping[str, Any], *, uses_fully_async_trainer: bool) -> None:
-    """Reject ``expert_block`` for an entrypoint that does not run ``FullyAsyncRayPPOTrainer``.
-
-    No other trainer reads the option, so the run would sync by broadcast.
-    """
-    if (
-        config["generator"]["weight_sync_transport"] == WeightSyncTransport.EXPERT_BLOCK
-        and not uses_fully_async_trainer
-    ):
-        raise ValueError(
-            "generator.weight_sync_transport=expert_block requires an entrypoint that runs "
-            "FullyAsyncRayPPOTrainer (skyrl_train.entrypoints.fully_async, or terminal_bench without colocation)"
-        )
 
 
 @dataclass(frozen=True)

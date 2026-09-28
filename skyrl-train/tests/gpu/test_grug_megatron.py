@@ -162,7 +162,6 @@ def _config(model_path: str, *, world_size: int, pp: int, ep: int):
     cfg.trainer.policy.optimizer_config.lr = 2.0e-2
     cfg.trainer.policy.optimizer_config.max_grad_norm = 0.0
     cfg.generator.backend = "vllm"
-    cfg.generator.async_engine = True
     cfg.generator.weight_sync_backend = "nccl"
     cfg.generator.inference_engine_tensor_parallel_size = 1
     cfg.generator.inference_engine_data_parallel_size = ROLLOUT_WORLD_SIZE
