@@ -1,12 +1,12 @@
 import torch
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol, Sequence
+from typing import List, Tuple, Union, Optional, Dict, Any, Sequence
 from collections import defaultdict
 from enum import StrEnum
 import numpy as np
 from skyrl_train.group_admission import group_is_fully_excluded_from_training
-from skyrl_train.trajectory_runners.base import (
+from skyrl_train.trajectory_runners.types import (
     TrajectoryBatch,
     TrajectoryRequestBatch,
     TrajectoryID,
@@ -1305,18 +1305,6 @@ def prepare_trajectory_request(
     }
 
     return trajectory_request, uids
-
-
-class HasCapturedGlobalStep(Protocol):
-    captured_global_step: Optional[int]
-
-
-def minimum_captured_global_step(outputs: Iterable[HasCapturedGlobalStep]) -> Optional[int]:
-    """Return the minimum model-step value recorded across a rollout group."""
-    return min(
-        (output.captured_global_step for output in outputs if output.captured_global_step is not None),
-        default=None,
-    )
 
 
 def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None, chat_template_kwargs=None):
