@@ -785,30 +785,32 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
             # The next model call or environment step may fail after mutating local
             # chat/route state. Keep only the last fully verified turn as a recovery point.
-            last_completed_state = copy.deepcopy(
-                (
-                    input_ids,
-                    loss_mask,
-                    rollout_logprobs,
-                    rollout_routes,
-                    route_sentinel,
-                    per_step_rewards,
-                    verification_results,
-                    chat_history,
-                    initial_prompt_length,
-                    selected_capture_possible,
-                    generated_ids,
-                    generated_topk_ids,
-                    generated_topk_scores,
-                    token_provenance,
-                    continuation_assistant_index,
-                    env_step_output,
-                    new_obs,
-                    output,
-                    stop_reason,
-                    response_end_idx,
+            if not done:
+                last_completed_state = await asyncio.to_thread(
+                    copy.deepcopy,
+                    (
+                        input_ids,
+                        loss_mask,
+                        rollout_logprobs,
+                        rollout_routes,
+                        route_sentinel,
+                        per_step_rewards,
+                        verification_results,
+                        chat_history,
+                        initial_prompt_length,
+                        selected_capture_possible,
+                        generated_ids,
+                        generated_topk_ids,
+                        generated_topk_scores,
+                        token_provenance,
+                        continuation_assistant_index,
+                        env_step_output,
+                        new_obs,
+                        output,
+                        stop_reason,
+                        response_end_idx,
+                    ),
                 )
-            )
 
         if terminal_error is not None:
             (
