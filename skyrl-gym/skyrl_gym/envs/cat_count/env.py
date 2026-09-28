@@ -4,7 +4,7 @@ from typing import Any
 
 from omegaconf import DictConfig
 
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
 from skyrl_gym.envs.cat_count.reward import CatCountScore, cat_count_score
 from skyrl_gym.verification import UNKNOWN_STOP_REASON, RolloutEvidence, VerificationResult
 
@@ -17,6 +17,9 @@ class CatCountEnv(BaseTextEnv):
         self.n = int(extras["extra_info"]["n"])
         self.stop_reason = UNKNOWN_STOP_REASON
         self.score: CatCountScore | None = None
+
+    def init(self, prompt: ConversationType) -> tuple[ConversationType, dict[str, Any]]:
+        return prompt, {"chat_completion_params": {}}
 
     def set_rollout_evidence(self, evidence: RolloutEvidence) -> None:
         self.stop_reason = evidence.stop_reason

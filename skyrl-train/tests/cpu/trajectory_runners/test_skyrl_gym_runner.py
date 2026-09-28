@@ -759,6 +759,46 @@ async def test_agent_loop_required_exact_chat_rejects_environment_without_chat_o
         )
 
 
+@pytest.mark.asyncio
+async def test_cat_count_exact_chat_preserves_sampled_evidence_and_verification(generator_cfg, mock_tokenizer):
+    generator_cfg.batched = False
+    generator_cfg.use_conversation_multi_turn = True
+    generator_cfg.require_exact_chat_transport = True
+    generator_cfg.sampling_params.logprobs = 0
+    model_client = AsyncMock()
+    model_client.generate.return_value = {
+        "responses": ["cat cat"],
+        "response_ids": [[21, 22]],
+        "prompt_ids": [[11, 12, 13]],
+        "stop_reasons": ["stop"],
+        "response_logprobs": [[-0.1, -0.2]],
+        "assistant_messages": [{"role": "assistant", "content": "cat cat"}],
+        "token_provenance": "engine",
+    }
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg,
+        DictConfig({"max_env_workers": 0}),
+        AsyncMock(),
+        mock_tokenizer,
+        model_client=model_client,
+    )
+    batch = await runner.run(
+        {
+            "prompts": [[{"role": "user", "content": "Reply with the word cat exactly 2 times."}]],
+            "env_extras": [{"extra_info": {"n": 2}}],
+            "env_classes": ["cat_count"],
+        }
+    )
+
+    assert batch["prompt_token_ids"] == [[11, 12, 13]]
+    assert batch["response_ids"] == [[21, 22]]
+    assert batch["rollout_logprobs"] == [[-0.1, -0.2]]
+    assert batch["rewards"] == [[0.0, 1.0]]
+    assert batch["loss_masks"] == [[1, 1]]
+    assert batch["verification_results"][0].passed is True
+    assert batch["env_metrics"][0]["exact_n2"] == 1.0
+
+
 def _structured_tool_turn_runner(mock_make, mock_tokenizer, mock_env, generator_cfg, mock_env_cfg, rendered_tool_ids):
     tools = [{"type": "function", "name": "python", "parameters": {"type": "object"}}]
     mock_env.init.return_value = (
