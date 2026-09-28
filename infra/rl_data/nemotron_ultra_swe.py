@@ -913,10 +913,15 @@ def prepare_swe_task_artifact(
     output_dir: Path,
     *,
     desired_paths: set[str] | None = None,
+    blend_files: tuple[str, ...] = ("rlvr1.jsonl", "rlvr2.jsonl"),
     blend_revision: str = NEMOTRON_ULTRA_REVISION,
     tasktrove_revision: str = TASKTROVE_REVISION,
 ) -> dict[str, Any]:
-    """Write the exact TaskTrove SWE proxy archives used by the blends."""
+    """Write the exact TaskTrove SWE proxy archives used by the blends.
+
+    Without ``desired_paths``, every proxy the RLVR blends reference is written. Callers
+    that pass their own paths also name the blend files the paths came from.
+    """
     if output_dir.exists():
         raise FileExistsError(f"Refusing to overwrite existing artifact: {output_dir}")
     proxy_rows = list(tasktrove_swe_proxy_rows(tasktrove_revision))
@@ -930,7 +935,7 @@ def prepare_swe_task_artifact(
         "blend": {
             "dataset": NEMOTRON_ULTRA_RL_DATASET,
             "revision": blend_revision,
-            "files": ["rlvr1.jsonl", "rlvr2.jsonl"],
+            "files": list(blend_files),
         },
         "tasktrove_proxy": {
             "dataset": TASKTROVE_DATASET,

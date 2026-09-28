@@ -18,7 +18,7 @@ from infra.rl_data.preparation import (
 from infra.rl_data.mixtures import MixtureSlice, MixtureSpec, load_mixture_spec, prepare_mixture
 from infra.rl_data.sources import (
     _iter_jsonl_rows,
-    _restore_nemotron_ultra_placeholder,
+    restore_nemotron_ultra_placeholder,
     Source,
     aime_1983_2024_source,
     aime24_source,
@@ -304,7 +304,7 @@ def test_nemotron_ultra_placeholder_hydrates_prompt_answer_and_provenance():
         ]
     }
 
-    restored = _restore_nemotron_ultra_placeholder(row, sources)
+    restored = restore_nemotron_ultra_placeholder(row, sources)
 
     assert restored["question"] == "Answer this: 2 + 2 Now."
     assert restored["expected_answer"] == "4"
