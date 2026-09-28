@@ -526,6 +526,7 @@ def create_ray_wrapped_inference_engines(
         still require the ray backend for shared-GPU resource management.
     """
     engine_init_kwargs = dict(engine_init_kwargs)
+    # Direct factory callers bypass generator config validation.
     if backend != "vllm" and weight_sync_pause_policy != DEFAULT_WEIGHT_SYNC_PAUSE_POLICY:
         raise ValueError("non-default weight sync pause policy requires vLLM")
     model_metadata_path = engine_init_kwargs.pop(MODEL_METADATA_PATH_KEY, pretrain)
