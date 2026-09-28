@@ -10,7 +10,7 @@ from typing import Protocol, TypeVar
 
 import ray
 from loguru import logger
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from ray.actor import ActorHandle
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from transformers import PreTrainedTokenizerBase
@@ -38,6 +38,11 @@ class RolloutWorkers(Protocol):
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
         """Generate and write one group, returning its response token count."""
         ...
+
+
+def detached_config(config: DictConfig) -> DictConfig:
+    """Return a resolved copy without OmegaConf parent references, to send to a rollout worker."""
+    return OmegaConf.create(OmegaConf.to_container(config, resolve=True))
 
 
 @dataclass(frozen=True)

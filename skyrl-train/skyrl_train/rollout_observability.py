@@ -119,12 +119,14 @@ def current_rollout_observation() -> RolloutObservation | None:
 
 
 @contextlib.contextmanager
-def measure_rollout(*, enabled: bool) -> Iterator[RolloutObservation | None]:
-    """Measure a rollout call inside a rollout worker, which returns the timings to the caller's observation."""
+def measure_rollout(
+    *, enabled: bool, clock: Callable[[], float] = time.perf_counter
+) -> Iterator[RolloutObservation | None]:
+    """Collect the enclosed rollout call's waits and phases in a new observation, without publishing them."""
     if not enabled:
         yield None
         return
-    observation = RolloutObservation(PhaseBreakdown("rollout_call", _PARENTS, enabled=True))
+    observation = RolloutObservation(PhaseBreakdown("rollout_call", _PARENTS, enabled=True, clock=clock))
     token = _CURRENT.set(observation)
     try:
         yield observation
@@ -139,28 +141,26 @@ def observe_rollout_call(
     if not enabled:
         yield None
         return
-    observation = RolloutObservation(PhaseBreakdown("rollout_call", _PARENTS, enabled=True, clock=clock))
-    token = _CURRENT.set(observation)
     outcome = "success"
-    try:
-        yield observation
-    except asyncio.CancelledError:
-        outcome = "cancelled"
-        raise
-    except BaseException:
-        outcome = "failure"
-        raise
-    finally:
-        _CURRENT.reset(token)
-        attributes = {"role": TRAINER_ROLE, "step": str(step), "mode": mode, "outcome": outcome}
-        duration = observation.phases.publish(clock_domain="driver_monotonic", attributes=attributes)
-        for name, durations in observation.waits.items():
-            publish_wait(name, durations, step=step, mode=mode)
-        record_event(
-            "rollout_call",
-            {"call_id": observation.call_id, **_window(duration), "response_tokens": observation.response_tokens},
-            attributes=attributes,
-        )
+    with measure_rollout(enabled=True, clock=clock) as observation:
+        try:
+            yield observation
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except BaseException:
+            outcome = "failure"
+            raise
+        finally:
+            attributes = {"role": TRAINER_ROLE, "step": str(step), "mode": mode, "outcome": outcome}
+            duration = observation.phases.publish(clock_domain="driver_monotonic", attributes=attributes)
+            for name, durations in observation.waits.items():
+                publish_wait(name, durations, step=step, mode=mode)
+            record_event(
+                "rollout_call",
+                {"call_id": observation.call_id, **_window(duration), "response_tokens": observation.response_tokens},
+                attributes=attributes,
+            )
 
 
 @contextlib.contextmanager

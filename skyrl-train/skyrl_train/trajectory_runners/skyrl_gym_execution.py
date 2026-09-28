@@ -11,7 +11,7 @@ from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.rollouts.workers import WorkerShard
+from skyrl_train.rollouts.workers import WorkerShard, detached_config
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner, TrajectoryPipeline
@@ -31,7 +31,7 @@ class GymRunnerSpec:
     @classmethod
     def from_config(cls, config: DictConfig, engines: Sequence[InferenceEngineInterface]) -> GymRunnerSpec:
         return cls(
-            config=OmegaConf.create(OmegaConf.to_container(config, resolve=True)),
+            config=detached_config(config),
             engines=list(engines),
             environments=dict(registry),
         )
