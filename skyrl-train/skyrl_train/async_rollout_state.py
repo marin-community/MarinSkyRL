@@ -8,7 +8,12 @@ from skyrl_train.trajectory_runners.base import TrajectoryBatch
 
 @dataclass
 class GeneratedOutputGroup:
-    """Samples and metadata for one rollout batch."""
+    """Samples and metadata for one rollout batch.
+
+    Completed trajectory payloads and source prompts are read-only: consumers
+    build new batches, allowing checkpoint snapshots to retain these payloads
+    while persistence runs in another thread. Admission metadata remains mutable.
+    """
 
     trajectory_batch: TrajectoryBatch
     uid: str

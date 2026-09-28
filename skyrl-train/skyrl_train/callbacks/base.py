@@ -422,6 +422,9 @@ class TrainerCallback(ABC):
         """Async version of on_save. Defaults to calling sync version."""
         return self.on_save(state, control, **kwargs)
 
+    async def wait_for_pending_saves(self) -> None:
+        """Finish callback artifacts before publishing their model checkpoint."""
+
     async def on_log_async(
         self,
         state: TrainerState,
@@ -466,6 +469,15 @@ class CallbackHandler:
     def add_callback(self, callback: TrainerCallback) -> None:
         """Add a callback to the handler."""
         self.callbacks.append(callback)
+
+    async def wait_for_pending_saves(self) -> None:
+        """Drain background artifact writes, propagating every persistence failure."""
+        results = await asyncio.gather(
+            *(callback.wait_for_pending_saves() for callback in self.callbacks), return_exceptions=True
+        )
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            raise BaseExceptionGroup("Background artifact writes failed", failures)
 
     def remove_callback(self, callback_type: type) -> None:
         """Remove all callbacks of a given type."""

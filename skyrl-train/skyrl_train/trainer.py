@@ -754,6 +754,14 @@ class RayPPOTrainer:
         return time.monotonic() - snapshot.upload_started_at, cleanup_duration
 
     async def _finish_checkpoint_upload(self, snapshot: CheckpointSnapshot, *, commit: bool) -> tuple[float, float]:
+        try:
+            await self.callback_handler.wait_for_pending_saves()
+        except BaseException:
+            try:
+                await self.callback_handler.wait_for_pending_saves()
+            finally:
+                await asyncio.to_thread(self._finish_checkpoint_upload_blocking, snapshot, commit=False)
+            raise
         return await asyncio.to_thread(self._finish_checkpoint_upload_blocking, snapshot, commit=commit)
 
     async def _await_checkpoint_upload(self, snapshot: CheckpointSnapshot) -> None:
