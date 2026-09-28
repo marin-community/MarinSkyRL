@@ -787,8 +787,6 @@ class InferenceEngineClient(InferenceEngineInterface):
         until weights are updated and generation resumes.
 
         A new stream waits at the same pause barrier as non-streaming requests.
-        It must not enter the engine during weight reload, when a forward pass
-        could touch parameters moved onto the ``meta`` device.
         """
         # Wait before routing or counting the request so it cannot enter the engine
         # during the reload or hold an engine slot while blocked.

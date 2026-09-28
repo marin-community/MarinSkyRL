@@ -20,7 +20,11 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
-from skyrl_train.config.weight_sync_pause import DEFAULT_WEIGHT_SYNC_PAUSE_POLICY, WeightSyncPausePolicy
+from skyrl_train.config.weight_sync_pause import (
+    DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
+    WeightSyncPausePolicy,
+    validate_weight_sync_pause_backend,
+)
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
 from skyrl_train.inference_engines.utils import (
     ReservedRendezvousPorts,
@@ -527,8 +531,7 @@ def create_ray_wrapped_inference_engines(
     """
     engine_init_kwargs = dict(engine_init_kwargs)
     # Direct factory callers bypass generator config validation.
-    if backend != "vllm" and weight_sync_pause_policy != DEFAULT_WEIGHT_SYNC_PAUSE_POLICY:
-        raise ValueError("non-default weight sync pause policy requires vLLM")
+    validate_weight_sync_pause_backend(weight_sync_pause_policy, backend=backend, run_engines_locally=True)
     model_metadata_path = engine_init_kwargs.pop(MODEL_METADATA_PATH_KEY, pretrain)
     if backend == "vllm":
         import vllm
