@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+from typing import Protocol
 from types import MappingProxyType
 from skyrl_train.metric_names import (
     TIS_ALIGNED_TOKENS_METRIC,
@@ -18,9 +21,10 @@ from skyrl_train.trajectory_runners.types import (
     TrajectoryRequestBatch as TrajectoryRequestBatch,
     TrainingPhase as TrainingPhase,
 )
+from skyrl_train.rollouts.buffer import RolloutGroup, RolloutTask, RolloutWriter
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import shape_trajectory_rewards
-from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
-from skyrl_train.rollout_observability import rollout_phase
+from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink, retain_trajectories
+from skyrl_train.rollout_observability import rollout_phase, rollout_wait
 
 
 def propagate_teacher_routes(input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> None:
@@ -44,6 +48,19 @@ def propagate_teacher_routes(input_batch: TrajectoryRequestBatch, output: Trajec
     if output_route_keys is not None and output_route_keys != route_keys:
         raise ValueError("trajectory runner output teacher_route_keys do not match request metadata")
     output["teacher_route_keys"] = route_keys
+
+
+class BatchRunner(Protocol):
+    async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch: ...
+
+
+async def run_rollout_task(runner: BatchRunner, task: RolloutTask, writer: RolloutWriter) -> int:
+    """Generate one leased prompt group, write it to the rollout buffer, and return its response token count."""
+    output = await runner.run(task.request, disable_tqdm=True)
+    group = RolloutGroup(output, task.prompt["uid"], task.lease.policy_step, task.prompt, task.request)
+    with rollout_wait("enqueue"):
+        await writer.write_rollout(task.lease, group)
+    return sum(len(response) for response in output["response_ids"])
 
 
 def propagate_data_sources(input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> None:
@@ -90,7 +107,7 @@ class TrajectoryRunner(ABC):
     """
 
     trajectory_runner_cfg = MappingProxyType({})
-    trajectory_sink: TrajectorySink | None = None
+    trajectory_sink: RetentionSink | None = None
 
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """Acquire trajectories and apply runner-independent output finalization.
@@ -121,7 +138,10 @@ class TrajectoryRunner(ABC):
                 await retain_trajectories(self.trajectory_sink, input_batch, output)
         return output
 
-    def set_trajectory_sink(self, sink: TrajectorySink) -> None:
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
+        return await run_rollout_task(self, task, writer)
+
+    def set_trajectory_sink(self, sink: RetentionSink) -> None:
         """Attach the trainer-owned sink used by shared output finalization."""
         sink.bind_runner(type(self).__name__)
         self.trajectory_sink = sink
@@ -132,7 +152,6 @@ class TrajectoryRunner(ABC):
         run_name: str,
         eval_step: int,
         val_set_name: str | None = None,
-        n_concurrent_trials: int | None = None,
     ) -> None:
         """Start an evaluation-scoped resource session when a runner needs one."""
 

@@ -20,26 +20,7 @@ import zstandard  # noqa: E402
 from marinskyrl.environment_contract import TrainingType  # noqa: E402
 from skyrl_train import telemetry as training_telemetry  # noqa: E402
 from skyrl_train.distillation import ChosenTokenTeacherEvidence  # noqa: E402
-from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec  # noqa: E402
 from skyrl_train.trajectory_runners.types import TrajectoryID, VerifierTestCollection  # noqa: E402
-
-
-@pytest.fixture
-def harbor_runner_spec() -> HarborRunnerSpec:
-    """Return the minimum common Harbor runner specification used by dispatcher tests."""
-    config = OmegaConf.create(
-        {
-            "trainer": {
-                "algorithm": {
-                    "policy_loss_type": "regular",
-                    "use_tis": False,
-                    "behavior_clip": None,
-                    "tis_lcs_alert_threshold": 0.1,
-                }
-            }
-        }
-    )
-    return HarborRunnerSpec(config, OmegaConf.create({}), OmegaConf.create({}))
 
 
 @pytest.fixture

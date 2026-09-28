@@ -6,9 +6,9 @@ dashboards display them. [Watching an RL run on Grafana](../grafana-rl-runs.md) 
 and [Telemetry](../../skyrl-train/docs/telemetry.md) covers the export path.
 
 Every record carries the run id, the execution uid, the process role and `training_type`. Launch
-composition sets `training_type` from the entrypoint and `trainer.placement.colocate_all`: `fully_async`
-and a non-colocated `terminal_bench` are `async`, the generate entrypoints have none, and every other
-entrypoint is `sync`. Panel numbers refer to the async dashboard.
+composition sets `training_type` from `trainer.rollout_buffer.max_staleness_steps`: `sync` at 0 and
+`async` above it; the generate entrypoints have none. Both modes run the same training loop and record
+the same families. Panel numbers refer to the async dashboard.
 
 ## Liveness and flow
 
@@ -26,16 +26,19 @@ entrypoint is `sync`. Panel numbers refer to the async dashboard.
 | How long does each weight sync take? | `phase_duration_seconds` for `sync_weights` and its stages | 14, 53 |
 | Is the model learning? | reward, evaluation, stop-reason and optimizer scalars in `training_metric_value` | 22 to 24, 40, 49, 50 |
 
-A group's disposition is `consumed`, `stale_enqueue`, an admission rejection such as `stale`,
-`fully_masked` or `duplicate_uid`, `insufficient_reward_spread` from dynamic sampling, or
-`epoch_end_drain`. A group still buffered at shutdown has none.
+The rollout buffer judges each committed group. Its disposition is `consumed` when a batch takes it,
+an admission rejection such as `stale`, `fully_masked` or `duplicate_uid`, or
+`insufficient_reward_spread` from dynamic sampling. Buffer dwell runs from commit to that judgment; a
+group restored from a checkpoint has no dwell, and a group still buffered at shutdown has no
+disposition.
 
 ## Time and memory
 
 Each rollout call records its wall time split into collect, assemble and finalize, with tokenize under
 collect, retain under finalize and the remainder as `rollout_call_residual`. Its waits cover the model
-call and the environment's queue, execution and resume; the producer also records its waits for a
-prompt, a slot and the enqueue (panels 7, 12, 15, 16). The driver samples its event-loop lag, and vLLM's
+call, the environment's queue, execution and resume, and the enqueue to the buffer; the dispatch loop
+also records its waits for a prompt and a lease slot (panels 7, 12, 15, 16). A rollout worker in another
+process reports only the call's wall and response tokens. The driver samples its event-loop lag, and vLLM's
 token counters joined to the trainer's phase windows give vLLM's rate during each phase (panel 42).
 
 The driver's step, buffer wait, training and weight-sync walls feed panel 6, and
@@ -79,6 +82,5 @@ uid. Each family below has its own switch, on by default.
 |---|---|---|---|
 | Liveness, steps, buffer, staleness, phase walls | none | a few records per step | 2, 3, 4, 6, 8, 11, 14, 28 |
 | Trainer scalars, loop events and mismatch statistics | `trainer.training_metrics` | one record per scalar per step; mismatch statistics take about 0.2 s of driver CPU at 1.3M loss tokens | sections above, 30 to 32, 44, 47, 48, 54 to 57 |
-| Async rollout calls, waits and windows | `trainer.async_spans` | several records per rollout call | 7, 10, 12, 15, 16, 18 to 20, 42, 53 |
-| Sync rollout calls | `trainer.generate_spans` | several records per rollout call | sync dashboard |
+| Rollout calls, waits, dispositions and loop windows | `trainer.rollout_spans` | several records per rollout call | 7, 10, 12, 15, 16, 18 to 20, 42, 53 |
 | Policy-update phases and learner memory | `trainer.policy_train_spans` | a few records per phase per rank | 16, 26, 27, 41 |

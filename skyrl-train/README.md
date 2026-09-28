@@ -24,8 +24,8 @@ The `skyrl-train` package supports:
 - Inference backends: vLLM, SGLang, and any custom OpenAI API compatible endpoint that exposes a method to perform weight sync
 - Megatron context and tensor parallelism for long-context training
 - Colocated or disaggregated training and generation (including on heterogeneous hardware)
-- Synchronous RL or async one-off pipelining
-- Simple batched rollouts or Asynchronous rollouts for multi-turn conversations
+- Synchronous or asynchronous RL through one rollout-buffer loop, with bounded policy staleness
+- Per-sample agent loops for single-turn and multi-turn environments
 - Weight sync via NCCL, gloo, or checkpoint-and-load
 - Integration with `skyrl-gym` to run any environment in the gymnasium
 - Sequence packing and Flash Attention 2

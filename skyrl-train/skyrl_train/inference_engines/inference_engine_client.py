@@ -1160,9 +1160,9 @@ class InferenceEngineClient(InferenceEngineInterface):
             wait_for_server_ready,
         )
 
-        # Bind the uvicorn server to 0.0.0.0 so that off-node clients (e.g. the
-        # rollout-fanout RolloutCoordinator actors running on WORKER nodes) can
-        # reach the endpoint over the internal compute network. The configured
+        # Bind the uvicorn server to 0.0.0.0 so that clients addressing this node
+        # by its IP (e.g. Harbor rollout workers and their agents) can reach the
+        # endpoint over the internal compute network. The configured
         # `http_endpoint_host` (default 127.0.0.1) is the CLIENT-side host used
         # for the local readiness probe below; binding the SERVER to 0.0.0.0 is
         # a superset of binding to 127.0.0.1, so the loopback readiness probe and

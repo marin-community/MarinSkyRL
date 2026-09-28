@@ -12,6 +12,9 @@ import skyrl_train.evaluate as evaluate_module
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryBatch
 from tests.cpu.util import example_dummy_config
 
+# A standalone evaluation starts the run's trajectory sink actor.
+pytestmark = pytest.mark.usefixtures("ray_module")
+
 
 @pytest.fixture
 def dummy_config():

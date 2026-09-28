@@ -28,6 +28,7 @@ dependencies = [
     "loguru",
     "marin-finelog",
     "marin-finelog-server",
+    "marin-finestore",
     "marin-iris",
     "marin-iris-native",
     "marin-rigging[secrets]>=0.2.123.dev35633925924",
