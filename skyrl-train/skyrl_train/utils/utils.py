@@ -1304,25 +1304,20 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
             env_vars[_net_env] = os.environ[_net_env]
 
     if env_vars.get(VLLM_BATCH_INVARIANT_ENV) == "1" or os.environ.get(VLLM_BATCH_INVARIANT_ENV) == "1":
-        # The inference actor also forwards this launcher variable directly,
-        # including task-owned runs whose trainer config leaves it unset.
-        # vLLM sets these inside its GPU worker during batch-invariant startup.
-        # Megatron's separate Ray rank shares a NCCL weight-update group with
-        # that worker. Different per-rank NCCL settings made the first broadcast
-        # fail with "Message truncated" and left the sender blocked. Apply the
-        # same settings to all Ray workers before NCCL initializes; this also
-        # constrains training collectives when batch invariance is enabled.
+        # Megatron and vLLM share a weight-update NCCL group; mismatched settings broke its first broadcast.
+        # Mirror pinned vLLM as a set; on upgrade, drop settings it drops and requalify publication.
+        # Remove this block if publication no longer joins their ranks; it also affects learner collectives.
         env_vars.update(
-            NCCL_LAUNCH_MODE="GROUP",
-            NCCL_COLLNET_ENABLE="0",
-            NCCL_NVLS_ENABLE="0",
-            NCCL_P2P_NET_DISABLE="1",
-            NCCL_MIN_NCHANNELS="1",
-            NCCL_MAX_NCHANNELS="1",
-            NCCL_PROTO="Simple",
-            NCCL_ALGO="allreduce:tree",
-            NCCL_NTHREADS="1",
-            NCCL_SOCKET_NTHREADS="1",
+            NCCL_LAUNCH_MODE="GROUP",  # Match vLLM's kernel launch mode.
+            NCCL_COLLNET_ENABLE="0",  # Avoid CollNet reduction offload.
+            NCCL_NVLS_ENABLE="0",  # Avoid NVLink SHARP reduction offload.
+            NCCL_P2P_NET_DISABLE="1",  # Match vLLM; NCCL does not document this switch.
+            NCCL_MIN_NCHANNELS="1",  # Match vLLM's channel lower bound.
+            NCCL_MAX_NCHANNELS="1",  # Prevent a multiple-channel split.
+            NCCL_PROTO="Simple",  # Keep LL and LL128 out of collectives.
+            NCCL_ALGO="allreduce:tree",  # Keep all-reduce on the Tree algorithm.
+            NCCL_NTHREADS="1",  # Match vLLM; NCCL does not document 1 as valid.
+            NCCL_SOCKET_NTHREADS="1",  # Avoid platform-dependent socket thread counts.
         )
 
     # EnvVarManager owns NCCL verbosity through trainer.debug_mode. Do not copy
