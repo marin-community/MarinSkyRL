@@ -1,19 +1,4 @@
-"""Decide whether a nightly SkyRL training run is healthy, from its log alone.
-
-The trainer mirrors every tracker payload to stdout as a ``WANDB_MIRROR`` line (see
-``RayPPOTrainer._log_metrics_stdout``), so a run's metrics survive in its log without
-wandb, a checkpoint, or cluster access. This reads that log and checks the run against a
-spec: enough training steps completed, the metrics that must exist are there and finite,
-the ones with a meaningful range are inside it, and the run finished inside its
-wall-clock budget.
-
-The gate is deliberately coarse. It answers "does the user-facing training path still
-work end to end", not "is the model any good" -- a two-step run of a 0.6B policy has no
-signal about quality, and a reward floor above zero would just be flaky.
-
-    python -m ci.marin_nightly.gate --log run.log \
-        --spec ci/marin_nightly/specs/gsm8k-qwen3-0.6b-megatron.json --wall-clock-seconds 900
-"""
+"""Check a SkyRL training log against its run spec."""
 
 import argparse
 import json
@@ -55,7 +40,7 @@ class MetricBound:
 
 @dataclass(frozen=True)
 class MetricOccurrence:
-    """Require a metric to cross one threshold on at least ``minimum_count`` steps."""
+    """Require at least ``minimum_count`` observations strictly above or below a threshold."""
 
     minimum_count: int
     comparison: Literal["above", "below"]
@@ -171,9 +156,11 @@ def _distinct_steps(steps: list[StepMetrics]) -> tuple[list[StepMetrics], list[s
     by_key: dict[tuple[str, int], StepMetrics] = {}
     failures = []
     for step in steps:
+        if step.kind not in (TRAIN, "eval"):
+            continue
         key = (step.kind, step.step)
         prior = by_key.get(key)
-        if prior is not None and prior.values != step.values:
+        if prior is not None and json.dumps(prior.values, sort_keys=True) != json.dumps(step.values, sort_keys=True):
             failures.append(f"conflicting {step.kind} payloads at step {step.step}")
         by_key[key] = step
     return sorted(by_key.values(), key=lambda item: (item.kind, item.step)), failures
@@ -189,24 +176,20 @@ def check_run(steps: list[StepMetrics], spec: GateSpec, wall_clock_seconds: floa
     train_steps = [s for s in distinct_steps if s.kind == TRAIN]
     if len(train_steps) < spec.min_train_steps:
         failures.append(f"logged {len(train_steps)} training steps, expected at least {spec.min_train_steps}")
-    if not train_steps:
-        return failures
+    if train_steps:
+        final = train_steps[-1]
+        for name in spec.finite_metrics:
+            if name not in final.values:
+                failures.append(f"step {final.step} did not log {name}")
+            elif not _is_finite(final.values[name]):
+                failures.append(f"step {final.step} logged {name}={final.values[name]!r}, which is not finite")
 
-    # The last step is the one that has to be healthy: an early step can look fine while the
-    # run degrades into NaN later.
-    final = train_steps[-1]
-    for name in spec.finite_metrics:
-        if name not in final.values:
-            failures.append(f"step {final.step} did not log {name}")
-        elif not _is_finite(final.values[name]):
-            failures.append(f"step {final.step} logged {name}={final.values[name]!r}, which is not finite")
-
-    for name, bound in spec.bounds.items():
-        value = final.values.get(name)
-        if not _is_finite(value):
-            continue  # already reported by the finiteness check if it was required
-        if not bound.minimum <= value <= bound.maximum:
-            failures.append(f"step {final.step} logged {name}={value}, outside [{bound.minimum}, {bound.maximum}]")
+        for name, bound in spec.bounds.items():
+            value = final.values.get(name)
+            if not _is_finite(value):
+                continue
+            if not bound.minimum <= value <= bound.maximum:
+                failures.append(f"step {final.step} logged {name}={value}, outside [{bound.minimum}, {bound.maximum}]")
 
     for requirement in spec.metric_series:
         failures.extend(_metric_series_failures(distinct_steps, requirement))
@@ -265,12 +248,13 @@ def _metric_series_failures(steps: list[StepMetrics], requirement: MetricSeries)
                 f"expected at least {2 * trend.window} for its trend"
             )
         else:
-            early = sum(values[: trend.window]) / trend.window
-            late = sum(values[-trend.window :]) / trend.window
-            if late - early < trend.min_improvement:
+            early = math.fsum(value / trend.window for value in values[: trend.window])
+            late = math.fsum(value / trend.window for value in values[-trend.window :])
+            improvement = late - early
+            if not math.isfinite(improvement) or improvement < trend.min_improvement:
                 failures.append(
-                    f"{requirement.kind} {requirement.metric} rose by {late - early:+.4f}, "
-                    f"expected at least +{trend.min_improvement:.4f}; the policy is not learning"
+                    f"{requirement.kind} {requirement.metric} rose by {improvement:+.4f}, "
+                    f"expected at least +{trend.min_improvement:.4f}"
                 )
 
     if requirement.occurrence is not None:
@@ -281,7 +265,8 @@ def _metric_series_failures(steps: list[StepMetrics], requirement: MetricSeries)
         )
         if count < occurrence.minimum_count:
             failures.append(
-                f"{requirement.kind} {requirement.metric} crossed its threshold {count} times, "
+                f"{requirement.kind} {requirement.metric} has {count} observations "
+                f"{occurrence.comparison} {occurrence.threshold}, "
                 f"expected at least {occurrence.minimum_count}"
             )
 
@@ -306,7 +291,8 @@ def main() -> int:
     failures = check_run(steps, spec, args.wall_clock_seconds)
     failures.extend(check_log_patterns(log_text, spec))
 
-    train_steps = [s for s in steps if s.kind == TRAIN]
+    distinct_steps, _ = _distinct_steps(steps)
+    train_steps = [s for s in distinct_steps if s.kind == TRAIN]
     print(f"parsed {len(train_steps)} training steps from {args.log} in {args.wall_clock_seconds:.0f}s")
     if train_steps:
         print(f"final step {train_steps[-1].step}: {json.dumps(train_steps[-1].values, sort_keys=True)}")

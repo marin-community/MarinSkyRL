@@ -28,7 +28,7 @@ WANDB_MIRROR kind=train step=2 metrics={"policy/policy_loss": 0.41, "reward/avg_
 `gate.py` parses those, counts distinct training steps, and checks the final payload
 against the spec's required metrics and bounds. A spec can also require evidence across
 the run: finite values at every step, minimum observation counts, first-to-last-window
-improvement, and a minimum number of threshold crossings. Training and evaluation
+improvement, and a minimum number of observations above or below a threshold. Training and evaluation
 payloads are separate streams. Duplicate payloads for one stream and step count once;
 conflicting copies fail. The gate exits non-zero with one line per violation.
 `tests/cpu/test_marin_nightly_gate.py` covers it.

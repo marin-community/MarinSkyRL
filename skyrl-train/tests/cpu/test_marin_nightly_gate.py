@@ -177,13 +177,23 @@ def test_eval_payloads_do_not_count_as_training_steps(spec):
     failures = check_run(parse_metrics(log), spec, wall_clock_seconds=300)
     assert "expected at least 2" in failures[0]
 
+    eval_spec = replace(
+        spec,
+        min_train_steps=0,
+        finite_metrics=(),
+        bounds={},
+        metric_series=(MetricSeries("eval", "eval/exact", True, 1),),
+    )
+    assert check_run([StepMetrics("eval", 0, {"eval/exact": 1.0})], eval_spec, 300) == []
+    assert check_run([], eval_spec, 300) != []
+    assert check_run([StepMetrics("eval", 0, {"eval/exact": float("nan")})], eval_spec, 300) != []
 
-def test_flat_reward_fails_the_trend_gate():
-    """The failure mode the trend check exists for: a run that generates and scores every step
-    but never learns keeps reward flat, and passes every structural check."""
-    failures = check_run(parse_metrics(reward_log([0.25, 0.25, 0.25, 0.25])), trend_spec(), wall_clock_seconds=300)
+
+@pytest.mark.parametrize("rewards,window", [([0.25] * 4, 2), ([1e308] * 9 + [0.5], 5)])
+def test_insufficient_reward_improvement_fails_the_trend_gate(rewards, window):
+    failures = check_run(parse_metrics(reward_log(rewards)), trend_spec(window=window), wall_clock_seconds=300)
     assert len(failures) == 1
-    assert "not learning" in failures[0]
+    assert "expected at least +0.0300" in failures[0]
 
 
 def test_rising_reward_passes_the_trend_gate():
@@ -205,6 +215,23 @@ def test_duplicate_payloads_do_not_count_as_completed_steps(spec):
     changed = replace(first, values={**first.values, "policy/policy_loss": 0.1})
     failures = check_run([first, changed], spec, wall_clock_seconds=300)
     assert any("conflicting train payloads at step 1" in failure for failure in failures)
+
+    startup = [
+        StepMetrics("startup", 0, {"startup/model_loading": 2.0}),
+        StepMetrics("startup", 0, {"startup/eval_before_train": 1.0}),
+    ]
+    assert check_run([*startup, *parse_metrics(healthy_log())], spec, 300) == []
+
+    boolean_value = replace(first, values={**first.values, "x": True})
+    numeric_value = replace(first, values={**first.values, "x": 1})
+    assert any(
+        "conflicting train payloads" in failure for failure in check_run([boolean_value, numeric_value], spec, 300)
+    )
+
+    nan_copies = parse_metrics("\n".join([mirror_line(1, **{"policy/policy_loss": float("nan")})] * 2))
+    failures = check_run(nan_copies, replace(spec, min_train_steps=1), 300)
+    assert len(failures) == 1
+    assert "not finite" in failures[0]
 
 
 def test_cat_count_series_requires_finite_learning_and_enough_train_and_eval_evidence(tmp_path):
@@ -333,7 +360,7 @@ def test_cat_count_series_requires_finite_learning_and_enough_train_and_eval_evi
         for step in steps
     ]
     assert any(
-        "reward/zero_std_group_fraction crossed its threshold 0 times" in failure
+        "reward/zero_std_group_fraction has 0 observations above 0.0" in failure
         for failure in check_run(flat_groups, spec, 300)
     )
 
@@ -344,7 +371,7 @@ def test_cat_count_series_requires_finite_learning_and_enough_train_and_eval_evi
         for step in steps
     ]
     assert any(
-        "policy/ppo_ratio_exact_unit_fraction crossed its threshold 0 times" in failure
+        "policy/ppo_ratio_exact_unit_fraction has 0 observations below 1.0" in failure
         for failure in check_run(no_clip, spec, 300)
     )
 
