@@ -203,14 +203,17 @@ def filtered_replay_topk(
     selected = native_idx.clone()
     replacements = torch.zeros_like(targets, dtype=torch.bool)
     threshold_offset = math.log(keep_fraction) if keep_fraction else -math.inf
+    native_scores = scores.detach().gather(1, native_idx)
+    cutoff_scores = native_scores.amin(dim=-1)
+    ranked_native = native_idx.gather(1, torch.argsort(native_scores, dim=-1, descending=True, stable=True))
     for row in torch.nonzero(mask, as_tuple=False).flatten().tolist():
         captured = targets[row].tolist()
         if len(set(captured)) != len(captured):
             raise ValueError("filtered replay captured experts must be distinct within a row")
-        kth_logit = scores[row, native_idx[row, -1]].item()
+        kth_logit = cutoff_scores[row].item()
         kept = [scores[row, expert].item() >= kth_logit + threshold_offset for expert in captured]
         used = {expert for expert, accepted in zip(captured, kept, strict=True) if accepted}
-        native_candidates = iter(expert for expert in native_idx[row].tolist() if expert not in used)
+        native_candidates = iter(expert for expert in ranked_native[row].tolist() if expert not in used)
         for slot, (expert, accepted) in enumerate(zip(captured, kept, strict=True)):
             if accepted:
                 selected[row, slot] = expert

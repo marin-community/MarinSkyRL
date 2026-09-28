@@ -22,13 +22,16 @@ from skyrl_train.models.megatron_router_replay import (
 from skyrl_train.models.megatron_router_replay import SENTINEL_EXPERT_ID, dense_replay_targets
 
 
-def test_filtered_replay_keeps_positive_probability_choices_and_native_order():
-    scores = torch.tensor([[-0.1, -0.2, -1.0, -4.0], [-0.1, -0.2, -1.0, -4.0]])
-    native = torch.tensor([[0, 1], [0, 1]])
+@pytest.mark.parametrize("native_order", [(0, 1), (1, 0)], ids=["sorted-training", "unsorted-scoring"])
+def test_filtered_replay_keeps_positive_probability_choices_and_native_order(native_order):
+    scores = torch.tensor([[-0.1, -0.2, -0.85, -4.0], [-0.1, -0.2, -0.85, -4.0]])
+    native = torch.tensor([native_order, native_order])
     captured = torch.tensor([[2, 1], [3, 2]])
+    probabilities = torch.softmax(scores, dim=-1)
+    reference_kept = probabilities.gather(1, captured) >= 0.5 * probabilities[:, 1:2]
     selected, replaced = filtered_replay_topk(scores, native, captured, torch.tensor([True, True]), 0.5)
-    assert selected.tolist() == [[0, 1], [0, 1]]
-    assert replaced.tolist() == [[True, False], [True, True]]
+    assert selected.tolist() == [[2, 1], [0, 2]]
+    assert torch.equal(replaced, ~reference_kept)
     offset_selected, _ = filtered_replay_topk(scores + 100, native, captured, torch.tensor([True, True]), 0.5)
     assert torch.equal(selected, offset_selected)
 
