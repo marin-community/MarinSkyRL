@@ -573,7 +573,7 @@ class MismatchProbeCallback(TrainerCallback):
             starting_weights_hash=self.starting_weights_hash,
             source_probe_archive=self.spec.reuse_probe,
             architecture=str(trainer.cfg.trainer.policy.model.path),
-            vllm_enforce_eager=bool(trainer.cfg.generator.engine_init_kwargs.get("enforce_eager", False)),
+            vllm_enforce_eager=bool(trainer.cfg.generator.enforce_eager),
             optimizer_steps_per_update=int(trainer.all_metrics.get("policy/policy_update_steps", 0)),
             seed=int(self.spec.seed),
             bootstrap_seed=request_seed(int(self.spec.seed), "bootstrap", 0),

@@ -61,7 +61,7 @@ def test_probe_requires_synchronous_trainer_and_adapter_for_layers():
     cfg = _probe_cfg()
     with pytest.raises(ValueError, match="synchronous"):
         validate_mismatch_probe_config(cfg, synchronous=False)
-    cfg.generator.engine_init_kwargs.enforce_eager = True
+    cfg.generator.enforce_eager = True
     cfg.trainer.mismatch_probe.layer_tokens = 4
     with pytest.raises(ValueError, match="no registered layer adapter"):
         validate_mismatch_probe_config(cfg)
