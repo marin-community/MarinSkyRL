@@ -95,6 +95,29 @@ def test_controller_ingress_preserves_a_real_openai_base_url(monkeypatch):
         assert os.environ["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
 
 
+def test_controller_ingress_proxy_listens_beyond_loopback(monkeypatch):
+    """The controller dials the registered advertise address, so a loopback-bound proxy
+    refuses every agent request and each trial times out with no model traffic."""
+    _patch_ingress(monkeypatch)
+    bound_hosts = []
+
+    def _record_port_probe(job_name, *, host):
+        bound_hosts.append(host)
+        return 18010
+
+    @contextlib.contextmanager
+    def _record_proxy(*a, host, port, **k):
+        bound_hosts.append(host)
+        yield f"http://{host}:{port}/v1"
+
+    monkeypatch.setattr(literal_proxy_utils, "select_literal_proxy_port", _record_port_probe)
+    monkeypatch.setattr(literal_proxy_utils, "maybe_serve_literal_proxy", _record_proxy)
+    with _runner()._ingress_context():
+        pass
+
+    assert bound_hosts == ["0.0.0.0", "0.0.0.0"]
+
+
 def test_direct_ingress_still_publishes_agent_dummy_key(monkeypatch):
     """Agent auth is DECOUPLED from controller-ingress: an installed agent (opencode) on
     ingress_mode=direct must still get the inert dummy key, or it refuses to start (zero

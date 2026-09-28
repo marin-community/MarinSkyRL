@@ -2190,6 +2190,20 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 tis_splice=self._tis_splice,
             )
 
+        if alignment_stats and alignment_stats.n_tito_full_successes:
+            assert assistant_prompt_token_ids
+            generation_prompt_ids = get_generation_prompt_ids(
+                self.tokenizer,
+                custom_chat_template=self.custom_chat_template_content,
+                chat_template_kwargs=self._chat_template_kwargs,
+            )
+            # OpenAI tool schemas and other request fields can change the served prompt
+            # without appearing in the reconstructed chat history.
+            prompt_ids = assistant_prompt_token_ids[0][
+                : len(assistant_prompt_token_ids[0]) - len(generation_prompt_ids)
+            ]
+            initial_prompt_length = len(prompt_ids)
+
         # Prefer the agent's terminal reason when Harbor supplied one. The local
         # response limit remains authoritative when the reconstructed response
         # itself exceeds the configured budget.
