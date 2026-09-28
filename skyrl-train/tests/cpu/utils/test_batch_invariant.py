@@ -4,7 +4,7 @@ import types
 import pytest
 from omegaconf import OmegaConf
 
-from skyrl_train.batch_invariant import enable_trainer_batch_invariance
+from skyrl_train.batch_invariant import BATCH_INVARIANT_NCCL_ENV, enable_trainer_batch_invariance
 from skyrl_train.env_vars import VLLM_BATCH_INVARIANT_ENV
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import _build_inference_engine_runtime_env
 from skyrl_train.utils.utils import prepare_runtime_environment, validate_batch_invariant_config
@@ -29,6 +29,7 @@ def test_batch_invariant_reaches_ray_and_nested_vllm_workers(monkeypatch):
     monkeypatch.setenv(VLLM_BATCH_INVARIANT_ENV, ray_environment[VLLM_BATCH_INVARIANT_ENV])
 
     assert ray_environment[VLLM_BATCH_INVARIANT_ENV] == "1"
+    assert BATCH_INVARIANT_NCCL_ENV.items() <= ray_environment.items()
     assert _build_inference_engine_runtime_env()["env_vars"][VLLM_BATCH_INVARIANT_ENV] == "1"
 
 
