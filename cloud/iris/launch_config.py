@@ -22,6 +22,7 @@ from cloud.iris.rl_config_translation import (
     validate_tp_divides_heads,
 )
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
+from marinskyrl.distillation import validate_generation_logprobs
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.task_sources import data_source
 
@@ -337,6 +338,7 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
     runtime = raw["runtime"]
     entrypoint = runtime["entrypoint"]
     registered_rl_entrypoint_module(entrypoint)
+    validate_generation_logprobs(config.skyrl)
     validate_mismatch_probe_config(
         skyrl,
         synchronous=entrypoint == RL_ENTRYPOINTS[RLEntrypoint.STANDARD] and run["mode"] == RunMode.TRAIN,

@@ -194,3 +194,16 @@ def test_task_materializes_the_forwarded_launch_document(tmp_path: Path) -> None
 
     assert path == str(destination)
     assert destination.read_bytes() == contents
+
+
+def test_launch_rejects_topk_logprobs_without_a_distillation_plan(tmp_path: Path) -> None:
+    raw = _raw_config()
+    raw["skyrl"]["generator"]["sampling_params"] = {"logprobs": 0}
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    load_launch_config(path)
+
+    raw["skyrl"]["generator"]["sampling_params"]["logprobs"] = 1
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="matching teacher top_k"):
+        load_launch_config(path)

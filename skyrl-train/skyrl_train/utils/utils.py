@@ -39,6 +39,7 @@ from marinskyrl.distillation import (
     DistillationObjectiveKind,
     compile_distillation_plan_from_config,
     validate_distillation_runtime_support,
+    validate_generation_logprobs,
 )
 from marinskyrl.inference_placement import validate_expert_block_transport
 from marinskyrl.runtime_options import GDNBackend, R3Transport
@@ -770,23 +771,7 @@ def validate_generator_cfg(cfg: DictConfig):
     if cfg.generator.backend == "sglang" and not cfg.generator.use_conversation_multi_turn:
         raise NotImplementedError("`use_conversation_multi_turn=False` is not supported for SGLang backend")
 
-    if cfg.generator.sampling_params.logprobs is not None:
-        assert isinstance(cfg.generator.sampling_params.logprobs, int)
-        if cfg.generator.sampling_params.logprobs > 0:
-            plan = compile_distillation_plan_from_config(cfg)
-            widths = {teacher.top_k for teacher in plan.teachers} if plan is not None else set()
-            if (
-                plan is None
-                or plan.objective is not DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
-                or widths != {cfg.generator.sampling_params.logprobs}
-                or cfg.generator.backend != "vllm"
-            ):
-                raise ValueError(
-                    "positive generator.sampling_params.logprobs requires a local vLLM "
-                    "student_topk_policy_surrogate plan with matching teacher top_k"
-                )
-        if not cfg.generator.run_engines_locally:
-            raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
+    validate_generation_logprobs(cfg)
 
     validate_megatron_cfg(cfg)
     if cfg.generator.backend == "sglang":
