@@ -37,7 +37,7 @@ from skyrl_train.rollouts.buffer import (
     RolloutTask,
 )
 from skyrl_train.rollouts.loader import GroupLoader, GroupLoaderState, PromptGroupDataset, PromptOrder, SeededPasses
-from skyrl_train.rollouts.payloads import FineStorePayloads, MemoryPayloads, PayloadStore
+from skyrl_train.rollouts.payloads import MemoryPayloads, ObjectStorePayloads, PayloadStore
 from skyrl_train.rollout_observability import dispatch_wait, observe_rollout_call, record_group_disposition
 from skyrl_train.rollouts.workers import RolloutWorkers
 from skyrl_train.telemetry import record_generated_work, record_rollout_buffer
@@ -76,12 +76,12 @@ class TrainingContextState:
     """Checkpointed rollout state: the loader, including prompts to regenerate, and committed groups.
 
     Each ready rollout's ``payload`` holds the durable form its payload store checkpoints: the ``RolloutGroup``
-    for payloads in memory, or its URI in the FineStore archive at ``archive_root``.
+    for payloads in memory, or the URI of its object under ``object_store_root``.
     """
 
     loader: GroupLoaderState
     ready: list[ReadyRollout]
-    archive_root: str | None
+    object_store_root: str | None
 
 
 def prompt_order_from_config(config: DictConfig, dataset: PromptGroupDataset) -> PromptOrder:
@@ -167,14 +167,14 @@ class TrainingContext:
             GroupAdvantageInvariant.from_config(algorithm.resolved_group_advantage),
             rollout_logprobs_required=policy_loss_requires_rollout_logprobs(algorithm.policy_loss_type),
         )
-        archive_root = config.trainer.rollout_buffer.finestore_root
+        object_store_root = config.trainer.rollout_buffer.object_store_root
         return cls(
             GroupLoader(dataset, prompt_order_from_config(config, dataset), batch_size=batch_size),
             buffer_config,
             RolloutContentPolicy(admission, selection),
             RolloutRequestSpec.from_config(config),
             workers,
-            FineStorePayloads(archive_root) if archive_root is not None else MemoryPayloads(),
+            ObjectStorePayloads(object_store_root) if object_store_root is not None else MemoryPayloads(),
             rollout_spans=config.trainer.rollout_spans,
         )
 
@@ -260,16 +260,21 @@ class TrainingContext:
             for rollout, payload in zip(snapshot.ready, payloads, strict=True)
         ]
         retries = [*loader.retries, *snapshot.retries, *uncommitted]
-        return TrainingContextState(dataclasses.replace(loader, retries=retries), ready, self._payloads.archive_root)
+        return TrainingContextState(
+            dataclasses.replace(loader, retries=retries), ready, self._payloads.object_store_root
+        )
 
     async def load_state_dict(self, state: TrainingContextState) -> None:
         """Restore a checkpoint's rollout state before ``start``."""
         if self._dispatcher is not None:
             raise RuntimeError("rollout state must be restored before dispatching starts")
-        if state.ready and state.archive_root != self._payloads.archive_root:
+        # Object URIs are absolute, so a resumed run may write new payloads under a different root, but it must
+        # read the checkpoint's payloads the way they were stored.
+        if state.ready and (state.object_store_root is None) != (self._payloads.object_store_root is None):
             raise ValueError(
-                f"the checkpoint's rollout payloads are in {state.archive_root or 'memory'}, but this run keeps them "
-                f"in {self._payloads.archive_root or 'memory'}; set trainer.rollout_buffer.finestore_root to match"
+                f"the checkpoint's rollout payloads are in {state.object_store_root or 'memory'}, but this run "
+                f"keeps them in {self._payloads.object_store_root or 'memory'}; set "
+                "trainer.rollout_buffer.object_store_root to match"
             )
         self.loader.load_state_dict(state.loader)
         ready = [

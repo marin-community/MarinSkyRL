@@ -1078,7 +1078,7 @@ def test_load_checkpoints_restores_rollout_state_only_when_requested(tmp_path, d
     rollout_state = TrainingContextState(
         loader=GroupLoaderState(order={"epoch": 0, "position": 7}, retries=[{"uid": "prompt-3"}]),
         ready=[],
-        archive_root=None,
+        object_store_root=None,
     )
     torch.save(rollout_state, checkpoint_path / "data.pt")
 

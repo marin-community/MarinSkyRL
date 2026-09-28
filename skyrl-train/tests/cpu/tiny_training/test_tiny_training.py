@@ -7,14 +7,12 @@ from pathlib import Path
 
 import pytest
 import torch
-from finestore.layout import BlobTables
-from finestore.reader import ReadView
 
-from skyrl_train.rollouts.payloads import ROLLOUT_OBJECT_PREFIX
+from skyrl_train.rollouts.payloads import ROLLOUT_OBJECT_SUFFIX
 from tests.cpu.tiny_training.experiment import (
-    FINESTORE_ARCHIVE,
     MAX_STALENESS_STEPS,
     N_SAMPLES_PER_PROMPT,
+    OBJECT_STORE_PAYLOADS,
     TRAIN_BATCH_SIZE,
     RolloutShape,
     TrainingMode,
@@ -71,10 +69,11 @@ def test_tiny_policy_trains_to_max_steps(tmp_path: Path, mode: TrainingMode, sha
         # Without dynamic sampling, the groups each step judged are exactly its batch.
         for record in steps:
             assert sum(record[f"curriculum/{name}/groups"] for name in CURRICULUM_BINS) == TRAIN_BATCH_SIZE
-    if FINESTORE_ARCHIVE[mode]:
-        # Every trained group was read back from the archive, which also keeps groups generated but not trained.
-        names = ReadView(str(tmp_path / "rollouts")).keys(BlobTables.DESCRIPTORS)
-        assert sum(name.startswith(ROLLOUT_OBJECT_PREFIX) for (name,) in names) >= NUM_STEPS * TRAIN_BATCH_SIZE
+    if OBJECT_STORE_PAYLOADS[mode]:
+        # Every trained group was read back from its object, and the objects stay for groups generated but not
+        # trained.
+        objects = list((tmp_path / "rollouts").glob(f"*{ROLLOUT_OBJECT_SUFFIX}"))
+        assert len(objects) >= NUM_STEPS * TRAIN_BATCH_SIZE
 
 
 def test_async_training_resumes_with_committed_groups(tmp_path: Path):

@@ -138,13 +138,13 @@ def test_composed_launch_records_whether_training_runs_ahead_of_its_updates(
 
 def test_object_store_uris_in_skyrl_config_reach_the_task_unchanged(tmp_path: Path) -> None:
     raw = _raw_config()
-    raw["skyrl"]["trainer"]["rollout_buffer"] = {"finestore_root": "s3://runs/smoke/rollout-archive"}
+    raw["skyrl"]["trainer"]["rollout_buffer"] = {"object_store_root": "s3://runs/smoke/rollouts"}
     path = tmp_path / "launch.yaml"
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
     config = load_launch_config(path)
 
-    assert config.skyrl.trainer.rollout_buffer.finestore_root == "s3://runs/smoke/rollout-archive"
+    assert config.skyrl.trainer.rollout_buffer.object_store_root == "s3://runs/smoke/rollouts"
 
 
 def test_qwen_smoke_accepts_hugging_face_model_input(tmp_path: Path) -> None:

@@ -3,8 +3,8 @@
 The experiments swap only the Megatron policy worker and the vLLM engines for the CPU backend.
 Ray runs locally with logical GPUs so placement code runs unchanged. Synchronous training runs the standard
 entrypoint at staleness 0; asynchronous training runs the Gym worker-pool entrypoint at positive staleness, so
-the two modes also cover both rollout-worker topologies. The asynchronous run also keeps its rollout payloads in
-a FineStore archive. Either mode runs single-turn groups, or multi-turn groups trained step-wise.
+the two modes also cover both rollout-worker topologies. The asynchronous run also writes each rollout payload
+to its own object. Either mode runs single-turn groups, or multi-turn groups trained step-wise.
 
 Usage::
 
@@ -57,8 +57,8 @@ N_SAMPLES_PER_PROMPT = 4
 # The async single-turn run draws prompts from an adaptive curriculum, which step-wise training does not support;
 # the other runs read the dataset in seeded passes.
 SAMPLING_KIND = {TrainingMode.SYNC: None, TrainingMode.ASYNC: "thompson"}
-# The async run's worker processes commit payloads to a FineStore archive; the sync run keeps them in Ray.
-FINESTORE_ARCHIVE = {TrainingMode.SYNC: False, TrainingMode.ASYNC: True}
+# The async run's worker processes write each payload to its own object; the sync run keeps them in Ray.
+OBJECT_STORE_PAYLOADS = {TrainingMode.SYNC: False, TrainingMode.ASYNC: True}
 
 
 def sampling_kind(mode: TrainingMode, shape: RolloutShape) -> str | None:
@@ -97,7 +97,7 @@ def tiny_training_config(
             "rollout_buffer": {
                 "max_staleness_steps": MAX_STALENESS_STEPS[mode],
                 "max_in_flight": 8,
-                "finestore_root": str(root / "rollouts") if FINESTORE_ARCHIVE[mode] else None,
+                "object_store_root": str(root / "rollouts") if OBJECT_STORE_PAYLOADS[mode] else None,
             },
             "train_batch_size": TRAIN_BATCH_SIZE,
             "policy_mini_batch_size": TRAIN_BATCH_SIZE,

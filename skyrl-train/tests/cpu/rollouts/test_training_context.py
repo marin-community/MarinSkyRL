@@ -17,7 +17,7 @@ from skyrl_train.rollouts.buffer import (
 )
 from skyrl_train.rollouts.context import RolloutRequestSpec, TrainingContext, TrainingContextState
 from skyrl_train.rollouts.loader import GroupLoader, GroupLoaderState, JudgedGroup, PromptOrder, SeededPasses
-from skyrl_train.rollouts.payloads import FineStorePayloads, MemoryPayloads, PayloadStore
+from skyrl_train.rollouts.payloads import MemoryPayloads, ObjectStorePayloads, PayloadStore
 
 SAMPLES_PER_PROMPT = 2
 STALL_TIMEOUT = 10.0
@@ -144,11 +144,11 @@ def _context(
     )
 
 
-@pytest.fixture(params=["memory", "finestore"])
+@pytest.fixture(params=["memory", "object_store"])
 def payloads(request, tmp_path) -> PayloadStore:
     if request.param == "memory":
         return MemoryPayloads()
-    return FineStorePayloads(str(tmp_path / "rollouts"))
+    return ObjectStorePayloads(str(tmp_path / "rollouts"))
 
 
 async def _ignore(groups: list[RolloutGroup]) -> None:
@@ -246,8 +246,8 @@ async def test_each_batch_reports_its_judged_groups_to_the_prompt_order(ray_modu
     assert metrics["order/groups"] == 2.0
 
 
-@pytest.mark.asyncio
-async def test_resume_regenerates_uncommitted_prompts_and_keeps_committed_groups(ray_module, payloads):
+async def _checkpoint_with_committed_group(payloads: PayloadStore) -> TrainingContextState:
+    """Train "a", then checkpoint once "c" is committed while "b" is still generating."""
     workers = _Workers(blocked=frozenset({"b"}))
     context = _context(["a", "b", "c"], workers, batch_size=1, max_in_flight=2, payloads=payloads)
     context.start()
@@ -256,9 +256,14 @@ async def test_resume_regenerates_uncommitted_prompts_and_keeps_committed_groups
         assert await _next_uids(context) == ["a"]
         await context.publish(2)
         await asyncio.wait_for(workers.written["c"].wait(), STALL_TIMEOUT)
-        state = await context.state_dict()
+        return await context.state_dict()
     finally:
         await context.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_regenerates_uncommitted_prompts_and_keeps_committed_groups(ray_module, payloads):
+    state = await _checkpoint_with_committed_group(payloads)
 
     assert [rollout.verdict.uid for rollout in state.ready] == ["c"]
     assert [prompt["uid"] for prompt in state.loader.retries] == ["b"]
@@ -289,22 +294,26 @@ async def test_failed_rollout_fails_the_next_batch(ray_module):
 
 @pytest.mark.asyncio
 async def test_resume_rejects_committed_groups_from_another_payload_store(ray_module, tmp_path):
-    workers = _Workers(blocked=frozenset({"b"}))
-    archive = FineStorePayloads(str(tmp_path / "rollouts"))
-    context = _context(["a", "b", "c"], workers, batch_size=1, max_in_flight=2, payloads=archive)
-    context.start()
-    try:
-        await context.publish(1)
-        await _next_uids(context)
-        await context.publish(2)
-        await asyncio.wait_for(workers.written["c"].wait(), STALL_TIMEOUT)
-        state = await context.state_dict()
-    finally:
-        await context.close()
+    state = await _checkpoint_with_committed_group(ObjectStorePayloads(str(tmp_path / "rollouts")))
 
     resumed = _context(["a", "b", "c"], _Workers(), batch_size=1, max_in_flight=2)
     try:
-        with pytest.raises(ValueError, match="finestore_root"):
+        with pytest.raises(ValueError, match="object_store_root"):
             await resumed.load_state_dict(state)
+    finally:
+        await resumed.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_under_a_new_object_store_root_trains_the_checkpointed_objects(ray_module, tmp_path):
+    state = await _checkpoint_with_committed_group(ObjectStorePayloads(str(tmp_path / "attempt-1")))
+
+    payloads = ObjectStorePayloads(str(tmp_path / "attempt-2"))
+    resumed = _context(["a", "b", "c"], _Workers(), batch_size=1, max_in_flight=2, payloads=payloads)
+    await resumed.load_state_dict(state)
+    resumed.start()
+    try:
+        await resumed.publish(2)
+        assert await _next_uids(resumed) == ["c"]
     finally:
         await resumed.close()
