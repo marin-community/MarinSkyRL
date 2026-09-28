@@ -1,4 +1,4 @@
-# Daytona-free asynchronous smoke for weight-sync pause behavior on two H100x8 nodes.
+# Daytona-free asynchronous smoke for weight-sync pause behavior on two H100x2 allocations.
 # Run separate attempts with generator.weight_sync_pause.mode=abort and keep.
 entrypoint: gym_worker_pool
 
@@ -22,9 +22,9 @@ trainer:
   epochs: 1
   max_steps: 3
   update_epochs_per_batch: 1
-  train_batch_size: 8
-  policy_mini_batch_size: 8
-  eval_batch_size: 8
+  train_batch_size: 4
+  policy_mini_batch_size: 4
+  eval_batch_size: 4
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
   eval_before_train: false
@@ -46,12 +46,12 @@ trainer:
   placement:
     colocate_all: false
     policy_num_nodes: 1
-    policy_num_gpus_per_node: 8
+    policy_num_gpus_per_node: 2
   project_name: vllm-pause-policy
   rollout_buffer:
     max_staleness_steps: 1
     batch_policy: full_batch
-    max_in_flight: 16
+    max_in_flight: 8
 
 generator:
   backend: vllm
@@ -60,7 +60,7 @@ generator:
   inference_engine_tensor_parallel_size: 1
   inference_engine_data_parallel_size: 1
   inference_engine_expert_parallel_size: 1
-  num_inference_engines: 8
+  num_inference_engines: 2
   n_samples_per_prompt: 2
   gpu_memory_utilization: 0.7
   enforce_eager: false
