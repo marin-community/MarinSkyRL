@@ -21,6 +21,7 @@ from skyrl_train.trajectory_runners.base import TrajectoryRunner
 from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink
 from skyrl_train.trajectory_runners.types import TrainingPhase, TrajectoryBatch, TrajectoryRequestBatch
 from skyrl_train.utils.fd_monitor import start_fd_monitor
+from skyrl_train.utils.utils import configure_ray_worker_logging
 from skyrl_train.worker_setup import configure_worker_process
 
 _Result = TypeVar("_Result")
@@ -84,6 +85,7 @@ class RolloutWorker:
 
     def __init__(self, spec: RunnerSpec, shard: WorkerShard, sink: RetentionSink | None, executor_threads: int):
         configure_worker_process()
+        configure_ray_worker_logging()
         start_fd_monitor()
         self._executor_threads = executor_threads
         self._runner = spec.build(tokenizer_from_config(spec.config), shard)
