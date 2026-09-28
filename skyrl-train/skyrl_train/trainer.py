@@ -49,6 +49,7 @@ from skyrl_train.dataset.preprocess import (
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC, validate_distillation_attachment
 from skyrl_train.distillation_adapters import AsyncRoutedTeacherScoreTicket, RoutedScoredDistillationBatch
 from skyrl_train.distillation_runtime import DistillationRuntime
+from skyrl_train.teacher_routing import route_row_metrics
 from skyrl_train.domain_gradient_balance import DomainGradientBalancer
 from skyrl_train.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
@@ -1452,6 +1453,7 @@ class RayPPOTrainer:
                 DISTILLATION_SCORED_TOKENS_METRIC: float(
                     sum(scored.distillation.valid_mask.sum().item() for scored in scored_distillation)
                 ),
+                **route_row_metrics(route for scored in scored_distillation for route in scored.routes),
             }
         )
 
