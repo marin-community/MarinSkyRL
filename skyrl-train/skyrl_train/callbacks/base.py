@@ -472,8 +472,12 @@ class CallbackHandler:
 
     async def wait_for_pending_saves(self) -> None:
         """Drain background artifact writes, propagating every persistence failure."""
-        for callback in self.callbacks:
-            await callback.wait_for_pending_saves()
+        results = await asyncio.gather(
+            *(callback.wait_for_pending_saves() for callback in self.callbacks), return_exceptions=True
+        )
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            raise BaseExceptionGroup("Background artifact writes failed", failures)
 
     def remove_callback(self, callback_type: type) -> None:
         """Remove all callbacks of a given type."""

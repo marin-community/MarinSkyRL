@@ -275,8 +275,8 @@ async def test_no_trainer_in_kwargs():
         await cb.on_save_async(_FakeState(1), _FakeControl())
 
 
-@pytest.mark.asyncio
-async def test_buffer_save_returns_while_writer_is_blocked_and_preserves_snapshot(tmp_path, monkeypatch):
+@pytest.fixture
+def blocked_buffer_writer(monkeypatch):
     started = threading.Event()
     release = threading.Event()
     original_write = io.write_bytes_atomic
@@ -288,6 +288,12 @@ async def test_buffer_save_returns_while_writer_is_blocked_and_preserves_snapsho
         original_write(path, payload)
 
     monkeypatch.setattr(io, "write_bytes_atomic", blocked_write)
+    return started, release
+
+
+@pytest.mark.asyncio
+async def test_buffer_save_returns_while_writer_is_blocked_and_preserves_snapshot(tmp_path, blocked_buffer_writer):
+    started, release = blocked_buffer_writer
     buffer = asyncio.Queue(maxsize=4)
     buffer.put_nowait(_make_item("before", step=5))
     trainer = _FakeTrainer(str(tmp_path), buffer)
@@ -369,7 +375,7 @@ async def test_checkpoint_marker_requires_successful_buffer_artifact(tmp_path, m
     )
     await callback.on_save_async(_FakeState(5), _FakeControl(), trainer=source)
     if fail_buffer:
-        with pytest.raises(OSError, match="buffer upload failed"):
+        with pytest.raises(ExceptionGroup, match="Background artifact writes failed"):
             await trainer._finish_checkpoint_upload(snapshot, commit=True)
         assert not marker.exists()
         assert not (step_path / "trainer.pt").exists()
@@ -380,18 +386,8 @@ async def test_checkpoint_marker_requires_successful_buffer_artifact(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_cancelled_waiter_keeps_buffer_write_drainable(tmp_path, monkeypatch):
-    started = threading.Event()
-    release = threading.Event()
-    original_write = io.write_bytes_atomic
-
-    def blocked_write(path, payload):
-        started.set()
-        if not release.wait(10):
-            raise TimeoutError("test writer was not released")
-        original_write(path, payload)
-
-    monkeypatch.setattr(io, "write_bytes_atomic", blocked_write)
+async def test_cancelled_waiter_keeps_buffer_write_drainable(tmp_path, blocked_buffer_writer):
+    started, release = blocked_buffer_writer
     buffer = asyncio.Queue(maxsize=1)
     buffer.put_nowait(_make_item("survives-cancellation", step=5))
     source = _FakeTrainer(str(tmp_path), buffer)
@@ -409,3 +405,22 @@ async def test_cancelled_waiter_keeps_buffer_write_drainable(tmp_path, monkeypat
         await callback.wait_for_pending_saves()
     restored = callback.load_buffer_state(str(tmp_path / "global_step_5"))
     assert [group.uid for group in restored.completed_groups] == ["survives-cancellation"]
+
+
+@pytest.mark.asyncio
+async def test_callback_drain_finishes_other_saves_when_one_fails():
+    drained = asyncio.Event()
+
+    class FailedCallback(BufferCheckpointCallback):
+        async def wait_for_pending_saves(self):
+            raise OSError("storage unavailable")
+
+    class PendingCallback(BufferCheckpointCallback):
+        async def wait_for_pending_saves(self):
+            await asyncio.sleep(0)
+            drained.set()
+
+    with pytest.raises(ExceptionGroup) as failure:
+        await CallbackHandler([FailedCallback(), PendingCallback()]).wait_for_pending_saves()
+    assert drained.is_set()
+    assert isinstance(failure.value.exceptions[0], OSError)
