@@ -33,6 +33,7 @@ TASKTROVE_DATASET = "open-thoughts/TaskTrove"
 TASKTROVE_REVISION = "131d8a8470c7a81113baac898c0c232db3f5ae31"
 TASKTROVE_SWE_PROXY_PARQUET = "laion__nemotron-gym-agentic-swe-pivot-v4/tasks.parquet"
 SWEGYM_DATASET = "SWE-Gym/SWE-Gym"
+RLVR_BLEND_FILES = ("rlvr1.jsonl", "rlvr2.jsonl")
 ENVIRONMENT_DIR = "environment"
 R2E_TEST_INFO_PATH = "tests/test_info.json"
 LEGACY_R2E_TEST_INFO_PATH = "/workspace/metadata.json"
@@ -874,7 +875,7 @@ def compose_swe_tasks(
 
 def _load_blend_swe_proxy_paths(revision: str, proxies: Mapping[SWEProxyKey, Mapping[str, Any]]) -> set[str]:
     paths: set[str] = set()
-    for filename in ("rlvr1.jsonl", "rlvr2.jsonl"):
+    for filename in RLVR_BLEND_FILES:
         path = hf_hub_download(
             repo_id=NEMOTRON_ULTRA_RL_DATASET,
             repo_type="dataset",
@@ -913,10 +914,15 @@ def prepare_swe_task_artifact(
     output_dir: Path,
     *,
     desired_paths: set[str] | None = None,
+    blend_files: tuple[str, ...] = RLVR_BLEND_FILES,
     blend_revision: str = NEMOTRON_ULTRA_REVISION,
     tasktrove_revision: str = TASKTROVE_REVISION,
 ) -> dict[str, Any]:
-    """Write the exact TaskTrove SWE proxy archives used by the blends."""
+    """Write the exact TaskTrove SWE proxy archives used by the blends.
+
+    Without ``desired_paths``, every proxy the RLVR blends reference is written. Callers
+    that pass their own paths also name the blend files the paths came from.
+    """
     if output_dir.exists():
         raise FileExistsError(f"Refusing to overwrite existing artifact: {output_dir}")
     proxy_rows = list(tasktrove_swe_proxy_rows(tasktrove_revision))
@@ -930,7 +936,7 @@ def prepare_swe_task_artifact(
         "blend": {
             "dataset": NEMOTRON_ULTRA_RL_DATASET,
             "revision": blend_revision,
-            "files": ["rlvr1.jsonl", "rlvr2.jsonl"],
+            "files": list(blend_files),
         },
         "tasktrove_proxy": {
             "dataset": TASKTROVE_DATASET,
