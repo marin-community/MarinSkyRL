@@ -23,7 +23,7 @@ def test_profiler_captures_one_forward_micro_batch_after_warm_update(tmp_path, m
     profiler = Profiler(config)
 
     profiler.begin_update()
-    profiler.start_mini_batch(0)
+    profiler.start_capture_if_selected(0)
     with torch.profiler.record_function("outside_before"):
         torch.ones(4).sum()
     profiler.stop_capture()
@@ -31,7 +31,7 @@ def test_profiler_captures_one_forward_micro_batch_after_warm_update(tmp_path, m
     assert not list(tmp_path.iterdir())
 
     profiler.begin_update()
-    profiler.start_mini_batch(0)
+    profiler.start_capture_if_selected(0)
     with torch.profiler.record_function("selected_forward_micro_batch"):
         torch.ones(4).sum()
     profiler.stop_capture()

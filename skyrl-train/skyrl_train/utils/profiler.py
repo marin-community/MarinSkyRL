@@ -45,7 +45,7 @@ class Profiler:
         if self.prof is not None and not self.saved:
             self.current_update_index += 1
 
-    def start_mini_batch(self, index: int) -> None:
+    def start_capture_if_selected(self, index: int) -> None:
         if (
             self.prof is None
             or self.saved

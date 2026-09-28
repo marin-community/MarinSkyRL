@@ -576,7 +576,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     micro_bsz = micro_buffer[0].sequences.shape[0]
 
                     if self.profiler is not None:
-                        self.profiler.start_mini_batch(policy_update_steps)
+                        self.profiler.start_capture_if_selected(policy_update_steps)
                     try:
                         metrics_list = self.model.forward_backward_mini_batch(
                             micro_batches=micro_buffer,
