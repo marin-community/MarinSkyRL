@@ -373,6 +373,10 @@ generator:
   backend: "vllm"
   vllm_attention_backend: null
   weight_sync_backend: "nccl"
+  # vLLM pause policy during weight sync. abort ends in-flight streams; keep preserves them.
+  weight_sync_pause:
+    mode: abort
+    clear_cache: true
   # How weights reach the engines. "broadcast": trainer rank 0 sends every tensor to every engine.
   # "expert_block": each MoE expert matrix is broadcast from a Megatron rank that holds it to the vLLM
   # workers that serve it. Needs engines that are not colocated with training, a Grug MoE on the megatron

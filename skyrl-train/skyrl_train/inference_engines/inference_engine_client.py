@@ -781,28 +781,17 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def chat_completion_stream(self, request_payload: Dict[str, Any]):
         """Streaming chat completion — yields SSE-formatted strings.
 
-        Uses the same session-based routing as ``chat_completion``. Unlike the
-        non-streaming retry loop, an in-flight stream cannot be paused/resumed
-        mid-generation (there is no per-turn boundary to re-issue from); instead the
-        engine's ``pause_generation`` drains any in-flight stream to idle at the
-        weight-sync boundary.
+        Uses the same session-based routing as ``chat_completion``. An in-flight
+        stream cannot be re-issued after abort because there is no per-turn
+        boundary. With the vLLM keep policy, the engine holds the stream in place
+        until weights are updated and generation resumes.
 
-        We must, however, honor the SAME pause barrier the non-streaming path uses
-        (``_wait_for_generation_to_resume``): a NEW stream must not START while
-        generation is paused for a weight sync. Otherwise it would register a fresh
-        request in the vLLM scheduler during the pause -> reload -> resume window (i.e.
-        AFTER ``pause_generation`` has already drained the engine to idle), and the next
-        engine step would run a forward pass (``reshape_and_cache_flash``) against params
-        that the layerwise weight reload has moved onto the ``meta`` device ->
-        ``EngineDeadError``. This is the streaming analog of the barrier at the top of
-        ``_chat_completion_with_retry``'s loop.
+        A new stream waits at the same pause barrier as non-streaming requests.
+        It must not enter the engine during weight reload, when a forward pass
+        could touch parameters moved onto the ``meta`` device.
         """
-        # Boundary guard (reused from the non-streaming path): block a new stream from
-        # entering the engine while a weight-sync pause is in effect. Placed before
-        # routing / _inc_inflight so a blocked stream holds no engine slot and does not
-        # touch the engine until resume. Together with the blocking scheduler pause RPC
-        # in pause_generation(), this keeps the engine request-idle across the reload,
-        # so no forward pass runs against meta-device params.
+        # Wait before routing or counting the request so it cannot enter the engine
+        # during the reload or hold an engine slot while blocked.
         await self._wait_for_generation_to_resume()
 
         session_id = request_payload["json"].pop("session_id", None)

@@ -42,6 +42,8 @@ Configuration
   before training fails. The ``null`` default allows 30 minutes before any step timing exists, then adapts to
   ``max(5 * recent median step time, 10 minutes)``. Set a positive value only when the workload needs a fixed
   deadline.
+- ``generator.weight_sync_pause``: Local vLLM's weight-sync pause policy. The default is ``mode: abort`` with
+  ``clear_cache: true``. See `Weight sync`_.
 
 A positive staleness needs separate GPUs for training and generation. The following snippet dedicates 4 GPUs to
 each:
@@ -141,21 +143,28 @@ Weight sync
 ~~~~~~~~~~~
 
 After each training step the trainer syncs the new weights to the inference engines and publishes the new policy
-step. While generation runs ahead of training, the sync pauses generation first. The vLLM engine aborts its
-in-flight requests, clears its KV and prefix caches, and holds its scheduler until the new weights are loaded.
-Requests that arrive during the pause wait for it to end.
+step. While generation runs ahead of training, the sync pauses generation first. Requests that arrive during the
+pause wait for it to end. ``generator.weight_sync_pause.mode`` controls requests already running in local vLLM
+engines:
 
-The inference engine client hides the abort from some requests but not all:
+- ``abort`` (the default) ends them. The client continues a non-streaming chat completion or single-prompt
+  ``generate`` call from its generated tokens, so the response can contain tokens sampled under both policies.
+  It re-issues a single-prompt ``/completions`` request once from the start. A streaming chat completion ends
+  early with finish reason ``abort`` because a stream cannot be re-issued mid-response. Agents that stream, such
+  as OpenCode under Harbor, see that turn cut short.
+- ``wait`` lets them finish before syncing weights, which may hold up the training step. It requires a vLLM
+  EngineCore process (``generator.vllm_v1_disable_multiproc=false``).
+- ``keep`` freezes them in place and resumes them after syncing weights. Streams and batched requests remain
+  active across the sync; the runner does not need to re-issue them.
 
-- A non-streaming chat completion or a single-prompt ``generate`` call continues from the tokens it already
-  generated. Its response mixes tokens sampled before the pause under the old weights with tokens sampled after
-  it under the new ones.
-- A single-prompt ``/completions`` request is issued again from the start, once.
-- A streaming chat completion ends early with finish reason ``abort``, since a stream cannot be re-issued
-  mid-response. Agents that stream, such as OpenCode under Harbor, see that turn cut short.
-- A batched ``generate`` or ``/completions`` request has no pause handling and fails if it starts during a pause.
+A batched ``generate`` or ``/completions`` request that starts during any pause fails. A trajectory interacting
+with its environment when the sync happens is unaffected.
 
-A trajectory that is interacting with its environment when the sync happens is unaffected.
+``generator.weight_sync_pause.clear_cache=true`` (the default) clears the KV and prefix caches. Under ``keep``,
+vLLM re-prefills each running request's prompt and generated tokens under the new weights. Setting it to
+``false`` keeps KV from the old weights, avoiding that work but potentially mixing policies in later generation.
+Only ``keep`` allows ``false``. A non-default pause policy requires local vLLM engines; SGLang and remote engines
+cannot pause generation.
 
 Checkpointing
 ~~~~~~~~~~~~~
