@@ -1,8 +1,10 @@
+from importlib import import_module
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from omegaconf import OmegaConf
 
+from cloud.iris.rl_config_translation import RL_ENTRYPOINTS
 from skyrl_train.entrypoints import fully_async
 from skyrl_train.entrypoints.fully_async import AsyncPPOExp
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient
@@ -65,3 +67,10 @@ def test_the_async_entrypoint_trains_inside_the_trainer_telemetry_lifecycle(tele
         ("terminal", "trainer"),
     ]
     assert rows[-1]["body"]["status"] == "completed"
+
+
+@pytest.mark.parametrize("module_name", RL_ENTRYPOINTS.values())
+def test_registered_entrypoints_expose_launcher_run_contract(module_name):
+    # The Iris launch-config driver imports run directly; the Hydra main alone
+    # left fully_async_in_process unable to start after the #710 restack.
+    assert callable(getattr(import_module(module_name), "run"))
