@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 
 import pytest
 import torch
@@ -222,3 +223,36 @@ async def test_validated_teacher_oracle_enforces_advertised_concurrency():
     evidence = await asyncio.gather(*score_tasks)
     assert len(evidence) == 3
     assert service.peak_active == 2
+
+
+@pytest.mark.asyncio
+async def test_teacher_cleanup_cancellation_does_not_wait_for_remaining_oracles():
+    class BlockingCloseService(DeterministicTeacherService):
+        def __init__(self, teacher_id):
+            super().__init__()
+            self.capabilities = replace(self.capabilities, teacher_id=teacher_id)
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def close(self):
+            self.started.set()
+            await self.release.wait()
+
+    first = BlockingCloseService("teacher-a")
+    last = BlockingCloseService("teacher-b")
+    owner = TeacherOracleOwner({"teacher-a": ValidatedTeacherOracle(first), "teacher-b": ValidatedTeacherOracle(last)})
+    closing = asyncio.create_task(owner.close())
+    try:
+        await asyncio.wait_for(last.started.wait(), timeout=1)
+        closing.cancel()
+        # asyncio.wait does not send a second cancellation that could hide a
+        # swallowed first cancellation and accidentally unblock the old code.
+        done, _ = await asyncio.wait({closing}, timeout=1)
+        assert closing in done
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        assert not first.started.is_set()
+    finally:
+        first.release.set()
+        last.release.set()
+        await asyncio.gather(closing, return_exceptions=True)
