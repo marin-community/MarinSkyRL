@@ -429,3 +429,71 @@ async def test_chat_grading_text_uses_parsed_final_content_and_preserves_raw_tok
     assert result["responses"] == [expected]
     assert result["response_ids"] == [[3, 4, 5]]
     assert result["assistant_messages"][0]["reasoning_content"] == "reasoning words"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "decoded,expected",
+    [
+        ('<|start_think|>not JSON<|end_think|>{"answer": 7}<|eot_id|>', '{"answer": 7}'),
+        ("<|start_think|>a tentative answer is 7", ""),
+        ("reasoning<|end_think|>7<|eot_id|>", "7"),
+    ],
+)
+async def test_chat_grading_recovers_reasoning_boundaries_without_changing_replay_evidence(decoded, expected):
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = decoded
+    engine.tokenize.return_value = {"tokens": [1, 2]}
+    raw_message = {"role": "assistant", "content": "reasoning words mixed with answer", "tool_calls": []}
+    engine.chat_completion.return_value = {
+        "choices": [
+            {
+                "message": raw_message,
+                "finish_reason": "stop",
+                "token_ids": [3, 4, 5],
+                "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}, {"logprob": -0.3}]},
+                "routed_experts": [[[1, 2]], [[3, 4]], [[5, 6]]],
+            }
+        ]
+    }
+    result = await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "question"}]],
+            "chat_completion_params": [{}],
+        }
+    )
+    assert result["responses"] == [expected]
+    assert result["response_ids"] == [[3, 4, 5]]
+    assert result["response_logprobs"] == [[-0.1, -0.2, -0.3]]
+    assert result["routed_experts"] == [[[[1, 2]], [[3, 4]], [[5, 6]]]]
+    assert result["assistant_messages"] == [raw_message]
+
+
+@pytest.mark.asyncio
+async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "7"
+    engine.tokenize.return_value = {"tokens": [1, 2, 3, 4]}
+
+    async def serve(request):
+        tokens = request["json"]["max_completion_tokens"]
+        assert tokens == 1
+        return {
+            "choices": [{"message": {"role": "assistant", "content": "7"}, "finish_reason": "stop", "token_ids": [7]}]
+        }
+
+    engine.chat_completion.side_effect = serve
+    result = await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "a correction prompt"}]],
+            "chat_completion_params": [{"max_output_tokens": 3}],
+            "sampling_params": {"max_generate_length": 3},
+            "max_context_length": 5,
+        }
+    )
+    assert result["responses"] == ["7"]
+    assert result["prompt_ids"] == [[1, 2, 3, 4]]

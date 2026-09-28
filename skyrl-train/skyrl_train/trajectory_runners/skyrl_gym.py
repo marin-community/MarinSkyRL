@@ -509,6 +509,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     prompts=[copy.deepcopy(chat_history)],
                     session_ids=[session_id],
                     sampling_params=current_sampling_params,
+                    max_context_length=(
+                        max_input_length + int(self.trajectory_runner_cfg.sampling_params.max_generate_length)
+                    ),
                     **(
                         {"chat_completion_params": [chat_completion_params]}
                         if chat_completion_params is not None
@@ -1215,6 +1218,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     (dict(message) for message in reversed(messages) if message.get("role") == "assistant"),
                     {},
                 )
+                assistant_message["content"] = outputs[index].evidence.response or ""
                 response_objects.append(response_object(assistant_message))
             try:
                 rewards, metrics = await asyncio.to_thread(

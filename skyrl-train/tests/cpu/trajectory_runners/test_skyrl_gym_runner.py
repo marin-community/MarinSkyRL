@@ -556,7 +556,10 @@ async def test_genrm_rewards_replace_provisional_rewards_by_prompt_cohort(genera
     def output(answer):
         return AgentLoopOutput(
             evidence=RolloutEvidence(
-                messages=({"role": "user", "content": "q"}, {"role": "assistant", "content": answer}),
+                messages=(
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "unparsed reasoning then " + answer},
+                ),
                 response=answer,
                 response_token_ids=(10, 11),
             ),
@@ -585,6 +588,7 @@ async def test_genrm_rewards_replace_provisional_rewards_by_prompt_cohort(genera
 
     assert [item.reward.optimization_reward for item in outputs] == pytest.approx([5.0, 1.0])
     assert [item.reward.token_rewards for item in outputs] == [(0.0, 5.0), (0.0, 1.0)]
+    assert outputs[0].evidence.messages[-1]["content"] == "unparsed reasoning then better"
 
 
 @pytest.mark.asyncio
