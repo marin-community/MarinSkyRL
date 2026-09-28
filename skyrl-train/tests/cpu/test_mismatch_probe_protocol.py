@@ -1,8 +1,4 @@
 import pytest
-from omegaconf import DictConfig
-
-import skyrl_gym
-
 from skyrl_train.mismatch_probe.protocol import (
     probe_hash,
     request_seed,
@@ -31,12 +27,3 @@ def test_token_identity_mutation_is_caught_before_comparison():
         require_token_identity(**(kwargs | {"trainer_response": [3, 5]}))
     with pytest.raises(ValueError, match="prompt IDs differ"):
         require_token_identity(**(kwargs | {"trainer_prompt": [1, 8]}))
-
-
-def test_fixture_reward_distinguishes_diverse_responses():
-    env = skyrl_gym.make("mismatch_fixture", env_config=DictConfig({}), extras={})
-    responses = ("blue square", "red circle", "green triangle", "yellow star")
-    rewards = [env.step(response)["reward"] for response in responses]
-    assert len(set(rewards)) == len(responses)
-    assert env.step(responses[0])["reward"] == rewards[0]
-    assert all(0 <= reward < 1 for reward in rewards)

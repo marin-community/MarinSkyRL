@@ -753,6 +753,49 @@ async def test_agent_loop_required_exact_chat_rejects_environment_without_chat_o
         )
 
 
+@pytest.mark.asyncio
+async def test_fixture_exact_chat_preserves_backend_tokens_routes_and_distinct_rewards(
+    mock_tokenizer, generator_cfg, mock_env_cfg
+):
+    generator_cfg.batched = False
+    generator_cfg.use_conversation_multi_turn = True
+    generator_cfg.require_exact_chat_transport = True
+    generator_cfg.sampling_params.logprobs = 0
+    model_client = AsyncMock()
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg, mock_env_cfg, AsyncMock(), mock_tokenizer, model_client=model_client
+    )
+    responses = ("blue square", "red circle", "green triangle", "yellow star")
+    rewards = []
+    for response in (*responses, responses[0]):
+        model_client.generate.return_value = {
+            "responses": [response],
+            "response_ids": [[21, 22]],
+            "prompt_ids": [[11, 12, 13]],
+            "stop_reasons": ["stop"],
+            "response_logprobs": [[-0.1, -0.2]],
+            "routed_experts": [[[[1, 2]], [[3, 4]]]],
+            "assistant_messages": [{"role": "assistant", "content": response}],
+            "token_provenance": "engine",
+        }
+        output = await runner.agent_loop(
+            [{"role": "user", "content": "describe a shape"}],
+            "mismatch_fixture",
+            {},
+            max_tokens=8,
+            max_input_length=512,
+        )
+        assert output.evidence.prompt_token_ids == (11, 12, 13)
+        assert output.evidence.response_token_ids == (21, 22)
+        assert output.evidence.behavior_logprobs == (-0.1, -0.2)
+        assert output.evidence.routed_experts == (((1, 2),), ((3, 4),))
+        assert output.loss_mask == [1, 1]
+        rewards.append(output.reward.optimization_reward)
+    assert len(set(rewards[:-1])) == len(responses)
+    assert rewards[-1] == rewards[0]
+    assert all(0 <= reward < 1 for reward in rewards)
+
+
 def _structured_tool_turn_runner(mock_make, mock_tokenizer, mock_env, generator_cfg, mock_env_cfg, rendered_tool_ids):
     tools = [{"type": "function", "name": "python", "parameters": {"type": "object"}}]
     mock_env.init.return_value = (

@@ -5,7 +5,7 @@ from typing import Any
 
 from omegaconf import DictConfig
 
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
 
 
 class MismatchFixtureEnv(BaseTextEnv):
@@ -14,6 +14,9 @@ class MismatchFixtureEnv(BaseTextEnv):
     def __init__(self, env_config: DictConfig, extras: dict[str, Any] | None = None):
         super().__init__()
         del env_config, extras
+
+    def init(self, prompt: ConversationType) -> tuple[ConversationType, dict[str, Any]]:
+        return prompt, {"chat_completion_params": {}}
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         digest = hashlib.sha256(action.encode("utf-8")).digest()
