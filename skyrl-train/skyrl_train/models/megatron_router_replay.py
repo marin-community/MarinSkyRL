@@ -187,19 +187,14 @@ def filtered_replay_topk(
     mask: torch.Tensor,
     keep_fraction: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Replace implausible captured experts with distinct native choices.
-
-    ``scores`` are the router's selection logits, including expert bias for
-    Grug. Comparing logit gaps is equivalent to comparing positive softmax
-    probabilities, and does not alter the router's combination weights.
-    """
+    """Keep captured experts above the fractional cutoff in softmax selection-score probability."""
     validate_replay_keep_fraction(keep_fraction, "filtered replay keep_fraction")
     if scores.ndim != 2 or native_idx.shape != targets.shape or native_idx.shape[0] != scores.shape[0]:
         raise ValueError("filtered replay scores, native choices and captured choices have incompatible shapes")
     if mask.shape != (scores.shape[0],):
         raise ValueError("filtered replay mask must have one value per token")
     if not torch.isfinite(scores).all():
-        raise ValueError("filtered replay requires finite selection logits")
+        raise ValueError("filtered replay requires finite selection scores")
     selected = native_idx.clone()
     replacements = torch.zeros_like(targets, dtype=torch.bool)
     threshold_offset = math.log(keep_fraction) if keep_fraction else -math.inf
@@ -210,8 +205,8 @@ def filtered_replay_topk(
         captured = targets[row].tolist()
         if len(set(captured)) != len(captured):
             raise ValueError("filtered replay captured experts must be distinct within a row")
-        kth_logit = cutoff_scores[row].item()
-        kept = [scores[row, expert].item() >= kth_logit + threshold_offset for expert in captured]
+        cutoff_score = cutoff_scores[row].item()
+        kept = [scores[row, expert].item() >= cutoff_score + threshold_offset for expert in captured]
         used = {expert for expert, accepted in zip(captured, kept, strict=True) if accepted}
         native_candidates = iter(expert for expert in ranked_native[row].tolist() if expert not in used)
         for slot, (expert, accepted) in enumerate(zip(captured, kept, strict=True)):

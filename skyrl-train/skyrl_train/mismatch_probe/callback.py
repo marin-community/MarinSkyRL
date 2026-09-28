@@ -182,22 +182,30 @@ class MismatchProbeCallback(TrainerCallback):
         seeds = []
         sample_ids = []
         uids = []
-        for prompt in prompts:
-            for repetition in range(samples):
-                seed = request_seed(int(self.spec.seed), prompt["uid"], repetition)
-                sampling = get_sampling_params_for_backend(
-                    trainer.cfg.generator.backend, trainer.cfg.generator.sampling_params
-                )
-                sampling["seed"] = seed
-                request, _ = prepare_trajectory_request(
-                    [prompt], 1, sampling, trainer.cfg.environment.env_class, "eval", 0
-                )
-                request["trajectory_ids"][0].repetition_id = repetition
-                request["probe_capture_token_identity"] = True
-                batches.append(await trainer.trajectory_runner.run(request))
-                seeds.append(seed)
-                sample_ids.append(f"{prompt['uid']}:{repetition}")
-                uids.append(prompt["uid"])
+        await trainer.trajectory_runner.start_eval_session(
+            run_name=trainer.cfg.trainer.get("run_name") or "mismatch-probe",
+            eval_step=trainer.global_step,
+            val_set_name="mismatch-probe",
+        )
+        try:
+            for prompt in prompts:
+                for repetition in range(samples):
+                    seed = request_seed(int(self.spec.seed), prompt["uid"], repetition)
+                    sampling = get_sampling_params_for_backend(
+                        trainer.cfg.generator.backend, trainer.cfg.generator.sampling_params
+                    )
+                    sampling["seed"] = seed
+                    request, _ = prepare_trajectory_request(
+                        [prompt], 1, sampling, trainer.cfg.environment.env_class, "eval", 0
+                    )
+                    request["trajectory_ids"][0].repetition_id = repetition
+                    request["probe_capture_token_identity"] = True
+                    batches.append(await trainer.trajectory_runner.run(request))
+                    seeds.append(seed)
+                    sample_ids.append(f"{prompt['uid']}:{repetition}")
+                    uids.append(prompt["uid"])
+        finally:
+            await trainer.trajectory_runner.stop_eval_session()
         trajectory = concatenate_trajectory_batches(
             batches,
             require_rollout_logprobs=True,
