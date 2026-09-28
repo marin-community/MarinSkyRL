@@ -581,7 +581,11 @@ class RolloutBuffer:
                 self._reject(self._stats[open_batch], rollout, AdmissionRejection.STALE)
                 self._retries.append(rollout.prompt)
                 continue
-            if self.config.first_token_admission and not verdict.rejections:
+            if (
+                self.config.batch_policy is BatchPolicy.FULL_BATCH
+                and self.config.first_token_admission
+                and not verdict.rejections
+            ):
                 assert verdict.oldest_policy_version is not None
                 if batch_id - (verdict.oldest_policy_version + 1) > self.config.max_staleness_steps:
                     self._reject(self._stats[batch_id], rollout, AdmissionRejection.STALE)

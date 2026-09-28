@@ -2122,7 +2122,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         )
 
     async def pause_generation(self) -> None:
-        """Abort outstanding requests and hold the EngineCore scheduler idle for weight reload."""
+        """Hold the EngineCore scheduler idle for a weight reload, using the configured pause mode."""
         engine = self.llm
         outstanding_requests = len(engine.output_processor.request_states)
         # vLLM's scheduler-level pause is a utility RPC into EngineCore. In abort

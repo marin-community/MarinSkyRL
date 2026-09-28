@@ -50,10 +50,14 @@ def trained_tokens_versioned(spans: Iterable[PolicyVersionSegment], loss_mask: S
     return all(index in versioned for index, trained in enumerate(loss_mask) if trained)
 
 
+def minimum_recorded(values: Iterable[int | None]) -> int | None:
+    """Return the smallest recorded version, ignoring absent values."""
+    return min((version for version in values if version is not None), default=None)
+
+
 def oldest_policy_version(rows: Iterable[Iterable[PolicyVersionSegment]]) -> int | None:
     """The oldest known version across rows of spans; None when no span carries one."""
-    versions = (span["policy_version"] for spans in rows for span in spans)
-    return min((version for version in versions if version is not None), default=None)
+    return minimum_recorded(span["policy_version"] for spans in rows for span in spans)
 
 
 @dataclass

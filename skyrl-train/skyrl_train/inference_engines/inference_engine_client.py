@@ -1141,7 +1141,8 @@ class InferenceEngineClient(InferenceEngineInterface):
             raise RuntimeError("Generation is not paused, cannot resume.")
         # Set before the waiters are released, so every chat attempt sent after this resume reads it.
         self._installed_policy_version = policy_version
-        await self._run_on_all_engines_before_deadline("resume_generation", policy_version=policy_version)
+        kwargs = {"policy_version": policy_version} if policy_version is not None else {}
+        await self._run_on_all_engines_before_deadline("resume_generation", **kwargs)
         self._release_generation_waiters()
 
     # ----------------------------

@@ -35,8 +35,9 @@ def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
     trainer.cfg = SimpleNamespace(
         trainer=SimpleNamespace(
             offload_optimizer_during_rollouts=offload_enabled,
-            rollout_buffer=SimpleNamespace(first_token_admission=True),
-        )
+            rollout_buffer=SimpleNamespace(first_token_admission=False),
+        ),
+        generator=SimpleNamespace(backend="vllm", run_engines_locally=True),
     )
     trainer.colocate_all = False
     trainer.global_step = 0

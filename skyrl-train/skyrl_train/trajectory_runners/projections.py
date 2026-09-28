@@ -7,7 +7,7 @@ from omegaconf import DictConfig
 
 from skyrl_train.distillation import INVALID_TOPK_INDEX
 from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
-from skyrl_train.policy_version import BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY
+from skyrl_train.policy_version import BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY, minimum_recorded
 from skyrl_gym.verification import RewardResult, TrainingDisposition
 from skyrl_train.trajectory_runners.types import (
     AgentLoopOutput,
@@ -19,7 +19,6 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     _sentinel_routed_experts_row,
     apply_overlong_filtering,
     get_rollout_metrics,
-    minimum_recorded,
     scalar_reward_token_credit,
 )
 

@@ -478,6 +478,26 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
             )
 
 
+def validate_rollout_buffer_options(cfg: DictConfig) -> None:
+    """Validate the buffer's capacity, pause behavior, and first-token admission requirements."""
+    buffer = cfg.trainer.rollout_buffer
+    PauseMode(buffer.pause_mode)
+    if buffer.max_in_flight is not None and (type(buffer.max_in_flight) is not int or buffer.max_in_flight < 1):
+        raise ValueError("trainer.rollout_buffer.max_in_flight must be a positive integer or null")
+    if type(buffer.clear_kv_cache_on_weight_sync) is not bool:
+        raise ValueError("trainer.rollout_buffer.clear_kv_cache_on_weight_sync must be a boolean")
+    if type(buffer.first_token_admission) is not bool:
+        raise ValueError("trainer.rollout_buffer.first_token_admission must be a boolean")
+    if not buffer.first_token_admission:
+        return
+    if buffer.max_staleness_steps < 1:
+        raise ValueError("first_token_admission requires trainer.rollout_buffer.max_staleness_steps >= 1")
+    if cfg.generator.backend != "vllm" or not cfg.generator.run_engines_locally or cfg.trainer.placement.colocate_all:
+        raise ValueError("first_token_admission requires local, non-colocated vLLM engines")
+    if buffer.pause_mode == PauseMode.KEEP and not buffer.clear_kv_cache_on_weight_sync:
+        raise ValueError("first_token_admission requires weight syncs to preempt in-flight requests")
+
+
 def validate_cfg(cfg: DictConfig):
     if cfg.trainer.strategy != "megatron":
         raise ValueError(f"Unsupported training strategy: {cfg.trainer.strategy}")
@@ -631,28 +651,7 @@ def validate_cfg(cfg: DictConfig):
         algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
 
-    PauseMode(cfg.trainer.rollout_buffer.pause_mode)
-    max_in_flight = cfg.trainer.rollout_buffer.max_in_flight
-    if max_in_flight is not None and (type(max_in_flight) is not int or max_in_flight < 1):
-        raise ValueError("trainer.rollout_buffer.max_in_flight must be a positive integer or null")
-    if type(cfg.trainer.rollout_buffer.clear_kv_cache_on_weight_sync) is not bool:
-        raise ValueError("trainer.rollout_buffer.clear_kv_cache_on_weight_sync must be a boolean")
-    if type(cfg.trainer.rollout_buffer.first_token_admission) is not bool:
-        raise ValueError("trainer.rollout_buffer.first_token_admission must be a boolean")
-    if cfg.trainer.rollout_buffer.first_token_admission:
-        if cfg.trainer.rollout_buffer.max_staleness_steps < 1:
-            raise ValueError("first_token_admission requires trainer.rollout_buffer.max_staleness_steps >= 1")
-        if (
-            cfg.generator.backend != "vllm"
-            or not cfg.generator.run_engines_locally
-            or cfg.trainer.placement.colocate_all
-        ):
-            raise ValueError("first_token_admission requires local, non-colocated vLLM engines")
-        if (
-            cfg.trainer.rollout_buffer.pause_mode == PauseMode.KEEP
-            and not cfg.trainer.rollout_buffer.clear_kv_cache_on_weight_sync
-        ):
-            raise ValueError("first_token_admission requires weight syncs to preempt in-flight requests")
+    validate_rollout_buffer_options(cfg)
     behavior_clip = cfg.trainer.algorithm.policy_loss_type == "behavior_clip"
     if behavior_clip and cfg.trainer.algorithm.use_tis:
         raise ValueError(

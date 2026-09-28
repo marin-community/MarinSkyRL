@@ -1,7 +1,7 @@
 import torch
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import List, Tuple, Union, Optional, Dict, Any, Sequence, Iterable
+from typing import List, Tuple, Union, Optional, Dict, Any, Sequence
 from collections import defaultdict
 from enum import StrEnum
 import numpy as np
@@ -1308,11 +1308,6 @@ def prepare_trajectory_request(
     }
 
     return trajectory_request, uids
-
-
-def minimum_recorded(values: Iterable[int | None]) -> int | None:
-    """Return the smallest recorded version across a rollout group."""
-    return min((value for value in values if value is not None), default=None)
 
 
 def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None, chat_template_kwargs=None):

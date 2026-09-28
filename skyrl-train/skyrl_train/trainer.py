@@ -1115,9 +1115,10 @@ class RayPPOTrainer:
                     self._offload_policy_optimizer, timings, timer_label="offload_policy_optimizer_to_cpu"
                 )
                 await self.sync_policy_weights_to_inference_engines()
-                await self.inference_engine_client.resume_generation(
-                    policy_version=self.global_step if self.cfg.trainer.rollout_buffer.first_token_admission else None
-                )
+                if self.cfg.generator.backend == "vllm" and self.cfg.generator.run_engines_locally:
+                    await self.inference_engine_client.resume_generation(policy_version=self.global_step)
+                else:
+                    await self.inference_engine_client.resume_generation()
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
 
     async def sync_policy_weights_to_inference_engines(self) -> None:

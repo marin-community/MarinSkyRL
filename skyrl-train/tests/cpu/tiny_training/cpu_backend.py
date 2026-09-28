@@ -267,7 +267,7 @@ class CPUInferenceEngine(InferenceEngineInterface):
         self._paused = True
         self._resumed.clear()
 
-    async def resume_generation(self) -> None:
+    async def resume_generation(self, policy_version: int | None = None) -> None:
         self._paused = False
         self._resumed.set()
 
