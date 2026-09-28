@@ -67,3 +67,22 @@ def test_grug_smoke_rejects_context_parallel_sliding_window_before_launch(tmp_pa
 
     with pytest.raises(ValueError, match=rf"trainer\.{role}\.megatron_config\.context_parallel_size=1"):
         validate_smoke_config(resolved)
+
+
+@pytest.mark.parametrize("role", ["policy", "ref"])
+def test_grug_smoke_rejects_uneven_pipeline_without_stage_layout(tmp_path, role):
+    config = launch_config(
+        "grug-pipeline-regression",
+        str(tmp_path / "output"),
+        str(tmp_path / "temporary"),
+        "s3://marin-us-east-02a/preflight/grug",
+        MODEL_REVISION,
+    )
+    # Grug has 26 layers, so PP4 needs an explicit uneven stage partition.
+    del config.skyrl.trainer[role].megatron_config.transformer_config_kwargs.num_layers_in_first_pipeline_stage
+    del config.skyrl.trainer[role].megatron_config.transformer_config_kwargs.num_layers_in_last_pipeline_stage
+    path = tmp_path / "launch.yaml"
+    OmegaConf.save(config, path)
+
+    with pytest.raises(ValueError, match="26 layers cannot be divided"):
+        validate_smoke_config(load_launch_config(path))

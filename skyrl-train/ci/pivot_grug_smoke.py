@@ -1,4 +1,4 @@
-"""Prepare pinned SWE inputs and run the existing split64 SkyRL launcher."""
+"""Prepare pinned SWE inputs and run the split SkyRL launcher."""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ from skyrl_train.utils.utils import validate_cfg
 
 MODEL = "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21"
 MODEL_REVISION = "b8c07f7df1df65525abbfdbcd1572318ba11c42f"
+MODEL_LAYERS = 26
 CLUSTER = "cw-us-east-02a"
 RECIPE = Path("cloud/iris/configs/grug_pivot_swe_smoke.yaml")
 
@@ -80,7 +81,7 @@ def launch_config(
                 "max_retries": 0,
                 "timeout": 28800,
                 "allocation": {
-                    "num_nodes": 8,
+                    "num_nodes": 5,
                     "gpus_per_node": 8,
                     "gpu_variant": "H100",
                     "cpu": 32,
@@ -122,12 +123,19 @@ def validate_smoke_config(config: DictConfig) -> None:
     """Check the pinned Grug recipe on CPU before preparing data or allocating GPUs."""
     skyrl = config.skyrl
     for role in ("policy", "ref"):
-        if skyrl.trainer[role].megatron_config.context_parallel_size != 1:
+        megatron = skyrl.trainer[role].megatron_config
+        if megatron.context_parallel_size != 1:
             raise ValueError(
                 f"Grug Pivot smoke requires trainer.{role}.megatron_config.context_parallel_size=1: "
                 "Transformer Engine 2.11 p2p CP does not support Grug sliding-window attention; "
                 "all_gather CP rejects packed sequences, and a2a CP2 cannot split Grug's five KV heads."
             )
+        first = OmegaConf.select(megatron, "transformer_config_kwargs.num_layers_in_first_pipeline_stage")
+        last = OmegaConf.select(megatron, "transformer_config_kwargs.num_layers_in_last_pipeline_stage")
+        middle_stages = megatron.pipeline_model_parallel_size - int(first is not None) - int(last is not None)
+        middle_layers = MODEL_LAYERS - (first or 0) - (last or 0)
+        if middle_stages <= 0 or middle_layers < middle_stages or middle_layers % middle_stages:
+            raise ValueError(f"Grug's {MODEL_LAYERS} layers cannot be divided across the {role} pipeline stages")
     validate_cfg(skyrl)
     module_name = str(config.runtime.entrypoint)
     if not callable(getattr(importlib.import_module(module_name), "run", None)):

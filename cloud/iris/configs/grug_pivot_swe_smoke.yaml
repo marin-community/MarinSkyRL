@@ -1,9 +1,9 @@
-# Ten-step SWE Pivot comparison. PP4/EP8 and a 16K window reduce peak H100 memory.
+# Ten-step SWE Pivot comparison on five H100 nodes per arm.
 # Each update uses 512 prefixes x 16 responses = 8192 trajectories.
-# Keep the one-action 512-token cap within a 16K request window.
+# Keep the one-action 512-token cap within a 32K request window.
 entrypoint: standard
 context_budget:
-  request_window_tokens: 16384
+  request_window_tokens: 32768
   max_new_tokens_per_turn: 512
   max_turns: 1
   generated_budget_fraction: 1.0
@@ -52,6 +52,12 @@ trainer:
       expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
       logprob_chunk_size: 128
+      optimizer_config_kwargs:
+        optimizer_cpu_offload: true
+        optimizer_offload_fraction: 1.0
+      transformer_config_kwargs:
+        num_layers_in_first_pipeline_stage: 6
+        num_layers_in_last_pipeline_stage: 6
       optimizer_checkpoint_sharding_type: dp_reshardable
       ddp_config:
         overlap_grad_reduce: true
@@ -65,6 +71,9 @@ trainer:
       expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
       logprob_chunk_size: 128
+      transformer_config_kwargs:
+        num_layers_in_first_pipeline_stage: 6
+        num_layers_in_last_pipeline_stage: 6
   placement:
     colocate_all: false
     colocate_policy_ref: true
@@ -85,7 +94,7 @@ generator:
   inference_engine_tensor_parallel_size: 1
   inference_engine_data_parallel_size: 8
   inference_engine_expert_parallel_size: 8
-  num_inference_engines: 4
+  num_inference_engines: 1
   n_samples_per_prompt: 16
   eval_n_samples_per_prompt: 1
   gpu_memory_utilization: 0.8
