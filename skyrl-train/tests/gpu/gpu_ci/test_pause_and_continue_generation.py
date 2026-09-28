@@ -6,6 +6,7 @@ uv run --isolated --group dev --extra vllm pytest tests/gpu/gpu_ci/test_pause_an
 
 import pytest
 import asyncio
+import json
 import ray
 from tests.gpu.gpu_ci.test_inference_engine_client_http_endpoint import get_test_actor_config
 from tests.gpu.utils import get_test_prompts, init_inference_engines, init_worker_with_type
@@ -407,3 +408,99 @@ def test_weight_sync_with_inflight_decodes_keeps_engine_alive(ray_init_fixture):
 
     assert len(outputs) == 8
     assert all(output["choices"][0]["finish_reason"] == "abort" for output in outputs)
+
+
+@pytest.mark.vllm
+@pytest.mark.parametrize(
+    ("mode", "expected_finish_reason"),
+    [("abort", "abort"), ("keep", "length")],
+)
+def test_streaming_chat_completion_crosses_weight_sync(ray_init_fixture, mode, expected_finish_reason):
+    """An in-flight stream exposes abort or survives the real weight update, per policy."""
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
+    cfg.trainer.placement.colocate_all = True
+    cfg.generator.weight_sync_backend = "nccl"
+    cfg.generator.weight_sync_pause.mode = mode
+    cfg.trainer.strategy = "megatron"
+    client, placement_group = init_inference_engines(
+        cfg=cfg,
+        use_local=True,
+        tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+        colocate_all=True,
+        backend="vllm",
+        model=MODEL,
+        num_inference_engines=1,
+        sleep_level=2,
+        max_num_seqs=2,
+    )
+    policy = init_worker_with_type(
+        "policy",
+        shared_pg=placement_group,
+        colocate_all=True,
+        num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
+        cfg=cfg,
+    )
+    ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+    messages: List[ConversationType] = get_test_prompts(MODEL, num_samples=1)[0]
+
+    async def stream_across_sync():
+        first_token = asyncio.Event()
+        finish_reasons = []
+        token_chunks = 0
+
+        async def consume():
+            nonlocal token_chunks
+            try:
+                async for chunk in client.chat_completion_stream(
+                    {
+                        "json": {
+                            "model": MODEL,
+                            "messages": messages,
+                            "max_tokens": 4096,
+                            "ignore_eos": True,
+                            "temperature": 0.0,
+                        },
+                        "headers": {},
+                    }
+                ):
+                    if not chunk.startswith("data: "):
+                        continue
+                    payload = chunk.removeprefix("data: ").strip()
+                    if payload == "[DONE]":
+                        continue
+                    event = json.loads(payload)
+                    assert "error" not in event, event
+                    for choice in event.get("choices", []):
+                        if choice.get("finish_reason") is not None:
+                            finish_reasons.append(choice["finish_reason"])
+                        elif choice.get("delta", {}).get("content"):
+                            token_chunks += 1
+                            first_token.set()
+            finally:
+                first_token.set()
+            return finish_reasons, token_chunks
+
+        stream_task = asyncio.create_task(consume())
+        paused = False
+        try:
+            try:
+                await asyncio.wait_for(first_token.wait(), timeout=120)
+                if stream_task.done():
+                    stream_task.result()
+                    raise AssertionError("stream completed before the weight sync")
+                paused = True
+                await client.pause_generation()
+                refs = policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client)
+                await asyncio.to_thread(ray.get, refs)
+            finally:
+                if paused:
+                    await client.resume_generation()
+            return await asyncio.wait_for(stream_task, timeout=240)
+        finally:
+            if not stream_task.done():
+                stream_task.cancel()
+                await asyncio.gather(stream_task, return_exceptions=True)
+
+    finish_reasons, token_chunks = asyncio.run(stream_across_sync())
+    assert token_chunks > 0
+    assert finish_reasons == [expected_finish_reason]

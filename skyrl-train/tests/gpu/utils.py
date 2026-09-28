@@ -27,6 +27,7 @@ from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ra
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
+from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
@@ -385,6 +386,7 @@ def init_inference_engines(
         sleep_level=sleep_level,
         enable_lora=enable_lora,
         engine_init_kwargs=engine_init_kwargs or {},
+        weight_sync_pause_policy=resolve_weight_sync_pause_policy(cfg.generator),
     )
     client = InferenceEngineClient(eps, tokenizer, cfg)
     if sleep:
