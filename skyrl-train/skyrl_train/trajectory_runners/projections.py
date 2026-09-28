@@ -18,6 +18,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     _sentinel_routed_experts_row,
     apply_overlong_filtering,
     get_rollout_metrics,
+    get_trajectory_passes,
     minimum_captured_global_step,
     scalar_reward_token_credit,
 )
@@ -73,23 +74,15 @@ class WholeTrajectoryProjection:
             candidate_logprobs if get_logprobs and all(x is not None for x in candidate_logprobs) else None
         )
 
-        verification_successes = _verification_successes(outputs)
-        rollout_metrics = get_rollout_metrics(
-            responses,
-            rewards,
-            [output.env_metrics for output in outputs],
-            request["env_classes"],
-            successes=verification_successes,
-        )
-        rollout_metrics.update(_token_provenance_metrics(outputs))
         batch = TrajectoryBatch(
             prompt_token_ids=[list(output.evidence.prompt_token_ids) for output in outputs],
             response_ids=responses,
             rewards=rewards,
+            verification_results=[output.verification for output in outputs],
+            evidence_messages=[[dict(message) for message in output.evidence.messages] for output in outputs],
             loss_masks=loss_masks,
             stop_reasons=[output.evidence.stop_reason for output in outputs],
-            rollout_metrics=rollout_metrics,
-            verification_successes=verification_successes,
+            rollout_metrics={},
             rollout_logprobs=rollout_logprobs,
             exclude_from_baseline=[not output.disposition.baseline_eligible for output in outputs],
             actual_global_step=minimum_captured_global_step(outputs),
@@ -102,6 +95,14 @@ class WholeTrajectoryProjection:
         attach_terminal_classifications(batch, outputs)
         attach_server_errors(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
+        batch["rollout_metrics"] = get_rollout_metrics(
+            responses,
+            rewards,
+            [output.env_metrics for output in outputs],
+            request["env_classes"],
+            successes=get_trajectory_passes(batch),
+        )
+        batch["rollout_metrics"].update(_token_provenance_metrics(outputs))
         return batch
 
 
@@ -145,17 +146,15 @@ class StepWiseTrajectoryProjection:
             else None
         )
 
-        verification_successes = _verification_successes(steps)
-        rollout_metrics = get_rollout_metrics(responses, rewards, successes=verification_successes)
-        rollout_metrics.update(_token_provenance_metrics(steps))
         batch = TrajectoryBatch(
             prompt_token_ids=[list(step.evidence.prompt_token_ids) for step in steps],
             response_ids=responses,
             rewards=rewards,
+            verification_results=[step.verification for step in steps],
+            evidence_messages=[[dict(message) for message in step.evidence.messages] for step in steps],
             loss_masks=loss_masks,
             stop_reasons=[step.evidence.stop_reason for step in steps],
-            rollout_metrics=rollout_metrics,
-            verification_successes=verification_successes,
+            rollout_metrics={},
             rollout_logprobs=rollout_logprobs,
             trajectory_ids=projected_ids,
             is_last_step=is_last_step,
@@ -167,6 +166,8 @@ class StepWiseTrajectoryProjection:
         attach_terminal_classifications(batch, steps)
         attach_server_errors(batch, steps)
         _attach_reward_channels(batch, steps, responses)
+        batch["rollout_metrics"] = get_rollout_metrics(responses, rewards, successes=get_trajectory_passes(batch))
+        batch["rollout_metrics"].update(_token_provenance_metrics(steps))
         return batch
 
 
@@ -314,12 +315,3 @@ def attach_unshaped_rewards(batch: TrajectoryBatch, rewards: Sequence[float | No
 def _token_provenance_metrics(outputs: Sequence[AgentLoopOutput]) -> dict[str, float]:
     reconstructed = sum(output.token_provenance == TokenProvenance.RECONSTRUCTED for output in outputs)
     return {TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC: reconstructed / len(outputs) if outputs else 0.0}
-
-
-def _verification_successes(outputs: Sequence[AgentLoopOutput]) -> list[bool]:
-    return [
-        output.verification.passed
-        if output.verification.passed is not None
-        else output.verification.score is not None and output.verification.score > 0.0
-        for output in outputs
-    ]

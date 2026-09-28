@@ -9,11 +9,12 @@ from collections.abc import Mapping
 from typing import Any
 
 import reasoning_gym
+import requests
 from omegaconf import DictConfig
-from reasoning_gym.utils import extract_answer
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from skyrl_gym.envs.lcb.livecodebench import DEFAULT_LIMITS, VerifierLimits
+from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_answer_text, last_boxed_answer
 from skyrl_gym.envs.nemotron_ultra.calendar import grade_calendar
 from skyrl_gym.envs.nemotron_ultra.code_gen import DEFAULT_PER_TEST_TIMEOUT_SECONDS, grade_code
 from skyrl_gym.envs.nemotron_ultra.format_verification import grade_format
@@ -24,7 +25,7 @@ from skyrl_gym.envs.nemotron_ultra.judge_verifiers import grade_abstention, grad
 from skyrl_gym.envs.nemotron_ultra.lean import verify_lean_attempt
 from skyrl_gym.envs.nemotron_ultra.math_with_judge import grade_math
 from skyrl_gym.envs.nemotron_ultra.mcqa import grade_mcqa
-from skyrl_gym.envs.nemotron_ultra.nvarc import grade_nvarc
+from skyrl_gym.envs.nemotron_ultra.nvarc import grade_inductive_arc, grade_transductive_arc
 from skyrl_gym.envs.nemotron_ultra.ns_tools import execute_python_calls
 from skyrl_gym.envs.nemotron_ultra.rdkit_chemistry import grade_rdkit_chemistry
 from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
@@ -48,12 +49,11 @@ _JAILBREAK_AGENTS = {
 
 
 def _extract_reasoning_gym_answer(text: str) -> str:
-    answer = extract_answer(text, tag_name="answer")
-    if answer is not None:
-        return answer
-    if match := re.search(r"\\boxed\{([^}]+)\}", text):
-        return match.group(1).strip()
-    return text.strip()
+    text = final_answer_text(text)
+    matches = list(re.finditer(r"<answer>(.*?)</answer>", text, re.DOTALL))
+    if matches:
+        return matches[-1].group(1).strip()
+    return last_boxed_answer(text) or text.strip()
 
 
 class NemotronUltraEnv(BaseTextEnv):
@@ -112,6 +112,9 @@ class NemotronUltraEnv(BaseTextEnv):
             raise TypeError(f"nemotron_ultra {field} must decode to an object")
         return decoded
 
+    def close(self) -> None:
+        self.sandbox.close_session(self.sandbox_session_id)
+
     def set_rollout_evidence(self, evidence: RolloutEvidence) -> None:
         self.evidence = evidence
 
@@ -122,7 +125,9 @@ class NemotronUltraEnv(BaseTextEnv):
         if self.evidence is not None:
             message = self.evidence.metadata.get("assistant_message")
             if isinstance(message, Mapping):
-                return dict(message)
+                grading_message = dict(message)
+                grading_message["content"] = final_answer_text(action)
+                return grading_message
         return {"role": "assistant", "content": action, "tool_calls": []}
 
     def _require_general_judge(self) -> OpenAIJudge:
@@ -136,6 +141,25 @@ class NemotronUltraEnv(BaseTextEnv):
         return self.safety_judge
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
+        action = final_answer_text(action)
+        try:
+            return self._step(action)
+        except (requests.RequestException, RuntimeError, ValueError) as error:
+            details = {
+                "agent": self.agent,
+                "error_type": type(error).__name__,
+                "error_message": str(error),
+                "grading_action": action,
+            }
+            return BaseTextEnvStepOutput(
+                observations=[],
+                reward=0.0,
+                done=True,
+                metadata=details,
+                verification=VerificationResult.error("verifier failed", diagnostics=details),
+            )
+
+    def _step(self, action: str) -> BaseTextEnvStepOutput:
         diagnostics: dict[str, Any] = {"agent": self.agent}
         self.turns += 1
         if self.agent in {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}:
@@ -172,11 +196,9 @@ class NemotronUltraEnv(BaseTextEnv):
                     reset_conversation=[{"role": "user", "content": correction_prompt}],
                 )
         elif self.agent in _TOOL_COMPARISON_AGENTS:
-            threshold = 0.0 if self.agent.startswith("swe_pivot_") else 0.1
             reward, category = grade_expected_action(
                 self.record["expected_action"],
                 self._assistant_message(action),
-                word_count_similarity_threshold=threshold,
             )
             diagnostics["category"] = category.value
         elif self.agent == "calendar_simple_agent":
@@ -194,12 +216,11 @@ class NemotronUltraEnv(BaseTextEnv):
         elif self.agent == "rdkit_chemistry_agent":
             reward, details = grade_rdkit_chemistry(action, self.record)
             diagnostics.update(details)
-        elif self.agent in {"nvarc_inductive_simple_agent", "nvarc_transductive_simple_agent"}:
-            reward, details = grade_nvarc(
-                action,
-                self.record,
-                inductive=self.agent.startswith("nvarc_inductive_"),
-            )
+        elif self.agent == "nvarc_inductive_simple_agent":
+            reward, details = grade_inductive_arc(action, self.record, sandbox=self.sandbox)
+            diagnostics.update(details)
+        elif self.agent == "nvarc_transductive_simple_agent":
+            reward, details = grade_transductive_arc(action, self.record)
             diagnostics.update(details)
         elif self.agent == "code_gen_simple_agent":
             reward, details = grade_code(
@@ -233,16 +254,22 @@ class NemotronUltraEnv(BaseTextEnv):
                 "metadata": self.record["metadata"],
             }
             answer = _extract_reasoning_gym_answer(action)
-            try:
-                reward = float(reasoning_gym.get_score_answer_fn(task_name)(answer=answer, entry=entry))
-            except Exception as error:
-                reward = 0.0
-                diagnostics["verifier_error"] = f"{type(error).__name__}: {error}"
+            reward = float(reasoning_gym.get_score_answer_fn(task_name)(answer=answer, entry=entry))
             diagnostics.update({"task_name": task_name, "extracted_answer": answer})
         else:
             raise NotImplementedError(f"Nemotron Ultra verifier {self.agent!r} has not been ported")
 
-        verification = VerificationResult.verified(reward, passed=reward > 0.0, diagnostics=diagnostics)
+        if diagnostics.get("error_type") == "schema_error" or any(diagnostics.get("instruction_errors", [])):
+            return BaseTextEnvStepOutput(
+                observations=[],
+                reward=0.0,
+                done=True,
+                metadata=diagnostics,
+                verification=VerificationResult.error("verifier configuration failed", diagnostics=diagnostics),
+            )
+        verification = VerificationResult.verified(
+            reward, passed=reward >= 1.0, diagnostics={**diagnostics, "grading_action": action}
+        )
         return BaseTextEnvStepOutput(
             observations=[],
             reward=reward,

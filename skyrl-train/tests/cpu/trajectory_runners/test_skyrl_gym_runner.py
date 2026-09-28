@@ -556,7 +556,10 @@ async def test_genrm_rewards_replace_provisional_rewards_by_prompt_cohort(genera
     def output(answer):
         return AgentLoopOutput(
             evidence=RolloutEvidence(
-                messages=({"role": "user", "content": "q"}, {"role": "assistant", "content": answer}),
+                messages=(
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "unparsed reasoning then " + answer},
+                ),
                 response=answer,
                 response_token_ids=(10, 11),
             ),
@@ -585,6 +588,7 @@ async def test_genrm_rewards_replace_provisional_rewards_by_prompt_cohort(genera
 
     assert [item.reward.optimization_reward for item in outputs] == pytest.approx([5.0, 1.0])
     assert [item.reward.token_rewards for item in outputs] == [(0.0, 5.0), (0.0, 1.0)]
+    assert outputs[0].evidence.messages[-1]["content"] == "unparsed reasoning then better"
 
 
 @pytest.mark.asyncio
@@ -621,7 +625,9 @@ async def test_genrm_cohort_ranking_is_skipped_for_single_sample_evaluation(gene
     await runner._apply_genrm_cohort_rewards([output], request)
 
     runner.genrm_judge.generate_response.assert_not_called()
-    assert output.reward.optimization_reward == 3.0
+    assert output.reward.optimization_reward == 0.0
+    assert not output.disposition.loss_eligible
+    assert output.verification.status.value == "unavailable"
     assert output.env_metrics["genrm/cohort_skipped_eval"] == 1.0
 
 
@@ -1516,6 +1522,26 @@ def test_pass_at_n_uses_unshaped_outcomes():
     assert first_avg_score == pytest.approx(0.35)
     assert second_avg_score == pytest.approx(2.0)
     assert first_pass_at_n == second_pass_at_n == 0.5
+
+
+def test_pass_at_n_honors_partial_credit_and_failed_verifiers():
+    batch: TrajectoryBatch = {
+        "rewards": [0.001, 0.3, 1.0, 1.0, 0.7, 0.8],
+        "verification_results": [
+            VerificationResult.verified(0.001, passed=False),
+            VerificationResult.verified(0.3, passed=False),
+            VerificationResult.verified(1.0, passed=True),
+            VerificationResult.error("judge unavailable"),
+            VerificationResult.verified(0.7),
+            None,
+        ],
+    }
+    mean_reward, pass_at_n = get_metrics_from_trajectory_batch(
+        batch, ["partial", "partial", "full", "error", "numeric", "harbor"]
+    )
+
+    assert mean_reward == pytest.approx(3.801 / 6)
+    assert pass_at_n == pytest.approx(3 / 5)
 
 
 @pytest.mark.asyncio
@@ -2453,3 +2479,77 @@ async def test_a_rollout_call_publishes_its_phases_and_waits(
     assert waits == {"model_client_await": 1, "env_await": 3, "env_queue": 3, "env_exec": 3, "env_resume": 3}
     (call,) = delivered_telemetry.select("rollout_call", step="3")
     assert call["attributes"]["outcome"] == "success"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("judge_fails", [False, True])
+async def test_genrm_failed_rollouts_keep_their_failure_and_never_enter_comparisons(
+    generator_cfg, mock_tokenizer, judge_fails
+):
+    generator_cfg.batched = False
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg,
+        DictConfig(
+            {
+                "max_env_workers": 0,
+                "nemotron_ultra": {
+                    "genrm": {
+                        "num_rollouts_per_prompt": 3,
+                        "group_answer_length_penalty_coeff": 0.0,
+                        "genrm_parse_retries": 0,
+                        "reasoning_bonus": 0.0,
+                        "answer_bonus": 0.0,
+                    },
+                },
+            }
+        ),
+        MagicMock(),
+        mock_tokenizer,
+    )
+    compared = []
+
+    class Judge:
+        def generate_response(self, messages, *, metadata, **kwargs):
+            compared.extend([metadata["response_1"], metadata["response_2"]])
+            if judge_fails:
+                raise ConnectionError("judge unavailable")
+            return '{"score_1":4,"score_2":4,"ranking":3.5}'
+
+    runner.genrm_judge = Judge()
+    outputs = [
+        AgentLoopOutput(
+            evidence=RolloutEvidence(
+                messages=({"role": "assistant", "content": answer},), response=answer, response_token_ids=(10, 11)
+            ),
+            verification=VerificationResult.verified(3.0),
+            reward=RewardResult(unshaped_reward=3.0, optimization_reward=3.0, token_rewards=(0.0, 3.0)),
+            disposition=TrainingDisposition.train(),
+            loss_mask=[1, 1],
+            env_metrics={},
+        )
+        for answer in ("valid-a", "failed", "valid-b")
+    ]
+    original_failure = VerificationResult.error("generation failed", diagnostics={"exception_type": "RuntimeError"})
+    outputs[1].verification = original_failure
+    outputs[1].disposition = TrainingDisposition.mask("generation failed")
+    outputs[1].reward = RewardResult(unshaped_reward=None, optimization_reward=0.0)
+    extras = {
+        "extra_info": {"nemotron_ultra": {"agent": "genrm_simple_agent", "record_json": '{"principle":"correct"}'}}
+    }
+    request = {
+        "prompts": [[{"role": "user", "content": "q"}]] * 3,
+        "env_extras": [extras] * 3,
+        "trajectory_ids": [TrajectoryID("same-prompt", i) for i in range(3)],
+        "batch_metadata": None,
+    }
+    await runner._apply_genrm_cohort_rewards(outputs, request)
+    assert "failed" not in compared
+    assert outputs[1].verification is original_failure
+    assert not outputs[1].disposition.loss_eligible
+    if judge_fails:
+        assert all(not output.disposition.loss_eligible for output in outputs)
+        assert all(output.reward.optimization_reward == 0.0 for output in outputs)
+        assert outputs[0].verification.status.value == "error"
+    else:
+        assert outputs[0].reward.optimization_reward == 4.0
+        assert outputs[2].reward.optimization_reward == 4.0

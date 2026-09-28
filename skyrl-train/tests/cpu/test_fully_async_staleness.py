@@ -728,3 +728,21 @@ async def test_batch_assembly_rejected_only_progress_terminates_instead_of_livel
 
     with pytest.raises(GroupAdmissionStalledError):
         await trainer._get_admitted_generation_group_mini_batch(queues)
+
+
+@pytest.mark.parametrize("dtype", [torch.bool, torch.int64, torch.float32])
+def test_consumed_staleness_counts_selected_masked_sequences_by_group(dtype, monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        "skyrl_train.fully_async_trainer.record_event",
+        lambda name, values, attributes: events.append((name, values, attributes)),
+    )
+    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.global_step = 7
+    masks = torch.tensor([[1, 1, 0, 0], [0, 0, 0, 0], [1, 0, 1, 1]], dtype=dtype)
+    trainer._record_consumed_staleness(["a", "b", "a"], [2, 0, 2], masks)
+    assert [event[1] for event in events] == [
+        {"staleness": 2, "groups": 1, "sequences": 2, "response_tokens": 5},
+        {"staleness": 0, "groups": 1, "sequences": 1, "response_tokens": 0},
+    ]
+    assert all(event[2]["step"] == "7" for event in events)

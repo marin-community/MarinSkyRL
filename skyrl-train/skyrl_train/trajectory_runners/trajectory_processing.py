@@ -43,6 +43,7 @@ from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
+from skyrl_gym.verification import VerificationStatus
 
 
 BATCH_ERROR_METRIC_PREFIX = "generate/errors/"
@@ -660,12 +661,13 @@ def get_metrics_from_trajectory_batch(trajectory_batch: TrajectoryBatch, uids: L
     Rewards can be either per-trajectory or per-token. The returned mean describes
     the optimization reward. ``pass_at_n`` uses ``unshaped_rewards`` when supplied,
     so optimization-specific shaping cannot change the task-success metric.
+    Explicit verifier pass verdicts take precedence over positive partial rewards.
     """
     rewards: Union[List[float], List[List[float]]] = trajectory_batch["rewards"]
     if not len(rewards):
         raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
-    outcome_rewards = get_outcome_rewards(trajectory_batch)
+    trajectory_passes = get_trajectory_passes(trajectory_batch)
 
     if isinstance(rewards[0], list):
         # Token-level rewards: rewards is List[List[float]]
@@ -674,17 +676,11 @@ def get_metrics_from_trajectory_batch(trajectory_batch: TrajectoryBatch, uids: L
     else:
         mean_reward = float(np.mean(rewards))
 
-    # TODO: We should make metrics customizable by the environment.
-    # Map from the example's uid to each trajectory's unshaped outcome on that example.
-    uid_to_trajectory_rewards = defaultdict(list)
-    for i, reward in enumerate(outcome_rewards):
-        uid_to_trajectory_rewards[uids[i]].append(reward)
+    uid_to_trajectory_passes = defaultdict(list)
+    for uid, passed in zip(uids, trajectory_passes, strict=True):
+        uid_to_trajectory_passes[uid].append(passed)
 
-    # For each example, pass@n = 1 if any trajectory achieves a positive reward.
-    # The explicit unshaped channel, when present, makes this invariant to reward shaping.
-    pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if any(r > 0.0 for r in v)) / len(
-        uid_to_trajectory_rewards
-    )
+    pass_at_n = sum(any(passes) for passes in uid_to_trajectory_passes.values()) / len(uid_to_trajectory_passes)
 
     return mean_reward, pass_at_n
 
@@ -701,6 +697,23 @@ def get_outcome_rewards(trajectory_batch: TrajectoryBatch) -> List[float]:
             )
         return [float(reward) for reward in unshaped_rewards]
     return [NormalizedReward.from_output(reward).outcome for reward in rewards]
+
+
+def get_trajectory_passes(trajectory_batch: TrajectoryBatch) -> List[bool]:
+    """Return task success, honoring explicit verifier verdicts when available."""
+    outcomes = get_outcome_rewards(trajectory_batch)
+    results = trajectory_batch.get("verification_results")
+    if results is None:
+        return [outcome > 0.0 for outcome in outcomes]
+    passes = []
+    for outcome, result in zip(outcomes, results, strict=True):
+        if result is None:
+            passes.append(outcome > 0.0)
+        elif result.status is not VerificationStatus.VERIFIED:
+            passes.append(False)
+        else:
+            passes.append(result.passed if result.passed is not None else outcome > 0.0)
+    return passes
 
 
 def _rollout_logprob_presence(trajectory_batches: List[TrajectoryBatch], *, required: bool) -> List[bool]:
@@ -757,16 +770,6 @@ def _concatenate_episode_evidence(result: TrajectoryBatch, batches: List[Traject
         ]
         result["env_classes"] = [
             env_class for batch in batches for env_class in batch.get("env_classes", [""] * len(batch["response_ids"]))
-        ]
-    if any("verification_successes" in batch for batch in batches):
-        result["verification_successes"] = [
-            success
-            for batch in batches
-            for success in (
-                batch["verification_successes"]
-                if "verification_successes" in batch
-                else _reward_sign_successes(batch["rewards"])
-            )
         ]
 
 
@@ -957,6 +960,13 @@ def concatenate_trajectory_batches(
         result["exclude_from_baseline"] = baseline_exclusions_concat
 
     _concatenate_episode_evidence(result, trajectory_batches)
+    for key in ("verification_results", "evidence_messages"):
+        if any(batch.get(key) is not None for batch in trajectory_batches):
+            result[key] = [
+                value
+                for batch in trajectory_batches
+                for value in (batch.get(key) or [None] * len(batch["response_ids"]))
+            ]
 
     # propagate additional keys with list values as-is
     additional_keys = [
@@ -973,7 +983,7 @@ def concatenate_trajectory_batches(
         result["rewards"],
         result.get("env_metrics"),
         result.get("env_classes"),
-        successes=result.get("verification_successes"),
+        successes=get_trajectory_passes(result) if result.get("verification_results") is not None else None,
     )
 
     # TIS alignment metrics use token-weighted fractions across batches.
@@ -1074,9 +1084,10 @@ def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatc
         "rewards",
         "rollout_logprobs",
         "verifier_tests",
-        "verification_successes",
         "env_metrics",
         "env_classes",
+        "verification_results",
+        "evidence_messages",
     ):
         value = trajectory_batch.get(key)
         if isinstance(value, list):

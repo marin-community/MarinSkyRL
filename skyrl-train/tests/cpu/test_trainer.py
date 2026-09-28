@@ -16,6 +16,7 @@ from pytest import approx
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
+from skyrl_train.callbacks.base import CallbackHandler
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.group_admission import GroupAdmissionStalledError, GroupAdvantageInvariant
 import skyrl_train.trainer as trainer_module
@@ -664,6 +665,7 @@ def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
 
 def test_checkpoint_marker_waits_for_rank_uploads(monkeypatch, tmp_path):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.callback_handler = CallbackHandler()
     trainer.policy_model = SimpleNamespace(async_run_ray_method=lambda *_args: [object()])
     trainer.critic_model = None
     trainer._last_saved_step = None

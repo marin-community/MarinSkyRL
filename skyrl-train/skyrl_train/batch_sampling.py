@@ -7,7 +7,11 @@ from typing import Any, MutableMapping, cast
 
 from skyrl_train.metric_names import ENVIRONMENT_METRIC_PREFIX
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
-from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches, get_rollout_metrics
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    concatenate_trajectory_batches,
+    get_rollout_metrics,
+    get_trajectory_passes,
+)
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import refresh_trajectory_reward_shaping_metrics
 
 
@@ -24,7 +28,7 @@ class RowOwnership(StrEnum):
 
 
 def _refresh_filtered_rollout_metrics(filtered: TrajectoryBatch) -> None:
-    if "env_metrics" not in filtered and "verification_successes" not in filtered:
+    if "env_metrics" not in filtered and "verification_results" not in filtered:
         return
     metrics = dict(filtered.get("rollout_metrics") or {})
     for name in tuple(metrics):
@@ -36,7 +40,7 @@ def _refresh_filtered_rollout_metrics(filtered: TrajectoryBatch) -> None:
             filtered["rewards"],
             filtered.get("env_metrics"),
             filtered.get("env_classes"),
-            successes=filtered.get("verification_successes"),
+            successes=get_trajectory_passes(filtered) if filtered.get("verification_results") is not None else None,
         )
     )
     filtered["rollout_metrics"] = metrics

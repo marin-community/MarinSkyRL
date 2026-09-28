@@ -21,6 +21,7 @@ Supports two configuration styles:
 import asyncio
 import contextlib
 import dataclasses
+from io import BytesIO
 import os
 from typing import Any, Dict, List, Optional, Type
 
@@ -1114,7 +1115,8 @@ class BufferCheckpointCallback(TrainerCallback):
     """Persist async rollout work with each checkpoint and during shutdown.
 
     Saves completed and admitted output groups plus stale-group retry prompts so
-    resume preserves every dataset row still needed by the current epoch.
+    resume preserves every dataset row still needed by the current epoch. Writes
+    run in the background; checkpoint publication and shutdown drain them.
     """
 
     ARTIFACT_NAME = "generation_buffer_state.pt"
@@ -1122,6 +1124,7 @@ class BufferCheckpointCallback(TrainerCallback):
 
     def __init__(self) -> None:
         self._queues: Optional[GenerationQueuesProvider] = None
+        self._pending_save: asyncio.Task[None] | None = None
 
     def bind_queues(self, queues: GenerationQueuesProvider) -> None:
         """Select the current epoch's queues for checkpoint persistence."""
@@ -1162,7 +1165,7 @@ class BufferCheckpointCallback(TrainerCallback):
         artifact_path = os.path.join(checkpoint_path, self.ARTIFACT_NAME)
 
         def save_state() -> None:
-            with io.open_file(artifact_path, "wb") as f:
+            with BytesIO() as f:
                 torch.save(
                     {
                         "completed_groups": completed,
@@ -1171,6 +1174,7 @@ class BufferCheckpointCallback(TrainerCallback):
                     },
                     f,
                 )
+                io.write_bytes_atomic(artifact_path, f.getvalue())
 
         await asyncio.to_thread(save_state)
         logger.info(
@@ -1183,9 +1187,20 @@ class BufferCheckpointCallback(TrainerCallback):
 
     async def flush_to_checkpoint(self, checkpoint_path: str) -> None:
         """Persist all resumable work, including a trained but uncheckpointed batch."""
+        await self.wait_for_pending_saves()
         if self._queues is None:
             raise RuntimeError("BufferCheckpointCallback queues were not bound before shutdown flush")
         await self._save_bound_state(checkpoint_path, self._queues.shutdown_snapshot())
+
+    async def wait_for_pending_saves(self) -> None:
+        if self._pending_save is None:
+            return
+        pending = self._pending_save
+        try:
+            await asyncio.shield(pending)
+        finally:
+            if pending.done():
+                self._pending_save = None
 
     async def on_save_async(
         self,
@@ -1199,6 +1214,10 @@ class BufferCheckpointCallback(TrainerCallback):
         if self._queues is None:
             raise RuntimeError("BufferCheckpointCallback queues were not bound before checkpoint save")
 
+        # Only one checkpoint owns buffer state at a time. Snapshot containers
+        # retain completed rollout payloads, which consumers read without mutation.
+        await self.wait_for_pending_saves()
+
         buffer_state = self._queues.snapshot()
         if not (buffer_state.completed_groups or buffer_state.admitted_groups or buffer_state.retry_prompts):
             return control
@@ -1207,7 +1226,7 @@ class BufferCheckpointCallback(TrainerCallback):
             trainer.cfg.trainer.ckpt_path,
             f"global_step_{state.global_step}",
         )
-        await self._save_bound_state(ckpt_path, buffer_state)
+        self._pending_save = asyncio.create_task(self._save_bound_state(ckpt_path, buffer_state))
 
         return control
 
