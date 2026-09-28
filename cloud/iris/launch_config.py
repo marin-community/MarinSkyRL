@@ -301,6 +301,7 @@ def validate_iris_allocation(config: dict[str, Any]) -> IrisAllocationConfig:
 def validate_launch_config(config: DictConfig) -> LaunchTopology:
     """Validate launch semantics before an Iris job can be submitted."""
     from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config  # noqa: PLC0415 - keep launcher imports Torch-free
+    from skyrl_train.config.router_replay import validate_router_replay_config  # noqa: PLC0415 - keep launcher imports Torch-free
 
     raw = _resolved_config(config)
     if raw["schema_version"] != 1:
@@ -339,6 +340,7 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
     entrypoint = runtime["entrypoint"]
     registered_rl_entrypoint_module(entrypoint)
     validate_generation_logprobs(config.skyrl)
+    validate_router_replay_config(skyrl)
     validate_mismatch_probe_config(
         skyrl,
         synchronous=entrypoint == RL_ENTRYPOINTS[RLEntrypoint.STANDARD] and run["mode"] == RunMode.TRAIN,

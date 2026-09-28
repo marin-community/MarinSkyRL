@@ -44,13 +44,26 @@ def test_filtered_replay_zero_fraction_and_native_mask():
         filtered_replay_topk(scores, native, torch.tensor([[0, 0], [0, 1]]), torch.tensor([True, False]), 0.5)
 
 
-def test_filtered_replay_scoring_scope_restores_training_mode_after_failure():
-    controller = MegatronRouterReplay(local_layer_indices=[0], recompute_enabled=False)
+@pytest.mark.parametrize("training_fraction", [None, 0.5], ids=["unfiltered-training", "filtered-training"])
+def test_filtered_replay_scoring_scope_restores_training_mode_after_failure(training_fraction):
+    controller = MegatronRouterReplay(local_layer_indices=[0], recompute_enabled=False, keep_fraction=training_fraction)
+    scores = torch.tensor([[-4.0, -3.0, -2.0, -1.0]])
+    targets = torch.tensor([[0, 1]])
+
+    def forward():
+        controller.begin_forward({0: targets}, torch.tensor([True]), record_recompute=False)
+        _, choices = controller.get_replay_topk(0, scores, 2, default_compute_topk=_fake_compute_topk)
+        controller.end_forward()
+        return choices.tolist()
+
     with pytest.raises(RuntimeError, match="injected"):
-        with controller.scoring_mode("router_replay_filtered", 0.5):
+        with controller.scoring_mode("router_replay"):
+            assert forward() == [[0, 1]]
             raise RuntimeError("injected")
-    assert controller._scoring_mode == "router_replay"
-    assert controller._keep_fraction is None
+    assert forward() == ([[0, 1]] if training_fraction is None else [[3, 2]])
+    with controller.scoring_mode("router_replay_filtered", 0.5):
+        assert forward() == [[3, 2]]
+    assert forward() == ([[0, 1]] if training_fraction is None else [[3, 2]])
 
 
 def test_probe_observations_record_sample_layer_and_only_response_positions():
@@ -198,19 +211,31 @@ class TestControllerSingleForward:
 
 
 class TestControllerRecomputeFifo:
-    def test_checkpointed_no_grad_forward_still_records_for_recompute(self):
-        scores = torch.randn(4, 8)
-        targets, mask = _masked_target_rows(4, 2, 8, 4)
-        controller = MegatronRouterReplay(local_layer_indices=[0], recompute_enabled=True)
+    @pytest.mark.parametrize("training_fraction", [None, 0.5], ids=["unfiltered-training", "filtered-training"])
+    def test_checkpointed_no_grad_forward_still_records_for_recompute(self, training_fraction):
+        scores = torch.tensor([[-4.0, -3.0, -2.0, -1.0]])
+        targets, mask = torch.tensor([[0, 1]]), torch.tensor([True])
+        controller = MegatronRouterReplay(
+            local_layer_indices=[0], recompute_enabled=True, keep_fraction=training_fraction
+        )
         handle = LayerReplayHandle(controller, layer_idx=0)
+
+        def compute_topk(values, topk, **kwargs):
+            return torch.topk(values, topk, dim=-1)
 
         controller.begin_forward({0: targets}, mask, record_recompute=True)
         with torch.no_grad():
-            handle.get_replay_topk(scores, 2, None, None, _fake_compute_topk)
+            _, forward_indices = handle.get_replay_topk(scores, 2, None, None, compute_topk)
         controller.end_forward()
 
-        _, recomputed_indices = handle.get_replay_topk(scores, 2, None, None, _fake_compute_topk)
-        assert torch.equal(recomputed_indices, targets)
+        expected = [[0, 1]] if training_fraction is None else [[3, 2]]
+        assert forward_indices.tolist() == expected
+        recompute_scores = scores.flip(-1).clone().requires_grad_()
+        values, recomputed_indices = handle.get_replay_topk(recompute_scores, 2, None, None, compute_topk)
+        assert recomputed_indices.tolist() == expected
+        values.sum().backward()
+        expected_gradient = [[1.0, 1.0, 0.0, 0.0]] if training_fraction is None else [[0.0, 0.0, 1.0, 1.0]]
+        assert recompute_scores.grad.tolist() == expected_gradient
         controller.assert_drained()
 
     def test_pp_interleave_serves_each_recompute_with_its_own_micro_batch(self):

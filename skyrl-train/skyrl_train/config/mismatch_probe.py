@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping, Sequence
 
 from skyrl_train.config.behavior_logprobs import (
     ROLLOUT_LOGPROB_ENGINE_OPTIONS,
     validate_behavior_logprob_sampling,
 )
+from skyrl_train.config.router_replay import validate_replay_keep_fraction
 
 NATIVE_MODE = "native"
 REPEAT_MODE = "repeat"
@@ -114,13 +114,7 @@ def validate_mismatch_probe_config(
             raise ValueError("trainer.mismatch_probe replay modes require an MoE router with top-k >= 2")
     if FILTERED_REPLAY_MODE in modes:
         fraction = (probe.get("filtered_replay") or {}).get("keep_fraction")
-        if (
-            isinstance(fraction, bool)
-            or not isinstance(fraction, (int, float))
-            or not math.isfinite(fraction)
-            or not 0 <= fraction <= 1
-        ):
-            raise ValueError("trainer.mismatch_probe.filtered_replay.keep_fraction must be explicit and in [0, 1]")
+        validate_replay_keep_fraction(fraction, "trainer.mismatch_probe.filtered_replay.keep_fraction")
 
     layer_tokens = probe.get("layer_tokens", 0)
     if isinstance(layer_tokens, bool) or not isinstance(layer_tokens, int) or layer_tokens < 0:

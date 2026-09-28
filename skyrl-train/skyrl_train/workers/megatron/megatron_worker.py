@@ -422,6 +422,7 @@ class MegatronWorker:
         self.model.router_replay = install_megatron_router_replay(
             self.actor_module,
             recompute_enabled=get_model_config(self.actor_module[0]).recompute_granularity is not None,
+            keep_fraction=self.cfg.trainer[role].megatron_config.get("moe_router_replay_keep_fraction"),
         )
 
     def save_hf_model(self, export_dir: str, tokenizer):

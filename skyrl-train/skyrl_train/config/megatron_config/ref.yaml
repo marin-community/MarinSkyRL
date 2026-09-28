@@ -13,3 +13,4 @@ logprob_chunk_size: 1024
 
 # Replay expert choices captured during rollout.
 moe_router_replay: false
+moe_router_replay_keep_fraction: null

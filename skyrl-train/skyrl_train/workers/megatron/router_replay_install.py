@@ -58,7 +58,7 @@ def _validate_replay_compatible_config(config) -> None:
 
 
 def install_megatron_router_replay(
-    actor_module: Sequence[nn.Module], *, recompute_enabled: bool
+    actor_module: Sequence[nn.Module], *, recompute_enabled: bool, keep_fraction: float | None = None
 ) -> MegatronRouterReplay:
     """Install per-router replay handles on every local ``TopKRouter``.
 
@@ -88,7 +88,9 @@ def install_megatron_router_replay(
         chunk_layers.append((chunk, indices))
 
     expected_local = {idx for _, indices in chunk_layers for idx in indices}
-    controller = MegatronRouterReplay(sorted(expected_local), recompute_enabled=recompute_enabled)
+    controller = MegatronRouterReplay(
+        sorted(expected_local), recompute_enabled=recompute_enabled, keep_fraction=keep_fraction
+    )
     controller.num_moe_layers_total = num_moe_layers(pattern)
     controller.topk = config.moe_router_topk
     controller.local_indices_for_module = {id(chunk): indices for chunk, indices in chunk_layers}
