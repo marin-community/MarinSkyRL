@@ -59,7 +59,6 @@ nemotron_ultra:
     num_rollouts_per_prompt: 16
     max_concurrent_comparisons: 4
     default_score: 3.0
-    default_ranking: 3.5
     max_output_tokens: 24576
     temperature: 1.0
     top_p: 0.95

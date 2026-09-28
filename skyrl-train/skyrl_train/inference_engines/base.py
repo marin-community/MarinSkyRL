@@ -29,6 +29,8 @@ class InferenceEngineInput(TypedDict):
     chat_completion_params: NotRequired[List[Dict[str, Any]]]
     # Preserve sampled tokens when the backend re-renders a structured assistant turn.
     chat_continuations: NotRequired[List[ChatContinuation | None]]
+    # The request window, including the backend-rendered prompt and new tokens.
+    max_context_length: NotRequired[int]
 
 
 class InferenceEngineOutput(TypedDict):

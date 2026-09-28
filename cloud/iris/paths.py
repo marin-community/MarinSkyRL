@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from marinskyrl.resource_locator import is_cloud_uri, is_hugging_face_repo_id
+from marinskyrl.resource_locator import is_hugging_face_repo_id
 
 # cloud/iris/paths.py -> cloud/iris -> cloud -> repo root
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -56,11 +56,11 @@ _PATH_EXTENSIONS = {
 
 
 def looks_like_file_path(value: str) -> bool:
-    """Check whether a string denotes a local file path."""
+    """Check if a string looks like a repository file path, not an HF repo ID or a URI such as ``s3://...``."""
     if not isinstance(value, str) or not value:
         return False
 
-    if is_cloud_uri(value) or is_hugging_face_repo_id(value):
+    if is_hugging_face_repo_id(value) or "://" in value:
         return False
 
     if value.startswith("/") or value.startswith("~"):

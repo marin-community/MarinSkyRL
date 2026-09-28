@@ -70,7 +70,6 @@ def _build_runner(
     overrides = {
         "sampling_params": {"max_generate_length": 200, "logprobs": None},
         "max_input_length": 200,
-        "batched": False,
         "max_turns": 3,
         "apply_overlong_filtering": False,
         "use_conversation_multi_turn": True,

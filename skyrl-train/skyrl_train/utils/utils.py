@@ -524,9 +524,12 @@ def validate_cfg(cfg: DictConfig):
         "trainer.progress.percent_step": cfg.trainer.progress.percent_step,
         "trainer.progress.count_step": cfg.trainer.progress.count_step,
         "generator.r3_dispatch_put_timeout_seconds": cfg.generator.r3_dispatch_put_timeout_seconds,
-        "trajectory_runner.process_pool.num_coordinators": cfg.trajectory_runner.process_pool.num_coordinators,
-        "trajectory_runner.process_pool.cpus_per_coordinator": cfg.trajectory_runner.process_pool.cpus_per_coordinator,
-        "trajectory_runner.process_pool.executor_workers": cfg.trajectory_runner.process_pool.executor_workers,
+        "trajectory_runner.rollout_workers.num_workers": cfg.trajectory_runner.rollout_workers.num_workers,
+        "trajectory_runner.rollout_workers.cpus_per_worker": cfg.trajectory_runner.rollout_workers.cpus_per_worker,
+        "trajectory_runner.rollout_workers.executor_threads": cfg.trajectory_runner.rollout_workers.executor_threads,
+        "trajectory_runner.rollout_workers.progress_timeout_seconds": (
+            cfg.trajectory_runner.rollout_workers.progress_timeout_seconds
+        ),
     }
     for path, value in runtime_values.items():
         if value <= 0:
@@ -633,6 +636,10 @@ def validate_cfg(cfg: DictConfig):
             "trainer.algorithm.policy_loss_type=behavior_clip cannot be combined with use_tis=true; "
             "behavior clipping already uses the full rollout importance ratio"
         )
+    assert cfg.trainer.rollout_buffer.max_staleness_steps == 0 or behavior_clip or cfg.trainer.algorithm.use_tis, (
+        "trainer.rollout_buffer.max_staleness_steps > 0 trains on rollouts from older policies and needs an "
+        "off-policy correction: set trainer.algorithm.use_tis=true or trainer.algorithm.policy_loss_type=behavior_clip"
+    )
 
     behavior_logprobs_required = rollout_logprobs_enabled(cfg.trainer.algorithm)
     if behavior_logprobs_required:
@@ -674,6 +681,9 @@ def validate_cfg(cfg: DictConfig):
 
     # Validate placement
     validate_expert_block_transport(cfg)
+    if cfg.trainer.placement.colocate_all and cfg.trainer.rollout_buffer.max_staleness_steps != 0:
+        # Colocated engines sleep during training, so no rollout may run ahead of the trained policy.
+        raise ValueError("colocate_all requires trainer.rollout_buffer.max_staleness_steps=0")
     if cfg.trainer.placement.colocate_all:
         tp_pp_size = (
             cfg.generator.inference_engine_tensor_parallel_size * cfg.generator.inference_engine_pipeline_parallel_size
@@ -746,11 +756,6 @@ def validate_generator_cfg(cfg: DictConfig):
             "num_inference_engines should be equal to the number of remote_inference_engine_urls"
         )
 
-    if not cfg.generator.async_engine and cfg.generator.backend == "vllm":
-        assert cfg.generator.batched, (
-            "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
-        )
-
     # TODO(tgriggs): use a more modular config validation
     if cfg.trainer.logger == "wandb":
         assert os.environ.get("WANDB_API_KEY"), "`WANDB_API_KEY` is required for `wandb` logger"
@@ -811,8 +816,6 @@ def validate_generator_cfg(cfg: DictConfig):
             raise ValueError(
                 'generator.enable_http_endpoint is not supported for SGLang backend yet. Please set generator.backend="vllm".'
             )
-        if not cfg.generator.async_engine:
-            raise ValueError("generator.async_engine must be True when generator.enable_http_endpoint==True.")
 
     # Validate inference engine parallelism.
     ep_size = cfg.generator.inference_engine_expert_parallel_size
@@ -1116,9 +1119,9 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # asyncio.set_event_loop_policy(DefaultEventLoopPolicy()) in
     # BasePPOExp.run() (entrypoints/main_base.py), but that ONLY covers the
     # skyrl_entrypoint driver process -- it does NOT propagate into the Ray
-    # *actor* processes (RolloutCoordinator, inference engines, policy/ref
+    # *actor* processes (rollout workers, inference engines, policy/ref
     # workers), which still install uvloop and still abort. Observed on the 80B
-    # production run (job 669177): a RolloutCoordinator CoreWorker aborted at
+    # production run (job 669177): a rollout worker's CoreWorker aborted at
     # Fatal Python error: Aborted -> uv__epoll_ctl_prep inside
     # CoreWorker.initialize_eventloops_for_actor_concurrency_group AFTER a full
     # clean step 1, taking the run down. The EnvVarManager projection below sets
@@ -1134,7 +1137,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # Disable libuv's io_uring backend in EVERY Ray actor/worker process.
     #
     # WHY (job 930208, the SSL re-abort): RAY_USE_UVLOOP=0 + the policy hook
-    # were STILL insufficient -- 930208 SIGABRT'd in a RolloutCoordinator at
+    # were STILL insufficient -- 930208 SIGABRT'd in a rollout worker at
     # uvloop/sslproto.pyx:517 SSLProtocol._on_handshake_complete (the
     # litellm->Daytona HTTPS handshake), proving a live uvloop.Loop() was
     # running an SSL transport in the actor despite the stock-asyncio POLICY.

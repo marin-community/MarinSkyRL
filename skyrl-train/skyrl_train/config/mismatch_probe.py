@@ -43,7 +43,7 @@ def validate_mismatch_probe_config(
     probe = trainer.get("mismatch_probe") or {}
     if not probe.get("enabled", False):
         return
-    if not synchronous:
+    if not synchronous or trainer.get("rollout_buffer", {}).get("max_staleness_steps", 0) != 0:
         raise ValueError("trainer.mismatch_probe requires the synchronous trainer")
     prompts = probe.get("prompts") or {}
     for field in ("count", "samples_per_prompt"):
