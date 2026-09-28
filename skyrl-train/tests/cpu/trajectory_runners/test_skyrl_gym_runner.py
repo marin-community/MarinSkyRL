@@ -1466,7 +1466,6 @@ def test_rollout_metrics_include_negative_reward_failures():
     metrics = get_rollout_metrics(
         responses=[[1, 2], list(range(9)), [3, 4, 5], list(range(11))],
         rewards=[1.0, -1.0, 1.0, -1.0],
-        successes=[True, False, True, False],
     )
 
     assert metrics["generate/avg_tokens_non_zero_rewards"] == pytest.approx(2.5)

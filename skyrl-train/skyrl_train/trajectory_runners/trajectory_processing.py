@@ -43,7 +43,7 @@ from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
-from skyrl_gym.verification import VerificationStatus
+from skyrl_gym.verification import VerificationResult, VerificationStatus
 
 
 BATCH_ERROR_METRIC_PREFIX = "generate/errors/"
@@ -983,7 +983,7 @@ def concatenate_trajectory_batches(
         result["rewards"],
         result.get("env_metrics"),
         result.get("env_classes"),
-        successes=get_trajectory_passes(result) if result.get("verification_results") is not None else None,
+        verification_results=result.get("verification_results"),
     )
 
     # TIS alignment metrics use token-weighted fractions across batches.
@@ -1153,7 +1153,7 @@ def get_rollout_metrics(
     rewards: Union[List[float], List[List[float]]],
     env_metrics: Optional[List[Dict[str, Any]]] = None,
     env_classes: Optional[List[str]] = None,
-    successes: Optional[List[bool]] = None,
+    verification_results: Optional[List[Optional[VerificationResult]]] = None,
 ):
     """
     Computes rollout metrics including token statistics and optional environment-specific metrics.
@@ -1163,18 +1163,22 @@ def get_rollout_metrics(
         rewards: List of rewards (either per-trajectory or per-token)
         env_metrics: Optional list of environment-specific metrics for each trajectory
         env_classes: Optional list of environment class names for each trajectory
-        successes: Optional verifier-defined success predicate for each trajectory
+        verification_results: Verifier verdicts that override reward-sign token statistics when present
 
     Returns:
         Dictionary of aggregated metrics
     """
     num_tokens_arr = np.array([len(response) for response in responses])
-    if successes is not None:
-        if len(successes) != len(responses):
-            raise ValueError("successes must have one value per response")
-        non_zero_rewards_arr = np.array(successes, dtype=bool)
-    else:
-        non_zero_rewards_arr = np.array(_reward_sign_successes(rewards), dtype=bool)
+    successes = _reward_sign_successes(rewards)
+    if verification_results is not None:
+        for index, result in enumerate(verification_results):
+            if result is None:
+                continue
+            if result.status is not VerificationStatus.VERIFIED:
+                successes[index] = False
+            elif result.passed is not None:
+                successes[index] = result.passed
+    non_zero_rewards_arr = np.array(successes, dtype=bool)
     zero_rewards_arr = ~non_zero_rewards_arr
     # average tokens for non zero rewards
     avg_tokens_non_zero_rewards = (

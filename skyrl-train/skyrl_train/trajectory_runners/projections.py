@@ -18,7 +18,6 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     _sentinel_routed_experts_row,
     apply_overlong_filtering,
     get_rollout_metrics,
-    get_trajectory_passes,
     minimum_captured_global_step,
     scalar_reward_token_credit,
 )
@@ -100,7 +99,7 @@ class WholeTrajectoryProjection:
             rewards,
             [output.env_metrics for output in outputs],
             request["env_classes"],
-            successes=get_trajectory_passes(batch),
+            verification_results=batch.get("verification_results"),
         )
         batch["rollout_metrics"].update(_token_provenance_metrics(outputs))
         return batch
@@ -166,7 +165,9 @@ class StepWiseTrajectoryProjection:
         attach_terminal_classifications(batch, steps)
         attach_server_errors(batch, steps)
         _attach_reward_channels(batch, steps, responses)
-        batch["rollout_metrics"] = get_rollout_metrics(responses, rewards, successes=get_trajectory_passes(batch))
+        batch["rollout_metrics"] = get_rollout_metrics(
+            responses, rewards, verification_results=batch.get("verification_results")
+        )
         batch["rollout_metrics"].update(_token_provenance_metrics(steps))
         return batch
 

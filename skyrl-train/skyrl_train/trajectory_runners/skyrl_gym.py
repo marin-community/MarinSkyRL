@@ -59,7 +59,6 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     _sentinel_routed_experts_row,
     get_custom_chat_template,
     get_generation_prompt_ids,
-    get_trajectory_passes,
     apply_overlong_filtering,
     get_rollout_metrics,
     normalize_token_ids,
@@ -1133,7 +1132,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             rewards,
             env_metrics,
             env_classes,
-            successes=get_trajectory_passes(trajectory_batch),
+            verification_results=trajectory_batch.get("verification_results"),
         )
 
         return trajectory_batch
