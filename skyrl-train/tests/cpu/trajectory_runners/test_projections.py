@@ -98,6 +98,8 @@ def test_whole_trajectory_projection_carries_environment_rates_into_async_batch(
         [replace(n20_miss, reward=RewardResult(unshaped_reward=0.0, optimization_reward=0.7))],
         {"env_classes": ["cat_count"], "sampling_params": {"logprobs": True}},
     )
+    assert unverified["rollout_metrics"]["generate/avg_tokens_non_zero_rewards"] == 0.0
+    assert unverified["rollout_metrics"]["generate/avg_tokens_zero_rewards"] == 3.0
     unverified.pop("verification_results")
     mixed = concatenate_trajectory_batches([joined, unverified], tis_lcs_alert_threshold=0.005)
     assert mixed["rollout_metrics"]["generate/avg_tokens_non_zero_rewards"] == 2.0

@@ -1176,8 +1176,8 @@ def get_rollout_metrics(
                 continue
             if result.status is not VerificationStatus.VERIFIED:
                 successes[index] = False
-            elif result.passed is not None:
-                successes[index] = result.passed
+            else:
+                successes[index] = result.passed if result.passed is not None else float(result.score) > 0.0
     non_zero_rewards_arr = np.array(successes, dtype=bool)
     zero_rewards_arr = ~non_zero_rewards_arr
     # average tokens for non zero rewards
