@@ -251,7 +251,7 @@ class DirectModelClient:
             if not isinstance(response_ids, list) or not all(isinstance(token, int) for token in response_ids):
                 raise RuntimeError("vLLM chat completion did not return exact token IDs")
             message = choice["message"]
-            text = self._client.tokenizer.decode(response_ids, skip_special_tokens=True)
+            text = message.get("content") or ""
             logprob_items = (choice.get("logprobs") or {}).get("content")
             response_logprobs = (
                 [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None

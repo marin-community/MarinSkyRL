@@ -7,8 +7,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-STRICT_BOXED_PATTERN = re.compile(r"\\boxed\{\s*[^A-Za-z]*([A-Z])[^A-Za-z]*\s*\}")
-BOXED_CONTENT_PATTERN = re.compile(r"\\boxed\{\s*(.*?)\s*\}", re.S)
+from skyrl_gym.envs.nemotron_ultra.answer_extraction import last_boxed_answer
+
 LATEX_TEXT_WRAP_PATTERN = re.compile(r"\\text\{\s*(.*?)\s*\}", re.S)
 ANSWER_COLON_PATTERN = re.compile(r"(?i)answer\s*:\s*(.+)")
 ANSWER_COLON_MD_PATTERN = re.compile(r"(?i)[*_]{0,2}Answer[*_]{0,2}\s*:[*_\s]{0,2}\s*([A-Z])(?![a-zA-Z0-9])")
@@ -52,7 +52,8 @@ def _normalize_extracted(value: str) -> str:
 
 
 def _strict_boxed(text: str, allowed: set[str]) -> str | None:
-    match = STRICT_BOXED_PATTERN.search(text)
+    boxed = last_boxed_answer(text)
+    match = None if boxed is None else re.fullmatch(r"\s*[^A-Za-z]*([A-Z])[^A-Za-z]*\s*", boxed)
     if not match:
         return None
     letter = match.group(1).upper()
@@ -60,17 +61,15 @@ def _strict_boxed(text: str, allowed: set[str]) -> str | None:
 
 
 def _option_text(text: str, options: list[dict[str, str]] | None, allowed: set[str]) -> str | None:
-    boxed = BOXED_CONTENT_PATTERN.search(text)
-    if not boxed:
+    boxed = last_boxed_answer(text)
+    if boxed is None:
         return None
-    candidates = {_normalize(boxed.group(1)), _normalize(_strip_latex(boxed.group(1)))}
+    candidates = {_normalize(boxed), _normalize(_strip_latex(boxed))}
     matches = {
         key.upper()
         for option in options or []
         for key, value in option.items()
-        if value is not None
-        and key.upper() in allowed
-        and any(_normalize(value) in candidate for candidate in candidates)
+        if value is not None and key.upper() in allowed and _normalize(value) in candidates
     }
     return next(iter(matches)) if len(matches) == 1 else None
 
@@ -85,7 +84,13 @@ def _custom_regex(
             continue
         if not matches:
             continue
-        captured = _normalize_extracted(matches[-1].strip()).upper()
+        value = matches[-1]
+        if isinstance(value, tuple):
+            captures = [capture for capture in value if capture]
+            if len(captures) != 1:
+                raise ValueError("MCQA output_regex must have one unambiguous answer capture")
+            value = captures[0]
+        captured = _normalize_extracted(value.strip()).upper()
         if len(captured) == 1 and captured.isalpha():
             return captured
         for option in options or []:

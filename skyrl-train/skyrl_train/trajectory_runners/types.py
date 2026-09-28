@@ -101,6 +101,8 @@ class TrajectoryBatch(TypedDict):
     reward_shaping_loop_spans: Optional[List[List[RewardShapingLoopSpan]]]
     loop_advantages: Optional[List[List[float]]]
     reward_shaping_versions: Optional[List[int]]
+    verification_results: List[Optional[VerificationResult]]
+    evidence_messages: List[Optional[list[dict[str, Any]]]]
     verifier_tests: Optional[List[Optional[VerifierTestCollection]]]
     loss_masks: List[List[int]]
     stop_reasons: Optional[List[str]]

@@ -15,15 +15,6 @@ import yaml
 from openapi_schema_validator import validate as validate_openapi
 
 
-def _strictify(schema: dict[str, Any]) -> None:
-    if "properties" in schema:
-        schema["required"] = list(schema["properties"])
-        schema["additionalProperties"] = False
-    for value in schema.values():
-        if isinstance(value, dict):
-            _strictify(value)
-
-
 def _coerce_xml(data: Any, schema: dict[str, Any]) -> Any:
     if not isinstance(schema, dict) or "type" not in schema:
         return data
@@ -128,12 +119,11 @@ def grade_structured_output(
     record: dict[str, Any],
     assistant_message: dict[str, Any],
 ) -> tuple[float, dict[str, Any]]:
-    """Validate text or tool arguments against the row's strict OpenAPI schema."""
+    """Validate text or tool arguments against the row's supplied OpenAPI schema."""
     try:
         schema = json.loads(record["schema_str"])
     except Exception as error:
         return 0.0, {"error_type": "schema_error", "error_message": str(error)[:200]}
-    _strictify(schema)
 
     if record.get("response_mode", "text") == "tool_call":
         value, error_type, message = _tool_payload(record, assistant_message)
