@@ -556,7 +556,10 @@ async def test_genrm_rewards_replace_provisional_rewards_by_prompt_cohort(genera
     def output(answer):
         return AgentLoopOutput(
             evidence=RolloutEvidence(
-                messages=({"role": "user", "content": "q"}, {"role": "assistant", "content": answer}),
+                messages=(
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "unparsed reasoning then " + answer},
+                ),
                 response=answer,
                 response_token_ids=(10, 11),
             ),
@@ -585,6 +588,7 @@ async def test_genrm_rewards_replace_provisional_rewards_by_prompt_cohort(genera
 
     assert [item.reward.optimization_reward for item in outputs] == pytest.approx([5.0, 1.0])
     assert [item.reward.token_rewards for item in outputs] == [(0.0, 5.0), (0.0, 1.0)]
+    assert outputs[0].evidence.messages[-1]["content"] == "unparsed reasoning then better"
 
 
 @pytest.mark.asyncio
@@ -1518,6 +1522,26 @@ def test_pass_at_n_uses_unshaped_outcomes():
     assert first_avg_score == pytest.approx(0.35)
     assert second_avg_score == pytest.approx(2.0)
     assert first_pass_at_n == second_pass_at_n == 0.5
+
+
+def test_pass_at_n_honors_partial_credit_and_failed_verifiers():
+    batch: TrajectoryBatch = {
+        "rewards": [0.001, 0.3, 1.0, 1.0, 0.7, 0.8],
+        "verification_results": [
+            VerificationResult.verified(0.001, passed=False),
+            VerificationResult.verified(0.3, passed=False),
+            VerificationResult.verified(1.0, passed=True),
+            VerificationResult.error("judge unavailable"),
+            VerificationResult.verified(0.7),
+            None,
+        ],
+    }
+    mean_reward, pass_at_n = get_metrics_from_trajectory_batch(
+        batch, ["partial", "partial", "full", "error", "numeric", "harbor"]
+    )
+
+    assert mean_reward == pytest.approx(3.801 / 6)
+    assert pass_at_n == pytest.approx(3 / 5)
 
 
 @pytest.mark.asyncio

@@ -33,6 +33,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     prepare_trajectory_request,
     concatenate_trajectory_batches,
     get_outcome_rewards,
+    get_trajectory_passes,
 )
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import NormalizedReward
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
@@ -215,7 +216,7 @@ class _DynamicSamplingCandidateMetrics:
         self.trajectory_count += group_size
         self.optimization_reward_sum += sum(NormalizedReward.from_output(reward).total for reward in rewards)
         self.outcome_reward_sum += sum(outcomes)
-        self.passed_group_count += int(any(reward > 0.0 for reward in outcomes))
+        self.passed_group_count += int(any(get_trajectory_passes(batch)))
 
     def merge(self, other: "_DynamicSamplingCandidateMetrics") -> None:
         if other.samples_per_group is not None:

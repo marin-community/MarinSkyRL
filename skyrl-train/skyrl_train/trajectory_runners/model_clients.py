@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 from uuid import uuid4
 
+from skyrl_gym.envs.nemotron_ultra.answer_extraction import REASONING_DELIMITERS, final_answer_text
 
 from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInput, InferenceEngineOutput
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY, render_exact_chat_continuation
@@ -213,6 +214,13 @@ class DirectModelClient:
                 "headers": {},
             }
             messages, prompt_ids = await _render_chat_prompt(self._client.tokenize, render_request, continuation)
+            max_context_length = request.get("max_context_length")
+            if max_context_length is not None:
+                remaining_tokens = max_context_length - len(prompt_ids)
+                if remaining_tokens <= 0:
+                    raise ContextLengthExceededError(category="context_overflow", request_id=None, status_code=400)
+                requested_tokens = chat_options.get("max_completion_tokens", remaining_tokens)
+                chat_options["max_completion_tokens"] = min(int(requested_tokens), remaining_tokens)
 
             body = {
                 "model": self._client.model_name,
@@ -252,6 +260,11 @@ class DirectModelClient:
                 raise RuntimeError("vLLM chat completion did not return exact token IDs")
             message = choice["message"]
             text = message.get("content") or ""
+            # Some serving configurations omit reasoning parsers and remove
+            # special delimiters from content. Exact tokens retain the boundary.
+            decoded = self._client.tokenizer.decode(response_ids, skip_special_tokens=False)
+            if any(marker in decoded for pair in REASONING_DELIMITERS for marker in pair):
+                text = final_answer_text(decoded)
             logprob_items = (choice.get("logprobs") or {}).get("content")
             response_logprobs = (
                 [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None

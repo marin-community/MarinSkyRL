@@ -60,13 +60,19 @@ def ultra_env(agent, record):
         ("reasoning</think>correct answer", "correct answer"),
         ("<think>the number is 20", ""),
         ("<thinking>analysis</thinking>42", "42"),
+        ("<|start_think|>wrong answer<|end_think|>correct answer<|eot_id|>", "correct answer"),
+        ("reasoning<|end_think|>42", "42"),
+        ("<|start_think|>the number is 20", ""),
+        ("Plain answer mentioning reasoning", "Plain answer mentioning reasoning"),
+        ("<think>discard</think><|start_think|>discard<|end_think|>42", "42"),
     ],
 )
 def test_final_answer_removes_reasoning_without_promoting_unfinished_work(text, answer):
     assert final_answer_text(text) == answer
 
 
-def test_structured_grading_ignores_reasoning_and_keeps_optional_fields_optional():
+@pytest.mark.parametrize("opening,closing", [("<think>", "</think>"), ("<|start_think|>", "<|end_think|>")])
+def test_structured_grading_ignores_reasoning_and_keeps_optional_fields_optional(opening, closing):
     record = {
         "schema_type": "json",
         "schema_str": json.dumps(
@@ -78,7 +84,7 @@ def test_structured_grading_ignores_reasoning_and_keeps_optional_fields_optional
         ),
     }
     result = ultra_env("structured_outputs_simple_agent", record).step(
-        '<think>not JSON</think>{"required": 7, "extra": true}'
+        opening + "not JSON" + closing + '{"required": 7, "extra": true}'
     )
     assert result["reward"] == 1.0
     assert grade_structured_output('{"optional":"x"}', record, {})[0] == 0.0
@@ -300,13 +306,30 @@ def test_judge_length_finish_cannot_be_accepted_as_partial_json(monkeypatch):
         OpenAIJudge(base_url="https://judge.example", model="judge").generate([])
 
 
-def test_instruction_final_answer_is_graded_without_reasoning_contamination():
+@pytest.mark.parametrize("opening,closing", [("<think>", "</think>"), ("<|start_think|>", "<|end_think|>")])
+def test_instruction_final_answer_is_graded_without_reasoning_contamination(opening, closing):
     env = ultra_env(
         "instruction_following_simple_agent",
         {"instruction_id_list": ["keywords:forbidden_words"], "kwargs": [{"forbidden_words": ["banana"]}]},
     )
-    assert env.step("<think>Do not say banana.</think>Hello.")["reward"] == 1.0
-    assert env.step("<think>I can ignore the instruction.</think>banana")["reward"] == 0.0
+    assert env.step(opening + "Do not say banana." + closing + "Hello.")["reward"] == 1.0
+    assert env.step(opening + "I can ignore the instruction." + closing + "banana")["reward"] == 0.0
+
+
+def test_grading_message_uses_final_content_without_mutating_retained_evidence():
+    env = ultra_env(
+        "single_step_tool_use_with_argument_comparison_agent",
+        {
+            "expected_action": {"type": "message", "content": "Hello."},
+        },
+    )
+    raw = {"role": "assistant", "content": "reasoning words Hello.", "tool_calls": []}
+    evidence = RolloutEvidence(metadata={"assistant_message": raw})
+    env.set_rollout_evidence(evidence)
+    result = env.step("<|start_think|>reasoning words<|end_think|>Hello.")
+    assert result["reward"] == 1.0
+    assert evidence.metadata["assistant_message"] == raw
+    assert raw["content"] == "reasoning words Hello."
 
 
 def test_broken_instruction_verifier_is_not_a_verified_wrong_answer():
