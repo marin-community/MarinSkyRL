@@ -23,6 +23,8 @@ REWARD_SHAPING_ROW_KEYS = (
     "loop_advantages",
     "reward_shaping_versions",
     "verifier_tests",
+    "verification_results",
+    "evidence_messages",
     "exception_types",
     "error_treatments",
     "server_errors",
