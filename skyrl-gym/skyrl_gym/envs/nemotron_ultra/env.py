@@ -206,7 +206,7 @@ class NemotronUltraEnv(BaseTextEnv):
                 reward=0.0,
                 done=True,
                 metadata=diagnostics,
-                verification=VerificationResult.unavailable("grading is skipped", diagnostics=diagnostics),
+                verification=VerificationResult.skipped("grading is skipped", diagnostics=diagnostics),
             )
 
         if self.agent in {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}:

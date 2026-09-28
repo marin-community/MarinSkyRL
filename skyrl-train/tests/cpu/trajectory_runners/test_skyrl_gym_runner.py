@@ -632,7 +632,7 @@ async def test_genrm_cohort_ranking_is_skipped_when_grading_is_skipped(generator
     )
     runner = SkyRLGymTrajectoryRunner(generator_cfg, skyrl_gym_cfg, MagicMock(), mock_tokenizer)
     runner.genrm_judge = MagicMock()
-    verification = VerificationResult.unavailable("grading is skipped")
+    verification = VerificationResult.skipped("grading is skipped")
     output = AgentLoopOutput(
         evidence=RolloutEvidence(
             messages=({"role": "user", "content": "q"}, {"role": "assistant", "content": "answer"}),
@@ -698,6 +698,40 @@ async def test_agent_loop_single_turn(
     assert sum(output.reward.token_rewards or ()) == 1.0
     assert (output.evidence.stop_reason or "unknown") == "stop"
     assert output.loss_mask == [1] * len(MOCK_LLM_OUTPUT_IDS)
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+@pytest.mark.parametrize(
+    ("verification", "loss_eligible"),
+    [
+        (VerificationResult.skipped("grading is skipped"), True),
+        (VerificationResult.unavailable("judge unreachable"), False),
+    ],
+)
+async def test_agent_loop_trains_skipped_verdicts_and_masks_missing_ones(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, env_cfg, verification, loss_eligible
+):
+    mock_env.step.side_effect = lambda x: BaseTextEnvStepOutput(
+        observations=[], reward=0.0, done=True, metadata={}, verification=verification
+    )
+    mock_tokenizer.eos_token_id = 4
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    trajectory_runner = SkyRLGymTrajectoryRunner(
+        trajectory_runner_cfg=generator_cfg,
+        skyrl_gym_cfg=env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    trajectory_runner.base_conversation_token_ids = []
+
+    output = await trajectory_runner.agent_loop(
+        [{"role": "user", "content": "q"}], env_cfg.env_class, {}, max_tokens=8, max_input_length=512
+    )
+
+    assert output.verification.status is verification.status
+    assert output.disposition.loss_eligible is loss_eligible
 
 
 @pytest.mark.asyncio
