@@ -432,13 +432,23 @@ def test_grug_megatron_eval_forward_is_independent_of_peer_rank_batch(
         ray.shutdown()
 
 
-def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
-    world_size = 2
+@pytest.mark.parametrize(
+    ("world_size", "ep", "optimizer_name"),
+    [(2, 1, "AdamW"), (2, 1, "MuonH"), (4, 2, "MuonH")],
+    ids=["pp2_adamw", "pp2_muonh", "pp2_ep2_muonh"],
+)
+def test_grug_megatron_pp2_train_step_updates_weights_and_exports(
+    tmp_path, world_size: int, ep: int, optimizer_name: str
+):
     require_hoppers(world_size)
     model_path = tmp_path / "model"
     model_path.mkdir()
     _write_tiny_checkpoint(model_path)
-    cfg = _config(str(model_path), world_size=world_size, pp=2, ep=1)
+    cfg = _config(str(model_path), world_size=world_size, pp=2, ep=ep)
+    cfg.trainer.policy.optimizer_config.optimizer = optimizer_name
+    if optimizer_name == "MuonH":
+        cfg.trainer.policy.optimizer_config.weight_decay = 0.0
+        cfg.trainer.policy.optimizer_config.optimizer_kwargs = {"adam_lr": 0.004}
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     batch = _padded_batch(tokenizer.pad_token_id)
     export_dir = tmp_path / "export"
