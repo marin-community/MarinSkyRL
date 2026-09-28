@@ -16,6 +16,7 @@ from pytest import approx
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
+from skyrl_train.callbacks.base import CallbackHandler
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.group_admission import GroupAdmissionStalledError, GroupAdvantageInvariant
 import skyrl_train.trainer as trainer_module
@@ -664,6 +665,7 @@ def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
 
 def test_checkpoint_marker_waits_for_rank_uploads(monkeypatch, tmp_path):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.callback_handler = CallbackHandler()
     trainer.policy_model = SimpleNamespace(async_run_ray_method=lambda *_args: [object()])
     trainer.critic_model = None
     trainer._last_saved_step = None
@@ -1216,6 +1218,39 @@ def test_calculate_kl_create_experience_batched(dummy_config, dummy_trajectory_r
     assert metrics["avg_kl_max"] == approx(0.3143, abs=1e-4)
     # Note; the raw KL mean is 0.054, but then the masked mean is different.
     assert metrics["avg_kl"] == approx(0.1249, abs=1e-4)
+
+
+def test_grpo_reports_one_flat_and_one_varied_reward_group():
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "step_wise_training": False,
+                "algorithm": {
+                    "advantage_estimator": "grpo",
+                    "gamma": 1.0,
+                    "lambd": 1.0,
+                    "grpo_norm_by_std": True,
+                },
+            }
+        }
+    )
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.exact_physical(physical_group_size=2)
+    trainer.all_metrics = {}
+    data = TrainingInputBatch(
+        {
+            "rewards": torch.tensor([[1.0], [1.0], [0.0], [2.0]]),
+            "response_mask": torch.ones(4, 1),
+            "values": None,
+        }
+    )
+    data.metadata = {"uids": ["easy", "easy", "hard", "hard"], "avg_response_length": 1.0}
+
+    result = trainer.compute_advantages_and_returns(data)
+
+    assert trainer.all_metrics["reward/zero_std_group_fraction"] == pytest.approx(0.5)
+    assert torch.equal(result["advantages"][:2], torch.zeros(2, 1))
+    assert torch.isfinite(result["advantages"]).all()
 
 
 @patch("skyrl_train.trainer.compute_advantages_and_returns", new_callable=MagicMock)

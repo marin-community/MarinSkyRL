@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
+from typing import Any, Dict, List, Literal, NotRequired, Optional, TypedDict, Union
 
 
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
@@ -93,6 +93,7 @@ class TrajectoryBatch(TypedDict):
 
     prompt_token_ids: List[List[int]]
     response_ids: List[List[int]]
+    data_sources: Optional[List[str | None]]
     rewards: Union[List[float], List[List[float]]]
     unshaped_rewards: Optional[List[float]]
     unshaped_reward_available: Optional[List[bool]]
@@ -100,12 +101,17 @@ class TrajectoryBatch(TypedDict):
     reward_shaping_loop_spans: Optional[List[List[RewardShapingLoopSpan]]]
     loop_advantages: Optional[List[List[float]]]
     reward_shaping_versions: Optional[List[int]]
+    verification_results: List[Optional[VerificationResult]]
+    evidence_messages: List[Optional[list[dict[str, Any]]]]
     verifier_tests: Optional[List[Optional[VerifierTestCollection]]]
     loss_masks: List[List[int]]
     stop_reasons: Optional[List[str]]
     exception_types: Optional[List[Optional[str]]]
     error_treatments: Optional[List[Optional[str]]]
+    server_errors: Optional[List[Optional[Dict[str, Any]]]]
     rollout_metrics: Optional[Dict[str, Any]]
+    env_metrics: NotRequired[List[Dict[str, Any]]]
+    env_classes: NotRequired[List[str]]
     rollout_logprobs: Optional[List[List[float]]]
     student_topk_indices: Optional[List[List[List[int]]]]
     behavior_topk_logprobs: Optional[List[List[List[float]]]]

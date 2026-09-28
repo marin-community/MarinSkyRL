@@ -4,11 +4,12 @@ import io as stdlib_io
 import json
 import math
 import os
+import re
 import shutil
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
+from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
@@ -53,7 +54,8 @@ from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_m
 from skyrl_train.tensor_math import masked_mean
 from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
-from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
+from skyrl_train.utils.advantage_estimators import GRPO_FLAT_REWARD_STD_TOLERANCE, compute_advantages_and_returns
+from skyrl_train.utils.algorithm_registry import AdvantageEstimator
 from skyrl_train.utils.loss_reduction import (
     GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION,
     compute_global_loss_denom,
@@ -130,7 +132,7 @@ from skyrl_train.telemetry import (
 )
 from skyrl_train.rollout_observability import observe_rollout_call
 from skyrl_train.utils.importance_ratio_diagnostics import mismatch_ratio_metrics
-from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
+from skyrl_train.timing_observability import StepWallTime, publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
     read_hf_export_request,
@@ -159,6 +161,47 @@ class CheckpointSnapshot:
 
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
+
+MAX_DOMAIN_REWARD_METRICS = 32
+
+
+def _domain_metric_source_key(source: str | None) -> str:
+    """Encode one source as a distinct, tracker-safe metric path segment.
+
+    Lowercase ASCII names stay readable. ``_missing`` denotes absent metadata;
+    other names use fixed-width UTF-8 byte escapes under ``_source_``.
+    """
+    if source is None:
+        return "_missing"
+    if re.fullmatch(r"[a-z_][a-z0-9_]*", source) and source != "_missing" and not source.startswith("_source_"):
+        return source
+    encoded = "".join(
+        chr(byte) if byte in b"abcdefghijklmnopqrstuvwxyz0123456789" else f"_{byte:02x}"
+        for byte in source.encode("utf-8")
+    )
+    return f"_source_{encoded}"
+
+
+def _domain_reward_metrics(data_sources: List[str | None], rewards: List[float]) -> Dict[str, float]:
+    """Return bounded per-source means with distinct, stable metric names."""
+    if len(data_sources) != len(rewards):
+        raise ValueError(
+            f"Expected one data source per reward, got {len(data_sources)} sources and {len(rewards)} rewards"
+        )
+
+    rewards_by_source: Dict[str, List[float]] = defaultdict(list)
+    for source, reward in zip(data_sources, rewards, strict=True):
+        rewards_by_source[_domain_metric_source_key(source)].append(reward)
+
+    sources = sorted(rewards_by_source)
+    metrics = {
+        f"reward/domain/{source}/avg_raw_reward": float(np.mean(rewards_by_source[source]))
+        for source in sources[:MAX_DOMAIN_REWARD_METRICS]
+    }
+    if len(sources) > MAX_DOMAIN_REWARD_METRICS:
+        overflow = [reward for source in sources[MAX_DOMAIN_REWARD_METRICS:] for reward in rewards_by_source[source]]
+        metrics["reward/domain_overflow/avg_raw_reward"] = float(np.mean(overflow))
+    return metrics
 
 
 def _active_online_eagle_results(results: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -209,6 +252,19 @@ def consumed_work(training_input: TrainingInputBatch) -> ConsumedWork:
         response_tokens=int(training_input["response_mask"][:real_rows].sum().item()),
         loss_tokens=int(training_input["loss_mask"][:real_rows].sum().item()),
     )
+
+
+def _zero_std_group_fraction(uids: Sequence[str], rewards: torch.Tensor) -> float:
+    group_rewards: dict[str, list[torch.Tensor]] = {}
+    for uid, reward in zip(uids, rewards, strict=True):
+        group_rewards.setdefault(uid, []).append(reward)
+    if not group_rewards:
+        return 0.0
+    flat_groups = sum(
+        len(group) > 1 and torch.std(torch.stack(group)).item() <= GRPO_FLAT_REWARD_STD_TOLERANCE
+        for group in group_rewards.values()
+    )
+    return flat_groups / len(group_rewards)
 
 
 class RayPPOTrainer:
@@ -712,6 +768,14 @@ class RayPPOTrainer:
         return time.monotonic() - snapshot.upload_started_at, cleanup_duration
 
     async def _finish_checkpoint_upload(self, snapshot: CheckpointSnapshot, *, commit: bool) -> tuple[float, float]:
+        try:
+            await self.callback_handler.wait_for_pending_saves()
+        except BaseException:
+            try:
+                await self.callback_handler.wait_for_pending_saves()
+            finally:
+                await asyncio.to_thread(self._finish_checkpoint_upload_blocking, snapshot, commit=False)
+            raise
         return await asyncio.to_thread(self._finish_checkpoint_upload_blocking, snapshot, commit=commit)
 
     async def _await_checkpoint_upload(self, snapshot: CheckpointSnapshot) -> None:
@@ -724,7 +788,8 @@ class RayPPOTrainer:
         task, state = pending
         self._pending_checkpoint_upload = None
         try:
-            duration, cleanup_duration = await task
+            with Timer("checkpoint_upload_blocking", self.all_timings, log_events=False):
+                duration, cleanup_duration = await task
         except OSError:
             self._record_checkpoint_save_failure(state)
             return False
@@ -739,16 +804,20 @@ class RayPPOTrainer:
         )
         return True
 
-    async def _run_step_end_callbacks(self, state: TrainerState) -> None:
+    async def _run_step_end_callbacks(self, state: TrainerState, *, step_wall: StepWallTime | None = None) -> None:
         """Run callback-requested work that belongs to the current training step."""
         self._control.reset()
         self._control = await self.callback_handler.call_event_async("on_step_end", state, self._control, trainer=self)
 
         if self._control.should_save:
+            if step_wall is not None:
+                step_wall.start("checkpoint_work")
             await self._save_intermediate_checkpoint(state)
             self._control.should_save = False
 
         if self._control.should_save_hf_model:
+            if step_wall is not None:
+                step_wall.start("checkpoint_work")
             # HF export reads the committed checkpoint. When checkpoint and HF
             # export share a cadence, wait for the background shard uploads and
             # marker publication before asking the exporter to consume it.
@@ -757,6 +826,8 @@ class RayPPOTrainer:
             self._control.should_save_hf_model = False
 
         if self._control.should_evaluate and self.eval_dataset is not None:
+            if step_wall is not None:
+                step_wall.start("evaluation")
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
                 self.all_metrics.update(eval_metrics)
@@ -764,6 +835,8 @@ class RayPPOTrainer:
                 "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
             )
             self._control.should_evaluate = False
+        if step_wall is not None:
+            step_wall.start("step_end_bookkeeping")
 
     async def _sync_weights_and_restore_rollout_residency(self) -> None:
         await self.inference_engine_client.wake_up(tags=["weights"])
@@ -2032,6 +2105,14 @@ class RayPPOTrainer:
                 max(values) > min(values) for values in grouped_rewards.values()
             ) / len(grouped_rewards)
         self.all_metrics.update(reward_metrics)
+        data_sources = trajectory_batch_for_metrics.get("data_sources")
+        if data_sources is not None:
+            self.all_metrics.update(
+                _domain_reward_metrics(
+                    data_sources,
+                    [float(sum(reward) if isinstance(reward, list) else reward) for reward in step_rewards],
+                )
+            )
         logger.info(f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, reward/avg_raw_reward: {mean_reward}")
 
         # re-assign reward but now it's per token rewards
@@ -2154,6 +2235,13 @@ class RayPPOTrainer:
         num_samples = len(token_level_rewards)
 
         return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
+        if (
+            self.cfg.trainer.algorithm.advantage_estimator == AdvantageEstimator.GRPO
+            and not self.cfg.trainer.step_wise_training
+        ):
+            self.all_metrics["reward/zero_std_group_fraction"] = _zero_std_group_fraction(
+                data.metadata["uids"][: num_samples - pad_size], return_sums
+            )
         if self.cfg.trainer.step_wise_training:
             avg_rewards: float = return_sums[data["is_last_step"][: num_samples - pad_size]].mean().item()
         else:

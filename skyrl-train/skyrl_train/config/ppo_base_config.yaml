@@ -262,7 +262,25 @@ trainer:
   fully_async:
     max_staleness_steps: 4
 
+    # Exclusive optimizer-step wall-time budgets in seconds. The corresponding
+    # timing/step_wall/* values sum to timing/step; legacy timing/* spans can overlap.
+    step_phase_budgets:
+      group_admission: 1800
+      batch_assembly: 600
+      training_preparation: 900
+      advantages: 300
+      policy_training: 3600
+      group_bookkeeping: 60
+      weight_sync: 600
+      step_end_bookkeeping: 60
+      checkpoint_work: 1800
+      evaluation: 1800
+      unaccounted: 5
+
     num_parallel_generation_workers: 768
+    # Limit completed rollout groups waiting for learner admission independently
+    # of the number of generation workers. Null retains the worker-count limit.
+    max_buffered_groups: null
 
     # Bound teacher-scoring work independently for each logical teacher. Queue
     # backpressure is applied when a rollout group is admitted, before learner
@@ -397,6 +415,16 @@ generator:
   # Deadline for every engine to acknowledge a weight-sync pause or resume.
   weight_sync_pause_timeout_seconds: 30.0
   max_turns: 1
+
+  # Shared Harbor/Gym terminal-error taxonomy. Unknown Gym failures retain the
+  # previous masking behavior; context overflow and timeouts are agent errors.
+  error_handling:
+    enable_error_classification: true
+    passthrough_exceptions: []
+    mask_exceptions: []
+    zero_exceptions: []
+    default_error_treatment: mask
+    preserve_logprobs_on_timeout: true
 
   chat_template:
     source: "name"
