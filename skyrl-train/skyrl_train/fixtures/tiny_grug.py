@@ -12,6 +12,7 @@ from datasets import Dataset
 from transformers import AutoTokenizer
 from rigging.filesystem.storage_path import StoragePath
 
+from marinskyrl.model_manifest import write_local_model_manifest
 from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeForCausalLM
 
 TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -83,6 +84,7 @@ def write_tiny_probe_fixture(path: Path) -> None:
     model_path.mkdir(parents=True, exist_ok=True)
     data_path.mkdir(parents=True, exist_ok=True)
     write_tiny_checkpoint(model_path)
+    write_local_model_manifest(model_path)
     for name, prompts in (("train", TRAIN_PROMPTS), ("validation", VALIDATION_PROMPTS)):
         rows = [
             {"prompt": [{"role": "user", "content": prompt}], "env_class": "mismatch_fixture"} for prompt in prompts
