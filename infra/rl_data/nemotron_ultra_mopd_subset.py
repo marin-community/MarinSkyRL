@@ -21,6 +21,8 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
+import datasets
+
 from infra.rl_data.nemotron_ultra_sample import (
     HUGGING_FACE_RESOLVE_URL,
     RANGE_BYTES,
@@ -231,8 +233,6 @@ def write_mopd_subset(
     output_dir: Path, prepared: list[PreparedRow], proxy_paths: set[str], manifest: dict[str, Any]
 ) -> dict[str, Any]:
     """Write ``train.parquet``, the SWE task artifact when SWE rows exist, and the manifest."""
-    import datasets
-
     if output_dir.exists():
         raise FileExistsError(f"Refusing to overwrite MOPD subset: {output_dir}")
     output_dir.mkdir(parents=True)
