@@ -45,6 +45,10 @@ def validate_mismatch_probe_config(
         return
     if not synchronous or trainer.get("rollout_buffer", {}).get("max_staleness_steps", 0) != 0:
         raise ValueError("trainer.mismatch_probe requires the synchronous trainer")
+    if trainer.get("step_wise_training", False):
+        raise ValueError(
+            "trainer.mismatch_probe requires whole-trajectory token identity; step-wise probing is unsupported"
+        )
     prompts = probe.get("prompts") or {}
     for field in ("count", "samples_per_prompt"):
         value = prompts.get(field)
@@ -120,6 +124,6 @@ def validate_mismatch_probe_config(
     if isinstance(layer_tokens, bool) or not isinstance(layer_tokens, int) or layer_tokens < 0:
         raise ValueError("trainer.mismatch_probe.layer_tokens must be a non-negative integer")
     if layer_tokens:
-        if not engine_options.get("enforce_eager"):
+        if not generator.get("enforce_eager"):
             raise ValueError("trainer.mismatch_probe layer capture requires eager vLLM")
         raise ValueError("trainer.mismatch_probe has no registered layer adapter for this architecture")
