@@ -49,6 +49,7 @@ from cloud.iris.ray_storage import (
     resolve_ray_spill_target,
 )
 from cloud.iris.rl_config_translation import (
+    IMPORT_PATH_TO_ENV_TYPE,
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
     RL_ENTRYPOINTS,
@@ -744,14 +745,19 @@ def _cluster_dashboard_host(cluster_config_path: Optional[str]) -> Optional[str]
 def _rl_config_uses_daytona(config: DictConfig) -> bool:
     """Return whether the resolved launch runs Harbor trials in Daytona sandboxes.
 
-    The Harbor entrypoints always do. Other entrypoints do when ``data.terminal_bench_data``
+    Harbor entrypoints use Daytona by default, but an explicit custom environment can
+    select another backend. Other entrypoints use Daytona when ``data.terminal_bench_data``
     routes rows to Harbor, as Nemotron Ultra routing does for its SWE rows.
     """
     if str(config.runtime.entrypoint) in {
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH],
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH_GENERATE],
     }:
-        return True
+        harbor = config.skyrl.get("terminal_bench", {}).get("harbor", {})
+        import_path = harbor.get("import_path")
+        if import_path:
+            return IMPORT_PATH_TO_ENV_TYPE.get(str(import_path)) == "daytona"
+        return str(harbor.get("environment_type", "daytona")) == "daytona"
     return bool(config.skyrl.get("data", {}).get("terminal_bench_data"))
 
 
