@@ -172,24 +172,24 @@ def normalize_final_answer(final_answer: str) -> str:
 
 
 _TEX_FRACTION = re.compile(r"\\[dt]?frac\{(-?\d+(?:\.\d+)?)\}\{(-?\d+(?:\.\d+)?)\}")
-_PLAIN_NUMBER = re.compile(r"-?\d+(?:\.\d+)?(?:/-?\d+(?:\.\d+)?)?")
+_SLASH_FRACTION = re.compile(r"(-?\d+(?:\.\d+)?)/(-?\d+(?:\.\d+)?)")
+_PLAIN_DECIMAL = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 def rational_value(answer: str) -> Optional[Fraction]:
     """Parse a normalized answer as an exact rational, accepting TeX fraction forms."""
     candidate = answer.replace(r"\left", "").replace(r"\right", "").strip()
-    match = _TEX_FRACTION.fullmatch(candidate)
-    if match is not None:
+    for pattern in (_TEX_FRACTION, _SLASH_FRACTION):
+        match = pattern.fullmatch(candidate)
+        if match is None:
+            continue
         try:
             return Fraction(match.group(1)) / Fraction(match.group(2))
         except ZeroDivisionError:
             return None
-    if not _PLAIN_NUMBER.fullmatch(candidate):
-        return None
-    try:
+    if _PLAIN_DECIMAL.fullmatch(candidate):
         return Fraction(candidate)
-    except (ValueError, ZeroDivisionError):
-        return None
+    return None
 
 
 def is_correct_minerva(
