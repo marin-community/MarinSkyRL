@@ -1,4 +1,4 @@
-# Ten-step SWE Pivot RL retry on five 5-H100 nodes: four learner, one inference.
+# Ten-step SWE Pivot RL retry on eight H100 nodes: six learner, two inference.
 # Each update uses 512 prefixes x 16 responses = 8192 trajectories.
 # Keep the one-action 512-token cap within a 32K request window.
 entrypoint: standard
@@ -46,18 +46,18 @@ trainer:
       weight_decay: 0.0
       max_grad_norm: 0.5
     megatron_config:
-      tensor_model_parallel_size: 5
-      pipeline_model_parallel_size: 4
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 6
       context_parallel_size: 1
-      expert_model_parallel_size: 1
-      expert_tensor_parallel_size: 5
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
       logprob_chunk_size: 128
       optimizer_config_kwargs:
         optimizer_cpu_offload: true
         optimizer_offload_fraction: 1.0
       transformer_config_kwargs:
-        num_layers_in_first_pipeline_stage: 6
-        num_layers_in_last_pipeline_stage: 6
+        num_layers_in_first_pipeline_stage: 5
+        num_layers_in_last_pipeline_stage: 5
       optimizer_checkpoint_sharding_type: dp_reshardable
       ddp_config:
         overlap_grad_reduce: true
@@ -65,22 +65,22 @@ trainer:
         grad_reduce_in_fp32: false
   ref:
     megatron_config:
-      tensor_model_parallel_size: 5
-      pipeline_model_parallel_size: 4
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 6
       context_parallel_size: 1
-      expert_model_parallel_size: 1
-      expert_tensor_parallel_size: 5
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
       logprob_chunk_size: 128
       transformer_config_kwargs:
-        num_layers_in_first_pipeline_stage: 6
-        num_layers_in_last_pipeline_stage: 6
+        num_layers_in_first_pipeline_stage: 5
+        num_layers_in_last_pipeline_stage: 5
   placement:
     colocate_all: false
     colocate_policy_ref: true
-    policy_num_nodes: 4
-    policy_num_gpus_per_node: 5
-    ref_num_nodes: 4
-    ref_num_gpus_per_node: 5
+    policy_num_nodes: 6
+    policy_num_gpus_per_node: 8
+    ref_num_nodes: 6
+    ref_num_gpus_per_node: 8
   enable_db_registration: false
   dump_eval_results: true
   eval_before_train: true
@@ -91,10 +91,10 @@ generator:
   backend: vllm
   model_dtype: bfloat16
   vllm_attention_backend: FLASH_ATTN
-  inference_engine_tensor_parallel_size: 5
-  inference_engine_data_parallel_size: 1
-  inference_engine_expert_parallel_size: 1
-  num_inference_engines: 1
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_data_parallel_size: 8
+  inference_engine_expert_parallel_size: 8
+  num_inference_engines: 2
   n_samples_per_prompt: 16
   eval_n_samples_per_prompt: 1
   gpu_memory_utilization: 0.8

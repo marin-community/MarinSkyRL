@@ -37,6 +37,7 @@ MODEL = "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21"
 MODEL_REVISION = "b8c07f7df1df65525abbfdbcd1572318ba11c42f"
 MODEL_LAYERS = 26
 MODEL_KV_HEADS = 5
+MODEL_VOCAB_SIZE = 128256
 MODEL_EXPERTS = 256
 MODEL_EXPERT_WIDTH = 1280
 CLUSTER = "cw-us-east-02a"
@@ -179,6 +180,8 @@ def validate_smoke_config(config: DictConfig) -> None:
             )
         if MODEL_KV_HEADS % megatron.tensor_model_parallel_size:
             raise ValueError(f"Grug's {MODEL_KV_HEADS} KV heads cannot be divided across trainer.{role} TP")
+        if MODEL_VOCAB_SIZE % megatron.tensor_model_parallel_size:
+            raise ValueError(f"Grug's {MODEL_VOCAB_SIZE} vocabulary tokens cannot be divided across trainer.{role} TP")
         if MODEL_EXPERTS % megatron.expert_model_parallel_size:
             raise ValueError(f"Grug's {MODEL_EXPERTS} experts cannot be divided across trainer.{role} EP")
         if MODEL_EXPERT_WIDTH % megatron.expert_tensor_parallel_size:

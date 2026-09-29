@@ -91,16 +91,25 @@ def test_grug_smoke_rejects_uneven_pipeline_without_stage_layout(tmp_path, role)
         validate_smoke_config(load_launch_config(path))
 
 
-@pytest.mark.parametrize(
-    "recipe,nodes,gpus_per_node",
-    [
-        ("cloud/iris/configs/grug_pivot_swe_tp5_retry.yaml", 6, 8),
-        ("cloud/iris/configs/grug_pivot_swe_tp5_25gpu.yaml", 5, 5),
-    ],
-)
-def test_grug_retry_preflight_preserves_sample_model_and_token_budget(
-    tmp_path, monkeypatch, capsys, recipe, nodes, gpus_per_node
-):
+@pytest.mark.parametrize("role", ["policy", "ref"])
+def test_grug_smoke_rejects_tp5_vocab_partition_before_launch(tmp_path, role):
+    config = launch_config(
+        "grug-vocab-regression",
+        str(tmp_path / "output"),
+        str(tmp_path / "temporary"),
+        "s3://marin-us-east-02a/preflight/grug",
+        MODEL_REVISION,
+        recipe_path="cloud/iris/configs/grug_pivot_swe_64gpu.yaml",
+    )
+    config.skyrl.trainer[role].megatron_config.tensor_model_parallel_size = 5
+    path = tmp_path / "launch.yaml"
+    OmegaConf.save(config, path)
+
+    with pytest.raises(ValueError, match="128256 vocabulary tokens cannot be divided"):
+        validate_smoke_config(load_launch_config(path))
+
+
+def test_grug_retry_preflight_preserves_sample_model_and_token_budget(tmp_path, monkeypatch, capsys):
     source_root = tmp_path / "source"
     data_root = source_root / "data"
     source_config = launch_config(
@@ -147,7 +156,9 @@ def test_grug_retry_preflight_preserves_sample_model_and_token_budget(
             "--temporary-root",
             str(tmp_path / "retry-temporary"),
             "--recipe",
-            recipe,
+            "cloud/iris/configs/grug_pivot_swe_64gpu.yaml",
+            "--cluster",
+            "cw-rno2a",
             "--reuse-comparison-root",
             str(source_root),
         ],
@@ -161,8 +172,9 @@ def test_grug_retry_preflight_preserves_sample_model_and_token_budget(
     assert retry.inputs.train_data[0].uri == str(data_root)
     assert retry.inputs.validation_data[0].uri == str(data_root)
     assert retry.skyrl.trainer.pivot_token_budget == 1_421_216_000
-    assert retry.iris.allocation.num_nodes == nodes
-    assert retry.iris.allocation.gpus_per_node == gpus_per_node
+    assert retry.iris.cluster == "cw-rno2a"
+    assert retry.iris.allocation.num_nodes == 8
+    assert retry.iris.allocation.gpus_per_node == 8
 
 
 def test_grug_comparison_pairs_outputs_from_separate_runs(tmp_path):
