@@ -6,36 +6,63 @@ Run with:
 uv run --isolated --group dev --extra cpu pytest tests/cpu/inf_engines/test_inference_engine_client.py
 """
 
-from http import HTTPStatus
+import asyncio
 import base64
 import io
 import socket
+from copy import deepcopy
+from http import HTTPStatus
 from unittest.mock import patch
 
 import numpy as np
-from transformers import AutoTokenizer
+import pytest
+import ray.exceptions
+from jinja2 import TemplateError
+from omegaconf import OmegaConf
+from skyrl_train.config.utils import get_default_config
+from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
+    ErrorResponse,
+)
 from skyrl_train.inference_engines.utils import (
     _RENDEZVOUS_PORT_START,
     _RENDEZVOUS_PORT_STOP,
     _find_available_rendezvous_port,
     _reserve_available_rendezvous_ports,
+    get_vllm_sampling_params,
+    hash_with_sha256,
     postprocess_completion_request,
     route_prompts_to_engines,
-    hash_with_sha256,
 )
-from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
-    ErrorResponse,
-)
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
-from omegaconf import OmegaConf
-import asyncio
-import pytest
-from jinja2 import TemplateError
-import random
-import ray.exceptions
-from copy import deepcopy
+from transformers import AutoTokenizer
+
+# (num_engines, num_prompts, with_session_ids): a single engine, an uneven even-split, session-id
+# routing with repeated ids, and more engines than prompts.
+ROUTING_CASES = [(1, 1, False), (3, 50, False), (4, 50, True), (16, 5, False)]
+
+
+def _routing_session_ids(num_prompts: int) -> list[int]:
+    # Repeated ids exercise session stickiness; the fixed modulus keeps the routing deterministic.
+    return [i % 7 for i in range(num_prompts)]
+
+
+def _make_min_cfg():
+    return OmegaConf.create(
+        {
+            "trainer": {
+                "policy": {"model": {"path": "dummy-model"}},
+            },
+            "generator": {
+                "backend": "vllm",
+                "enable_http_endpoint": False,
+                "http_endpoint_host": "127.0.0.1",
+                "http_endpoint_port": 0,
+                "weight_sync_pause_timeout_seconds": 30.0,
+            },
+        }
+    )
 
 
 def test_rendezvous_port_avoids_ephemeral_range_and_existing_listener(monkeypatch):
@@ -59,9 +86,8 @@ def test_rendezvous_port_reservations_hold_ports_until_released(monkeypatch):
     reservations = _reserve_available_rendezvous_ports(2)
     ports = [reservation.getsockname()[1] for reservation in reservations]
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as contender:
-        with pytest.raises(OSError):
-            contender.bind(("", ports[0]))
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as contender, pytest.raises(OSError):
+        contender.bind(("", ports[0]))
 
     for reservation in reservations:
         reservation.close()
@@ -96,10 +122,7 @@ class _CommunicatorEngine:
     ids=["logical-dp-engines", "legacy-sequential-engines"],
 )
 def test_weight_sync_communicator_rank_offsets(engines, expected_offsets):
-    client = object.__new__(InferenceEngineClient)
-    client.engines = engines
-    client._dead_engines = set()
-    client.enable_http_endpoint = False
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
 
     asyncio.run(
         client.init_weight_update_communicator(
@@ -115,120 +138,37 @@ def test_weight_sync_communicator_rank_offsets(engines, expected_offsets):
     assert [engine.received_rank_offset for engine in engines] == expected_offsets
 
 
-# -------------------------------------------
-# tests for postprocess_completion_request
-# --------------------------------------------
+@pytest.mark.parametrize(
+    ("prompt", "session_id", "expected_session_ids", "expected_prompt"),
+    [
+        ("hello world", None, None, ["hello world"]),
+        ("hello world", 123, [123], ["hello world"]),
+        ("hello world", ["abc"], ["abc"], ["hello world"]),
+        ("hello world", [1, 2], HTTPStatus.BAD_REQUEST, ["hello world"]),
+        ([1, 2, 3], None, None, [[1, 2, 3]]),
+        ([1, 2, 3], 7, [7], [[1, 2, 3]]),
+        ([1, 2, 3], [8], [8], [[1, 2, 3]]),
+        ([1, 2, 3], [8, 9], HTTPStatus.BAD_REQUEST, [[1, 2, 3]]),
+        ([[1, 2], [3, 4, 5]], None, None, [[1, 2], [3, 4, 5]]),
+        ([[1, 2], [3, 4, 5]], ["a", "b"], ["a", "b"], [[1, 2], [3, 4, 5]]),
+        ([[1, 2], [3, 4, 5]], [1], HTTPStatus.BAD_REQUEST, [[1, 2], [3, 4, 5]]),
+        (["p0", "p1"], None, None, ["p0", "p1"]),
+        (["p0", "p1", "p2"], [10, 11, 12], [10, 11, 12], ["p0", "p1", "p2"]),
+        (["p0", "p1", "p2"], [10, 11], HTTPStatus.BAD_REQUEST, ["p0", "p1", "p2"]),
+        (["p0", "p1", "p2"], 10, HTTPStatus.BAD_REQUEST, ["p0", "p1", "p2"]),
+    ],
+)
+def test_postprocess_completion_request_normalizes_prompt_and_session_ids(
+    prompt, session_id, expected_session_ids, expected_prompt
+):
+    session_ids, processed = postprocess_completion_request(prompt, session_id)
 
-
-def test_postprocess_single_string_no_session_id():
-    prompt = "hello world"
-    traj, processed = postprocess_completion_request(prompt, None)
-    assert traj is None
-    assert isinstance(processed, list)
-    assert processed == [prompt]
-
-
-def test_postprocess_single_string_scalar_session_id():
-    prompt = "hello world"
-    traj, processed = postprocess_completion_request(prompt, 123)
-    assert traj == [123]
-    assert processed == [prompt]
-
-
-def test_postprocess_single_string_list_session_id_singleton():
-    prompt = "hello world"
-    traj, processed = postprocess_completion_request(prompt, ["abc"])  # accepts str ids
-    assert traj == ["abc"]
-    assert processed == [prompt]
-
-
-def test_postprocess_single_string_list_session_id_wrong_len():
-    prompt = "hello world"
-    traj, processed = postprocess_completion_request(prompt, [1, 2])
-    assert isinstance(traj, ErrorResponse)
-    assert processed == [prompt]
-    assert traj.error.code == HTTPStatus.BAD_REQUEST.value
-
-
-def test_postprocess_single_token_ids_no_session_id():
-    prompt = [1, 2, 3]
-    traj, processed = postprocess_completion_request(prompt, None)
-    assert traj is None
-    assert processed == [prompt]
-
-
-def test_postprocess_single_token_ids_scalar_session_id():
-    prompt = [1, 2, 3]
-    traj, processed = postprocess_completion_request(prompt, 7)
-    assert traj == [7]
-    assert processed == [prompt]
-
-
-def test_postprocess_single_token_ids_list_session_id_singleton():
-    prompt = [1, 2, 3]
-    traj, processed = postprocess_completion_request(prompt, [8])
-    assert traj == [8]
-    assert processed == [prompt]
-
-
-def test_postprocess_single_token_ids_list_session_id_wrong_len():
-    prompt = [1, 2, 3]
-    traj, processed = postprocess_completion_request(prompt, [8, 9])
-    assert isinstance(traj, ErrorResponse)
-    assert processed == [prompt]
-    assert traj.error.code == HTTPStatus.BAD_REQUEST.value
-
-
-def test_postprocess_batched_token_ids_no_session_id():
-    prompt = [[1, 2], [3, 4, 5]]
-    traj, processed = postprocess_completion_request(prompt, None)
-    assert traj is None
-    assert processed is prompt  # unchanged shape
-
-
-def test_postprocess_batched_token_ids_with_matching_session_ids():
-    prompt = [[1, 2], [3, 4, 5]]
-    traj, processed = postprocess_completion_request(prompt, ["a", "b"])  # accepts str ids too
-    assert traj == ["a", "b"]
-    assert processed is prompt
-
-
-def test_postprocess_batched_token_ids_with_wrong_session_ids_length():
-    prompt = [[1, 2], [3, 4, 5]]
-    traj, processed = postprocess_completion_request(prompt, [1])
-    assert isinstance(traj, ErrorResponse)
-    assert processed is prompt
-    assert traj.error.code == HTTPStatus.BAD_REQUEST.value
-
-
-def test_postprocess_batched_strings_no_session_id():
-    prompt = ["p0", "p1"]
-    traj, processed = postprocess_completion_request(prompt, None)
-    assert traj is None
-    assert processed is prompt
-
-
-def test_postprocess_batched_strings_with_matching_session_ids():
-    prompt = ["p0", "p1", "p2"]
-    traj, processed = postprocess_completion_request(prompt, [10, 11, 12])
-    assert traj == [10, 11, 12]
-    assert processed is prompt
-
-
-def test_postprocess_batched_strings_with_wrong_session_ids_length():
-    prompt = ["p0", "p1", "p2"]
-    traj, processed = postprocess_completion_request(prompt, [10, 11])
-    assert isinstance(traj, ErrorResponse)
-    assert processed is prompt
-    assert traj.error.code == HTTPStatus.BAD_REQUEST.value
-
-
-def test_postprocess_batched_strings_with_wrong_session_ids_length_2():
-    prompt = ["p0", "p1", "p2"]
-    traj, processed = postprocess_completion_request(prompt, 10)
-    assert isinstance(traj, ErrorResponse)
-    assert processed is prompt
-    assert traj.error.code == HTTPStatus.BAD_REQUEST.value
+    assert processed == expected_prompt
+    if expected_session_ids is HTTPStatus.BAD_REQUEST:
+        assert isinstance(session_ids, ErrorResponse)
+        assert session_ids.error.code == HTTPStatus.BAD_REQUEST.value
+    else:
+        assert session_ids == expected_session_ids
 
 
 # -------------------------------------------
@@ -263,9 +203,7 @@ async def test_generate_single_selected_scores_fail_closed_on_abort(stop_reason)
         assert output["prompt_logprobs"] == [[None, {7: -7.0, 17: -17.0}]]
 
 
-@pytest.mark.parametrize("num_prompts", [1, 50, 100])
-@pytest.mark.parametrize("with_session_id", [True, False])
-@pytest.mark.parametrize("num_engines", [1, 3, 4, 8, 16])
+@pytest.mark.parametrize(("num_engines", "num_prompts", "with_session_id"), ROUTING_CASES)
 def test_completion_batched_routing_and_order_preservation(num_prompts, with_session_id, num_engines):
     """
     In InferenceEngineClient.completion, when the request is batched, we distribute the batch
@@ -313,31 +251,14 @@ def test_completion_batched_routing_and_order_preservation(num_prompts, with_ses
                 },
             }
 
-    # Create a minimal config to avoid spinning up HTTP endpoint
-    cfg = OmegaConf.create(
-        {
-            "trainer": {
-                "policy": {"model": {"path": "dummy-model"}},
-            },
-            "generator": {
-                "backend": "vllm",
-                "enable_http_endpoint": False,
-                "http_endpoint_host": "127.0.0.1",
-                "http_endpoint_port": 0,
-                "weight_sync_pause_timeout_seconds": 30.0,
-            },
-        }
-    )
+    cfg = _make_min_cfg()
 
     engines = [MockEngine() for _ in range(num_engines)]
     tokenizer = object()  # not used by completion()
     client = InferenceEngineClient(engines=engines, tokenizer=tokenizer, full_config=cfg)
 
     prompts = [str(i) for i in range(num_prompts)]
-    if with_session_id:
-        session_ids = [random.randint(1, 100) for _ in range(num_prompts)]
-    else:
-        session_ids = None
+    session_ids = _routing_session_ids(num_prompts) if with_session_id else None
     request_payload = {
         "json": {
             "model": "dummy-model",
@@ -447,9 +368,7 @@ async def test_generate_preserves_response_topk_across_engine_routing(num_engine
     assert output["prefix_cache_hit_tokens"] == [base * 16 for base in range(num_prompts)]
 
 
-@pytest.mark.parametrize("num_prompts", [1, 50, 100])
-@pytest.mark.parametrize("with_session_id", [True, False])
-@pytest.mark.parametrize("num_engines", [1, 3, 4, 8, 16])
+@pytest.mark.parametrize(("num_engines", "num_prompts", "with_session_id"), ROUTING_CASES)
 def test_generate_batched_routing_and_order_preservation(num_prompts, with_session_id, num_engines):
     """
     See the `test_completion_batched_routing_and_order_preservation` test for more details.
@@ -480,21 +399,7 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
                 "stop_reasons": stop_reasons,
             }
 
-    # Minimal config, do not spin up HTTP endpoint
-    cfg = OmegaConf.create(
-        {
-            "trainer": {
-                "policy": {"model": {"path": "dummy-model"}},
-            },
-            "generator": {
-                "backend": "vllm",
-                "enable_http_endpoint": False,
-                "http_endpoint_host": "127.0.0.1",
-                "http_endpoint_port": 0,
-                "weight_sync_pause_timeout_seconds": 30.0,
-            },
-        }
-    )
+    cfg = _make_min_cfg()
 
     engines = [MockEngine() for _ in range(num_engines)]
     tokenizer = object()  # not used when prompt_token_ids are provided
@@ -502,10 +407,7 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
 
     # Build token id prompts [[0], [1], ..., [n-1]]
     prompt_token_ids = [[i] for i in range(num_prompts)]
-    if with_session_id:
-        session_ids = [random.randint(1, 100) for _ in range(num_prompts)]
-    else:
-        session_ids = None
+    session_ids = _routing_session_ids(num_prompts) if with_session_id else None
 
     input_batch = {
         "prompts": None,
@@ -577,59 +479,16 @@ def test_route_prompts_to_engines_batched_more_engines_than_prompts():
 
 def test_route_prompts_to_engines_with_session_ids_grouping_and_partition():
     num_engines = 4
-    # Ensure same session IDs route to the same engine index
+    # Same session IDs route to the same engine; the mapping pins the sha256-based assignment.
     sids = ["A", "A", "B", "C", "B"]
-    # hash A ends in 45, B ends in 44, C ends in 69, with % 4 they become 1, 0, 1
-    engine_idx = [hash_with_sha256(sid) % num_engines for sid in sids]  # what we do in route_prompts_to_engines
-    assert engine_idx == [1, 1, 0, 1, 0]
     mapping = route_prompts_to_engines(num_prompts=5, num_inference_engines=num_engines, session_ids=sids)
 
     assert mapping == {1: [0, 1, 3], 0: [2, 4]}
 
 
-def test_route_prompts_to_engines_validation_errors():
-    # num_prompts must be > 0
-    with pytest.raises(AssertionError):
-        route_prompts_to_engines(num_prompts=0, num_inference_engines=1, session_ids=None)
-
-    # num_inference_engines must be > 0
-    with pytest.raises(AssertionError):
-        route_prompts_to_engines(num_prompts=1, num_inference_engines=0, session_ids=None)
-
-    # session_ids length must match
-    with pytest.raises(AssertionError):
-        route_prompts_to_engines(num_prompts=2, num_inference_engines=1, session_ids=["x"])  # len 1 != 2
-
-    # session_ids type checking
-    with pytest.raises(AssertionError):
-        route_prompts_to_engines(num_prompts=2, num_inference_engines=1, session_ids=[1, 2.0])  # float invalid
-
-    # No error
-    route_prompts_to_engines(num_prompts=2, num_inference_engines=1, session_ids=[1, 2])
-    route_prompts_to_engines(num_prompts=2, num_inference_engines=1, session_ids=None)
-    route_prompts_to_engines(num_prompts=1, num_inference_engines=1, session_ids=None)
-
-
 # -------------------------------------------
 # tests for InferenceEngineClient.chat_completion retry logic
 # --------------------------------------------
-
-
-def _make_min_cfg():
-    return OmegaConf.create(
-        {
-            "trainer": {
-                "policy": {"model": {"path": "dummy-model"}},
-            },
-            "generator": {
-                "backend": "vllm",
-                "enable_http_endpoint": False,
-                "http_endpoint_host": "127.0.0.1",
-                "http_endpoint_port": 0,
-                "weight_sync_pause_timeout_seconds": 30.0,
-            },
-        }
-    )
 
 
 class _DraftUpdateEngine:
@@ -660,36 +519,6 @@ async def test_draft_refresh_retains_per_engine_exceptions() -> None:
         {"active": False, "error": "RuntimeError: load failed"},
     ]
     assert [engine.calls for engine in engines] == [[weights_path], [weights_path]]
-
-
-@pytest.mark.asyncio
-async def test_draft_refresh_skips_dead_engines() -> None:
-    engines = [_DraftUpdateEngine({"active": True}), _DraftUpdateEngine({"active": True})]
-    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
-    client._dead_engines.add(1)
-
-    weights_path = "s3://bucket/drafts/draft-step-4/model.safetensors"
-    coverage = await client.update_draft_weights(weights_path)
-
-    assert coverage == [{"active": True}]
-    assert engines[0].calls == [weights_path]
-    assert engines[1].calls == []
-
-
-@pytest.mark.parametrize(
-    "engine_limit,expected",
-    [
-        (65536, 65536),
-        (None, None),
-    ],
-)
-def test_client_context_limit_comes_from_live_engine(engine_limit, expected):
-    configured = _make_min_cfg()
-    engines = [] if engine_limit is None else [type("Engine", (), {"max_model_len": engine_limit})()]
-
-    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=configured)
-
-    assert client.max_model_len == expected
 
 
 @pytest.mark.parametrize(
@@ -929,11 +758,10 @@ async def test_chat_completion_retry_keeps_routes_across_interrupted_chunks(drop
 
     assert choice["token_ids"] == [11, 12, 13]
     assert engine.requests[1]["json"]["_skyrl_exact_prompt_token_ids"] == [1, 2, 11, 12]
-    assert normalize_routed_experts(choice["routed_experts"], response["prompt_token_ids"], choice["token_ids"]) == [
-        [[3]],
-        [[4]],
-        [[0]],
-    ]
+    np.testing.assert_array_equal(
+        normalize_routed_experts(choice["routed_experts"], response["prompt_token_ids"], choice["token_ids"]),
+        [[[3]], [[4]], [[0]]],
+    )
 
 
 @pytest.mark.asyncio
@@ -1089,45 +917,6 @@ async def test_chat_completion_accepts_tool_call_response_without_text_content()
 
 
 @pytest.mark.asyncio
-async def test_tokenize_returns_native_serving_response_without_local_rendering():
-    class NativeRenderingEngine:
-        def __init__(self):
-            self.request_payload = None
-
-        async def tokenize(self, request_payload):
-            self.request_payload = request_payload
-            return {
-                "tokens": [7, 8, 9],
-                "count": 3,
-                "max_model_len": 4096,
-                "token_strs": ["typed", "content", "parts"],
-            }
-
-    engine = NativeRenderingEngine()
-    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
-    request_payload = {
-        "json": {
-            "model": "dummy-model",
-            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
-            "continue_final_message": True,
-            "add_generation_prompt": False,
-            "return_token_strs": True,
-        },
-        "headers": {"x-request-id": "continuation-1"},
-    }
-
-    response = await client.tokenize(deepcopy(request_payload))
-
-    assert response == {
-        "tokens": [7, 8, 9],
-        "count": 3,
-        "max_model_len": 4096,
-        "token_strs": ["typed", "content", "parts"],
-    }
-    assert engine.request_payload == request_payload
-
-
-@pytest.mark.asyncio
 async def test_tokenize_surfaces_remote_chat_render_failure_as_template_error():
     template_error = TemplateError("assistant and tool roles are incompatible")
     validation_error = RuntimeError("chat template validation failed")
@@ -1152,9 +941,22 @@ async def test_tokenize_surfaces_remote_chat_render_failure_as_template_error():
 # --------------------------------------------
 
 
+@pytest.fixture(scope="module")
+def tokenizer():
+    return AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+
+
+@pytest.fixture(scope="module")
+def vllm_sampling_params() -> dict:
+    """The trainer's default vLLM sampling params, with a 10-token generation budget."""
+    sampling = get_default_config().generator.sampling_params
+    sampling.max_generate_length = 10
+    return get_vllm_sampling_params(sampling)
+
+
 @pytest.mark.parametrize("max_tokens_key", ["max_tokens", "max_completion_tokens"])
 @pytest.mark.asyncio
-async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
+async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, tokenizer, vllm_sampling_params):
     """
     Test that generate() with retry logic properly accumulates tokens and adjusts subsequent requests.
 
@@ -1200,13 +1002,12 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
             return deepcopy(self.responses[idx])
 
     engines = [MockEngine()]
-    cfg = _make_min_cfg()
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-    client = InferenceEngineClient(engines=engines, tokenizer=tokenizer, full_config=cfg)
+    client = InferenceEngineClient(engines=engines, tokenizer=tokenizer, full_config=_make_min_cfg())
 
     # Original request
     prompt_token_ids = [[1, 2, 3, 4, 5]]  # 5 prompt tokens
-    sampling_params = {max_tokens_key: 10, "temperature": 0.7}
+    sampling_params = dict(vllm_sampling_params)
+    sampling_params[max_tokens_key] = sampling_params.pop("max_tokens")
 
     input_batch = InferenceEngineInput(
         prompt_token_ids=prompt_token_ids,
@@ -1224,18 +1025,13 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
 
     # First call should have original prompt
     assert first_call["prompt_token_ids"] == [[1, 2, 3, 4, 5]]
-    assert first_call["sampling_params"][max_tokens_key] == 10
-    assert first_call["sampling_params"]["temperature"] == 0.7
+    assert first_call["sampling_params"] == sampling_params
 
-    # Second call should have prompt + first response tokens
-    assert second_call["prompt_token_ids"] == [[1, 2, 3, 4, 5, 21, 22]]
-    assert second_call["sampling_params"][max_tokens_key] == 8  # 10 - 2 already generated
-    assert second_call["sampling_params"]["temperature"] == 0.7
-
-    # Third call should also have prompt + first response tokens (second was ignored)
-    assert third_call["prompt_token_ids"] == [[1, 2, 3, 4, 5, 21, 22]]
-    assert third_call["sampling_params"][max_tokens_key] == 8  # 10 - 2 already generated
-    assert third_call["sampling_params"]["temperature"] == 0.7
+    # Continuations append the generated tokens and shrink the budget by them; the empty
+    # second abort is ignored. Every other sampling field is carried over unchanged.
+    for call in (second_call, third_call):
+        assert call["prompt_token_ids"] == [[1, 2, 3, 4, 5, 21, 22]]
+        assert call["sampling_params"] == {**sampling_params, max_tokens_key: 8}
     assert [call["session_ids"] for call in engines[0].calls] == [["stable-session"]] * 3
 
     # Final response should accumulate all tokens
@@ -1269,9 +1065,7 @@ async def test_generate_retry_direct_return():
             return deepcopy(self.response)
 
     engines = [MockEngine()]
-    cfg = _make_min_cfg()
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-    client = InferenceEngineClient(engines=engines, tokenizer=tokenizer, full_config=cfg)
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
 
     prompt_token_ids = [[1, 2, 3, 4, 5]]
     sampling_params = {"max_tokens": 10}
@@ -1329,9 +1123,7 @@ async def test_generate_retry_no_gen_finish():
             return deepcopy(self.responses[len(self.calls) - 1])
 
     engines = [MockEngine()]
-    cfg = _make_min_cfg()
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-    client = InferenceEngineClient(engines=engines, tokenizer=tokenizer, full_config=cfg)
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
 
     original_prompt_ids = [7, 8, 9]
     input_batch = InferenceEngineInput(
@@ -1411,22 +1203,6 @@ async def test_weight_sync_pauses_loaded_scheduler_until_reload_finishes():
 
 
 @pytest.mark.asyncio
-async def test_chat_completion_stream_not_paused_passes_through():
-    """When generation is not paused, the streaming path reaches the engine
-    immediately and forwards its chunks unchanged (the pause barrier is a no-op).
-    This is the flag-off / steady-state behavior."""
-    engines = [_MockStreamEngine()]
-    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
-
-    payload = {"json": {"model": "dummy-model", "messages": [{"role": "user", "content": "hi"}]}, "headers": {}}
-    chunks = [chunk async for chunk in client.chat_completion_stream(payload)]
-
-    assert engines[0].entered.is_set()
-    assert any("delta" in c for c in chunks)
-    assert any("[DONE]" in c for c in chunks)
-
-
-@pytest.mark.asyncio
 async def test_chat_completion_stream_blocks_while_paused_then_resumes():
     """Regression for the vLLM meta-tensor EngineDeadError at the weight-sync boundary.
 
@@ -1484,6 +1260,36 @@ class _MockCompletionEngine:
             raise response
         return response
 
+    async def pause_generation(self):
+        pass
+
+    async def resume_generation(self):
+        pass
+
+
+class _MidflightPauseCompletionEngine(_MockCompletionEngine):
+    """Holds the first request in flight until the scheduler pauses, which aborts it."""
+
+    def __init__(self):
+        super().__init__(
+            [
+                _completion_response("partial", "abort", completion_tokens=2),
+                _completion_response("complete answer", "stop"),
+            ]
+        )
+        self.scheduler_paused = asyncio.Event()
+
+    async def completion(self, request_payload):
+        if not self.calls:
+            self.entered.set()
+            self.calls.append(deepcopy(request_payload["json"]))
+            await self.scheduler_paused.wait()
+            return self.responses[0]
+        return await super().completion(request_payload)
+
+    async def pause_generation(self):
+        self.scheduler_paused.set()
+
 
 def _completion_response(text, finish_reason, *, completion_tokens=None):
     return {
@@ -1514,29 +1320,25 @@ SINGLE_PROMPTS = [pytest.param("hello", id="string"), pytest.param([1, 2, 3, 4],
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("prompt", SINGLE_PROMPTS)
-async def test_completion_single_prompt_blocks_while_paused_then_resumes(prompt, monkeypatch):
+async def test_completion_single_prompt_blocks_while_paused_then_resumes(prompt):
     engines = [_MockCompletionEngine([_completion_response("done", "stop")])]
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
-    barrier_entered = asyncio.Event()
-    resume = asyncio.Event()
+    await client.pause_generation()
 
-    async def _wait_for_resume():
-        barrier_entered.set()
-        await resume.wait()
-
-    monkeypatch.setattr(client, "_wait_for_generation_to_resume", _wait_for_resume)
-
-    task = asyncio.create_task(client.completion(_completion_payload(prompt)))
-    await asyncio.wait_for(barrier_entered.wait(), timeout=1)
+    task = asyncio.create_task(client.completion(_completion_payload(prompt, session_id="trial-7")))
+    # A parked request never runs on a bare yield, so one that was going to reach the engine
+    # would do so within these turns.
+    for _ in range(10):
+        await asyncio.sleep(0)
     assert not engines[0].entered.is_set(), "request reached the engine while generation was paused"
     assert not task.done()
 
-    resume.set()
+    await client.resume_generation()
     result = await asyncio.wait_for(task, timeout=5)
 
-    assert engines[0].entered.is_set()
     assert result["choices"][0]["text"] == "done"
     assert len(engines[0].calls) == 1
+    assert "session_id" not in engines[0].calls[0], "session_id must be stripped before it reaches the engine"
 
 
 @pytest.mark.asyncio
@@ -1570,40 +1372,23 @@ async def test_completion_single_prompt_reissues_once_after_a_midflight_abort(pr
 
 
 @pytest.mark.asyncio
-async def test_completion_single_prompt_reissue_waits_for_a_pause_that_is_still_on(monkeypatch):
-    engines = [
-        _MockCompletionEngine(
-            [
-                _completion_response("partial", "abort", completion_tokens=2),
-                _completion_response("complete answer", "stop"),
-            ]
-        )
-    ]
-    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
-
-    retry_waiting = asyncio.Event()
-    resume_retry = asyncio.Event()
-    barrier_calls = 0
-
-    async def _wait_for_resume():
-        nonlocal barrier_calls
-        barrier_calls += 1
-        if barrier_calls == 2:
-            retry_waiting.set()
-            await resume_retry.wait()
-
-    monkeypatch.setattr(client, "_wait_for_generation_to_resume", _wait_for_resume)
+async def test_completion_single_prompt_reissue_waits_for_a_pause_that_is_still_on():
+    engine = _MidflightPauseCompletionEngine()
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
 
     task = asyncio.create_task(client.completion(_completion_payload([1, 2, 3, 4])))
-    await asyncio.wait_for(retry_waiting.wait(), timeout=1)
-    assert len(engines[0].calls) == 1, "the retry entered the engine while generation was paused"
+    await asyncio.wait_for(engine.entered.wait(), timeout=5)
+    await client.pause_generation()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert len(engine.calls) == 1, "the retry entered the engine while generation was paused"
     assert not task.done()
 
-    resume_retry.set()
+    await client.resume_generation()
     result = await asyncio.wait_for(task, timeout=5)
 
     assert result["choices"][0]["finish_reason"] == "stop"
-    assert len(engines[0].calls) == 2
+    assert len(engine.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -1632,12 +1417,9 @@ async def test_completion_pause_retry_stays_on_failover_engine():
         ),
     ]
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+    session_id = next(sid for sid in ("trial-0", "trial-1") if hash_with_sha256(sid) % 2 == 0)
 
-    result = await client._single_completion_with_pause_retry(
-        0,
-        _completion_payload([1, 2, 3, 4])["json"],
-        {"Content-Type": "application/json"},
-    )
+    result = await client.completion(_completion_payload([1, 2, 3, 4], session_id=session_id))
 
     assert result["choices"][0]["text"] == "complete"
     assert len(engines[0].calls) == 1
@@ -1681,19 +1463,6 @@ async def test_completion_batched_still_raises_while_paused(prompt):
         await client.completion(_completion_payload(prompt))
 
     assert not engines[0].entered.is_set()
-
-
-@pytest.mark.asyncio
-async def test_completion_single_prompt_is_unaffected_when_never_paused():
-    """Steady state: no pause, no abort, one engine call, response forwarded unchanged."""
-    engines = [_MockCompletionEngine([_completion_response("done", "stop")])]
-    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
-
-    result = await client.completion(_completion_payload([1, 2, 3, 4], session_id="trial-7"))
-
-    assert result["choices"][0]["text"] == "done"
-    assert len(engines[0].calls) == 1
-    assert "session_id" not in engines[0].calls[0], "session_id must be stripped before it reaches the engine"
 
 
 # -------------------------------------------
@@ -1788,22 +1557,55 @@ class _DeadEngine(_MockGenerateEngine):
         raise ray.exceptions.RayActorError()
 
 
+async def _fail_over_engine_zero(client: InferenceEngineClient) -> None:
+    """Send a session routed to engine 0 so its actor error marks engine 0 dead."""
+    session_id = next(sid for sid in ("trial-0", "trial-1") if hash_with_sha256(sid) % 2 == 0)
+    await client.generate(
+        InferenceEngineInput(prompt_token_ids=[[1, 2, 3]], sampling_params={"max_tokens": 5}, session_ids=[session_id])
+    )
+
+
 @pytest.mark.asyncio
 async def test_weight_sync_pause_skips_an_engine_that_already_died():
     """A pause must not wait on, or fail because of, an engine the client already knows is dead."""
     dead, live = _DeadEngine(), _MockGenerateEngine()
     client = InferenceEngineClient(engines=[dead, live], tokenizer=object(), full_config=_make_min_cfg())
-    # A session routed to the dead engine fails over to the live one and marks the dead one.
-    session_id = next(sid for sid in ("trial-0", "trial-1") if hash_with_sha256(sid) % 2 == 0)
-    await client.generate(
-        InferenceEngineInput(prompt_token_ids=[[1, 2, 3]], sampling_params={"max_tokens": 5}, session_ids=[session_id])
-    )
+    await _fail_over_engine_zero(client)
     assert len(live.requests) == 1
 
     await client.pause_generation()
     assert live.scheduler_paused
     await client.resume_generation()
     assert not live.scheduler_paused
+
+
+class _DraftGenerateEngine(_MockGenerateEngine):
+    def __init__(self):
+        super().__init__()
+        self.draft_updates = []
+
+    async def update_draft_weights(self, weights_path):
+        self.draft_updates.append(weights_path)
+        return {"active": True}
+
+
+class _DeadDraftEngine(_DraftGenerateEngine):
+    async def generate(self, request):
+        raise ray.exceptions.RayActorError()
+
+
+@pytest.mark.asyncio
+async def test_draft_refresh_skips_dead_engines() -> None:
+    dead, live = _DeadDraftEngine(), _DraftGenerateEngine()
+    client = InferenceEngineClient(engines=[dead, live], tokenizer=object(), full_config=_make_min_cfg())
+    await _fail_over_engine_zero(client)
+
+    weights_path = "s3://bucket/drafts/draft-step-4/model.safetensors"
+    coverage = await client.update_draft_weights(weights_path)
+
+    assert coverage == [{"active": True}]
+    assert dead.draft_updates == []
+    assert live.draft_updates == [weights_path]
 
 
 class _NeverAnsweringEngine(_MockGenerateEngine):

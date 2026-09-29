@@ -123,7 +123,7 @@ class MismatchProbeCallback(TrainerCallback):
         self.probe_hash: str | None = None
         self.starting_weights_hash: str | None = None
         self.source_manifest = None
-        self.generation_scores: list[list[float]] | None = None
+        self.generation_scores: list[np.ndarray] | None = None
         self.timing: dict[str, float] = {}
         self.weights: dict[int, str] = {}
         self.batch_layout: dict[str, object] = {}
@@ -237,10 +237,10 @@ class MismatchProbeCallback(TrainerCallback):
                 decoded = np.frombuffer(row.routed_experts, dtype=row.routed_experts_dtype).reshape(
                     row.routed_experts_shape
                 )
-                routes.append(decoded.tolist())
+                routes.append(decoded.copy())
         if any(route is None for route in routes) and any(route is not None for route in routes):
             raise ValueError("reuse_probe source mixes captured and missing routed-expert rows")
-        self.generation_scores = [generations[row.sample_id].logprobs for row in rows]
+        self.generation_scores = [np.asarray(generations[row.sample_id].logprobs, dtype=np.float32) for row in rows]
         trajectory = {
             "prompt_token_ids": [row.prompt_token_ids for row in rows],
             "response_ids": [row.trainer_input_ids for row in rows],

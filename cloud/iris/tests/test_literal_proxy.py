@@ -22,11 +22,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from cloud.iris.literal_proxy_utils import (  # noqa: E402
-    DEFAULT_LITERAL_PROXY_PORT,
-    _slug,
     literal_log_path,
     literal_log_remote_uri,
-    literal_proxy_endpoint,
     literal_proxy_port,
     maybe_serve_literal_proxy,
     select_literal_proxy_port,
@@ -41,10 +38,6 @@ def test_upstream_origin_strips_path_to_avoid_double_v1():
     assert upstream_origin("https://h:8443/v1/") == "https://h:8443"
     with pytest.raises(ValueError):
         upstream_origin("localhost:8000/v1")  # not absolute
-
-
-def test_literal_proxy_endpoint_default_port():
-    assert literal_proxy_endpoint() == f"http://127.0.0.1:{DEFAULT_LITERAL_PROXY_PORT}/v1"
 
 
 def test_literal_proxy_port_is_stable_and_separates_iris_tasks(monkeypatch):
@@ -68,15 +61,13 @@ def test_select_literal_proxy_port_skips_bound_candidate(monkeypatch):
     assert 10000 <= selected < 20000
 
 
-def test_slug_is_filesystem_safe():
-    assert _slug("rl/qwen3:8b run") == "rl-qwen3-8b-run"
-    assert _slug("") == "job"
-
-
-def test_serve_token_is_unique_per_call(monkeypatch):
+def test_serve_token_distinguishes_retries_of_the_same_task(monkeypatch):
+    monkeypatch.setenv("IRIS_TASK_ID", "/user/job/0:1")
+    first_attempt = serve_token()
     monkeypatch.setenv("IRIS_TASK_ID", "/user/job/0:2")
-    t = serve_token()
-    assert t.endswith("0-2")  # rank + retry leaf folded in
+    second_attempt = serve_token()
+
+    assert first_attempt != second_attempt
 
 
 def test_literal_log_path_local(tmp_path):

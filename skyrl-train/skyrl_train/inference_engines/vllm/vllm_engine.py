@@ -25,6 +25,7 @@ from skyrl_train.config.behavior_logprobs import (
     ROLLOUT_LOGPROB_VALIDATION_KEY,
     validate_behavior_logprob_sampling,
 )
+from skyrl_train.config.weight_sync_pause import WeightSyncPausePolicy
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     capture_rank_directory,
     capture_rank_name,
@@ -1376,6 +1377,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         self._stats_engine_id = uuid4().hex
         self._stats_attributes: Dict[str, str] = {}
         self._rendezvous_port_reservation = kwargs.pop("rendezvous_port_reservation", None)
+        self._weight_sync_pause_policy: WeightSyncPausePolicy = kwargs.pop("weight_sync_pause_policy")
         setup_envvars_for_vllm(kwargs, bundle_indices)
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
         logger.info(
@@ -2142,16 +2144,17 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         )
 
     async def pause_generation(self) -> None:
-        """Abort outstanding requests and hold the EngineCore scheduler idle for weight reload."""
+        """Apply the configured pause policy while the engine reloads weights."""
         engine = self.llm
         outstanding_requests = len(engine.output_processor.request_states)
-        # vLLM's scheduler-level pause is a utility RPC into EngineCore. In abort
-        # mode it aborts running/waiting requests, waits for the scheduler to reach
-        # its paused state, and clears the KV/prefix cache before returning. Unlike
-        # AsyncLLM.abort(), it cannot report success merely because the frontend
-        # output_processor already removed the request IDs.
-        await engine.pause_generation(mode="abort", clear_cache=True)
-        logger.info(f"pause_generation() finished, aborted {outstanding_requests} requests and paused EngineCore")
+        policy = self._weight_sync_pause_policy
+        await engine.pause_generation(mode=policy.mode.value, clear_cache=policy.clear_cache)
+        logger.info(
+            "pause_generation() finished, mode={}, clear_cache={}, outstanding_requests={}, EngineCore paused",
+            policy.mode.value,
+            policy.clear_cache,
+            outstanding_requests,
+        )
 
     async def resume_generation(self) -> None:
         """Release the EngineCore scheduler after the weight reload completes."""
