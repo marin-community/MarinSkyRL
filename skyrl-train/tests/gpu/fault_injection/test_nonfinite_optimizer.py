@@ -3,6 +3,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+import ray
 import torch
 import torch.distributed as dist
 from megatron.core import parallel_state as mpu
@@ -16,6 +17,9 @@ import skyrl_train
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
 from tests.gpu.gpu_ci.test_megatron_objective_scaling import TokenLogits, run_distributed
+from tests.gpu.test_megatron_worker import get_test_actor_config, get_test_training_batch
+from tests.gpu.utils import init_worker_with_type
+from skyrl_train.utils.utils import validate_cfg
 
 
 def assert_state_equal(actual, expected):
@@ -157,3 +161,43 @@ def run_nonfinite_rank(rank, dtype, rendezvous):
 def test_nonfinite_gradient_preserves_optimizer_state_on_every_rank(tmp_path, dtype):
     assert torch.cuda.device_count() >= 4, "Run on an allocation with four GPUs"
     run_distributed(run_nonfinite_rank, 4, (dtype, (tmp_path / "nonfinite").as_uri()))
+
+
+def test_policy_worker_reports_skips_and_resets_streak_after_clean_update(ray_init_fixture):
+    assert torch.cuda.device_count() >= 4, "Run on an allocation with four GPUs"
+    cfg = get_test_actor_config(logger="console")
+    cfg.trainer.policy.model.revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+    cfg.trainer.flash_attn = True
+    cfg.trainer.use_sample_packing = True
+    cfg.trainer.placement.policy_num_gpus_per_node = 4
+    cfg.trainer.policy.megatron_config.context_parallel_size = 2
+    cfg.trainer.policy.max_consecutive_nonfinite_steps = 1
+    cfg.trainer.algorithm.advantage_estimator = "uniform"
+    cfg.trainer.algorithm.policy_loss_type = "importance_sampling"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.train_batch_size = 4
+    cfg.trainer.policy_mini_batch_size = 4
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.generator.n_samples_per_prompt = 1
+    validate_cfg(cfg)
+    policy = init_worker_with_type("policy", num_gpus_per_node=4, cfg=cfg)
+
+    for step, nonfinite in enumerate((True, False, True)):
+        batch = get_test_training_batch(4)
+        batch.metadata["global_step"] = step
+        if nonfinite:
+            batch["advantages"][0, 0] = torch.nan
+        outputs = ray.get(policy.async_run_ray_method("mesh", "ppo_train", data=batch), timeout=180)
+        assert len(outputs) == 4
+        for output in outputs:
+            status = output.metadata["train_status"]
+            assert status["skipped_steps"] == int(nonfinite)
+            assert status["policy_update_steps"] == int(not nonfinite)
+            if nonfinite:
+                assert "raw_grad_norm" not in status
+            else:
+                assert 0 < status["raw_grad_norm"] < float("inf")
+
+    batch.metadata["global_step"] = 3
+    with pytest.raises(ray.exceptions.RayTaskError, match="nonfinite policy gradients after 1 consecutive"):
+        ray.get(policy.async_run_ray_method("mesh", "ppo_train", data=batch), timeout=180)
