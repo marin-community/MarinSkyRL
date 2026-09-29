@@ -747,8 +747,15 @@ async def test_agent_loop_required_exact_chat_rejects_environment_without_chat_o
 
 
 @pytest.mark.asyncio
-async def test_fixture_exact_chat_preserves_backend_tokens_routes_and_distinct_rewards(
-    mock_tokenizer, generator_cfg, mock_env_cfg
+@pytest.mark.parametrize(
+    "environment,extras,responses,expected_rewards",
+    [
+        ("mismatch_fixture", {}, ("blue square", "red circle", "green triangle", "yellow star"), None),
+        ("aime", {"reward_model": {"ground_truth": "42"}}, (r"Answer: \boxed{42}", r"Answer: \boxed{43}"), (1.0, -1.0)),
+    ],
+)
+async def test_exact_chat_preserves_backend_tokens_routes_and_environment_rewards(
+    mock_tokenizer, generator_cfg, mock_env_cfg, environment, extras, responses, expected_rewards
 ):
     generator_cfg.use_conversation_multi_turn = True
     generator_cfg.require_exact_chat_transport = True
@@ -757,7 +764,6 @@ async def test_fixture_exact_chat_preserves_backend_tokens_routes_and_distinct_r
     runner = SkyRLGymTrajectoryRunner(
         generator_cfg, mock_env_cfg, AsyncMock(), mock_tokenizer, model_client=model_client
     )
-    responses = ("blue square", "red circle", "green triangle", "yellow star")
     rewards = []
     for response in (*responses, responses[0]):
         model_client.generate.return_value = {
@@ -772,8 +778,8 @@ async def test_fixture_exact_chat_preserves_backend_tokens_routes_and_distinct_r
         }
         output = await runner.agent_loop(
             [{"role": "user", "content": "describe a shape"}],
-            "mismatch_fixture",
-            {},
+            environment,
+            extras,
             max_tokens=8,
             max_input_length=512,
         )
@@ -783,9 +789,12 @@ async def test_fixture_exact_chat_preserves_backend_tokens_routes_and_distinct_r
         assert output.evidence.routed_experts == (((1, 2),), ((3, 4),))
         assert output.loss_mask == [1, 1]
         rewards.append(output.reward.optimization_reward)
-    assert len(set(rewards[:-1])) == len(responses)
     assert rewards[-1] == rewards[0]
-    assert all(0 <= reward < 1 for reward in rewards)
+    if expected_rewards is None:
+        assert len(set(rewards[:-1])) == len(responses)
+        assert all(0 <= reward < 1 for reward in rewards)
+    else:
+        assert rewards[:-1] == list(expected_rewards)
 
 
 def _structured_tool_turn_runner(mock_make, mock_tokenizer, mock_env, generator_cfg, mock_env_cfg, rendered_tool_ids):
