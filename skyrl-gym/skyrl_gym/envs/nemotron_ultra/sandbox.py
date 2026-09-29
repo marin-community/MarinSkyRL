@@ -56,9 +56,17 @@ class SandboxClient:
         if "<output cut>" in value.get("stdout", "") or "<output cut>" in value.get("stderr", ""):
             value["output_truncated"] = True
         if session_id is not None:
-            if session_id in self._sessions and value.get("new_session_created") is True:
+            timeout_reset = value.get("process_status") == "timeout" and value.get("new_session_created") is True
+            if timeout_reset:
+                # The sandbox kills a timed-out kernel and repeats its reset flag on the next execution.
+                self._sessions.discard(session_id)
+                value["stderr"] = value.get("stderr", "").rstrip("\n") + (
+                    "\nPython session state was reset after the timeout; previous variables are no longer available.\n"
+                )
+            elif session_id in self._sessions and value.get("new_session_created") is True:
                 raise RuntimeError(f"Sandbox lost stateful session {session_id}")
-            self._sessions.add(session_id)
+            else:
+                self._sessions.add(session_id)
         return value
 
     def close_session(self, session_id: str) -> None:
