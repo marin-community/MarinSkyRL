@@ -22,6 +22,7 @@ from skyrl_gym.envs.lcb.livecodebench import (
     compute_score,
     normalize_lcb_ground_truth,
 )
+from skyrl_gym.envs.mcq.utils import extract_mcq_answer
 from skyrl_gym.envs.reasoning_gym.scoring import normalize_ground_truth as normalize_reasoning_gym_ground_truth
 from skyrl_gym.envs.reasoning_gym.scoring import score_response as score_reasoning_gym_response
 from skyrl_gym.envs.registration import spec
@@ -141,10 +142,8 @@ def _normalize_mcq(ground_truth: Any) -> str:
 
 
 def _mcq_is_correct(response: str, ground_truth: str) -> bool:
-    import re
-
-    match = re.search(r"\\boxed\{([A-Za-z])\}", response)
-    return match is not None and match.group(1).upper() == ground_truth
+    answer = extract_mcq_answer(response)
+    return answer is not None and answer == ground_truth
 
 
 # ---------------------------------------------------------------------------
