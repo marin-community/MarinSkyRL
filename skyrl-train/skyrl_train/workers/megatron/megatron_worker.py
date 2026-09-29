@@ -340,7 +340,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
-        self.profiler: Profiler = None
+        self.profiler: Profiler | None = None
         self._warned_exact_unit_policy_ratio = False
 
     def forward(self, data):
@@ -574,29 +574,24 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         chunk.zero_grad_buffer()
                     seq_len = micro_buffer[0].sequences.shape[1]
                     micro_bsz = micro_buffer[0].sequences.shape[0]
+                    profiler = self.profiler.for_mini_batch(policy_update_steps) if self.profiler is not None else None
 
-                    if self.profiler is not None:
-                        self.profiler.start_capture_if_selected(policy_update_steps)
-                    try:
-                        metrics_list = self.model.forward_backward_mini_batch(
-                            micro_batches=micro_buffer,
-                            seq_len=seq_len,
-                            micro_batch_size=micro_bsz,
-                            temperature=self.cfg.generator.sampling_params.temperature,
-                            timings=timing,
-                            profiler=self.profiler,
+                    metrics_list = self.model.forward_backward_mini_batch(
+                        micro_batches=micro_buffer,
+                        seq_len=seq_len,
+                        micro_batch_size=micro_bsz,
+                        temperature=self.cfg.generator.sampling_params.temperature,
+                        timings=timing,
+                        profiler=profiler,
+                    )
+
+                    if self.empty_cuda_cache:
+                        torch.cuda.empty_cache()
+
+                    with timing.span("megatron_optimizer_step"):
+                        grad_norm = self.strategy.optimizer_step(
+                            self.optimizer, self.model, self.scheduler, name="actor"
                         )
-
-                        if self.empty_cuda_cache:
-                            torch.cuda.empty_cache()
-
-                        with timing.span("megatron_optimizer_step"):
-                            grad_norm = self.strategy.optimizer_step(
-                                self.optimizer, self.model, self.scheduler, name="actor"
-                            )
-                    finally:
-                        if self.profiler is not None:
-                            self.profiler.stop_capture()
 
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
                     # the whole world size to get the metrics for the global micro batch
