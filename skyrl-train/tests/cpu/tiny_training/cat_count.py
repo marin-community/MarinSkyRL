@@ -8,7 +8,7 @@ from omegaconf import DictConfig, OmegaConf
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.utils.algorithm_registry import AdvantageEstimatorRegistry
 
-FAST_STEPS = 6
+FAST_STEPS = 10
 
 
 def flipped_grpo(**kwargs):
@@ -36,7 +36,13 @@ def write_rows(path: Path, ns: list[int], source: str, repeats: int = 1) -> Path
 
 
 def cat_count_config(
-    root: Path, model: Path, *, steps: int = FAST_STEPS, staleness: int = 0, resume: bool = False
+    root: Path,
+    model: Path,
+    *,
+    steps: int = FAST_STEPS,
+    staleness: int = 0,
+    resume: bool = False,
+    eval_interval: int | None = None,
 ) -> DictConfig:
     """Run counting with the real rollout pool, objective, evaluation and checkpoint callbacks."""
     return OmegaConf.merge(
@@ -70,7 +76,7 @@ def cat_count_config(
                 "max_prompt_length": 64,
                 "max_steps": steps,
                 "eval_before_train": True,
-                "eval_interval": min(steps, 10),
+                "eval_interval": min(steps, 10) if eval_interval is None else eval_interval,
                 "ckpt_interval": steps,
                 "hf_save_interval": -1,
                 "resume_mode": "latest" if resume else "none",

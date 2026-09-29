@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import math
 import threading
@@ -36,15 +37,21 @@ pytestmark = pytest.mark.slow
 @pytest.fixture(scope="session")
 def cat_count_policy(pytestconfig) -> Path:
     # pytest's cache is portable and reusable across CI invocations; this fixture does no RL.
-    directory = Path(pytestconfig.cache.mkdir("cat_count_policy")) / "llama-128x2-pretrain3000-seed0"
+    parameters = argparse.Namespace(steps=3000, lr=3e-4, width=128, layers=2, seed=0)
+    identity = hashlib.sha256(json.dumps(vars(parameters), sort_keys=True).encode()).hexdigest()[:16]
+    directory = Path(pytestconfig.cache.mkdir("cat_count_policy")) / f"llama-{identity}"
+    parameters.out = directory
     if not all((directory / name).exists() for name in ("model.safetensors", "config.json", "tokenizer.json")):
         torch.set_num_threads(1)
-        pretrain(argparse.Namespace(out=directory, steps=3000, lr=3e-4, width=128, layers=2, seed=0))
+        pretrain(parameters)
     return directory
 
 
 @pytest.fixture(scope="module")
 def cat_count_session(monkeypatch_module):
+    repository = Path(__file__).resolve().parents[3]
+    assert Path(skyrl_train.__file__).resolve().is_relative_to(repository / "skyrl-train")
+    assert Path(skyrl_gym.__file__).resolve().is_relative_to(repository / "skyrl-gym")
     rows = []
 
     class Sink(BaseHTTPRequestHandler):
@@ -97,9 +104,16 @@ def monkeypatch_module():
 
 
 def train(
-    root: Path, model: Path, *, flipped: bool = False, steps: int = FAST_STEPS, staleness: int = 0, resume: bool = False
+    root: Path,
+    model: Path,
+    *,
+    flipped: bool = False,
+    steps: int = FAST_STEPS,
+    staleness: int = 0,
+    resume: bool = False,
+    eval_interval: int | None = None,
 ):
-    cfg = cat_count_config(root, model, steps=steps, staleness=staleness, resume=resume)
+    cfg = cat_count_config(root, model, steps=steps, staleness=staleness, resume=resume, eval_interval=eval_interval)
     if flipped:
         cfg.trainer.algorithm.advantage_estimator = "cat_count_flipped_grpo"
     validate_cfg(cfg)
@@ -116,9 +130,6 @@ def scores(records):
 
 
 def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_policy, cat_count_session):
-    repository = Path(__file__).resolve().parents[3]
-    assert Path(skyrl_train.__file__).resolve().is_relative_to(repository / "skyrl-train")
-    assert Path(skyrl_gym.__file__).resolve().is_relative_to(repository / "skyrl-gym")
     positive = train(tmp_path / "positive", cat_count_policy)
     negative = train(tmp_path / "negative", cat_count_policy, flipped=True)
     before, after = scores(positive)
@@ -152,7 +163,8 @@ def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_po
 def test_cat_count_async_resumes_and_converges(tmp_path, cat_count_policy, cat_count_session):
     root = tmp_path / "async"
     first = train(root, cat_count_policy, steps=4, staleness=1)
-    resumed = train(root, cat_count_policy, steps=100, staleness=1, resume=True)
+    resumed = train(root, cat_count_policy, steps=100, staleness=1, resume=True, eval_interval=2)
+    assert scores(resumed)[len(scores(first))] == scores(first)[-1]
     assert len([row for row in first if "policy/raw_grad_norm" in row]) == 4
     training = [row for row in resumed if "policy/raw_grad_norm" in row]
     assert [row["trainer/global_step"] for row in training] == list(range(1, 101))

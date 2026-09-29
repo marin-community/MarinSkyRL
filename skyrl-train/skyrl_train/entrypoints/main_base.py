@@ -144,7 +144,8 @@ def create_ray_wrapped_inference_engines_from_config(
         "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
     }
     if cfg.generator.backend == "vllm":
-        from skyrl_train.trajectory_runners.trajectory_processing import get_custom_chat_template
+        # The template resolver imports Torch from the optional trainer runtime.
+        from skyrl_train.trajectory_runners.trajectory_processing import get_custom_chat_template  # noqa: PLC0415
 
         engine_init_kwargs["chat_template"] = get_custom_chat_template(cfg.generator.chat_template)
         engine_init_kwargs["default_chat_template_kwargs"] = OmegaConf.to_container(

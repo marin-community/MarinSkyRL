@@ -234,10 +234,10 @@ class CPUInferenceEngine(InferenceEngineInterface):
     async def _generate_one(self, prompt_ids, sampling_params):
         if self._decoder is None:
             self._decoder = asyncio.get_running_loop().create_task(self._decode_loop())
-        fut = asyncio.get_running_loop().create_future()
-        self._pending.append((list(prompt_ids), dict(sampling_params), fut))
+        future = asyncio.get_running_loop().create_future()
+        self._pending.append((list(prompt_ids), dict(sampling_params), future))
         self._wake.set()
-        return await fut
+        return await future
 
     async def _decode_loop(self):
         while True:
@@ -252,70 +252,76 @@ class CPUInferenceEngine(InferenceEngineInterface):
                 continue
             groups = {}
             for item in batch:
-                sp = item[1]
-                key = (float(sp["temperature"]), int(sp.get("min_tokens", 0)))
+                sampling_params = item[1]
+                key = (float(sampling_params["temperature"]), int(sampling_params.get("min_tokens", 0)))
                 groups.setdefault(key, []).append(item)
             for (temperature, min_tokens), items in groups.items():
                 try:
                     results = await self._decode_batch(items, temperature, min_tokens)
-                    for (_, _, fut), res in zip(items, results):
-                        if not fut.done():
-                            fut.set_result(res)
-                except Exception as e:  # noqa: BLE001
-                    for _, _, fut in items:
-                        if not fut.done():
-                            fut.set_exception(e)
+                    for (_, _, future), result in zip(items, results):
+                        if not future.done():
+                            future.set_result(result)
+                except Exception as error:  # noqa: BLE001
+                    for _, _, future in items:
+                        if not future.done():
+                            future.set_exception(error)
 
     async def _decode_batch(self, items, temperature, min_tokens):
-        n = len(items)
-        max_new = [int(sp["max_tokens"]) for _, sp, _ in items]
-        lengths = [len(p) for p, _, _ in items]
-        width = max(lengths)
-        pad = self.model.config.pad_token_id or 0
-        input_ids = torch.full((n, width), pad, dtype=torch.long)
-        attn = torch.zeros((n, width), dtype=torch.long)
-        for i, (p, _, _) in enumerate(items):
-            input_ids[i, width - len(p) :] = torch.tensor(p)
-            attn[i, width - len(p) :] = 1
-        out_ids = [[] for _ in range(n)]
-        out_lps = [[] for _ in range(n)]
-        stop = ["length"] * n
-        live = torch.ones(n, dtype=torch.bool)
-        pkv = None
-        cur = input_ids
-        pos = (attn.cumsum(-1) - 1).clamp(min=0)
-        for t in range(max(max_new)):
+        batch_size = len(items)
+        max_response_tokens = [int(sampling_params["max_tokens"]) for _, sampling_params, _ in items]
+        prompt_lengths = [len(prompt_ids) for prompt_ids, _, _ in items]
+        prompt_width = max(prompt_lengths)
+        pad_token_id = self.model.config.pad_token_id or 0
+        input_ids = torch.full((batch_size, prompt_width), pad_token_id, dtype=torch.long)
+        attention_mask = torch.zeros((batch_size, prompt_width), dtype=torch.long)
+        for index, (prompt_ids, _, _) in enumerate(items):
+            input_ids[index, prompt_width - len(prompt_ids) :] = torch.tensor(prompt_ids)
+            attention_mask[index, prompt_width - len(prompt_ids) :] = 1
+        response_ids = [[] for _ in range(batch_size)]
+        response_logprobs = [[] for _ in range(batch_size)]
+        stop_reasons = ["length"] * batch_size
+        live_sequences = torch.ones(batch_size, dtype=torch.bool)
+        past_key_values = None
+        input_tokens = input_ids
+        position_ids = (attention_mask.cumsum(-1) - 1).clamp(min=0)
+        for token_index in range(max(max_response_tokens)):
             await self._resumed.wait()
             with torch.no_grad(), torch.autocast(device_type="cpu", dtype=torch.bfloat16, enabled=True):
-                o = self.model(cur, attention_mask=attn, position_ids=pos, past_key_values=pkv, use_cache=True)
-            pkv = o.past_key_values
-            logits = o.logits[:, -1].float()
-            if t < min_tokens:
+                output = self.model(
+                    input_tokens,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+            past_key_values = output.past_key_values
+            logits = output.logits[:, -1].float()
+            if token_index < min_tokens:
                 logits[:, self.eos_token_id] = float("-inf")
             if temperature == 0.0:
-                lp = torch.log_softmax(logits, -1)
-                tok = logits.argmax(-1)
+                log_probs = torch.log_softmax(logits, -1)
+                token_ids = logits.argmax(-1)
             else:
-                lp = torch.log_softmax(logits / temperature, -1)
-                tok = torch.multinomial(lp.exp(), 1).squeeze(-1)
-            tok_lp = lp.gather(-1, tok[:, None]).squeeze(-1)
-            for i in range(n):
-                if not live[i]:
+                log_probs = torch.log_softmax(logits / temperature, -1)
+                token_ids = torch.multinomial(log_probs.exp(), 1).squeeze(-1)
+            token_logprobs = log_probs.gather(-1, token_ids[:, None]).squeeze(-1)
+            for index in range(batch_size):
+                if not live_sequences[index]:
                     continue
-                out_ids[i].append(int(tok[i]))
-                out_lps[i].append(float(tok_lp[i]))
-                if int(tok[i]) == self.eos_token_id:
-                    stop[i] = "stop"
-                    live[i] = False
-                elif len(out_ids[i]) >= max_new[i]:
-                    live[i] = False
-            if not live.any():
+                response_ids[index].append(int(token_ids[index]))
+                response_logprobs[index].append(float(token_logprobs[index]))
+                if int(token_ids[index]) == self.eos_token_id:
+                    stop_reasons[index] = "stop"
+                    live_sequences[index] = False
+                elif len(response_ids[index]) >= max_response_tokens[index]:
+                    live_sequences[index] = False
+            if not live_sequences.any():
                 break
-            cur = torch.where(live, tok, torch.full_like(tok, pad))[:, None]
-            attn = torch.cat([attn, live.long()[:, None]], 1)
-            pos = pos[:, -1:] + 1
+            input_tokens = torch.where(live_sequences, token_ids, torch.full_like(token_ids, pad_token_id))[:, None]
+            attention_mask = torch.cat([attention_mask, live_sequences.long()[:, None]], 1)
+            position_ids = position_ids[:, -1:] + 1
             await asyncio.sleep(0)
-        return [(out_ids[i], out_lps[i], stop[i]) for i in range(n)]
+        return [(response_ids[index], response_logprobs[index], stop_reasons[index]) for index in range(batch_size)]
 
     async def pause_generation(self) -> None:
         self._resumed.clear()

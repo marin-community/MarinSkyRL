@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 import torch
-from skyrl_train.rollouts.payloads import ROLLOUT_OBJECT_SUFFIX
 
+from skyrl_train.rollouts.payloads import ROLLOUT_OBJECT_SUFFIX
 from tests.cpu.tiny_training import experiment
 from tests.cpu.tiny_training.experiment import (
     MAX_STALENESS_STEPS,
