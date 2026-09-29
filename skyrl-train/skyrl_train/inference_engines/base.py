@@ -57,7 +57,6 @@ class InferenceEngineOutput(TypedDict):
     # inner list is prompt positions, dict maps token_id → logprob.
     # Only populated when SamplingParams(prompt_logprobs=K) is used.
     prompt_logprobs: Optional[List[List[Optional[Dict[int, float]]]]]
-    routed_experts: NotRequired[List[List[List[List[int]]]]]
     # Requested candidate-token scores at each generated position, separate
     # from the sampled token's response_logprobs.
     requested_token_logprobs: NotRequired[List[List[Dict[int, float]]]]

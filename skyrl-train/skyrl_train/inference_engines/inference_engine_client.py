@@ -359,7 +359,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
         student_topk_indices: List[Optional[List[List[int]]]] = [None for _ in range(n)]
         behavior_topk_logprobs: List[Optional[List[List[float]]]] = [None for _ in range(n)]
-        routed_experts: List[Optional[List[List[List[int]]]]] = [None for _ in range(n)]
+        routed_experts: List[Optional[np.ndarray]] = [None for _ in range(n)]
         requested_token_logprobs: List[Optional[List[Dict[int, float]]]] = [None for _ in range(n)]
         prefix_cache_hit_tokens: List[Optional[int]] = [None for _ in range(n)]
         # a bit hacky for now
@@ -519,7 +519,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         accum_response_logprobs: List[float] = []
         accum_student_topk_indices: List[List[int]] = []
         accum_behavior_topk_logprobs: List[List[float]] = []
-        accum_routed_experts: List[List[List[int]]] = []
+        accum_routed_experts: List[np.ndarray] = []
         accum_requested_token_logprobs: List[Dict[int, float]] = []
         saw_student_topk: Optional[bool] = None
         saw_routed_experts: Optional[bool] = None
@@ -620,7 +620,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             if has_routed_experts:
                 if len(routed_experts) != 1 or len(routed_experts[0]) != len(new_response_ids):
                     raise ValueError("Inference engine routed expert tokens must align with response tokens")
-                accum_routed_experts.extend(routed_experts[0])
+                accum_routed_experts.append(routed_experts[0])
 
             requested = partial_response.get("requested_token_logprobs")
             has_requested = requested is not None
@@ -669,7 +669,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             output["student_topk_indices"] = [accum_student_topk_indices]
             output["behavior_topk_logprobs"] = [accum_behavior_topk_logprobs]
         if saw_routed_experts:
-            output["routed_experts"] = [accum_routed_experts]
+            output["routed_experts"] = [np.concatenate(accum_routed_experts, axis=0)]
         if saw_requested_token_logprobs:
             output["requested_token_logprobs"] = [accum_requested_token_logprobs]
         if saw_prefix_cache_hit_tokens:
