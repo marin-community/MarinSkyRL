@@ -23,7 +23,7 @@ from taskcompendium.models import (
     ToolResult,
 )
 from taskcompendium.resources import ResourceVisibility, TaskResource
-from taskcompendium.submission import AnswerFormat, SubmissionConvention, chat_request
+from taskcompendium.submission import AnswerCall, JsonAnswer, PlainText, SubmissionConvention, chat_request
 
 from skyrl_train.entrypoints.taskcompendium import TaskCompendiumExp
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -42,7 +42,7 @@ from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 
 
-def _lowering(root: Path, name: str) -> Path:
+def _lowering(root: Path, name: str, *, convention: SubmissionConvention = PlainText(id="plain")) -> Path:
     specification = TaskSpec(
         id=name,
         context=ConversationInput(
@@ -59,7 +59,7 @@ def _lowering(root: Path, name: str) -> Path:
     )
     return lower_to_harbor(
         specification,
-        SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
+        convention,
         HarborEnvironmentConfig(),
         root / name,
     )
@@ -105,7 +105,7 @@ def test_taskcompendium_dataset_preserves_tool_history_through_harbor(tmp_path):
     )
     task = lower_to_harbor(
         specification,
-        SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
+        PlainText(id="plain"),
         HarborEnvironmentConfig(),
         tmp_path / "tool-history",
     )
@@ -117,8 +117,8 @@ def test_taskcompendium_dataset_preserves_tool_history_through_harbor(tmp_path):
     assert read_specification(task / SPECIFICATION_FILE).context == specification.context
 
 
-@pytest.mark.parametrize("answer_format", [AnswerFormat.PLAIN, AnswerFormat.JSON])
-def test_taskcompendium_dataset_keeps_advertised_tools_on_harbor_path(tmp_path, answer_format):
+@pytest.mark.parametrize("convention", [PlainText(id="plain"), JsonAnswer(id="json")])
+def test_taskcompendium_dataset_keeps_advertised_tools_on_harbor_path(tmp_path, convention):
     specification = TaskSpec(
         id="text-with-tools",
         context=ConversationInput(events=(TextMessage(role="user", content="Find the color and answer briefly."),)),
@@ -132,7 +132,6 @@ def test_taskcompendium_dataset_keeps_advertised_tools_on_harbor_path(tmp_path, 
             parallel_tool_calls=False,
         ),
     )
-    convention = SubmissionConvention(id=answer_format.value, answer_format=answer_format)
     task = lower_to_harbor(specification, convention, HarborEnvironmentConfig(), tmp_path / "text-with-tools")
 
     dataset = TaskCompendiumTaskDataset([str(task)], api_base="http://policy:8000/v1", model_name="policy")
@@ -156,7 +155,7 @@ def test_taskcompendium_dataset_routes_answer_call_to_harbor(tmp_path):
     )
     lower_to_harbor(
         specification,
-        SubmissionConvention(id="answer-call", answer_format=AnswerFormat.ANSWER_CALL),
+        AnswerCall(id="answer-call"),
         HarborEnvironmentConfig(),
         tmp_path / "answer-call",
     )
@@ -241,14 +240,25 @@ def test_workplace_dataset_uses_policy_endpoint_model_name(
     assert dataset[0]["env_extras"]["model_name"] == endpoint.model_name == expected_name
 
 
+@pytest.mark.parametrize(
+    ("convention", "response", "reward", "submission_failure"),
+    [
+        (PlainText(id="plain"), "blue", 1.0, False),
+        (JsonAnswer(id="json"), '{"answer":"blue"}', 1.0, False),
+        (JsonAnswer(id="json"), '{"answer":"red"}', 0.0, False),
+        (JsonAnswer(id="json"), '{"answer":', 0.0, True),
+    ],
+)
 @pytest.mark.asyncio
-async def test_native_runner_preserves_engine_tokens_logprobs_and_grades_response(tmp_path):
-    task = _lowering(tmp_path, "chat")
+async def test_native_runner_preserves_engine_tokens_logprobs_and_grades_response(
+    tmp_path, convention, response, reward, submission_failure
+):
+    task = _lowering(tmp_path, "chat", convention=convention)
     tokenizer = MagicMock()
     tokenizer.apply_chat_template.return_value = [10, 11, 12]
     model_client = AsyncMock()
     model_client.generate.return_value = {
-        "responses": ["blue"],
+        "responses": [response],
         "response_ids": [[20, 21]],
         "stop_reasons": ["stop"],
         "response_logprobs": [[-0.1, -0.2]],
@@ -282,7 +292,10 @@ async def test_native_runner_preserves_engine_tokens_logprobs_and_grades_respons
     assert result["response_ids"] == [[20, 21]]
     assert result["rollout_logprobs"] == [[-0.1, -0.2]]
     assert result["loss_masks"] == [[1, 1]]
-    assert result["rewards"] == [1.0]
+    assert result["rewards"] == [reward]
+    assert result["exception_types"] == ["submission_failure" if submission_failure else None]
+    assert result["error_treatments"] == ["zero" if submission_failure else None]
+    assert result["rollout_metrics"]["taskcompendium/submission_failures"] == float(submission_failure)
     assert result["trajectory_ids"] == [identity]
     inference_request = model_client.generate.await_args.args[0]
     assert inference_request["prompt_token_ids"] == [[10, 11, 12]]

@@ -13,7 +13,7 @@ from omegaconf import OmegaConf
 from taskcompendium.grading import exact_answer
 from taskcompendium.lowering import HarborEnvironmentConfig, lower_to_harbor
 from taskcompendium.models import AnswerType, ConversationInput, EnvironmentRequirements, Source, TaskSpec, TextMessage
-from taskcompendium.submission import AnswerFormat, SubmissionConvention
+from taskcompendium.submission import PlainText
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
@@ -45,7 +45,7 @@ async def test_mixed_taskcompendium_rollout_updates_cpu_policy(
         environment_requirements=EnvironmentRequirements(),
         answer_type=AnswerType.TEXT,
     )
-    plain = SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN)
+    plain = PlainText(id="plain")
     lower_to_harbor(chat, plain, HarborEnvironmentConfig(), tmp_path / "chat")
     workplace, convention, binding = workplace_import
     lower_to_harbor(

@@ -226,7 +226,7 @@ class NativeTaskCompendiumRunner(TrajectoryRunner):
         rewards: list[float] = []
         exception_types: list[str | None] = []
         error_treatments: list[str | None] = []
-        extraction_errors = 0
+        submission_failures = 0
         with tempfile.TemporaryDirectory(prefix="taskcompendium-native-") as temporary:
             workspace = Path(temporary)
             for extra, prompt, response, identity in zip(
@@ -239,17 +239,17 @@ class NativeTaskCompendiumRunner(TrajectoryRunner):
                     events=tuple(TextMessage.model_validate(message) for message in prompt)
                     + (TextMessage(role="assistant", content=response),)
                 )
-                result = grade_answer(specification, convention, conversation, workspace)
+                result = await grade_answer(specification, convention, conversation, workspace)
                 if result.status is Outcome.GRADED and result.reward is not None:
                     rewards.append(result.reward)
                     exception_types.append(None)
                     error_treatments.append(None)
                     continue
-                if result.status is Outcome.EXTRACTION_ERROR:
-                    rewards.append(0.0)
-                    exception_types.append(Outcome.EXTRACTION_ERROR.value)
+                if result.status is Outcome.SUBMISSION_FAILURE and result.reward is not None:
+                    rewards.append(result.reward)
+                    exception_types.append(Outcome.SUBMISSION_FAILURE.value)
                     error_treatments.append("zero")
-                    extraction_errors += 1
+                    submission_failures += 1
                     continue
                 raise UngradedTaskCompendiumBatchError(
                     f"{identity.to_string()} has semantic status {result.status.value}; "
@@ -268,7 +268,7 @@ class NativeTaskCompendiumRunner(TrajectoryRunner):
             "trajectory_ids": list(identities),
             "rollout_metrics": {
                 "taskcompendium/native_chat_trajectories": float(size),
-                "taskcompendium/extraction_errors_zeroed": float(extraction_errors),
+                "taskcompendium/submission_failures": float(submission_failures),
             },
             "rollout_logprobs": rollout_logprobs,
             "is_last_step": [True] * size,
