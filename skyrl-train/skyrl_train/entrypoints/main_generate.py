@@ -56,13 +56,17 @@ class EvalOnlyEntrypoint(BasePPOExp):
         await load_initial_policy_adapter(inference_engine_client, self.cfg)
         trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
 
-        results: dict[str, Any] = await evaluate(
-            eval_dataloader=build_eval_dataloader(self.cfg, self.eval_dataset),
-            trajectory_runner=trajectory_runner,
-            cfg=self.cfg,
-            global_step=None,
-            tokenizer=self.tokenizer,
-        )
+        await trajectory_runner.startup()
+        try:
+            results: dict[str, Any] = await evaluate(
+                eval_dataloader=build_eval_dataloader(self.cfg, self.eval_dataset),
+                trajectory_runner=trajectory_runner,
+                cfg=self.cfg,
+                global_step=None,
+                tokenizer=self.tokenizer,
+            )
+        finally:
+            await trajectory_runner.shutdown()
 
         tracker = self.get_tracker()
         tracker.log(results, step=0, commit=True)
