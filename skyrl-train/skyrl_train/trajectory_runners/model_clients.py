@@ -22,7 +22,10 @@ from skyrl_train.trajectory_runners.types import TokenProvenance
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 
 
-_CHAT_SAMPLING_EXCLUSIONS = frozenset({"max_generate_length", "logprobs", "stop"})
+# The per-turn output limit, as the trainer config (`max_generate_length`) and vLLM (`max_tokens`) spell it. Chat
+# requests carry it only as `max_completion_tokens`, which vLLM prefers over `max_tokens`.
+_OUTPUT_LIMIT_KEYS = ("max_generate_length", "max_tokens")
+_CHAT_SAMPLING_EXCLUSIONS = frozenset({*_OUTPUT_LIMIT_KEYS, "logprobs", "stop"})
 
 
 class ModelClientOutput(InferenceEngineOutput):
@@ -178,8 +181,10 @@ class DirectModelClient:
             result.pop("tools", None)
         if "max_output_tokens" in result:
             result["max_completion_tokens"] = result.pop("max_output_tokens")
-        if "max_generate_length" in sampling_params:
-            configured_max = int(sampling_params["max_generate_length"])
+        for key in _OUTPUT_LIMIT_KEYS:
+            if sampling_params.get(key) is None:
+                continue
+            configured_max = int(sampling_params[key])
             requested_max = result.get("max_completion_tokens")
             result["max_completion_tokens"] = (
                 configured_max if requested_max is None else min(configured_max, int(requested_max))

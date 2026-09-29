@@ -1,5 +1,5 @@
 # @package environment.skyrl_gym
-max_env_workers: 32
+max_env_workers: 32 # environment threads in each rollout worker
 
 gsm8k:
   # Select final_line when only a completed response's last #### line should earn reward.
