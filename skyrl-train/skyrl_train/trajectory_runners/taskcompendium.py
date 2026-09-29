@@ -62,8 +62,8 @@ def _native_chat_eligible(
         and specification.verifier.kind is VerifierKind.EXACT_ANSWER
         and convention.answer_format in (AnswerFormat.PLAIN, AnswerFormat.JSON)
         and convention.supports(specification.answer_type)
-        and not specification.requirements.capabilities
-        and not specification.requirements.providers
+        and not specification.environment_requirements.capabilities
+        and not specification.tool_providers
         and not any(resource.visibility is ResourceVisibility.AGENT for resource in specification.resources)
         and binding == HarborEnvironmentConfig()
     )

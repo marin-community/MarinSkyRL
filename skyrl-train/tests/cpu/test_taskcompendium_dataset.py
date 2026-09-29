@@ -10,7 +10,7 @@ from omegaconf import OmegaConf
 from taskcompendium.grading import exact_answer
 from taskcompendium.importers.nemo_workplace import load_fixture
 from taskcompendium.lowering import HarborEnvironmentConfig, lower_to_harbor
-from taskcompendium.models import AnswerType, ConversationInput, Source, TaskRequirements, TaskSpec, TextMessage
+from taskcompendium.models import AnswerType, ConversationInput, EnvironmentRequirements, Source, TaskSpec, TextMessage
 from taskcompendium.resources import ResourceVisibility, TaskResource
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
 
@@ -41,7 +41,7 @@ def _lowering(root: Path, name: str) -> Path:
             )
         ),
         verifier=exact_answer("blue"),
-        requirements=TaskRequirements(),
+        environment_requirements=EnvironmentRequirements(),
         source=Source(dataset="test", revision="revision", row=name, importer_revision="importer"),
         answer_type=AnswerType.TEXT,
         resources=(TaskResource(path="private/reference.txt", visibility=ResourceVisibility.VERIFIER, content="blue"),),
@@ -81,7 +81,7 @@ def test_taskcompendium_dataset_routes_answer_call_to_harbor(tmp_path):
         id="answer-call",
         context=ConversationInput(events=(TextMessage(role="user", content="Reply with the word blue."),)),
         verifier=exact_answer("blue"),
-        requirements=TaskRequirements(),
+        environment_requirements=EnvironmentRequirements(),
         source=Source(dataset="test", revision="revision", row="answer-call", importer_revision="importer"),
         answer_type=AnswerType.TEXT,
     )
