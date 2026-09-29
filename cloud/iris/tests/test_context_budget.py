@@ -42,7 +42,7 @@ _CONFIGS = {
     "snowball_megatron_online_eagle.yaml": (9856, 8192, 1),
     "snowball_megatron_smoke.yaml": (2048, 512, 1),
     "snowball_mopd_ultra_32k.yaml": (32767, 8192, 50),
-    "snowball_mopd_ultra_async_32k_smoke.yaml": (32768, 8192, 50),
+    "snowball_mopd_ultra_async_32k_smoke.yaml": (32767, 8192, 50),
     "snowball_mopd_ultra_async_smoke.yaml": (8192, 2048, 1),
     "snowball_mopd_ultra_smoke.yaml": (8192, 2048, 1),
     "snowball_opd_math_smoke.yaml": (2048, 512, 1),
