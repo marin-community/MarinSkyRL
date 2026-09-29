@@ -1,7 +1,10 @@
 """Behavior checks for the NVIDIA NeMo Gym reward ports."""
 
+import contextlib
+import io
 import json
 import threading
+from typing import Any
 
 import pytest
 import requests
@@ -20,7 +23,7 @@ from skyrl_gym.envs.nemotron_ultra.genrm_utils import (
 from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group
 from skyrl_gym.envs.nemotron_ultra.instruction_following import grade_instruction_following
 from skyrl_gym.envs.nemotron_ultra.jailbreak import grade_jailbreak
-from skyrl_gym.envs.nemotron_ultra.judge import GenRMResponseTransport, OpenAIJudge
+from skyrl_gym.envs.nemotron_ultra.judge import GenRMResponseTransport, IncompleteJudgeResponse, OpenAIJudge
 from skyrl_gym.envs.nemotron_ultra.judge_verifiers import grade_abstention, grade_multichallenge
 from skyrl_gym.envs.nemotron_ultra.lean import verify_lean_attempt
 from skyrl_gym.envs.nemotron_ultra import math_with_judge
@@ -421,6 +424,39 @@ def transform(grid):
     )
 
 
+def test_nvarc_transductive_extraction_accepts_reasoning_and_common_grid_formats():
+    expected = [[1, 3], [1, 3]]
+    assert parse_grid("<|start_think|>\nCandidate color: 2\n<|end_think|>\n1 3\n1 3") == expected
+    assert parse_grid("<think>the answer uses color 2</think>13\n13") == expected
+    assert parse_grid("[[1, 3], [1, 3]]") == expected
+    assert parse_grid("[[1, 3],\n [1, 3]]") == expected
+    assert parse_grid("analysis \\boxed{[[1, 3], [1, 3]]}") == expected
+    assert parse_grid("[[1, 3], [1]]") is None
+    assert parse_grid("[[1, 3], [1, 13]]") is None
+    assert parse_grid("[[1, 3], [1, 3]] junk") is None
+
+
+def test_nvarc_transductive_incorrect_parseable_grid_scores_zero():
+    record = {"expected_output": [[2, 3], [4, 5]]}
+    assert grade_transductive_arc("[[1, 3], [1, 3]]", record)[0] == 0.0
+
+
+def test_nvarc_inductive_unfenced_transform_after_reasoning_executes():
+    record = {"test_input": [[1, 2], [3, 4]], "expected_output": [[2, 3], [4, 5]]}
+    response = (
+        "<|start_think|>\nCandidate color: 2\n<|end_think|>\n"
+        "Here is the transform:\n"
+        "import numpy as np\n"
+        "def transform(grid):\n"
+        "    return [[cell + 1 for cell in row] for row in grid]\n"
+    )
+
+    reward, details = grade_inductive_arc(response, record, python_timeout_seconds=2, sandbox=_ExecutingSandbox())
+
+    assert reward == 1.0
+    assert details["extraction_successful"] is True
+
+
 def test_code_gen_reward_runs_every_row_unit_test():
     record = {
         "verifier_metadata": {
@@ -565,6 +601,43 @@ def test_math_reward_avoids_forking_the_multithreaded_worker(monkeypatch):
     assert requested_methods == ["forkserver"]
 
 
+def test_math_judge_retries_length_capped_output_with_a_larger_budget():
+    class LengthCappedJudge:
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, messages, *, max_tokens=8192):
+            self.calls.append(max_tokens)
+            if len(self.calls) == 1:
+                raise IncompleteJudgeResponse("finish_reason=length")
+            return "[[A=B]]"
+
+    judge = LengthCappedJudge()
+    reward, details = grade_math(
+        r"The answer is \boxed{0.25}.",
+        {"question": "What is one half?", "expected_answer": r"\frac{1}{2}"},
+        judge=judge,
+    )
+
+    assert reward == 1.0
+    assert judge.calls == [8192, 16384, 8192]
+
+
+def test_math_judge_persistent_output_cap_keeps_the_attempt_ungraded():
+    class CappedJudge:
+        def generate(self, messages, *, max_tokens=8192):
+            raise IncompleteJudgeResponse("finish_reason=length")
+
+    env = _ultra_env("math_with_judge_simple_agent", {}, {"question": "What is one half?", "expected_answer": "1/2"})
+    env.general_judge = CappedJudge()
+
+    result = env.step(r"The answer is \boxed{0.25}.")
+
+    assert result["verification"].status is VerificationStatus.ERROR
+    assert result["verification"].score is None
+    assert result["reward"] == 0.0
+
+
 class _Judge:
     def __init__(self, outputs):
         self.outputs = iter(outputs)
@@ -623,6 +696,20 @@ class _Sandbox:
     def execute(self, code, **kwargs):
         self.calls.append((code, kwargs))
         return self.result
+
+
+class _ExecutingSandbox:
+    """Local stand-in for the HTTP sandbox that really runs the verifier script."""
+
+    def execute(self, code, **kwargs):
+        stdout = io.StringIO()
+        namespace: dict[str, Any] = {}
+        try:
+            with contextlib.redirect_stdout(stdout):
+                exec(code, namespace)
+        except Exception as error:
+            return {"process_status": "error", "stdout": stdout.getvalue(), "stderr": repr(error)}
+        return {"process_status": "completed", "stdout": stdout.getvalue(), "stderr": ""}
 
 
 def test_ns_tools_executes_structured_python_calls_with_stateful_session():
