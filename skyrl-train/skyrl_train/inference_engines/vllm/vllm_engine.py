@@ -1562,6 +1562,13 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             )
         # TODO (erictang000): potentially enable log requests for a debugging mode
         custom_chat_template_path = kwargs.pop("custom_chat_template_chat_completion_path", None)
+        custom_chat_template_content = kwargs.pop("chat_template", None)
+        chat_template_kwargs = kwargs.pop("default_chat_template_kwargs", None)
+        if custom_chat_template_path:
+            file_template = Path(custom_chat_template_path).read_text()
+            if custom_chat_template_content is not None and custom_chat_template_content != file_template:
+                raise ValueError("generator.chat_template and the serving template file must agree")
+            custom_chat_template_content = file_template
         # Use factory to inject engine ID into stat logger
         stat_loggers = [self._create_stat_logger_factory()]
 
@@ -1610,16 +1617,6 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             base_model_paths=base_model_paths,
         )
 
-        # TODO(Charlie): adding custom chat template for chat completion. Hacky!
-        if custom_chat_template_path:
-            with open(custom_chat_template_path, "r") as f:
-                custom_chat_template_content = f.read()
-            logger.info(
-                f"Initializing OpenAIServingChat with custom_chat_template read from: {custom_chat_template_path}"
-            )
-        else:
-            custom_chat_template_content = None
-
         # The pinned fork shares one renderer between chat, completion, and
         # tokenization serving.
         online_renderer = OnlineRenderer(
@@ -1628,6 +1625,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             request_logger=None,
             chat_template=custom_chat_template_content,
             chat_template_content_format="auto",
+            default_chat_template_kwargs=chat_template_kwargs,
             **wrapper_kwargs,
         )
         online_renderer.warmup()
@@ -1639,6 +1637,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             request_logger=None,
             chat_template=custom_chat_template_content,
             chat_template_content_format="auto",
+            default_chat_template_kwargs=chat_template_kwargs,
             **wrapper_kwargs,
         )
         self.openai_serving_completion = OpenAIServingCompletion(
@@ -1653,6 +1652,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             request_logger=None,
             chat_template=custom_chat_template_content,
             chat_template_content_format="auto",
+            default_chat_template_kwargs=chat_template_kwargs,
         )
         return engine
 
