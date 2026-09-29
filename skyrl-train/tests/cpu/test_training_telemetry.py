@@ -16,7 +16,6 @@ from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.timing_observability import STEP_WALL_PHASES
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
-from skyrl_train.trajectory_runners.trajectory_retention_config import TrajectoryRetentionConfig
 from tests.cpu.util import example_dummy_config
 
 # Record names and attribute values the async RL dashboard reads (marin
@@ -124,21 +123,6 @@ class FakeEngines:
         pass
 
 
-class DisabledRetentionSink:
-    """In-process stand-in for the trainer's Ray trajectory-sink actor, whose cold start dominated this test."""
-
-    config = TrajectoryRetentionConfig(enabled=False)
-
-    def bind_runner(self, runner_name):
-        pass
-
-    def retain(self, input_batch, output):
-        return {}
-
-    def close(self):
-        pass
-
-
 class FakeTracker:
     def __init__(self):
         self.logs = []
@@ -164,14 +148,14 @@ def _config(max_staleness_steps: int):
             "algorithm": {"use_kl_loss": False, "dynamic_sampling": {"type": "filter"}},
         },
     )
-    OmegaConf.update(cfg, "generator", {"n_samples_per_prompt": 2})
+    # Retention off gives the trainer its in-process disabled sink instead of a Ray actor.
+    OmegaConf.update(cfg, "generator", {"n_samples_per_prompt": 2, "trajectory_retention": {"enabled": False}})
     OmegaConf.update(cfg, "data", {"shuffle": False})
     return cfg
 
 
 async def _train_two_steps(monkeypatch, max_staleness_steps: int) -> RayPPOTrainer:
     cfg = _config(max_staleness_steps)
-    monkeypatch.setattr(trainer_module, "make_trajectory_sink", lambda config, tokenizer: DisabledRetentionSink())
     runner = ScriptedRunner()
     dataset = PromptRows()
     trainer = RayPPOTrainer(

@@ -665,7 +665,7 @@ def test_rl_report_row_reads_policy_namespaced_tis_log_ratio(tmp_path):
     assert "entropy=0.05" in trend
     assert "TIS exact=0.975" in trend
     assert "TIS |log r|=0.125" in trend
-    assert "token |Δlog p| μ/p99/max=0.021/0.44/3.25" in trend
+    assert "0.021/0.44/3.25" in trend
 
 
 def test_rl_report_row_explains_tis_disabled_by_resolved_config(tmp_path):

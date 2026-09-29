@@ -272,12 +272,9 @@ def test_training_command_routes_config_budgets_domains_and_gate_schedule() -> N
     assert overrides["actor_rollout_ref.rollout.max_num_batched_tokens"] == str(
         training.prompt_limit + training.response_limit
     )
-    assert overrides["+actor_rollout_ref.rollout.domain_response_limits"] == (
-        "{" + ",".join(f"{d}:{limit}" for d, limit in zip(fidelity.DOMAINS, training.domain_response_limits)) + "}"
-    )
-    assert [overrides[f"+data.domain_weights.{d}"] for d in fidelity.DOMAINS] == [
-        str(weight) for weight in training.domain_weights
-    ]
+    # The default config's per-domain response limits and sampling weights, as Hydra reads them.
+    assert overrides["+actor_rollout_ref.rollout.domain_response_limits"] == "{math:16384,code:16384,if:2048}"
+    assert [overrides[f"+data.domain_weights.{d}"] for d in ("math", "code", "if")] == ["2", "2", "1"]
     # A one-step gate clamps the save and eval cadence so its only step is checkpointed and validated.
     assert overrides["trainer.total_training_steps"] == "1"
     assert overrides["trainer.save_freq"] == "1"

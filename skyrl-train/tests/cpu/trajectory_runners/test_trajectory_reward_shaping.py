@@ -402,7 +402,7 @@ async def test_trajectory_runner_applies_shared_shaping_after_generation():
 
 
 def test_retired_loop_penalty_key_fails_instead_of_being_ignored():
-    # #378 replaced the per-occurrence reward penalty with token credit; a stale config
-    # carrying the old key must fail loudly rather than silently train without a penalty.
+    # The per-occurrence reward penalty became token credit; a stale config carrying the old key
+    # must fail loudly rather than silently train without a penalty.
     with pytest.raises(ValueError, match="unknown loop settings"):
         parse_trajectory_reward_shaping_config({"loop": {"penalty_per_occurrence": 0.1}})

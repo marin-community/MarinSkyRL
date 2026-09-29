@@ -2,7 +2,7 @@
 
 Two production RL failures motivated these tests:
 
-* Job 631790 (Qwen3-Next-80B, terminal_bench): the prompt-assembly site passed a `BatchEncoding` into the
+* Qwen3-Next-80B terminal_bench training: the prompt-assembly site passed a `BatchEncoding` into the
   training batch. `BatchEncoding` is a `UserDict`, not a `dict`, so iterating it yields its keys and the batch
   verifier rejected the string 'input_ids' as a token id.
 * Qwen3-Next-80B no-op learning: `get_generation_prompt_ids` and `encode_messages_subset` slice an

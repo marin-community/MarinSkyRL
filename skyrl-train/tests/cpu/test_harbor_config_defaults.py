@@ -40,7 +40,7 @@ def test_omitted_keys_get_defaults():
     assert kwargs["trajectory_config"] == {"raw_content": True}
 
 
-# The r5 case: an explicit `false` must not be swallowed by the default.
+# An explicit `false` must not be swallowed by the default.
 @pytest.mark.parametrize("record_terminal_session", [True, False])
 def test_explicit_record_terminal_session_is_honored(record_terminal_session):
     kwargs = _agent_kwargs({"name": "terminus-2", "record_terminal_session": record_terminal_session})

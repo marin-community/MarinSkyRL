@@ -26,6 +26,8 @@ from skyrl_train.trajectory_runners.types import TrajectoryID, VerifierTestColle
 # A slow test starts its own Ray cluster of about 4 GiB, and four workers running the rest of the suite fill most
 # of a 16 GiB CI runner, so at most one slow test runs per 12 GiB of host memory. A second one on that runner
 # pushes it past Ray's memory monitor, which then kills actors.
+# pytest-xdist sets this in each worker process.
+XDIST_WORKER_COUNT_ENV = "PYTEST_XDIST_WORKER_COUNT"
 HOST_MEMORY_PER_SLOW_TEST_BYTES = 12 * 2**30
 
 
@@ -35,7 +37,7 @@ def pytest_configure(config: pytest.Config) -> None:
     Torch defaults every process to one intra-op thread per physical core, so N workers would each spin that many
     threads. OMP_NUM_THREADS carries the same limit into subprocesses that tests spawn.
     """
-    worker_count = os.environ.get("PYTEST_XDIST_WORKER_COUNT")
+    worker_count = os.environ.get(XDIST_WORKER_COUNT_ENV)
     if worker_count is None:
         return
     threads = max(1, os.cpu_count() // int(worker_count))
@@ -53,7 +55,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """
     slow = [item for item in items if item.get_closest_marker("slow") is not None]
     items[:] = slow + [item for item in items if item.get_closest_marker("slow") is None]
-    worker_count = os.environ.get("PYTEST_XDIST_WORKER_COUNT")
+    worker_count = os.environ.get(XDIST_WORKER_COUNT_ENV)
     if worker_count is None:
         return
     host_memory = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")

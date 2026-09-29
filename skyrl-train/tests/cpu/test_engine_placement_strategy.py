@@ -49,7 +49,7 @@ def test_resolve_engine_max_model_len(engine_kwargs, rope_scaling, expected):
 @pytest.mark.parametrize(
     "tp,pp,dp,expected",
     [
-        # Regression (lever1/swesmith): multi-node TP=1 must not use per-engine STRICT_PACK, which scatters
+        # Regression: multi-node TP=1 must not use per-engine STRICT_PACK, which scatters
         # 1-GPU bundles and starves the policy PACK placement group of whole nodes.
         (1, 1, 1, False),
         (2, 1, 1, True),  # de-risk geometry on ray/uni -> on-node STRICT_PACK

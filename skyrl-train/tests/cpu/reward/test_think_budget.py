@@ -1,4 +1,4 @@
-"""Think-token loss down-weighting (F7): weighted mask values and weighted-mean denominators."""
+"""Think-token loss down-weighting: weighted mask values and weighted-mean denominators."""
 
 import math
 
