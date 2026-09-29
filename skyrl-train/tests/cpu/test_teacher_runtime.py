@@ -493,3 +493,26 @@ async def test_local_teacher_pool_builds_one_engine_per_data_parallel_group(monk
     assert engine_kwargs["tensor_parallel_size"] == 1
     assert engine_kwargs["data_parallel_size"] == 8
     assert engine_kwargs["expert_parallel_size"] == 8
+
+
+@pytest.mark.asyncio
+async def test_local_teacher_engine_holds_a_full_student_window_plus_the_scored_token(monkeypatch):
+    engine = _Engine()
+    engine_kwargs = {}
+    tokenizer = _Tokenizer({"a": 0, "b": 1, "c": 2})
+
+    def create_engine(**kwargs):
+        engine_kwargs.update(kwargs)
+        return [engine]
+
+    monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
+    monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", create_engine)
+    cfg = _config()
+    cfg.generator.engine_init_kwargs.max_model_len = 32768
+    prepared = prepare_distillation_runtime(cfg, tokenizer)
+    runtime = await start_distillation_runtime(cfg, prepared)
+    assert runtime is not None
+    await runtime.close()
+
+    assert engine_kwargs["engine_init_kwargs"]["max_model_len"] == 32769
+    assert cfg.generator.engine_init_kwargs.max_model_len == 32768
