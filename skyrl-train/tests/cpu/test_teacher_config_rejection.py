@@ -5,6 +5,9 @@ from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils import validate_cfg
+from skyrl_train.utils.utils import validate_megatron_cfg
+from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_config
+from cloud.iris.tests.test_nemotron_ultra_grading_config import _HPCStub, _skipped_grading_config
 from skyrl_train.objective.losses import PolicyLossInputs
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.config.objective_spec import TopKLossParams
@@ -87,8 +90,12 @@ def skipped_grading_config() -> DictConfig:
     return cfg
 
 
-def test_skipped_grading_is_accepted_for_pure_distillation():
-    validate_cfg(skipped_grading_config())
+def test_skipped_grading_is_accepted_for_pure_distillation(tmp_path):
+    parsed = parse_rl_config(str(_skipped_grading_config(tmp_path, eval_interval=-1)))
+    cfg = compose_skyrl_config(parsed, {"job_name": "grading-test", "num_nodes": 1}, _HPCStub()).config
+    cfg.trainer.flash_attn = False
+    validate_cfg(cfg)
+    validate_megatron_cfg(cfg)
 
 
 @pytest.mark.parametrize(
