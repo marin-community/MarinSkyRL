@@ -24,21 +24,21 @@ class TaskCompendiumExp(TerminalBenchExp):
         return f"http://{self.cfg.generator.http_endpoint_host}:{self.cfg.generator.http_endpoint_port}/v1"
 
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
-        from taskcompendium.skyrl import TaskCompendiumTrajectoryRunner  # noqa: PLC0415
-
         from skyrl_train.trajectory_runners.model_clients import DirectModelClient  # noqa: PLC0415
         from skyrl_train.trajectory_runners.taskcompendium import (  # noqa: PLC0415
             NativeTaskCompendiumRunner,
+            TaskCompendiumHarborRunner,
             TaskCompendiumTrajectoryRouter,
         )
         from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
 
         output_dir = Path(tempfile.mkdtemp(prefix="taskcompendium-attempts-"))
-        harbor_runner = TaskCompendiumTrajectoryRunner(
+        harbor_runner = TaskCompendiumHarborRunner(
             tokenizer,
             output_dir,
             concurrency=int(cfg.taskcompendium_config.concurrency),
-            archive_uri=(str(cfg.taskcompendium_config.archive_uri) if cfg.taskcompendium_config.archive_uri else None),
+            max_turns=int(cfg.taskcompendium_config.max_turns),
+            timeout=float(cfg.taskcompendium_config.timeout),
         )
         native_runner = NativeTaskCompendiumRunner(cfg.generator, tokenizer, DirectModelClient(inference_engine_client))
         return TaskCompendiumTrajectoryRouter(

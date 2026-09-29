@@ -3,27 +3,27 @@
 from __future__ import annotations
 
 import asyncio
-import copy
-import json
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-import msgspec
 from omegaconf import DictConfig
-from taskcompendium.execution import HarborTaskBinding, NoEnvironment
-from taskcompendium.grading import grade_attempt
-from taskcompendium.models import (
-    AssistantFinal,
-    ConstraintVerifier,
-    ContextRequirement,
-    Outcome,
-    ResourceRole,
-    TaskTroveVerifier,
+from taskcompendium.grading import Outcome
+from taskcompendium.lowering import (
+    ENVIRONMENT_CONFIG_FILE,
+    SPECIFICATION_FILE,
+    STATEFUL_ENVIRONMENT,
+    SUBMISSION_CONVENTION_FILE,
+    HarborEnvironmentConfig,
+    read_environment_config,
+    read_specification,
+    read_submission_convention,
 )
-from taskcompendium.serialization import from_json, renderings_from_json
-from tasktrove_verify.spec import Mode
+from taskcompendium.models import AnswerType, VerifierKind
+from taskcompendium.resources import ResourceVisibility
+from taskcompendium.verifier_registry import grade_answer
 from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.inference_engines.base import InferenceEngineInput
@@ -37,6 +37,7 @@ from skyrl_train.trajectory_runners.model_clients import ModelClient
 from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
     get_custom_chat_template,
+    get_response_ids_and_loss_mask_from_messages,
     normalize_token_ids,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
@@ -52,26 +53,17 @@ class UngradedTaskCompendiumBatchError(RuntimeError):
 
 def _native_chat_eligible(task_dir: Path) -> bool:
     """Return whether the lowering can run as one host-graded chat completion."""
-    specification = from_json((task_dir / "specification.json").read_bytes())
-    renderings = renderings_from_json((task_dir / "renderings.json").read_bytes())
-    binding = msgspec.json.decode((task_dir / "binding.json").read_bytes(), type=HarborTaskBinding)
-    if len(specification.steps) != 1 or len(renderings) != 1:
-        return False
-    step = specification.steps[0]
-    verifier = step.verifier
-    host_gradeable = isinstance(verifier, ConstraintVerifier) or (
-        isinstance(verifier, TaskTroveVerifier) and verifier.runtime is None and verifier.mode is not Mode.JUDGE
-    )
-    resources = (*specification.resources, *step.resources)
+    specification = read_specification(task_dir / SPECIFICATION_FILE)
+    convention = read_submission_convention(task_dir / SUBMISSION_CONVENTION_FILE)
+    binding = read_environment_config(task_dir / ENVIRONMENT_CONFIG_FILE)
     return (
-        isinstance(renderings[0].submission, AssistantFinal)
-        and step.context_requirement is ContextRequirement.INSTRUCTION_AND_WORKSPACE
-        and host_gradeable
+        specification.answer_type in (AnswerType.TEXT, AnswerType.NUMBER)
+        and specification.verifier.kind is VerifierKind.EXACT_ANSWER
+        and convention.supports(specification.answer_type)
         and not specification.requirements.capabilities
         and not specification.requirements.action_interfaces
-        and not any(ResourceRole.AGENT in resource.roles for resource in resources)
-        and isinstance(binding.environment, NoEnvironment)
-        and not binding.tools
+        and not any(resource.visibility is ResourceVisibility.AGENT for resource in specification.resources)
+        and binding == HarborEnvironmentConfig()
     )
 
 
@@ -85,9 +77,9 @@ class TaskCompendiumTaskDataset:
     def _task_directories(root: Path) -> list[Path]:
         if not root.is_dir():
             raise ValueError(f"TaskCompendium data root does not exist: {root}")
-        if (root / "manifest.json").is_file():
+        if (root / SPECIFICATION_FILE).is_file():
             return [root]
-        tasks = sorted(path for path in root.iterdir() if (path / "manifest.json").is_file())
+        tasks = sorted(path for path in root.iterdir() if (path / SPECIFICATION_FILE).is_file())
         if not tasks:
             raise ValueError(f"TaskCompendium data root has no lowering packages: {root}")
         return tasks
@@ -116,21 +108,12 @@ class TaskCompendiumTaskDataset:
                     )
                     continue
 
-                execution_path = task_dir / "reference-execution.json"
-                if not execution_path.is_file():
-                    raise ValueError(f"TaskCompendium Harbor lowering lacks reference-execution.json: {task_dir}")
-                execution = copy.deepcopy(json.loads(execution_path.read_text()))
-                agent = execution["agent"]
-                if agent.get("import_path", "").endswith(("ReplayAgent", "ActionOutputReplayAgent")):
-                    raise ValueError(f"Replay agents cannot produce on-policy training data: {task_dir}")
-                agent.setdefault("kwargs", {})["api_base"] = api_base
-                agent["model_name"] = model_name
                 rows.append(
                     {
                         "uid": task_dir.name,
                         "prompt": [{"role": "user", "content": str(task_dir)}],
                         "env_class": HARBOR_ENV_CLASS,
-                        "env_extras": {"task_dir": str(task_dir), "execution": execution},
+                        "env_extras": {"task_dir": str(task_dir), "api_base": api_base, "model_name": model_name},
                     }
                 )
         return rows
@@ -234,19 +217,11 @@ class NativeTaskCompendiumRunner(TrajectoryRunner):
         extraction_errors = 0
         with tempfile.TemporaryDirectory(prefix="taskcompendium-native-") as temporary:
             workspace = Path(temporary)
-            for extra, prompt, response, identity in zip(
-                extras, input_batch["prompts"], responses, identities, strict=True
-            ):
+            for extra, response, identity in zip(extras, responses, identities, strict=True):
                 task_dir = Path(extra["task_dir"])
-                specification = from_json((task_dir / "specification.json").read_bytes())
-                renderings = renderings_from_json((task_dir / "renderings.json").read_bytes())
-                result = grade_attempt(
-                    specification,
-                    renderings[0],
-                    response,
-                    workspace,
-                    transcript=tuple([*prompt, {"role": "assistant", "content": response}]),
-                )
+                specification = read_specification(task_dir / SPECIFICATION_FILE)
+                convention = read_submission_convention(task_dir / SUBMISSION_CONVENTION_FILE)
+                result = grade_answer(specification, convention, response, workspace)
                 if result.status is Outcome.GRADED and result.reward is not None:
                     rewards.append(result.reward)
                     exception_types.append(None)
@@ -289,6 +264,122 @@ class NativeTaskCompendiumRunner(TrajectoryRunner):
             output["student_topk_indices"] = selected_indices
             output["behavior_topk_logprobs"] = selected_logprobs
         return output
+
+
+class TaskCompendiumHarborRunner(TrajectoryRunner):
+    """Run tool-bearing task packages and reconstruct learner actions from Harbor traces."""
+
+    def __init__(
+        self, tokenizer: PreTrainedTokenizerBase, output_dir: Path, *, concurrency: int, max_turns: int, timeout: float
+    ):
+        self.tokenizer = tokenizer
+        self.output_dir = output_dir
+        self.concurrency = concurrency
+        self.max_turns = max_turns
+        self.timeout = timeout
+        self.trajectory_sink = None
+        self.global_step_fn = None
+
+    async def startup(self) -> None:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    async def shutdown(self) -> None:
+        pass
+
+    async def start_eval_session(self, **kwargs) -> None:
+        del kwargs
+
+    async def stop_eval_session(self) -> None:
+        pass
+
+    async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
+        del disable_tqdm
+        from taskcompendium.harbor.runner import AgentStrategy, ChatLaunch, run_trial  # noqa: PLC0415
+
+        extras = input_batch.get("env_extras")
+        identities = input_batch.get("trajectory_ids")
+        size = len(input_batch["prompts"])
+        if extras is None or identities is None or not (len(extras) == len(identities) == size):
+            raise ValueError("Harbor requests require aligned task metadata and trajectory IDs")
+        if any(name != HARBOR_ENV_CLASS for name in input_batch["env_classes"]):
+            raise ValueError(f"This runner requires env_class={HARBOR_ENV_CLASS}")
+        semaphore = asyncio.Semaphore(self.concurrency)
+
+        async def trial(extra, prompt, identity):
+            task_dir = Path(extra["task_dir"])
+            if prompt != [{"role": "user", "content": str(task_dir)}]:
+                raise ValueError("Harbor request prompts must identify the corresponding task package")
+            binding = read_environment_config(task_dir / ENVIRONMENT_CONFIG_FILE)
+            launch = ChatLaunch(
+                model=extra["model_name"],
+                api_base=extra["api_base"],
+                strategy=(
+                    AgentStrategy.STATEFUL_TOOLS
+                    if binding.environment == STATEFUL_ENVIRONMENT
+                    else AgentStrategy.DIRECT_CHAT
+                ),
+                max_turns=self.max_turns,
+                request_timeout=self.timeout,
+                trial_timeout=self.timeout,
+            )
+            async with semaphore:
+                result = await run_trial(task_dir, binding, launch, self.output_dir, uuid4().hex)
+            trial_path = result.resolve_trial_path(self.output_dir)
+            if result.exception_info is not None or result.verifier_result is None:
+                raise UngradedTaskCompendiumBatchError(
+                    f"{identity.to_string()} is ungraded; Harbor trace retained at {trial_path}"
+                )
+            reward = result.verifier_result.rewards.get("reward")
+            metadata = result.agent_result.metadata if result.agent_result is not None else None
+            if reward is None or not isinstance(metadata, dict) or not isinstance(metadata.get("all_messages"), list):
+                raise UngradedTaskCompendiumBatchError(
+                    f"{identity.to_string()} lacks a reward or assistant trace; Harbor trace retained at {trial_path}"
+                )
+            messages = metadata["all_messages"]
+            first_assistant = next(
+                (index for index, message in enumerate(messages) if message.get("role") == "assistant"), None
+            )
+            if first_assistant is None:
+                raise UngradedTaskCompendiumBatchError(
+                    f"{identity.to_string()} lacks assistant actions; Harbor trace retained at {trial_path}"
+                )
+            tools = metadata.get("tool_definitions")
+            template_kwargs = {"tools": tools} if tools else {}
+            prompt_ids = normalize_token_ids(
+                self.tokenizer.apply_chat_template(
+                    messages[:first_assistant], tokenize=True, add_generation_prompt=False, **template_kwargs
+                )
+            )
+            response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
+                messages[first_assistant:],
+                self.tokenizer,
+                rollout_logprobs_required=False,
+                tito_full=False,
+                chat_template_kwargs=template_kwargs,
+            )
+            return prompt_ids, response_ids, loss_mask, float(reward)
+
+        rows = await asyncio.gather(
+            *(
+                trial(extra, prompt, identity)
+                for extra, prompt, identity in zip(extras, input_batch["prompts"], identities, strict=True)
+            )
+        )
+        return {
+            "prompt_token_ids": [row[0] for row in rows],
+            "response_ids": [row[1] for row in rows],
+            "loss_masks": [row[2] for row in rows],
+            "rewards": [row[3] for row in rows],
+            "unshaped_rewards": [row[3] for row in rows],
+            "stop_reasons": ["stop"] * size,
+            "exception_types": [None] * size,
+            "error_treatments": [None] * size,
+            "trajectory_ids": list(identities),
+            "rollout_metrics": {"taskcompendium/reconstructed_trajectories": float(size)},
+            "rollout_logprobs": None,
+            "is_last_step": [True] * size,
+            "exclude_from_baseline": [False] * size,
+        }
 
 
 class TaskCompendiumTrajectoryRouter:
@@ -357,6 +448,12 @@ class TaskCompendiumTrajectoryRouter:
             jobs.append(self.harbor_runner.run(_select_rows(input_batch, harbor_indices), disable_tqdm=disable_tqdm))
             index_groups.append(harbor_indices)
         outputs = await asyncio.gather(*jobs)
+        if native_indices and harbor_indices:
+            # The Harbor trace is retokenized. Do not preserve partial behavior-policy
+            # evidence on a batch that also contains reconstructed actions.
+            outputs[0]["rollout_logprobs"] = None
+            outputs[0].pop("student_topk_indices", None)
+            outputs[0].pop("behavior_topk_logprobs", None)
         result = (
             outputs[0]
             if len(outputs) == 1

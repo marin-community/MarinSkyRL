@@ -1,79 +1,51 @@
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-import msgspec
 import pytest
 from omegaconf import OmegaConf
-from taskcompendium.execution import HarborTaskBinding, NoEnvironment, ShellSimEnvironment, ShellToolBinding
-from taskcompendium.models import (
-    AssistantFinal,
-    Capability,
-    Rendering,
-    Source,
-    StepSpecification,
-    TaskMetadata,
-    TaskRequirements,
-    TaskSpec,
-    TaskTroveVerifier,
-)
-from taskcompendium.serialization import to_json
-from tasktrove_verify.spec import Mode
+from taskcompendium.grading import exact_answer
+from taskcompendium.lowering import HarborEnvironmentConfig, lower_to_harbor
+from taskcompendium.models import AnswerType, Source, TaskRequirements, TaskSpec
+from taskcompendium.resources import ResourceVisibility, TaskResource
+from taskcompendium.submission import AnswerFormat, SubmissionConvention
 
 from skyrl_train.trajectory_runners.taskcompendium import (
     HARBOR_ENV_CLASS,
     NATIVE_CHAT_ENV_CLASS,
     NativeTaskCompendiumRunner,
+    TaskCompendiumHarborRunner,
     TaskCompendiumTaskDataset,
     TaskCompendiumTrajectoryRouter,
 )
+from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
 from skyrl_train.trajectory_runners.types import TrajectoryID
+from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 
 
-def _lowering(root: Path, name: str, *, harbor: bool = False) -> Path:
-    task = root / name
-    task.mkdir()
-    requirements = TaskRequirements(capabilities=(Capability.FILESYSTEM,)) if harbor else TaskRequirements()
+def _lowering(root: Path, name: str) -> Path:
     specification = TaskSpec(
         id=name,
-        steps=(
-            StepSpecification(
-                instructions="Reply with the word blue.",
-                verifier=TaskTroveVerifier(Mode.EXACT, {"expected": ["blue"]}),
-            ),
-        ),
-        requirements=requirements,
-        resources=(),
-        metadata=TaskMetadata(Source("test", "revision", name, "importer")),
+        instructions="Reply with the word blue.",
+        verifier=exact_answer("blue"),
+        requirements=TaskRequirements(),
+        source=Source(dataset="test", revision="revision", row=name, importer_revision="importer"),
+        answer_type=AnswerType.TEXT,
+        resources=(TaskResource(path="private/reference.txt", visibility=ResourceVisibility.VERIFIER, content="blue"),),
     )
-    binding = (
-        HarborTaskBinding(ShellSimEnvironment(), (ShellToolBinding("shell", "shellsim"),))
-        if harbor
-        else HarborTaskBinding(NoEnvironment())
+    return lower_to_harbor(
+        specification,
+        SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
+        HarborEnvironmentConfig(),
+        root / name,
     )
-    (task / "manifest.json").write_text("{}")
-    (task / "specification.json").write_bytes(to_json(specification))
-    (task / "renderings.json").write_bytes(msgspec.json.encode((Rendering("plain", AssistantFinal()),)))
-    (task / "binding.json").write_bytes(msgspec.json.encode(binding))
-    (task / "instruction.md").write_text("Reply with the word blue.")
-    if harbor:
-        execution = {
-            "agent": {
-                "import_path": "taskcompendium.harbor.agents:ShellToolAgent",
-                "model_name": "stale-model",
-                "kwargs": {"max_turns": 2},
-            },
-            "environment": {},
-            "verifier": {},
-        }
-        (task / "reference-execution.json").write_text(json.dumps(execution))
-    return task
 
 
-def test_taskcompendium_dataset_routes_simple_chat_natively_and_binds_harbor_tasks(tmp_path):
+def test_taskcompendium_dataset_routes_simple_chat_natively(tmp_path):
     native = _lowering(tmp_path, "chat")
-    harbor = _lowering(tmp_path, "tools", harbor=True)
 
     dataset = TaskCompendiumTaskDataset(
         [str(tmp_path)],
@@ -81,18 +53,13 @@ def test_taskcompendium_dataset_routes_simple_chat_natively_and_binds_harbor_tas
         model_name="snowball",
     )
 
-    assert [row["uid"] for row in dataset] == ["chat", "tools"]
+    assert [row["uid"] for row in dataset] == ["chat"]
     assert dataset[0] == {
         "uid": "chat",
-        "prompt": [{"role": "user", "content": "Reply with the word blue."}],
+        "prompt": [{"role": "user", "content": "Reply with the word blue.\n\nGive your answer as plain text.\n"}],
         "env_class": NATIVE_CHAT_ENV_CLASS,
         "env_extras": {"task_dir": str(native)},
     }
-    assert dataset[1]["env_class"] == HARBOR_ENV_CLASS
-    assert dataset[1]["prompt"] == [{"role": "user", "content": str(harbor)}]
-    execution = dataset[1]["env_extras"]["execution"]
-    assert execution["agent"]["kwargs"]["api_base"] == "http://policy:8000/v1"
-    assert execution["agent"]["model_name"] == "snowball"
 
 
 @pytest.mark.asyncio
@@ -201,8 +168,138 @@ async def test_router_splits_mixed_batches_and_restores_order():
 
     assert result["response_ids"] == [[2], [1], [2]]
     assert result["rewards"] == [2.0, 1.0, 2.0]
+    assert result["rollout_logprobs"] is None
     assert result["trajectory_ids"] == identities
     assert result["rollout_metrics"]["taskcompendium/native_chat_trajectories"] == 1.0
     assert result["rollout_metrics"]["taskcompendium/harbor_trajectories"] == 2.0
     assert native.requests[0]["prompts"] == [request["prompts"][1]]
     assert harbor.requests[0]["prompts"] == [request["prompts"][0], request["prompts"][2]]
+
+
+@pytest.mark.asyncio
+async def test_mixed_batch_uses_live_scripted_policy_endpoint_and_produces_trainable_actions(tmp_path):
+    pytest.importorskip("harbor")
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from taskcompendium.importers.nemo_workplace import load_fixture
+    from transformers import PreTrainedTokenizerFast
+
+    _lowering(tmp_path, "chat")
+    specification, convention, binding = load_fixture()
+    lower_to_harbor(specification, convention, binding, tmp_path / "workplace")
+    source_row = json.loads(
+        next(resource.content for resource in specification.resources if resource.path == "source-row.json")
+    )
+    gold = source_row["ground_truth"][0]
+    requests = []
+
+    class Endpoint(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append(payload)
+            message = (
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": gold["name"], "arguments": gold["arguments"]},
+                        }
+                    ],
+                }
+                if len(requests) == 1
+                else {"role": "assistant", "content": "Done."}
+            )
+            body = json.dumps({"choices": [{"message": message}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Endpoint)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        dataset = TaskCompendiumTaskDataset(
+            [str(tmp_path / "chat"), str(tmp_path / "workplace")],
+            api_base=f"http://127.0.0.1:{server.server_port}/v1",
+            model_name="fixture",
+        )
+        backend = Tokenizer(models.WordLevel({"[UNK]": 0, "[EOS]": 1}, unk_token="[UNK]"))
+        backend.pre_tokenizer = pre_tokenizers.Whitespace()
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=backend, unk_token="[UNK]", eos_token="[EOS]", pad_token="[UNK]"
+        )
+        tokenizer.chat_template = (
+            "{% for message in messages %}{{ message['role'] }}: {{ message['content'] or '' }}"
+            "{% if message.get('tool_calls') %}{{ message['tool_calls'] }}{% endif %} [EOS] {% endfor %}"
+            "{% if add_generation_prompt %}assistant: {% endif %}"
+        )
+        client = AsyncMock()
+        client.generate.return_value = {
+            "responses": ["blue"],
+            "response_ids": [[20, 21]],
+            "stop_reasons": ["stop"],
+            "response_logprobs": [[-0.1, -0.2]],
+        }
+        cfg = OmegaConf.create(
+            {"sampling_params": {"temperature": 1.0}, "chat_template": None, "chat_template_kwargs": {}}
+        )
+        router = TaskCompendiumTrajectoryRouter(
+            native_runner=NativeTaskCompendiumRunner(cfg, tokenizer, client),
+            harbor_runner=TaskCompendiumHarborRunner(
+                tokenizer, tmp_path / "trials", concurrency=1, max_turns=3, timeout=30
+            ),
+            require_rollout_logprobs=False,
+            tis_lcs_alert_threshold=0.005,
+        )
+        batch = {
+            "prompts": [row["prompt"] for row in dataset],
+            "env_classes": [row["env_class"] for row in dataset],
+            "env_extras": [row["env_extras"] for row in dataset],
+            "sampling_params": {"temperature": 1.0},
+            "trajectory_ids": [TrajectoryID(row["uid"], 0) for row in dataset],
+            "batch_metadata": None,
+        }
+        await router.startup()
+        try:
+            result = await router.run(batch)
+        finally:
+            await router.shutdown()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert result["rewards"] == [1.0, 1.0]
+    validate_trajectory_batch(2, result)
+    assert result["rollout_logprobs"] is None
+    assert all(
+        tokens and len(tokens) == len(mask) and any(mask)
+        for tokens, mask in zip(result["response_ids"], result["loss_masks"], strict=True)
+    )
+    assert 0 in result["loss_masks"][1]
+    tensor_batch = convert_prompts_responses_to_batch_tensors(
+        tokenizer,
+        result["prompt_token_ids"],
+        result["response_ids"],
+        [
+            [0.0] * (len(tokens) - 1) + [reward]
+            for tokens, reward in zip(result["response_ids"], result["rewards"], strict=True)
+        ],
+        result["loss_masks"],
+    )
+    assert tensor_batch[0].shape[0] == tensor_batch[4].shape[0] == 2
+    assert tensor_batch[5] is None
+    assert len(requests) == 2
+    assert len(requests[0]["tools"]) == 27
+    assert "ground_truth" not in json.dumps(requests)
+    traces = list((tmp_path / "trials").rglob("result.json"))
+    assert len(traces) == 1
+    actions = json.loads(traces[0].read_text())["agent_result"]["metadata"]["tools"]
+    assert [action["call_id"] for action in actions] == ["call-1"]
