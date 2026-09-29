@@ -2117,7 +2117,7 @@ wheels = [
 [[package]]
 name = "harbor"
 version = "0.8.1"
-source = { git = "https://github.com/marin-community/harbor.git?rev=952a005353273590631b8f970f4664a121710b32#952a005353273590631b8f970f4664a121710b32" }
+source = { git = "https://github.com/marin-community/harbor.git?rev=ef1eaf207f41f84eb53d17f9c8bd84c073a9aba5#ef1eaf207f41f84eb53d17f9c8bd84c073a9aba5" }
 dependencies = [
     { name = "dirhash", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "fastapi", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
@@ -2154,7 +2154,7 @@ daytona = [
 [[package]]
 name = "harbor-config"
 version = "0.1.0"
-source = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-952a005353273590631b8f970f4664a121710b32/harbor_config-0.1.0-py3-none-any.whl" }
+source = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-ef1eaf207f41f84eb53d17f9c8bd84c073a9aba5/harbor_config-0.1.0-py3-none-any.whl" }
 dependencies = [
     { name = "pydantic", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-cpu') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-cpu') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-vllm') or (sys_platform == 'darwin' and extra == 'extra-10-marinskyrl-cpu') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "pyyaml", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-cpu') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-cpu') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-vllm') or (sys_platform == 'darwin' and extra == 'extra-10-marinskyrl-cpu') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
@@ -2163,7 +2163,7 @@ dependencies = [
     { name = "universal-pathlib", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-cpu') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-cpu') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-10-marinskyrl-vllm') or (sys_platform == 'darwin' and extra == 'extra-10-marinskyrl-cpu') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-952a005353273590631b8f970f4664a121710b32/harbor_config-0.1.0-py3-none-any.whl", hash = "sha256:2ce83e513ad81c81834374bc5f1d9a892fb205c3dd2da59ee2dbad794947b67b" },
+    { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-ef1eaf207f41f84eb53d17f9c8bd84c073a9aba5/harbor_config-0.1.0-py3-none-any.whl", hash = "sha256:e3e104ded8f44c6a98bf806cc67770073be14605d9572bb1fd13acde34a8862f" },
 ]
 
 [package.metadata]
@@ -3198,11 +3198,11 @@ requires-dist = [
     { name = "flashinfer-python", marker = "sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.6.18.post1" },
     { name = "fsspec", specifier = ">=2024.0.0" },
     { name = "func-timeout" },
-    { name = "harbor", extras = ["analysis", "datasets", "daytona"], marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/marin-community/harbor.git?rev=952a005353273590631b8f970f4664a121710b32" },
-    { name = "harbor-config", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-952a005353273590631b8f970f4664a121710b32/harbor_config-0.1.0-py3-none-any.whl" },
-    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'cuda'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-952a005353273590631b8f970f4664a121710b32/harbor_config-0.1.0-py3-none-any.whl" },
-    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-952a005353273590631b8f970f4664a121710b32/harbor_config-0.1.0-py3-none-any.whl" },
-    { name = "harbor-config", marker = "extra == 'cpu'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-952a005353273590631b8f970f4664a121710b32/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor", extras = ["analysis", "datasets", "daytona"], marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/marin-community/harbor.git?rev=ef1eaf207f41f84eb53d17f9c8bd84c073a9aba5" },
+    { name = "harbor-config", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-ef1eaf207f41f84eb53d17f9c8bd84c073a9aba5/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'cuda'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-ef1eaf207f41f84eb53d17f9c8bd84c073a9aba5/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-ef1eaf207f41f84eb53d17f9c8bd84c073a9aba5/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "extra == 'cpu'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-ef1eaf207f41f84eb53d17f9c8bd84c073a9aba5/harbor_config-0.1.0-py3-none-any.whl" },
     { name = "hf-transfer" },
     { name = "hs-connectors", marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/lukedhlee/speculators.git?subdirectory=hs_connectors&rev=6496b4db007de00dd4741349643d23b23e29dce8" },
     { name = "huggingface-hub", specifier = ">=0.34.0" },
@@ -3246,7 +3246,7 @@ requires-dist = [
     { name = "s3fs" },
     { name = "smart-open" },
     { name = "speculators", marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/lukedhlee/speculators.git?rev=6496b4db007de00dd4741349643d23b23e29dce8" },
-    { name = "taskcompendium", extras = ["harbor", "workplace"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=a2a6aff950d5cd64c94888faf02417f84f2b4742" },
+    { name = "taskcompendium", extras = ["harbor", "workplace"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=d32ab685102556af89597fa225919a2d6a4ceba3" },
     { name = "tensorboard" },
     { name = "tensordict", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'" },
     { name = "tensordict", marker = "sys_platform == 'linux' and extra == 'cuda'" },
@@ -3308,7 +3308,7 @@ docs = [
     { name = "sphinx-copybutton", specifier = ">=0.5.0" },
     { name = "sphinx-rtd-theme", specifier = ">=2.0.0" },
 ]
-harbor-test = [{ name = "harbor", marker = "sys_platform == 'linux'", git = "https://github.com/marin-community/harbor.git?rev=952a005353273590631b8f970f4664a121710b32" }]
+harbor-test = [{ name = "harbor", marker = "sys_platform == 'linux'", git = "https://github.com/marin-community/harbor.git?rev=ef1eaf207f41f84eb53d17f9c8bd84c073a9aba5" }]
 
 [[package]]
 name = "markdown"
@@ -6855,9 +6855,10 @@ wheels = [
 [[package]]
 name = "taskcompendium"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=a2a6aff950d5cd64c94888faf02417f84f2b4742#a2a6aff950d5cd64c94888faf02417f84f2b4742" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=d32ab685102556af89597fa225919a2d6a4ceba3#d32ab685102556af89597fa225919a2d6a4ceba3" }
 dependencies = [
     { name = "pydantic", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+    { name = "tasktrove-verify", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
 
 [package.optional-dependencies]
@@ -6867,6 +6868,14 @@ harbor = [
 workplace = [
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "pandas", version = "3.0.5", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+]
+
+[[package]]
+name = "tasktrove-verify"
+version = "0.1.0"
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftasktrove-verify&rev=d32ab685102556af89597fa225919a2d6a4ceba3#d32ab685102556af89597fa225919a2d6a4ceba3" }
+dependencies = [
+    { name = "tomlkit", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
 
 [[package]]
@@ -7094,6 +7103,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/be/ba/1f744cdc819428fc6b5084ec34d9b30660f6f9daaf70eead706e3203ec3c/toml-0.10.2.tar.gz", hash = "sha256:b3bda1d108d5dd99f4a20d24d9c348e91c4db7ab1b749200bded2f839ccbe68f", size = 22253, upload-time = "2020-11-01T01:40:22.204Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/44/6f/7120676b6d73228c96e17f1f794d8ab046fc910d781c8d151120c3f1569e/toml-0.10.2-py2.py3-none-any.whl", hash = "sha256:806143ae5bfb6a3c6e736a764057db0e6a0e05e338b5630894a5f779cabb4f9b", size = 16588, upload-time = "2020-11-01T01:40:20.672Z" },
+]
+
+[[package]]
+name = "tomlkit"
+version = "0.15.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/94/96/e07752635b98536177fa1f37671c8f3cdde2e724c6bcf6034b2cfb571565/tomlkit-0.15.1.tar.gz", hash = "sha256:e25bbf38843005246210a12982776f27f99cb9be67160e14434d0c0d21ee1e97", size = 180129, upload-time = "2026-07-17T01:48:04.562Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/13/bc/8c13eb66537dce1d2bd3a57132902f38d0e7f5bb46fa9f4daed9fe9d76ee/tomlkit-0.15.1-py3-none-any.whl", hash = "sha256:177a05aece5a8ca5266fd3c448abb47b8d352f09d477d3ca8332db4d89b24304", size = 49449, upload-time = "2026-07-17T01:48:05.728Z" },
 ]
 
 [[package]]
