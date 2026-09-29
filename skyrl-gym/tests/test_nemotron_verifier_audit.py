@@ -532,3 +532,25 @@ def test_sandbox_http_budget_allows_execution_and_worker_queue_but_propagates_tr
     monkeypatch.setattr(requests, "post", unavailable)
     with pytest.raises(requests.exceptions.ReadTimeout, match="sandbox unavailable"):
         client.execute("1", language="ipython", timeout_seconds=10, session_id="slow")
+
+
+@pytest.mark.parametrize("grading_mode", ["binary", "fraction"])
+@pytest.mark.parametrize(
+    "action", ["", "  \n", "<think>Do not say banana.</think>", "<|start_think|>forever forever forever"]
+)
+def test_instruction_negative_constraints_do_not_reward_a_missing_final_answer(grading_mode, action):
+    record = {
+        "instruction_id_list": ["keywords:forbidden_words", "keywords:word_count_different_numbers"],
+        "kwargs": [{"forbidden_words": ["banana"]}, {"keyword": "forever", "frequency": 3, "relation": "less than"}],
+        "grading_mode": grading_mode,
+    }
+    env = ultra_env("instruction_following_simple_agent", record)
+    missing = env.step(action)
+    assert missing["reward"] == 0.0
+    assert missing["verification"].status == VerificationStatus.VERIFIED
+    assert missing["verification"].passed is False
+    assert missing["verification"].diagnostics["empty_final_answer"] is True
+    valid = env.step("<think>Avoid banana and forever.</think>Hello.")
+    assert valid["reward"] == 1.0
+    assert valid["verification"].passed is True
+    assert valid["verification"].diagnostics["empty_final_answer"] is False
