@@ -302,8 +302,7 @@ normalization. The `advantage source`_ defines exact masking and singleton behav
      - Temporal credit with a critic; requires ``trainer.critic.model.path``. Set ``gamma: 1.0`` and ``lambd: 1.0`` for undiscounted full returns. Avoid when no critic is provisioned.
 
 For RLOO-N and RLOO-N-PBS, ``group_advantage_min_size`` must be at least 2 and
-no larger than ``generator.n_samples_per_prompt``. The default null resolves to
-that physical group size. ``rloo_n_filter_zero_reward_groups: true`` assigns
+no larger than ``generator.n_samples_per_prompt``. An explicit integer is required; null is rejected. ``rloo_n_filter_zero_reward_groups: true`` assigns
 zero credit to constant-reward groups. This estimator-local rule is separate
 from writer admission's dynamic sampling.
 
@@ -472,8 +471,9 @@ settings must also be supplied.
 
 For each of GRPO, DAPO, Dr.GRPO, GSPO and CISPO, start from this complete launch
 source and change only ``algorithm_recipe`` to the table's name. Use the
-repository's configured Iris launcher with the resulting file as ``--rl-config``;
-set the launch model and cluster allocation to match two nodes with one GPU each. The
+launch configuration composer with the resulting source as the ``skyrl`` subtree
+of your infrastructure's launch document. Set its model input and cluster
+allocation to match two nodes with one GPU each. The
 parquet files must contain prompts and rewards for ``gsm8k``. Dataset creation is
 covered by :doc:`../datasets/dataset-preparation`.
 
@@ -513,6 +513,15 @@ covered by :doc:`../datasets/dataset-preparation`.
      num_inference_engines: 1
      inference_engine_tensor_parallel_size: 1
      n_samples_per_prompt: 4
+
+The enclosing `launch document schema`_ supplies ``run``, ``runtime``, ``iris``,
+``ray``, ``artifacts`` and staged ``inputs``. Save that document as ``launch.yaml``;
+``load_launch_config`` composes its source ``skyrl`` subtree and validates it
+before submission. From the repository root, the launch command is:
+
+.. code-block:: bash
+
+   uv run --frozen python -m cloud.iris.launch iris launch --config launch.yaml
 
 Asynchronous updates
 ~~~~~~~~~~~~~~~~~~~~
@@ -712,3 +721,5 @@ teacher evidence and group admission.
 .. _Understanding R1-Zero-Like Training: https://arxiv.org/abs/2503.20783
 .. _Back to Basics: https://arxiv.org/abs/2402.14740
 .. _REINFORCE++: https://arxiv.org/abs/2501.03262
+
+.. _launch document schema: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/cloud/iris/launch_config.py
