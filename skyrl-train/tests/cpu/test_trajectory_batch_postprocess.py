@@ -15,6 +15,7 @@ from skyrl_train.trajectory_runners.base import TrajectoryBatch, propagate_data_
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.config.utils import get_default_config
 from omegaconf import OmegaConf
+from skyrl_gym.verification import VerificationResult
 
 
 class DummyDataset:
@@ -233,3 +234,50 @@ def test_postprocess_logs_training_reward_by_domain():
 
     assert trainer.all_metrics["reward/domain/math/avg_raw_reward"] == 0.8
     assert trainer.all_metrics["reward/domain/tools/avg_raw_reward"] == 0.6
+
+
+def test_reward_metrics_leave_out_skipped_rollouts():
+    config = create_config(4)
+    config.generator.n_samples_per_prompt = 2
+    trainer = make_trainer(config)
+    skipped = VerificationResult.skipped("grading is skipped")
+    trajectory_batch: TrajectoryBatch = {
+        "prompt_token_ids": [[1], [1], [2], [2]],
+        "response_ids": [[3], [4], [5], [6]],
+        "rewards": [1.0, 0.0, 0.0, 0.0],
+        "verification_results": [
+            VerificationResult.verified(1.0, passed=True),
+            VerificationResult.verified(0.0, passed=False),
+            skipped,
+            skipped,
+        ],
+        "data_sources": ["lean", "lean", "ultra", "ultra"],
+        "loss_masks": [[1], [1], [1], [1]],
+        "rollout_metrics": None,
+    }
+
+    trainer.postprocess_trajectory_batch(trajectory_batch, ["a", "a", "b", "b"])
+
+    assert trainer.all_metrics["reward/avg_raw_reward"] == 0.5
+    assert trainer.all_metrics["reward/avg_pass_at_2"] == 1.0
+    assert trainer.all_metrics["reward/informative_group_fraction"] == 1.0
+    assert trainer.all_metrics["reward/domain/lean/avg_raw_reward"] == 0.5
+    assert "reward/domain/ultra/avg_raw_reward" not in trainer.all_metrics
+
+
+def test_all_skipped_rollouts_record_no_reward_metrics():
+    trainer = make_trainer(create_config(2))
+    skipped = VerificationResult.skipped("grading is skipped")
+    trajectory_batch: TrajectoryBatch = {
+        "prompt_token_ids": [[1], [2]],
+        "response_ids": [[3], [4]],
+        "rewards": [0.0, 0.0],
+        "verification_results": [skipped, skipped],
+        "loss_masks": [[1], [1]],
+        "rollout_metrics": None,
+    }
+
+    result = trainer.postprocess_trajectory_batch(trajectory_batch, ["a", "b"])
+
+    assert not any(key.startswith("reward/") for key in trainer.all_metrics)
+    assert result["rewards"] == [[0.0], [0.0]]
