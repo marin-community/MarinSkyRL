@@ -22,7 +22,7 @@ from taskcompendium.lowering import (
 )
 from taskcompendium.models import AnswerType, TaskSpec, VerifierKind
 from taskcompendium.resources import ResourceVisibility
-from taskcompendium.submission import SubmissionConvention, chat_request
+from taskcompendium.submission import AnswerFormat, SubmissionConvention, chat_request
 from taskcompendium.verifier_registry import grade_answer
 from transformers import PreTrainedTokenizerBase
 
@@ -60,9 +60,10 @@ def _native_chat_eligible(
     return (
         specification.answer_type in (AnswerType.TEXT, AnswerType.NUMBER)
         and specification.verifier.kind is VerifierKind.EXACT_ANSWER
+        and convention.answer_format in (AnswerFormat.PLAIN, AnswerFormat.JSON)
         and convention.supports(specification.answer_type)
         and not specification.requirements.capabilities
-        and not specification.requirements.action_interfaces
+        and not specification.requirements.providers
         and not any(resource.visibility is ResourceVisibility.AGENT for resource in specification.resources)
         and binding == HarborEnvironmentConfig()
     )
@@ -301,7 +302,7 @@ class TaskCompendiumHarborRunner(TrajectoryRunner):
 
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         del disable_tqdm
-        from taskcompendium.harbor.runner import AgentStrategy, ChatLaunch, run_trial  # noqa: PLC0415
+        from taskcompendium.harbor.runner import ChatLaunch, run_trial  # noqa: PLC0415
 
         extras = input_batch.get("env_extras")
         identities = input_batch.get("trajectory_ids")
@@ -320,7 +321,6 @@ class TaskCompendiumHarborRunner(TrajectoryRunner):
             launch = ChatLaunch(
                 model=extra["model_name"],
                 api_base=extra["api_base"],
-                strategy=(AgentStrategy.CHAT_TOOLS if binding.tool_binding is not None else AgentStrategy.DIRECT_CHAT),
                 max_turns=self.max_turns,
                 request_timeout=self.timeout,
                 trial_timeout=self.timeout,

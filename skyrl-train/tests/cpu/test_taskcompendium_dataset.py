@@ -76,6 +76,29 @@ def test_taskcompendium_dataset_routes_simple_chat_natively(tmp_path):
     }
 
 
+def test_taskcompendium_dataset_routes_answer_call_to_harbor(tmp_path):
+    specification = TaskSpec(
+        id="answer-call",
+        context=ConversationInput(events=(TextMessage(role="user", content="Reply with the word blue."),)),
+        verifier=exact_answer("blue"),
+        requirements=TaskRequirements(),
+        source=Source(dataset="test", revision="revision", row="answer-call", importer_revision="importer"),
+        answer_type=AnswerType.TEXT,
+    )
+    lower_to_harbor(
+        specification,
+        SubmissionConvention(id="answer-call", answer_format=AnswerFormat.ANSWER_CALL),
+        HarborEnvironmentConfig(),
+        tmp_path / "answer-call",
+    )
+
+    dataset = TaskCompendiumTaskDataset(
+        [str(tmp_path / "answer-call")], api_base="http://policy:8000/v1", model_name="snowball"
+    )
+
+    assert dataset[0]["env_class"] == HARBOR_ENV_CLASS
+
+
 def test_taskcompendium_dataset_supplies_distinct_uids_to_prompt_loader(tmp_path):
     _lowering(tmp_path, "chat-a")
     _lowering(tmp_path, "chat-b")
