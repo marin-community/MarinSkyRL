@@ -181,6 +181,10 @@ class CPUPolicyWorker(PolicyWorkerBase):
     async def init_weight_sync_state(self, inference_engine_client):
         """Weights travel through the Ray object store, which needs no communicator."""
 
+    async def barrier_all(self) -> None:
+        """Drain the actor event loop and synchronize the CPU worker group."""
+        await asyncio.to_thread(dist.barrier)
+
     async def broadcast_to_inference_engines(self, inference_engine_client):
         if dist.get_rank() == 0:
             state = {name: tensor.detach().clone() for name, tensor in self.model.model.state_dict().items()}

@@ -323,6 +323,68 @@ def test_reduce_loss():
     assert torch.allclose(result_max, expected_max), f"Expected {expected_max}, got {result_max}"
 
 
+@pytest.mark.parametrize(("micro_batch", "dp_size"), [(1, 1), (2, 1), (4, 1), (1, 2), (2, 2)])
+def test_step_objective_matches_full_batch_for_any_split(micro_batch, dp_size):
+    mask = torch.tensor([[1, 0, 0, 0], [1, 1, 1, 0], [1, 1, 0, 0], [1, 1, 1, 1]], dtype=torch.float64)
+    advantages = torch.arange(1, 17, dtype=torch.float64).reshape(4, 4)
+    reference_log_probs = torch.zeros_like(advantages, requires_grad=True)
+    reference = (
+        sum(
+            -reference_log_probs[row, token].exp() * advantages[row, token]
+            for row in range(4)
+            for token in range(4)
+            if mask[row, token] > 0
+        )
+        / mask.sum()
+    )
+    reference.backward()
+
+    log_probs = torch.zeros_like(advantages, requires_grad=True)
+    config = OmegaConf.create(
+        {
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "policy_loss_type": "regular",
+            "eps_clip_low": 0.2,
+            "eps_clip_high": 0.2,
+            "think_token_weight": 1.0,
+            "use_entropy_loss": False,
+            "entropy_loss_coef": 0.0,
+            "use_kl_loss": False,
+            "kl_loss_coef": 0.0,
+            "kl_estimator_type": "k1",
+            "use_tis": False,
+            "tis_imp_ratio_cap": 2.0,
+        }
+    )
+    rank_rows = 4 // dp_size
+    num_microbatches = rank_rows // micro_batch
+    cp_size = 1
+    scheduled = log_probs.new_zeros(())
+    for rank in range(dp_size):
+        for start in range(rank * rank_rows, (rank + 1) * rank_rows, micro_batch):
+            rows = slice(start, start + micro_batch)
+            objective = compute_policy_objective(
+                action_log_probs=log_probs[rows],
+                old_action_log_probs=torch.zeros_like(log_probs[rows]),
+                base_action_log_probs=None,
+                advantages=advantages[rows],
+                loss_mask=mask[rows],
+                rollout_logprobs=None,
+                response_span_tags=None,
+                token_entropy=torch.zeros_like(log_probs[rows]),
+                config=config,
+                policy_loss_fn=ppo_policy_loss,
+                accumulation_steps=num_microbatches,
+                scaling=LossScaling.MEGATRON_PIPELINE,
+            )
+            # Megatron's schedule scales by CP/M and DDP averages over DP*CP.
+            scheduled = scheduled + objective.optimization_loss * cp_size / num_microbatches / (dp_size * cp_size)
+    scheduled.backward()
+    torch.testing.assert_close(log_probs.grad, reference_log_probs.grad, rtol=1e-6, atol=1e-7)
+    torch.testing.assert_close(scheduled, reference, rtol=1e-6, atol=1e-7)
+
+
 def _validatable_dummy_config():
     """A dummy config that passes validate_batch_sizes so validate_cfg reaches the
     loss_reduction allow-list (single-GPU placement, all batch sizes == 1)."""

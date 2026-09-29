@@ -8,7 +8,10 @@ from pathlib import Path
 import pytest
 import torch
 
+from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY
 from skyrl_train.rollouts.payloads import ROLLOUT_OBJECT_SUFFIX
+from skyrl_train.training_batch import TrainingInputBatch
+from tests.cpu.tiny_training.cpu_backend import CHECKPOINT_FILE_TEMPLATE
 from tests.cpu.tiny_training.experiment import (
     MAX_STALENESS_STEPS,
     N_SAMPLES_PER_PROMPT,
@@ -49,6 +52,50 @@ def _train(root: Path, mode: TrainingMode, shape: RolloutShape, *, steps: int, c
 
 def _trained_steps(root: Path) -> list[dict]:
     return [record for record in read_metrics(root) if "policy/raw_grad_norm" in record]
+
+
+def test_one_step_is_independent_of_micro_batch_size(tmp_path: Path):
+    roots = [tmp_path / "micro_8", tmp_path / "micro_4"]
+    for root, micro_batch_size in zip(roots, [8, 4], strict=True):
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tests.cpu.tiny_training.fixed_batch",
+                f"--root={root}",
+                f"--micro-batch-size={micro_batch_size}",
+            ],
+            cwd=SKYRL_TRAIN_DIR,
+            env={**os.environ, "RAY_ENABLE_UV_RUN_RUNTIME_ENV": "0"},
+            timeout=RUN_TIMEOUT_SECONDS,
+            check=True,
+        )
+    batches = [
+        TrainingInputBatch().load(root / "exports/dumped_data/global_step_1_training_input.pkl") for root in roots
+    ]
+    assert batches[0].keys() == batches[1].keys()
+    for key, tensor in batches[0].items():
+        if tensor is None:
+            assert batches[1][key] is None
+        else:
+            torch.testing.assert_close(
+                tensor, batches[1][key], rtol=0, atol=0, msg=f"nondeterministic rollouts in {key}"
+            )
+    lengths = batches[0]["loss_mask"].sum(-1)
+    assert lengths.min() < lengths.max()
+    for rank in range(2):
+        states = [
+            torch.load(
+                root
+                / "ckpts/global_step_1"
+                / POLICY_CHECKPOINT_SUBDIRECTORY
+                / CHECKPOINT_FILE_TEMPLATE.format(rank=rank),
+                weights_only=False,
+            )
+            for root in roots
+        ]
+        for key, tensor in states[0]["model"].items():
+            torch.testing.assert_close(tensor, states[1]["model"][key], rtol=1e-5, atol=1e-6, msg=key)
 
 
 @pytest.mark.parametrize("shape", list(RolloutShape))
