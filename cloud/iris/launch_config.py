@@ -21,7 +21,7 @@ from cloud.iris.rl_config_translation import (
     validate_tp_divides_heads,
 )
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
-from marinskyrl.resource_locator import join_resource_path
+from marinskyrl.resource_locator import is_hugging_face_repo_id, join_resource_path
 from marinskyrl.task_sources import data_source
 
 
@@ -189,6 +189,12 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
     raw_skyrl = OmegaConf.to_container(config.skyrl, resolve=False)
     if not isinstance(raw_skyrl, dict):
         raise TypeError("skyrl must be a mapping")
+    model_path = str(config.inputs.model.local_path)
+    hugging_face_model = is_hugging_face_repo_id(model_path)
+    if hugging_face_model and str(config.inputs.model.uri) != model_path:
+        raise ValueError("Hugging Face model URI and task model path must identify the same pinned repository")
+    model_source_uri = None if hugging_face_model else str(config.inputs.model.uri)
+    model_source_identity = None if hugging_face_model else str(config.inputs.model.identity)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", encoding="utf-8") as source_file:
         OmegaConf.save(OmegaConf.create(raw_skyrl), source_file.name, resolve=False)
         parsed = parse_rl_config(source_file.name)
@@ -199,9 +205,9 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
                 "experiments_dir": str(config.runtime.experiments_dir),
                 "num_nodes": int(config.iris.allocation.num_nodes),
                 "gpus_per_node": int(config.iris.allocation.gpus_per_node),
-                "model_path": str(config.inputs.model.local_path),
-                "model_source_uri": str(config.inputs.model.uri),
-                "model_source_identity": str(config.inputs.model.identity),
+                "model_path": model_path,
+                "model_source_uri": model_source_uri,
+                "model_source_identity": model_source_identity,
                 "model_revision": str(config.inputs.model.identity),
                 "train_data": list(config.inputs.train_data),
                 "val_data": list(config.inputs.validation_data),

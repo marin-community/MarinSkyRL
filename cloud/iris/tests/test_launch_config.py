@@ -12,6 +12,7 @@ import yaml
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config, parse_rl_config
+from cloud.iris.task_runtime import _runtime_namespace
 
 
 def _raw_config() -> dict[str, Any]:
@@ -110,6 +111,28 @@ def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) ->
 
     assert config.skyrl.trainer.train_batch_size == 8
     assert validate_launch_config(config).num_nodes == 1
+
+
+def test_pinned_hugging_face_policy_reaches_skyrl_without_object_store_staging(tmp_path: Path) -> None:
+    raw = _raw_config()
+    repo = "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21"
+    revision = "b8c07f7df1df65525abbfdbcd1572318ba11c42f"
+    raw["inputs"]["model"] = {
+        "uri": repo,
+        "identity": revision,
+        "local_path": repo,
+        "tokenizer_uri": repo,
+        "tokenizer_revision": revision,
+    }
+    path = tmp_path / "pinned-hf-launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    config = load_launch_config(path)
+
+    assert config.skyrl.trainer.policy.model.path == repo
+    assert config.skyrl.trainer.policy.model.revision == revision
+    assert config.skyrl.trainer.policy.model.get("source_uri") is None
+    assert _runtime_namespace(config).prestage_model == repo
 
 
 def test_taskcompendium_source_recipe_selects_its_entrypoint(tmp_path: Path) -> None:

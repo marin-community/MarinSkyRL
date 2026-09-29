@@ -2020,7 +2020,11 @@ def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
             _container(draft_mapping), context="generator.speculative_decoding.model"
         )
     offline = task_env.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes", "on"}
-    prestage_model = model_uri if not is_cloud_uri(model_uri) and (model.chat_template or offline) else ""
+    prestage_model = (
+        model_uri
+        if not is_cloud_uri(model_uri) and (is_hugging_face_repo_id(model_uri) or model.chat_template or offline)
+        else ""
+    )
     return argparse.Namespace(
         ray_port=int(config.ray.port),
         ray_spill_dir=validate_ray_spill_dir(str(config.ray.spill_dir)),
