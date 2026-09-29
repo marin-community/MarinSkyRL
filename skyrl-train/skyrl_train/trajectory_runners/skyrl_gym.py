@@ -292,8 +292,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
         env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
+        output = None
         try:
-            return await self._run_agent_loop(
+            output = await self._run_agent_loop(
                 env,
                 prompt,
                 env_class,
@@ -304,7 +305,27 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 trajectory_id=trajectory_id,
             )
         finally:
-            await self._run_in_executor_if_available(env.close)
+            try:
+                await self._run_in_executor_if_available(env.close)
+            except requests.RequestException as error:
+                # Session deletion is cleanup, not verification. Keep completed evidence
+                # and any original rollout exception, while exposing the cleanup failure.
+                logger.exception("Environment cleanup failed for trajectory {}", trajectory_id)
+                if output is not None:
+                    output = replace(
+                        output,
+                        verification=replace(
+                            output.verification,
+                            diagnostics={
+                                **output.verification.diagnostics,
+                                "cleanup_exception_type": type(error).__name__,
+                                "cleanup_error": str(error),
+                            },
+                        ),
+                        env_metrics={**output.env_metrics, "environment_cleanup_error": 1.0},
+                    )
+        assert output is not None
+        return output
 
     async def _run_agent_loop(
         self,
