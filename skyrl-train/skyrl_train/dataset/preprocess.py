@@ -35,63 +35,21 @@ def _routed_experts_dtype_for_num_experts(num_experts: Optional[int]) -> Optiona
 
 
 def _collate_routed_experts_from_arrays(
-    routed_experts: List["np.ndarray"],
+    routed_experts: List[np.ndarray],
     max_output_len: int,
     num_experts: Optional[int],
 ) -> "torch.Tensor":
     """Build a dense ``[B, response, layer, top_k]`` routed-expert tensor.
 
-    Inputs may use NumPy arrays or nested sequences. Ragged sentinel rows are
-    normalized to the widest layer/top-k shape, and response rows are right-padded
-    with zeroes before the configured expert-count dtype is applied.
+    Response rows are right-padded with zeroes in the final tensor dtype.
     """
-    # Normalize each token row and learn the widest layer/top-k shape.
-    L, K = 1, 1
-    sample_arrs: List["np.ndarray | List[np.ndarray]"] = []
-    for sample_re in routed_experts:
-        try:
-            sample_arr = np.asarray(sample_re, dtype=np.int16)
-        except ValueError:
-            # A few sentinel rows may have a smaller layer/top-k shape.
-            pass
-        else:
-            if sample_arr.ndim == 3:
-                L = max(L, sample_arr.shape[1])
-                K = max(K, sample_arr.shape[2])
-                sample_arrs.append(sample_arr)
-                continue
-
-        rows = []
-        for row in sample_re:
-            arr = np.asarray(row, dtype=np.int16)
-            if arr.size == 0:
-                arr = np.zeros((1, 1), dtype=np.int16)
-            elif arr.ndim == 1:
-                arr = arr.reshape(arr.shape[0], 1)
-            elif arr.ndim != 2:
-                arr = arr.reshape(-1, 1)
-            L = max(L, arr.shape[0])
-            K = max(K, arr.shape[1])
-            rows.append(arr)
-        sample_arrs.append(rows)
-
-    B = len(sample_arrs)
-    # Preallocate the sentinel-zero canvas and slice-assign each real row.
-    out = np.zeros((B, max_output_len, L, K), dtype=np.int16)
-    for b, rows in enumerate(sample_arrs):
-        if isinstance(rows, np.ndarray):
-            token_count = min(len(rows), max_output_len)
-            out[b, :token_count, : rows.shape[1], : rows.shape[2]] = rows[:token_count]
-            continue
-        for token_index, arr in enumerate(rows[:max_output_len]):
-            out[b, token_index, : arr.shape[0], : arr.shape[1]] = arr
-
-    routed_experts_tensor = torch.from_numpy(out)  # int16 [B, max_output_len, L, K]
-
+    if any(rows.ndim != 3 for rows in routed_experts):
+        raise ValueError("routed_experts must contain [token, layer, top_k] arrays")
+    layers = max(rows.shape[1] for rows in routed_experts)
+    top_k = max(rows.shape[2] for rows in routed_experts)
     _re_dtype = _routed_experts_dtype_for_num_experts(num_experts)
     if _re_dtype is None:
-        # num_experts is unknown/non-MoE, so fall back to a per-batch maximum.
-        _max_expert_id = int(out.max()) if out.size else 0
+        _max_expert_id = max((int(rows.max()) for rows in routed_experts if rows.size), default=0)
         if _max_expert_id <= torch.iinfo(torch.uint8).max:
             _re_dtype = torch.uint8
         elif _max_expert_id <= torch.iinfo(torch.int16).max:
@@ -105,7 +63,12 @@ def _collate_routed_experts_from_arrays(
             "unknown-config cases but must NOT be hit on a MoE-RL run — thread "
             "the model's num_experts through to make the dtype rank-invariant.".format(_re_dtype)
         )
-    return routed_experts_tensor.to(_re_dtype)
+    numpy_dtype = {torch.uint8: np.uint8, torch.int16: np.int16, torch.int64: np.int64}[_re_dtype]
+    out = np.zeros((len(routed_experts), max_output_len, layers, top_k), dtype=numpy_dtype)
+    for index, rows in enumerate(routed_experts):
+        count = min(len(rows), max_output_len)
+        out[index, :count, : rows.shape[1], : rows.shape[2]] = rows[:count]
+    return torch.from_numpy(out)
 
 
 def _verify_inputs(
@@ -183,7 +146,7 @@ def convert_prompts_responses_to_batch_tensors(
     rewards: List[List[float]],
     loss_masks: List[List[int]],
     logprobs: Optional[List[List[float]]] = None,
-    routed_experts: Optional[List[List[List[List[int]]]]] = None,
+    routed_experts: Optional[List[np.ndarray]] = None,
     token_level_shaping: Optional[List[List[float]]] = None,
     response_span_tags: Optional[List[List[int]]] = None,
     num_experts: Optional[int] = None,

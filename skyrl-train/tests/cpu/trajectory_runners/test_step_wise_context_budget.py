@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 from omegaconf import DictConfig, open_dict
 
@@ -16,10 +17,11 @@ from skyrl_train.trajectory_runners.step_wise import clamp_generation_tokens
 
 
 class _RecordingInferenceEngine:
-    def __init__(self, response_logprobs=None, topk=None):
+    def __init__(self, response_logprobs=None, topk=None, routes=None):
         self.requests = []
         self.response_logprobs = response_logprobs
         self.topk = topk
+        self.routes = routes
 
     async def generate(self, request):
         self.requests.append(request)
@@ -32,6 +34,8 @@ class _RecordingInferenceEngine:
         if self.topk is not None:
             output["student_topk_indices"] = [self.topk[0]]
             output["behavior_topk_logprobs"] = [self.topk[1]]
+        if self.routes is not None:
+            output["routed_experts"] = [self.routes]
         return output
 
 
@@ -107,7 +111,9 @@ async def test_step_wise_stop_eos_keeps_published_behavior_evidence_aligned(mock
     runner = SkyRLGymTrajectoryRunner(
         cfg,
         DictConfig({"max_env_workers": 0}),
-        _RecordingInferenceEngine(response_logprobs=[-0.1, -0.2]),
+        _RecordingInferenceEngine(
+            response_logprobs=[-0.1, -0.2], routes=np.asarray([[[1, 2]], [[3, 4]]], dtype=np.uint8)
+        ),
         tokenizer,
         pipeline=TrajectoryPipeline(StepWiseRolloutCollector, StepWiseTrajectoryProjection(cfg, tokenizer)),
     )
@@ -124,6 +130,7 @@ async def test_step_wise_stop_eos_keeps_published_behavior_evidence_aligned(mock
     assert published.response_token_ids == (7, 8, tokenizer.eos_token_id)
     assert published.behavior_logprobs == (-0.1, -0.2, 0.0)
     assert outputs[0].evidence.behavior_logprobs == (-0.1, -0.2, 0.0)
+    np.testing.assert_array_equal(outputs[0].evidence.routed_experts, [[[1, 2]], [[3, 4]], [[0, 0]]])
 
 
 @pytest.mark.asyncio

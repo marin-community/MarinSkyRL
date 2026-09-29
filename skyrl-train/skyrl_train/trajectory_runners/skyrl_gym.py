@@ -18,6 +18,7 @@ import skyrl_gym
 from typing import Callable, Generic, List, Dict, Any, Optional, Sequence, Tuple, TypeVar
 from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
+import numpy as np
 
 from skyrl_train.trajectory_runners.base import (
     TrajectoryRunner,
@@ -423,8 +424,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         )
         collect_logprobs = current_sampling_params.get("logprobs", None) is not None
         rollout_logprobs: Optional[List[float]] = [] if collect_logprobs else None
-        rollout_routes: Optional[List[List[List[int]]]] = None
-        route_sentinel: Optional[List[List[int]]] = None
+        rollout_routes: np.ndarray | None = None
+        route_sentinel: np.ndarray | None = None
         requested_logprobs = current_sampling_params.get("logprobs")
         collect_topk = isinstance(requested_logprobs, int) and requested_logprobs > 0
         selected_capture_possible = collect_topk and not retokenize_chat_history
@@ -554,7 +555,14 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                         if rollout_logprobs is not None:
                             rollout_logprobs += [0.0] * observation_token_count
                         if rollout_routes is not None:
-                            rollout_routes.extend([route_sentinel] * observation_token_count)
+                            rollout_routes = np.concatenate(
+                                (
+                                    rollout_routes,
+                                    np.zeros(
+                                        (observation_token_count, *route_sentinel.shape), dtype=route_sentinel.dtype
+                                    ),
+                                )
+                            )
                 input_ids = rendered_prompt_ids[0]
 
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
@@ -573,7 +581,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     if response_routes is not None:
                         if route_sentinel is None:
                             route_sentinel = _sentinel_routed_experts_row(response_routes[0])
-                        response_routes.append(route_sentinel)
+                        response_routes = np.concatenate((response_routes, route_sentinel[None]))
                     added_eos = True
 
             # 2. Environment step
@@ -662,14 +670,21 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                         rollout_logprobs = None
                     else:
                         rollout_logprobs += response_logprobs
-                if response_routes:
+                if response_routes is not None and len(response_routes):
                     if route_sentinel is None:
                         route_sentinel = _sentinel_routed_experts_row(response_routes[0])
                     if rollout_routes is None:
-                        rollout_routes = [route_sentinel] * (len(loss_mask) - len(output_ids))
-                    rollout_routes.extend(response_routes)
+                        rollout_routes = np.zeros(
+                            (len(loss_mask) - len(output_ids), *response_routes.shape[1:]), dtype=response_routes.dtype
+                        )
+                    rollout_routes = np.concatenate((rollout_routes, response_routes))
                 elif rollout_routes is not None:
-                    rollout_routes.extend([route_sentinel] * len(output_ids))
+                    rollout_routes = np.concatenate(
+                        (
+                            rollout_routes,
+                            np.zeros((len(output_ids), *rollout_routes.shape[1:]), dtype=rollout_routes.dtype),
+                        )
+                    )
                 per_step_rewards.append((step_reward, response_end_idx))
                 continuation_assistant_index = len(chat_history)
                 chat_history.append(dict(assistant_message))
@@ -719,15 +734,35 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 if retokenize_chat_history:
                     rollout_routes = None
                     route_sentinel = None
-                elif response_routes:
+                elif response_routes is not None and len(response_routes):
                     if route_sentinel is None:
                         route_sentinel = _sentinel_routed_experts_row(response_routes[0])
                     if rollout_routes is None:
-                        rollout_routes = [route_sentinel] * previous_loss_mask_length
-                    rollout_routes.extend(response_routes)
-                    rollout_routes.extend([route_sentinel] * (len(loss_mask) - len(rollout_routes)))
+                        rollout_routes = np.zeros(
+                            (previous_loss_mask_length, *response_routes.shape[1:]), dtype=response_routes.dtype
+                        )
+                    rollout_routes = np.concatenate((rollout_routes, response_routes))
+                    if len(loss_mask) > len(rollout_routes):
+                        rollout_routes = np.concatenate(
+                            (
+                                rollout_routes,
+                                np.zeros(
+                                    (len(loss_mask) - len(rollout_routes), *rollout_routes.shape[1:]),
+                                    dtype=rollout_routes.dtype,
+                                ),
+                            )
+                        )
                 elif rollout_routes is not None:
-                    rollout_routes.extend([route_sentinel] * (len(loss_mask) - len(rollout_routes)))
+                    if len(loss_mask) > len(rollout_routes):
+                        rollout_routes = np.concatenate(
+                            (
+                                rollout_routes,
+                                np.zeros(
+                                    (len(loss_mask) - len(rollout_routes), *rollout_routes.shape[1:]),
+                                    dtype=rollout_routes.dtype,
+                                ),
+                            )
+                        )
 
             # The next model call or environment step may fail after mutating local
             # chat/route state. Keep only the last fully verified turn as a recovery point.
@@ -823,7 +858,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 if rollout_logprobs is not None:
                     rollout_logprobs.append(0.0)
                 if rollout_routes is not None:
-                    rollout_routes.append(route_sentinel)
+                    rollout_routes = np.concatenate((rollout_routes, route_sentinel[None]))
 
         assert rollout_logprobs is None or len(rollout_logprobs) == len(response_ids), (
             "rollout_logprobs and response_ids should have the same length"
@@ -902,11 +937,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
             student_topk_indices=None if selected is None else selected.indices,
             behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
-            routed_experts=(
-                None
-                if rollout_routes is None
-                else tuple(tuple(tuple(layer) for layer in token) for token in rollout_routes)
-            ),
+            routed_experts=rollout_routes,
             metadata=({"terminal_exception_type": disposition.exception_type} if terminal_error is not None else {}),
         )
         reward_result = RewardResult(

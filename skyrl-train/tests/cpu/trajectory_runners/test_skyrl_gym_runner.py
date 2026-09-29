@@ -211,7 +211,7 @@ async def test_gym_terminal_error_retains_only_completed_turn(
         "response_ids": [[10, 12]],
         "stop_reasons": ["stop"],
         "response_logprobs": [[-0.1, -0.2]],
-        "routed_experts": [[[[1, 2]], [[3, 4]]]],
+        "routed_experts": [np.asarray([[[1, 2]], [[3, 4]]], dtype=np.uint8)],
         "token_provenance": "engine",
     }
     model_client.generate.side_effect = [
@@ -224,7 +224,7 @@ async def test_gym_terminal_error_retains_only_completed_turn(
 
     assert output.evidence.response_token_ids[:2] == (10, 12)
     assert output.evidence.behavior_logprobs[:2] == (-0.1, -0.2)
-    assert output.evidence.routed_experts[:2] == (((1, 2),), ((3, 4),))
+    np.testing.assert_array_equal(output.evidence.routed_experts[:2], [[[1, 2]], [[3, 4]]])
     assert output.evidence.generated_token_count == 2
     assert output.verification.score == 1.0
     if failure_phase == "generate":
@@ -543,7 +543,7 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
         "prompt_ids": [[11, 12, 13]],
         "stop_reasons": ["tool_calls"],
         "response_logprobs": [[-0.1, -0.2]],
-        "routed_experts": [[[[1, 2]], [[3, 4]]]],
+        "routed_experts": [np.asarray([[[1, 2]], [[3, 4]]], dtype=np.uint8)],
         "prompt_logprobs": None,
         "assistant_messages": [assistant_message],
         "token_provenance": "engine",
@@ -567,7 +567,7 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
     assert evidence.metadata["assistant_message"] == assistant_message
     assert output.evidence.prompt_token_ids == (11, 12, 13)
     assert output.evidence.response_token_ids == (21, 22)
-    assert output.evidence.routed_experts == (((1, 2),), ((3, 4),))
+    np.testing.assert_array_equal(output.evidence.routed_experts, [[[1, 2]], [[3, 4]]])
 
 
 @pytest.mark.asyncio
@@ -827,7 +827,7 @@ async def test_multi_turn_assembly_aligns_per_token_fields_across_observations(
             "stop_reasons": ["stop"],
             "response_ids": [[10, EOS]],
             "response_logprobs": [[-0.1, -0.2]],
-            "routed_experts": [[[[1, 2]], [[3, 4]]]],
+            "routed_experts": [np.asarray([[[1, 2]], [[3, 4]]], dtype=np.uint8)],
             "student_topk_indices": [[[11, 12], [13, 14]]],
             "behavior_topk_logprobs": [[[-0.1, -2.0], [-0.2, -1.9]]],
         },
@@ -836,7 +836,7 @@ async def test_multi_turn_assembly_aligns_per_token_fields_across_observations(
             "stop_reasons": ["stop"],
             "response_ids": [[20, EOS]],
             "response_logprobs": [[-0.3, -0.4]],
-            "routed_experts": [[[[5, 6]], [[7, 8]]]],
+            "routed_experts": [np.asarray([[[5, 6]], [[7, 8]]], dtype=np.uint8)],
             "student_topk_indices": [[[21, 22], [23, 24]]],
             "behavior_topk_logprobs": [[[-0.3, -1.8], [-0.4, -1.7]]],
         },
@@ -867,7 +867,10 @@ async def test_multi_turn_assembly_aligns_per_token_fields_across_observations(
         # Dropping the first turn's EOS leaves no aligned top-K capture for the single-message format.
         return
 
-    assert output["rollout_routed_experts"] == [[[[1, 2]], [[3, 4]]] + [[[0, 0]]] * gap + [[[5, 6]], [[7, 8]]]]
+    np.testing.assert_array_equal(
+        output["rollout_routed_experts"][0],
+        [[[1, 2]], [[3, 4]]] + [[[0, 0]]] * gap + [[[5, 6]], [[7, 8]]],
+    )
     assert output["student_topk_indices"] == [[[11, 12], [13, 14]] + [[-1, -1]] * gap + [[21, 22], [23, 24]]]
     assert output["behavior_topk_logprobs"] == [
         [[-0.1, -2.0], [-0.2, -1.9]] + [[0.0, 0.0]] * gap + [[-0.3, -1.8], [-0.4, -1.7]]

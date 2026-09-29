@@ -38,8 +38,6 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     extract_routed_experts_from_rollout_details,
     normalize_token_ids,
     AlignmentStats,
-    _sentinel_routed_experts_row,
-    SENTINEL_EXPERT_ID,
 )
 from skyrl_train.utils.reward_shaping import (
     ParsedTestResult,
@@ -299,7 +297,7 @@ def _rollout_evidence_from_harbor(
     response_ids: List[int],
     loss_mask: List[int],
     rollout_logprobs: Optional[List[float]],
-    rollout_routed_experts: Optional[List[List[List[int]]]],
+    rollout_routed_experts: Optional[np.ndarray],
 ) -> RolloutEvidence:
     final_response = next(
         (str(message.get("content") or "") for message in reversed(chat_history) if message.get("role") == "assistant"),
@@ -313,11 +311,7 @@ def _rollout_evidence_from_harbor(
         prompt_token_ids=tuple(prompt_ids),
         response_token_ids=tuple(response_ids),
         behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
-        routed_experts=(
-            None
-            if rollout_routed_experts is None
-            else tuple(tuple(tuple(layer) for layer in token) for token in rollout_routed_experts)
-        ),
+        routed_experts=rollout_routed_experts,
     )
 
 
@@ -1330,21 +1324,24 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             if has_any_routed_experts:
                 # Learn the [L, K] sentinel-row shape from the first real sample so
                 # missing/failed samples are sentinel-filled at the correct width.
-                sentinel_row = [[SENTINEL_EXPERT_ID]]
+                sentinel_row = None
                 for output in all_outputs:
-                    if output.evidence.routed_experts:
-                        sentinel_row = _sentinel_routed_experts_row(output.evidence.routed_experts[0])
+                    if output.evidence.routed_experts is not None:
+                        routes = output.evidence.routed_experts
+                        sentinel_row = np.zeros(routes.shape[1:], dtype=routes.dtype)
                         break
+                if sentinel_row is None:
+                    raise ValueError("routed_experts capture has no route geometry")
                 rollout_routed_experts_list = []
                 for output in all_outputs:
                     if output.evidence.routed_experts is not None:
-                        rollout_routed_experts_list.append(
-                            [[list(layer) for layer in token] for token in output.evidence.routed_experts]
-                        )
+                        rollout_routed_experts_list.append(output.evidence.routed_experts)
                     else:
                         # Sentinel-fill missing samples to match response_ids length.
                         rollout_routed_experts_list.append(
-                            [list(sentinel_row) for _ in range(len(output.evidence.response_token_ids))]
+                            np.zeros(
+                                (len(output.evidence.response_token_ids), *sentinel_row.shape), dtype=sentinel_row.dtype
+                            )
                         )
 
         # Collect the Stage B per-token shaping channel + span tags. Gated on
