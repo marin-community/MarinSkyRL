@@ -348,6 +348,97 @@ def test_replace_mode_optimizes_only_sampled_reverse_kl():
     torch.testing.assert_close(actions.grad, expected_gradient)
 
 
+@pytest.mark.parametrize(
+    "sampling_probs,cap", [([0.2, 0.3, 0.5], 2.0), ([0.05, 0.6, 0.35], 10.0), ([0.05, 0.6, 0.35], 2.0)]
+)
+def test_replace_mode_tis_matches_enumerated_reverse_kl_gradient(sampling_probs, cap):
+    # Enumerate every possible sampled token, weighted by its sampling probability.
+    # With an inactive cap this must recover the exact categorical KL gradient.
+    learner = torch.tensor([0.2, 0.3, 0.5], dtype=torch.float64)
+    sampling = torch.tensor(sampling_probs, dtype=torch.float64)
+    teacher = torch.tensor([0.4, 0.4, 0.2], dtype=torch.float64)
+    logits = learner.log().requires_grad_()
+    old = learner.log().reshape(3, 1).requires_grad_()
+    rollout = sampling.log().reshape(3, 1).requires_grad_()
+    actions = logits.log_softmax(-1).reshape(3, 1)
+    config = _policy_config(reward_mode="replace")
+    config.use_tis = True
+    config.tis_imp_ratio_cap = cap
+    objective = compute_policy_objective(
+        action_log_probs=actions,
+        old_action_log_probs=old,
+        base_action_log_probs=None,
+        advantages=torch.zeros_like(actions),
+        loss_mask=torch.ones_like(actions),
+        rollout_logprobs=rollout,
+        response_span_tags=None,
+        token_entropy=torch.zeros_like(actions),
+        config=config,
+        policy_loss_fn=ppo_policy_loss,
+        accumulation_steps=1,
+        scaling=LossScaling.CALLER,
+        distillation=SampledReverseKLInput(
+            teacher_action_log_probs=teacher.log().reshape(3, 1),
+            valid_mask=torch.ones_like(actions, dtype=torch.bool),
+            loss_weights=(3 * sampling).reshape(3, 1),
+        ),
+    )
+    objective.optimization_loss.backward()
+    # Analytic categorical gradient; the cap limits how much probability mass
+    # each sampled token can represent. Teacher gap always uses learner, not q.
+    gap = (learner / teacher).log()
+    retained_fraction = torch.minimum(torch.ones_like(learner), cap * sampling / learner)
+    coefficient = retained_fraction * gap
+    expected_loss = learner.dot(coefficient)
+    expected_gradient = learner * (coefficient - expected_loss)
+    torch.testing.assert_close(objective.unscaled_loss, expected_loss)
+    torch.testing.assert_close(logits.grad, expected_gradient)
+    assert old.grad is None
+    assert rollout.grad is None
+
+
+def test_sampled_reverse_kl_tis_masks_padding_and_environment_tokens():
+    config = _policy_config(reward_mode="replace")
+    config.use_tis = True
+    actions = torch.tensor([[-2.0, float("nan"), -1.0]], requires_grad=True)
+    distillation = SampledReverseKLInput(
+        teacher_action_log_probs=torch.tensor([[-1.0, float("nan"), -2.0]]),
+        valid_mask=torch.tensor([[True, False, True]]),
+        loss_weights=torch.ones(1, 3),
+    )
+    loss, _ = distillation.objective_loss(
+        action_log_probs=actions,
+        old_action_log_probs=actions.detach(),
+        student_selected_logprobs=None,
+        rollout_logprobs=torch.tensor([[-3.0, float("nan"), float("nan")]]),
+        loss_mask=torch.tensor([[True, False, False]]),
+        config=config,
+    )
+    loss.backward()
+    torch.testing.assert_close(loss, torch.tensor(-2.0))
+    torch.testing.assert_close(actions.grad, torch.tensor([[-2.0, 0.0, 0.0]]))
+
+
+@pytest.mark.parametrize("rollout", [None, torch.tensor([[float("nan"), 0.0]])])
+def test_sampled_reverse_kl_tis_refuses_missing_sampling_evidence(rollout):
+    config = _policy_config(reward_mode="replace")
+    config.use_tis = True
+    distillation = SampledReverseKLInput(
+        teacher_action_log_probs=torch.tensor([[-1.0, float("nan")]]),
+        valid_mask=torch.tensor([[True, False]]),
+        loss_weights=torch.ones(1, 2),
+    )
+    with pytest.raises(ValueError, match="rollout logprobs"):
+        distillation.objective_loss(
+            action_log_probs=torch.tensor([[-2.0, 0.0]], requires_grad=True),
+            old_action_log_probs=torch.tensor([[-2.0, 0.0]]),
+            student_selected_logprobs=None,
+            rollout_logprobs=rollout,
+            loss_mask=torch.ones(1, 2),
+            config=config,
+        )
+
+
 def test_student_topk_surrogate_matches_selected_policy_gradient_at_behavior_policy():
     behavior_probs = torch.tensor([0.45, 0.35, 0.20], dtype=torch.float64)
     teacher_probs = torch.tensor([0.55, 0.40, 0.05], dtype=torch.float64)
@@ -404,6 +495,7 @@ def test_student_topk_surrogate_clips_improving_high_ratio_update():
     loss, metrics = distillation.objective_loss(
         action_log_probs=torch.zeros((1, 1), dtype=torch.float64),
         old_action_log_probs=torch.zeros((1, 1), dtype=torch.float64),
+        rollout_logprobs=None,
         student_selected_logprobs=student_topk_logprobs(logits, distillation.student_topk_indices),
         loss_mask=torch.ones((1, 1), dtype=torch.bool),
         config=_policy_config(),
@@ -428,6 +520,7 @@ def test_student_topk_surrogate_applies_negative_advantage_dual_clip():
     loss, metrics = distillation.objective_loss(
         action_log_probs=torch.zeros((1, 1), dtype=torch.float64),
         old_action_log_probs=torch.zeros((1, 1), dtype=torch.float64),
+        rollout_logprobs=None,
         student_selected_logprobs=student_topk_logprobs(logits, distillation.student_topk_indices),
         loss_mask=torch.ones((1, 1), dtype=torch.bool),
         config=_policy_config(),
@@ -665,6 +758,7 @@ def test_student_topk_surrogate_rejects_plausible_invalid_teacher_scores():
         distillation.objective_loss(
             action_log_probs=torch.zeros(1, 2),
             old_action_log_probs=torch.zeros(1, 2),
+            rollout_logprobs=None,
             student_selected_logprobs=torch.tensor([[[-0.5, -0.8], [float("nan"), float("nan")]]]),
             loss_mask=torch.tensor([[True, False]]),
             config=_policy_config(),

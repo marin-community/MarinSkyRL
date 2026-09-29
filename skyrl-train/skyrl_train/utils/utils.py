@@ -652,6 +652,13 @@ def validate_cfg(cfg: DictConfig):
         "off-policy correction: set trainer.algorithm.use_tis=true or trainer.algorithm.policy_loss_type=behavior_clip"
     )
 
+    if distillation_plan is not None and cfg.trainer.rollout_buffer.max_staleness_steps > 0:
+        if (
+            distillation_plan.objective is not DistillationObjectiveKind.SAMPLED_REVERSE_KL
+            or not cfg.trainer.algorithm.use_tis
+        ):
+            raise ValueError("Asynchronous distillation requires sampled_reverse_kl with use_tis=true")
+
     behavior_logprobs_required = rollout_logprobs_enabled(cfg.trainer.algorithm)
     if behavior_logprobs_required:
         if cfg.generator.sampling_params.logprobs is None:
