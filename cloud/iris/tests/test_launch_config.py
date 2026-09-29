@@ -12,6 +12,7 @@ import yaml
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
+from skyrl_train.distributed.megatron.nonfinite_steps import NonfiniteStepAction, nonfinite_step_action
 
 
 def _raw_config() -> dict[str, Any]:
@@ -207,3 +208,15 @@ def test_task_materializes_the_forwarded_launch_document(tmp_path: Path) -> None
 
     assert path == str(destination)
     assert destination.read_bytes() == contents
+
+
+def test_null_nonfinite_limit_in_launch_fails_on_first_invalid_step(tmp_path: Path) -> None:
+    raw = _raw_config()
+    raw["skyrl"]["trainer"]["policy"] = {"max_consecutive_nonfinite_steps": None}
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    config = load_launch_config(path)
+
+    action = nonfinite_step_action(float("nan"), True, 0, config.skyrl.trainer.policy.max_consecutive_nonfinite_steps)
+    assert action is NonfiniteStepAction.FAIL
