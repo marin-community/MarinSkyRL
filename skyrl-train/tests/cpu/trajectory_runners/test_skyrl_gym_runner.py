@@ -250,7 +250,7 @@ async def test_gym_terminal_error_retains_only_completed_turn(
 
     assert output.evidence.response_token_ids[:2] == (10, 12)
     assert output.evidence.behavior_logprobs[:2] == (-0.1, -0.2)
-    assert output.evidence.routed_experts[:2] == (((1, 2),), ((3, 4),))
+    np.testing.assert_array_equal(output.evidence.routed_experts[:2], [[[1, 2]], [[3, 4]]])
     assert output.evidence.generated_token_count == 2
     assert output.verification.score == 1.0
     if failure_phase == "generate":
@@ -717,7 +717,7 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
     assert evidence.metadata["assistant_message"] == assistant_message
     assert output.evidence.prompt_token_ids == (11, 12, 13)
     assert output.evidence.response_token_ids == (21, 22)
-    assert output.evidence.routed_experts == (((1, 2),), ((3, 4),))
+    np.testing.assert_array_equal(output.evidence.routed_experts, [[[1, 2]], [[3, 4]]])
 
 
 @pytest.mark.asyncio
@@ -1057,9 +1057,10 @@ async def test_generate_multiturn_aligns_rollout_logprobs(
     assert output["response_ids"] == [[10, 4, *MOCK_TOKENIZER_ENCODED_IDS, 20, 4]]
     assert output["loss_masks"] == [[1, 1, 0, 0, 0, 0, 1, 1]]
     assert output["rollout_logprobs"] == [[-0.1, -0.2, 0.0, 0.0, 0.0, 0.0, -0.3, -0.4]]
-    assert output["rollout_routed_experts"] == [
-        [[[1, 2]], [[3, 4]], [[0, 0]], [[0, 0]], [[0, 0]], [[0, 0]], [[5, 6]], [[7, 8]]]
-    ]
+    np.testing.assert_array_equal(
+        output["rollout_routed_experts"][0],
+        [[[1, 2]], [[3, 4]], [[0, 0]], [[0, 0]], [[0, 0]], [[0, 0]], [[5, 6]], [[7, 8]]],
+    )
     assert output["student_topk_indices"] == [
         [[11, 12], [13, 14], [-1, -1], [-1, -1], [-1, -1], [-1, -1], [21, 22], [23, 24]]
     ]

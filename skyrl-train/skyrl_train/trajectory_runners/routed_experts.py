@@ -24,9 +24,7 @@ def decode_routed_experts(routes: str, expected_rows: int) -> np.ndarray:
     return rows
 
 
-def normalize_routed_experts(
-    routes: Any, prompt_ids: list[int] | None, response_ids: list[int]
-) -> list[list[list[int]]]:
+def normalize_routed_experts(routes: Any, prompt_ids: list[int] | None, response_ids: list[int]) -> np.ndarray:
     """Return response routes, with a sentinel for the final unforwarded token.
 
     vLLM's encoded array starts at the first prompt token and ends at the
@@ -41,7 +39,7 @@ def normalize_routed_experts(
         rows = rows[len(prompt_ids) :]
         if response_ids:
             rows = np.concatenate((rows, np.zeros((1, *rows.shape[1:]), dtype=rows.dtype)))
-    elif isinstance(routes, list):
+    elif isinstance(routes, (list, np.ndarray)):
         if len(routes) != len(response_ids):
             raise ValueError("routed_experts must align with exact response token IDs")
         try:
@@ -60,4 +58,4 @@ def normalize_routed_experts(
         or np.any(rows > np.iinfo(np.int16).max)
     ):
         raise ValueError("routed_experts must have [token, layer, expert] nonnegative int16 shape")
-    return rows.tolist()
+    return np.ascontiguousarray(rows, dtype=np.int16)

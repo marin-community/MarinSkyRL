@@ -1,4 +1,9 @@
 from dataclasses import replace
+import base64
+import io
+import pickle
+
+import numpy as np
 
 from omegaconf import OmegaConf
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
@@ -6,6 +11,8 @@ from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDispos
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
 from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TrajectoryID
+from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
+from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 
 
 class _Tokenizer:
@@ -60,14 +67,15 @@ def test_whole_trajectory_projection_preserves_one_sample_per_trajectory():
 
 def test_whole_trajectory_projection_preserves_routes_and_fills_missing_rows():
     routed = _step([3, 4], [0.0, 1.0])
-    routed.evidence = replace(routed.evidence, routed_experts=(((1, 2),), ((3, 4),)))
+    routed.evidence = replace(routed.evidence, routed_experts=np.asarray([[[1, 2]], [[3, 4]]], dtype=np.int16))
 
     output = WholeTrajectoryProjection(_config(), _Tokenizer()).project(
         [routed, _step([5], [0.0])],
         {"env_classes": None, "sampling_params": {"logprobs": True}},
     )
 
-    assert output["rollout_routed_experts"] == [[[[1, 2]], [[3, 4]]], [[[0, 0]]]]
+    np.testing.assert_array_equal(output["rollout_routed_experts"][0], [[[1, 2]], [[3, 4]]])
+    np.testing.assert_array_equal(output["rollout_routed_experts"][1], [[[0, 0]]])
 
 
 def test_whole_trajectory_projection_adapts_masked_scalar_row_to_token_level_rewards():
@@ -125,7 +133,7 @@ def test_step_wise_projection_preserves_group_identity_and_final_step():
 
 def test_step_wise_projection_preserves_routes():
     step = _step([3, 4], [0.0, 1.0])
-    step.evidence = replace(step.evidence, routed_experts=(((1, 2),), ((3, 4),)))
+    step.evidence = replace(step.evidence, routed_experts=np.asarray([[[1, 2]], [[3, 4]]], dtype=np.int16))
 
     output = StepWiseTrajectoryProjection(_config(), _Tokenizer()).project(
         [[step]],
@@ -136,7 +144,7 @@ def test_step_wise_projection_preserves_routes():
         },
     )
 
-    assert output["rollout_routed_experts"] == [[[[1, 2]], [[3, 4]]]]
+    np.testing.assert_array_equal(output["rollout_routed_experts"][0], [[[1, 2]], [[3, 4]]])
 
 
 def test_step_wise_projection_preserves_student_topk_candidates():
@@ -185,3 +193,38 @@ def test_projection_derives_mask_baseline_and_token_credit_from_contracts():
     assert output["error_treatments"] == ["passthrough"]
     assert output["unshaped_rewards"] == [0.0]
     assert output["unshaped_reward_available"] == [False]
+
+
+def test_encoded_routes_remain_compact_through_projection_and_training_collation():
+    response_ids = list(range(1024))
+    wire_rows = (np.arange(1026 * 4 * 2).reshape(1026, 4, 2) % 512).astype(np.uint16)
+    stream = io.BytesIO()
+    np.save(stream, wire_rows, allow_pickle=False)
+    routes = normalize_routed_experts(base64.b64encode(stream.getvalue()).decode(), [10, 11, 12], response_ids)
+    rollout = _step(response_ids, [0.0] * 1023 + [1.0])
+    rollout.evidence = replace(rollout.evidence, routed_experts=routes)
+    output = WholeTrajectoryProjection(_config(), _Tokenizer()).project(
+        [rollout, _step([7], [0.0])],
+        {"env_classes": None, "sampling_params": {"logprobs": True}},
+    )
+    projected = output["rollout_routed_experts"]
+    # Nested Python containers inflate each token/layer into a tracked object.
+    # The wire-to-trainer carrier must serialize at dense-array size instead.
+    restored = pickle.loads(pickle.dumps(projected, protocol=5))
+    assert len(pickle.dumps(projected, protocol=5)) < routes.nbytes + 2048
+    np.testing.assert_array_equal(restored[0][:-1], wire_rows[3:])
+    np.testing.assert_array_equal(restored[0][-1], np.zeros((4, 2)))
+    np.testing.assert_array_equal(restored[1], np.zeros((1, 4, 2)))
+    tokenizer = _Tokenizer()
+    tokenizer.pad_token_id = 0
+    packed = convert_prompts_responses_to_batch_tensors(
+        tokenizer,
+        [[10, 11, 12], [10]],
+        [response_ids, [7]],
+        output["rewards"],
+        output["loss_masks"],
+        routed_experts=restored,
+        num_experts=512,
+    )[6]
+    np.testing.assert_array_equal(packed[0].numpy(), routes)
+    np.testing.assert_array_equal(packed[1].numpy(), np.zeros((1024, 4, 2)))

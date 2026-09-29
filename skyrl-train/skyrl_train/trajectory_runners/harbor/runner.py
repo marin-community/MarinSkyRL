@@ -314,9 +314,7 @@ def _rollout_evidence_from_harbor(
         response_token_ids=tuple(response_ids),
         behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
         routed_experts=(
-            None
-            if rollout_routed_experts is None
-            else tuple(tuple(tuple(layer) for layer in token) for token in rollout_routed_experts)
+            None if rollout_routed_experts is None else np.ascontiguousarray(rollout_routed_experts, dtype=np.int16)
         ),
     )
 

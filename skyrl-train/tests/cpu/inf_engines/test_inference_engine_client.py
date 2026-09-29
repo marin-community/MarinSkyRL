@@ -923,11 +923,10 @@ async def test_chat_completion_retry_keeps_routes_across_interrupted_chunks(drop
 
     assert choice["token_ids"] == [11, 12, 13]
     assert engine.requests[1]["json"]["_skyrl_exact_prompt_token_ids"] == [1, 2, 11, 12]
-    assert normalize_routed_experts(choice["routed_experts"], response["prompt_token_ids"], choice["token_ids"]) == [
-        [[3]],
-        [[4]],
-        [[0]],
-    ]
+    np.testing.assert_array_equal(
+        normalize_routed_experts(choice["routed_experts"], response["prompt_token_ids"], choice["token_ids"]),
+        [[[3]], [[4]], [[0]]],
+    )
 
 
 @pytest.mark.asyncio
