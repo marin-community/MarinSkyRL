@@ -81,7 +81,12 @@ class EvalOnlyEntrypoint(BasePPOExp):
                 sink.close()
 
         tracker = self.get_tracker()
-        tracker.log(results, step=0, commit=True)
+        exit_code = 1
+        try:
+            tracker.log(results, step=0, commit=True)
+            exit_code = 0
+        finally:
+            tracker.finish(exit_code=exit_code)
 
         return results
 

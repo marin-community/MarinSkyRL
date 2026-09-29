@@ -15,6 +15,7 @@ class _SharedRun:
         self.summary = {}
         self.axes = {}
         self.requested_steps = []
+        self.state = "running"
 
     def define_metric(self, name, step_metric=None):
         self.axes[name] = step_metric
@@ -28,7 +29,11 @@ class _SharedRun:
             self.pending.clear()
 
     def finish(self, exit_code=0):
-        pass
+        if self.pending:
+            self.history.append(self.pending.copy())
+            self.summary.update(self.pending)
+            self.pending.clear()
+        self.state = "finished" if exit_code == 0 else "failed"
 
 
 def test_default_shared_wandb_run_commits_eval_and_train_metrics(monkeypatch):
@@ -51,3 +56,16 @@ def test_default_shared_wandb_run_commits_eval_and_train_metrics(monkeypatch):
     assert run.axes["*"] == "trainer/global_step"
     assert run.summary["eval/reward"] == 0.25
     assert run.summary["train/loss"] == 0.5
+
+
+def test_explicit_finish_flushes_final_metrics_before_process_teardown(monkeypatch):
+    run = _SharedRun()
+    monkeypatch.setattr(wandb, "init", lambda **kwargs: run)
+    monkeypatch.setattr(ray, "is_initialized", lambda: False)
+    tracker = Tracking("project", "run", backends="wandb", config=OmegaConf.create({}))
+    tracker.log({"consumed/loss_total": 14258}, step=1, commit=False)
+    assert run.history == []
+    tracker.finish()
+    tracker.finish()
+    assert run.history == [{"consumed/loss_total": 14258, "trainer/global_step": 1}]
+    assert run.state == "finished"

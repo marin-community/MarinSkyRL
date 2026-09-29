@@ -23,9 +23,13 @@ class LifecycleRunner:
 class RecordingTracker:
     def __init__(self) -> None:
         self.calls = []
+        self.finished = False
 
     def log(self, *args, **kwargs) -> None:
         self.calls.append((args, kwargs))
+
+    def finish(self, exit_code=0) -> None:
+        self.finished = True
 
 
 @pytest.mark.asyncio
@@ -65,5 +69,6 @@ async def test_eval_only_uses_generation_engine_without_initial_wake(monkeypatch
     result = await experiment._evaluate()
 
     assert result == {"reward": 1.0}
+    assert tracker.finished
     assert trajectory_runner.events == ["attach_sink", "startup", "evaluate", "shutdown", "close_sink"]
     assert tracker.calls == [(({"reward": 1.0},), {"step": 0, "commit": True})]

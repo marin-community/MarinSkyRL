@@ -613,6 +613,7 @@ class RayPPOTrainer:
                 await self._distillation_runtime.start()
             await self._startup_trajectory_runner()
             await self._train_loop()
+            await asyncio.to_thread(self.tracker.finish)
         except Exception as error:
             log_exception_as_text(f"Train loop failed at global_step {self.global_step}", error)
             receipt = write_exception_receipt("skyrl-trainer", error)
