@@ -116,7 +116,6 @@ def test_tiny_policy_trains_to_max_steps(tmp_path: Path, mode: TrainingMode, sha
             expected = torch.zeros_like(batch["action_log_probs"], dtype=torch.float32)
             expected[eligible] = (
                 (batch["action_log_probs"][eligible].float() - batch["rollout_logprobs"][eligible].float())
-                .clamp(-20, 20)
                 .exp()
                 .clamp(max=2)
             )

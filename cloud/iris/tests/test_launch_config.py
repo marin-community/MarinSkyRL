@@ -7,6 +7,7 @@ import math
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 
 import pytest
 import numpy as np
@@ -16,6 +17,7 @@ from omegaconf import OmegaConf
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
+from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, GroupSelectionResult
 from skyrl_train.objective.objective import build_objective_micro_batch, compute_policy_objective
 from skyrl_train.objective.reduction import step_counts
 from skyrl_train.objective.teacher import teacher_advantages
@@ -173,6 +175,13 @@ def test_algorithm_recipe_launch_drives_policy_value_and_gradient(tmp_path: Path
     path = tmp_path / "recipe.yaml"
     path.write_text(yaml.safe_dump(raw))
     config = load_launch_config(path).skyrl.trainer.algorithm
+    if recipe == "dapo":
+        raw["skyrl"]["trainer"]["algorithm"]["dynamic_sampling"] = {"type": None}
+        path.write_text(yaml.safe_dump(raw))
+        sampling = load_launch_config(path).skyrl.trainer.algorithm.dynamic_sampling
+        selection = GroupSelectionPolicy(DynamicSamplingType(sampling.type) if sampling.type is not None else None)
+        group = SimpleNamespace(trajectory_batch={"response_ids": [[1], [2]], "rewards": [1.0, 1.0]})
+        assert selection.evaluate(group) is GroupSelectionResult.KEEP
 
     mask = torch.tensor([[1.0, 0.0], [1.0, 1.0]])
     old = torch.full_like(mask, -2.0)
