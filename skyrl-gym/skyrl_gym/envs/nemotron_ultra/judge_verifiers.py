@@ -69,6 +69,14 @@ def grade_multichallenge(
 ) -> tuple[float, dict[str, Any]]:
     response = final_answer_text(response)
     rubric = record.get("rubric") or record.get("metadata", {}).get("rubric") or []
+    # Prior conversation context can satisfy a rubric even when the model submitted no final answer.
+    if not response.strip():
+        return 0.0, {
+            "empty_final_answer": True,
+            "rubric_evaluations": [],
+            "num_passed": 0,
+            "num_total": len(rubric),
+        }
     context = record.get("context", "")
 
     def evaluate(item: dict[str, Any]) -> dict[str, Any]:
