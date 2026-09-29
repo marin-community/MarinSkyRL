@@ -77,14 +77,14 @@ class WholeTrajectoryProjection:
             rollout_logprobs=rollout_logprobs,
             exclude_from_baseline=[not output.disposition.baseline_eligible for output in outputs],
         )
-        if request.get("env_classes") is not None and any(output.env_metrics for output in outputs):
-            batch["env_metrics"] = [output.env_metrics for output in outputs]
-            batch["env_classes"] = list(request["env_classes"])
         attach_student_topk(batch, outputs, responses, loss_masks)
         attach_routed_experts(batch, outputs, responses)
         attach_terminal_classifications(batch, outputs)
         attach_server_errors(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
+        if request.get("env_classes") is not None and any(output.env_metrics for output in outputs):
+            batch["env_metrics"] = [output.env_metrics for output in outputs]
+            batch["env_classes"] = list(request["env_classes"])
         batch["rollout_metrics"] = get_rollout_metrics(
             responses,
             rewards,

@@ -2,10 +2,11 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from safetensors.torch import save_file
 import torch
 
-from cloud.iris.hf_model_cache import stage_artifact_model_metadata, stage_model_metadata
+from cloud.iris.hf_model_cache import stage_model_metadata
 from marinskyrl.model_manifest import snapshot_model_manifest
 from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore, lazy_first_dim_patterns_for_bridge
 
@@ -15,27 +16,42 @@ def _write_index(metadata_dir: Path, weight_map: dict[str, str]) -> None:
     (metadata_dir / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
 
 
-def test_loads_only_requested_tensor_range_without_local_weight_files(tmp_path: Path) -> None:
+@pytest.mark.parametrize("indexed", [True, False])
+def test_loads_only_requested_tensor_range_without_local_weight_files(tmp_path: Path, indexed: bool) -> None:
     remote = tmp_path / "remote"
     remote.mkdir()
+    weight_file = "model-00001-of-00001.safetensors" if indexed else "model.safetensors"
     save_file(
         {
             "layer.0.weight": torch.arange(8, dtype=torch.float32),
             "layer.1.weight": torch.arange(1_000_000, dtype=torch.float32),
         },
-        remote / "model-00001-of-00001.safetensors",
+        remote / weight_file,
     )
-    (remote / "config.json").write_text("{}")
-    (remote / "tokenizer.json").write_text("{}")
     metadata = tmp_path / "metadata"
-    stage_artifact_model_metadata(str(remote), "artifact@v1:abc123", str(metadata))
+    if indexed:
+        _write_index(metadata, {"layer.0.weight": weight_file, "layer.1.weight": weight_file})
+    else:
+        metadata.mkdir()
 
     store = RemoteSafetensorsTensorStore(str(remote), metadata)
     loaded = store.load_tensors(["layer.0.weight"])
 
     torch.testing.assert_close(loaded["layer.0.weight"], torch.arange(8, dtype=torch.float32))
-    assert store.bytes_read < (remote / "model-00001-of-00001.safetensors").stat().st_size
+    assert store.bytes_read < (remote / weight_file).stat().st_size
     assert not tuple(metadata.glob("*.safetensors"))
+
+
+def test_invalid_index_is_not_replaced_by_single_file_fallback(tmp_path: Path) -> None:
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    save_file({"weight": torch.ones(2)}, remote / "model.safetensors")
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    (metadata / "model.safetensors.index.json").write_text("not JSON")
+
+    with pytest.raises(ValueError, match="Invalid safetensors weight index"):
+        RemoteSafetensorsTensorStore(str(remote), metadata)
 
 
 def test_auto_bridge_uses_registered_bridge_remote_slice_patterns(tmp_path: Path) -> None:
