@@ -15,6 +15,14 @@ from marinskyrl.distillation import (
 )
 
 
+class KLEstimator(StrEnum):
+    K1 = "k1"
+    ABS = "abs"
+    K2 = "k2"
+    K3 = "k3"
+    K3_UNBIASED_GRADIENT = "k3_unbiased_gradient"
+
+
 class RatioAnchor(StrEnum):
     OLD = "old"
     ROLLOUT = "rollout"
@@ -116,6 +124,12 @@ def validate_objective(cfg: DictConfig) -> None:
     if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
         raise ValueError("trainer.policy.max_consecutive_nonfinite_steps must be null or an integer >= 1")
     algorithm = cfg.trainer.algorithm
+    try:
+        KLEstimator(algorithm.kl_estimator_type)
+    except ValueError as error:
+        raise ValueError(
+            f"invalid kl_estimator_type: {algorithm.kl_estimator_type}; choose one of {list(KLEstimator)}"
+        ) from error
     try:
         reduction = LossReduction(algorithm.loss_reduction)
     except ValueError as error:

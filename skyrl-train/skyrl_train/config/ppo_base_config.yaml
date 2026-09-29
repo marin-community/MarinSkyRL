@@ -183,9 +183,7 @@ trainer:
       type: "fixed"
       kl_target: 0.1
       horizon: 10000
-    kl_estimator_type: "k3"
-    use_kl_estimator_k3: false
-    use_abs_kl: false
+    kl_estimator_type: "k3_unbiased_gradient"
     # ROLE-ACTIVATING: true requires a reference model and can add or share a physical reference bundle according
     # to placement settings. A wrapper must not treat this as a reward-only toggle.
     use_kl_in_reward: false

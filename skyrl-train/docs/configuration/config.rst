@@ -272,9 +272,7 @@ Algorithm Configuration
         kl_target: 0.1 # target KL divergence for adaptive KL controller
         horizon: 10000 # controls the update rate of the adaptive KL controller
   
-      kl_estimator_type: "k3" # "k1", "k2", "k3", "abs" - see http://joschu.net/blog/kl-approx.html for details
-      use_kl_estimator_k3: false # to be deprecated, use kl_estimator_type="k3" instead
-      use_abs_kl: false # to be deprecated, use kl_estimator_type="abs" instead
+      kl_estimator_type: "k3_unbiased_gradient"
 
       # note: use_kl_in_reward and use_kl_loss should be mutually exclusive
       use_kl_in_reward: false # apply kl loss to rewards
@@ -337,9 +335,14 @@ Algorithm Configuration
  - ``kl_target``: Target KL divergence for adaptive KL controller.
  - ``horizon``: Controls the update rate of the adaptive KL controller.
 
-- ``algorithm.kl_estimator_type``: KL estimator type to use. Options include: ``k1``, ``k2``, ``k3``, ``abs``. See `this blog post <http://joschu.net/blog/kl-approx.html>`_ for details. We use ``k3`` as the default.
-- ``algorithm.use_kl_estimator_k3``: Whether to use the k3 estimator for KL divergence calculation. The k3 estimator is the non negative kl approximation in `this blog post <http://joschu.net/blog/kl-approx.html>`_. Besides non negative, it is also unbiased and has lower variance. This flag is to be deprecated, use ``kl_estimator_type="k3"`` instead.
-- ``algorithm.use_abs_kl``: Whether to use the absolute KL divergence for KL divergence calculation. This flag is to be deprecated, use ``kl_estimator_type="abs"`` instead.
+- ``algorithm.kl_estimator_type``: ``k1``, ``abs``, ``k2``, ``k3``, or the default ``k3_unbiased_gradient``.
+  The default has k3's reported value and k2's gradient through the clamped log probability ratio.
+  Under on-policy sampling, away from the log-ratio clamp, its expected gradient is that of
+  reverse KL, ``KL(policy || reference)``. The k3 value clamp does not limit that gradient.
+  Plain ``k3`` has the forward-KL gradient under the same sampling assumption.
+  Metrics and the KL-in-reward penalty use values only. verl calls this value/gradient
+  combination ``k3+``; see `Approximating KL Divergence <http://joschu.net/blog/kl-approx.html>`_
+  for the k1, k2 and k3 value estimators.
 - ``algorithm.use_kl_in_reward``: Whether to apply KL divergence penalty to rewards. The new rewards will be computed as ``rewards - kl * kl_loss_coef``.
 - ``algorithm.use_kl_loss``: Whether to add a KL divergence loss to the policy model. The policy loss will be computed as ``policy_loss + kl * kl_loss_coef``.
 - ``algorithm.kl_loss_coef``: Coefficient for the KL divergence loss.

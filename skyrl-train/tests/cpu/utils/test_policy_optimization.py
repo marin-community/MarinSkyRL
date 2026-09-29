@@ -69,6 +69,8 @@ def test_compute_approx_kl(dummy_data):
     log_ratio = log_probs - log_probs_base
     expected_k3 = (torch.exp(-log_ratio) - 1 + log_ratio) * mask
     assert torch.allclose(kl_k3, expected_k3, atol=1e-4), "k3 estimator is not correct"
+    unbiased = compute_approx_kl(log_probs, log_probs_base, mask, kl_estimator_type="k3_unbiased_gradient")
+    torch.testing.assert_close(unbiased, kl_k3, rtol=0, atol=0)
 
 
 def test_default_kl_estimator_loss_gradient_is_the_reverse_kl_gradient():
@@ -87,7 +89,8 @@ def test_default_kl_estimator_loss_gradient_is_the_reverse_kl_gradient():
 
 
 @pytest.mark.parametrize("coefficient", [0.0, 0.1, 1.0])
-def test_policy_objective_kl_gradient_matches_analytic_derivative(coefficient):
+@pytest.mark.parametrize("estimator", ["k3", "k3_unbiased_gradient"])
+def test_policy_objective_kl_gradient_matches_analytic_derivative(coefficient, estimator):
     log_probs = torch.tensor([[-0.8, -1.3, -0.6], [-1.3, -0.8, -0.6]], dtype=torch.float64, requires_grad=True)
     base_log_probs = torch.full_like(log_probs, -1.0)
     mask = torch.tensor([[1.0, 1.0, 0.0], [0.0, 0.0, 0.0]], dtype=torch.float64)
@@ -103,7 +106,7 @@ def test_policy_objective_kl_gradient_matches_analytic_derivative(coefficient):
             "entropy_loss_coef": 0.0,
             "use_kl_loss": True,
             "kl_loss_coef": coefficient,
-            "kl_estimator_type": "k3",
+            "kl_estimator_type": estimator,
             "use_tis": False,
         }
     )
@@ -125,8 +128,7 @@ def test_policy_objective_kl_gradient_matches_analytic_derivative(coefficient):
     )
     objective.optimization_loss.backward()
 
-    # k3 derivatives at log(p/q) = [0.2, -0.3], away from clamps.
-    derivatives = [1.0 - math.exp(-0.2), 1.0 - math.exp(0.3)]
+    derivatives = [0.2, -0.3] if estimator == "k3_unbiased_gradient" else [1.0 - math.exp(-0.2), 1.0 - math.exp(0.3)]
     expected = torch.zeros_like(log_probs)
     # Two active tokens in one trainable sequence; the empty row contributes neither numerator nor count.
     expected[0, :2] = torch.tensor(derivatives, dtype=log_probs.dtype) * coefficient / 2
@@ -135,6 +137,22 @@ def test_policy_objective_kl_gradient_matches_analytic_derivative(coefficient):
     metric = compute_approx_kl(log_probs, base_log_probs, mask, kl_estimator_type="k3")
     assert not metric.requires_grad
     torch.testing.assert_close(objective.rows.kl.detach(), metric[0, :2].sum() / 2)
+
+
+def test_unbiased_kl_keeps_k3_values_and_clamps_only_log_ratio_gradients():
+    log_probs = torch.tensor([-30.0, -5.0, -0.3, 0.0, 0.2, 5.0, 30.0, 0.5], dtype=torch.float64, requires_grad=True)
+    reference = torch.zeros_like(log_probs)
+    mask = torch.tensor([1, 1, 1, 1, 1, 1, 1, 0])
+    values = differentiable_approx_kl(log_probs, reference, mask, "k3_unbiased_gradient")
+    reported = compute_approx_kl(log_probs, reference, mask, "k3")
+    torch.testing.assert_close(values, reported, rtol=0, atol=0)
+    values.sum().backward()
+    torch.testing.assert_close(
+        log_probs.grad,
+        torch.tensor([0, -5, -0.3, 0, 0.2, 5, 0, 0], dtype=torch.float64),
+        rtol=0,
+        atol=0,
+    )
 
 
 def test_compute_reinforce_plus_plus_outcome_advantage_returns_and_masking():

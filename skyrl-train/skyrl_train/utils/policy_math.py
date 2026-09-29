@@ -12,6 +12,7 @@ import torch
 from jaxtyping import Float
 from omegaconf import DictConfig
 
+from skyrl_train.config.objective_spec import KLEstimator
 from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, masked_mean
 from skyrl_train.training_batch import TrainingInputBatch
 
@@ -35,35 +36,24 @@ def differentiable_approx_kl(
     log_probs: torch.Tensor,
     log_probs_base: torch.Tensor,
     loss_mask: Optional[torch.Tensor] = None,
-    kl_estimator_type: str = "k3",
+    kl_estimator_type: str = KLEstimator.K3_UNBIASED_GRADIENT.value,
 ) -> torch.Tensor:
-    """
-    Compute differentiable per-token approximate KL divergence.
-    Schulman blog: http://joschu.net/blog/kl-approx.html
-
-    Args:
-        log_probs: Log probabilities of the new distribution.
-        log_probs_base: Log probabilities of the base distribution.
-        loss_mask: Mask for tokens included in the loss.
-        kl_estimator_type: Approximation to use: ``k1``, ``abs``, ``k2``, or ``k3``.
-    """
-    if kl_estimator_type == "k1":
+    """Return per-token KL estimates with the selected value and gradient convention."""
+    estimator = KLEstimator(kl_estimator_type)
+    if estimator is KLEstimator.K1:
         kld = log_probs - log_probs_base
-    elif kl_estimator_type == "abs":
+    elif estimator is KLEstimator.ABS:
         kld = (log_probs - log_probs_base).abs()
-    elif kl_estimator_type == "k2":
+    elif estimator is KLEstimator.K2:
         kld = 0.5 * (log_probs - log_probs_base).square()
-    # J. Schulman. Approximating kl divergence, 2020.
-    # URL http://joschu.net/blog/kl-approx.html.
-    elif kl_estimator_type == "k3":
-        kl = log_probs_base - log_probs
-        # For numerical stability
-        kl = torch.clamp(kl, min=-LOG_PROB_DELTA_CLIP, max=LOG_PROB_DELTA_CLIP)
-        ratio = torch.exp(kl)
-        kld = (ratio - kl - 1).contiguous()
-        kld = torch.clamp(kld, min=-10, max=10)
     else:
-        raise ValueError(f"Invalid KL estimator type: {kl_estimator_type}")
+        log_ratio = (log_probs_base - log_probs).clamp(-LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP)
+        k3 = (log_ratio.exp() - log_ratio - 1).contiguous().clamp(-10, 10)
+        if estimator is KLEstimator.K3_UNBIASED_GRADIENT:
+            k2 = 0.5 * log_ratio.square()
+            kld = k3.detach() + (k2 - k2.detach())
+        else:
+            kld = k3
 
     if loss_mask is not None:
         kld = kld * loss_mask
@@ -75,7 +65,7 @@ def compute_approx_kl(
     log_probs: torch.Tensor,
     log_probs_base: torch.Tensor,
     loss_mask: Optional[torch.Tensor] = None,
-    kl_estimator_type: str = "k3",
+    kl_estimator_type: str = KLEstimator.K3_UNBIASED_GRADIENT.value,
 ) -> torch.Tensor:
     """Compute approximate KL without gradients for metrics and reward shaping.
 
