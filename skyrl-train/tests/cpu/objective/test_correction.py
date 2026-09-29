@@ -86,7 +86,9 @@ def test_correction_on_policy_is_identity_on_eligible_tokens(preset):
 )
 def test_sequence_truncation_broadcasts_only_over_trainable_tokens(aggregate, expected):
     correction = OffPolicyCorrection.from_config(
-        OmegaConf.create({"name": "custom", "rules": [{"kind": "sequence", "aggregate": aggregate, "action": "truncate", "high": 3}]})
+        OmegaConf.create(
+            {"name": "custom", "rules": [{"kind": "sequence", "aggregate": aggregate, "action": "truncate", "high": 3}]}
+        )
     )
     old = torch.tensor([[4.0, 1.0, float("nan")], [float("nan")] * 3]).log()
     mask = torch.tensor([[1, 1, 0], [0, 0, 0]])
@@ -99,7 +101,12 @@ def test_sequence_truncation_broadcasts_only_over_trainable_tokens(aggregate, ex
 
 def test_sequence_product_clamps_log_sum_before_exponentiating():
     correction = OffPolicyCorrection.from_config(
-        OmegaConf.create({"name": "custom", "rules": [{"kind": "sequence", "aggregate": "product", "action": "truncate", "high": 1e20}]})
+        OmegaConf.create(
+            {
+                "name": "custom",
+                "rules": [{"kind": "sequence", "aggregate": "product", "action": "truncate", "high": 1e20}],
+            }
+        )
     )
     old = torch.tensor([[100.0, 100.0], [-100.0, -100.0]])
 

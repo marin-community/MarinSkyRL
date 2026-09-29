@@ -100,6 +100,7 @@ def tiny_training_config(
             "algorithm": {
                 "use_kl_loss": False,
                 "policy_loss_type": POLICY_LOSS_TYPE[mode],
+                "off_policy_correction": "tis" if mode is TrainingMode.SYNC else "none",
                 "group_admission": {"stall_timeout": STALL_TIMEOUT_SECONDS},
             },
             "rollout_buffer": {
@@ -112,6 +113,7 @@ def tiny_training_config(
             "micro_train_batch_size_per_gpu": micro_batch_size,
             "micro_forward_batch_size_per_gpu": micro_batch_size,
             "dump_data_batch": dump_data_batch,
+            "training_metrics": mode is TrainingMode.ASYNC,
             "use_sample_packing": False,
             "max_steps": max_steps,
             "eval_before_train": False,

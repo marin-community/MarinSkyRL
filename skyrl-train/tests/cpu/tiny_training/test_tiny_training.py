@@ -42,6 +42,7 @@ def _train(root: Path, mode: TrainingMode, shape: RolloutShape, *, steps: int, c
             f"--steps={steps}",
             f"--checkpoint-interval={checkpoint_interval}",
             f"--root={root}",
+            *(["--dump-data-batch"] if mode is TrainingMode.SYNC else []),
         ],
         cwd=SKYRL_TRAIN_DIR,
         env={**os.environ, "RAY_ENABLE_UV_RUN_RUNTIME_ENV": "0"},
@@ -108,6 +109,21 @@ def test_tiny_policy_trains_to_max_steps(tmp_path: Path, mode: TrainingMode, sha
     # A batch whose samples all score alike, which happens by chance, leaves no advantage to train on.
     assert any(record["policy/raw_grad_norm"] > 0 for record in steps)
     assert max(record["async/staleness_max"] for record in steps) <= MAX_STALENESS_STEPS[mode]
+    if mode is TrainingMode.SYNC:
+        for step in range(1, NUM_STEPS + 1):
+            batch = TrainingInputBatch().load(tmp_path / f"exports/dumped_data/global_step_{step}_training_input.pkl")
+            eligible = batch["loss_mask"].bool()
+            expected = torch.zeros_like(batch["action_log_probs"], dtype=torch.float32)
+            expected[eligible] = (
+                (batch["action_log_probs"][eligible].float() - batch["rollout_logprobs"][eligible].float())
+                .clamp(-20, 20)
+                .exp()
+                .clamp(max=2)
+            )
+            torch.testing.assert_close(batch["correction_weights"], expected)
+            assert steps[step - 1]["policy/correction/weight_mean"] == pytest.approx(
+                expected.sum().item() / eligible.sum().item()
+            )
     if shape is RolloutShape.STEP_WISE:
         # A trajectory that answers wrongly on its first turn trains one sample per turn.
         trajectories = NUM_STEPS * TRAIN_BATCH_SIZE * N_SAMPLES_PER_PROMPT
