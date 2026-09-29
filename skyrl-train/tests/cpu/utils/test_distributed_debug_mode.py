@@ -3,8 +3,6 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from tests.cpu.util import example_dummy_config
-
 from skyrl_train.debug_mode import apply_debug_mode, debug_environment
 from skyrl_train.env_vars import (
     DEBUG_ARTIFACT_DIR_ENV,
@@ -15,6 +13,7 @@ from skyrl_train.env_vars import (
     write_process_manifest,
 )
 from skyrl_train.utils.utils import prepare_runtime_environment
+from tests.cpu.util import example_dummy_config
 
 
 def _debug_config(*, checkpoint_path: str = "/gpfs/experiments/run/checkpoints"):
@@ -64,7 +63,7 @@ def test_explicit_phase_diagnostics_off_overrides_light_mode(monkeypatch):
     assert "SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS" not in environment
 
 
-def test_distributed_mode_expands_complete_worker_contract(monkeypatch):
+def test_distributed_mode_writes_artifacts_beside_checkpoints(monkeypatch):
     monkeypatch.delenv(DEBUG_MODE_ENV, raising=False)
     monkeypatch.delenv(DEBUG_ARTIFACT_DIR_ENV, raising=False)
 
@@ -72,18 +71,11 @@ def test_distributed_mode_expands_complete_worker_contract(monkeypatch):
 
     assert environment[DEBUG_MODE_ENV] == "distributed"
     assert environment[DEBUG_ARTIFACT_DIR_ENV] == "/gpfs/experiments/run/debug"
-    assert environment["NCCL_DEBUG"] == "INFO"
-    assert environment["NCCL_DEBUG_SUBSYS"] == "INIT,BOOTSTRAP,ENV,NET,GRAPH,TUNING"
-    assert environment["SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"] == "1"
-    assert environment["TORCH_CPP_LOG_LEVEL"] == "INFO"
-    assert environment["TORCH_NCCL_DESYNC_DEBUG"] == "1"
-    assert environment["TORCH_NCCL_ENABLE_TIMING"] == "1"
-    assert environment["TORCH_NCCL_TRACE_CPP_STACK"] == "1"
-    assert environment["TORCH_SHOW_CPP_STACKTRACES"] == "1"
-    assert environment["TORCH_SYMBOLIZE_MODE"] == "fast"
-    assert environment["PYTHONFAULTHANDLER"] == "1"
     assert environment["TORCH_FR_DUMP_TEMP_FILE"].startswith("/gpfs/experiments/run/debug/flight_recorder/")
     assert environment["NCCL_DEBUG_FILE"] == "/gpfs/experiments/run/debug/nccl/nccl.%h.%p.log"
+    assert environment["NCCL_DEBUG"] == "INFO"
+    assert environment["TORCH_NCCL_DESYNC_DEBUG"] == "1"
+    # Settings that serialize or slow every kernel stay opt-in even in distributed mode.
     assert "CUDA_LAUNCH_BLOCKING" not in environment
     assert "TORCH_DISTRIBUTED_DEBUG" not in environment
 

@@ -2,27 +2,35 @@ import pytest
 from omegaconf import OmegaConf
 
 from skyrl_train.config.trajectory_runner_capabilities import (
+    SUPPORTED_OPENCODE_LITERAL_VERSION,
     EntrypointOperation,
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
 )
 
+GYM = TrajectoryRunnerMode.SKYRL_GYM
+HARBOR = TrajectoryRunnerMode.HARBOR
+MINI_SWE = TrajectoryRunnerMode.MINI_SWE
+HARBOR_KEY = "terminal_bench_config.harbor"
+NO_TIS = {"trainer.algorithm.use_tis": False}
+FULL_TITO = {"trainer.algorithm.use_tis": False, "trainer.algorithm.tito_full": True}
+OPENCODE = {f"{HARBOR_KEY}.version": SUPPORTED_OPENCODE_LITERAL_VERSION}
+EXACT_CHAT = {
+    "generator.chat_template.name_or_path": "qwen2_5_with_generation_tag_simplified",
+    "generator.require_exact_chat_transport": True,
+}
 
-def _harbor_config(agent_name, **harbor_overrides):
+
+def _harbor_config(agent_name):
     harbor = {
         "name": agent_name,
         "collect_rollout_details": True,
         **({"thinking_format": "qwen-chat-template"} if agent_name == "pi" else {}),
-        **harbor_overrides,
     }
     return OmegaConf.create(
         {
             "trainer": {
-                "algorithm": {
-                    "use_tis": True,
-                    "policy_loss_type": "regular",
-                    "tito_full": None,
-                },
+                "algorithm": {"use_tis": True, "policy_loss_type": "regular", "tito_full": None},
                 "placement": {"colocate_all": True},
             },
             "terminal_bench_config": {"harbor": harbor},
@@ -31,15 +39,11 @@ def _harbor_config(agent_name, **harbor_overrides):
     )
 
 
-def _skyrl_config(*, use_tis=True, policy_loss_type="regular"):
+def _skyrl_config():
     return OmegaConf.create(
         {
             "trainer": {
-                "algorithm": {
-                    "use_tis": use_tis,
-                    "policy_loss_type": policy_loss_type,
-                    "tito_full": None,
-                },
+                "algorithm": {"use_tis": True, "policy_loss_type": "regular", "tito_full": None},
                 "step_wise_training": False,
             },
             "generator": {
@@ -50,183 +54,163 @@ def _skyrl_config(*, use_tis=True, policy_loss_type="regular"):
     )
 
 
-@pytest.mark.parametrize("agent_name", ["codex", "claude-code", "future-agent"])
-def test_harbor_behavior_logprobs_reject_unsupported_agents(agent_name):
-    with pytest.raises(ValueError, match="cannot supply exact sampled completion"):
-        validate_trajectory_runner_capabilities(_harbor_config(agent_name), TrajectoryRunnerMode.HARBOR)
+def _config(agent_name, overrides, distillation, local_distillation_config):
+    cfg = _skyrl_config() if agent_name is None else _harbor_config(agent_name)
+    for key, value in overrides.items():
+        OmegaConf.update(cfg, key, value, force_add=True)
+    return local_distillation_config(cfg) if distillation else cfg
 
 
-@pytest.mark.parametrize("agent_name", ["terminus-2", "terminus_2", "terminus-kira", "terminus_kira"])
-def test_harbor_behavior_logprobs_accept_terminus_with_rollout_details(agent_name):
-    validate_trajectory_runner_capabilities(_harbor_config(agent_name), TrajectoryRunnerMode.HARBOR)
+# (mode, harbor agent or None for SkyRL Gym, dotted config overrides, distillation)
+ACCEPTED = [
+    pytest.param(HARBOR, "terminus-2", {}, False, id="harbor-terminus-2"),
+    pytest.param(HARBOR, "terminus_kira", {}, False, id="harbor-terminus-kira-underscore-alias"),
+    pytest.param(HARBOR, "opencode", OPENCODE, False, id="harbor-opencode-tested-version"),
+    pytest.param(HARBOR, "pi", {}, False, id="harbor-pi"),
+    pytest.param(GYM, None, {}, False, id="gym-tis"),
+    pytest.param(GYM, None, {"trainer.step_wise_training": True}, False, id="gym-step-wise"),
+    pytest.param(GYM, None, {**NO_TIS, "trainer.algorithm.policy_loss_type": "behavior_clip"}, False, id="gym-clip"),
+    pytest.param(
+        GYM,
+        None,
+        {**EXACT_CHAT, "trainer.algorithm.tito_full": True, "generator.sampling_params": {"logprobs": 0}},
+        False,
+        id="gym-full-tito-exact-chat",
+    ),
+    pytest.param(GYM, None, NO_TIS, True, id="distill-gym"),
+    pytest.param(HARBOR, "terminus-2", NO_TIS, True, id="distill-harbor-terminus-2"),
+    pytest.param(HARBOR, "opencode", {**NO_TIS, **OPENCODE}, True, id="distill-harbor-opencode"),
+    pytest.param(HARBOR, "pi", NO_TIS, True, id="distill-harbor-pi"),
+    pytest.param(
+        HARBOR,
+        "terminus-2",
+        {**NO_TIS, "trainer.placement.colocate_all": False},
+        True,
+        id="distill-harbor-separate-placement",
+    ),
+    pytest.param(HARBOR, "terminus-2", FULL_TITO, False, id="full-tito-harbor-terminus-2"),
+    pytest.param(HARBOR, "opencode", {**FULL_TITO, **OPENCODE}, False, id="full-tito-harbor-opencode"),
+    pytest.param(HARBOR, "pi", FULL_TITO, False, id="full-tito-harbor-pi"),
+]
 
 
-@pytest.mark.parametrize("agent_name", ["terminus-2", "terminus-kira", "pi"])
-def test_harbor_behavior_logprobs_require_rollout_details(agent_name):
-    with pytest.raises(ValueError, match="collect_rollout_details=true"):
-        validate_trajectory_runner_capabilities(
-            _harbor_config(agent_name, collect_rollout_details=False), TrajectoryRunnerMode.HARBOR
+@pytest.mark.parametrize(("mode", "agent_name", "overrides", "distillation"), ACCEPTED)
+def test_runner_capabilities_accept(mode, agent_name, overrides, distillation, local_distillation_config):
+    cfg = _config(agent_name, overrides, distillation, local_distillation_config)
+
+    validate_trajectory_runner_capabilities(cfg, mode)
+
+
+# (mode, harbor agent or None, overrides, distillation, operation, match naming the runner or config field)
+REJECTED = [
+    pytest.param(HARBOR, "codex", {}, False, "train", "Harbor codex cannot supply exact", id="harbor-codex"),
+    pytest.param(HARBOR, "future-agent", {}, False, "train", "Harbor future-agent", id="harbor-unknown-agent"),
+    *(
+        pytest.param(
+            HARBOR,
+            agent,
+            {f"{HARBOR_KEY}.collect_rollout_details": False},
+            False,
+            "train",
+            "terminal_bench.harbor.collect_rollout_details",
+            id=f"harbor-{agent}-no-rollout-details",
         )
-
-
-@pytest.mark.parametrize("version", [None, "latest", "1.18.1"])
-def test_harbor_behavior_logprobs_require_tested_opencode_version(version):
-    with pytest.raises(ValueError, match="terminal_bench.harbor.version=1.18.2"):
-        validate_trajectory_runner_capabilities(
-            _harbor_config("opencode", version=version), TrajectoryRunnerMode.HARBOR
+        for agent in ("terminus-2", "pi")
+    ),
+    *(
+        pytest.param(
+            HARBOR,
+            "opencode",
+            {f"{HARBOR_KEY}.version": version},
+            False,
+            "train",
+            "terminal_bench.harbor.version",
+            id=f"harbor-opencode-version-{version}",
         )
-
-
-def test_harbor_behavior_logprobs_accept_tested_opencode_bridge():
-    validate_trajectory_runner_capabilities(_harbor_config("opencode", version="1.18.2"), TrajectoryRunnerMode.HARBOR)
-
-
-def test_harbor_behavior_logprobs_require_vllm_for_opencode():
-    cfg = _harbor_config("opencode", version="1.18.2")
-    cfg.generator.backend = "sglang"
-
-    with pytest.raises(ValueError, match="generator.backend=vllm"):
-        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
-
-
-def test_harbor_behavior_logprobs_accept_pi_literal_bridge():
-    validate_trajectory_runner_capabilities(_harbor_config("pi"), TrajectoryRunnerMode.HARBOR)
-
-
-@pytest.mark.parametrize("thinking_format", [None, "unsupported"])
-def test_harbor_behavior_logprobs_require_supported_pi_thinking_format(thinking_format):
-    with pytest.raises(ValueError, match="terminal_bench.harbor.thinking_format"):
-        validate_trajectory_runner_capabilities(
-            _harbor_config("pi", thinking_format=thinking_format), TrajectoryRunnerMode.HARBOR
+        for version in (None, "latest", "1.18.1")
+    ),
+    pytest.param(
+        HARBOR,
+        "opencode",
+        {**OPENCODE, "generator.backend": "sglang"},
+        False,
+        "train",
+        "generator.backend",
+        id="harbor-opencode-sglang",
+    ),
+    *(
+        pytest.param(
+            HARBOR,
+            "pi",
+            {f"{HARBOR_KEY}.thinking_format": fmt},
+            False,
+            "train",
+            "terminal_bench.harbor.thinking_format",
+            id=f"harbor-pi-thinking-format-{fmt}",
         )
+        for fmt in (None, "unsupported")
+    ),
+    pytest.param(MINI_SWE, None, {}, False, "train", "mini-swe", id="mini-swe-tis"),
+    pytest.param(
+        TrajectoryRunnerMode.TASKCOMPENDIUM,
+        None,
+        {},
+        False,
+        "train",
+        "TaskCompendium native/Harbor router",
+        id="taskcompendium-tis",
+    ),
+    pytest.param(
+        TrajectoryRunnerMode.TASKCOMPENDIUM,
+        None,
+        {**NO_TIS, "trainer.algorithm.policy_loss_type": "behavior_clip"},
+        False,
+        "train",
+        "TaskCompendium native/Harbor router",
+        id="taskcompendium-clip",
+    ),
+    pytest.param(
+        MINI_SWE,
+        None,
+        {**NO_TIS, "trainer.algorithm.policy_loss_type": "behavior_clip"},
+        False,
+        "train",
+        "mini-swe",
+        id="mini-swe-clip",
+    ),
+    pytest.param(
+        GYM,
+        None,
+        {"generator.chat_template.name_or_path": "qwen3"},
+        False,
+        "train",
+        "SkyRL Gym custom-template multi-turn",
+        id="gym-custom-template-retokenized",
+    ),
+    pytest.param(
+        GYM,
+        None,
+        {**EXACT_CHAT, **NO_TIS, "generator.sampling_params": {"logprobs": None}},
+        False,
+        "train",
+        "generator.sampling_params.logprobs",
+        id="gym-exact-chat-without-logprobs",
+    ),
+    pytest.param(MINI_SWE, None, NO_TIS, True, "train", "mini-swe", id="distill-mini-swe"),
+    pytest.param(HARBOR, "codex", NO_TIS, True, "train", "tokenized learner actions", id="distill-harbor-codex"),
+    pytest.param(HARBOR, "terminus-2", NO_TIS, True, "generate", "training-only", id="distill-generate"),
+    pytest.param(GYM, None, FULL_TITO, False, "train", "SkyRL Gym does not support", id="full-tito-gym"),
+    pytest.param(
+        HARBOR, "terminus-kira", FULL_TITO, False, "train", "Harbor terminus-kira", id="full-tito-harbor-kira"
+    ),
+]
 
 
-@pytest.mark.parametrize(
-    ("mode", "expected_runner"),
-    [
-        (TrajectoryRunnerMode.MINI_SWE, "mini-swe"),
-        (TrajectoryRunnerMode.TASKCOMPENDIUM, "TaskCompendium native/Harbor router"),
-    ],
-)
-@pytest.mark.parametrize(
-    ("use_tis", "policy_loss_type"),
-    [(True, "regular"), (False, "behavior_clip")],
-)
-def test_behavior_logprobs_reject_runners_without_exact_evidence(mode, expected_runner, use_tis, policy_loss_type):
-    cfg = _skyrl_config(use_tis=use_tis, policy_loss_type=policy_loss_type)
+@pytest.mark.parametrize(("mode", "agent_name", "overrides", "distillation", "operation", "match"), REJECTED)
+def test_runner_capabilities_reject(
+    mode, agent_name, overrides, distillation, operation, match, local_distillation_config
+):
+    cfg = _config(agent_name, overrides, distillation, local_distillation_config)
 
-    with pytest.raises(ValueError, match=expected_runner):
-        validate_trajectory_runner_capabilities(cfg, mode)
-
-
-@pytest.mark.parametrize(
-    ("step_wise_training", "use_tis", "policy_loss_type"),
-    [(False, True, "regular"), (True, True, "regular"), (False, False, "behavior_clip")],
-)
-def test_behavior_logprobs_accept_exact_skyrl_gym_paths(step_wise_training, use_tis, policy_loss_type):
-    cfg = _skyrl_config(use_tis=use_tis, policy_loss_type=policy_loss_type)
-    cfg.trainer.step_wise_training = step_wise_training
-
-    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
-
-
-def test_behavior_logprobs_reject_multiturn_custom_template_retokenization():
-    cfg = _skyrl_config()
-    cfg.generator.chat_template.name_or_path = "qwen3"
-
-    with pytest.raises(ValueError, match="resolved evidence fidelity is retokenized"):
-        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
-
-
-def test_full_tito_accepts_exact_structured_chat_transport():
-    cfg = _skyrl_config(use_tis=True)
-    cfg.trainer.algorithm.tito_full = True
-    cfg.generator.chat_template.name_or_path = "qwen2_5_with_generation_tag_simplified"
-    cfg.generator.sampling_params = {"logprobs": 0}
-    cfg.generator.require_exact_chat_transport = True
-
-    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
-
-
-def test_exact_structured_chat_transport_requires_logprobs():
-    cfg = _skyrl_config(use_tis=False)
-    cfg.generator.chat_template.name_or_path = "qwen2_5_with_generation_tag_simplified"
-    cfg.generator.sampling_params = {"logprobs": None}
-    cfg.generator.require_exact_chat_transport = True
-
-    with pytest.raises(ValueError, match="generator.sampling_params.logprobs=an integer"):
-        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
-
-
-def test_distillation_accepts_skyrl_gym_learner_tokens(local_distillation_config):
-    cfg = local_distillation_config(_skyrl_config(use_tis=False))
-
-    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
-
-
-@pytest.mark.parametrize(("agent_name", "version"), [("terminus-2", None), ("opencode", "1.18.2"), ("pi", None)])
-def test_distillation_accepts_exact_synchronous_harbor_paths(agent_name, version, local_distillation_config):
-    cfg = local_distillation_config(_harbor_config(agent_name, version=version))
-    cfg.trainer.algorithm.use_tis = False
-
-    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
-
-
-def test_distillation_rejects_harbor_without_exact_token_evidence(local_distillation_config):
-    cfg = local_distillation_config(_harbor_config("codex"))
-    cfg.trainer.algorithm.use_tis = False
-
-    with pytest.raises(ValueError, match="Harbor codex cannot supply tokenized learner actions"):
-        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
-
-
-def test_distillation_accepts_separately_placed_harbor_with_exact_token_evidence(local_distillation_config):
-    cfg = local_distillation_config(_harbor_config("terminus-2"))
-    cfg.trainer.algorithm.use_tis = False
-    cfg.trainer.placement.colocate_all = False
-
-    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
-
-
-def test_distillation_rejects_mini_swe_before_allocation(local_distillation_config):
-    cfg = local_distillation_config(_skyrl_config(use_tis=False))
-
-    with pytest.raises(ValueError, match="mini-swe"):
-        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.MINI_SWE)
-
-
-def test_distillation_rejects_generate_only_entrypoint_before_allocation(local_distillation_config):
-    cfg = local_distillation_config(_harbor_config("terminus-2"))
-    cfg.trainer.algorithm.use_tis = False
-
-    with pytest.raises(ValueError, match="training-only"):
-        validate_trajectory_runner_capabilities(
-            cfg,
-            TrajectoryRunnerMode.HARBOR,
-            EntrypointOperation.GENERATE,
-        )
-
-
-@pytest.mark.parametrize(
-    ("mode", "agent_name", "version", "expected_runner"),
-    [
-        (TrajectoryRunnerMode.SKYRL_GYM, None, None, "SkyRL Gym"),
-        (TrajectoryRunnerMode.HARBOR, "terminus-kira", None, "Harbor terminus-kira"),
-    ],
-)
-def test_explicit_full_tito_rejects_runners_without_exact_continuation(mode, agent_name, version, expected_runner):
-    cfg = _skyrl_config() if agent_name is None else _harbor_config(agent_name, version=version)
-    cfg.trainer.algorithm.use_tis = False
-    cfg.trainer.algorithm.tito_full = True
-
-    with pytest.raises(ValueError, match=expected_runner):
-        validate_trajectory_runner_capabilities(cfg, mode)
-
-
-@pytest.mark.parametrize(("agent_name", "version"), [("terminus-2", None), ("opencode", "1.18.2"), ("pi", None)])
-def test_explicit_full_tito_accepts_exact_harbor_continuation(agent_name, version):
-    cfg = _harbor_config(agent_name, version=version)
-    cfg.trainer.algorithm.use_tis = False
-    cfg.trainer.algorithm.tito_full = True
-
-    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
+    with pytest.raises(ValueError, match=match):
+        validate_trajectory_runner_capabilities(cfg, mode, EntrypointOperation(operation))

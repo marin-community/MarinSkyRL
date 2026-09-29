@@ -10,24 +10,22 @@ from typing import Protocol, TypeVar
 
 import ray
 from loguru import logger
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from ray.actor import ActorHandle
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from transformers import PreTrainedTokenizerBase
 
+from skyrl_train.rollout_observability import RolloutTimings, current_rollout_observation, measure_rollout
 from skyrl_train.rollouts.buffer import RolloutTask, RolloutWriter
 from skyrl_train.tokenizer import tokenizer_from_config
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
 from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink
 from skyrl_train.trajectory_runners.types import TrainingPhase, TrajectoryBatch, TrajectoryRequestBatch
 from skyrl_train.utils.fd_monitor import start_fd_monitor
+from skyrl_train.utils.utils import configure_ray_worker_logging
 from skyrl_train.worker_setup import configure_worker_process
 
 _Result = TypeVar("_Result")
-
-# Each worker imports its runner stack and loads its tokenizer from a shared filesystem; spacing the starts keeps
-# those page-ins from overlapping each other and the engines' weight loads.
-WORKER_START_INTERVAL_SECONDS = 2.0
 
 
 class RolloutWorkers(Protocol):
@@ -36,6 +34,11 @@ class RolloutWorkers(Protocol):
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
         """Generate and write one group, returning its response token count."""
         ...
+
+
+def detached_config(config: DictConfig) -> DictConfig:
+    """Return a resolved copy without OmegaConf parent references, to send to a rollout worker."""
+    return OmegaConf.create(OmegaConf.to_container(config, resolve=True))
 
 
 @dataclass(frozen=True)
@@ -56,12 +59,18 @@ class RunnerSpec(Protocol):
 
 @dataclass(frozen=True)
 class RolloutWorkerResources:
-    """Size of a rollout worker pool, and how long a worker may go without completing a request."""
+    """Size of a rollout worker pool, how its workers start, and how long a worker may go without completing a request.
+
+    Workers start one at a time, each ``start_interval_seconds`` after the previous one is up, because each imports
+    its runner stack and loads its tokenizer from a shared filesystem, and spacing the starts keeps those page-ins
+    from overlapping each other and the engines' weight loads. An interval of zero starts every worker at once.
+    """
 
     num_workers: int
     cpus_per_worker: int
     executor_threads: int
     progress_timeout_seconds: float
+    start_interval_seconds: float
 
     @classmethod
     def from_config(cls, config: DictConfig) -> RolloutWorkerResources:
@@ -71,6 +80,7 @@ class RolloutWorkerResources:
             cpus_per_worker=int(workers.cpus_per_worker),
             executor_threads=int(workers.executor_threads),
             progress_timeout_seconds=float(workers.progress_timeout_seconds),
+            start_interval_seconds=float(workers.start_interval_seconds),
         )
 
 
@@ -84,6 +94,7 @@ class RolloutWorker:
 
     def __init__(self, spec: RunnerSpec, shard: WorkerShard, sink: RetentionSink | None, executor_threads: int):
         configure_worker_process()
+        configure_ray_worker_logging()
         start_fd_monitor()
         self._executor_threads = executor_threads
         self._runner = spec.build(tokenizer_from_config(spec.config), shard)
@@ -101,11 +112,19 @@ class RolloutWorker:
     async def shutdown(self) -> None:
         await self._runner.shutdown()
 
-    async def run(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
-        return await self._runner.run(input_batch, disable_tqdm=True)
+    async def run(
+        self, input_batch: TrajectoryRequestBatch, observe: bool
+    ) -> tuple[TrajectoryBatch, RolloutTimings | None]:
+        with measure_rollout(enabled=observe) as observation:
+            output = await self._runner.run(input_batch, disable_tqdm=True)
+        return output, None if observation is None else observation.timings()
 
-    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
-        return await self._runner.run_task(task, writer)
+    async def run_task(
+        self, task: RolloutTask, writer: RolloutWriter, observe: bool
+    ) -> tuple[int, RolloutTimings | None]:
+        with measure_rollout(enabled=observe) as observation:
+            response_tokens = await self._runner.run_task(task, writer)
+        return response_tokens, None if observation is None else observation.timings()
 
     async def start_eval_session(
         self,
@@ -130,7 +149,7 @@ class RolloutWorkerPool:
     ``RolloutWorkerStalledError`` when its worker completes nothing for the progress timeout.
 
     Workers run on the driver's node, beside the rollout buffer actor they commit to and the Harbor proxy whose
-    node-local log they read. They start one at a time.
+    node-local log they read.
     """
 
     def __init__(self, spec: RunnerSpec, resources: RolloutWorkerResources):
@@ -155,16 +174,28 @@ class RolloutWorkerPool:
         self._sink = sink
 
     async def startup(self) -> None:
-        node = NodeAffinitySchedulingStrategy(node_id=ray.get_runtime_context().get_node_id(), soft=False)
-        worker = RolloutWorker.options(num_cpus=self._resources.cpus_per_worker, scheduling_strategy=node)
         count = self._resources.num_workers
+        interval = self._resources.start_interval_seconds
+        if interval == 0:
+            actors = [self._launch_worker(index) for index in range(count)]
+            await asyncio.gather(*(actor.startup.remote() for actor in actors))
+            self._actors = actors
+            logger.info("Rollout workers started: count={}", count)
+            return
         for index in range(count):
             if index:
-                await asyncio.sleep(WORKER_START_INTERVAL_SECONDS)
-            actor = worker.remote(self._spec, WorkerShard(index, count), self._sink, self._resources.executor_threads)
+                await asyncio.sleep(interval)
+            actor = self._launch_worker(index)
             await actor.startup.remote()
             self._actors.append(actor)
             logger.info("Rollout worker {}/{} started", index + 1, count)
+
+    def _launch_worker(self, index: int) -> ActorHandle:
+        node = NodeAffinitySchedulingStrategy(node_id=ray.get_runtime_context().get_node_id(), soft=False)
+        worker = RolloutWorker.options(num_cpus=self._resources.cpus_per_worker, scheduling_strategy=node)
+        return worker.remote(
+            self._spec, WorkerShard(index, self._resources.num_workers), self._sink, self._resources.executor_threads
+        )
 
     async def shutdown(self) -> None:
         actors, self._actors = self._actors, []
@@ -178,10 +209,14 @@ class RolloutWorkerPool:
 
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         del disable_tqdm
-        return await self._dispatch(_training_phase(input_batch), lambda actor: actor.run.remote(input_batch))
+        return await self._observed(
+            _training_phase(input_batch), lambda actor, observe: actor.run.remote(input_batch, observe)
+        )
 
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
-        return await self._dispatch(_training_phase(task.request), lambda actor: actor.run_task.remote(task, writer))
+        return await self._observed(
+            _training_phase(task.request), lambda actor, observe: actor.run_task.remote(task, writer, observe)
+        )
 
     async def start_eval_session(
         self,
@@ -220,6 +255,21 @@ class RolloutWorkerPool:
         reserved = {0} if self._eval_session_active else set()
         eligible = [index for index in range(len(self._actors)) if index not in reserved]
         return min(eligible, key=self._pending.__getitem__, default=None)
+
+    async def _observed(
+        self,
+        phase: TrainingPhase,
+        submit: Callable[[ActorHandle, bool], Awaitable[tuple[_Result, RolloutTimings | None]]],
+    ) -> _Result:
+        """Run one request on a worker, adding the waits and phases it measured to the caller's rollout observation.
+
+        Rollout waits happen inside the worker, but the caller's observation publishes them with the call.
+        """
+        observation = current_rollout_observation()
+        result, timings = await self._dispatch(phase, lambda actor: submit(actor, observation is not None))
+        if observation is not None and timings is not None:
+            observation.absorb(timings)
+        return result
 
     async def _dispatch(self, phase: TrainingPhase, submit: Callable[[ActorHandle], Awaitable[_Result]]) -> _Result:
         async with self._routing:

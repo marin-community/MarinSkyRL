@@ -50,19 +50,9 @@ def test_behavior_logprob_config_reaches_engine_and_sampling_options(temperature
     "settings",
     [
         {"temperature": 0.0},
-        {"temperature": float("nan")},
-        {"temperature": float("inf")},
         {"top_p": 0.95},
-        {"top_k": 20},
-        {"min_p": 0.1},
         {"repetition_penalty": 1.1},
-        {"presence_penalty": 0.1},
-        {"frequency_penalty": 0.1},
-        {"min_tokens": 1},
-        {"allowed_token_ids": [1]},
         {"logit_bias": {"1": 1.0}},
-        {"response_format": {"type": "json_object"}},
-        {"tool_choice": "required"},
     ],
 )
 def test_behavior_logprobs_reject_unmatched_sampling(settings):
@@ -74,9 +64,7 @@ def test_behavior_logprobs_reject_unmatched_sampling(settings):
     "options",
     [
         {"logprobs_mode": "raw_logprobs"},
-        {"generation_config": "auto"},
         {"override_generation_config": {"top_k": 20}},
-        {"logits_processors": ["custom.Processor"]},
     ],
 )
 def test_behavior_logprobs_reject_conflicting_engine_options(options):

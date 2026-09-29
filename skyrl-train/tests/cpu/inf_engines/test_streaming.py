@@ -197,7 +197,8 @@ def app_with_error_backend():
 
 
 class TestHTTPEndpointStreaming:
-    def test_streaming_returns_event_stream(self, app_with_mock_backend):
+    def test_streaming_returns_sse_chunks_with_token_ids_and_one_done(self, app_with_mock_backend):
+        """SSE chunks carrying token_ids (post-engine remap) reach the client, terminated by one [DONE]."""
         client, _ = app_with_mock_backend
         resp = client.post(
             "/v1/chat/completions",
@@ -209,32 +210,7 @@ class TestHTTPEndpointStreaming:
         )
         assert resp.status_code == 200
         assert "text/event-stream" in resp.headers.get("content-type", "")
-
-    def test_streaming_body_contains_sse_chunks(self, app_with_mock_backend):
-        client, _ = app_with_mock_backend
-        resp = client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "test-model",
-                "messages": [{"role": "user", "content": "hi"}],
-                "stream": True,
-            },
-        )
-        body = resp.text
-        assert "data: " in body
-        assert "data: [DONE]" in body
-
-    def test_streaming_forwards_token_ids(self, app_with_mock_backend):
-        """SSE chunks carrying token_ids (post-engine remap) reach the client."""
-        client, _ = app_with_mock_backend
-        resp = client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "test-model",
-                "messages": [{"role": "user", "content": "hi"}],
-                "stream": True,
-            },
-        )
+        assert resp.text.count("data: [DONE]") == 1
         found_psf = False
         for line in resp.text.split("\n"):
             if not line.startswith("data: ") or "[DONE]" in line:
@@ -416,17 +392,3 @@ class TestSafeSSEStream:
         )
         assert resp.status_code == 200
         assert "data: [DONE]" in resp.text
-
-    def test_normal_stream_not_double_done(self, app_with_mock_backend):
-        """Normal stream already containing [DONE] is not duplicated."""
-        client, _ = app_with_mock_backend
-        resp = client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "test-model",
-                "messages": [{"role": "user", "content": "hi"}],
-                "stream": True,
-            },
-        )
-        body = resp.text
-        assert body.count("[DONE]") == 1

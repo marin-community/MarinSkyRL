@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import base64
-from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
-from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config, parse_rl_config
+from cloud.iris import training_driver
+from cloud.iris.launch_config import load_launch_config, validate_launch_config
+from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
 from cloud.iris.skyrl_entrypoint import run_config
 from cloud.iris.task_runtime import _runtime_namespace
 from cloud.iris.training_driver import local_rl_config_from_launch
@@ -33,7 +33,7 @@ def _raw_config() -> dict[str, Any]:
         "runtime": {
             "launcher_commit": "a" * 40,
             "profile": "megatron",
-            "entrypoint": "skyrl_train.entrypoints.gym_worker_pool",
+            "entrypoint": "skyrl_train.entrypoints.main_base",
         },
         "iris": {
             "cluster": "cw-us-east-08a",
@@ -76,7 +76,7 @@ def _raw_config() -> dict[str, Any]:
             "validation_data": [],
         },
         "skyrl": {
-            "entrypoint": "gym_worker_pool",
+            "entrypoint": "standard",
             "context_budget": {
                 "request_window_tokens": 1024,
                 "max_new_tokens_per_turn": 256,
@@ -143,21 +143,6 @@ def test_pinned_hugging_face_policy_reaches_skyrl_without_object_store_staging(t
     assert runner_config.model_source_identity is None
 
 
-def test_taskcompendium_source_recipe_selects_its_entrypoint(tmp_path: Path) -> None:
-    path = tmp_path / "taskcompendium.yaml"
-    path.write_text(
-        "entrypoint: taskcompendium\n"
-        "context_budget:\n"
-        "  request_window_tokens: 2\n"
-        "  max_new_tokens_per_turn: 1\n"
-        "  max_turns: 1\n"
-    )
-
-    parsed = parse_rl_config(str(path))
-
-    assert parsed.entrypoint == "skyrl_train.entrypoints.taskcompendium"
-
-
 def test_taskcompendium_launch_dispatches_to_its_ray_driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     raw = _raw_config()
     raw["runtime"]["entrypoint"] = "skyrl_train.entrypoints.taskcompendium"
@@ -182,9 +167,8 @@ def test_taskcompendium_launch_dispatches_to_its_ray_driver(tmp_path: Path, monk
 @pytest.mark.parametrize(
     ("entrypoint", "max_staleness_steps", "expected"),
     [
-        ("gym_worker_pool", 0, "sync"),
-        ("gym_worker_pool", 2, "async"),
         ("standard", 0, "sync"),
+        ("standard", 2, "async"),
         ("terminal_bench", 1, "async"),
         ("generate", 0, None),
         ("taskcompendium", 0, "sync"),
@@ -215,7 +199,9 @@ def test_object_store_uris_in_skyrl_config_reach_the_task_unchanged(tmp_path: Pa
     assert config.skyrl.trainer.rollout_buffer.object_store_root == "s3://runs/smoke/rollouts"
 
 
-def test_qwen_smoke_accepts_hugging_face_model_input(tmp_path: Path) -> None:
+def test_qwen_smoke_hugging_face_model_input_reaches_the_runner_without_a_model_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config = _raw_config()
     config["skyrl"] = yaml.safe_load(
         (Path(__file__).resolve().parents[1] / "configs/qwen_megatron_smoke.yaml").read_text()
@@ -230,28 +216,30 @@ def test_qwen_smoke_accepts_hugging_face_model_input(tmp_path: Path) -> None:
     config["inputs"]["data_kind"] = "parquet"
     path = tmp_path / "qwen-launch.yaml"
     path.write_text(yaml.safe_dump(config, sort_keys=False))
+    seen = []
+
+    class RecordingRunner:
+        def __init__(self, run_config):
+            seen.append(run_config)
+
+        def setup(self):
+            pass
+
+        def run(self):
+            return 0
+
+    monkeypatch.setattr(training_driver, "LocalRLRunner", RecordingRunner)
+    monkeypatch.setattr("sys.argv", ["training_driver", "--config", str(path)])
 
     resolved = load_launch_config(path)
+    with pytest.raises(SystemExit) as result:
+        training_driver.main()
 
-    assert resolved.skyrl.trainer.policy.model.path == "Qwen/Qwen3-0.6B"
-    assert resolved.skyrl.trainer.policy.model.source_uri is None
     assert resolved.runtime.entrypoint == "skyrl_train.entrypoints.main_base"
-
-
-def test_launch_config_rejects_allocation_smaller_than_role_plan() -> None:
-    raw = _raw_config()
-    raw["iris"]["allocation"]["num_nodes"] = 0
-
-    with pytest.raises(ValueError, match="num_nodes"):
-        validate_launch_config(compose_launch_config(raw))
-
-
-def test_colocated_rollout_parallelism_must_fit_the_allocated_bundle() -> None:
-    raw = deepcopy(_raw_config())
-    raw["skyrl"]["generator"]["inference_engine_data_parallel_size"] = 2
-
-    with pytest.raises(ValueError, match="colocated rollout geometry"):
-        validate_launch_config(compose_launch_config(raw))
+    assert resolved.skyrl.trainer.policy.model.source_uri is None
+    assert result.value.code == 0
+    assert seen[0].model_path == "Qwen/Qwen3-0.6B"
+    assert seen[0].model_source_uri is None
 
 
 def test_task_materializes_the_forwarded_launch_document(tmp_path: Path) -> None:

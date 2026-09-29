@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping, Protocol, TypeAlias
 
+import numpy as np
+
 
 Message: TypeAlias = Mapping[str, Any]
 UNKNOWN_STOP_REASON = "unknown"
@@ -36,7 +38,7 @@ class RolloutEvidence:
     behavior_logprobs: tuple[float, ...] | None = None
     student_topk_indices: tuple[tuple[int, ...], ...] | None = None
     behavior_topk_logprobs: tuple[tuple[float, ...], ...] | None = None
-    routed_experts: tuple[tuple[tuple[int, ...], ...], ...] | None = None
+    routed_experts: np.ndarray | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -67,6 +69,8 @@ class VerificationStatus(StrEnum):
     VERIFIED = "verified"
     UNAVAILABLE = "unavailable"
     ERROR = "error"
+    # The environment was configured not to verify; the trajectory still trains.
+    SKIPPED = "skipped"
 
 
 @dataclass(frozen=True)
@@ -111,6 +115,14 @@ class VerificationResult:
     def unavailable(cls, reason: str, *, diagnostics: Mapping[str, Any] | None = None) -> "VerificationResult":
         return cls(
             status=VerificationStatus.UNAVAILABLE,
+            reason=reason,
+            diagnostics={} if diagnostics is None else diagnostics,
+        )
+
+    @classmethod
+    def skipped(cls, reason: str, *, diagnostics: Mapping[str, Any] | None = None) -> "VerificationResult":
+        return cls(
+            status=VerificationStatus.SKIPPED,
             reason=reason,
             diagnostics={} if diagnostics is None else diagnostics,
         )

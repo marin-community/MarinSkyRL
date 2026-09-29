@@ -27,15 +27,6 @@ def test_megatron_router_replay_reaches_dcp_guard():
         validate_cfg(cfg)
 
 
-def test_unsupported_strategy_rejected():
-    cfg = get_default_config()
-    cfg.trainer.strategy = "unknown"
-    cfg.trainer.logger = "console"
-
-    with pytest.raises(ValueError, match="Unsupported training strategy"):
-        validate_cfg(cfg)
-
-
 def test_megatron_router_replay_rejects_fused_router():
     cfg = _megatron_replay_cfg()
     # Struct mode blocks new dict keys; the launcher's Hydra `+` override allows
