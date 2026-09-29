@@ -3,6 +3,7 @@ uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/te
 """
 
 import pytest
+from loguru import logger
 from concurrent.futures import Executor, Future
 from typing import List, Dict, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -651,6 +652,23 @@ async def test_genrm_cohort_ranking_is_skipped_when_grading_is_skipped(generator
     runner.genrm_judge.generate_response.assert_not_called()
     assert output.verification is verification
     assert output.disposition.loss_eligible
+
+
+def test_skipped_grading_warns_once_when_a_batch_has_no_ultra_rows(generator_cfg, mock_tokenizer):
+    skyrl_gym_cfg = DictConfig({"max_env_workers": 0, "nemotron_ultra": {"grading": "skip"}})
+    runner = SkyRLGymTrajectoryRunner(generator_cfg, skyrl_gym_cfg, MagicMock(), mock_tokenizer)
+    messages = []
+    sink_id = logger.add(messages.append, level="WARNING", format="{message}")
+    try:
+        runner._warn_if_skip_has_no_ultra_rows({"env_classes": ["nemotron_ultra", "gsm8k"]})
+        assert messages == []
+        runner._warn_if_skip_has_no_ultra_rows({"env_classes": ["gsm8k", "gsm8k"]})
+        runner._warn_if_skip_has_no_ultra_rows({"env_classes": ["gsm8k"]})
+    finally:
+        logger.remove(sink_id)
+
+    assert len(messages) == 1
+    assert "has no nemotron_ultra rows" in messages[0]
 
 
 @pytest.mark.asyncio
