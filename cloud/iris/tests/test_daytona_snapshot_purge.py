@@ -74,7 +74,7 @@ def test_daytona_preflight_follows_harbor_usage(entrypoint, terminal_bench_data,
             "runtime": {"entrypoint": entrypoint},
             "skyrl": {
                 "data": {"terminal_bench_data": terminal_bench_data},
-                "terminal_bench": {"harbor": harbor},
+                "terminal_bench_config": {"harbor": harbor},
             },
         }
     )

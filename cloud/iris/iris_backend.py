@@ -754,7 +754,7 @@ def _rl_config_uses_daytona(config: DictConfig) -> bool:
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH],
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH_GENERATE],
     }:
-        harbor = config.skyrl.get("terminal_bench", {}).get("harbor", {})
+        harbor = config.skyrl.get("terminal_bench_config", {}).get("harbor", {})
         return harbor_environment_type(harbor) == DAYTONA_ENVIRONMENT_TYPE
     return bool(config.skyrl.get("data", {}).get("terminal_bench_data"))
 
