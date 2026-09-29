@@ -798,6 +798,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 response_end_idx,
             ) = last_completed_state
 
+        if not done and terminal_error is None and stop_reason == "length":
+            terminal_step = await self._run_in_executor_if_available(env.finish_at_input_limit)
+            if terminal_step is not None:
+                env_step_output = terminal_step
+                verification_results.append(verification_from_env_step(terminal_step))
+                per_step_rewards.append((terminal_step["reward"], response_end_idx))
+
         # Get environment-specific metrics after the episode is done
         env_metrics = environment_metrics_from_step(env_step_output, env.get_metrics())
         prompt_ids = input_ids[:initial_prompt_length]
