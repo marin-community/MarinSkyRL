@@ -698,6 +698,18 @@ def get_outcome_rewards(trajectory_batch: TrajectoryBatch) -> List[float]:
     return [NormalizedReward.from_output(reward).outcome for reward in rewards]
 
 
+def graded_row_indices(trajectory_batch: TrajectoryBatch) -> List[int]:
+    """Return rows whose environment ran grading; skipped rows carry no reward to report."""
+    results = trajectory_batch.get("verification_results")
+    if results is None:
+        return list(range(len(trajectory_batch["rewards"])))
+    return [
+        index
+        for index, result in enumerate(results)
+        if result is None or result.status is not VerificationStatus.SKIPPED
+    ]
+
+
 def get_trajectory_passes(trajectory_batch: TrajectoryBatch) -> List[bool]:
     """Return task success, honoring explicit verifier verdicts when available."""
     outcomes = get_outcome_rewards(trajectory_batch)
