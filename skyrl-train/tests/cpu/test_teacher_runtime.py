@@ -69,7 +69,10 @@ def _config():
                 "teacher_scoring": {"max_queued_per_teacher": 1, "workers_per_teacher": 1},
             },
             "generator": {
+                "backend": "vllm",
+                "run_engines_locally": True,
                 "model_dtype": "bfloat16",
+                "weight_sync_pause": {"mode": "keep", "clear_cache": True},
                 "vllm_v1_disable_multiproc": True,
                 "enable_prefix_caching": False,
                 "enforce_eager": False,

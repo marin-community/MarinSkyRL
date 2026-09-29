@@ -22,6 +22,7 @@ from ray.util.placement_group import (
 from skyrl_train.batch_invariant import BATCH_INVARIANT_NCCL_ENV
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
+from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
 from skyrl_train.config.objective_spec import resolve_objective_config, validate_objective
 from skyrl_train.callbacks.types import (
@@ -548,6 +549,7 @@ def validate_cfg(cfg: DictConfig):
     spec = PolicyLossRegistry.spec(cfg.trainer.algorithm.policy_loss_type)
     cfg.trainer.algorithm.resolved_loss_spec = {**asdict(spec), "anchor": spec.anchor.value}
     validate_objective(cfg)
+    resolve_weight_sync_pause_policy(cfg.generator)
     validate_generator_cfg(cfg)
     validate_batch_invariant_config(cfg)
     validate_hf_export_config(cfg)

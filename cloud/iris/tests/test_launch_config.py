@@ -38,7 +38,7 @@ def _raw_config() -> dict[str, Any]:
         "runtime": {
             "launcher_commit": "a" * 40,
             "profile": "megatron",
-            "entrypoint": "skyrl_train.entrypoints.gym_worker_pool",
+            "entrypoint": "skyrl_train.entrypoints.main_base",
         },
         "iris": {
             "cluster": "cw-us-east-08a",
@@ -81,7 +81,7 @@ def _raw_config() -> dict[str, Any]:
             "validation_data": [],
         },
         "skyrl": {
-            "entrypoint": "gym_worker_pool",
+            "entrypoint": "standard",
             "context_budget": {
                 "request_window_tokens": 1024,
                 "max_new_tokens_per_turn": 256,
@@ -234,9 +234,8 @@ def test_algorithm_recipe_launch_drives_policy_value_and_gradient(tmp_path: Path
 @pytest.mark.parametrize(
     ("entrypoint", "max_staleness_steps", "expected"),
     [
-        ("gym_worker_pool", 0, "sync"),
-        ("gym_worker_pool", 2, "async"),
         ("standard", 0, "sync"),
+        ("standard", 2, "async"),
         ("terminal_bench", 1, "async"),
         ("generate", 0, None),
     ],

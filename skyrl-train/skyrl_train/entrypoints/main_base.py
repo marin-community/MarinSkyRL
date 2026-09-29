@@ -252,32 +252,6 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
     )
 
 
-def build_gym_trajectory_runner(
-    cfg: DictConfig, tokenizer: PreTrainedTokenizerBase, inference_engine_client: InferenceEngineClient
-) -> TrajectoryRunner:
-    """Build the SkyRL-Gym runner, collecting step-wise trajectories when step-wise training is enabled."""
-    from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection  # noqa: PLC0415
-    from skyrl_train.trajectory_runners.skyrl_gym import (  # noqa: PLC0415
-        SkyRLGymTrajectoryRunner,
-        TrajectoryPipeline,
-    )
-    from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector  # noqa: PLC0415
-
-    pipeline = None
-    if cfg.trainer.step_wise_training:
-        pipeline = TrajectoryPipeline(
-            StepWiseRolloutCollector,
-            StepWiseTrajectoryProjection(cfg.generator, tokenizer),
-        )
-    return SkyRLGymTrajectoryRunner(
-        trajectory_runner_cfg=cfg.generator,
-        skyrl_gym_cfg=cfg.environment.skyrl_gym,
-        inference_engine_client=inference_engine_client,
-        tokenizer=tokenizer,
-        pipeline=pipeline,
-    )
-
-
 class BasePPOExp:
     def __init__(self, cfg: DictConfig):
         """
@@ -464,12 +438,17 @@ class BasePPOExp:
         return pg
 
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
-        """Initialize the configured trajectory runner.
+        """Run SkyRL-Gym, and Harbor for Nemotron Ultra's terminal-bench rows, in rollout worker processes.
 
         Returns:
             TrajectoryRunner: The runner.
         """
-        gym_runner = build_gym_trajectory_runner(cfg, tokenizer, inference_engine_client)
+        del tokenizer
+        from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources  # noqa: PLC0415
+        from skyrl_train.trajectory_runners.skyrl_gym_execution import GymRunnerSpec  # noqa: PLC0415
+
+        resources = RolloutWorkerResources.from_config(cfg)
+        gym_runner = RolloutWorkerPool(GymRunnerSpec.from_config(cfg, inference_engine_client.engines), resources)
         terminal_bench_data = list(cfg.data.get("terminal_bench_data", []))
         if not terminal_bench_data:
             return gym_runner
@@ -477,13 +456,12 @@ class BasePPOExp:
         if cfg.trainer.step_wise_training:
             raise ValueError("Nemotron Ultra terminal-bench routing is incompatible with step-wise training")
 
-        from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources  # noqa: PLC0415
         from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec  # noqa: PLC0415
         from skyrl_train.trajectory_runners.nemotron_ultra import NemotronUltraTrajectoryRouter  # noqa: PLC0415
 
         if not cfg.get("terminal_bench_config"):
             raise ValueError("data.terminal_bench_data requires terminal_bench_config")
-        harbor_runner = RolloutWorkerPool(HarborRunnerSpec.from_config(cfg), RolloutWorkerResources.from_config(cfg))
+        harbor_runner = RolloutWorkerPool(HarborRunnerSpec.from_config(cfg), resources)
         return NemotronUltraTrajectoryRouter(
             gym_runner=gym_runner,
             harbor_runner=harbor_runner,
