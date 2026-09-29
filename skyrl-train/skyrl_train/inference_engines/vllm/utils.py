@@ -134,9 +134,15 @@ def ensure_token_ids_in_sse_chunk(sse_chunk: str) -> str:
 
 
 def apply_openai_sampling(
-    body: Dict[str, Any], sampling_params: Dict[str, Any], validate_rollout_logprob_sampling: bool
+    body: Dict[str, Any],
+    sampling_params: Dict[str, Any],
+    validate_rollout_logprob_sampling: bool,
+    *,
+    request_sampling_params: Dict[str, Any] | None = None,
 ) -> None:
-    """Apply generator sampling overrides and validate training probabilities."""
+    """Apply the request's generator sampling config and validate training probabilities."""
+    if request_sampling_params is not None:
+        sampling_params = request_sampling_params
     body.update(
         {
             "temperature": sampling_params.get("temperature", 1.0),
