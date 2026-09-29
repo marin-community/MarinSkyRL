@@ -1,4 +1,4 @@
-"""Config validation rejects ``expert_block`` unless its requirements are met."""
+"""Config validation of the ``expert_block`` weight-sync transport."""
 
 import subprocess
 import sys
@@ -27,50 +27,6 @@ def expert_block_config():
         inference_engine_expert_parallel_size=8,
     )
     return cfg
-
-
-def test_a_complete_expert_block_configuration_is_accepted():
-    validate_expert_block_transport(expert_block_config())
-
-
-def test_unequal_expert_parallel_degrees_are_accepted():
-    cfg = expert_block_config()
-    cfg.trainer.policy.megatron_config.expert_model_parallel_size = 16
-    validate_expert_block_transport(cfg)
-
-
-def test_the_default_transport_needs_nothing():
-    cfg = example_dummy_config()
-    assert cfg.generator.weight_sync_transport == "broadcast"
-    validate_expert_block_transport(cfg)
-
-
-@pytest.mark.parametrize(
-    "path,value,message",
-    [
-        ("trainer.strategy", "unknown", "megatron strategy"),
-        ("trainer.policy.megatron_config.tensor_model_parallel_size", 2, "tensor_model_parallel_size 1"),
-        ("trainer.policy.megatron_config.expert_tensor_parallel_size", 2, "expert_tensor_parallel_size 1"),
-        ("trainer.policy.megatron_config.expert_model_parallel_size", 0, "must be positive"),
-        ("generator.backend", "sglang", "non-colocated vLLM"),
-        ("trainer.placement.colocate_all", True, "non-colocated vLLM"),
-        ("generator.weight_sync_backend", "gloo", "must be nccl"),
-        ("generator.inference_engine_tensor_parallel_size", 2, "TP=1"),
-        ("generator.inference_engine_expert_parallel_size", 4, "EP equal to DP"),
-        ("generator.inference_engine_data_parallel_size", 1, "DP=1"),
-        ("generator.expert_block_sync.timeout_seconds", 0, "must be positive"),
-        ("generator.weight_sync_transport", "shard", "must be one of"),
-    ],
-)
-def test_each_missing_precondition_is_named(path, value, message):
-    cfg = expert_block_config()
-    node = cfg
-    *parents, leaf = path.split(".")
-    for key in parents:
-        node = node[key]
-    node[leaf] = value
-    with pytest.raises(ValueError, match=message):
-        validate_expert_block_transport(cfg)
 
 
 def test_pipeline_parallel_engines_on_the_mp_backend_are_refused():

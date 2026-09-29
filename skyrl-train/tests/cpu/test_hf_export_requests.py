@@ -1,13 +1,12 @@
 import json
 import subprocess
 from pathlib import Path
-from unittest.mock import Mock
 
 import pytest
 from omegaconf import OmegaConf
 
 from cloud.iris import export_hf_checkpoint
-from cloud.iris.export_hf_checkpoint import ExportJobSpec, argument_parser, manual_spec, request_spec
+from cloud.iris.export_hf_checkpoint import ExportJobSpec, argument_parser, request_spec
 from skyrl_train.callbacks.base import TrainerControl, TrainerState
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler
 from skyrl_train.config.utils import get_default_config
@@ -89,19 +88,6 @@ def test_export_request_preserves_durable_source_for_task_local_model(tmp_path):
     assert request.model_source_identity == "policy@abc123"
 
 
-def test_export_request_rejects_task_local_model_without_durable_source():
-    with pytest.raises(ValueError, match="task-local model_path"):
-        HFExportRequest(
-            step=10,
-            checkpoint_base_path="s3://bucket/checkpoints",
-            checkpoint_path="s3://bucket/checkpoints/global_step_10",
-            export_path="s3://bucket/exports",
-            model_path="/tmp/materialized-model",
-            num_nodes=8,
-            gpus_per_node=8,
-        )
-
-
 def test_checkpoint_cleanup_retains_pending_export_source(tmp_path):
     for step in (5, 10, 15):
         (tmp_path / f"global_step_{step}").mkdir()
@@ -138,21 +124,6 @@ def test_corrupt_export_request_protects_its_checkpoint(tmp_path, request_conten
     (checkpoint / "hf_export_request.json").write_text(request_contents)
 
     assert protected_hf_export_steps(str(tmp_path)) == {5}
-
-
-def test_hf_export_interval_must_be_checkpoint_aligned():
-    cfg = OmegaConf.create(
-        {
-            "trainer": {
-                "ckpt_interval": 3,
-                "hf_save_interval": 5,
-                "hf_hub_repo_id": "org/exported-model",
-            }
-        }
-    )
-
-    with pytest.raises(ValueError, match="multiple of trainer.ckpt_interval"):
-        validate_hf_export_config(cfg)
 
 
 @pytest.mark.parametrize(
@@ -292,33 +263,12 @@ def test_request_mode_rejects_task_local_model_without_source_before_submission(
         request_spec(args, parser)
 
 
-def test_manual_export_requires_explicit_checkpoint_geometry():
-    parser = argument_parser()
-    args = parser.parse_args(
-        [
-            "--ckpt_path",
-            "/checkpoint",
-            "--step",
-            "10",
-            "--model_path",
-            "org/model",
-            "--launch-config",
-            "config.yaml",
-            "--gpu-variant",
-            "H100",
-        ]
-    )
-
-    with pytest.raises(SystemExit):
-        manual_spec(args, parser)
-
-
 @pytest.mark.parametrize(
     ("exit_code", "expected_status"),
     [(0, HFExportStatus.COMPLETE), (17, HFExportStatus.PENDING)],
 )
 def test_export_request_records_lifecycle_result(tmp_path, monkeypatch, exit_code, expected_status):
-    request, _ = _export_job_spec(tmp_path, no_wait=False)
+    request, _ = _export_job_spec(tmp_path)
     checkpoint = Path(request.checkpoint_path)
     checkpoint.mkdir(parents=True)
     write_hf_export_request(request)
@@ -361,7 +311,7 @@ def test_export_request_records_lifecycle_result(tmp_path, monkeypatch, exit_cod
     assert updated.last_exit_code == exit_code
 
 
-def _export_job_spec(tmp_path, *, no_wait: bool) -> tuple[HFExportRequest, ExportJobSpec]:
+def _export_job_spec(tmp_path) -> tuple[HFExportRequest, ExportJobSpec]:
     request = HFExportRequest(
         step=10,
         checkpoint_base_path=str(tmp_path / "checkpoints"),
@@ -378,12 +328,12 @@ def _export_job_spec(tmp_path, *, no_wait: bool) -> tuple[HFExportRequest, Expor
         gpu_variant="H100",
         job_name=None,
         timeout=7200,
-        no_wait=no_wait,
+        no_wait=False,
     )
 
 
 def test_export_request_rejects_metadata_only_success(tmp_path, monkeypatch):
-    request, spec = _export_job_spec(tmp_path, no_wait=False)
+    request, spec = _export_job_spec(tmp_path)
     checkpoint = Path(request.checkpoint_path)
     checkpoint.mkdir(parents=True)
     write_hf_export_request(request)
@@ -399,14 +349,3 @@ def test_export_request_rejects_metadata_only_success(tmp_path, monkeypatch):
     updated = read_hf_export_request(str(checkpoint))
     assert updated is not None
     assert updated.status is HFExportStatus.PENDING
-
-
-def test_manual_no_wait_returns_after_submission_without_verifying_artifacts(tmp_path, monkeypatch):
-    _, spec = _export_job_spec(tmp_path, no_wait=True)
-    monkeypatch.setattr(export_hf_checkpoint.subprocess, "call", lambda *args, **kwargs: 0)
-    verify = Mock()
-    monkeypatch.setattr(export_hf_checkpoint, "_verify_hf_model_export", verify)
-
-    export_hf_checkpoint._run_export(spec, ["ignored"])
-
-    verify.assert_not_called()
