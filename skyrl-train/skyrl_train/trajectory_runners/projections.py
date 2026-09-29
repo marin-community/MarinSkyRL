@@ -3,6 +3,7 @@
 import copy
 from typing import Generic, Protocol, Sequence, TypeVar
 
+import numpy as np
 from omegaconf import DictConfig
 
 from skyrl_train.distillation import INVALID_TOPK_INDEX
@@ -15,7 +16,6 @@ from skyrl_train.trajectory_runners.types import (
     TrajectoryRequestBatch,
 )
 from skyrl_train.trajectory_runners.trajectory_processing import (
-    _sentinel_routed_experts_row,
     apply_overlong_filtering,
     get_rollout_metrics,
     scalar_reward_token_credit,
@@ -191,17 +191,16 @@ def attach_routed_experts(
 ) -> None:
     """Project exact per-token routes and preserve the batch's route shape."""
     captured = [output.evidence.routed_experts for output in outputs]
-    template = next((routes[0] for routes in captured if routes), None)
+    template = next((routes for routes in captured if routes is not None and len(routes)), None)
     if template is None:
         return
-    sentinel = _sentinel_routed_experts_row(template)
+    shape = template.shape[1:]
+    dtype = template.dtype
     projected = []
     for routes, response in zip(captured, responses, strict=True):
         if routes is not None and len(routes) != len(response):
             raise ValueError("routed_experts must align with response token IDs")
-        projected.append(
-            [sentinel for _ in response] if routes is None else [[list(layer) for layer in token] for token in routes]
-        )
+        projected.append(np.zeros((len(response), *shape), dtype=dtype) if routes is None else routes)
     batch["rollout_routed_experts"] = projected
 
 
