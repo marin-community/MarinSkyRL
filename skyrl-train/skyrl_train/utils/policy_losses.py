@@ -28,7 +28,7 @@ from skyrl_train.utils.loss_reduction import (
     reduce_loss,
 )
 from skyrl_train.utils.algorithm_registry import PolicyLossType, register_policy_loss
-from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_delta
+from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_delta, truncated_importance_weights
 from skyrl_train.utils.policy_math import differentiable_approx_kl
 
 
@@ -313,6 +313,7 @@ def compute_policy_objective(
             action_log_probs=action_log_probs,
             old_action_log_probs=old_action_log_probs,
             student_selected_logprobs=student_topk_logprobs,
+            rollout_logprobs=rollout_logprobs,
             loss_mask=loss_mask,
             config=config,
         )
@@ -387,8 +388,9 @@ def ppo_policy_loss(
     if config.use_tis and rollout_logprobs is not None:
         loguru.logger.debug(f"Using TIS with dtype: {rollout_logprobs.dtype}")
         # Apply truncated importance sampling -> https://fengyao.notion.site/off-policy-rl
-        tis_imp_ratio = safe_exp_delta(old_log_probs - rollout_logprobs, out_dtype=log_probs.dtype)
-        tis_imp_ratio = torch.clamp(tis_imp_ratio, max=config.tis_imp_ratio_cap)
+        tis_imp_ratio = truncated_importance_weights(
+            old_log_probs, rollout_logprobs, config.tis_imp_ratio_cap, log_probs.dtype
+        )
         loss = loss * tis_imp_ratio
 
     loss = reduce_loss(

@@ -24,7 +24,7 @@ def test_async_smoke_runs_the_in_process_async_trainer_and_passes_trainer_valida
         parsed, {"job_name": "mopd-async-smoke-test", "experiments_dir": "/tmp/exp", "num_nodes": 8}, _HPCStub()
     )
 
-    assert compiled.entrypoint == "skyrl_train.entrypoints.fully_async_in_process"
+    assert compiled.entrypoint == "skyrl_train.entrypoints.main_base"
     validate_cfg(compiled.config)
 
 

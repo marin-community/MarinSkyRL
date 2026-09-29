@@ -10,7 +10,7 @@ import torch
 from omegaconf import DictConfig
 
 from marinskyrl.distillation import TeacherEvidenceKind
-from skyrl_train.tensor_math import TOKEN_MEAN_LOSS_REDUCTION, masked_mean, safe_exp_delta
+from skyrl_train.tensor_math import TOKEN_MEAN_LOSS_REDUCTION, masked_mean, safe_exp_delta, truncated_importance_weights
 
 INVALID_TOPK_INDEX = -1
 RETAINED_MASS_ATOL = 1e-6
@@ -118,13 +118,20 @@ class SampledReverseKLInput:
         action_log_probs: torch.Tensor,
         old_action_log_probs: torch.Tensor,
         student_selected_logprobs: Optional[torch.Tensor],
+        rollout_logprobs: Optional[torch.Tensor],
         loss_mask: Optional[torch.Tensor],
         config: DictConfig,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        del config
         if student_selected_logprobs is not None:
             raise ValueError("chosen-token reverse KL does not use selected student logprobs")
-        return sampled_reverse_kl_loss(action_log_probs, old_action_log_probs, self, loss_mask), {}
+        return sampled_reverse_kl_loss(
+            action_log_probs,
+            old_action_log_probs,
+            self,
+            loss_mask,
+            rollout_logprobs=rollout_logprobs,
+            tis_imp_ratio_cap=config.tis_imp_ratio_cap if config.use_tis else None,
+        ), {}
 
 
 @dataclass(frozen=True)
@@ -173,10 +180,11 @@ class SparseForwardKLInput:
         action_log_probs: torch.Tensor,
         old_action_log_probs: torch.Tensor,
         student_selected_logprobs: Optional[torch.Tensor],
+        rollout_logprobs: Optional[torch.Tensor],
         loss_mask: Optional[torch.Tensor],
         config: DictConfig,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        del action_log_probs, old_action_log_probs, config
+        del action_log_probs, old_action_log_probs, config, rollout_logprobs
         if student_selected_logprobs is None:
             raise ValueError("sparse forward KL requires student logprobs at the teacher's top-K token IDs")
         return sparse_forward_kl_loss(student_selected_logprobs, self, loss_mask)
@@ -228,10 +236,11 @@ class StudentTopKPolicySurrogateInput:
         action_log_probs: torch.Tensor,
         old_action_log_probs: torch.Tensor,
         student_selected_logprobs: Optional[torch.Tensor],
+        rollout_logprobs: Optional[torch.Tensor],
         loss_mask: Optional[torch.Tensor],
         config: DictConfig,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        del action_log_probs, old_action_log_probs
+        del action_log_probs, old_action_log_probs, rollout_logprobs
         if student_selected_logprobs is None:
             raise ValueError("student-top-K OPD requires student logprobs at the selected IDs")
         return student_topk_policy_surrogate_loss(student_selected_logprobs, self, loss_mask, config)
@@ -255,6 +264,7 @@ class DistillationInput(Protocol):
         action_log_probs: torch.Tensor,
         old_action_log_probs: torch.Tensor,
         student_selected_logprobs: Optional[torch.Tensor],
+        rollout_logprobs: Optional[torch.Tensor],
         loss_mask: Optional[torch.Tensor],
         config: DictConfig,
     ) -> tuple[torch.Tensor, dict[str, float]]: ...
@@ -736,8 +746,16 @@ def sampled_reverse_kl_loss(
     old_action_log_probs: torch.Tensor,
     distillation: SampledReverseKLInput,
     loss_mask: Optional[torch.Tensor],
+    *,
+    rollout_logprobs: Optional[torch.Tensor],
+    tis_imp_ratio_cap: Optional[float],
 ) -> torch.Tensor:
-    """Return an on-policy score-function surrogate for ``KL(policy || teacher)``."""
+    """Return a reverse-KL surrogate with optional token-level rollout correction.
+
+    TIS corrects the sampled token conditional on its stored prefix, not the
+    distribution of prefixes. The teacher gap remains anchored to the learner
+    at the start of the update, independently of the rollout sampling policy.
+    """
     expected_shape = action_log_probs.shape
     payload_tensors = (
         ("old_action_log_probs", old_action_log_probs),
@@ -776,9 +794,22 @@ def sampled_reverse_kl_loss(
         distillation.teacher_action_log_probs,
         torch.zeros_like(action_log_probs),
     )
-    behavior_logprobs = old_action_log_probs.detach()
-    teacher_gap = behavior_logprobs - teacher_logprobs
-    importance_ratio = safe_exp_delta(action_log_probs - behavior_logprobs, out_dtype=action_log_probs.dtype)
+    learner_logprobs = torch.where(effective_mask, old_action_log_probs.detach(), 0.0)
+    current_logprobs = torch.where(effective_mask, action_log_probs, 0.0)
+    teacher_gap = learner_logprobs - teacher_logprobs
+    importance_ratio = safe_exp_delta(current_logprobs - learner_logprobs, out_dtype=action_log_probs.dtype)
+    if tis_imp_ratio_cap is not None:
+        if rollout_logprobs is None:
+            raise ValueError("sampled reverse KL with use_tis requires rollout logprobs")
+        if rollout_logprobs.shape != expected_shape or rollout_logprobs.device != expected_device:
+            raise ValueError("rollout_logprobs must match action_log_probs shape and device")
+        rollout_values = rollout_logprobs[effective_mask]
+        if not torch.all(torch.isfinite(rollout_values)) or torch.any(rollout_values > 0):
+            raise ValueError("sampled reverse KL requires finite nonpositive rollout logprobs on scored tokens")
+        sampling_logprobs = torch.where(effective_mask, rollout_logprobs.detach(), 0.0)
+        importance_ratio = importance_ratio * truncated_importance_weights(
+            learner_logprobs, sampling_logprobs, tis_imp_ratio_cap, action_log_probs.dtype
+        )
     token_loss = importance_ratio * teacher_gap * distillation.loss_weights
     return masked_mean(token_loss, effective_mask, dim=-1).mean()
 
