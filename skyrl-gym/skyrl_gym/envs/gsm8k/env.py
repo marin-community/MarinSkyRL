@@ -16,16 +16,16 @@ class GSM8kEnv(BaseTextEnv):
         assert "reward_spec" in extras, "reward_spec field is required"
         assert "ground_truth" in extras["reward_spec"], "ground_truth is required in reward_spec field"
         self.ground_truth = extras["reward_spec"]["ground_truth"]
-        self.answer_format = extras["reward_spec"].get("answer_format", "strict")
+        self.reward_method = env_config.get("reward_method", "strict")
         self.stop_reason = None
 
     def set_rollout_evidence(self, evidence: RolloutEvidence) -> None:
         self.stop_reason = evidence.stop_reason
 
     def _get_reward(self, action: str) -> float:
-        if self.answer_format == "final_line" and self.stop_reason not in {"stop", "complete", "eos", "end_turn"}:
+        if self.reward_method == "final_line" and self.stop_reason not in {"stop", "complete", "eos", "end_turn"}:
             return 0.0
-        return utils.compute_score(action, self.ground_truth, method=self.answer_format)
+        return utils.compute_score(action, self.ground_truth, method=self.reward_method)
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         done = True  # always done after one step

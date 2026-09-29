@@ -42,8 +42,8 @@ def test_compute_score(output, ground_truth, expected):
 def test_completed_final_line_reward(output, ground_truth, stop_reason, expected):
     env = skyrl_gym.make(
         "gsm8k",
-        env_config=DictConfig({}),
-        extras={"reward_spec": {"method": "rule", "answer_format": "final_line", "ground_truth": ground_truth}},
+        env_config=DictConfig({"reward_method": "final_line"}),
+        extras={"reward_spec": {"method": "rule", "ground_truth": ground_truth}},
     )
     env.set_rollout_evidence(RolloutEvidence(response=output, stop_reason=stop_reason))
     assert env.step(output)["reward"] == expected
