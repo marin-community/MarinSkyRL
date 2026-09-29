@@ -18,7 +18,7 @@
 # limitations under the License.
 
 import torch
-from megatron.core.optimizer import OptimizerConfig
+from megatron.core.optimizer import OptimizerConfig, get_standard_config_overrides
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
@@ -43,6 +43,13 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
         "use_distributed_optimizer": True,
     }
 
+    if _optim_name == "adam":
+        beta1, beta2 = optim_config.get("adam_betas", (0.9, 0.999))
+        optim_args.update(
+            adam_beta1=beta1,
+            adam_beta2=beta2,
+            adam_eps=optim_config.get("optimizer_kwargs", {}).get("eps", 1e-8),
+        )
     optim_args.update(optimizer_config_kwargs)
 
     config = OptimizerConfig(**optim_args)
@@ -70,10 +77,14 @@ def get_megatron_optimizer(
             "megatron-core 0.18.x's config_overrides mapping; only the defaults "
             "are supported."
         )
-    # Base optimizer.
+    config_overrides = get_standard_config_overrides(config)
+    if config.optimizer == "adam":
+        # SkyRL's AdamW recipe applies weight decay to every trainable parameter.
+        config_overrides = {key: override for key, override in config_overrides.items() if "wd_mult" not in override}
     return get_megatron_optimizer_native(
         config=config,
         model_chunks=model,
+        config_overrides=config_overrides,
     )
 
 
