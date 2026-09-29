@@ -300,10 +300,25 @@ def test_artifact_metadata_staging_leaves_weight_shards_remote(tmp_path: Path) -
 
     metadata_bytes = stage_artifact_model_metadata(source.as_uri(), "artifact@v1:abc123", str(destination))
 
-    assert metadata_bytes == sum(path.stat().st_size for path in (source / "config.json", source / "tokenizer.json"))
+    index = json.loads((destination / "model.safetensors.index.json").read_text())
+    assert index["weight_map"] == {"weight": "model.safetensors"}
+    metadata_files = (
+        destination / "config.json",
+        destination / "tokenizer.json",
+        destination / "model.safetensors.index.json",
+    )
+    assert metadata_bytes == sum(path.stat().st_size for path in metadata_files)
+    assert not (source / "model.safetensors.index.json").exists()
     assert (destination / "config.json").read_text() == "{}"
     assert (destination / "tokenizer.json").read_text() == "{}"
     assert not (destination / "model.safetensors").exists()
+
+    index_path = destination / "model.safetensors.index.json"
+    cached_index = tmp_path / "cached-index"
+    cached_index.hardlink_to(index_path)
+    repeated_bytes = stage_artifact_model_metadata(source.as_uri(), "artifact@v1:abc123", str(destination))
+    assert repeated_bytes == metadata_bytes
+    assert index_path.samefile(cached_index)
 
 
 def test_artifact_model_staging_materializes_weight_shards(tmp_path: Path) -> None:

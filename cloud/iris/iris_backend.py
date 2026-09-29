@@ -742,11 +742,17 @@ def _cluster_dashboard_host(cluster_config_path: Optional[str]) -> Optional[str]
 
 
 def _rl_config_uses_daytona(config: DictConfig) -> bool:
-    """Return whether the resolved launch uses a Daytona-backed entrypoint."""
-    return str(config.runtime.entrypoint) in {
+    """Return whether the resolved launch runs Harbor trials in Daytona sandboxes.
+
+    The Harbor entrypoints always do. Other entrypoints do when ``data.terminal_bench_data``
+    routes rows to Harbor, as Nemotron Ultra routing does for its SWE rows.
+    """
+    if str(config.runtime.entrypoint) in {
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH],
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH_GENERATE],
-    }
+    }:
+        return True
+    return bool(config.skyrl.get("data", {}).get("terminal_bench_data"))
 
 
 def validate_controller_ingress_reachability(args: SimpleNamespace) -> None:

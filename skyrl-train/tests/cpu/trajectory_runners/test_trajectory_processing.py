@@ -3,7 +3,6 @@ uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/te
 """
 
 import pytest
-from types import SimpleNamespace
 
 from skyrl_train.batch_sampling import filter_trajectory_batch
 from skyrl_train.trajectory_runners.trajectory_processing import (
@@ -11,23 +10,12 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     TitoFullDeclineReason,
     apply_overlong_filtering,
     concatenate_trajectory_batches,
-    minimum_captured_global_step,
     encode_messages_subset,
     get_batch_failure_metrics,
     get_response_ids_and_loss_mask_from_messages,
     get_generation_prompt_ids,
 )
 from transformers import AutoTokenizer
-
-
-def test_minimum_captured_global_step_uses_oldest_sample_in_group():
-    outputs = [
-        SimpleNamespace(captured_global_step=9),
-        SimpleNamespace(captured_global_step=None),
-        SimpleNamespace(captured_global_step=6),
-    ]
-
-    assert minimum_captured_global_step(outputs) == 6
 
 
 @pytest.mark.parametrize(

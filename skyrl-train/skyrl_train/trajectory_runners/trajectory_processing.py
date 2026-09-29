@@ -1,12 +1,12 @@
 import torch
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol, Sequence
+from typing import List, Tuple, Union, Optional, Dict, Any, Sequence
 from collections import defaultdict
 from enum import StrEnum
 import numpy as np
 from skyrl_train.group_admission import group_is_fully_excluded_from_training
-from skyrl_train.trajectory_runners.base import (
+from skyrl_train.trajectory_runners.types import (
     TrajectoryBatch,
     TrajectoryRequestBatch,
     TrajectoryID,
@@ -760,7 +760,7 @@ def _reward_sign_successes(rewards: Sequence[float | List[float]]) -> List[bool]
     return [float(np.sum(reward)) > 0.0 for reward in rewards]
 
 
-def _concatenate_episode_evidence(result: TrajectoryBatch, batches: List[TrajectoryBatch]) -> None:
+def _concatenate_environment_metrics(result: TrajectoryBatch, batches: List[TrajectoryBatch]) -> None:
     if any("env_metrics" in batch for batch in batches):
         for batch in batches:
             if ("env_metrics" in batch) != ("env_classes" in batch):
@@ -959,7 +959,7 @@ def concatenate_trajectory_batches(
     if baseline_exclusions_concat is not None:
         result["exclude_from_baseline"] = baseline_exclusions_concat
 
-    _concatenate_episode_evidence(result, trajectory_batches)
+    _concatenate_environment_metrics(result, trajectory_batches)
     for key in ("verification_results", "evidence_messages"):
         if any(batch.get(key) is not None for batch in trajectory_batches):
             result[key] = [
@@ -1322,18 +1322,6 @@ def prepare_trajectory_request(
     }
 
     return trajectory_request, uids
-
-
-class HasCapturedGlobalStep(Protocol):
-    captured_global_step: Optional[int]
-
-
-def minimum_captured_global_step(outputs: Iterable[HasCapturedGlobalStep]) -> Optional[int]:
-    """Return the minimum model-step value recorded across a rollout group."""
-    return min(
-        (output.captured_global_step for output in outputs if output.captured_global_step is not None),
-        default=None,
-    )
 
 
 def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None, chat_template_kwargs=None):

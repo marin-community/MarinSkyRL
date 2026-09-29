@@ -46,7 +46,6 @@ def grug_engine_client(
         shared_pg=shared_pg,
         gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
         inference_engine_enable_sleep=inference_engine_enable_sleep,
-        async_engine=True,
         max_num_batched_tokens=MAX_MODEL_LEN * cfg.generator.inference_engine_data_parallel_size,
         max_num_seqs=cfg.trainer.train_batch_size,
         tokenizer=tokenizer,
