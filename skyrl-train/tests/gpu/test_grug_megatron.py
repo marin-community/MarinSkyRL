@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 import ray
 import torch
+from omegaconf import open_dict
 from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
@@ -492,7 +493,8 @@ def test_grug_megatron_muonh_pp2_ep2_checkpoint_continues_exactly(tmp_path):
     cfg.trainer.policy.optimizer_config.optimizer_kwargs = {"adam_lr": 2.0e-2}
     cfg.trainer.policy.optimizer_config.max_grad_norm = 1.0
     cfg.trainer.policy.optimizer_config.num_warmup_steps = 10
-    cfg.trainer.policy.optimizer_config.lr_warmup_init = 2.0e-3
+    with open_dict(cfg.trainer.policy.optimizer_config):
+        cfg.trainer.policy.optimizer_config.lr_warmup_init = 2.0e-3
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     batch = _padded_batch(tokenizer.pad_token_id, prompt_length=48, response_length=48, variable_lengths=True)
     names = [
