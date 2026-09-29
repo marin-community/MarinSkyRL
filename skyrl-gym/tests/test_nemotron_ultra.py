@@ -1,7 +1,10 @@
 """Behavior checks for the NVIDIA NeMo Gym reward ports."""
 
+import contextlib
+import io
 import json
 import threading
+from typing import Any
 
 import pytest
 import requests
@@ -421,6 +424,39 @@ def transform(grid):
     )
 
 
+def test_nvarc_transductive_extraction_accepts_reasoning_and_common_grid_formats():
+    expected = [[1, 3], [1, 3]]
+    assert parse_grid("<|start_think|>\nCandidate color: 2\n<|end_think|>\n1 3\n1 3") == expected
+    assert parse_grid("<think>the answer uses color 2</think>13\n13") == expected
+    assert parse_grid("[[1, 3], [1, 3]]") == expected
+    assert parse_grid("[[1, 3],\n [1, 3]]") == expected
+    assert parse_grid("analysis \\boxed{[[1, 3], [1, 3]]}") == expected
+    assert parse_grid("[[1, 3], [1]]") is None
+    assert parse_grid("[[1, 3], [1, 13]]") is None
+    assert parse_grid("[[1, 3], [1, 3]] junk") is None
+
+
+def test_nvarc_transductive_incorrect_parseable_grid_scores_zero():
+    record = {"expected_output": [[2, 3], [4, 5]]}
+    assert grade_transductive_arc("[[1, 3], [1, 3]]", record)[0] == 0.0
+
+
+def test_nvarc_inductive_unfenced_transform_after_reasoning_executes():
+    record = {"test_input": [[1, 2], [3, 4]], "expected_output": [[2, 3], [4, 5]]}
+    response = (
+        "<|start_think|>\nCandidate color: 2\n<|end_think|>\n"
+        "Here is the transform:\n"
+        "import numpy as np\n"
+        "def transform(grid):\n"
+        "    return [[cell + 1 for cell in row] for row in grid]\n"
+    )
+
+    reward, details = grade_inductive_arc(response, record, python_timeout_seconds=2, sandbox=_ExecutingSandbox())
+
+    assert reward == 1.0
+    assert details["extraction_successful"] is True
+
+
 def test_code_gen_reward_runs_every_row_unit_test():
     record = {
         "verifier_metadata": {
@@ -623,6 +659,20 @@ class _Sandbox:
     def execute(self, code, **kwargs):
         self.calls.append((code, kwargs))
         return self.result
+
+
+class _ExecutingSandbox:
+    """Local stand-in for the HTTP sandbox that really runs the verifier script."""
+
+    def execute(self, code, **kwargs):
+        stdout = io.StringIO()
+        namespace: dict[str, Any] = {}
+        try:
+            with contextlib.redirect_stdout(stdout):
+                exec(code, namespace)
+        except Exception as error:
+            return {"process_status": "error", "stdout": stdout.getvalue(), "stderr": repr(error)}
+        return {"process_status": "completed", "stdout": stdout.getvalue(), "stderr": ""}
 
 
 def test_ns_tools_executes_structured_python_calls_with_stateful_session():

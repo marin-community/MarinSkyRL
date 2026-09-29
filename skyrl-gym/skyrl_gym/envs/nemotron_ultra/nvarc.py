@@ -29,14 +29,32 @@ def parse_grid(text: str) -> list[list[int]] | None:
     boxed = last_boxed_answer(text)
     if boxed is not None:
         text = boxed
+    text = text.strip()
+    if text.startswith("["):
+        try:
+            candidate = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return candidate if _valid_grid(candidate) else None
     rows = []
-    for line in text.strip().splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if not re.fullmatch(r"[0-9\s]+", line):
             return None
         cells = line.split() if " " in line or "\t" in line else list(line)
         rows.append([int(cell) for cell in cells])
     return rows if _valid_grid(rows) else None
+
+
+def _unfenced_transform(text: str) -> str | None:
+    match = re.search(r"^def transform\b", text, re.MULTILINE)
+    if match is None:
+        return None
+    # Keep module-level imports from the preamble; drop prose around the code.
+    imports = [
+        line for line in text[: match.start()].splitlines() if re.match(r"\s*(?:import\s|from\s.+?\simport\b)", line)
+    ]
+    return "\n".join([*imports, text[match.start() :]]).strip()
 
 
 def _extract_python(text: str) -> str | None:
@@ -47,7 +65,7 @@ def _extract_python(text: str) -> str | None:
     blocks = re.findall(r"```\s*\n(.*?)```", text, re.DOTALL)
     if blocks:
         return blocks[-1].strip()
-    return text.strip() if "def transform" in text else None
+    return _unfenced_transform(text)
 
 
 def _execute_python(code: str, input_grid: list[list[int]], timeout_seconds: int, sandbox: SandboxClient):
