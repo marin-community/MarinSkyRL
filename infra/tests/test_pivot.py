@@ -9,7 +9,7 @@ from datasets import Dataset
 
 from infra.rl_data.pivot import adapt_row, filter_candidates, heldout_trajectories
 from infra.rl_data.pivot_publish import publish_artifacts
-from infra.rl_data.pivot_report import summarize, check_rollout_geometry
+from infra.rl_data.pivot_report import summarize, summarize_exposure, check_rollout_geometry
 
 
 def swe_row(index):
@@ -112,3 +112,24 @@ def test_publish_is_content_addressed_and_rejects_changed_data(tmp_path):
     (source / "train.parquet").write_bytes(b"changed")
     with pytest.raises(ValueError, match="checksum"):
         publish_artifacts(source, str(tmp_path / "store"))
+
+
+def test_exposure_distinguishes_unique_rows_visits_and_response_multiplicity():
+    row = adapt_row(swe_row(0), "swe", 0, "train")
+    records = []
+    for step in (1, 2):
+        for repetition in range(16):
+            record = retained(row, repetition, 1)
+            record.update(phase="train", global_step=step, prompt={"token_ids": [1, 2, 3]},
+                          response={"token_ids": [4, 5]})
+            record["trajectory"]["instance_id"] = f"visit-{step}"
+            records.append(record)
+    result = summarize_exposure(records)
+    assert result["unique_source_rows"] == 1
+    assert result["prefix_visits"] == 2
+    assert result["responses"] == 32
+    assert result["prompt_tokens_per_response_total"] == 96
+    assert result["response_tokens_total"] == 64
+    assert result["responses_per_source_row"] == {row["extra_info"]["source_id"]: 32}
+    with pytest.raises(ValueError, match="Duplicate"):
+        summarize_exposure([*records, records[0]])

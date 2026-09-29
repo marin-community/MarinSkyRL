@@ -159,7 +159,17 @@ Check the first PivotRL training step's retention archive before a full run:
 ```bash
 uv run python -m infra.rl_data.pivot_report "$FIRST_TRAIN_STEP_ARCHIVE" --check-geometry
 uv run python -m infra.rl_data.pivot_report "$ONE_CHECKPOINT_HELDOUT_ARCHIVES"
+uv run python -m infra.rl_data.pivot_report "$TRAINING_ARCHIVES" --exposure
 ```
+
+Exposure reports distinguish unique source rows, prefix visits, and responses per
+row. Their token totals describe retained trajectories before the final loss-budget
+mask; the trainer's `consumed/loss_total` is the authoritative loss-token count.
+Heldout aggregate scores appear in W&B as `eval/pivot_swe/avg_score` and
+`eval/pivot_terminal/avg_score`, mirrored to Iris stdout as `WANDB_MIRROR`.
+Per-row predictions and verification results remain in the run's immutable
+`attempts/trajectories` archives. Confidence intervals are computed by the report
+command above; they are not automatically added to W&B.
 
 The accuracy report bootstraps source trajectories for 95% intervals, preserving
 dependence between neighboring prefixes. Its effective independent units are the
