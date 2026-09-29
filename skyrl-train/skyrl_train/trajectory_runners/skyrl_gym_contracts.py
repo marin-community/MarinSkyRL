@@ -3,6 +3,8 @@
 from collections.abc import Sequence
 from typing import Any
 
+import numpy as np
+
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationResult
 
@@ -70,7 +72,7 @@ def publish_rollout_evidence(
         generated_token_count=len(response_token_ids),
         prompt_token_ids=() if prompt_token_ids is None else tuple(prompt_token_ids),
         response_token_ids=tuple(response_token_ids),
-        behavior_logprobs=None if behavior_logprobs is None else tuple(behavior_logprobs),
+        behavior_logprobs=None if behavior_logprobs is None else np.asarray(behavior_logprobs, dtype=np.float32),
         metadata={} if metadata is None else metadata,
     )
     env.set_rollout_evidence(evidence)
