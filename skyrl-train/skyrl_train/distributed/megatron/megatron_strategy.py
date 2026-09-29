@@ -1,10 +1,10 @@
 import os
+import math
 import random
 import tempfile
 from contextlib import nullcontext
 from datetime import timedelta
 from typing import List, Union, Optional
-from jaxtyping import Float
 from loguru import logger
 
 import numpy as np
@@ -46,7 +46,13 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
     FullyParallelSaveStrategyWrapper,
 )
 from transformers import PreTrainedTokenizer
-from megatron.core.optimizer import DistributedOptimizer
+from megatron.core.optimizer import ChainedOptimizer, DistributedOptimizer
+from megatron.core.optimizer.clip_grads import clip_grad_by_total_norm_fp32
+from skyrl_train.distributed.megatron.nonfinite_steps import (
+    NonfiniteStepAction,
+    OptimizerStepResult,
+    nonfinite_step_action,
+)
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
 from skyrl_train import hf_model_io
@@ -160,19 +166,66 @@ class MegatronStrategy(DistributedStrategy):
     def backward(self, loss: torch.Tensor, model, optimizer: optim.Optimizer, **kwargs) -> None:
         raise NotImplementedError()
 
+    @torch.no_grad()
     def optimizer_step(
         self,
         optimizer: optim.Optimizer,
         model,
         scheduler,
         name="model",
+        consecutive_nonfinite_steps: int = 0,
+        max_consecutive_nonfinite_steps: int | None = None,
         **kwargs,
-    ) -> Optional[Float[torch.Tensor, "1"]]:
-        """Perform optimizer step"""
-        _, grad_norm, _ = optimizer.step()
-        scheduler.step(1)
+    ) -> OptimizerStepResult:
+        """Apply prepared gradients only when all training ranks can take a finite step."""
+        found_inf = bool(optimizer.prepare_grads())
+        flag = torch.tensor(int(found_inf), device=self.collective_device())
+        dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+        found_inf = bool(flag.item())
+        grad_norm = None if found_inf else float(optimizer.get_grad_norm())
+        flag.fill_(int(found_inf or not math.isfinite(grad_norm)))
+        dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+        if flag.item():
+            action = nonfinite_step_action(
+                float("nan"), True, consecutive_nonfinite_steps, max_consecutive_nonfinite_steps
+            )
+            optimizer.zero_grad()
+            if action is NonfiniteStepAction.FAIL:
+                raise RuntimeError(
+                    f"nonfinite policy gradients after {consecutive_nonfinite_steps} consecutive skipped steps; "
+                    f"max_consecutive_nonfinite_steps={max_consecutive_nonfinite_steps}"
+                )
+            return OptimizerStepResult(grad_norm=None, applied=False)
+
+        should_skip_update = False
+        optimizers = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
+        for child in optimizers:
+            if getattr(child, "is_stub_optimizer", False):
+                continue
+            parameters = child.get_parameters()
+            if not parameters:
+                continue
+            if child.config.clip_grad > 0:
+                clip_grad_by_total_norm_fp32(
+                    parameters,
+                    max_norm=child.config.clip_grad,
+                    total_norm=grad_norm,
+                    use_decoupled_grad=(
+                        child.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8
+                        or (
+                            child.config.use_precision_aware_optimizer
+                            and getattr(parameters[0], "__fsdp_param__", False)
+                        )
+                    ),
+                )
+            should_skip_update |= grad_norm > child.config.grad_norm_skip_threshold
+        flag.fill_(int(should_skip_update))
+        dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+        applied = False if flag.item() else bool(optimizer.step_with_ready_grads())
+        if applied:
+            scheduler.step(1)
         optimizer.zero_grad()
-        return grad_norm
+        return OptimizerStepResult(grad_norm=grad_norm, applied=applied)
 
     def prepare(
         self, *models_or_model_optim_pairs: ModelOrModelOptimPair

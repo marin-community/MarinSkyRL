@@ -17,7 +17,7 @@ SPEC="${SPEC:-ci/marin_nightly/specs/opd-qwen3-sync.json}"
 MAX_STEPS="${MAX_STEPS:-1}"
 MAX_STALENESS_STEPS="${MAX_STALENESS_STEPS:-0}"
 # Positive staleness trains on rollouts from older policies, which needs an off-policy correction.
-if (( MAX_STALENESS_STEPS > 0 )); then POLICY_LOSS_TYPE=behavior_clip; else POLICY_LOSS_TYPE=regular; fi
+if (( MAX_STALENESS_STEPS > 0 )); then POLICY_LOSS_TYPE=behavior_clip; else POLICY_LOSS_TYPE=importance_sampling; fi
 source "$REPOSITORY_ROOT/skyrl-train/ci/marin_nightly/resolve_runtime.sh" \
   "$REPOSITORY_ROOT" "$NIGHTLY_RL_ENV" production
 

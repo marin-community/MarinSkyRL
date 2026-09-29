@@ -12,7 +12,30 @@ from omegaconf import DictConfig
 
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.tensor_math import masked_mean
-from skyrl_train.utils.loss_reduction import reduce_loss
+from skyrl_train.config.objective_spec import LossReduction
+from skyrl_train.objective.losses import PolicyLossInputs
+from skyrl_train.objective.reduction import reduce_to_step, step_counts
+
+
+def _policy_loss(name):
+    loss = PolicyLossRegistry.get(name)
+
+    def evaluate(log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_logprobs=None):
+        mask = torch.ones_like(log_probs) if loss_mask is None else loss_mask
+        inputs = PolicyLossInputs(log_probs, old_log_probs, rollout_logprobs, advantages, mask)
+        result = loss(inputs, config)
+        counts = step_counts([mask], [mask], [], [advantages], config.max_seq_len, lambda value: value)
+        reduced = reduce_to_step(
+            result.values,
+            mask,
+            counts.policy,
+            LossReduction(config.loss_reduction),
+            max_seq_len=counts.max_seq_len,
+            nonzero_advantage_rows=counts.nonzero_advantage_rows,
+        )
+        return reduced, result.metrics
+
+    return evaluate
 
 
 def _clipping_config(loss_name: str, *, eps_clip_low: float, eps_clip_high: float) -> DictConfig:
@@ -35,7 +58,7 @@ def _clipping_config(loss_name: str, *, eps_clip_low: float, eps_clip_high: floa
 
 @pytest.mark.parametrize("loss_name", ["regular", "gspo", "cispo"])
 def test_clip_bounds_control_only_their_ratio_side(loss_name: str):
-    loss_fn = PolicyLossRegistry.get(loss_name)
+    loss_fn = _policy_loss(loss_name)
     old_log_probs = torch.zeros((2, 1))
     log_probs = torch.log(torch.tensor([[0.75], [1.10]]))
     advantages = torch.tensor([[-1.0], [1.0]])
@@ -61,7 +84,7 @@ def test_clip_bounds_control_only_their_ratio_side(loss_name: str):
 
 @pytest.mark.parametrize("loss_name", ["regular", "gspo", "cispo"])
 def test_policy_loss_reports_clip_decisions_and_pressure_by_ratio_side(loss_name: str):
-    loss_fn = PolicyLossRegistry.get(loss_name)
+    loss_fn = _policy_loss(loss_name)
     old_log_probs = torch.zeros((4, 1))
     log_probs = torch.log(torch.tensor([[0.75], [0.85], [1.10], [1.02]]))
     advantages = torch.tensor([[-1.0], [-1.0], [1.0], [1.0]])
@@ -110,7 +133,7 @@ def test_policy_loss_dual_clip():
     )
 
     # Create loss function with dual clipping
-    loss_fn = PolicyLossRegistry.get("dual_clip")
+    loss_fn = _policy_loss("dual_clip")
 
     # Calculate expected values
     ratio = torch.exp(log_probs - old_log_probs)  # approx [0.5, 1.0, 10.0]
@@ -145,7 +168,7 @@ def test_behavior_clip_matches_regular_loss_on_policy():
     log_probs = torch.tensor([[-1.2, -0.9, -2.7]])
     config = _clipping_config("regular", eps_clip_low=0.2, eps_clip_high=0.2)
 
-    regular_loss, _ = PolicyLossRegistry.get("regular")(
+    regular_loss, _ = _policy_loss("regular")(
         log_probs,
         old_log_probs,
         advantages,
@@ -153,7 +176,7 @@ def test_behavior_clip_matches_regular_loss_on_policy():
         rollout_logprobs=old_log_probs,
     )
     config.policy_loss_type = "behavior_clip"
-    behavior_loss, _ = PolicyLossRegistry.get("behavior_clip")(
+    behavior_loss, _ = _policy_loss("behavior_clip")(
         log_probs,
         old_log_probs,
         advantages,
@@ -171,7 +194,7 @@ def test_behavior_clip_stops_resuppressing_stale_negative_advantage_token():
     advantages = torch.tensor([[-1.0]])
     config = _clipping_config("behavior_clip", eps_clip_low=0.2, eps_clip_high=0.2)
 
-    loss, metrics = PolicyLossRegistry.get("behavior_clip")(
+    loss, metrics = _policy_loss("behavior_clip")(
         log_probs,
         old_log_probs,
         advantages,
@@ -188,7 +211,7 @@ def test_behavior_clip_requires_rollout_logprobs():
     config = _clipping_config("behavior_clip", eps_clip_low=0.2, eps_clip_high=0.2)
 
     with pytest.raises(ValueError, match="rollout_logprobs are required"):
-        PolicyLossRegistry.get("behavior_clip")(
+        _policy_loss("behavior_clip")(
             torch.zeros((1, 1)),
             torch.zeros((1, 1)),
             torch.ones((1, 1)),
@@ -201,7 +224,7 @@ def test_behavior_clip_rejects_tis_multiplication():
     config.use_tis = True
 
     with pytest.raises(ValueError, match="cannot be combined with use_tis"):
-        PolicyLossRegistry.get("behavior_clip")(
+        _policy_loss("behavior_clip")(
             torch.zeros((1, 1)),
             torch.zeros((1, 1)),
             torch.ones((1, 1)),
@@ -234,7 +257,7 @@ def test_policy_loss_cispo():
     )
 
     # Create loss function with cispo
-    loss_fn = PolicyLossRegistry.get("cispo")
+    loss_fn = _policy_loss("cispo")
 
     # Calculate expected values
     ratio = torch.exp(log_probs - old_log_probs)  # approx [0.5, 1.0, 10.0]
@@ -265,166 +288,6 @@ def test_policy_loss_cispo():
     torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-3, atol=1e-8)
     # close to hand calculated value
     assert actual_loss.item() == pytest.approx(-0.99768266666, abs=1e-4)
-
-
-def test_policy_loss_reduction_modes():
-    """Tests different loss_reduction modes in PolicyLoss function.
-
-    Note: token_mean and sequence_mean give the same result when all sequences
-    have the same length and no mask is applied, but differ when masking creates
-    different effective sequence lengths.
-    """
-
-    device = "cpu"
-
-    clip_eps_low = 0.2
-    clip_eps_high = 0.2
-
-    advantages = torch.tensor(
-        [
-            [2.0, 2.0, 2.0],  # sequence 1: consistently higher advantages
-            [1.0, 1.0, 1.0],  # sequence 2: consistently lower advantages
-        ],
-        device=device,
-    )
-
-    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]], device=device)
-
-    log_probs = torch.tensor(
-        [[-1.5, -0.5, -1.2], [-0.8, -1.3, -0.9]],  # ratios ≈ [[0.61, 1.65, 0.83],[1.22, 0.74, 1.11]]
-        device=device,
-    )
-
-    # Create masks to test sequences with different numbers of valid tokens
-    loss_mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 0.0, 0.0]], device=device)
-
-    # Create configs for different reduction modes
-    config_token = DictConfig(
-        {
-            "eps_clip_low": clip_eps_low,
-            "eps_clip_high": clip_eps_high,
-            "clip_ratio_c": 3.0,
-            "policy_loss_type": "regular",
-            "loss_reduction": "token_mean",
-            "max_seq_len": 4,
-            "use_tis": False,
-        }
-    )
-
-    config_seq = DictConfig(
-        {
-            "eps_clip_low": clip_eps_low,
-            "eps_clip_high": clip_eps_high,
-            "clip_ratio_c": 3.0,
-            "policy_loss_type": "regular",
-            "loss_reduction": "sequence_mean",
-            "max_seq_len": 4,
-            "use_tis": False,
-        }
-    )
-
-    # Get loss function
-    loss_fn = PolicyLossRegistry.get("regular")
-
-    # Test token_mean without mask
-    loss_token_no_mask, _ = loss_fn(log_probs, old_log_probs, advantages, config_token)
-
-    # Test token_mean with mask
-    loss_token_with_mask, _ = loss_fn(log_probs, old_log_probs, advantages, config_token, loss_mask)
-
-    # Test sequence_mean without mask
-    loss_seq_no_mask, _ = loss_fn(log_probs, old_log_probs, advantages, config_seq)
-
-    # Test sequence_mean with mask
-    loss_seq_with_mask, _ = loss_fn(log_probs, old_log_probs, advantages, config_seq, loss_mask)
-
-    # Manual calculations to verify (using default PolicyLoss parameters)
-    ratio = torch.exp(log_probs - old_log_probs)
-    surr1 = ratio * advantages
-    surr2 = ratio.clamp(1 - clip_eps_low, 1 + clip_eps_high) * advantages  # clip_eps_low=0.2, clip_eps_high=0.2
-    loss_per_token = -torch.min(surr1, surr2)
-
-    # Expected token_mean without mask: mean of all tokens
-    expected_token_no_mask = loss_per_token.mean()
-
-    # Expected token_mean with mask: masked mean of all tokens
-    expected_token_with_mask = (loss_per_token * loss_mask).sum() / (loss_mask.sum() + 1e-8)
-
-    # Expected sequence_mean without mask: mean of sequence means
-    expected_seq_no_mask = loss_per_token.mean(dim=1).mean()
-
-    # Expected sequence_mean with mask: mean of masked sequence means
-    seq_means_masked = (loss_per_token * loss_mask).sum(dim=1) / (loss_mask.sum(dim=1) + 1e-8)
-    expected_seq_with_mask = seq_means_masked.mean()
-
-    # Verify results
-    torch.testing.assert_close(loss_token_no_mask, expected_token_no_mask, rtol=1e-5, atol=1e-8)
-    torch.testing.assert_close(loss_token_with_mask, expected_token_with_mask, rtol=1e-5, atol=1e-8)
-    torch.testing.assert_close(loss_seq_no_mask, expected_seq_no_mask, rtol=1e-5, atol=1e-8)
-    torch.testing.assert_close(loss_seq_with_mask, expected_seq_with_mask, rtol=1e-5, atol=1e-8)
-
-    # Verify that the two reduction modes give the same results when sequences have equal length and no mask
-    assert torch.allclose(loss_token_no_mask, loss_seq_no_mask, rtol=1e-5), (
-        "token_mean and sequence_mean should give same results when sequences have equal length and no mask"
-    )
-    # But they should give different results when mask creates different effective sequence lengths
-    assert not torch.allclose(loss_token_with_mask, loss_seq_with_mask, rtol=1e-3), (
-        "token_mean and sequence_mean with mask should give different results"
-    )
-
-
-def test_policy_loss_reduction_edge_cases():
-    """Tests edge cases for loss_reduction modes."""
-
-    device = "cpu"
-
-    # Test with single sequence (should give same result for both modes)
-    advantages = torch.tensor([[1.0, -1.0, 2.0]], device=device)
-    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
-    log_probs = torch.tensor([[-1.5, -0.5, -1.2]], device=device)
-
-    # Create configs for different reduction modes
-    config_token = DictConfig(
-        {
-            "eps_clip_low": 0.2,
-            "eps_clip_high": 0.2,
-            "clip_ratio_c": 3.0,
-            "policy_loss_type": "regular",
-            "loss_reduction": "token_mean",
-            "max_seq_len": 4,
-            "use_tis": False,
-        }
-    )
-
-    config_seq = DictConfig(
-        {
-            "eps_clip_low": 0.2,
-            "eps_clip_high": 0.2,
-            "clip_ratio_c": 3.0,
-            "policy_loss_type": "regular",
-            "loss_reduction": "sequence_mean",
-            "max_seq_len": 4,
-            "use_tis": False,
-        }
-    )
-
-    # Get loss function
-    loss_fn = PolicyLossRegistry.get("regular")
-
-    loss_token, _ = loss_fn(log_probs, old_log_probs, advantages, config_token)
-    loss_seq, _ = loss_fn(log_probs, old_log_probs, advantages, config_seq)
-
-    # With single sequence, both modes should give same result
-    torch.testing.assert_close(loss_token, loss_seq, rtol=1e-6, atol=1e-8)
-
-    # Test with completely masked sequence
-    loss_mask = torch.tensor([[0.0, 0.0, 0.0]], device=device)
-    loss_token_masked, _ = loss_fn(log_probs, old_log_probs, advantages, config_token, loss_mask)
-    loss_seq_masked, _ = loss_fn(log_probs, old_log_probs, advantages, config_seq, loss_mask)
-
-    # Should handle zero mask gracefully (due to +1e-8 in denominator)
-    assert torch.isfinite(loss_token_masked)
-    assert torch.isfinite(loss_seq_masked)
 
 
 def test_gspo_importance_sampling_levels():
@@ -493,7 +356,7 @@ def test_gspo_importance_sampling_levels():
             "use_tis": False,
         }
     )
-    ppo_loss_fn = PolicyLossRegistry.get("regular")
+    ppo_loss_fn = _policy_loss("regular")
     loss_token, _ = ppo_loss_fn(log_probs, old_log_probs, advantages, ppo_config, loss_mask)
 
     # Test GSPO (sequence-level importance sampling)
@@ -508,7 +371,7 @@ def test_gspo_importance_sampling_levels():
             "use_tis": False,
         }
     )
-    gspo_loss_fn = PolicyLossRegistry.get("gspo")
+    gspo_loss_fn = _policy_loss("gspo")
     loss_sequence, _ = gspo_loss_fn(log_probs, old_log_probs, advantages, gspo_config, loss_mask)
 
     # Manual calculation for token-level (standard PPO)
@@ -615,7 +478,7 @@ def test_clip_cov_policy_loss():
     )
 
     # Get loss function
-    clip_cov_fn = PolicyLossRegistry.get("clip_cov")
+    clip_cov_fn = _policy_loss("clip_cov")
 
     # Calculate loss
     loss, metrics = clip_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
@@ -636,7 +499,7 @@ def test_clip_cov_policy_loss():
         }
     )
 
-    regular_fn = PolicyLossRegistry.get("regular")
+    regular_fn = _policy_loss("regular")
     regular_loss, _ = regular_fn(log_probs, old_log_probs, advantages, regular_config, loss_mask)
 
     # Clip-Cov should give different results due to covariance-based correction
@@ -677,7 +540,7 @@ def test_kl_cov_policy_loss():
     )
 
     # Get loss function
-    kl_cov_fn = PolicyLossRegistry.get("kl_cov")
+    kl_cov_fn = _policy_loss("kl_cov")
 
     # Calculate loss
     loss, metrics = kl_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
@@ -698,7 +561,7 @@ def test_kl_cov_policy_loss():
         }
     )
 
-    regular_fn = PolicyLossRegistry.get("regular")
+    regular_fn = _policy_loss("regular")
     regular_loss, _ = regular_fn(log_probs, old_log_probs, advantages, regular_config, loss_mask)
 
     # KL-Cov should give different results due to KL regularization on selected tokens
@@ -730,7 +593,7 @@ def test_sapo_policy_loss_basic():
         }
     )
 
-    loss_fn = PolicyLossRegistry.get("sapo")
+    loss_fn = _policy_loss("sapo")
 
     # Actual SAPO loss
     actual_loss, metrics = loss_fn(
@@ -764,66 +627,6 @@ def test_sapo_policy_loss_basic():
     assert metrics == {}
 
 
-def test_reduce_loss_seq_mean_token_sum_norm_global():
-    """seq_mean_token_sum_norm_global: loss == sum(loss * mask) / global_denom.
-
-    Also a regression guard that the EXISTING reduction modes are byte-identical
-    when the new global_denom param is left at its default (None).
-    """
-    device = "cpu"
-
-    loss = torch.tensor(
-        [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]],
-        device=device,
-    )
-    loss_mask = torch.tensor(
-        [[1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 0.0, 0.0]],
-        device=device,
-    )
-    max_seq_len = 4
-    global_denom = 5.0  # e.g. global_num_seqs=... such that Z is this known value
-
-    # --- New mode: sum of masked loss / global_denom (NOT a mean) ---
-    out = reduce_loss(
-        loss,
-        loss_mask,
-        "seq_mean_token_sum_norm_global",
-        max_seq_len=max_seq_len,
-        global_denom=global_denom,
-    )
-    expected = torch.sum(loss * loss_mask) / global_denom
-    torch.testing.assert_close(out, expected, rtol=1e-6, atol=1e-8)
-
-    # New mode without a mask -> sum of all / global_denom
-    out_nomask = reduce_loss(
-        loss,
-        None,
-        "seq_mean_token_sum_norm_global",
-        max_seq_len=max_seq_len,
-        global_denom=global_denom,
-    )
-    torch.testing.assert_close(out_nomask, torch.sum(loss) / global_denom, rtol=1e-6, atol=1e-8)
-
-    # Missing global_denom must assert
-    with pytest.raises(AssertionError):
-        reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm_global", max_seq_len=max_seq_len)
-
-    # --- Regression guard: the existing modes are unchanged with default global_denom=None ---
-    # token_mean == masked_mean
-    tm = reduce_loss(loss, loss_mask, "token_mean", max_seq_len=max_seq_len)
-    torch.testing.assert_close(tm, (loss * loss_mask).sum() / (loss_mask.sum() + 1e-8), rtol=1e-6, atol=1e-8)
-    # sequence_mean == per-seq masked mean, then batch mean
-    sm = reduce_loss(loss, loss_mask, "sequence_mean", max_seq_len=max_seq_len)
-    seq_means = (loss * loss_mask).sum(dim=-1) / (loss_mask.sum(dim=-1) + 1e-8)
-    torch.testing.assert_close(sm, seq_means.mean(), rtol=1e-6, atol=1e-8)
-    # seq_mean_token_sum_norm (Dr.GRPO) == per-seq token-sum / max_seq_len, then mean
-    drgrpo = reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm", max_seq_len=max_seq_len)
-    torch.testing.assert_close(drgrpo, (torch.sum(loss * loss_mask, dim=-1) / max_seq_len).mean(), rtol=1e-6, atol=1e-8)
-
-    # The new mode is genuinely different from Dr.GRPO (sum-vs-mean of seq terms)
-    assert not torch.allclose(out, drgrpo, rtol=1e-3)
-
-
 def test_tis_graceful_degrade_on_none_logprobs():
     """Fix A: use_tis=True but a batch with no rollout logprobs must degrade to
     the standard (non-TIS) policy loss for THAT batch instead of crashing.
@@ -850,7 +653,7 @@ def test_tis_graceful_degrade_on_none_logprobs():
         "max_seq_len": 4,
         "tis_imp_ratio_cap": 2.0,
     }
-    loss_fn = PolicyLossRegistry.get("regular")
+    loss_fn = _policy_loss("regular")
 
     # Reference: TIS off.
     cfg_off = DictConfig({**base_cfg, "use_tis": False})

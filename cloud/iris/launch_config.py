@@ -330,6 +330,10 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
     allocation = validate_iris_allocation(raw)
     skyrl = raw["skyrl"]
     run = raw["run"]
+    if run["mode"] == RunMode.TRAIN:
+        from skyrl_train.config.objective_spec import validate_objective
+
+        validate_objective(config.skyrl)
     runtime = raw["runtime"]
     entrypoint = runtime["entrypoint"]
     registered_rl_entrypoint_module(entrypoint)

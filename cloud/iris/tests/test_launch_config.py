@@ -102,14 +102,25 @@ def _raw_config() -> dict[str, Any]:
     }
 
 
-def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("loss", "reduction"), [("regular", "token_mean"), ("gspo", "sequence_mean")])
+def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path, loss: str, reduction: str) -> None:
     path = tmp_path / "resolved-launch.yaml"
-    path.write_text(yaml.safe_dump(_raw_config(), sort_keys=False))
+    raw = _raw_config()
+    raw["skyrl"]["trainer"]["algorithm"].update(policy_loss_type=loss, loss_reduction=reduction)
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
     config = load_launch_config(path)
 
     assert config.skyrl.trainer.train_batch_size == 8
     assert validate_launch_config(config).num_nodes == 1
+    if loss == "gspo":
+        config.skyrl.trainer.algorithm.loss_reduction = "token_mean"
+        with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):
+            validate_launch_config(config)
+        raw["skyrl"]["trainer"]["algorithm"]["loss_reduction"] = "token_mean"
+        path.write_text(yaml.safe_dump(raw, sort_keys=False))
+        with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):
+            load_launch_config(path)
 
 
 @pytest.mark.parametrize(

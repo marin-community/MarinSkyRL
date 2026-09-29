@@ -7,9 +7,11 @@ import torch
 import math
 import pytest
 from omegaconf import OmegaConf
-from skyrl_train.utils.loss_reduction import compute_global_loss_denom, count_nonzero_advantage_seqs, reduce_loss
 from skyrl_train.utils.policy_math import compute_approx_kl
-from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective, ppo_policy_loss
+from skyrl_train.objective.losses import PolicyLossInputs, TokenLoss, ppo_policy_loss
+from skyrl_train.objective.objective import build_objective_micro_batch, compute_policy_objective
+from skyrl_train.objective.reduction import step_counts
+from skyrl_train.config.objective_spec import LossSpec, RatioAnchor
 from skyrl_train.utils.advantage_estimators import (
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
@@ -89,7 +91,7 @@ def test_policy_objective_kl_gradient_matches_analytic_derivative(coefficient):
             "use_tis": False,
         }
     )
-    objective = compute_policy_objective(
+    batch = build_objective_micro_batch(
         action_log_probs=log_probs,
         old_action_log_probs=log_probs.detach(),
         base_action_log_probs=base_log_probs,
@@ -98,23 +100,25 @@ def test_policy_objective_kl_gradient_matches_analytic_derivative(coefficient):
         rollout_logprobs=None,
         response_span_tags=None,
         token_entropy=torch.zeros_like(log_probs),
-        config=config,
-        policy_loss_fn=ppo_policy_loss,
-        accumulation_steps=2,
-        scaling=LossScaling.CALLER,
+        think_token_weight=1.0,
+        teacher=None,
+    )
+    counts = step_counts([mask], [mask], [], [torch.zeros_like(mask)], 3, lambda value: value)
+    objective = compute_policy_objective(
+        batch, loss=ppo_policy_loss, counts=counts, config=config, loss_scale=1, report_scale=1
     )
     objective.optimization_loss.backward()
 
     # k3 derivatives at log(p/q) = [0.2, -0.3], away from clamps.
     derivatives = [1.0 - math.exp(-0.2), 1.0 - math.exp(0.3)]
     expected = torch.zeros_like(log_probs)
-    # Two active tokens, two sequences (including an empty one), two accumulated microbatches.
-    expected[0, :2] = torch.tensor(derivatives, dtype=log_probs.dtype) * coefficient / 8
+    # Two active tokens in one trainable sequence; the empty row contributes neither numerator nor count.
+    expected[0, :2] = torch.tensor(derivatives, dtype=log_probs.dtype) * coefficient / 2
     torch.testing.assert_close(log_probs.grad, expected, rtol=1e-12, atol=1e-12)
 
     metric = compute_approx_kl(log_probs, base_log_probs, mask, kl_estimator_type="k3")
     assert not metric.requires_grad
-    torch.testing.assert_close(objective.kl_loss.detach(), metric[0, :2].sum() / 4)
+    torch.testing.assert_close(objective.rows.kl.detach(), metric[0, :2].sum() / 2)
 
 
 def test_compute_reinforce_plus_plus_outcome_advantage_returns_and_masking():
@@ -297,94 +301,6 @@ def test_compute_gae_advantage_return_lam(advantage_test_data):
     assert torch.allclose(ret, expected_ret, atol=1e-5)
 
 
-def test_reduce_loss():
-    """Test the reduce_loss function with different reduction types."""
-    # Test data: 2x3 loss tensor with different valid token counts per sequence
-    loss = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-    loss_mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 0.0, 0.0]])  # seq0 has 3 tokens, seq1 has 1 token
-
-    # Test token_mean: sum all valid losses / count valid tokens
-    # Valid losses: [1.0, 2.0, 3.0, 4.0], mean = 10.0/4 = 2.5
-    result_token = reduce_loss(loss, loss_mask, "token_mean")
-    expected_token = torch.tensor(2.5)
-    assert torch.allclose(result_token, expected_token), f"Expected {expected_token}, got {result_token}"
-
-    # Test sequence_mean: mean of per-sequence means
-    # Seq 0: (1.0 + 2.0 + 3.0) / 3 = 2.0, Seq 1: 4.0 / 1 = 4.0, batch mean = (2.0 + 4.0) / 2 = 3.0
-    result_seq = reduce_loss(loss, loss_mask, "sequence_mean")
-    expected_seq = torch.tensor(3.0)
-    assert torch.allclose(result_seq, expected_seq), f"Expected {expected_seq}, got {result_seq}"
-
-    # Test seq_mean_token_sum_norm: sum per sequence / max_len, then batch mean
-    # Seq 0: (1.0 + 2.0 + 3.0) / 4 = 1.5, Seq 1: 4.0 / 4 = 1.0, batch mean = (1.5 + 1.0) / 2 = 1.25
-    max_seq_len = 4
-    result_max = reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm", max_seq_len)
-    expected_max = torch.tensor(1.25)
-    assert torch.allclose(result_max, expected_max), f"Expected {expected_max}, got {result_max}"
-
-
-@pytest.mark.parametrize(("micro_batch", "dp_size"), [(1, 1), (2, 1), (4, 1), (1, 2), (2, 2)])
-def test_step_objective_matches_full_batch_for_any_split(micro_batch, dp_size):
-    mask = torch.tensor([[1, 0, 0, 0], [1, 1, 1, 0], [1, 1, 0, 0], [1, 1, 1, 1]], dtype=torch.float64)
-    advantages = torch.arange(1, 17, dtype=torch.float64).reshape(4, 4)
-    reference_log_probs = torch.zeros_like(advantages, requires_grad=True)
-    reference = (
-        sum(
-            -reference_log_probs[row, token].exp() * advantages[row, token]
-            for row in range(4)
-            for token in range(4)
-            if mask[row, token] > 0
-        )
-        / mask.sum()
-    )
-    reference.backward()
-
-    log_probs = torch.zeros_like(advantages, requires_grad=True)
-    config = OmegaConf.create(
-        {
-            "loss_reduction": "token_mean",
-            "max_seq_len": 4,
-            "policy_loss_type": "regular",
-            "eps_clip_low": 0.2,
-            "eps_clip_high": 0.2,
-            "think_token_weight": 1.0,
-            "use_entropy_loss": False,
-            "entropy_loss_coef": 0.0,
-            "use_kl_loss": False,
-            "kl_loss_coef": 0.0,
-            "kl_estimator_type": "k1",
-            "use_tis": False,
-            "tis_imp_ratio_cap": 2.0,
-        }
-    )
-    rank_rows = 4 // dp_size
-    num_microbatches = rank_rows // micro_batch
-    cp_size = 1
-    scheduled = log_probs.new_zeros(())
-    for rank in range(dp_size):
-        for start in range(rank * rank_rows, (rank + 1) * rank_rows, micro_batch):
-            rows = slice(start, start + micro_batch)
-            objective = compute_policy_objective(
-                action_log_probs=log_probs[rows],
-                old_action_log_probs=torch.zeros_like(log_probs[rows]),
-                base_action_log_probs=None,
-                advantages=advantages[rows],
-                loss_mask=mask[rows],
-                rollout_logprobs=None,
-                response_span_tags=None,
-                token_entropy=torch.zeros_like(log_probs[rows]),
-                config=config,
-                policy_loss_fn=ppo_policy_loss,
-                accumulation_steps=num_microbatches,
-                scaling=LossScaling.MEGATRON_PIPELINE,
-            )
-            # Megatron's schedule scales by CP/M and DDP averages over DP*CP.
-            scheduled = scheduled + objective.optimization_loss * cp_size / num_microbatches / (dp_size * cp_size)
-    scheduled.backward()
-    torch.testing.assert_close(log_probs.grad, reference_log_probs.grad, rtol=1e-6, atol=1e-7)
-    torch.testing.assert_close(scheduled, reference, rtol=1e-6, atol=1e-7)
-
-
 def _validatable_dummy_config():
     """A dummy config that passes validate_batch_sizes so validate_cfg reaches the
     loss_reduction allow-list (single-GPU placement, all batch sizes == 1)."""
@@ -439,151 +355,6 @@ def test_validate_cfg_accepts_all_loss_reductions(loss_reduction):
         )
 
 
-def test_global_loss_denom_driver_matches_allreduce_sum():
-    """The DRIVER-side collective-free global loss denominator Z must be BIT-IDENTICAL
-    to the historical in-worker ``all_reduce(sum)`` of per-rank ``local_num_seqs`` over
-    the full policy PG. This is the objective-preservation proof for the 80B gs1 NCCL
-    wedge fix (worker.py seq_mean_token_sum_norm_global normalizer, collective #288606):
-    the fix moves the collective off the async ppo_train hot path to a driver precompute
-    and MUST NOT change Z.
-    """
-    torch.manual_seed(0)
-    max_seq_len = 4096
-    # A range of (world_size, dp_size) mesh geometries, including the 80B
-    # EP8xDP8xCP1 = 64-rank shape that hit the wedge.
-    for world_size, dp_size in [(64, 2), (64, 8), (64, 16), (8, 4), (16, 16), (4, 1)]:
-        ranks_per_dp_group = world_size // dp_size
-        # Synthetic full-batch advantages: rows divisible by dp_size, with a deterministic
-        # subset of all-zero rows (excluded / zero-variance) so the nonzero-seq count is
-        # non-trivial and < n_rows.
-        n_rows = dp_size * 5
-        resp_len = 7
-        adv = torch.randn(n_rows, resp_len)
-        adv[::3] = 0.0
-
-        # Reference: emulate the historical per-rank all_reduce(sum). MeshDispatch splits
-        # the full batch into dp_size disjoint row-chunks; every rank in a dp-group holds
-        # the SAME chunk, so summing local counts over ALL world_size ranks ==
-        # ranks_per_dp_group * (per-chunk counts summed over the dp groups).
-        chunks = torch.chunk(adv, dp_size, dim=0)
-        assert len(chunks) == dp_size
-        summed_over_ranks = 0.0
-        for dp in range(dp_size):
-            summed_over_ranks += ranks_per_dp_group * count_nonzero_advantage_seqs(chunks[dp])
-        ref_Z = max(summed_over_ranks, 1.0) * max_seq_len
-
-        # New: driver-side collective-free.
-        new_Z = compute_global_loss_denom(adv, max_seq_len, ranks_per_dp_group)
-
-        assert new_Z == ref_Z, f"(world={world_size}, dp={dp_size}) Z mismatch: {new_Z} != {ref_Z}"
-
-    # All-zero-advantage batch -> clamp(min=1) path still yields a valid denom (matches
-    # the legacy max(global_num_seqs, 1.0) clamp).
-    adv_zero = torch.zeros(8, 5)
-    assert compute_global_loss_denom(adv_zero, max_seq_len, 4) == 1.0 * max_seq_len
-
-
-def _mask_sum_policy_loss(
-    log_probs,
-    old_log_probs,
-    advantages,
-    config,
-    loss_mask=None,
-    rollout_logprobs=None,
-    global_loss_denom=None,
-):
-    del old_log_probs, advantages, config, rollout_logprobs, global_loss_denom
-    return (log_probs * loss_mask).sum(), {}
-
-
-@pytest.mark.parametrize("loss_reduction", ["token_mean", "seq_mean_token_sum_norm_global"])
-def test_policy_objective_scheduler_and_caller_scaling_have_gradient_parity(loss_reduction):
-    config = OmegaConf.create(
-        {
-            "loss_reduction": loss_reduction,
-            "think_token_weight": 1.0,
-            "use_entropy_loss": False,
-            "entropy_loss_coef": 0.0,
-            "use_kl_loss": False,
-            "kl_loss_coef": 0.0,
-            "kl_estimator_type": "k1",
-            "use_tis": False,
-            "tis_imp_ratio_cap": 2.0,
-        }
-    )
-    accumulation_steps = 3
-    common = {
-        "old_action_log_probs": torch.zeros(1, 2),
-        "base_action_log_probs": None,
-        "advantages": torch.ones(1, 2),
-        "loss_mask": torch.ones(1, 2),
-        "rollout_logprobs": None,
-        "response_span_tags": None,
-        "token_entropy": torch.zeros(1, 2),
-        "config": config,
-        "policy_loss_fn": _mask_sum_policy_loss,
-        "accumulation_steps": accumulation_steps,
-        "global_loss_denom": 12.0,
-    }
-
-    caller_log_probs = torch.tensor([[1.0, 2.0]], requires_grad=True)
-    caller = compute_policy_objective(
-        action_log_probs=caller_log_probs,
-        scaling=LossScaling.CALLER,
-        **common,
-    )
-    caller.optimization_loss.backward()
-
-    scheduler_log_probs = torch.tensor([[1.0, 2.0]], requires_grad=True)
-    scheduler = compute_policy_objective(
-        action_log_probs=scheduler_log_probs,
-        scaling=LossScaling.MEGATRON_PIPELINE,
-        **common,
-    )
-    (scheduler.optimization_loss / accumulation_steps).backward()
-
-    torch.testing.assert_close(scheduler_log_probs.grad, caller_log_probs.grad, rtol=0, atol=0)
-    assert caller.unscaled_loss.item() == pytest.approx(3.0)
-    assert scheduler.unscaled_loss.item() == pytest.approx(3.0)
-    expected_caller_loss = 3.0 if loss_reduction == "seq_mean_token_sum_norm_global" else 1.0
-    expected_scheduler_loss = 9.0 if loss_reduction == "seq_mean_token_sum_norm_global" else 3.0
-    assert caller.optimization_loss.item() == pytest.approx(expected_caller_loss)
-    assert scheduler.optimization_loss.item() == pytest.approx(expected_scheduler_loss)
-    assert "global_loss_denom" not in config
-
-
-def test_policy_objective_applies_think_weight_before_policy_loss():
-    config = OmegaConf.create(
-        {
-            "loss_reduction": "token_mean",
-            "think_token_weight": 0.25,
-            "use_entropy_loss": False,
-            "entropy_loss_coef": 0.0,
-            "use_kl_loss": False,
-            "kl_loss_coef": 0.0,
-            "kl_estimator_type": "k1",
-            "use_tis": False,
-            "tis_imp_ratio_cap": 2.0,
-        }
-    )
-    result = compute_policy_objective(
-        action_log_probs=torch.ones(1, 4),
-        old_action_log_probs=torch.zeros(1, 4),
-        base_action_log_probs=None,
-        advantages=torch.ones(1, 4),
-        loss_mask=torch.ones(1, 4),
-        rollout_logprobs=None,
-        response_span_tags=torch.tensor([[1, 0, 1, 0]]),
-        token_entropy=torch.zeros(1, 4),
-        config=config,
-        policy_loss_fn=_mask_sum_policy_loss,
-        accumulation_steps=1,
-        scaling=LossScaling.CALLER,
-    )
-
-    assert result.policy_loss.item() == pytest.approx(2.5)
-
-
 @pytest.mark.parametrize(
     ("config_path", "invalid_value", "error"),
     [
@@ -598,7 +369,8 @@ def test_validate_cfg_rejects_unknown_config_choice(config_path, invalid_value, 
 
     cfg = _validatable_dummy_config()
     OmegaConf.update(cfg, config_path, invalid_value)
-    with pytest.raises(AssertionError, match=error):
+    error_type = ValueError if config_path == "trainer.algorithm.loss_reduction" else AssertionError
+    with pytest.raises(error_type, match=error):
         validate_cfg(cfg)
 
 
@@ -674,7 +446,7 @@ def test_validate_cfg_rejects_gspo_without_sequence_mean_reduction():
     cfg.trainer.algorithm.policy_loss_type = "gspo"
     cfg.trainer.algorithm.loss_reduction = "token_mean"
 
-    with pytest.raises(ValueError, match="GSPO requires trainer.algorithm.loss_reduction=sequence_mean"):
+    with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):
         validate_cfg(cfg)
 
 
@@ -807,36 +579,22 @@ def test_advantage_estimator_registry_specific():
     AdvantageEstimatorRegistry.unregister("test_decorator")
 
 
-def test_policy_loss_registry_specific():
-    """Test PolicyLossRegistry-specific functionality."""
-    from omegaconf import DictConfig
+def test_registered_policy_loss_preserves_per_token_gradients():
+    @register_policy_loss("test_policy_decorator", LossSpec(RatioAnchor.NONE))
+    def decorated_policy_loss(inputs, config):
+        return TokenLoss(-inputs.log_probs * inputs.advantages, {})
 
-    @register_policy_loss("test_policy_decorator")
-    def decorated_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_log_probs=None):
-        return torch.tensor(1.5), {"ppo_clip_ratio": 0.3}
-
-    # Test decorator worked
-    assert "test_policy_decorator" in PolicyLossRegistry.list_available()
-    retrieved = PolicyLossRegistry.get("test_policy_decorator")
-    assert retrieved == decorated_policy_loss
-
-    # Test function execution
-    config = DictConfig({"policy_loss_type": "test_policy_decorator"})
-    loss, metrics = retrieved(
-        log_probs=torch.tensor([[0.1]]),
-        old_log_probs=torch.tensor([[0.2]]),
-        advantages=torch.tensor([[1.0]]),
-        config=config,
-    )
-    assert loss.item() == 1.5
-    assert metrics["ppo_clip_ratio"] == 0.3
-
-    # Test error message includes "Policy loss"
-    with pytest.raises(ValueError, match="Unknown policy loss"):
-        PolicyLossRegistry.get("non_existent_policy")
-
-    # Clean up
-    PolicyLossRegistry.unregister("test_policy_decorator")
+    try:
+        log_probs = torch.tensor([[-0.1, -0.5]], requires_grad=True)
+        inputs = PolicyLossInputs(
+            log_probs, log_probs.detach(), None, torch.tensor([[3.0, -2.0]]), torch.ones_like(log_probs)
+        )
+        result = PolicyLossRegistry.get("test_policy_decorator")(inputs, OmegaConf.create({}))
+        torch.testing.assert_close(result.values, torch.tensor([[0.3, -1.0]]))
+        result.values.sum().backward()
+        torch.testing.assert_close(log_probs.grad, torch.tensor([[-3.0, 2.0]]))
+    finally:
+        PolicyLossRegistry.unregister("test_policy_decorator")
 
 
 def test_package_initialization_registers_complete_builtin_algorithm_sets():
@@ -859,20 +617,52 @@ def test_package_initialization_registers_complete_builtin_algorithm_sets():
     }
 
 
-def test_validate_cfg_preserves_custom_policy_loss():
-    def custom_policy_loss(*args, **kwargs):
-        return torch.tensor(0.0), {}
+def test_validate_cfg_applies_custom_loss_contract_to_training():
+    def custom_policy_loss(inputs, config):
+        return TokenLoss(-inputs.log_probs * inputs.advantages, {})
 
-    PolicyLossRegistry.register("custom_policy", custom_policy_loss)
+    PolicyLossRegistry.register(
+        "custom_policy", custom_policy_loss, spec=LossSpec(RatioAnchor.NONE, sequence_level=True)
+    )
     cfg = _validatable_dummy_config()
-    OmegaConf.update(cfg, "trainer.algorithm.policy_loss_type", "custom_policy")
-    OmegaConf.update(cfg, "generator.num_inference_engines", 1)
-    OmegaConf.update(cfg, "generator.inference_engine_tensor_parallel_size", 1)
-    OmegaConf.update(cfg, "generator.inference_engine_pipeline_parallel_size", 1)
-    OmegaConf.update(cfg, "generator.inference_engine_data_parallel_size", 1)
+    cfg.trainer.algorithm.policy_loss_type = "custom_policy"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.generator.num_inference_engines = 1
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.generator.inference_engine_pipeline_parallel_size = 1
+    cfg.generator.inference_engine_data_parallel_size = 1
     try:
+        cfg.trainer.algorithm.loss_reduction = "token_mean"
+        with pytest.raises(ValueError, match="requires trainer.algorithm.loss_reduction=sequence_mean"):
+            validate_cfg(cfg)
+        cfg.trainer.algorithm.loss_reduction = "sequence_mean"
         validate_cfg(cfg)
-        assert PolicyLossRegistry.get("custom_policy") is custom_policy_loss
+        log_probs = torch.tensor([[-0.1, -0.5]], requires_grad=True)
+        advantages = torch.tensor([[3.0, -2.0]])
+        mask = torch.ones_like(log_probs)
+        batch = build_objective_micro_batch(
+            action_log_probs=log_probs,
+            old_action_log_probs=log_probs.detach(),
+            base_action_log_probs=None,
+            advantages=advantages,
+            loss_mask=mask,
+            rollout_logprobs=None,
+            response_span_tags=None,
+            token_entropy=torch.zeros_like(log_probs),
+            think_token_weight=1,
+            teacher=None,
+        )
+        counts = step_counts([mask], [mask], [], [advantages], 2, lambda value: value)
+        result = compute_policy_objective(
+            batch,
+            loss=PolicyLossRegistry.get("custom_policy"),
+            counts=counts,
+            config=cfg.trainer.algorithm,
+            loss_scale=1,
+            report_scale=1,
+        )
+        result.optimization_loss.backward()
+        torch.testing.assert_close(log_probs.grad, torch.tensor([[-1.5, 1.0]]))
     finally:
         PolicyLossRegistry.unregister("custom_policy")
 
@@ -886,68 +676,28 @@ def _remove_registry_entries(registry, *names: str) -> None:
 
 @pytest.mark.usefixtures("ray_module")
 def test_registry_cross_ray_process():
-    """Test that registry works with Ray and that functions can be retrieved and called from different processes"""
+    import ray
+
+    def custom_loss(inputs, config):
+        return TokenLoss(-2 * inputs.log_probs * inputs.advantages, {})
+
+    @ray.remote
+    def gradient_from_registered_loss():
+        log_probs = torch.tensor([[-0.4]], requires_grad=True)
+        inputs = PolicyLossInputs(
+            log_probs, log_probs.detach(), None, torch.tensor([[3.0]]), torch.ones_like(log_probs)
+        )
+        result = PolicyLossRegistry.get("cross_process_test")(inputs, OmegaConf.create({}))
+        result.values.sum().backward()
+        return result.values.detach(), log_probs.grad
+
     try:
-        import ray
-        from omegaconf import DictConfig
-
-        # Create test functions
-        def test_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
-            return torch.tensor(2.0), {"ppo_clip_ratio": 0.5}
-
-        def test_policy_loss_2(log_probs, old_log_probs, advantages, config, loss_mask=None):
-            return torch.tensor(3.0), {"ppo_clip_ratio": 0.6}
-
-        def test_advantage_estimator(**kwargs):
-            rewards = kwargs["token_level_rewards"]
-            return rewards * 2, rewards * 3
-
-        # Test basic registration and retrieval
-        PolicyLossRegistry.register("cross_process_test", test_policy_loss)
-        AdvantageEstimatorRegistry.register(
-            "cross_process_adv_test", test_advantage_estimator, group_contract=NoGroupAdvantage()
-        )
-
-        # Test Ray integration
-        @ray.remote
-        def test_ray_registry_access():
-            policy_loss = PolicyLossRegistry.get("cross_process_test")
-            adv_estimator = AdvantageEstimatorRegistry.get("cross_process_adv_test")
-
-            loss, metrics = policy_loss(
-                log_probs=torch.tensor([[0.1]]),
-                old_log_probs=torch.tensor([[0.2]]),
-                advantages=torch.tensor([[1.0]]),
-                config=DictConfig({"policy_loss_type": "cross_process_test"}),
-            )
-
-            adv, ret = adv_estimator(
-                token_level_rewards=torch.tensor([[1.0, 2.0]]),
-                response_mask=torch.tensor([[1.0, 1.0]]),
-                index=np.array(["0", "0"]),
-            )
-            return loss, metrics, adv, ret
-
-        # Run Ray task
-        loss, metrics, adv, ret = ray.get(test_ray_registry_access.remote())
-        assert loss.item() == 2.0
-        assert metrics["ppo_clip_ratio"] == 0.5
-        assert adv.shape == torch.Size([1, 2])
-        assert ret.shape == torch.Size([1, 2])
-
-        # test that registration works after ray init as well
-        PolicyLossRegistry.register("cross_process_test_2", test_policy_loss_2)
-        loss_2, metrics_2 = PolicyLossRegistry.get("cross_process_test_2")(
-            log_probs=torch.tensor([[0.1]]),
-            old_log_probs=torch.tensor([[0.2]]),
-            advantages=torch.tensor([[1.0]]),
-            config=DictConfig({"policy_loss_type": "cross_process_test_2"}),
-        )
-        assert loss_2.item() == 3.0
-        assert metrics_2["ppo_clip_ratio"] == 0.6
+        PolicyLossRegistry.register("cross_process_test", custom_loss, spec=LossSpec(RatioAnchor.NONE))
+        values, gradient = ray.get(gradient_from_registered_loss.remote())
+        torch.testing.assert_close(values, torch.tensor([[2.4]]))
+        torch.testing.assert_close(gradient, torch.tensor([[-6.0]]))
     finally:
-        _remove_registry_entries(PolicyLossRegistry, "cross_process_test", "cross_process_test_2")
-        _remove_registry_entries(AdvantageEstimatorRegistry, "cross_process_adv_test")
+        _remove_registry_entries(PolicyLossRegistry, "cross_process_test")
 
 
 @pytest.mark.usefixtures("ray_module")

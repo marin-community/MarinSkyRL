@@ -6,6 +6,7 @@ import sys
 import logging
 import math
 import socket
+from dataclasses import asdict
 
 import ray
 import torch
@@ -22,6 +23,7 @@ from skyrl_train.batch_invariant import BATCH_INVARIANT_NCCL_ENV
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
 from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
+from skyrl_train.config.objective_spec import resolve_objective_config, validate_objective
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
@@ -54,12 +56,10 @@ from .algorithm_registry import (
     AdvantageEstimatorRegistry,
     NoGroupAdvantage,
     PolicyLossRegistry,
-    PolicyLossType,
     rollout_logprobs_enabled,
     sync_registries,
 )
 from .logging_utils import format_exception_text
-from .loss_reduction import SEQUENCE_MEAN_LOSS_REDUCTION, SUPPORTED_LOSS_REDUCTIONS
 from .nccl_environment import worker_nccl_environment
 from .placement_geometry import validate_colocated_engine_geometry
 
@@ -486,20 +486,6 @@ def validate_cfg(cfg: DictConfig):
         raise ValueError("Megatron does not support a critic worker")
     distillation_plan = compile_distillation_plan_from_config(cfg)
     validate_distillation_runtime_support(distillation_plan)
-    if (
-        distillation_plan is not None
-        and distillation_plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
-    ):
-        if (
-            cfg.trainer.use_sample_packing
-            or cfg.trainer.policy.sequence_parallel_size != 1
-            or cfg.trainer.policy.megatron_config.context_parallel_size != 1
-            or cfg.trainer.policy.megatron_config.tensor_model_parallel_size != 1
-        ):
-            raise ValueError(
-                "selected-ID distillation on Megatron requires trainer.use_sample_packing=false, "
-                "sequence_parallel_size=1, context_parallel_size=1, and tensor_model_parallel_size=1"
-            )
     trajectory_selector = trajectory_selector_from_config(cfg)
     if trajectory_selector is not None:
         if cfg.trainer.step_wise_training:
@@ -508,13 +494,6 @@ def validate_cfg(cfg: DictConfig):
         cfg.trainer.algorithm.dynamic_sampling.informative_on,
         float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
     )
-    if (
-        cfg.trainer.algorithm.policy_loss_type == PolicyLossType.GSPO
-        and cfg.trainer.algorithm.loss_reduction != SEQUENCE_MEAN_LOSS_REDUCTION
-    ):
-        raise ValueError(
-            f"GSPO requires trainer.algorithm.loss_reduction=sequence_mean; got {cfg.trainer.algorithm.loss_reduction}"
-        )
     runtime_values = {
         "trainer.distributed.placement_group_timeout_seconds": cfg.trainer.distributed.placement_group_timeout_seconds,
         "trainer.distributed.worker_collective_timeout_seconds": cfg.trainer.distributed.worker_collective_timeout_seconds,
@@ -559,6 +538,14 @@ def validate_cfg(cfg: DictConfig):
         )
     if cfg.generator.gdn_backend not in set(GDNBackend):
         raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
+    available_policy_losses = PolicyLossRegistry.list_available()
+    assert available_policy_losses != [], "Policy loss registry is not populated."
+    assert cfg.trainer.algorithm.policy_loss_type in available_policy_losses, (
+        f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
+    )
+    spec = PolicyLossRegistry.spec(cfg.trainer.algorithm.policy_loss_type)
+    cfg.trainer.algorithm.resolved_loss_spec = {**asdict(spec), "anchor": spec.anchor.value}
+    validate_objective(cfg)
     validate_generator_cfg(cfg)
     validate_batch_invariant_config(cfg)
     validate_hf_export_config(cfg)
@@ -586,13 +573,6 @@ def validate_cfg(cfg: DictConfig):
             "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints or negative to keep all checkpoints"
         )
 
-    available_policy_losses = PolicyLossRegistry.list_available()
-    assert available_policy_losses != [], "Policy loss registry is not populated."
-
-    assert cfg.trainer.algorithm.policy_loss_type in available_policy_losses, (
-        f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
-    )
-
     available_advantage_estimators = AdvantageEstimatorRegistry.list_available()
     assert cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators, (
         f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {available_advantage_estimators}"
@@ -602,11 +582,6 @@ def validate_cfg(cfg: DictConfig):
         NoGroupAdvantage,
     ):
         raise ValueError("best-of-N selection requires a no-group advantage estimator")
-
-    assert cfg.trainer.algorithm.loss_reduction in SUPPORTED_LOSS_REDUCTIONS, (
-        f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
-        f"Must be one of {list(SUPPORTED_LOSS_REDUCTIONS)}"
-    )
 
     # add field to algorithm config needed for loss functions
     # create a new config to make it modifiable
@@ -631,6 +606,7 @@ def validate_cfg(cfg: DictConfig):
         logger.warning("`use_kl_estimator_k3` will be deprecated, overriding to use `kl_estimator_type='k3'` instead")
         algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
+    resolve_objective_config(cfg)
 
     behavior_clip = cfg.trainer.algorithm.policy_loss_type == "behavior_clip"
     if behavior_clip and cfg.trainer.algorithm.use_tis:

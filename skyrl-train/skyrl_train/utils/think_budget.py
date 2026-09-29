@@ -1,30 +1,4 @@
-"""Mild per-think-token cost (Stage D / M4).
-
-Mechanism 4 of the loop-behavior reward plan: apply gentle *active* pressure
-against thinking-faff. F7's loss down-weighting (``build_think_weighted_loss_mask``
-in ``loss_reduction.py``) is the *passive* half — it stops RL from *reinforcing*
-think-token growth (credit no longer flows full-strength to ``<think>`` tokens).
-M4 is the *active* half — a small negative token reward on ``<think>`` tokens that
-*penalizes* faffing, ``capped per turn`` so it can never dominate the outcome.
-
-Design (mirrors ``pbs_shaping.compute_pbs_token_shaping``):
-  * Writes a small negative value (``think_token_cost``, default 0.0 = OFF) onto
-    each ``SPAN_THINK``-tagged response token.
-  * **Capped per turn**: the total cost for any single assistant turn's think span
-    is clamped to ``-max_cost_per_turn`` (default 0.05), so a single long ramble
-    can't swamp the trajectory. Within a turn the (capped) total is scattered
-    uniformly across that turn's THINK tokens.
-  * Rides the SAME additive ``token_level_shaping`` channel + ``rloo_n_pbs`` seam
-    as Stage C's PBS credit. PBS writes EDIT tokens; M4 writes THINK tokens — the
-    spans are **non-overlapping**, so the two can be summed into one channel
-    (``compute_think_token_cost`` is additive-friendly: it only touches THINK
-    positions, leaving any pre-existing PBS/EDIT entries intact).
-
-BYTE-IDENTICAL CONTRACT: ``think_token_cost == 0.0`` ⇒ an all-zeros vector ⇒ the
-channel is unchanged ⇒ the additive seam is a no-op ⇒ advantages bit-identical.
-
-Pure / CPU-only; no torch dependency. Unit-testable in isolation.
-"""
+"""Per-think-token reward costs capped by assistant turn."""
 
 from __future__ import annotations
 

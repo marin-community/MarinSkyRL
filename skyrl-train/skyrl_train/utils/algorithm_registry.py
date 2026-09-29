@@ -15,6 +15,7 @@ import ray
 from loguru import logger
 from omegaconf import DictConfig
 
+from skyrl_train.config.objective_spec import BUILTIN_LOSS_SPECS, LossSpec
 from skyrl_train.utils.function_registry import BaseFunctionRegistry
 
 
@@ -93,6 +94,7 @@ class PolicyLossType(StrEnum):
     KL_COV = "kl_cov"
     SAPO = "sapo"
     SFT = "sft"
+    IMPORTANCE_SAMPLING = "importance_sampling"
 
 
 def policy_loss_requires_rollout_logprobs(policy_loss_type: str) -> bool:
@@ -120,6 +122,26 @@ class PolicyLossRegistry(BaseFunctionRegistry):
 
     _actor_name = "policy_loss_registry"
     _function_type = "policy loss"
+    _specs: dict[str, LossSpec] = {}
+
+    @classmethod
+    def register(cls, name: str, func: Callable, *, spec: LossSpec):
+        if name in BUILTIN_LOSS_SPECS:
+            assert spec == BUILTIN_LOSS_SPECS[name], f"policy loss {name!r} disagrees with its launcher LossSpec"
+        super().register(name, func)
+        cls._specs[name] = spec
+
+    @classmethod
+    def spec(cls, name: str) -> LossSpec:
+        try:
+            return cls._specs[name]
+        except KeyError as error:
+            raise ValueError(f"policy loss {name!r} has no local LossSpec") from error
+
+    @classmethod
+    def unregister(cls, name: str):
+        super().unregister(name)
+        cls._specs.pop(name, None)
 
 
 def register_advantage_estimator(name: Union[str, AdvantageEstimator], *, group_contract: GroupAdvantageContract):
@@ -137,7 +159,7 @@ def register_advantage_estimator(name: Union[str, AdvantageEstimator], *, group_
     return decorator
 
 
-def register_policy_loss(name: Union[str, PolicyLossType]):
+def register_policy_loss(name: Union[str, PolicyLossType], spec: LossSpec):
     """Decorator to register a policy loss function."""
     registry_name = name.value if isinstance(name, PolicyLossType) else name
 
@@ -146,7 +168,7 @@ def register_policy_loss(name: Union[str, PolicyLossType]):
         def wrapper(*args, **kwargs):
             return func(*args, **kwargs)
 
-        PolicyLossRegistry.register(registry_name, wrapper)
+        PolicyLossRegistry.register(registry_name, wrapper, spec=spec)
         return wrapper
 
     return decorator

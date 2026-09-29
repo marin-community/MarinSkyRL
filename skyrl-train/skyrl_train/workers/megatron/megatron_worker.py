@@ -45,7 +45,6 @@ from skyrl_train.workers.megatron.router_replay_install import install_megatron_
 import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
 from skyrl_train.training_batch import (
-    GLOBAL_LOSS_DENOM_METADATA_KEY,
     TrainingBatchIterator,
     TrainingOutputBatch,
     gradient_accumulation_steps,
@@ -342,6 +341,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler = None
         self._warned_exact_unit_policy_ratio = False
+        self._consecutive_nonfinite_steps = 0
 
     def forward(self, data):
         with self._memory.span("forward", step=data.metadata.get("global_step")):
@@ -559,7 +559,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         rollout_action_logprobs=experience.rollout_logprobs,
                         response_span_tags=experience.response_span_tags,
                         distillation=experience.distillation,
-                        global_loss_denom=(experience.metadata or {}).get(GLOBAL_LOSS_DENOM_METADATA_KEY),
                         rollout_routed_experts=experience.rollout_routed_experts,
                     )
                 )
@@ -587,9 +586,18 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         torch.cuda.empty_cache()
 
                     with timing.span("megatron_optimizer_step"):
-                        grad_norm = self.strategy.optimizer_step(
-                            self.optimizer, self.model, self.scheduler, name="actor"
+                        step_result = self.strategy.optimizer_step(
+                            self.optimizer,
+                            self.model,
+                            self.scheduler,
+                            name="actor",
+                            consecutive_nonfinite_steps=self._consecutive_nonfinite_steps,
+                            max_consecutive_nonfinite_steps=self.cfg.trainer.policy.max_consecutive_nonfinite_steps,
                         )
+                    if step_result.applied:
+                        self._consecutive_nonfinite_steps = 0
+                    elif step_result.grad_norm is None:
+                        self._consecutive_nonfinite_steps += 1
 
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
                     # the whole world size to get the metrics for the global micro batch
@@ -600,8 +608,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                             status.pop("policy_kl")
 
                         # Attach grad norm only for the last micro in the mini-batch
-                        if i == len(metrics_list) - 1 and grad_norm is not None:
-                            status["raw_grad_norm"] = grad_norm
+                        if i == len(metrics_list) - 1:
+                            status["skipped_steps"] = float(not step_result.applied)
+                            if step_result.grad_norm is not None:
+                                status["raw_grad_norm"] = step_result.grad_norm
 
                         # attach response_length
                         status["response_length"] = micro_buffer[i].num_actions
@@ -614,7 +624,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
                     pbar.set_postfix(policy_progress_metrics(status_list[-1]))
 
-                    policy_update_steps += 1
+                    policy_update_steps += int(step_result.applied)
                     micro_buffer = []
 
             # drop any trailing micros that don't fill a mini-batch (keep behavior consistent)

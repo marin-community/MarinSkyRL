@@ -181,6 +181,7 @@ class DistillationPlan:
     routing: TeacherRoutingPlan
     residency: TeacherResidencySpec = TeacherResidencySpec()
     domain_gradient_balance: DomainGradientBalanceSpec | None = None
+    advantage_clip: float | None = None
 
 
 def validate_distillation_runtime_support(plan: DistillationPlan | None) -> None:
@@ -607,7 +608,17 @@ def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan 
     distillation = _mapping(raw_distillation, "trainer.algorithm.distillation")
     _reject_unknown(
         distillation,
-        frozenset({"objective", "routing_plan", "coefficient", "reward_mode", "residency", "domain_gradient_balance"}),
+        frozenset(
+            {
+                "objective",
+                "routing_plan",
+                "coefficient",
+                "reward_mode",
+                "residency",
+                "domain_gradient_balance",
+                "advantage_clip",
+            }
+        ),
         "trainer.algorithm.distillation",
     )
     objective = _enum_value(
@@ -623,6 +634,11 @@ def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan 
         "trainer.algorithm.distillation",
     )
     coefficient = _positive_float(distillation, "coefficient", "trainer.algorithm.distillation")
+    advantage_clip = (
+        _nonnegative_float(distillation, "advantage_clip", "trainer.algorithm.distillation")
+        if distillation.get("advantage_clip") is not None
+        else None
+    )
     routing_name = _required_string(distillation, "routing_plan", "trainer.algorithm.distillation")
     residency = _teacher_residency(distillation)
 
@@ -664,6 +680,7 @@ def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan 
         routing=routing,
         residency=residency,
         domain_gradient_balance=balance,
+        advantage_clip=advantage_clip,
     )
 
 

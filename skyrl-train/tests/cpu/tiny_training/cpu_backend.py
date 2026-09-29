@@ -38,6 +38,7 @@ class CausalLMPolicy(nn.Module):
         super().__init__()
         self.model = model
 
+    @torch.autocast(device_type="cpu", enabled=False)
     def forward(
         self,
         sequences: torch.Tensor,
@@ -51,6 +52,7 @@ class CausalLMPolicy(nn.Module):
     ):
         if rollout_routed_experts is not None:
             raise ValueError("router replay requires a mixture-of-experts policy")
+        # FP32 keeps the CPU reference's backward arithmetic stable across batch splits.
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
         # Callers read only the trailing response-aligned positions, so skip the vocabulary
@@ -88,9 +90,7 @@ class CPUStrategy(DistributedStrategy):
     def backward(self, loss: torch.Tensor, model, optimizer, **kwargs):
         loss.backward()
 
-    def optimizer_step(self, optimizer, model, scheduler, name="model", stale_clip_lr_scale=1.0, **kwargs):
-        if stale_clip_lr_scale != 1.0:
-            raise ValueError("the CPU strategy does not implement StaleClip learning-rate scaling")
+    def optimizer_step(self, optimizer, model, scheduler, name="model", **kwargs):
         if self.world_size > 1:
             for parameter in model.parameters():
                 if parameter.grad is not None:
