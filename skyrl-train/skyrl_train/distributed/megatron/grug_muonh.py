@@ -1,31 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The Grug MuonH, AdamH, and Adam recipe on Megatron's FP32 master parameters."""
+"""Hero's MuonH and AdamH updates for Megatron's FP32 master parameters.
 
-from __future__ import annotations
+The BF16 Newton--Schulz transform is adapted from NVIDIA NeMo
+Emerging-Optimizers at 6ef41445b246d2c64c2e6f82cc56fbc9c9c07937.
+"""
 
 from collections.abc import Iterable
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from torch import Tensor
 from torch.optim import Optimizer
 
-Route = Literal["muonh", "adamh", "adam"]
-ROUTE_KEY = "grug_route"
-LAYOUT_KEY = "grug_layout"
-QKV_LAYOUT = "qkv"
-GATE_UP_LAYOUT = "gate_up"
-MUONH_ROUTE: Route = "muonh"
-ADAMH_ROUTE: Route = "adamh"
-ADAM_ROUTE: Route = "adam"
-DEFAULT_MOMENTUM = 0.95
-DEFAULT_NESTEROV = True
-DEFAULT_NS_STEPS = 5
-DEFAULT_BETAS = (0.9, 0.95)
-DEFAULT_EPSILON = 1e-8
-_NORM_FLOOR = 1e-10
+type MegatronGrugRoute = Literal["grug_muonh", "grug_muonh_qkv", "grug_muonh_gate_up", "grug_adamh", "adam"]
+_DIRECTION_SCRATCH_BYTES = 16 * 1024 * 1024
+
 _QUINTIC_COEFFICIENTS = (
     (4.0848, -6.8946, 2.9270),
     (3.9505, -6.3029, 2.6377),
@@ -33,32 +24,12 @@ _QUINTIC_COEFFICIENTS = (
     (2.8769, -3.1427, 1.2046),
     (2.8366, -3.0525, 1.2012),
 )
-_MATRIX_RANKS = (2, 3)
+_HYPERBALL_EPS = 1e-10
 
 
-def grug_muonh_route(name: str, parameter: Tensor) -> Route:
-    """Classify the Megatron parameter using Marin's three optimizer routes."""
-    lower_name = name.lower()
-    if "gated_norm" in lower_name or (
-        "embed_norm." in lower_name and lower_name.endswith(("down_proj.weight", "up_proj.weight"))
-    ):
-        return MUONH_ROUTE
-    if (
-        "embed" in lower_name
-        or "router_bias" in lower_name
-        or "attn_gate" in lower_name
-        or ".router" in lower_name
-        or lower_name.startswith("router.")
-    ):
-        return ADAM_ROUTE
-    if "output_proj" in lower_name or "lm_head" in lower_name or "output_layer" in lower_name:
-        return ADAMH_ROUTE
-    if parameter.ndim in _MATRIX_RANKS:
-        return MUONH_ROUTE
-    return ADAM_ROUTE
-
-
-def _newton_schulz_quintic(matrix: Tensor, *, steps: int, eps: float) -> Tensor:
+def _muon_direction(matrix: Tensor, *, steps: int, eps: float) -> Tensor:
+    """Return Marin's BF16 quintic direction with its matrix shape scale."""
+    original_dtype = matrix.dtype
     x = matrix.to(torch.bfloat16)
     x = x / (torch.linalg.vector_norm(x, dim=(-2, -1), keepdim=True) + eps)
     transposed = x.shape[-2] > x.shape[-1]
@@ -67,143 +38,231 @@ def _newton_schulz_quintic(matrix: Tensor, *, steps: int, eps: float) -> Tensor:
     for index in range(steps):
         a, b, c = _QUINTIC_COEFFICIENTS[index % len(_QUINTIC_COEFFICIENTS)]
         gram = x @ x.mT
-        x = a * x + (b * gram + c * (gram @ gram)) @ x
+        polynomial = b * gram + c * (gram @ gram)
+        x = a * x + polynomial @ x
     if transposed:
         x = x.mT
-    return x.to(matrix.dtype)
+    # PyTorch Linear matrices are (fan_out, fan_in); Marin stores the transpose.
+    rows, columns = matrix.shape[-2:]
+    return x.to(original_dtype).mul_(max(1.0, rows / columns) ** 0.5)
 
 
-def _hyperball_step_(parameter: Tensor, direction: Tensor, *, lr: float, clamp_final_norm: bool) -> None:
-    parameter_norm = torch.linalg.vector_norm(parameter, dim=(-2, -1), keepdim=True, dtype=torch.float32)
-    direction_norm = torch.linalg.vector_norm(direction, dim=(-2, -1), keepdim=True, dtype=torch.float32)
-    direction.mul_(parameter_norm / direction_norm.clamp_min_(_NORM_FLOOR)).mul_(-lr).add_(parameter)
-    candidate_norm = torch.linalg.vector_norm(direction, dim=(-2, -1), keepdim=True, dtype=torch.float32)
+def _matrix_norm(value: Tensor) -> Tensor:
+    return torch.linalg.vector_norm(value, dim=(-2, -1), keepdim=True, dtype=torch.float32).square_().sqrt_()
+
+
+def _matrix_step_(
+    parameter: Tensor,
+    direction: Tensor,
+    *,
+    lr: float,
+    ns_steps: int | None = None,
+    muon_eps: float = 1e-8,
+    clamp_final_norm: bool,
+) -> None:
+    """Apply HyperBall to each complete matrix, consuming direction as scratch."""
+    if ns_steps is not None:
+        direction = _muon_direction(direction, steps=ns_steps, eps=muon_eps)
+    parameter_norm = _matrix_norm(parameter)
+    direction_norm = _matrix_norm(direction).clamp_min_(_HYPERBALL_EPS)
+    direction.mul_(parameter_norm / direction_norm).mul_(-lr).add_(parameter)
+    candidate_norm = _matrix_norm(direction)
     if clamp_final_norm:
-        candidate_norm.clamp_min_(_NORM_FLOOR)
-    parameter.copy_(direction.mul_(parameter_norm / candidate_norm))
+        candidate_norm.clamp_min_(_HYPERBALL_EPS)
+    direction.mul_(parameter_norm / candidate_norm)
+    parameter.copy_(direction)
 
 
-class GrugMegatronMuonH(Optimizer):
-    """One checkpoint and scheduler surface for the three Grug update rules."""
+def megatron_grug_route(name: str, parameter: Tensor) -> MegatronGrugRoute:
+    """Classify Megatron's fused parameter names using the Hero recipe."""
+    lower = name.lower()
+    if "gated_norm" in lower:
+        return "grug_muonh"
+    if lower.endswith((".down_proj.weight", ".up_proj.weight")) and any(
+        f"{norm}." in lower for norm in ("embed_norm", "final_layernorm", "input_layernorm", "pre_mlp_layernorm")
+    ):
+        return "grug_muonh"
+    if "output_layer.weight" in lower or "output_proj" in lower or "lm_head" in lower:
+        return "grug_adamh"
+    if (
+        "embed" in lower
+        or "sconv" in lower
+        or "attn_gate" in lower
+        or ".router." in lower
+        or lower.startswith("router.")
+    ):
+        return "adam"
+    if lower.endswith("linear_qkv.weight"):
+        return "grug_muonh_qkv"
+    if "linear_fc1.weight" in lower and (".experts." in lower or ".shared_experts." in lower):
+        return "grug_muonh_gate_up"
+    return "grug_muonh" if parameter.ndim in (2, 3) else "adam"
+
+
+def _muon_update_(
+    parameter: Tensor,
+    direction: Tensor,
+    *,
+    lr: float,
+    ns_steps: int,
+    eps: float,
+    route: MegatronGrugRoute,
+    qkv_split_shapes: tuple[int, int, int],
+) -> None:
+    if route == "grug_muonh_qkv":
+        if parameter.ndim != 2 or parameter.shape[0] % sum(qkv_split_shapes):
+            raise ValueError(f"Unexpected fused QKV shape: {tuple(parameter.shape)}")
+        groups = parameter.shape[0] // sum(qkv_split_shapes)
+        parameter_view = parameter.view(groups, sum(qkv_split_shapes), parameter.shape[1])
+        direction_view = direction.view_as(parameter_view)
+        for parameter_part, direction_part in zip(
+            parameter_view.split(qkv_split_shapes, dim=1), direction_view.split(qkv_split_shapes, dim=1)
+        ):
+            # A single QKV group can leave the split contiguous, so contiguous()
+            # would alias parameter_part and make the write-back overlap.
+            logical_parameter = parameter_part.reshape(-1, parameter.shape[1]).clone()
+            logical_direction = direction_part.reshape_as(logical_parameter).contiguous()
+            _matrix_step_(
+                logical_parameter, logical_direction, lr=lr, ns_steps=ns_steps, muon_eps=eps, clamp_final_norm=True
+            )
+            parameter_part.copy_(logical_parameter.view_as(parameter_part))
+        return
+
+    if route == "grug_muonh_gate_up":
+        if parameter.ndim not in (2, 3) or parameter.shape[-2] % 2:
+            raise ValueError(f"Unexpected fused gate/up shape: {tuple(parameter.shape)}")
+        for parameter_part, direction_part in zip(parameter.chunk(2, dim=-2), direction.chunk(2, dim=-2)):
+            _matrix_step_(parameter_part, direction_part, lr=lr, ns_steps=ns_steps, muon_eps=eps, clamp_final_norm=True)
+        return
+
+    _matrix_step_(parameter, direction, lr=lr, ns_steps=ns_steps, muon_eps=eps, clamp_final_norm=True)
+
+
+def _adamh_direction_in_grad_(
+    gradient: Tensor, exp_avg: Tensor, exp_avg_sq: Tensor, *, step: int, betas: tuple[float, float], eps: float
+) -> None:
+    """Reuse the consumed FP32 gradient for AdamH's direction, with bounded scratch."""
+    beta1, beta2 = betas
+    bias1 = 1 - beta1**step
+    bias2 = 1 - beta2**step
+    row_bytes = gradient[0].numel() * gradient.element_size()
+    rows_per_chunk = max(1, _DIRECTION_SCRATCH_BYTES // row_bytes)
+    for start in range(0, gradient.shape[0], rows_per_chunk):
+        end = start + rows_per_chunk
+        direction_chunk = gradient[start:end]
+        direction_chunk.copy_(exp_avg[start:end]).div_(bias1)
+        denominator = exp_avg_sq[start:end].clone().div_(bias2).sqrt_().add_(eps)
+        direction_chunk.div_(denominator)
+        del denominator
+
+
+def _offloaded_muon_direction_in_grad_(gradient: Tensor, momentum: Tensor, *, beta: float, nesterov: bool) -> None:
+    """Update CPU momentum in bounded GPU chunks, leaving the direction in the consumed gradient."""
+    if not gradient.is_contiguous():
+        raise ValueError("Offloaded MuonH requires contiguous FP32 master gradients")
+    gradient_flat = gradient.view(-1)
+    momentum_flat = momentum.view(-1)
+    elements_per_chunk = max(1, _DIRECTION_SCRATCH_BYTES // gradient.element_size())
+    for start in range(0, gradient_flat.numel(), elements_per_chunk):
+        gradient_chunk = gradient_flat[start : start + elements_per_chunk]
+        momentum_chunk = momentum_flat[start : start + elements_per_chunk]
+        scratch = torch.empty_like(gradient_chunk)
+        scratch.copy_(momentum_chunk)
+        scratch.mul_(beta).add_(gradient_chunk)
+        momentum_chunk.copy_(scratch)
+        if nesterov:
+            gradient_chunk.add_(scratch, alpha=beta)
+        else:
+            gradient_chunk.copy_(scratch)
+        del scratch
+
+
+class MegatronGrugMuonH(Optimizer):
+    """Flat optimizer state for Megatron's mixed-precision and sharded checkpoint wrappers.
+
+    Megatron creates a separate instance per optimizer route and expert-parallel
+    group. Its standard Adam path owns the remaining parameters.
+    """
 
     def __init__(
         self,
-        params: Iterable[dict],
+        params: Iterable[dict[str, Any]],
         *,
         lr: float,
-        momentum: float = DEFAULT_MOMENTUM,
-        nesterov: bool = DEFAULT_NESTEROV,
-        ns_steps: int = DEFAULT_NS_STEPS,
-        betas: tuple[float, float] = DEFAULT_BETAS,
-        eps: float = DEFAULT_EPSILON,
-        muon_eps: float = DEFAULT_EPSILON,
-        adam_lr: float | None = None,
-        min_lr: float = 0.0,
-        qkv_num_query_groups: int | None = None,
-        qkv_heads_per_group: int | None = None,
-        qkv_head_dim: int | None = None,
-        tensor_model_parallel_size: int = 1,
-        expert_tensor_parallel_size: int = 1,
+        betas: tuple[float, float],
+        momentum: float,
+        nesterov: bool,
+        ns_steps: int,
+        eps: float,
+        muon_eps: float,
+        qkv_split_shapes: tuple[int, int, int],
+        offload_momentum: bool = False,
     ) -> None:
-        if tensor_model_parallel_size != 1:
-            raise ValueError("Grug MuonH requires tensor_model_parallel_size=1")
-        if expert_tensor_parallel_size != 1:
-            raise ValueError("Grug MuonH requires expert_tensor_parallel_size=1")
-        if ns_steps < 1:
-            raise ValueError("MuonH backend_steps must be positive")
-        if adam_lr is not None and lr <= 0:
-            raise ValueError("MuonH master lr must be positive when adam_lr is set")
-        defaults = {"lr": lr, "weight_decay": 0.0, ROUTE_KEY: MUONH_ROUTE}
-        super().__init__(params, defaults)
-        self.momentum = momentum
-        self.nesterov = nesterov
-        self.ns_steps = ns_steps
-        self.betas = betas
-        self.eps = eps
-        self.muon_eps = muon_eps
-        self.adam_lr_mult = (adam_lr / lr) if adam_lr is not None else 1.0
-        self.qkv_num_query_groups = qkv_num_query_groups
-        self.qkv_heads_per_group = qkv_heads_per_group
-        self.qkv_head_dim = qkv_head_dim
-        for group in self.param_groups:
-            if group[ROUTE_KEY] == ADAM_ROUTE:
-                group["lr_mult"] = self.adam_lr_mult
-                if adam_lr is not None:
-                    group["lr"] = adam_lr
-                    group["max_lr"] = adam_lr
-                    group["min_lr"] = min_lr * self.adam_lr_mult
-            elif group[ROUTE_KEY] not in (MUONH_ROUTE, ADAMH_ROUTE):
-                raise ValueError(f"Unknown Grug optimizer route: {group[ROUTE_KEY]}")
-            layout = group.get(LAYOUT_KEY)
-            if layout not in (None, QKV_LAYOUT, GATE_UP_LAYOUT):
-                raise ValueError(f"Unknown Grug fused layout: {layout}")
-            if layout == QKV_LAYOUT and not all(
-                value is not None for value in (qkv_num_query_groups, qkv_heads_per_group, qkv_head_dim)
-            ):
-                raise ValueError("Fused QKV MuonH requires attention group geometry")
-            if layout is not None and group[ROUTE_KEY] != MUONH_ROUTE:
-                raise ValueError("Grug fused layouts require the MuonH route")
-            if group.get("weight_decay", 0.0) != 0.0:
-                raise ValueError("MuonH requires weight_decay=0 for every parameter group")
-
-    def _muonh_matrix_step_(self, parameter: Tensor, gradient: Tensor, momentum_buffer: Tensor, lr: float) -> None:
-        momentum_buffer.mul_(self.momentum).add_(gradient)
-        direction = gradient.add(momentum_buffer, alpha=self.momentum) if self.nesterov else momentum_buffer
-        direction = _newton_schulz_quintic(direction, steps=self.ns_steps, eps=self.muon_eps)
-        rows, columns = direction.shape[-2:]
-        direction.mul_(max(1.0, rows / columns) ** 0.5)
-        _hyperball_step_(parameter, direction, lr=lr, clamp_final_norm=True)
-
-    def _qkv_row_indices(self, parameter: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        num_groups = self.qkv_num_query_groups
-        heads_per_group = self.qkv_heads_per_group
-        head_dim = self.qkv_head_dim
-        if num_groups is None or heads_per_group is None or head_dim is None:
-            raise ValueError("Fused QKV MuonH requires attention group geometry")
-        rows_per_group = (heads_per_group + 2) * head_dim
-        if parameter.ndim != 2 or parameter.shape[0] != num_groups * rows_per_group:
-            raise ValueError(f"Fused QKV parameter has incompatible shape {tuple(parameter.shape)}")
-        offsets = torch.arange(num_groups, device=parameter.device)[:, None] * rows_per_group
-        q = (offsets + torch.arange(heads_per_group * head_dim, device=parameter.device)).reshape(-1)
-        k = (offsets + heads_per_group * head_dim + torch.arange(head_dim, device=parameter.device)).reshape(-1)
-        v = (offsets + (heads_per_group + 1) * head_dim + torch.arange(head_dim, device=parameter.device)).reshape(-1)
-        return q, k, v
-
-    def _fused_muonh_step_(
-        self, parameter: Tensor, gradient: Tensor, momentum_buffer: Tensor, lr: float, layout: str
-    ) -> None:
-        if layout == GATE_UP_LAYOUT:
-            if parameter.shape[-2] % 2:
-                raise ValueError(f"Fused gate/up parameter has incompatible shape {tuple(parameter.shape)}")
-            for part, grad_part, momentum_part in zip(
-                parameter.chunk(2, dim=-2), gradient.chunk(2, dim=-2), momentum_buffer.chunk(2, dim=-2)
-            ):
-                self._muonh_matrix_step_(part, grad_part, momentum_part, lr)
-            return
-        for indices in self._qkv_row_indices(parameter):
-            part = parameter.index_select(0, indices)
-            momentum_part = momentum_buffer.index_select(0, indices)
-            self._muonh_matrix_step_(part, gradient.index_select(0, indices), momentum_part, lr)
-            parameter.index_copy_(0, indices, part)
-            momentum_buffer.index_copy_(0, indices, momentum_part)
-
-    def _initialize_parameter_state(self, parameter: Tensor, route: Route, *, prototype: Tensor | None = None) -> dict:
-        state = self.state[parameter]
-        if not state:
-            value = parameter if prototype is None else prototype
-            if route == MUONH_ROUTE:
-                state["momentum_buffer"] = torch.zeros_like(value)
-            else:
-                state["step"] = torch.zeros((), dtype=torch.int64, device=parameter.device)
-                state["exp_avg"] = torch.zeros_like(value)
-                state["exp_avg_sq"] = torch.zeros_like(value)
-        return state
+        self.qkv_split_shapes = qkv_split_shapes
+        self.offload_momentum = offload_momentum
+        super().__init__(
+            params,
+            defaults={
+                "lr": lr,
+                "betas": betas,
+                "momentum": momentum,
+                "nesterov": nesterov,
+                "ns_steps": ns_steps,
+                "eps": eps,
+                "muon_eps": muon_eps,
+                "weight_decay": 0.0,
+            },
+        )
 
     def initialize_state(self) -> None:
-        """Populate all states before a distributed checkpoint is loaded."""
+        """Materialize all moments before Megatron builds a checkpoint load template."""
         for group in self.param_groups:
+            route = group.get("optimizer", "grug_muonh")
             for parameter in group["params"]:
-                self._initialize_parameter_state(parameter, group[ROUTE_KEY])
+                state = self.state[parameter]
+                if route == "grug_adamh":
+                    if "step" not in state:
+                        state["step"] = torch.zeros((), dtype=torch.int64, device=parameter.device)
+                    if "exp_avg" not in state:
+                        state["exp_avg"] = torch.zeros_like(parameter)
+                    if "exp_avg_sq" not in state:
+                        state["exp_avg_sq"] = torch.zeros_like(parameter)
+                else:
+                    if "momentum_buffer" not in state:
+                        state["momentum_buffer"] = (
+                            torch.zeros(
+                                parameter.shape, dtype=parameter.dtype, device="cpu", pin_memory=parameter.is_cuda
+                            )
+                            if self.offload_momentum
+                            else torch.zeros_like(parameter)
+                        )
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        if not self.offload_momentum:
+            super().load_state_dict(state_dict)
+            return
+        # PyTorch moves per-parameter state to the parameter's GPU on load.
+        # Keep Muon moments on CPU without ever materializing that GPU copy.
+        saved_momenta = {}
+        stripped_state = {}
+        for parameter_id, values in state_dict["state"].items():
+            if "momentum_buffer" in values:
+                saved_momenta[parameter_id] = values["momentum_buffer"]
+                stripped_state[parameter_id] = {key: value for key, value in values.items() if key != "momentum_buffer"}
+            else:
+                stripped_state[parameter_id] = values
+        existing = {parameter: values.get("momentum_buffer") for parameter, values in self.state.items()}
+        super().load_state_dict({**state_dict, "state": stripped_state})
+        for saved_group, current_group in zip(state_dict["param_groups"], self.param_groups, strict=True):
+            for parameter_id, parameter in zip(saved_group["params"], current_group["params"], strict=True):
+                if parameter_id not in saved_momenta:
+                    continue
+                saved = saved_momenta[parameter_id]
+                buffer = existing.get(parameter)
+                if buffer is None or buffer.shape != saved.shape:
+                    buffer = torch.empty(saved.shape, dtype=parameter.dtype, device="cpu", pin_memory=parameter.is_cuda)
+                buffer.copy_(saved)
+                self.state[parameter]["momentum_buffer"] = buffer
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -211,40 +270,60 @@ class GrugMegatronMuonH(Optimizer):
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
+
         for group in self.param_groups:
-            route = group[ROUTE_KEY]
-            lr = group["lr"]
+            route = group.get("optimizer", "grug_muonh")
+            if route not in ("grug_muonh", "grug_muonh_qkv", "grug_muonh_gate_up", "grug_adamh"):
+                raise ValueError(f"Unsupported Hero Megatron optimizer route: {route}")
             for parameter in group["params"]:
                 gradient = parameter.grad
                 if gradient is None:
                     continue
                 if gradient.is_sparse:
-                    raise RuntimeError("MuonH does not support sparse gradients")
-                if route != ADAM_ROUTE and parameter.ndim not in _MATRIX_RANKS:
-                    raise RuntimeError(f"{route} received a rank-{parameter.ndim} parameter")
-                state = self._initialize_parameter_state(parameter, route, prototype=gradient)
-                if route == MUONH_ROUTE:
-                    momentum_buffer = state["momentum_buffer"]
-                    layout = group.get(LAYOUT_KEY)
-                    if layout is None:
-                        self._muonh_matrix_step_(parameter, gradient, momentum_buffer, lr)
-                    else:
-                        self._fused_muonh_step_(parameter, gradient, momentum_buffer, lr, layout)
-                    if "step" in state:
-                        state["step"].add_(1)
+                    raise RuntimeError("Hero MuonH/AdamH does not support sparse gradients")
+                if parameter.ndim not in (2, 3):
+                    raise RuntimeError(f"Hero MuonH/AdamH received rank-{parameter.ndim} parameter")
+                state = self.state[parameter]
+                if not state:
+                    self.initialize_state()
+
+                if route == "grug_adamh":
+                    beta1, beta2 = group["betas"]
+                    state["step"].add_(1)
+                    state["exp_avg"].mul_(beta1).add_(gradient, alpha=1 - beta1)
+                    state["exp_avg_sq"].mul_(beta2).addcmul_(gradient, gradient, value=1 - beta2)
+                    step = int(state["step"].item())
+                    _adamh_direction_in_grad_(
+                        gradient,
+                        state["exp_avg"],
+                        state["exp_avg_sq"],
+                        step=step,
+                        betas=(beta1, beta2),
+                        eps=group["eps"],
+                    )
+                    _matrix_step_(parameter, gradient, lr=group["lr"], clamp_final_norm=False)
                     continue
-                beta1, beta2 = self.betas
-                state["step"].add_(1)
-                exp_avg = state["exp_avg"]
-                exp_avg_sq = state["exp_avg_sq"]
-                exp_avg.mul_(beta1).add_(gradient, alpha=1 - beta1)
-                exp_avg_sq.mul_(beta2).addcmul_(gradient, gradient, value=1 - beta2)
-                step = state["step"]
-                bias_corrected_mean = exp_avg / (1 - torch.pow(beta1, step))
-                bias_corrected_variance = exp_avg_sq / (1 - torch.pow(beta2, step))
-                direction = bias_corrected_mean / (bias_corrected_variance.sqrt() + self.eps)
-                if route == ADAMH_ROUTE:
-                    _hyperball_step_(parameter, direction, lr=lr, clamp_final_norm=False)
+
+                momentum_buffer = state["momentum_buffer"]
+                if momentum_buffer.device.type == "cpu" and gradient.is_cuda:
+                    _offloaded_muon_direction_in_grad_(
+                        gradient, momentum_buffer, beta=group["momentum"], nesterov=group["nesterov"]
+                    )
+                    direction = gradient
                 else:
-                    parameter.add_(direction, alpha=-lr)
+                    momentum_buffer.mul_(group["momentum"]).add_(gradient)
+                    direction = (
+                        gradient.add_(momentum_buffer, alpha=group["momentum"])
+                        if group["nesterov"]
+                        else momentum_buffer
+                    )
+                _muon_update_(
+                    parameter,
+                    direction,
+                    lr=group["lr"],
+                    ns_steps=group["ns_steps"],
+                    eps=group["muon_eps"],
+                    route=route,
+                    qkv_split_shapes=self.qkv_split_shapes,
+                )
         return loss

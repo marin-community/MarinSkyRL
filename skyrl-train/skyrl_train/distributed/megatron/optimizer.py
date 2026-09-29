@@ -20,115 +20,86 @@
 from collections.abc import Mapping
 
 import torch
-from megatron.core.distributed import DistributedDataParallel
-from megatron.core.optimizer import OptimizerConfig
+from megatron.core.optimizer import OptimizerConfig, ParamKey, ParamWithNamePredicate
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
-from megatron.core.optimizer.emerging_optimizers import _EMERGING_OPTIMIZERS, EmergingOptimizerEntry
-from megatron.core.optimizer.optimizer_config import ParamKey, ParamWithNamePredicate
+from megatron.core.optimizer.emerging_optimizers import EmergingOptimizerEntry, _EMERGING_OPTIMIZERS
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
-from skyrl_train.distributed.megatron.grug_muonh import (
-    DEFAULT_BETAS,
-    DEFAULT_EPSILON,
-    DEFAULT_MOMENTUM,
-    DEFAULT_NESTEROV,
-    DEFAULT_NS_STEPS,
-    ADAMH_ROUTE,
-    ADAM_ROUTE,
-    GATE_UP_LAYOUT,
-    GrugMegatronMuonH,
-    LAYOUT_KEY,
-    MUONH_ROUTE,
-    QKV_LAYOUT,
-    ROUTE_KEY,
-    grug_muonh_route,
-)
+from megatron.core.utils import get_model_config
 
-_GRUG_MUONH_KEY = "grug_muonh"
+from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH, megatron_grug_route
+
+
+_GRUG_MUONH_NAME = "grug_muonh"
+_GRUG_EMERGING_ROUTES = ("grug_muonh_qkv", "grug_muonh_gate_up", "grug_adamh")
 
 
 class _GrugMuonHParamScheduler(OptimizerParamScheduler):
     def get_lr(self, param_group: dict) -> float:
-        if (
-            param_group.get(ROUTE_KEY) != ADAM_ROUTE
-            or self.lr_warmup_steps <= 0
-            or self.num_steps > self.lr_warmup_steps
-        ):
+        if param_group.get("optimizer") != "adam" or self.lr_warmup_steps <= 0 or self.num_steps > self.lr_warmup_steps:
             return super().get_lr(param_group)
-        init_lr = self.init_lr * param_group.get("lr_mult", 1.0)
         max_lr = param_group.get("max_lr", self.max_lr)
+        init_lr = self.init_lr * max_lr / self.max_lr if self.max_lr else 0.0
         return init_lr + (max_lr - init_lr) * self.num_steps / self.lr_warmup_steps
 
 
-def _grug_muonh_extra(optim_config: dict) -> Mapping:
-    extra = optim_config.get("optimizer_kwargs", {})
-    if not isinstance(extra, Mapping):
+def _grug_muonh_extra(optim_config: Mapping) -> dict:
+    raw = optim_config.get("optimizer_kwargs", {})
+    if not isinstance(raw, Mapping):
         raise TypeError("MuonH optimizer_kwargs must be a mapping")
-    known = {"adam_lr", "momentum", "nesterov", "backend_steps", "epsilon", "muon_epsilon"}
+    extra = dict(raw)
+    known = {"adam_lr", "momentum", "nesterov", "backend_steps", "epsilon", "muon_epsilon", "offload_momentum"}
     unknown = sorted(set(extra) - known)
     if unknown:
         raise ValueError(f"Unknown MuonH optimizer_kwargs: {unknown}")
+    if "offload_momentum" in extra and not isinstance(extra["offload_momentum"], bool):
+        raise TypeError("MuonH offload_momentum must be a bool")
+    if float(optim_config.get("weight_decay", 0.0)) != 0.0:
+        raise ValueError("MuonH requires weight_decay=0")
     return extra
 
 
-def _grug_muonh_kwargs(optim_config: dict, config: OptimizerConfig) -> dict:
-    if float(config.weight_decay) != 0.0:
-        raise ValueError("MuonH requires weight_decay=0")
+def _register_grug_muonh(optim_config: Mapping) -> None:
+    """Register Hero's recipe with the optimizer factory pinned at MCore 0.18."""
     extra = _grug_muonh_extra(optim_config)
-    return {
-        "lr": float(config.lr),
-        "min_lr": float(config.min_lr),
-        "adam_lr": float(extra["adam_lr"]) if "adam_lr" in extra else None,
-        "momentum": float(extra.get("momentum", DEFAULT_MOMENTUM)),
-        "nesterov": bool(extra.get("nesterov", DEFAULT_NESTEROV)),
-        "ns_steps": int(extra.get("backend_steps", DEFAULT_NS_STEPS)),
-        "betas": (float(config.adam_beta1), float(config.adam_beta2)),
-        "eps": float(config.adam_eps),
-        "muon_eps": float(extra.get("muon_epsilon", DEFAULT_EPSILON)),
-    }
+    adam_lr = float(extra.get("adam_lr", optim_config["lr"]))
+    muon_eps = float(extra.get("muon_epsilon", 1e-8))
+    overrides = {}
+    for route in (*_GRUG_EMERGING_ROUTES, "adam"):
+        predicate = ParamWithNamePredicate(
+            name=f"grug_{route}",
+            fn=lambda parameter, name, expected=route: megatron_grug_route(name, parameter) == expected,
+        )
+        override = {"optimizer": route}
+        if route == "adam":
+            override["max_lr"] = adam_lr
+        overrides[ParamKey(with_name_predicate=predicate)] = override
 
+    def config_to_kwargs(config, model_chunks, pg_collection):
+        model_config = get_model_config(model_chunks[0])
+        if model_config.tensor_model_parallel_size != 1:
+            raise ValueError("Hero MuonH fused-matrix updates currently require tensor parallel size 1")
+        kv_rows = model_config.kv_channels
+        query_rows = model_config.num_attention_heads // model_config.num_query_groups * kv_rows
+        return {
+            "lr": config.lr,
+            "betas": (config.adam_beta1, config.adam_beta2),
+            "momentum": config.muon_momentum,
+            "nesterov": config.muon_nesterov,
+            "ns_steps": config.muon_num_ns_steps,
+            "eps": config.adam_eps,
+            "muon_eps": muon_eps,
+            "qkv_split_shapes": (query_rows, kv_rows, kv_rows),
+            "offload_momentum": extra.get("offload_momentum", False),
+        }
 
-def _register_grug_muonh() -> None:
-    if _GRUG_MUONH_KEY in _EMERGING_OPTIMIZERS:
-        return
-
-    _EMERGING_OPTIMIZERS[_GRUG_MUONH_KEY] = EmergingOptimizerEntry(
-        optimizer_cls=GrugMegatronMuonH,
-        init_state_fn=lambda optimizer, _config=None: optimizer.initialize_state(),
-        config_to_kwargs=lambda config, _chunks, _groups: config._grug_muonh_kwargs,
-        default_param_overrides={
-            # MCore matches checkpoint parameter groups by wd_mult/lr_mult, not
-            # by grug_route. Weight decay is zero for this recipe, so distinct
-            # wd_mult values preserve all update math while making route state
-            # unambiguous at checkpoint load.
-            ParamKey(
-                with_name_predicate=ParamWithNamePredicate(
-                    name="grug_muonh_adamh", fn=lambda parameter, name: grug_muonh_route(name, parameter) == ADAMH_ROUTE
-                )
-            ): {ROUTE_KEY: ADAMH_ROUTE, "wd_mult": 2.0},
-            ParamKey(
-                with_name_predicate=ParamWithNamePredicate(
-                    name="grug_muonh_adam_matrix",
-                    fn=lambda parameter, name: grug_muonh_route(name, parameter) == ADAM_ROUTE and parameter.ndim >= 2,
-                )
-            ): {ROUTE_KEY: ADAM_ROUTE, "wd_mult": 3.0},
-            ParamKey(
-                with_name_predicate=ParamWithNamePredicate(
-                    name="grug_muonh_adam_vector",
-                    fn=lambda parameter, name: grug_muonh_route(name, parameter) == ADAM_ROUTE and parameter.ndim < 2,
-                )
-            ): {ROUTE_KEY: ADAM_ROUTE},
-            ParamKey(
-                with_name_predicate=ParamWithNamePredicate(
-                    name="grug_muonh_qkv", fn=lambda parameter, name: ".linear_qkv.weight" in name
-                )
-            ): {ROUTE_KEY: MUONH_ROUTE, LAYOUT_KEY: QKV_LAYOUT, "wd_mult": 4.0},
-            ParamKey(
-                with_name_predicate=ParamWithNamePredicate(
-                    name="grug_muonh_gate_up", fn=lambda parameter, name: ".linear_fc1.weight" in name
-                )
-            ): {ROUTE_KEY: MUONH_ROUTE, LAYOUT_KEY: GATE_UP_LAYOUT, "wd_mult": 5.0},
-        },
+    entry = EmergingOptimizerEntry(
+        optimizer_cls=MegatronGrugMuonH,
+        init_state_fn=lambda optimizer, config=None: optimizer.initialize_state(),
+        config_to_kwargs=config_to_kwargs,
+        default_param_overrides=overrides,
     )
+    for route in (_GRUG_MUONH_NAME, *_GRUG_EMERGING_ROUTES):
+        _EMERGING_OPTIMIZERS[route] = entry
 
 
 def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict) -> OptimizerConfig:
@@ -141,7 +112,7 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
     if _optim_name == "adamw":
         _optim_name = "adam"
     if _optim_name == "muonh":
-        _optim_name = _GRUG_MUONH_KEY
+        _optim_name = _GRUG_MUONH_NAME
     optim_args = {
         "optimizer": _optim_name,
         "lr": optim_config.get("lr"),
@@ -153,25 +124,33 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
         "use_distributed_optimizer": True,
     }
 
-    if _optim_name == _GRUG_MUONH_KEY:
-        optim_args["use_distributed_optimizer"] = False
-        betas = tuple(float(value) for value in optim_config.get("adam_betas", DEFAULT_BETAS))
+    optim_args.update(optimizer_config_kwargs)
+
+    if _optim_name == _GRUG_MUONH_NAME:
+        extra = _grug_muonh_extra(optim_config)
+        if float(optim_args["weight_decay"]) != 0.0:
+            raise ValueError("MuonH requires weight_decay=0, including Megatron overrides")
+        if optimizer_config_kwargs.get("use_distributed_optimizer", False):
+            raise ValueError("Hero MuonH uses Megatron's full-matrix optimizer path")
+        if optim_args.get("optimizer_cpu_offload", False) or optim_args.get("optimizer_offload_fraction", 0.0):
+            raise ValueError("Hero MuonH does not support Megatron's AdamW CPU optimizer offload")
+        if optim_args.get("use_precision_aware_optimizer", False):
+            raise ValueError("Hero MuonH requires FP32 master parameters")
+        betas = tuple(float(beta) for beta in optim_config.get("adam_betas", (0.9, 0.95)))
         if len(betas) != 2:
             raise ValueError("MuonH adam_betas must contain two values")
-        extra = _grug_muonh_extra(optim_config)
         optim_args.update(
             adam_beta1=betas[0],
             adam_beta2=betas[1],
-            adam_eps=float(extra.get("epsilon", DEFAULT_EPSILON)),
+            adam_eps=float(extra.get("epsilon", 1e-8)),
+            muon_momentum=float(extra.get("momentum", 0.95)),
+            muon_nesterov=bool(extra.get("nesterov", True)),
+            muon_num_ns_steps=int(extra.get("backend_steps", 5)),
+            decoupled_weight_decay=False,
+            use_distributed_optimizer=False,
         )
 
-    optim_args.update(optimizer_config_kwargs)
-
     config = OptimizerConfig(**optim_args)
-    if _optim_name == _GRUG_MUONH_KEY:
-        if config.use_distributed_optimizer:
-            raise ValueError("Grug MuonH requires all-reduced data-parallel gradients")
-        config._grug_muonh_kwargs = _grug_muonh_kwargs(optim_config, config)
     return config
 
 
@@ -181,6 +160,7 @@ def get_megatron_optimizer(
     no_weight_decay_cond=None,
     scale_lr_cond=None,
     lr_mult=1.0,
+    grug_optimizer_config: Mapping | None = None,
 ):
     # megatron-core 0.18.x removed the per-param-group knobs
     # (no_weight_decay_cond / scale_lr_cond / lr_mult) from get_megatron_optimizer
@@ -196,20 +176,11 @@ def get_megatron_optimizer(
             "megatron-core 0.18.x's config_overrides mapping; only the defaults "
             "are supported."
         )
-    if config.optimizer == _GRUG_MUONH_KEY:
-        _register_grug_muonh()
-        first_chunk = model[0]
-        base_model = first_chunk.module if isinstance(first_chunk, DistributedDataParallel) else first_chunk
-        model_config = base_model.config
-        if model_config.num_attention_heads % model_config.num_query_groups:
-            raise ValueError("Grug MuonH requires whole query heads per key/value group")
-        config._grug_muonh_kwargs.update(
-            qkv_num_query_groups=model_config.num_query_groups,
-            qkv_heads_per_group=model_config.num_attention_heads // model_config.num_query_groups,
-            qkv_head_dim=model_config.kv_channels,
-            tensor_model_parallel_size=model_config.tensor_model_parallel_size,
-            expert_tensor_parallel_size=model_config.expert_tensor_parallel_size,
-        )
+    if config.optimizer == _GRUG_MUONH_NAME:
+        if grug_optimizer_config is None:
+            raise ValueError("Hero MuonH requires its original optimizer configuration")
+        _register_grug_muonh(grug_optimizer_config)
+
     # Base optimizer.
     return get_megatron_optimizer_native(
         config=config,
@@ -237,12 +208,10 @@ def get_megatron_optimizer_param_scheduler(
     ):
         lr_warmup_steps = int(config.lr_warmup_steps_ratio * lr_decay_steps)
 
-    scheduler_cls = (
-        _GrugMuonHParamScheduler
-        if any(group.get(ROUTE_KEY) == ADAM_ROUTE for group in optimizer.param_groups)
-        else OptimizerParamScheduler
+    scheduler_class = (
+        _GrugMuonHParamScheduler if str(config.get("optimizer", "adam")).lower() == "muonh" else OptimizerParamScheduler
     )
-    opt_param_scheduler = scheduler_cls(
+    opt_param_scheduler = scheduler_class(
         optimizer,
         init_lr=config.get("lr_warmup_init", 0.0),
         max_lr=config.lr,

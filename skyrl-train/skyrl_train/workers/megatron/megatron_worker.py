@@ -17,7 +17,7 @@ from omegaconf import OmegaConf
 
 from megatron.bridge import AutoBridge
 import megatron.core.parallel_state as mpu
-from megatron.core.optimizer import DistributedOptimizer, OptimizerConfig
+from megatron.core.optimizer import ChainedOptimizer, DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
 from skyrl_train.distributed.megatron.optimizer import (
@@ -25,6 +25,7 @@ from skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer,
     get_megatron_optimizer_param_scheduler,
 )
+from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
@@ -400,9 +401,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             pp_size=mpu.get_pipeline_model_parallel_world_size(),
         )
 
-    def _initialize_policy_modules(
-        self, model_path: str, *, mode: _MegatronInitMode, optimizer_config: OptimizerConfig | None = None
-    ) -> None:
+    def _initialize_policy_modules(self, model_path: str, *, mode: _MegatronInitMode) -> None:
         """Construct the shared Megatron model graph at the checkpoint geometry."""
         for_training = mode is _MegatronInitMode.TRAINING
         self.init_configs(
@@ -418,15 +417,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             tokenizer_revision=self.cfg.trainer.policy.model.get("tokenizer_revision"),
         )
 
-        ddp_config = None
-        if for_training:
-            if optimizer_config is None:
-                raise ValueError("Training Megatron policy requires an optimizer config")
-            ddp_config = dict(self.cfg.trainer.policy.megatron_config.ddp_config)
-            configured_sharding = ddp_config.get("use_distributed_optimizer")
-            if configured_sharding is not None and configured_sharding != optimizer_config.use_distributed_optimizer:
-                raise ValueError("Megatron DDP gradient sharding must match the optimizer")
-            ddp_config["use_distributed_optimizer"] = optimizer_config.use_distributed_optimizer
+        ddp_config = self.cfg.trainer.policy.megatron_config.ddp_config if for_training else None
+        if for_training and str(self.cfg.trainer.policy.optimizer_config.optimizer).lower() == "muonh":
+            ddp_config = dict(ddp_config)
+            if ddp_config.get("use_distributed_optimizer", False):
+                raise ValueError("Hero MuonH needs unsharded Megatron DDP gradient buffers")
+            ddp_config["use_distributed_optimizer"] = False
+            ddp_config["overlap_param_gather"] = False
 
         self.actor_module = self.make_megatron_module(
             wrap_with_ddp=for_training,
@@ -449,17 +446,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
     def init_model(self, model_path, num_training_steps: int = 1e9):
         """Initialize the model, optimizer, and scheduler for the policy worker."""
-        optim_config = init_megatron_optim_config(
-            self.cfg.trainer.policy.optimizer_config, self.cfg.trainer.policy.megatron_config.optimizer_config_kwargs
-        )
-        self._initialize_policy_modules(model_path, mode=_MegatronInitMode.TRAINING, optimizer_config=optim_config)
+        self._initialize_policy_modules(model_path, mode=_MegatronInitMode.TRAINING)
 
         # create profiler
         if self.cfg.trainer.policy.megatron_config.torch_profiler_config.enable:
             self.profiler = Profiler(self.cfg.trainer.policy.megatron_config.torch_profiler_config)
 
         # create optimizer
-        self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
+        optim_config = init_megatron_optim_config(
+            self.cfg.trainer.policy.optimizer_config, self.cfg.trainer.policy.megatron_config.optimizer_config_kwargs
+        )
+        self.optimizer = get_megatron_optimizer(
+            self.actor_module,
+            optim_config,
+            grug_optimizer_config=self.cfg.trainer.policy.optimizer_config,
+        )
 
         self._normalize_mini_batch_size()
 
@@ -768,6 +769,23 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             await cache_reset_task
         torch.cuda.empty_cache()
         torch.distributed.barrier()
+
+    def grug_optimizer_route_snapshot(self):
+        """Return this rank and the optimizer route for each named parameter."""
+        if str(self.cfg.trainer.policy.optimizer_config.optimizer).lower() != "muonh":
+            raise ValueError("Optimizer route snapshot requires Hero MuonH")
+        names = {id(parameter): name for chunk in self.actor_module for name, parameter in chunk.named_parameters()}
+        optimizers = (
+            self.optimizer.chained_optimizers if isinstance(self.optimizer, ChainedOptimizer) else [self.optimizer]
+        )
+        routes = {}
+        for wrapped in optimizers:
+            default_route = "grug_muonh" if isinstance(wrapped.optimizer, MegatronGrugMuonH) else "adam"
+            for index, group in enumerate(wrapped.optimizer.param_groups):
+                route = group.get("optimizer", default_route)
+                for parameter in (*wrapped.float16_groups[index], *wrapped.fp32_from_fp32_groups[index]):
+                    routes[names[id(parameter)]] = route
+        return {"rank": torch.distributed.get_rank(), "routes": routes}
 
     def grug_validation_snapshot(self, names=()):
         """Return the calling rank and requested Grug weights in HF layout, gathered on rank 0.

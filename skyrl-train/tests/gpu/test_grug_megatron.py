@@ -11,8 +11,10 @@ serving: rollout, PP2 update, weight broadcast, serving readback, rollout.
 from __future__ import annotations
 
 import asyncio
+import copy
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import ray
@@ -21,6 +23,8 @@ from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
+from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH, _offloaded_muon_direction_in_grad_
+from skyrl_train.distributed.megatron.megatron_utils import load_megatron_optimizer, offload_megatron_optimizer
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX, GrugMoeConfig, GrugMoeForCausalLM
@@ -431,23 +435,13 @@ def test_grug_megatron_eval_forward_is_independent_of_peer_rank_batch(
         ray.shutdown()
 
 
-@pytest.mark.parametrize(
-    ("world_size", "ep", "optimizer_name"),
-    [(2, 1, "AdamW"), (2, 1, "MuonH"), (4, 2, "MuonH")],
-    ids=["pp2_adamw", "pp2_muonh", "pp2_ep2_muonh"],
-)
-def test_grug_megatron_pp2_train_step_updates_weights_and_exports(
-    tmp_path, world_size: int, ep: int, optimizer_name: str
-):
+def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
+    world_size = 2
     require_hoppers(world_size)
     model_path = tmp_path / "model"
     model_path.mkdir()
     _write_tiny_checkpoint(model_path)
-    cfg = _config(str(model_path), world_size=world_size, pp=2, ep=ep)
-    cfg.trainer.policy.optimizer_config.optimizer = optimizer_name
-    if optimizer_name == "MuonH":
-        cfg.trainer.policy.optimizer_config.weight_decay = 0.0
-        cfg.trainer.policy.optimizer_config.optimizer_kwargs = {"adam_lr": 0.004}
+    cfg = _config(str(model_path), world_size=world_size, pp=2, ep=1)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     batch = _padded_batch(tokenizer.pad_token_id)
     export_dir = tmp_path / "export"
@@ -479,6 +473,87 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(
         policy.kill_actors()
         reloaded = _hf_response_logprobs_direct(str(export_dir), batch)
         _assert_logprobs_close(post_update, reloaded, batch["response_mask"])
+    finally:
+        ray.shutdown()
+
+
+def test_grug_megatron_muonh_pp2_ep2_checkpoint_continues_exactly(tmp_path):
+    require_hoppers(4)
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    _write_tiny_checkpoint(model_path)
+    cfg = _config(str(model_path), world_size=4, pp=2, ep=2)
+    # Keep the scoring and training micro-batch shapes identical for MoE routing.
+    cfg.trainer.micro_forward_batch_size_per_gpu = 1
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.trainer.policy.optimizer_config.optimizer = "MuonH"
+    cfg.trainer.policy.optimizer_config.weight_decay = 0.0
+    cfg.trainer.policy.optimizer_config.adam_betas = [0.9, 0.95]
+    cfg.trainer.policy.optimizer_config.optimizer_kwargs = {"adam_lr": 2.0e-2}
+    cfg.trainer.policy.optimizer_config.max_grad_norm = 1.0
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    batch = _padded_batch(tokenizer.pad_token_id, prompt_length=48, response_length=48, variable_lengths=True)
+    names = [
+        LM_HEAD_NAME,
+        EMBED_GATE_NAME,
+        STACKED_EXPERT_NAME,
+        ROUTER_NAME,
+        "model.layers.0.self_attn.q_proj.weight",
+        BIAS_NAMES[0],
+    ]
+    initialize_ray(cfg)
+    try:
+        policy = _init_policy(cfg, 4)
+        routes = ray.get(policy.async_run_ray_method("pass_through", "grug_optimizer_route_snapshot"))
+        expected = {
+            "embedding.word_embeddings.weight": "adam",
+            "embed_norm.down_proj.weight": "grug_muonh",
+            "self_attention.linear_qkv.weight": "grug_muonh_qkv",
+            "mlp.experts.linear_fc1.weight0": "grug_muonh_gate_up",
+            "output_layer.weight": "grug_adamh",
+        }
+        for suffix, route in expected.items():
+            observed = {
+                value for snapshot in routes for name, value in snapshot["routes"].items() if name.endswith(suffix)
+            }
+            assert observed == {route}, (suffix, observed)
+
+        before = rank0_validation_snapshot(policy, names)
+        for _ in range(2):
+            scores = _megatron_response_logprobs(policy, batch)
+            batch["action_log_probs"] = (scores * batch["response_mask"]).float()
+            status = _train_step(policy, batch)
+            assert status["log_ratio_abs_max"] < TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE
+        saved = rank0_validation_snapshot(policy, names)
+        for name in names[:-1]:
+            assert not torch.equal(saved[name], before[name]), name
+        torch.testing.assert_close(saved[names[-1]], before[names[-1]], rtol=0, atol=0)
+
+        checkpoint = str(tmp_path / "checkpoint")
+        ray.get(
+            policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint, tokenizer=tokenizer)
+        )
+        scores = _megatron_response_logprobs(policy, batch)
+        batch["action_log_probs"] = (scores * batch["response_mask"]).float()
+        _train_step(policy, batch)
+        continued = rank0_validation_snapshot(policy, names)
+        ray.get(policy.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint))
+        restored = rank0_validation_snapshot(policy, names)
+        for name in names:
+            torch.testing.assert_close(restored[name], saved[name], rtol=0, atol=0)
+        _train_step(policy, batch)
+        resumed = rank0_validation_snapshot(policy, names)
+        for name in names:
+            torch.testing.assert_close(resumed[name], continued[name], rtol=0, atol=0)
+        scores = _megatron_response_logprobs(policy, batch)
+        export_dir = tmp_path / "export"
+        ray.get(policy.async_run_ray_method("pass_through", "save_hf_model", str(export_dir), tokenizer))
+        exported = GrugMoeForCausalLM.from_pretrained(export_dir, dtype=torch.float32).state_dict()
+        for name in names:
+            torch.testing.assert_close(exported[name].float(), resumed[name], rtol=0, atol=0)
+        policy.kill_actors()
+        reloaded = _hf_response_logprobs_direct(str(export_dir), batch)
+        _assert_logprobs_close(scores, reloaded, batch["response_mask"])
     finally:
         ray.shutdown()
 
@@ -615,3 +690,78 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
     finally:
         ray.util.remove_placement_group(shared_pg)
         ray.shutdown()
+
+
+@pytest.mark.parametrize("nesterov", [False, True])
+def test_megatron_muonh_offloaded_direction_matches_cuda_reference(nesterov):
+    require_hoppers(1)
+    torch.manual_seed(11)
+    shape = (1025, 4096)  # Crosses the 16 MiB transfer-chunk boundary.
+    gradient = torch.randn(shape, device="cuda")
+    momentum = torch.randn(shape, device="cuda")
+    expected_momentum = momentum.clone().mul_(0.95).add_(gradient)
+    expected_direction = gradient.clone()
+    if nesterov:
+        expected_direction.add_(expected_momentum, alpha=0.95)
+    else:
+        expected_direction.copy_(expected_momentum)
+
+    actual_direction = gradient.clone()
+    actual_momentum = momentum.cpu().pin_memory()
+    _offloaded_muon_direction_in_grad_(actual_direction, actual_momentum, beta=0.95, nesterov=nesterov)
+
+    torch.testing.assert_close(actual_direction, expected_direction, rtol=0, atol=0)
+    torch.testing.assert_close(actual_momentum, expected_momentum.cpu(), rtol=0, atol=0)
+
+
+def test_megatron_muonh_momentum_stays_on_cpu_after_rollout_backload_and_resume():
+    require_hoppers(1)
+    torch.manual_seed(17)
+    parameters = [torch.nn.Parameter(torch.randn(4, 8, device="cuda")) for _ in range(2)]
+
+    def new_optimizer(weights):
+        return MegatronGrugMuonH(
+            [
+                {"params": [weights[0]], "optimizer": "grug_muonh"},
+                {"params": [weights[1]], "optimizer": "grug_adamh"},
+            ],
+            lr=1e-3,
+            betas=(0.9, 0.95),
+            momentum=0.95,
+            nesterov=True,
+            ns_steps=5,
+            eps=1e-8,
+            muon_eps=1e-8,
+            qkv_split_shapes=(4, 2, 2),
+            offload_momentum=True,
+        )
+
+    optimizer = new_optimizer(parameters)
+    for parameter in parameters:
+        parameter.grad = torch.randn_like(parameter)
+    optimizer.step()
+    saved_parameters = [parameter.detach().clone() for parameter in parameters]
+    saved_state = copy.deepcopy(optimizer.state_dict())
+
+    megatron_optimizer = SimpleNamespace(optimizer=optimizer)
+    offload_megatron_optimizer(megatron_optimizer)
+    load_megatron_optimizer(megatron_optimizer)
+    assert optimizer.state[parameters[0]]["momentum_buffer"].device.type == "cpu"
+    assert optimizer.state[parameters[0]]["momentum_buffer"].is_pinned()
+    assert optimizer.state[parameters[1]]["exp_avg"].device.type == "cuda"
+    assert optimizer.state[parameters[1]]["exp_avg_sq"].device.type == "cuda"
+
+    restored_parameters = [torch.nn.Parameter(parameter.clone()) for parameter in saved_parameters]
+    restored_optimizer = new_optimizer(restored_parameters)
+    restored_optimizer.initialize_state()
+    restored_optimizer.load_state_dict(saved_state)
+    assert restored_optimizer.state[restored_parameters[0]]["momentum_buffer"].device.type == "cpu"
+
+    for parameter, restored in zip(parameters, restored_parameters, strict=True):
+        gradient = torch.randn_like(parameter)
+        parameter.grad = gradient.clone()
+        restored.grad = gradient.clone()
+    optimizer.step()
+    restored_optimizer.step()
+    for parameter, restored in zip(parameters, restored_parameters, strict=True):
+        torch.testing.assert_close(parameter, restored, rtol=0, atol=0)
