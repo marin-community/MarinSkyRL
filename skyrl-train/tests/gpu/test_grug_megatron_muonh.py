@@ -102,6 +102,12 @@ def _gradients(model, amplitude):
         parameter.grad = torch.linspace(-1, 1, parameter.numel(), device="cuda").reshape_as(parameter) * amplitude
 
 
+def _step(optimizer, model):
+    for parameter in model.parameters():
+        parameter.main_grad = parameter.grad
+    return optimizer.step()
+
+
 def _assert_weights(actual, expected):
     for name, parameter in actual.named_parameters():
         reference = expected.get_parameter(name)
@@ -143,7 +149,7 @@ def test_native_factory_matches_three_jax_steps_and_adam(distributed_parallel_st
             parameter.grad = gradient.clone()
         reference.grad = torch.full_like(reference, 0.125 * step)
         adam.step()
-        success, _, _ = optimizer.step()
+        success, _, _ = _step(optimizer, model)
         assert success
         for parameter, expected in zip(fused_parameters, fused_values(f"parameter_{step}")):
             torch.testing.assert_close(parameter, expected, rtol=5e-3, atol=3e-3)
@@ -162,7 +168,7 @@ def test_native_factory_clips_all_routes_by_the_global_norm(distributed_parallel
         expected_norm = torch.nn.utils.clip_grad_norm_(reference.parameters(), 1.0)
         muon.step()
         adam.step()
-        success, norm, _ = optimizer.step()
+        success, norm, _ = _step(optimizer, model)
         assert success
         assert norm > 1.0
         assert norm == pytest.approx(expected_norm.item(), rel=1e-6)
@@ -191,7 +197,7 @@ def test_route_warmup_and_scheduler_resume_match_weight_updates(distributed_para
         adam.param_groups[0]["lr"] = adam_lr
         muon.step()
         adam.step()
-        success, _, _ = optimizer.step()
+        success, _, _ = _step(optimizer, model)
         assert success
         _assert_weights(model, reference)
         scheduler.step(1)
