@@ -17,7 +17,11 @@ from loguru import logger
 from uuid import uuid4
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.types import VerifierTestCollection
-from skyrl_train.trajectory_runners.projections import attach_terminal_classifications, project_loss_mask
+from skyrl_train.trajectory_runners.projections import (
+    attach_routed_experts,
+    attach_terminal_classifications,
+    project_loss_mask,
+)
 from skyrl_train.metric_names import (
     IDENTITY_AWARE_REWARD_METRIC_PREFIX,
     LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
@@ -38,8 +42,6 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     extract_routed_experts_from_rollout_details,
     normalize_token_ids,
     AlignmentStats,
-    _sentinel_routed_experts_row,
-    SENTINEL_EXPERT_ID,
 )
 from skyrl_train.utils.reward_shaping import (
     ParsedTestResult,
@@ -1318,33 +1320,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                     f"and if context length errors are preventing logprob collection."
                 )
 
-        # Collect routed_experts (Stage 1 MoE router-replay capture rail). Mirrors
-        # the rollout_logprobs gather and mixed-presence handling. Gated on
-        # moe_router_replay so the TrajectoryBatch is byte-identical when off (the
-        # key is omitted entirely, not set to None). Skipped for eval like logprobs.
-        rollout_routed_experts_list = None
-        if self._moe_router_replay and not is_eval:
-            has_any_routed_experts = any(output.evidence.routed_experts is not None for output in all_outputs)
-            if has_any_routed_experts:
-                # Learn the [L, K] sentinel-row shape from the first real sample so
-                # missing/failed samples are sentinel-filled at the correct width.
-                sentinel_row = [[SENTINEL_EXPERT_ID]]
-                for output in all_outputs:
-                    if output.evidence.routed_experts:
-                        sentinel_row = _sentinel_routed_experts_row(output.evidence.routed_experts[0])
-                        break
-                rollout_routed_experts_list = []
-                for output in all_outputs:
-                    if output.evidence.routed_experts is not None:
-                        rollout_routed_experts_list.append(
-                            [[list(layer) for layer in token] for token in output.evidence.routed_experts]
-                        )
-                    else:
-                        # Sentinel-fill missing samples to match response_ids length.
-                        rollout_routed_experts_list.append(
-                            [list(sentinel_row) for _ in range(len(output.evidence.response_token_ids))]
-                        )
-
         # Collect the Stage B per-token shaping channel + span tags. Gated on
         # enable_token_reward_channel so the TrajectoryBatch is byte-identical when
         # off (keys omitted entirely). Sentinel-fill (zeros) any sample missing them
@@ -1403,10 +1378,8 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         if self._reward_shaping_enabled:
             trajectory_batch["verifier_tests"] = [output.verifier_tests for output in all_outputs]
 
-        # Only attach routed_experts when router-replay is on, so the flag-off
-        # TrajectoryBatch dict is byte-identical to today (key absent, not None).
-        if rollout_routed_experts_list is not None:
-            trajectory_batch["rollout_routed_experts"] = rollout_routed_experts_list
+        if self._moe_router_replay and not is_eval:
+            attach_routed_experts(trajectory_batch, all_outputs, trajectory_batch["response_ids"])
 
         # Attach the Stage B channel + tags only when present, so the flag-off
         # TrajectoryBatch dict is byte-identical to today (keys absent, not None).
