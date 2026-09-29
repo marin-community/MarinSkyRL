@@ -1,6 +1,8 @@
 """Projection of harness interaction records into trainer samples."""
 
 import copy
+
+import numpy as np
 from typing import Generic, Protocol, Sequence, TypeVar
 
 from omegaconf import DictConfig
@@ -191,7 +193,7 @@ def attach_routed_experts(
 ) -> None:
     """Project exact per-token routes and preserve the batch's route shape."""
     captured = [output.evidence.routed_experts for output in outputs]
-    template = next((routes[0] for routes in captured if routes), None)
+    template = next((routes[0] for routes in captured if routes is not None and len(routes)), None)
     if template is None:
         return
     sentinel = _sentinel_routed_experts_row(template)
@@ -199,9 +201,7 @@ def attach_routed_experts(
     for routes, response in zip(captured, responses, strict=True):
         if routes is not None and len(routes) != len(response):
             raise ValueError("routed_experts must align with response token IDs")
-        projected.append(
-            [sentinel for _ in response] if routes is None else [[list(layer) for layer in token] for token in routes]
-        )
+        projected.append(np.zeros((len(response), *sentinel.shape), dtype=np.int16) if routes is None else routes)
     batch["rollout_routed_experts"] = projected
 
 

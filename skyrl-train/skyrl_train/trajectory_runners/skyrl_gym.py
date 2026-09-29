@@ -11,6 +11,7 @@ import asyncio
 import copy
 import json
 import requests
+import numpy as np
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from uuid import uuid4
@@ -894,11 +895,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
             student_topk_indices=None if selected is None else selected.indices,
             behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
-            routed_experts=(
-                None
-                if rollout_routes is None
-                else tuple(tuple(tuple(layer) for layer in token) for token in rollout_routes)
-            ),
+            routed_experts=(None if rollout_routes is None else np.ascontiguousarray(rollout_routes, dtype=np.int16)),
             metadata=({"terminal_exception_type": disposition.exception_type} if terminal_error is not None else {}),
         )
         reward_result = RewardResult(
