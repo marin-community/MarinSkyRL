@@ -8,6 +8,7 @@ import dataclasses
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, TypeVar
 
 import ray
@@ -70,6 +71,11 @@ class RolloutRequestSpec:
             [prompt], self.samples_per_prompt, self.sampling_params, self.environment_class, "train", policy_step
         )
         return request
+
+
+class RolloutResumePolicy(StrEnum):
+    RESTORE = "restore"
+    REGENERATE = "regenerate"
 
 
 @dataclass(frozen=True)
@@ -266,10 +272,19 @@ class TrainingContext:
             dataclasses.replace(loader, retries=retries), ready, self._payloads.object_store_root
         )
 
-    async def load_state_dict(self, state: TrainingContextState) -> None:
+    async def load_state_dict(
+        self, state: TrainingContextState, *, committed_groups: RolloutResumePolicy = RolloutResumePolicy.RESTORE
+    ) -> None:
         """Restore a checkpoint's rollout state before ``start``."""
         if self._dispatcher is not None:
             raise RuntimeError("rollout state must be restored before dispatching starts")
+        if committed_groups is RolloutResumePolicy.REGENERATE:
+            # Preserve the prompt cursor, but regenerate queued samples with the new policy and verifiers.
+            loader = dataclasses.replace(
+                state.loader, retries=[*state.loader.retries, *(r.prompt for r in state.ready)]
+            )
+            logger.info("Regenerating {} checkpointed groups instead of restoring their verdicts", len(state.ready))
+            state = dataclasses.replace(state, loader=loader, ready=[])
         # Object URIs are absolute, so a resumed run may write new payloads under a different root, but it must
         # read the checkpoint's payloads the way they were stored.
         if state.ready and (state.object_store_root is None) != (self._payloads.object_store_root is None):

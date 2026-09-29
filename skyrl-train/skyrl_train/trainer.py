@@ -27,7 +27,7 @@ from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.rollouts.buffer import RolloutGroup
-from skyrl_train.rollouts.context import TrainingContext, TrainingContextState
+from skyrl_train.rollouts.context import RolloutResumePolicy, TrainingContext, TrainingContextState
 from skyrl_train.trajectory_selection import trajectory_selector_from_config
 from skyrl_train.trajectory_runners.base import (
     TrajectoryBatch,
@@ -1216,7 +1216,10 @@ class RayPPOTrainer:
                 self.global_step, _ = self.load_checkpoints()
             logger.info(f"Resumed training from global_step {self.global_step}")
             if self._restored_rollout_state is not None:
-                await self.context.load_state_dict(self._restored_rollout_state)
+                await self.context.load_state_dict(
+                    self._restored_rollout_state,
+                    committed_groups=RolloutResumePolicy(self.cfg.trainer.rollout_buffer.resume_policy),
+                )
                 self._restored_rollout_state = None
 
         await self._start_draft_trainer()

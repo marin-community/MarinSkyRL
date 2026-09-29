@@ -16,7 +16,7 @@ from skyrl_train.rollouts.buffer import (
     RolloutTask,
     RolloutWriter,
 )
-from skyrl_train.rollouts.context import RolloutRequestSpec, TrainingContext, TrainingContextState
+from skyrl_train.rollouts.context import RolloutRequestSpec, RolloutResumePolicy, TrainingContext, TrainingContextState
 from skyrl_train.rollouts.loader import PromptLoader, PromptLoaderState, JudgedGroup, PromptOrder, SeededPasses
 from skyrl_train.rollouts.payloads import MemoryPayloads, ObjectStorePayloads, PayloadStore
 
@@ -340,3 +340,24 @@ async def test_resume_under_a_new_object_store_root_trains_the_checkpointed_obje
         assert await _next_uids(resumed) == ["c"]
     finally:
         await resumed.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_regenerates_old_verdicts_without_restarting_prompt_order(ray_module):
+    group = RolloutGroup(_batch(masked=True), "c", 1, _prompt("c"))
+    committed = ReadyRollout("old-verdict", 1, 1, group.prompt, CONTENT_POLICY.verdict(group), [], None)
+    state = TrainingContextState(PromptLoaderState({"epoch": 0, "position": 3}, [_prompt("b")]), [committed], None)
+    workers = _Workers()
+    context = _context(["a", "b", "c", "d"], workers, batch_size=2, max_in_flight=2)
+    await context.load_state_dict(state, committed_groups=RolloutResumePolicy.REGENERATE)
+    assert context.loader.state_dict().order == state.loader.order
+    context.start()
+    try:
+        await context.publish(4)
+        groups, metrics = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
+    finally:
+        await context.close()
+    assert workers.started[:2] == ["b", "c"]
+    assert sorted(g.uid for g in groups) == ["b", "c"]
+    assert metrics.get("async/rejected_count/fully_masked", 0) == 0
+    assert state.ready == [committed]
