@@ -173,13 +173,14 @@ def normalize_final_answer(final_answer: str) -> str:
 
 _TEX_FRACTION = re.compile(r"\\[dt]?frac\{(-?\d+(?:\.\d+)?)\}\{(-?\d+(?:\.\d+)?)\}")
 _SLASH_FRACTION = re.compile(r"(-?\d+(?:\.\d+)?)/(-?\d+(?:\.\d+)?)")
+_RATIO = re.compile(r"(-?\d+):(-?\d+)")
 _PLAIN_DECIMAL = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 def rational_value(answer: str) -> Optional[Fraction]:
-    """Parse a normalized answer as an exact rational, accepting TeX fraction forms."""
+    """Parse a normalized answer as an exact rational, accepting TeX fraction and ratio forms."""
     candidate = answer.replace(r"\left", "").replace(r"\right", "").strip()
-    for pattern in (_TEX_FRACTION, _SLASH_FRACTION):
+    for pattern in (_TEX_FRACTION, _SLASH_FRACTION, _RATIO):
         match = pattern.fullmatch(candidate)
         if match is None:
             continue
