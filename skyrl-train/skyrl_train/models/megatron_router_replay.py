@@ -180,14 +180,23 @@ class _Phase(Enum):
     FORWARD = "forward"
 
 
+class RouterScoreType(Enum):
+    LOGITS = "logits"
+    PROBABILITIES = "probabilities"
+    BIASED_PROBABILITIES = "biased_probabilities"
+
+
 def filtered_replay_topk(
     scores: torch.Tensor,
     native_idx: torch.Tensor,
     targets: torch.Tensor,
     mask: torch.Tensor,
     keep_fraction: float,
+    score_type: RouterScoreType = RouterScoreType.LOGITS,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Keep captured experts above the fractional cutoff in softmax selection-logit probability."""
+    """Keep captured experts above the fractional native selection-probability cutoff."""
+    if score_type is RouterScoreType.BIASED_PROBABILITIES:
+        raise NotImplementedError("filtered replay does not support expert bias added to probability scores")
     validate_replay_keep_fraction(keep_fraction, "filtered replay keep_fraction")
     if scores.ndim != 2 or native_idx.shape != targets.shape or native_idx.shape[0] != scores.shape[0]:
         raise ValueError("filtered replay scores, native choices and captured choices have incompatible shapes")
@@ -206,7 +215,10 @@ def filtered_replay_topk(
         if len(set(captured)) != len(captured):
             raise ValueError("filtered replay captured experts must be distinct within a row")
         cutoff_score = cutoff_scores[row].item()
-        kept = [scores[row, expert].item() >= cutoff_score + threshold_offset for expert in captured]
+        cutoff_score = (
+            cutoff_score + threshold_offset if score_type is RouterScoreType.LOGITS else cutoff_score * keep_fraction
+        )
+        kept = [scores[row, expert].item() >= cutoff_score for expert in captured]
         used = {expert for expert, accepted in zip(captured, kept, strict=True) if accepted}
         native_candidates = iter(expert for expert in ranked_native[row].tolist() if expert not in used)
         for slot, (expert, accepted) in enumerate(zip(captured, kept, strict=True)):
@@ -386,6 +398,7 @@ class MegatronRouterReplay:
         default_compute_topk: Optional[
             Callable[[torch.Tensor, int, Optional[int], Optional[int]], Tuple[torch.Tensor, torch.Tensor]]
         ] = None,
+        score_type: RouterScoreType = RouterScoreType.LOGITS,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return ``(probs, top_indices)`` with rollout choices on masked rows.
 
@@ -416,7 +429,7 @@ class MegatronRouterReplay:
         targets = targets.to(device=scores.device)
         replaced = torch.zeros_like(targets, dtype=torch.bool)
         if self._scoring_mode == FILTERED_REPLAY_MODE and is_forward:
-            idx, replaced = filtered_replay_topk(scores, native_idx, targets, mask, self._keep_fraction)
+            idx, replaced = filtered_replay_topk(scores, native_idx, targets, mask, self._keep_fraction, score_type)
         else:
             idx = torch.where(mask.unsqueeze(-1), targets, native_idx)
         probs = scores.gather(1, idx)
@@ -498,9 +511,15 @@ class LayerReplayHandle:
     positionally.
     """
 
-    def __init__(self, controller: MegatronRouterReplay, layer_idx: int) -> None:
+    def __init__(
+        self,
+        controller: MegatronRouterReplay,
+        layer_idx: int,
+        score_type: RouterScoreType = RouterScoreType.LOGITS,
+    ) -> None:
         self._controller = controller
         self.layer_idx = layer_idx
+        self._score_type = score_type
 
     def get_replay_topk(
         self,
@@ -511,7 +530,7 @@ class LayerReplayHandle:
         default_compute_topk: Optional[Callable] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return self._controller.get_replay_topk(
-            self.layer_idx, scores, topk, num_groups, group_topk, default_compute_topk
+            self.layer_idx, scores, topk, num_groups, group_topk, default_compute_topk, self._score_type
         )
 
 
