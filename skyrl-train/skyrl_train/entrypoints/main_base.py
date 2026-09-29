@@ -33,7 +33,6 @@ from marinskyrl.speculative_decoding import (
     parse_speculative_decoding_config,
     runai_model_uri,
 )
-from skyrl_train.trajectory_runners.trajectory_processing import get_custom_chat_template
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -145,6 +144,8 @@ def create_ray_wrapped_inference_engines_from_config(
         "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
     }
     if cfg.generator.backend == "vllm":
+        from skyrl_train.trajectory_runners.trajectory_processing import get_custom_chat_template
+
         engine_init_kwargs["chat_template"] = get_custom_chat_template(cfg.generator.chat_template)
         engine_init_kwargs["default_chat_template_kwargs"] = OmegaConf.to_container(
             cfg.generator.chat_template_kwargs, resolve=True
