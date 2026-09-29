@@ -11,7 +11,6 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 from taskcompendium.grading import exact_answer
-from taskcompendium.importers.nemo_workplace import load_fixture
 from taskcompendium.lowering import HarborEnvironmentConfig, lower_to_harbor
 from taskcompendium.models import AnswerType, ConversationInput, EnvironmentRequirements, Source, TaskSpec, TextMessage
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
@@ -34,7 +33,9 @@ from skyrl_train.config.utils import get_default_config
 
 @pytest.mark.integrations
 @pytest.mark.asyncio
-async def test_mixed_taskcompendium_rollout_updates_cpu_policy(tmp_path: Path, trusted_workplace_checkout: Path):
+async def test_mixed_taskcompendium_rollout_updates_cpu_policy(
+    tmp_path: Path, trusted_workplace_checkout: Path, workplace_import
+):
     pytest.importorskip("harbor")
     chat = TaskSpec(
         id="chat",
@@ -46,7 +47,7 @@ async def test_mixed_taskcompendium_rollout_updates_cpu_policy(tmp_path: Path, t
     )
     plain = SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN)
     lower_to_harbor(chat, plain, HarborEnvironmentConfig(), tmp_path / "chat")
-    workplace, convention, binding = load_fixture()
+    workplace, convention, binding = workplace_import
     lower_to_harbor(
         workplace,
         convention,

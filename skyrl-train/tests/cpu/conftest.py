@@ -7,10 +7,19 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import SimpleNamespace
+from urllib.request import urlopen
 
 import pytest
 from omegaconf import OmegaConf
-from taskcompendium.importers.nemo_workplace import PROVIDER_GIT_REVISION, PROVIDER_REPOSITORY
+from taskcompendium.importers.nemo_workplace import (
+    PROVIDER_GIT_REVISION,
+    PROVIDER_REPOSITORY,
+    SOURCE_EXAMPLE_MAX_BYTES,
+    SOURCE_EXAMPLE_URL,
+    WorkplaceImport,
+    import_row,
+    select_row_zero,
+)
 
 # CPU tests already run in the locked uv environment. Ray's uv hook would package
 # this checkout and create another environment for every local Ray session.
@@ -65,6 +74,14 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     group_count = min(int(worker_count), max(1, round(host_memory / HOST_MEMORY_PER_SLOW_TEST_BYTES)))
     for index, item in enumerate(slow):
         item.add_marker(pytest.mark.xdist_group(f"slow-{index % group_count}"))
+
+
+@pytest.fixture(scope="session")
+def workplace_import() -> WorkplaceImport:
+    """Resolve and validate the source row before exporting private task resources."""
+    with urlopen(SOURCE_EXAMPLE_URL, timeout=30) as response:
+        source = response.read(SOURCE_EXAMPLE_MAX_BYTES + 1)
+    return import_row(select_row_zero(source))
 
 
 @pytest.fixture(scope="session")

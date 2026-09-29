@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from omegaconf import OmegaConf
 from taskcompendium.grading import exact_answer
-from taskcompendium.importers.nemo_workplace import load_fixture
 from taskcompendium.lowering import SPECIFICATION_FILE, HarborEnvironmentConfig, lower_to_harbor, read_specification
 from taskcompendium.models import (
     AnswerType,
@@ -205,10 +204,10 @@ def test_taskcompendium_requires_a_serving_policy_endpoint():
     [("short-served-alias", "short-served-alias"), (None, "short-policy-path")],
 )
 def test_workplace_dataset_uses_policy_endpoint_model_name(
-    tmp_path, served_alias, expected_name, trusted_workplace_checkout
+    tmp_path, served_alias, expected_name, trusted_workplace_checkout, workplace_import
 ):
     pytest.importorskip("harbor")
-    specification, convention, binding = load_fixture()
+    specification, convention, binding = workplace_import
     lower_to_harbor(
         specification,
         convention,
@@ -369,14 +368,14 @@ async def test_router_splits_mixed_batches_and_restores_order():
 
 @pytest.mark.asyncio
 async def test_mixed_batch_uses_live_scripted_policy_endpoint_and_produces_trainable_actions(
-    tmp_path, trusted_workplace_checkout
+    tmp_path, trusted_workplace_checkout, workplace_import
 ):
     pytest.importorskip("harbor")
     from tokenizers import Tokenizer, models, pre_tokenizers
     from transformers import PreTrainedTokenizerFast
 
     _lowering(tmp_path, "chat")
-    specification, convention, binding = load_fixture()
+    specification, convention, binding = workplace_import
     lower_to_harbor(
         specification,
         convention,
