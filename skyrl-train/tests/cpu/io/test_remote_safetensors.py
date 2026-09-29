@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from safetensors.torch import save_file
 import torch
 
-from cloud.iris.hf_model_cache import stage_model_metadata
+from cloud.iris.hf_model_cache import stage_artifact_model_metadata, stage_model_metadata
 from marinskyrl.model_manifest import snapshot_model_manifest
 from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore, lazy_first_dim_patterns_for_bridge
 
@@ -25,14 +25,10 @@ def test_loads_only_requested_tensor_range_without_local_weight_files(tmp_path: 
         },
         remote / "model-00001-of-00001.safetensors",
     )
+    (remote / "config.json").write_text("{}")
+    (remote / "tokenizer.json").write_text("{}")
     metadata = tmp_path / "metadata"
-    _write_index(
-        metadata,
-        {
-            "layer.0.weight": "model-00001-of-00001.safetensors",
-            "layer.1.weight": "model-00001-of-00001.safetensors",
-        },
-    )
+    stage_artifact_model_metadata(str(remote), "artifact@v1:abc123", str(metadata))
 
     store = RemoteSafetensorsTensorStore(str(remote), metadata)
     loaded = store.load_tensors(["layer.0.weight"])

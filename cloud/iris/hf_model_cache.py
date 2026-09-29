@@ -614,12 +614,7 @@ def stage_artifact_model_metadata(model_uri: str, source_identity: str, local_pa
     metadata_inventory = tuple(item for item in inventory if not _is_weight(item[1].path))
     if not metadata_inventory:
         raise ValueError(f"Model artifact contains no metadata: {model_uri}")
-    artifact = materialize_inventory(
-        ArtifactSource(uri=model_uri, identity=source_identity, local_path=local_path),
-        filesystem,
-        metadata_inventory,
-    )
-    metadata_bytes = sum(entry.size for entry in artifact.files)
+    generated_files = {}
     shards = tuple(item for item in inventory if _is_safetensors(item[1].path))
     if shards and not any(entry.path == HF_WEIGHT_INDEX_FILENAME for _, entry in inventory):
         shard_headers = {}
@@ -627,10 +622,14 @@ def stage_artifact_model_metadata(model_uri: str, source_identity: str, local_pa
             with filesystem.open(shard_path, "rb") as source:
                 _header, keys = read_safetensors_header(source, shard_path)
             shard_headers[entry.path] = (entry.size, keys)
-        index_bytes = build_safetensors_weight_index(shard_headers, model_uri)
-        (Path(local_path) / HF_WEIGHT_INDEX_FILENAME).write_bytes(index_bytes)
-        metadata_bytes += len(index_bytes)
-    return metadata_bytes
+        generated_files[HF_WEIGHT_INDEX_FILENAME] = build_safetensors_weight_index(shard_headers, model_uri)
+    artifact = materialize_inventory(
+        ArtifactSource(uri=model_uri, identity=source_identity, local_path=local_path),
+        filesystem,
+        metadata_inventory,
+        generated_files=generated_files,
+    )
+    return sum(entry.size for entry in artifact.files)
 
 
 def stage_artifact_model(model_uri: str, source_identity: str, local_path: str) -> int:

@@ -760,7 +760,7 @@ def _reward_sign_successes(rewards: Sequence[float | List[float]]) -> List[bool]
     return [float(np.sum(reward)) > 0.0 for reward in rewards]
 
 
-def _concatenate_episode_evidence(result: TrajectoryBatch, batches: List[TrajectoryBatch]) -> None:
+def _concatenate_environment_metrics(result: TrajectoryBatch, batches: List[TrajectoryBatch]) -> None:
     if any("env_metrics" in batch for batch in batches):
         for batch in batches:
             if ("env_metrics" in batch) != ("env_classes" in batch):
@@ -959,7 +959,7 @@ def concatenate_trajectory_batches(
     if baseline_exclusions_concat is not None:
         result["exclude_from_baseline"] = baseline_exclusions_concat
 
-    _concatenate_episode_evidence(result, trajectory_batches)
+    _concatenate_environment_metrics(result, trajectory_batches)
     for key in ("verification_results", "evidence_messages"):
         if any(batch.get(key) is not None for batch in trajectory_batches):
             result[key] = [

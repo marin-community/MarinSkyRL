@@ -8,6 +8,7 @@ import posixpath
 import shutil
 import tempfile
 from contextlib import contextmanager
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -196,17 +197,23 @@ def materialize_inventory(
     source: ArtifactSource,
     filesystem: AbstractFileSystem,
     remote_inventory: tuple[tuple[str, FileEntry], ...],
+    *,
+    generated_files: Mapping[str, bytes] | None = None,
 ) -> MaterializedArtifact:
     """Materialize a selected remote inventory into its declared node-local path."""
-    inventory = tuple(entry for _, entry in remote_inventory)
+    generated_files = generated_files or {}
+    remote_files = tuple(entry for _, entry in remote_inventory)
+    inventory = remote_files + tuple(FileEntry(path=path, size=len(data)) for path, data in generated_files.items())
     target = Path(source.local_path).resolve()
     if _materialization_matches(target, source, inventory):
         return MaterializedArtifact(source=source, files=inventory)
 
     with atomic_directory_update(target, staging_prefix=f".{target.name}.staging-") as staging:
         copied_inventory = copy_file_inventory(filesystem, remote_inventory, staging)
-        if copied_inventory != inventory:
+        if copied_inventory != remote_files:
             raise ValueError(f"Artifact source changed while it was being staged: {source.uri}")
+        for path, data in generated_files.items():
+            (staging / path).write_bytes(data)
         manifest = {
             "source_uri": source.uri,
             "source_identity": source.identity,

@@ -22,7 +22,6 @@ from cloud.iris.hf_model_cache import (
     stage_model_metadata,
 )
 from marinskyrl.model_manifest import ModelManifest, snapshot_model_manifest
-from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore
 
 
 def _snapshot_file(path: str, payload: bytes) -> HuggingFaceSnapshotFile:
@@ -301,8 +300,8 @@ def test_artifact_metadata_staging_leaves_weight_shards_remote(tmp_path: Path) -
 
     metadata_bytes = stage_artifact_model_metadata(source.as_uri(), "artifact@v1:abc123", str(destination))
 
-    store = RemoteSafetensorsTensorStore(source.as_uri(), destination)
-    assert store.load_tensors(["weight"])["weight"].tolist() == [0.0, 1.0, 2.0, 3.0]
+    index = json.loads((destination / "model.safetensors.index.json").read_text())
+    assert index["weight_map"] == {"weight": "model.safetensors"}
     metadata_files = (
         destination / "config.json",
         destination / "tokenizer.json",
@@ -313,6 +312,13 @@ def test_artifact_metadata_staging_leaves_weight_shards_remote(tmp_path: Path) -
     assert (destination / "config.json").read_text() == "{}"
     assert (destination / "tokenizer.json").read_text() == "{}"
     assert not (destination / "model.safetensors").exists()
+
+    index_path = destination / "model.safetensors.index.json"
+    cached_index = tmp_path / "cached-index"
+    cached_index.hardlink_to(index_path)
+    repeated_bytes = stage_artifact_model_metadata(source.as_uri(), "artifact@v1:abc123", str(destination))
+    assert repeated_bytes == metadata_bytes
+    assert index_path.samefile(cached_index)
 
 
 def test_artifact_model_staging_materializes_weight_shards(tmp_path: Path) -> None:

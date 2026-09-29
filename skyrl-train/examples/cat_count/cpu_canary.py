@@ -16,12 +16,12 @@ from tokenizers import Tokenizer, decoders, models, pre_tokenizers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 from transformers.tokenization_utils_base import BatchEncoding
 
-from skyrl_gym.envs.cat_count.reward import CatCountScore, cat_count_score
+from skyrl_gym.envs.cat_count.reward import TARGET_WORD, CatCountScore, cat_count_score
 from skyrl_train.utils.advantage_estimators import GRPO_FLAT_REWARD_STD_TOLERANCE, compute_grpo_outcome_advantage
 from skyrl_train.utils.policy_losses import ppo_policy_loss
 
-PROMPT = "Reply with the word cat exactly {N} times, separated by single spaces. Nothing else."
-TEMPLATE = PROMPT.replace("word cat", "word {W}")
+PROMPT = f"Reply with the word {TARGET_WORD} exactly {{N}} times, separated by single spaces. Nothing else."
+TEMPLATE = PROMPT.replace(f"word {TARGET_WORD}", "word {W}")
 OTHER_WORDS = ["dog", "bird", "fox", "cow", "pig", "owl", "bee", "ant"]
 SPECIAL = ["<pad>", "<eos>", "<unk>", "<|user|>", "<|assistant|>"]
 PROMPT_WORDS = sorted(set(PROMPT.replace("{N}", "").replace(",", "").replace(".", "").split()))
@@ -53,24 +53,24 @@ class Rollout:
 
 
 def build_tokenizer() -> PreTrainedTokenizerFast:
-    tk = Tokenizer(models.WordLevel({w: i for i, w in enumerate(VOCAB)}, unk_token="<unk>"))
-    tk.pre_tokenizer = pre_tokenizers.Sequence(
+    word_tokenizer = Tokenizer(models.WordLevel({w: i for i, w in enumerate(VOCAB)}, unk_token="<unk>"))
+    word_tokenizer.pre_tokenizer = pre_tokenizers.Sequence(
         [pre_tokenizers.WhitespaceSplit(), pre_tokenizers.Punctuation(), pre_tokenizers.Digits(individual_digits=True)]
     )
-    tk.decoder = decoders.WordPiece(prefix="##")
-    tok = PreTrainedTokenizerFast(
-        tokenizer_object=tk,
+    word_tokenizer.decoder = decoders.WordPiece(prefix="##")
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=word_tokenizer,
         pad_token="<pad>",
         eos_token="<eos>",
         unk_token="<unk>",
         additional_special_tokens=["<|user|>", "<|assistant|>"],
     )
-    tok.chat_template = CHAT_TEMPLATE
-    tok.padding_side = "left"
-    return tok
+    tokenizer.chat_template = CHAT_TEMPLATE
+    tokenizer.padding_side = "left"
+    return tokenizer
 
 
-def prompt_text(tok, n: int, word: str = "cat") -> str:
+def prompt_text(tok, n: int, word: str = TARGET_WORD) -> str:
     return tok.apply_chat_template(
         [{"role": "user", "content": TEMPLATE.format(W=word, N=n)}], tokenize=False, add_generation_prompt=True
     )
@@ -101,7 +101,7 @@ def pretrain(args) -> None:
         batch = []
         for _ in range(32):
             if random.random() < 1 / 9:
-                word, n = "cat", 1
+                word, n = TARGET_WORD, 1
             else:
                 word, n = random.choice(OTHER_WORDS), random.randint(1, 30)
             p = tok(prompt_text(tok, n, word), add_special_tokens=False).input_ids
