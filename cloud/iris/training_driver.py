@@ -336,7 +336,7 @@ class LocalRLRunner:
                 # endpoint would silently misroute every judge call to vLLM.
                 os.environ["HARBOR_MODEL_ENDPOINT"] = api_base
                 # Also thread the minted URL through the structured SkyRL config so the
-                # value reaches the Ray tasks/actors (skyrl_entrypoint, RolloutCoordinator)
+                # value reaches the Ray tasks/actors (skyrl_entrypoint, rollout workers)
                 # where HarborTrajectoryRunner is built. The env var alone is insufficient:
                 # this runner ATTACHES to a Ray cluster the controller started BEFORE the
                 # mint, so its workers never inherit HARBOR_MODEL_ENDPOINT from this process

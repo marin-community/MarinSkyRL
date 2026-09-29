@@ -56,11 +56,11 @@ _PATH_EXTENSIONS = {
 
 
 def looks_like_file_path(value: str) -> bool:
-    """Check if a string looks like a file path (not an HF repo ID)."""
+    """Check if a string looks like a repository file path, not an HF repo ID or a URI such as ``s3://...``."""
     if not isinstance(value, str) or not value:
         return False
 
-    if is_hugging_face_repo_id(value):
+    if is_hugging_face_repo_id(value) or "://" in value:
         return False
 
     if value.startswith("/") or value.startswith("~"):

@@ -125,7 +125,9 @@ class NemotronUltraEnv(BaseTextEnv):
         if self.evidence is not None:
             message = self.evidence.metadata.get("assistant_message")
             if isinstance(message, Mapping):
-                return dict(message)
+                grading_message = dict(message)
+                grading_message["content"] = final_answer_text(action)
+                return grading_message
         return {"role": "assistant", "content": action, "tool_calls": []}
 
     def _require_general_judge(self) -> OpenAIJudge:

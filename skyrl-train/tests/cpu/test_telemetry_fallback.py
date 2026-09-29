@@ -63,7 +63,7 @@ def test_records_carry_the_step_they_describe(monkeypatch):
     ):
         monkeypatch.setattr(trainer_telemetry, name, _Recorder(name))
 
-    trainer_telemetry.record_generated_work([[1, 2], [3]], [True, True], 39)
+    trainer_telemetry.record_generated_work(trainer_telemetry.GeneratedWork.from_batch([[1, 2], [3]], [True, True]), 39)
     trainer_telemetry.record_rollout_staleness([2, 0], 41)
     trainer_telemetry.record_policy_step(41)
     trainer_telemetry.record_rollout_buffer(3, 8)

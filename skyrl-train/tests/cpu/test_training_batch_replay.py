@@ -7,11 +7,11 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
+from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
 from tests.training_batch_replay import (
     BatchReplayProvenance,
-    CapturingFullyAsyncRayPPOTrainer,
+    CapturingRayPPOTrainer,
     config_fingerprint,
     load_training_batch_artifact,
     replay_policy_forward,
@@ -47,7 +47,7 @@ def _provenance(**overrides) -> BatchReplayProvenance:
     return BatchReplayProvenance(**fields)
 
 
-def _bare_async_trainer(trainer_type):
+def _bare_trainer(trainer_type):
     trainer = object.__new__(trainer_type)
     trainer.cfg = OmegaConf.create(
         {
@@ -146,7 +146,7 @@ def test_config_fingerprint_excludes_only_the_diagnostic_controls():
 
 @pytest.mark.asyncio
 async def test_capture_survives_a_subsequent_forward_failure(tmp_path: Path):
-    trainer, events = _bare_async_trainer(CapturingFullyAsyncRayPPOTrainer)
+    trainer, events = _bare_trainer(CapturingRayPPOTrainer)
     trainer.global_step = 7
     trainer.capture_artifact_path = tmp_path / "step-7-pre-forward"
     trainer.capture_provenance = _provenance()
@@ -170,7 +170,7 @@ async def test_capture_survives_a_subsequent_forward_failure(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_replay_uses_production_step_prefix_and_stops_after_forward():
-    trainer, events = _bare_async_trainer(FullyAsyncRayPPOTrainer)
+    trainer, events = _bare_trainer(RayPPOTrainer)
 
     def forward(_self, training_input):
         events.append("forward")

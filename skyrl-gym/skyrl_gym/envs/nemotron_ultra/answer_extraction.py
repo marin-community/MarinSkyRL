@@ -4,16 +4,29 @@ import re
 
 from skyrl_gym.envs.aime.utils import last_boxed_only_string, remove_boxed
 
+REASONING_DELIMITERS = (
+    ("<think>", "</think>"),
+    ("<thinking>", "</thinking>"),
+    ("<|start_think|>", "<|end_think|>"),
+)
+
 
 def final_answer_text(text: str) -> str:
-    """Remove complete reasoning blocks; an unfinished block has no answer."""
-    text = re.sub(r"<(think|thinking)>.*?</\1>", "", text, flags=re.DOTALL)
-    for closing in ("</think>", "</thinking>"):
-        if closing in text:
-            text = text.rsplit(closing, 1)[-1]
-    if re.search(r"<(?:think|thinking)>", text):
+    """Strip explicit reasoning blocks, preserving unmarked text.
+
+    An unfinished reasoning block has no final answer. A closing marker alone
+    ends reasoning whose opening marker was supplied by the chat template.
+    Unmarked prose cannot be reliably classified as reasoning.
+    """
+    for opening, closing in REASONING_DELIMITERS:
+        text = re.sub(re.escape(opening) + ".*?" + re.escape(closing), "", text, flags=re.DOTALL)
+    last_closing = max(
+        (text.rfind(closing) + len(closing) for _, closing in REASONING_DELIMITERS if closing in text), default=0
+    )
+    text = text[last_closing:]
+    if any(opening in text for opening, _ in REASONING_DELIMITERS):
         return ""
-    return text.strip()
+    return text.strip().removesuffix("<|eot_id|>").strip()
 
 
 def last_boxed_answer(text: str) -> str | None:

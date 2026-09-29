@@ -25,7 +25,6 @@ uv run --isolated --extra vllm --with "litellm[proxy]>=1.67.5" --with "sandbox@.
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.async_engine=true \
   generator.gpu_memory_utilization=0.8 \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.placement.colocate_all=true \
