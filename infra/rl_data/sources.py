@@ -14,6 +14,7 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
+import datasets
 import numpy as np
 import reasoning_gym
 import requests
@@ -1225,8 +1226,6 @@ def _load_asdiv_rows(source: Source, revision: str, parameters: Mapping[str, Any
 
 
 def _load_hugging_face_dataset(source: Source, revision: str, config: str | None = None):
-    import datasets
-
     return datasets.load_dataset(
         source.dataset_id,
         config,
@@ -1307,10 +1306,8 @@ def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping
     return (restore_nemotron_ultra_placeholder(row, placeholder_sources) for row in rows)
 
 
-def load_nemotron_ultra_placeholder_sources() -> dict[tuple[str, str], Any]:
+def load_nemotron_ultra_placeholder_sources() -> dict[tuple[str, str], datasets.Dataset]:
     """Load the pinned datasets that NVIDIA's math placeholder rows point into."""
-    import datasets
-
     return {
         (DAPO_MATH_DATASET, "train"): datasets.load_dataset(
             DAPO_MATH_DATASET,
