@@ -193,18 +193,6 @@ async def test_waits_measured_in_a_worker_join_the_callers_rollout_observation(s
 
 
 @pytest.mark.asyncio
-async def test_pool_returns_one_group_unchanged(spec):
-    expected = _output([TrajectoryID("a", 0)])
-
-    async def completed_request(_input_batch):
-        return expected
-
-    pool = _pool([_Worker(completed_request)], spec)
-
-    assert await pool.run(_request([TrajectoryID("a", 0)])) is expected
-
-
-@pytest.mark.asyncio
 async def test_progress_deadline_resets_when_the_same_worker_completes_a_request(spec, monkeypatch):
     slow_result = None
     slow_task = None

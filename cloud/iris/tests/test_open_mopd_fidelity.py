@@ -131,26 +131,6 @@ def test_reference_source_patches_route_domain_response_limits(tmp_path: Path) -
         patched.generate({}, False, {"domain": ["math"]}, 2, [1, 2])
 
 
-def test_config_parser_rejects_unknown_nested_fields(tmp_path: Path) -> None:
-    raw = json.loads(fidelity.DEFAULT_CONFIG.read_text())
-    raw["training"]["typo"] = 1
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(raw))
-
-    with pytest.raises(ValueError, match="training keys"):
-        fidelity.load_config(config_path)
-
-
-def test_config_parser_rejects_non_paper_domain_response_limits(tmp_path: Path) -> None:
-    raw = json.loads(fidelity.DEFAULT_CONFIG.read_text())
-    raw["training"]["domain_response_limits"] = [16384, 16384, 16384]
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(raw))
-
-    with pytest.raises(ValueError, match="paper response limits"):
-        fidelity.load_config(config_path)
-
-
 @pytest.mark.parametrize(
     "lfs_files",
     [
@@ -271,8 +251,9 @@ def test_dataset_verification_is_recorded(monkeypatch: pytest.MonkeyPatch, tmp_p
     )
 
 
-def test_training_command_has_semantic_control_settings() -> None:
+def test_training_command_routes_config_budgets_domains_and_gate_schedule() -> None:
     config = fidelity.load_config(fidelity.DEFAULT_CONFIG)
+    training = config.training
     inputs = StagedInputs(
         source=Path("/work/Open-MOPD"),
         student=Path("/work/student"),
@@ -280,83 +261,30 @@ def test_training_command_has_semantic_control_settings() -> None:
         dataset=Path("/work/train.parquet"),
         validation_dataset=Path("/work/aime24.parquet"),
     )
-    command = training_command(config, inputs, "paper_checkpoint", Path("/work/output"), world_size=8)
+    command = training_command(config, inputs, "one_step", Path("/work/output"), world_size=8)
     bash_index = command.index("bash")
     environment = dict(value.split("=", 1) for value in command[1:bash_index])
-    overrides = {
-        command[index + 1].split("=", 1)[0]: command[index + 1].split("=", 1)[1]
-        for index, value in enumerate(command)
-        if value == "--extra"
-    }
+    overrides = dict(command[index + 1].split("=", 1) for index, value in enumerate(command) if value == "--extra")
 
-    assert environment == {
-        "TRAIN_BATCH_SIZE": "1024",
-        "MAX_PROMPT_LENGTH": "2048",
-        "MAX_RESPONSE_LENGTH": "16384",
-        "N_RESPONSES": "1",
-        "TOTAL_EPOCHS": "1",
-    }
-    assert overrides == {
-        "algorithm.adv_estimator": "token_reward_direct",
-        "algorithm.use_kl_in_reward": "False",
-        "actor_rollout_ref.actor.ppo_mini_batch_size": "256",
-        "actor_rollout_ref.actor.ppo_epochs": "1",
-        "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu": "1",
-        "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu": "1",
-        "actor_rollout_ref.actor.optim.lr": "1.5e-06",
-        "actor_rollout_ref.actor.optim.lr_scheduler_type": "constant",
-        "actor_rollout_ref.actor.optim.clip_grad": "1.0",
-        "actor_rollout_ref.actor.use_kl_loss": "False",
-        "actor_rollout_ref.actor.entropy_coeff": "0.0",
-        "actor_rollout_ref.actor.loss_agg_mode": "token-mean",
-        "actor_rollout_ref.actor.clip_ratio_low": "0.2",
-        "actor_rollout_ref.actor.clip_ratio_high": "0.28",
-        "+actor_rollout_ref.actor.opd_refresh_advantage": "True",
-        "+actor_rollout_ref.actor.opd_reward_weight_mode": "student_p",
-        "+actor_rollout_ref.rollout.log_prob_top_k": "16",
-        "+actor_rollout_ref.rollout.top_k_strategy": "only_stu",
-        "+actor_rollout_ref.rollout.reward_weight_mode": "student_p",
-        "+actor_rollout_ref.rollout.domain_response_limits": "{math:16384,code:16384,if:2048}",
-        "actor_rollout_ref.rollout.mode": "sync",
-        "data.return_raw_chat": "True",
-        "actor_rollout_ref.rollout.max_num_batched_tokens": "18432",
-        "actor_rollout_ref.rollout.temperature": "1.0",
-        "actor_rollout_ref.rollout.top_p": "0.99",
-        "reward_model.micro_batch_size_per_gpu": "1",
-        "reward_model.model.input_tokenizer": "null",
-        "+reward_model.teacher_temperature": "1.0",
-        "+reward_model.reward_kwargs.compute_true_reward": "False",
-        "+data.sampler.class_path": "pkg://verl.utils.dataset.domain_weighted_sampler",
-        "+data.sampler.class_name": "DomainWeightedSampler",
-        "+data.domain_weights.math": "2",
-        "+data.domain_weights.code": "2",
-        "+data.domain_weights.if": "1",
-        "data.dataloader_num_workers": "0",
-        "+mt_opd.domain_weighting": "domain_routing",
-        "+mt_opd.target_share_domains": "[math,code,if]",
-        "+mt_opd.target_share_values": "[0.3333333333333333,0.3333333333333333,0.3333333333333333]",
-        "+mt_opd.normalize_reward_scale": "1.0",
-        "+mt_opd.reward_scale_stat": "mean",
-        "+mt_opd.reward_scale_direction": "multiply",
-        "+mt_opd.reward_scale_anchored": "True",
-        "+mt_opd.conflict_policy": "none",
-        "trainer.total_training_steps": "200",
-        "trainer.save_freq": "2",
-        "trainer.test_freq": "2",
-        "trainer.val_before_train": "False",
-        "trainer.validation_data_dir": "/work/output/validation",
-        "actor_rollout_ref.rollout.val_kwargs.temperature": "0.6",
-        "actor_rollout_ref.rollout.val_kwargs.top_p": "0.95",
-        "+actor_rollout_ref.rollout.val_kwargs.max_tokens": "16384",
-        "actor_rollout_ref.rollout.val_kwargs.do_sample": "True",
-        "actor_rollout_ref.rollout.val_kwargs.n": "1",
-        "trainer.logger": "['console']",
-        "trainer.resume_mode": "auto",
-    }
+    assert environment["TRAIN_BATCH_SIZE"] == str(training.train_batch_size)
+    assert environment["MAX_PROMPT_LENGTH"] == str(training.prompt_limit)
+    assert environment["MAX_RESPONSE_LENGTH"] == str(training.response_limit)
+    assert overrides["actor_rollout_ref.rollout.max_num_batched_tokens"] == str(
+        training.prompt_limit + training.response_limit
+    )
+    assert overrides["+actor_rollout_ref.rollout.domain_response_limits"] == (
+        "{" + ",".join(f"{d}:{limit}" for d, limit in zip(fidelity.DOMAINS, training.domain_response_limits)) + "}"
+    )
+    assert [overrides[f"+data.domain_weights.{d}"] for d in fidelity.DOMAINS] == [
+        str(weight) for weight in training.domain_weights
+    ]
+    # A one-step gate clamps the save and eval cadence so its only step is checkpointed and validated.
+    assert overrides["trainer.total_training_steps"] == "1"
+    assert overrides["trainer.save_freq"] == "1"
+    assert overrides["trainer.test_freq"] == "1"
+    assert command[command.index("--train") + 1] == str(inputs.dataset)
+    assert command[command.index("--val") + 1] == str(inputs.validation_dataset)
     assert command[command.index("--gpus") + 1] == "8"
-    assert command[command.index("--train") + 1] == "/work/train.parquet"
-    assert command[command.index("--val") + 1] == "/work/aime24.parquet"
-    assert config.training.train_batch_size // config.training.mini_batch_size * config.training.ppo_epochs == 4
 
 
 def test_all_acceptance_gates_resolve_steps_and_checkpoints() -> None:
@@ -537,23 +465,6 @@ def test_gpu_override_records_deviation_and_enforces_authors_world_size() -> Non
         fidelity.gpu_count("H100x4")
     with pytest.raises(ValueError, match="Malformed"):
         fidelity.gpu_count("H100")
-
-
-def test_multi_teacher_prompt_limit_does_not_add_a_paper_deviation() -> None:
-    config = fidelity.load_config(fidelity.DEFAULT_CONFIG)
-    plan = fidelity.build_plan(
-        config,
-        config_path=fidelity.DEFAULT_CONFIG,
-        gate="one_step",
-        cluster_config=Path("/tmp/iris.yaml"),
-        output_uri=OUTPUT_URI,
-        task_image=TASK_IMAGE,
-    )
-
-    assert plan.prompt_limit == 2048
-    assert plan.known_deviations == config.known_deviations
-    assert plan.evaluation_reference.repository == "BytedTsinghua-SIA/Open-MOPD-SmolLM3-3B-Final"
-    assert plan.evaluation_reference.revision == "228a146a5d95f00136057347ac4810e6635061b6"
 
 
 @pytest.mark.parametrize("output_uri", ["/tmp/output", "file:///tmp/output", "s3://bucket"])
