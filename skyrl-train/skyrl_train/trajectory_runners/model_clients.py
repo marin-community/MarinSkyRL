@@ -24,7 +24,8 @@ from skyrl_train.trajectory_runners.types import TokenProvenance
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 
 
-_CHAT_SAMPLING_EXCLUSIONS = frozenset({"max_generate_length", "logprobs", "stop"})
+_CHAT_OUTPUT_LIMIT_KEYS = ("max_tokens", "max_completion_tokens", "max_output_tokens", "max_generate_length")
+_CHAT_SAMPLING_EXCLUSIONS = frozenset((*_CHAT_OUTPUT_LIMIT_KEYS, "logprobs", "stop"))
 
 
 class ModelClientOutput(InferenceEngineOutput):
@@ -176,14 +177,18 @@ class DirectModelClient:
             result["tools"] = cls._chat_tools(result["tools"])
         else:
             result.pop("tools", None)
-        if "max_output_tokens" in result:
-            result["max_completion_tokens"] = result.pop("max_output_tokens")
-        if "max_generate_length" in sampling_params:
-            configured_max = int(sampling_params["max_generate_length"])
-            requested_max = result.get("max_completion_tokens")
-            result["max_completion_tokens"] = (
-                configured_max if requested_max is None else min(configured_max, int(requested_max))
-            )
+        output_limits = []
+        for key in _CHAT_OUTPUT_LIMIT_KEYS:
+            requested_limit = result.pop(key, None)
+            configured_limit = sampling_params.get(key)
+            if requested_limit is not None:
+                output_limits.append(int(requested_limit))
+            if configured_limit is not None:
+                output_limits.append(int(configured_limit))
+        if output_limits:
+            # A single wire field prevents the context-cap alias from overriding
+            # the configured generation budget in vLLM's request parsing.
+            result["max_completion_tokens"] = min(output_limits)
         return result
 
     async def _generate_chat(self, request: InferenceEngineInput) -> ModelClientOutput:
