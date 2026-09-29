@@ -56,7 +56,9 @@ masking a token with a correction does not renormalize the surviving tokens.
 
 Let :math:`T=\sum_{it}d_{it}`, :math:`n_i=\sum_t d_{it}`,
 :math:`B=\sum_i\mathbf{1}[n_i>0]`, and :math:`L_{\max}` be the configured
-maximum generation length. ``StepCounts`` computes counts over every microbatch
+total input and generation length,
+``generator.max_input_length + generator.sampling_params.max_generate_length``.
+``StepCounts`` computes counts over every microbatch
 in one optimizer step and sums them across data-parallel ranks in one packed
 all-reduce. Context-parallel replicas are excluded from that count reduction.
 Counts are recomputed for each accumulation window and training epoch.
@@ -143,8 +145,9 @@ Validation and failure stages
 ``validate_cfg`` repeats the contract at runtime startup after resolving custom
 registrations. Resolved contracts contain only primitive configuration values
 for worker transport. Teacher startup checks tokenizer identity and capabilities;
-writer admission checks actual rollout evidence. An optimizer-step failure is a
-separate runtime event.
+writer admission checks actual rollout evidence. After admission, the driver
+checks teacher row identities before learner-batch assembly. An optimizer-step
+failure is a separate runtime event.
 
 .. list-table::
    :header-rows: 1
@@ -181,8 +184,11 @@ separate runtime event.
      - Teacher/student tokenizer identity or evidence capability mismatch.
      - Use identical vocabularies and tokenizer fingerprints, and a teacher backend that serves the requested evidence.
    * - Writer admission
-     - Missing or malformed log probabilities, or mismatched teacher row identities.
-     - Enable the required generator evidence and retain trajectory IDs and token-aligned evidence through rollout processing.
+     - Missing or malformed required rollout log probabilities.
+     - Enable the required generator evidence and preserve its token alignment through rollout processing.
+   * - Driver, after admission
+     - Teacher evidence row identities differ from the admitted trajectories.
+     - Preserve trajectory IDs and row order through teacher scoring and learner-batch assembly.
    * - Optimizer step
      - Non-finite loss/gradients or an exhausted skip allowance.
      - Inspect the affected batch, objective and gradient diagnostics; correct the numerical cause before resuming.
@@ -190,9 +196,11 @@ separate runtime event.
 Non-finite optimizer steps
 --------------------------
 
-``trainer.policy.max_consecutive_nonfinite_steps: 3`` permits three consecutive
-non-finite attempts and raises on the fourth. Null raises immediately. A
-successfully applied update resets the streak. The skip decision is synchronized
+Megatron with ``trainer.policy.max_consecutive_nonfinite_steps: 3`` permits
+three non-finite skips between applied updates and raises on the next. Null
+raises immediately. A successfully applied update resets the streak; finite
+gradient-threshold skips leave it unchanged. The base worker does not implement
+this skip allowance. The Megatron skip decision is synchronized
 across the affected ranks. A skipped non-finite step preserves parameters,
 optimizer moments and the learning-rate scheduler. A finite gradient norm above
 a configured optimizer threshold follows that threshold's own semantics.
