@@ -173,7 +173,7 @@ def local_expert_sources(
     *,
     num_experts: int,
     expert_parallel_size: int,
-    hidden_size: int,
+    expert_hidden_size: int,
     intermediate_size: int,
 ) -> list[ExpertSource]:
     """Group expert slices into whole matrices. Check that each is one contiguous BF16 parameter."""
@@ -199,7 +199,11 @@ def local_expert_sources(
             )
         first = next(iter(parts.values()))
         source = sources[first.source_key]
-        shape = (hidden_size, intermediate_size) if projection == "fc2" else (2 * intermediate_size, hidden_size)
+        shape = (
+            (expert_hidden_size, intermediate_size)
+            if projection == "fc2"
+            else (2 * intermediate_size, expert_hidden_size)
+        )
         if tuple(source.shape) != shape or source.dtype != torch.bfloat16:
             raise ValueError(f"Parameter {first.source_key} is not the {shape} BF16 matrix of expert {expert}")
         entry = ExpertEntry(

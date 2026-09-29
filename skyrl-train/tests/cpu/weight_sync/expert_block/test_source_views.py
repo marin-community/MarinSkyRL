@@ -70,7 +70,7 @@ def test_expert_sources_are_the_whole_gate_up_and_down_matrices_of_the_ranks_own
         TrainerRank(rank=1, dp=0, pp=0, ep=1),
         num_experts=NUM_EXPERTS,
         expert_parallel_size=2,
-        hidden_size=HIDDEN,
+        expert_hidden_size=HIDDEN,
         intermediate_size=INTERMEDIATE,
     )
     _, expected = reference_hf(parameters)
@@ -85,8 +85,9 @@ def test_expert_sources_are_the_whole_gate_up_and_down_matrices_of_the_ranks_own
 def test_split_schema_expert_mappings_use_the_expert_schedule():
     # The current Hero checkpoint exposes expert 2 as separate HF tensors.
     prefix = "model.layers.0.mlp.experts.2"
-    fc1 = torch.arange(2 * INTERMEDIATE * HIDDEN, dtype=torch.bfloat16).reshape(2 * INTERMEDIATE, HIDDEN)
-    fc2 = torch.arange(HIDDEN * INTERMEDIATE, dtype=torch.bfloat16).reshape(HIDDEN, INTERMEDIATE)
+    latent_size = HIDDEN - 1
+    fc1 = torch.arange(2 * INTERMEDIATE * latent_size, dtype=torch.bfloat16).reshape(2 * INTERMEDIATE, latent_size)
+    fc2 = torch.arange(latent_size * INTERMEDIATE, dtype=torch.bfloat16).reshape(latent_size, INTERMEDIATE)
     local = local_source_slices(
         [
             task(
@@ -110,7 +111,7 @@ def test_split_schema_expert_mappings_use_the_expert_schedule():
         TrainerRank(rank=1, dp=0, pp=0, ep=1),
         num_experts=NUM_EXPERTS,
         expert_parallel_size=2,
-        hidden_size=HIDDEN,
+        expert_hidden_size=latent_size,
         intermediate_size=INTERMEDIATE,
     )
     assert {(item.entry.layer, item.entry.expert, item.entry.projection) for item in sources} == {
@@ -140,7 +141,7 @@ def test_an_expert_outside_the_ranks_block_is_refused():
             TrainerRank(rank=1, dp=0, pp=0, ep=1),
             num_experts=NUM_EXPERTS,
             expert_parallel_size=2,
-            hidden_size=HIDDEN,
+            expert_hidden_size=HIDDEN,
             intermediate_size=INTERMEDIATE,
         )
 
