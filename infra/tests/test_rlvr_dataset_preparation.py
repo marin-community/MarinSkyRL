@@ -681,6 +681,17 @@ def test_gsm8k_rejects_missing_delimiter():
             {"grade": "2"},
         ),
         (
+            asdiv_source(),
+            {
+                "Body": "20 people do not like shopping and 7 people like shopping.",
+                "Question": "What is the ratio of the number of people who do not like shopping to the number of people who like shopping?",
+                "Answer": "20:7",
+                "Grade": "6",
+            },
+            "20:7",
+            {"grade": "6"},
+        ),
+        (
             svamp_source(),
             {"Body": "Sam has four apples.", "Question": "How many?", "Answer": 4.0},
             "4",
