@@ -9,8 +9,18 @@ import pytest
 from omegaconf import OmegaConf
 from taskcompendium.grading import exact_answer
 from taskcompendium.importers.nemo_workplace import load_fixture
-from taskcompendium.lowering import HarborEnvironmentConfig, lower_to_harbor
-from taskcompendium.models import AnswerType, ConversationInput, EnvironmentRequirements, Source, TaskSpec, TextMessage
+from taskcompendium.lowering import SPECIFICATION_FILE, HarborEnvironmentConfig, lower_to_harbor, read_specification
+from taskcompendium.models import (
+    AnswerType,
+    AssistantToolCalls,
+    ConversationInput,
+    ConversationToolCall,
+    EnvironmentRequirements,
+    Source,
+    TaskSpec,
+    TextMessage,
+    ToolResult,
+)
 from taskcompendium.resources import ResourceVisibility, TaskResource
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
 
@@ -74,6 +84,36 @@ def test_taskcompendium_dataset_routes_simple_chat_natively(tmp_path):
         "env_class": NATIVE_CHAT_ENV_CLASS,
         "env_extras": {"task_dir": str(native)},
     }
+
+
+def test_taskcompendium_dataset_preserves_tool_history_through_harbor(tmp_path):
+    specification = TaskSpec(
+        id="tool-history",
+        context=ConversationInput(
+            events=(
+                TextMessage(role="user", content="Look up the color and answer with it."),
+                AssistantToolCalls(calls=(ConversationToolCall(call_id="lookup", name="lookup_color", arguments={}),)),
+                ToolResult(call_id="lookup", content="blue"),
+                TextMessage(role="user", content="What color was returned?"),
+            )
+        ),
+        verifier=exact_answer("blue"),
+        environment_requirements=EnvironmentRequirements(),
+        source=Source(dataset="test", revision="revision", row="tool-history", importer_revision="importer"),
+        answer_type=AnswerType.TEXT,
+    )
+    task = lower_to_harbor(
+        specification,
+        SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
+        HarborEnvironmentConfig(),
+        tmp_path / "tool-history",
+    )
+
+    dataset = TaskCompendiumTaskDataset([str(task)], api_base="http://policy:8000/v1", model_name="policy")
+
+    assert dataset[0]["env_class"] == HARBOR_ENV_CLASS
+    assert dataset[0]["env_extras"]["task_dir"] == str(task)
+    assert read_specification(task / SPECIFICATION_FILE).context == specification.context
 
 
 def test_taskcompendium_dataset_routes_answer_call_to_harbor(tmp_path):
@@ -189,7 +229,9 @@ async def test_native_runner_preserves_engine_tokens_logprobs_and_grades_respons
     runner = NativeTaskCompendiumRunner(cfg, tokenizer, model_client)
     identity = TrajectoryID("chat", 0)
     request = {
-        "prompts": [[{"role": "user", "content": "Reply with the word blue."}]],
+        "prompts": [
+            TaskCompendiumTaskDataset([str(task)], api_base="http://policy:8000/v1", model_name="policy")[0]["prompt"]
+        ],
         "env_classes": [NATIVE_CHAT_ENV_CLASS],
         "env_extras": [{"task_dir": str(task)}],
         "sampling_params": {"temperature": 0.5, "logprobs": 1},

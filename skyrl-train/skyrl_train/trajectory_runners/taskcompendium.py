@@ -20,7 +20,7 @@ from taskcompendium.lowering import (
     read_specification,
     read_submission_convention,
 )
-from taskcompendium.models import AnswerType, TaskSpec, VerifierKind
+from taskcompendium.models import AnswerType, ConversationTrace, TaskSpec, TextMessage, VerifierKind
 from taskcompendium.resources import ResourceVisibility
 from taskcompendium.submission import AnswerFormat, SubmissionConvention, chat_request
 from taskcompendium.verifier_registry import grade_answer
@@ -60,6 +60,7 @@ def _native_chat_eligible(
     return (
         specification.answer_type in (AnswerType.TEXT, AnswerType.NUMBER)
         and specification.verifier.kind is VerifierKind.EXACT_ANSWER
+        and all(isinstance(event, TextMessage) for event in specification.context.events)
         and convention.answer_format in (AnswerFormat.PLAIN, AnswerFormat.JSON)
         and convention.supports(specification.answer_type)
         and not specification.environment_requirements.capabilities
@@ -225,11 +226,17 @@ class NativeTaskCompendiumRunner(TrajectoryRunner):
         extraction_errors = 0
         with tempfile.TemporaryDirectory(prefix="taskcompendium-native-") as temporary:
             workspace = Path(temporary)
-            for extra, response, identity in zip(extras, responses, identities, strict=True):
+            for extra, prompt, response, identity in zip(
+                extras, input_batch["prompts"], responses, identities, strict=True
+            ):
                 task_dir = Path(extra["task_dir"])
                 specification = read_specification(task_dir / SPECIFICATION_FILE)
                 convention = read_submission_convention(task_dir / SUBMISSION_CONVENTION_FILE)
-                result = grade_answer(specification, convention, response, workspace)
+                conversation = ConversationTrace(
+                    events=tuple(TextMessage.model_validate(message) for message in prompt)
+                    + (TextMessage(role="assistant", content=response),)
+                )
+                result = grade_answer(specification, convention, conversation, workspace)
                 if result.status is Outcome.GRADED and result.reward is not None:
                     rewards.append(result.reward)
                     exception_types.append(None)
