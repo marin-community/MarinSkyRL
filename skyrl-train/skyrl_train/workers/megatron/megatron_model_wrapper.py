@@ -225,9 +225,10 @@ class MegatronModelWrapper:
         if probe_row_indices is not None:
             if probe_row_indices.shape != (batch_size,):
                 raise ValueError("probe row indices must have one entry per sequence")
-            probe_positions = torch.full((batch_size, seq_len, 2), -1, dtype=torch.long, device=device)
-            probe_positions[:, seq_len - response_len :, 0] = probe_row_indices[:, None]
-            probe_positions[:, seq_len - response_len :, 1] = torch.arange(response_len, device=device)
+            # Zero encodes padding through the shared sequence transforms.
+            probe_positions = torch.zeros((batch_size, seq_len, 2), dtype=torch.long, device=device)
+            probe_positions[:, seq_len - response_len :, 0] = probe_row_indices[:, None] + 1
+            probe_positions[:, seq_len - response_len :, 1] = torch.arange(1, response_len + 1, device=device)
 
         if self.use_sample_packing:
             # The routes tensor is ours, not the pipeline's input: always run the
@@ -253,7 +254,7 @@ class MegatronModelWrapper:
         mask = sequence_major_flatten(mask_BS)
         response_mask = sequence_major_flatten(response_BS)
         if probe_positions is not None:
-            probe_positions = sequence_major_flatten(probe_positions)
+            probe_positions = sequence_major_flatten(probe_positions) - 1
         tp_size = mpu.get_tensor_model_parallel_world_size()
         if tp_size > 1:
             # Under TP sequence parallelism the router sees this rank's

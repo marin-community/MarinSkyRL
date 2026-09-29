@@ -71,8 +71,8 @@ def _layout_config(tmp_path, layout) -> tuple:
     return cfg, model_path
 
 
-def _routed_batch(pad_token_id: int, *, captured: bool) -> TrainingInputBatch:
-    batch = _padded_batch(pad_token_id)
+def _routed_batch(pad_token_id: int, *, captured: bool, variable_lengths: bool = False) -> TrainingInputBatch:
+    batch = _padded_batch(pad_token_id, variable_lengths=variable_lengths)
     generator = torch.Generator().manual_seed(31)
     shape = (batch["sequences"].shape[0], RESPONSE_LENGTH, NUM_LAYERS, TOPK)
     if not captured:
@@ -133,7 +133,7 @@ def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path):
     require_hoppers(2)
     cfg, model_path = _layout_config(tmp_path, ("probe-pp2", 2, 1, 2, 1, 1, False))
     pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
-    batch = _routed_batch(pad_token_id, captured=True)
+    batch = _routed_batch(pad_token_id, captured=True, variable_lengths=True)
     initialize_ray(cfg)
     try:
         policy = init_worker_with_type(
