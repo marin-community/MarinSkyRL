@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import torch
+from skyrl_train.config.objective_spec import load_correction
+from skyrl_train.objective.correction import compute_correction
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
-import torch
 from omegaconf import DictConfig, open_dict
 
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.config.objective_spec import load_correction
-from skyrl_train.objective.correction import compute_correction
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection
 from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner, TrajectoryPipeline
@@ -19,10 +20,11 @@ from skyrl_train.trajectory_runners.step_wise import clamp_generation_tokens
 
 
 class _RecordingInferenceEngine:
-    def __init__(self, response_logprobs=None, topk=None):
+    def __init__(self, response_logprobs=None, topk=None, routes=None):
         self.requests = []
         self.response_logprobs = response_logprobs
         self.topk = topk
+        self.routes = routes
 
     async def generate(self, request):
         self.requests.append(request)
@@ -35,6 +37,8 @@ class _RecordingInferenceEngine:
         if self.topk is not None:
             output["student_topk_indices"] = [self.topk[0]]
             output["behavior_topk_logprobs"] = [self.topk[1]]
+        if self.routes is not None:
+            output["routed_experts"] = [self.routes]
         return output
 
 
@@ -118,7 +122,9 @@ async def test_step_wise_stop_eos_keeps_published_behavior_evidence_aligned(mock
     runner = SkyRLGymTrajectoryRunner(
         cfg,
         DictConfig({"max_env_workers": 0}),
-        _RecordingInferenceEngine(response_logprobs=[-0.1, -0.2]),
+        _RecordingInferenceEngine(
+            response_logprobs=[-0.1, -0.2], routes=np.asarray([[[1, 2]], [[3, 4]]], dtype=np.uint8)
+        ),
         tokenizer,
         pipeline=TrajectoryPipeline(StepWiseRolloutCollector, StepWiseTrajectoryProjection(cfg, tokenizer)),
     )
@@ -145,6 +151,8 @@ async def test_step_wise_stop_eos_keeps_published_behavior_evidence_aligned(mock
         expected[0, :2] = torch.tensor([2.0, 0.25])
         torch.testing.assert_close(correction.weights, expected)
         assert correction.metrics["policy/correction/weight_mean"] == pytest.approx(1.125)
+
+    np.testing.assert_array_equal(outputs[0].evidence.routed_experts, [[[1, 2]], [[3, 4]]] + [[[0, 0]]] * 5)
 
 
 @pytest.mark.asyncio

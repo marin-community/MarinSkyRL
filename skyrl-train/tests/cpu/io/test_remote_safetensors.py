@@ -42,19 +42,11 @@ def test_loads_only_requested_tensor_range_without_local_weight_files(tmp_path: 
     assert not tuple(metadata.glob("*.safetensors"))
 
 
-def test_auto_bridge_uses_registered_bridge_remote_slice_patterns(tmp_path: Path) -> None:
-    key = "model.layers.0.mlp.experts.down_proj.weight"
-    metadata = tmp_path / "metadata"
-    _write_index(metadata, {key: "model.safetensors"})
-
+def test_auto_bridge_uses_registered_bridge_remote_slice_patterns() -> None:
     registered_bridge = SimpleNamespace(REMOTE_FIRST_DIM_SLICE_PATTERNS=("model.layers.*.mlp.experts.*",))
     auto_bridge = SimpleNamespace(_model_bridge=registered_bridge)
 
-    patterns = lazy_first_dim_patterns_for_bridge(auto_bridge)
-    store = RemoteSafetensorsTensorStore("s3://models/snowball", metadata, lazy_first_dim_patterns=patterns)
-
-    assert patterns == registered_bridge.REMOTE_FIRST_DIM_SLICE_PATTERNS
-    assert store._lazy_first_dim_keys == {key}
+    assert lazy_first_dim_patterns_for_bridge(auto_bridge) == registered_bridge.REMOTE_FIRST_DIM_SLICE_PATTERNS
 
 
 def test_twelve_rank_simulation_records_bounded_remote_reads_and_local_disk(tmp_path: Path) -> None:

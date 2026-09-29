@@ -16,6 +16,7 @@ if str(_REPO_ROOT) not in sys.path:
 from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_config  # noqa: E402
 from marinskyrl.runtime_options import RolloutGrading  # noqa: E402
 from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraGrading  # noqa: E402
+from skyrl_train.utils.utils import validate_megatron_cfg  # noqa: E402
 
 _BASE_CONFIG = _REPO_ROOT / "cloud/iris/configs/nemotron_ultra_rlvr_acceptance.yaml"
 
@@ -63,6 +64,8 @@ def test_launcher_composes_skipped_grading_for_pure_distillation(tmp_path):
 
     cfg = compose_skyrl_config(parsed, {"job_name": "grading-test", "num_nodes": 1}, _HPCStub()).config
 
+    cfg.trainer.flash_attn = False
+    validate_megatron_cfg(cfg)
     assert cfg.environment.skyrl_gym.nemotron_ultra.grading == "skip"
 
 

@@ -214,8 +214,6 @@ trainer:
     tis_lcs_alert_threshold: 0.005
     enable_token_reward_channel: false
     think_token_weight: 1.0
-    think_token_cost: 0.0
-    think_max_cost_per_turn: 0.05
     sapo:
       tau_pos: 1.0
       tau_neg: 1.05
@@ -535,3 +533,6 @@ trajectory_runner:
     cpus_per_worker: 8
     executor_threads: 256 # width of each worker's default thread pool, which Harbor's model client runs on
     progress_timeout_seconds: 21600 # fail a worker's requests when none of them completes for this long
+    # Workers start one at a time, this long after the previous one is up, so their imports and tokenizer loads
+    # from a shared filesystem do not overlap; zero starts them all at once.
+    start_interval_seconds: 2.0

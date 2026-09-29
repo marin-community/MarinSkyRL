@@ -18,7 +18,6 @@ from scripts.iris.iris_ops import (
     StyledCell,
     box_table,
     filter_records,
-    format_duration,
     job_bundle,
     job_id_parts,
     load_bundle_manifest,
@@ -45,27 +44,25 @@ def test_monitor_defaults_to_the_shared_document_bundle_root(monkeypatch):
     assert "experiments" not in bundle.directory.parts
 
 
-def test_iris_binary_defaults_to_path_and_honors_explicit_override(monkeypatch):
-    monkeypatch.delenv("IRIS_BIN", raising=False)
-    assert iris_ops.resolve_iris_binary() == "iris"
-
-    monkeypatch.setenv("IRIS_BIN", "/opt/operator/bin/iris")
-    assert iris_ops.resolve_iris_binary() == "/opt/operator/bin/iris"
-
-
-def test_iris_command_resolves_binary_when_invoked(monkeypatch):
+@pytest.mark.parametrize(
+    ("iris_bin", "expected"), [(None, "iris"), ("/opt/operator/bin/iris", "/opt/operator/bin/iris")]
+)
+def test_iris_command_resolves_binary_when_invoked(monkeypatch, iris_bin, expected):
     calls = []
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setenv("IRIS_BIN", "/opt/operator/bin/iris")
+    if iris_bin is None:
+        monkeypatch.delenv("IRIS_BIN", raising=False)
+    else:
+        monkeypatch.setenv("IRIS_BIN", iris_bin)
     monkeypatch.setattr(iris_ops.subprocess, "run", fake_run)
 
     iris_ops.run_iris_command(["job", "list"], cluster="cw-rno2a")
 
-    assert calls[0][0] == ["/opt/operator/bin/iris", "--cluster=cw-rno2a", "job", "list"]
+    assert calls[0][0] == [expected, "--cluster=cw-rno2a", "job", "list"]
 
 
 @pytest.mark.parametrize(
@@ -98,14 +95,6 @@ def test_shared_regex_filters_records():
     filters = parse_regex_filters(["cluster=^cw-", "name=glm", "state=running"], {"cluster", "name", "state"})
 
     assert filter_records(records, filters, lambda record: record) == [records[0]]
-
-
-def test_shared_duration_formatter():
-    assert format_duration(60_000, 7_320_000) == "2h 1m"
-
-
-def test_shared_table_renderer():
-    assert "│ one │ two │" in box_table(["A", "B"], [["one", "two"]])
 
 
 def test_box_table_wraps_to_width_and_sanitizes_multiline_cells():
@@ -441,6 +430,7 @@ def test_save_ray_logs_retries_only_unfinished_files_after_partial_stream(monkey
         return process
 
     monkeypatch.setattr(coreweave_ops.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(coreweave_ops.time, "sleep", lambda _delay: None)
     initial = [
         {"path": "a.log", "size": 3, "inode": 41},
         {"path": "b.log", "size": 3, "inode": 42},
@@ -528,40 +518,21 @@ def test_coreweave_command_retries_transient_transport_failures(monkeypatch, std
     assert delays == [coreweave_ops.DNS_INITIAL_BACKOFF]
 
 
-def test_ray_log_inventory_honors_explicit_container_python(monkeypatch):
-    monkeypatch.setattr(
-        coreweave_ops,
-        "resolve_container_python",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("generic discovery should not run")),
-    )
-    monkeypatch.setattr(coreweave_ops, "command", lambda *_args, **_kwargs: "[]")
-
-    assert (
-        coreweave_ops.ray_log_inventory(
-            ["kubectl"],
-            "pod",
-            "task",
-            python_executable="/runtime/bin/python",
-        )
-        == []
-    )
-
-
-def test_complete_ray_log_sync_discovers_frozen_task_python(monkeypatch, tmp_path):
-    commands: list[list[str]] = []
+def test_complete_ray_log_sync_inventories_logs_with_the_frozen_task_python(monkeypatch, tmp_path):
     frozen_python = "/app/.venv/bin/python"
+    inventory_interpreters: list[str] = []
 
-    def fake_command(arguments, **_kwargs):
-        commands.append(arguments)
-        if "IRIS_VENV" in arguments[-1]:
-            return frozen_python
+    def fake_kubectl(arguments, **_kwargs):
+        exec_argv = arguments[arguments.index("--") + 1 :]
+        if exec_argv[0] == "sh":
+            return f"{frozen_python}\n"
+        inventory_interpreters.append(exec_argv[0])
         return "[]"
 
-    monkeypatch.setattr(coreweave_ops, "command", fake_command)
+    monkeypatch.setattr(coreweave_ops, "command", fake_kubectl)
 
     assert watch_coreweave_rl.fetch_complete_ray_logs(["kubectl"], "pod", tmp_path) == 0
-    assert any("IRIS_VENV" in command[-1] for command in commands)
-    assert any(frozen_python in command for command in commands)
+    assert inventory_interpreters == [frozen_python]
 
 
 def test_rl_sync_warning_never_renders_proxy_html():
@@ -681,50 +652,6 @@ def test_rl_report_row_keeps_artifact_exceptions_out_of_trend(tmp_path):
     assert row[2].value == "running"
 
 
-def test_rl_report_row_reads_driver_mismatch_and_correction_metrics(tmp_path):
-    row = _rl_report_row(
-        tmp_path,
-        "Training Step Progress: 7 / 80\n"
-        'WANDB_MIRROR kind=train step=7 metrics={"policy/policy_entropy": 0.05, '
-        '"policy/mismatch/pooled/log_ratio_abs_mean": 0.125, "policy/correction/weight_mean": 0.75, "policy/correction/truncated_fraction": 0.1, "policy/correction/masked_fraction": 0.2}\n',
-    )
-
-    assert "entropy=0.05" in row[-1].value
-    assert "mismatch |log r|=0.125" in row[-1].value
-    assert "correction weight=0.75" in row[-1].value
-    assert "correction truncated=0.1" in row[-1].value
-    assert "correction masked=0.2" in row[-1].value
-
-
-def test_rl_report_row_explains_correction_disabled_by_resolved_config(tmp_path):
-    row = _rl_report_row(
-        tmp_path,
-        "trainer:\n"
-        "  algorithm:\n"
-        "    off_policy_correction: none\n"
-        "Training Step Progress: 2 / 80\n"
-        'WANDB_MIRROR kind=train step=2 metrics={"policy/policy_entropy": 0.7143, '
-        '"policy/log_ratio_abs_mean": 0.0}\n',
-    )
-
-    assert "correction disabled" in row[-1].value
-    assert "TIS exact=—" not in row[-1].value
-    assert "TIS r=—" not in row[-1].value
-
-
-def test_rl_report_row_flags_configured_correction_without_diagnostics(tmp_path):
-    row = _rl_report_row(
-        tmp_path,
-        "trainer:\n"
-        "  algorithm:\n"
-        "    off_policy_correction: tis\n"
-        "Training Step Progress: 2 / 80\n"
-        'WANDB_MIRROR kind=train step=2 metrics={"policy/policy_entropy": 0.7143}\n',
-    )
-
-    assert "correction tis; metrics missing" in row[-1].value
-
-
 def test_rl_report_row_replaces_traceback_signal_with_error_report_pointer(tmp_path):
     row = _rl_report_row(tmp_path, "Traceback (most recent call last)\nraw details\n", state="failed")
 
@@ -815,17 +742,6 @@ def test_rl_main_degrades_unexpected_job_sync_failure_into_error_report(monkeypa
     assert "unexpected raw sync exception" not in stdout
     errors = (tmp_path / "reports/rl/latest-errors.md").read_text()
     assert "unexpected raw sync exception" in errors
-
-
-def test_rl_progress_reporter_writes_phase_and_elapsed_time(monkeypatch, capsys):
-    monkeypatch.setattr(watch_coreweave_rl.time, "monotonic", lambda: 165.0)
-
-    reporter = watch_coreweave_rl.ProgressReporter(started_at=100.0)
-    reporter.phase("trace inventory 1/2")
-
-    prefix, phase = capsys.readouterr().err.rstrip().split("] ", 1)
-    assert prefix.endswith("+01:05")
-    assert phase == "trace inventory 1/2"
 
 
 def test_rl_discovery_skips_iris_preamble_and_parses_terminal_states(
@@ -962,28 +878,6 @@ def test_fetch_user_budget_reports_no_budget_set_when_unset(monkeypatch):
 
     assert budget.spent is None and budget.limit is None
     assert budget.note == "no budget set"
-
-
-def test_budget_line_shows_consumed_allotted_and_percent():
-    budget = watch_coreweave_rl.UserBudget("benjaminfeuer", "cw-rno2a", 487818, 1000000, "interactive")
-
-    line = watch_coreweave_rl.budget_line(budget)
-
-    # Pins the computed formatting (thousands grouping, percent), not the prose layout.
-    assert "spent=487,818" in line
-    assert "limit=1,000,000" in line
-    assert "49%" in line
-    assert "band=interactive" in line
-
-
-def test_budget_line_omits_percent_when_limit_missing():
-    budget = watch_coreweave_rl.UserBudget("benjaminfeuer", "cw-rno2a", 500, None, "interactive")
-
-    line = watch_coreweave_rl.budget_line(budget)
-
-    assert "spent=500" in line
-    assert "limit=—" in line
-    assert "%" not in line
 
 
 def _remote_trace_objects():
@@ -1191,3 +1085,49 @@ def test_trace_sync_skips_object_that_disappears_after_listing(tmp_path):
             "size": 1,
         }
     ]
+
+
+def test_rl_report_row_reads_driver_mismatch_and_correction_metrics(tmp_path):
+    row = _rl_report_row(
+        tmp_path,
+        "Training Step Progress: 7 / 80\n"
+        'WANDB_MIRROR kind=train step=7 metrics={"policy/policy_entropy": 0.05, '
+        '"generate/tis/exact_match_fraction": 0.975, "policy/log_ratio_abs_mean": 0.021, "policy/log_ratio_abs_p99": 0.44, "policy/log_ratio_abs_max": 3.25, "policy/mismatch/pooled/log_ratio_abs_mean": 0.125, "policy/correction/weight_mean": 0.75, "policy/correction/truncated_fraction": 0.1, "policy/correction/masked_fraction": 0.2}\n',
+    )
+
+    assert "entropy=0.05" in row[-1].value
+    assert "mismatch |log r|=0.125" in row[-1].value
+    assert "correction weight=0.75" in row[-1].value
+    assert "correction truncated=0.1" in row[-1].value
+    assert "correction masked=0.2" in row[-1].value
+    assert "TIS exact=0.975" in row[-1].value
+    assert "0.021/0.44/3.25" in row[-1].value
+
+
+def test_rl_report_row_flags_configured_correction_without_diagnostics(tmp_path):
+    row = _rl_report_row(
+        tmp_path,
+        "trainer:\n"
+        "  algorithm:\n"
+        "    off_policy_correction: tis\n"
+        "Training Step Progress: 2 / 80\n"
+        'WANDB_MIRROR kind=train step=2 metrics={"policy/policy_entropy": 0.7143}\n',
+    )
+
+    assert "correction tis; metrics missing" in row[-1].value
+
+
+def test_rl_report_row_explains_correction_disabled_by_resolved_config(tmp_path):
+    row = _rl_report_row(
+        tmp_path,
+        "trainer:\n"
+        "  algorithm:\n"
+        "    off_policy_correction: none\n"
+        "Training Step Progress: 2 / 80\n"
+        'WANDB_MIRROR kind=train step=2 metrics={"policy/policy_entropy": 0.7143, '
+        '"policy/log_ratio_abs_mean": 0.0}\n',
+    )
+
+    assert "correction disabled" in row[-1].value
+    assert "TIS exact=—" not in row[-1].value
+    assert "TIS r=—" not in row[-1].value

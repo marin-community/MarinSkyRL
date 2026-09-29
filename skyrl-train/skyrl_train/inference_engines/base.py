@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, TypedDict, Any, Optional, Hashable, NotRequired
 
+import numpy as np
+
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
 OnlineEagleResult = Dict[str, Any] | List[Dict[str, Any]]
@@ -57,6 +59,7 @@ class InferenceEngineOutput(TypedDict):
     prompt_logprobs: Optional[List[List[Optional[Dict[int, float]]]]]
     prompt_ids: NotRequired[List[List[int]]]
     assistant_messages: NotRequired[List[Dict[str, Any]]]
+    routed_experts: NotRequired[List[np.ndarray | None]]
 
 
 class NamedWeightsUpdateRequest(TypedDict):

@@ -1,11 +1,15 @@
 """The coordinator loop between the group loader, rollout workers, and the rollout buffer actor."""
 
-import asyncio
-from collections import defaultdict
 from copy import deepcopy
+import asyncio
+import inspect
+from collections import defaultdict
+from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
 import ray
+from ray.actor import ActorHandle
 
 from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, resolve_dynamic_sampling_criteria
 from skyrl_train.group_admission import (
@@ -24,7 +28,12 @@ from skyrl_train.rollouts.buffer import (
     RolloutTask,
     RolloutWriter,
 )
-from skyrl_train.rollouts.context import RolloutRequestSpec, TrainingContext, TrainingContextState
+from skyrl_train.rollouts.context import (
+    RolloutRequestSpec,
+    TrainingContext,
+    TrainingContextState,
+    start_rollout_buffer,
+)
 from skyrl_train.rollouts.loader import PromptLoader, PromptLoaderState, JudgedGroup, PromptOrder, SeededPasses
 from skyrl_train.rollouts.payloads import MemoryPayloads, ObjectStorePayloads, PayloadStore
 
@@ -132,9 +141,46 @@ class _RecordingOrder:
         self._passes.load_state_dict(state)
 
 
+class _InProcessActor:
+    """Serves an actor's ``method.remote(...)`` calls on the caller's event loop.
+
+    Starting a real buffer actor spawns a Ray worker that imports the trainer, which takes seconds per test.
+    """
+
+    def __init__(self, instance):
+        self._instance = instance
+
+    def __getattr__(self, name: str) -> SimpleNamespace:
+        method = getattr(self._instance, name)
+
+        async def call(*args):
+            result = method(*args)
+            return await result if inspect.isawaitable(result) else result
+
+        return SimpleNamespace(remote=lambda *args: asyncio.ensure_future(call(*args)))
+
+
+def _in_process_buffer(config: RolloutBufferConfig) -> _InProcessActor:
+    return _InProcessActor(RolloutBuffer(config))
+
+
+StartBuffer = Callable[[RolloutBufferConfig], ActorHandle]
+
+
+@pytest.fixture
+def start_buffer(request, monkeypatch) -> StartBuffer:
+    """Start each context's buffer in-process, or as a Ray actor when parametrized with ``"ray_actor"``."""
+    if getattr(request, "param", "in_process") == "ray_actor":
+        return start_rollout_buffer
+    # An in-process buffer has no actor for ``TrainingContext.close`` to kill.
+    monkeypatch.setattr(ray, "kill", lambda _actor: None)
+    return _in_process_buffer
+
+
 def _context(
     uids: list[str],
     workers: _Workers,
+    start_buffer: StartBuffer,
     *,
     batch_size: int,
     max_in_flight: int,
@@ -143,9 +189,11 @@ def _context(
     order: PromptOrder | None = None,
     payloads: PayloadStore | None = None,
 ) -> TrainingContext:
+    config = RolloutBufferConfig(batch_size, max_in_flight, max_staleness_steps, batch_policy, None, None)
     return TrainingContext(
         PromptLoader(_Prompts(uids), order or SeededPasses(len(uids), seed=0, shuffle=False), batch_size=batch_size),
-        RolloutBufferConfig(batch_size, max_in_flight, max_staleness_steps, batch_policy, None, None),
+        config,
+        start_buffer(config),
         CONTENT_POLICY,
         RolloutRequestSpec(samples_per_prompt=SAMPLES_PER_PROMPT, sampling_params={}, environment_class="test"),
         workers,
@@ -154,53 +202,211 @@ def _context(
     )
 
 
+async def _ignore(groups: list[RolloutGroup]) -> None:
+    pass
+
+
+async def _next_uids(context: TrainingContext) -> list[str]:
+    groups, _ = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
+    return [group.uid for group in groups]
+
+
+@pytest.mark.asyncio
+async def test_rolling_batches_do_not_wait_for_a_slow_rollout(ray_module, start_buffer):
+    workers = _Workers(blocked=frozenset({"slow"}))
+    context = _context(
+        ["slow", "a", "b"], workers, start_buffer, batch_size=1, max_in_flight=2, batch_policy=BatchPolicy.ROLLING
+    )
+    context.start()
+    try:
+        await context.publish(1)
+        assert await _next_uids(context) == ["a"]
+        await context.publish(2)
+        assert await _next_uids(context) == ["b"]
+        assert "slow" in workers.started
+    finally:
+        await context.close()
+
+
+@pytest.mark.asyncio
+async def test_full_batches_train_a_slow_rollout_in_its_own_step(ray_module, start_buffer):
+    workers = _Workers(blocked=frozenset({"slow"}))
+    context = _context(["slow", "a", "b"], workers, start_buffer, batch_size=1, max_in_flight=2)
+    context.start()
+    try:
+        await context.publish(1)
+        await asyncio.wait_for(workers.written["a"].wait(), STALL_TIMEOUT)
+        workers.unblocked["slow"].set()
+        assert await _next_uids(context) == ["slow"]
+        await context.publish(2)
+        assert await _next_uids(context) == ["a"]
+    finally:
+        await context.close()
+
+
+@pytest.mark.asyncio
+async def test_a_slow_row_does_not_regenerate_rows_already_in_the_batch(ray_module, start_buffer):
+    workers = _Workers(blocked=frozenset({"b"}))
+    context = _context(["a", "b", "c"], workers, start_buffer, batch_size=3, max_in_flight=6)
+    context.start()
+    try:
+        await context.publish(1)
+        await asyncio.wait_for(workers.written["a"].wait(), STALL_TIMEOUT)
+        await asyncio.wait_for(workers.written["c"].wait(), STALL_TIMEOUT)
+        workers.unblocked["b"].set()
+        groups, metrics = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
+    finally:
+        await context.close()
+
+    assert sorted(group.uid for group in groups) == ["a", "b", "c"]
+    assert metrics["async/rejected_count/duplicate_uid"] == 0
+    assert workers.started_while_blocked == ["a", "b", "c"]
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_row_is_generated_again_within_a_synchronous_step(ray_module, start_buffer):
+    workers = _Workers(masked_once=frozenset({"m"}))
+    context = _context(["m", "a"], workers, start_buffer, batch_size=2, max_in_flight=2, max_staleness_steps=0)
+    context.start()
+    try:
+        await context.publish(1)
+        groups, metrics = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
+    finally:
+        await context.close()
+
+    assert sorted(group.uid for group in groups) == ["a", "m"]
+    assert metrics["async/rejected_count/fully_masked"] == 1
+    assert workers.started == ["m", "a", "m"]
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_regenerate_a_committed_group(ray_module, start_buffer):
+    group = RolloutGroup(_batch(), "c", 1, _prompt("c"))
+    committed = ReadyRollout("committed", 1, 1, group.prompt, CONTENT_POLICY.verdict(group), [group], None)
+    # The order's next draw is row "c", which the checkpoint already holds.
+    state = TrainingContextState(PromptLoaderState({"epoch": 0, "position": 2}, []), [committed], None)
+    workers = _Workers()
+    context = _context(["a", "b", "c"], workers, start_buffer, batch_size=2, max_in_flight=4)
+    await context.load_state_dict(state)
+    context.start()
+    try:
+        await context.publish(1)
+        groups, metrics = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
+    finally:
+        await context.close()
+
+    assert groups[0].uid == "c"
+    assert metrics["async/rejected_count/duplicate_uid"] == 0
+    assert workers.started[:2] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_each_batch_reports_its_judged_groups_to_the_prompt_order(ray_module, start_buffer):
+    order = _RecordingOrder(3)
+    context = _context(["a", "b", "c"], _Workers(), start_buffer, batch_size=2, max_in_flight=2, order=order)
+    context.start()
+    try:
+        await context.publish(1)
+        groups, metrics = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
+    finally:
+        await context.close()
+
+    assert order.observed == [[JudgedGroup(group.uid, (0.0, 1.0)) for group in groups]]
+    assert metrics["order/groups"] == 2.0
+
+
+async def _checkpoint_with_committed_group(payloads: PayloadStore, start_buffer: StartBuffer) -> TrainingContextState:
+    """Train "a", then checkpoint once "c" is committed while "b" is still generating."""
+    workers = _Workers(blocked=frozenset({"b"}))
+    context = _context(["a", "b", "c"], workers, start_buffer, batch_size=1, max_in_flight=2, payloads=payloads)
+    context.start()
+    try:
+        await context.publish(1)
+        assert await _next_uids(context) == ["a"]
+        await context.publish(2)
+        await asyncio.wait_for(workers.written["c"].wait(), STALL_TIMEOUT)
+        return await context.state_dict()
+    finally:
+        await context.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload_kind", "start_buffer"),
+    # The real actor covers Ray's handling of in-memory payload references across the actor boundary.
+    [("memory", "ray_actor"), ("object_store", "in_process")],
+    indirect=["start_buffer"],
+)
+async def test_resume_regenerates_uncommitted_prompts_and_keeps_committed_groups(
+    ray_module, payload_kind, start_buffer, tmp_path
+):
+    payloads = MemoryPayloads() if payload_kind == "memory" else ObjectStorePayloads(str(tmp_path / "rollouts"))
+    state = await _checkpoint_with_committed_group(payloads, start_buffer)
+
+    assert [rollout.verdict.uid for rollout in state.ready] == ["c"]
+    assert [prompt["uid"] for prompt in state.loader.retries] == ["b"]
+
+    resumed_workers = _Workers()
+    resumed = _context(["a", "b", "c"], resumed_workers, start_buffer, batch_size=1, max_in_flight=2, payloads=payloads)
+    await resumed.load_state_dict(state)
+    resumed.start()
+    try:
+        # "b" was leased for step 2 and "c" for step 3, so each trains in its own step.
+        await resumed.publish(2)
+        assert await _next_uids(resumed) == ["b"]
+        await resumed.publish(3)
+        assert await _next_uids(resumed) == ["c"]
+        assert resumed_workers.started[0] == "b"
+    finally:
+        await resumed.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_rollout_fails_the_next_batch(ray_module, start_buffer):
+    context = _context(["bad"], _Workers(failing=frozenset({"bad"})), start_buffer, batch_size=1, max_in_flight=1)
+    context.start()
+    try:
+        await context.publish(1)
+        with pytest.raises(RuntimeError, match="rollout bad failed"):
+            await _next_uids(context)
+    finally:
+        await context.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_committed_groups_from_another_payload_store(ray_module, tmp_path, start_buffer):
+    state = await _checkpoint_with_committed_group(ObjectStorePayloads(str(tmp_path / "rollouts")), start_buffer)
+
+    resumed = _context(["a", "b", "c"], _Workers(), start_buffer, batch_size=1, max_in_flight=2)
+    try:
+        with pytest.raises(ValueError, match="object_store_root"):
+            await resumed.load_state_dict(state)
+    finally:
+        await resumed.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_under_a_new_object_store_root_trains_the_checkpointed_objects(ray_module, tmp_path, start_buffer):
+    state = await _checkpoint_with_committed_group(ObjectStorePayloads(str(tmp_path / "attempt-1")), start_buffer)
+
+    payloads = ObjectStorePayloads(str(tmp_path / "attempt-2"))
+    resumed = _context(["a", "b", "c"], _Workers(), start_buffer, batch_size=1, max_in_flight=2, payloads=payloads)
+    await resumed.load_state_dict(state)
+    resumed.start()
+    try:
+        await resumed.publish(2)
+        await _next_uids(resumed)
+        await resumed.publish(3)
+        assert await _next_uids(resumed) == ["c"]
+    finally:
+        await resumed.close()
+
+
 @pytest.fixture(params=["memory", "object_store"])
 def payloads(request, tmp_path) -> PayloadStore:
     if request.param == "memory":
         return MemoryPayloads()
     return ObjectStorePayloads(str(tmp_path / "rollouts"))
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("missing_field", ["rollout_logprobs", "student_topk_indices", "behavior_topk_logprobs"])
-async def test_writer_requires_behavior_evidence_only_at_trainable_tokens(ray_module, payloads, missing_field):
-    policy = RolloutContentPolicy(
-        GroupAdmissionPolicy(
-            GroupAdvantageInvariant.no_group_advantage(physical_group_size=2),
-            rollout_logprobs_required=True,
-            student_topk_width=2,
-        ),
-        GroupSelectionPolicy(None),
-    )
-    buffer = ray.remote(RolloutBuffer).remote(RolloutBufferConfig(1, 1, 0, BatchPolicy.FULL_BATCH, None, None))
-    writer = payloads.writer(buffer, policy)
-    batch = _batch()
-    batch.update(
-        response_ids=[[2, 3], [4, 5]],
-        loss_masks=[[1, 0], [0, 0]],
-        rollout_logprobs=[[-0.2, None], [None, None]],
-        student_topk_indices=[[[1, 2], None], [None, None]],
-        behavior_topk_logprobs=[[[-0.3, -1.4], None], [None, None]],
-    )
-    try:
-        await buffer.publish.remote(1)
-        lease = await buffer.acquire_lease.remote()
-        invalid = deepcopy(batch)
-        invalid[missing_field][0][0] = None
-        with pytest.raises(TrainingGroupInvariantError) as error:
-            await writer.write_rollout(lease, RolloutGroup(invalid, "a", 1, _prompt("a")))
-        expected = (
-            AdmissionRejection.MISSING_ROLLOUT_LOGPROBS
-            if missing_field == "rollout_logprobs"
-            else AdmissionRejection.MISSING_BEHAVIOR_TOPK
-        )
-        assert error.value.rejections == (expected,)
-        await writer.write_rollout(lease, RolloutGroup(batch, "a", 1, _prompt("a")))
-        admission = await buffer.admit.remote(STALL_TIMEOUT)
-        groups = await payloads.fetch(admission.payloads)
-        assert [group.trajectory_batch for group in groups] == [batch]
-    finally:
-        ray.kill(buffer)
 
 
 @pytest.mark.asyncio
@@ -248,190 +454,43 @@ async def test_writer_filters_success_ceiling_using_final_outcomes(ray_module, p
         ray.kill(buffer)
 
 
-async def _ignore(groups: list[RolloutGroup]) -> None:
-    pass
-
-
-async def _next_uids(context: TrainingContext) -> list[str]:
-    groups, _ = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
-    return [group.uid for group in groups]
-
-
 @pytest.mark.asyncio
-async def test_rolling_batches_do_not_wait_for_a_slow_rollout(ray_module):
-    workers = _Workers(blocked=frozenset({"slow"}))
-    context = _context(["slow", "a", "b"], workers, batch_size=1, max_in_flight=2, batch_policy=BatchPolicy.ROLLING)
-    context.start()
+@pytest.mark.parametrize("missing_field", ["rollout_logprobs", "student_topk_indices", "behavior_topk_logprobs"])
+async def test_writer_requires_behavior_evidence_only_at_trainable_tokens(ray_module, payloads, missing_field):
+    policy = RolloutContentPolicy(
+        GroupAdmissionPolicy(
+            GroupAdvantageInvariant.no_group_advantage(physical_group_size=2),
+            rollout_logprobs_required=True,
+            student_topk_width=2,
+        ),
+        GroupSelectionPolicy(None),
+    )
+    buffer = ray.remote(RolloutBuffer).remote(RolloutBufferConfig(1, 1, 0, BatchPolicy.FULL_BATCH, None, None))
+    writer = payloads.writer(buffer, policy)
+    batch = _batch()
+    batch.update(
+        response_ids=[[2, 3], [4, 5]],
+        loss_masks=[[1, 0], [0, 0]],
+        rollout_logprobs=[[-0.2, None], [None, None]],
+        student_topk_indices=[[[1, 2], None], [None, None]],
+        behavior_topk_logprobs=[[[-0.3, -1.4], None], [None, None]],
+    )
     try:
-        await context.publish(1)
-        assert await _next_uids(context) == ["a"]
-        await context.publish(2)
-        assert await _next_uids(context) == ["b"]
-        assert "slow" in workers.started
+        await buffer.publish.remote(1)
+        lease = await buffer.acquire_lease.remote()
+        invalid = deepcopy(batch)
+        invalid[missing_field][0][0] = None
+        with pytest.raises(TrainingGroupInvariantError) as error:
+            await writer.write_rollout(lease, RolloutGroup(invalid, "a", 1, _prompt("a")))
+        expected = (
+            AdmissionRejection.MISSING_ROLLOUT_LOGPROBS
+            if missing_field == "rollout_logprobs"
+            else AdmissionRejection.MISSING_BEHAVIOR_TOPK
+        )
+        assert error.value.rejections == (expected,)
+        await writer.write_rollout(lease, RolloutGroup(batch, "a", 1, _prompt("a")))
+        admission = await buffer.admit.remote(STALL_TIMEOUT)
+        groups = await payloads.fetch(admission.payloads)
+        assert [group.trajectory_batch for group in groups] == [batch]
     finally:
-        await context.close()
-
-
-@pytest.mark.asyncio
-async def test_full_batches_train_a_slow_rollout_in_its_own_step(ray_module):
-    workers = _Workers(blocked=frozenset({"slow"}))
-    context = _context(["slow", "a", "b"], workers, batch_size=1, max_in_flight=2)
-    context.start()
-    try:
-        await context.publish(1)
-        await asyncio.wait_for(workers.written["a"].wait(), STALL_TIMEOUT)
-        workers.unblocked["slow"].set()
-        assert await _next_uids(context) == ["slow"]
-        await context.publish(2)
-        assert await _next_uids(context) == ["a"]
-    finally:
-        await context.close()
-
-
-@pytest.mark.asyncio
-async def test_a_slow_row_does_not_regenerate_rows_already_in_the_batch(ray_module):
-    workers = _Workers(blocked=frozenset({"b"}))
-    context = _context(["a", "b", "c"], workers, batch_size=3, max_in_flight=6)
-    context.start()
-    try:
-        await context.publish(1)
-        await asyncio.wait_for(workers.written["a"].wait(), STALL_TIMEOUT)
-        await asyncio.wait_for(workers.written["c"].wait(), STALL_TIMEOUT)
-        workers.unblocked["b"].set()
-        groups, metrics = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
-    finally:
-        await context.close()
-
-    assert sorted(group.uid for group in groups) == ["a", "b", "c"]
-    assert metrics["async/rejected_count/duplicate_uid"] == 0
-    assert workers.started_while_blocked == ["a", "b", "c"]
-
-
-@pytest.mark.asyncio
-async def test_a_rejected_row_is_generated_again_within_a_synchronous_step(ray_module):
-    workers = _Workers(masked_once=frozenset({"m"}))
-    context = _context(["m", "a"], workers, batch_size=2, max_in_flight=2, max_staleness_steps=0)
-    context.start()
-    try:
-        await context.publish(1)
-        groups, metrics = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
-    finally:
-        await context.close()
-
-    assert sorted(group.uid for group in groups) == ["a", "m"]
-    assert metrics["async/rejected_count/fully_masked"] == 1
-    assert workers.started == ["m", "a", "m"]
-
-
-@pytest.mark.asyncio
-async def test_resume_does_not_regenerate_a_committed_group(ray_module):
-    group = RolloutGroup(_batch(), "c", 1, _prompt("c"))
-    committed = ReadyRollout("committed", 1, 1, group.prompt, CONTENT_POLICY.verdict(group), [group], None)
-    # The order's next draw is row "c", which the checkpoint already holds.
-    state = TrainingContextState(PromptLoaderState({"epoch": 0, "position": 2}, []), [committed], None)
-    workers = _Workers()
-    context = _context(["a", "b", "c"], workers, batch_size=2, max_in_flight=4)
-    await context.load_state_dict(state)
-    context.start()
-    try:
-        await context.publish(1)
-        groups, metrics = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
-    finally:
-        await context.close()
-
-    assert groups[0].uid == "c"
-    assert metrics["async/rejected_count/duplicate_uid"] == 0
-    assert workers.started[:2] == ["a", "b"]
-
-
-@pytest.mark.asyncio
-async def test_each_batch_reports_its_judged_groups_to_the_prompt_order(ray_module):
-    order = _RecordingOrder(3)
-    context = _context(["a", "b", "c"], _Workers(), batch_size=2, max_in_flight=2, order=order)
-    context.start()
-    try:
-        await context.publish(1)
-        groups, metrics = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
-    finally:
-        await context.close()
-
-    assert order.observed == [[JudgedGroup(group.uid, (0.0, 1.0)) for group in groups]]
-    assert metrics["order/groups"] == 2.0
-
-
-async def _checkpoint_with_committed_group(payloads: PayloadStore) -> TrainingContextState:
-    """Train "a", then checkpoint once "c" is committed while "b" is still generating."""
-    workers = _Workers(blocked=frozenset({"b"}))
-    context = _context(["a", "b", "c"], workers, batch_size=1, max_in_flight=2, payloads=payloads)
-    context.start()
-    try:
-        await context.publish(1)
-        assert await _next_uids(context) == ["a"]
-        await context.publish(2)
-        await asyncio.wait_for(workers.written["c"].wait(), STALL_TIMEOUT)
-        return await context.state_dict()
-    finally:
-        await context.close()
-
-
-@pytest.mark.asyncio
-async def test_resume_regenerates_uncommitted_prompts_and_keeps_committed_groups(ray_module, payloads):
-    state = await _checkpoint_with_committed_group(payloads)
-
-    assert [rollout.verdict.uid for rollout in state.ready] == ["c"]
-    assert [prompt["uid"] for prompt in state.loader.retries] == ["b"]
-
-    resumed_workers = _Workers()
-    resumed = _context(["a", "b", "c"], resumed_workers, batch_size=1, max_in_flight=2, payloads=payloads)
-    await resumed.load_state_dict(state)
-    resumed.start()
-    try:
-        # "b" was leased for step 2 and "c" for step 3, so each trains in its own step.
-        await resumed.publish(2)
-        assert await _next_uids(resumed) == ["b"]
-        await resumed.publish(3)
-        assert await _next_uids(resumed) == ["c"]
-        assert resumed_workers.started[0] == "b"
-    finally:
-        await resumed.close()
-
-
-@pytest.mark.asyncio
-async def test_failed_rollout_fails_the_next_batch(ray_module):
-    context = _context(["bad"], _Workers(failing=frozenset({"bad"})), batch_size=1, max_in_flight=1)
-    context.start()
-    try:
-        await context.publish(1)
-        with pytest.raises(RuntimeError, match="rollout bad failed"):
-            await _next_uids(context)
-    finally:
-        await context.close()
-
-
-@pytest.mark.asyncio
-async def test_resume_rejects_committed_groups_from_another_payload_store(ray_module, tmp_path):
-    state = await _checkpoint_with_committed_group(ObjectStorePayloads(str(tmp_path / "rollouts")))
-
-    resumed = _context(["a", "b", "c"], _Workers(), batch_size=1, max_in_flight=2)
-    try:
-        with pytest.raises(ValueError, match="object_store_root"):
-            await resumed.load_state_dict(state)
-    finally:
-        await resumed.close()
-
-
-@pytest.mark.asyncio
-async def test_resume_under_a_new_object_store_root_trains_the_checkpointed_objects(ray_module, tmp_path):
-    state = await _checkpoint_with_committed_group(ObjectStorePayloads(str(tmp_path / "attempt-1")))
-
-    payloads = ObjectStorePayloads(str(tmp_path / "attempt-2"))
-    resumed = _context(["a", "b", "c"], _Workers(), batch_size=1, max_in_flight=2, payloads=payloads)
-    await resumed.load_state_dict(state)
-    resumed.start()
-    try:
-        await resumed.publish(2)
-        await _next_uids(resumed)
-        await resumed.publish(3)
-        assert await _next_uids(resumed) == ["c"]
-    finally:
-        await resumed.close()
+        ray.kill(buffer)

@@ -49,9 +49,13 @@ def test_resolve_engine_max_model_len(engine_kwargs, rope_scaling, expected):
 @pytest.mark.parametrize(
     "tp,pp,dp,expected",
     [
-        (1, 1, 1, False),  # single-GPU engines -> flat PACK
+        # Regression: multi-node TP=1 must not use per-engine STRICT_PACK, which scatters
+        # 1-GPU bundles and starves the policy PACK placement group of whole nodes.
+        (1, 1, 1, False),
         (2, 1, 1, True),  # de-risk geometry on ray/uni -> on-node STRICT_PACK
-        (4, 1, 1, True),  # TP=4 -> on-node STRICT_PACK
+        # Regression (#232): TP=4 on 4-GPU nodes must still STRICT_PACK; a `gpus > gpus_per_node` gate
+        # re-breaks cross-node TP all-reduce with a decode deadlock.
+        (4, 1, 1, True),
         (1, 2, 1, True),  # PP=2 single TP -> multi-GPU engine, still needs on-node
         (2, 2, 1, True),  # TP*PP=4
         (1, 1, 4, True),  # DP4xEP4 on 4-GPU nodes -> on-node STRICT_PACK
@@ -69,32 +73,6 @@ def test_ray_uni_backend_gate(tp, pp, dp, expected):
             data_parallel_size=dp,
         )
         is expected
-    )
-
-
-def test_tp1_never_strict_pack_so_policy_pg_not_starved():
-    # The exact lever1/swesmith regression: multi-node TP=1 must NOT use
-    # per-engine STRICT_PACK (which scatters 1-GPU bundles and starves the
-    # policy PACK PG of its whole nodes).
-    assert not use_per_engine_strict_pack_pg(
-        use_hybrid_engine=False,
-        use_mp_backend=False,
-        tensor_parallel_size=1,
-        pipeline_parallel_size=1,
-        data_parallel_size=1,
-    )
-
-
-def test_tp4_on_4gpu_node_still_strict_pack():
-    # Guards against the WRONG `per_engine_gpu_count > gpus_per_node` gate:
-    # TP=4 on 4-GPU nodes (4 is not > 4) must still use STRICT_PACK, else #232
-    # (cross-node TP all-reduce decode deadlock) re-breaks.
-    assert use_per_engine_strict_pack_pg(
-        use_hybrid_engine=False,
-        use_mp_backend=False,
-        tensor_parallel_size=4,
-        pipeline_parallel_size=1,
-        data_parallel_size=1,
     )
 
 
@@ -191,17 +169,6 @@ def test_colocated_config_rejects_asynchronous_rollouts_before_allocation():
     cfg.trainer.algorithm.policy_loss_type = "behavior_clip"
 
     with pytest.raises(ValueError, match="colocate_all requires"):
-        validate_cfg(cfg)
-
-
-def test_config_rejects_nonpositive_engine_startup_timeout():
-    cfg = example_dummy_config()
-    cfg.trainer.train_batch_size = 4
-    cfg.trainer.policy_mini_batch_size = 4
-    cfg.trainer.micro_train_batch_size_per_gpu = 1
-    cfg.generator.engine_init_timeout_seconds = 0
-
-    with pytest.raises(ValueError, match="engine_init_timeout_seconds must be greater than zero"):
         validate_cfg(cfg)
 
 

@@ -518,6 +518,11 @@ def validate_cfg(cfg: DictConfig):
     for path, value in runtime_values.items():
         if value <= 0:
             raise ValueError(f"{path} must be positive; got {value}")
+    start_interval = cfg.trajectory_runner.rollout_workers.start_interval_seconds
+    if start_interval < 0:
+        raise ValueError(
+            f"trajectory_runner.rollout_workers.start_interval_seconds must be non-negative; got {start_interval}"
+        )
     if cfg.trainer.model_load_retry.max_retries < 0:
         raise ValueError(
             f"trainer.model_load_retry.max_retries must be non-negative; got {cfg.trainer.model_load_retry.max_retries}"

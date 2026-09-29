@@ -9,6 +9,7 @@ import zipfile
 
 import pytest
 
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.trajectory_runners.base import (
     BatchMetadata,
     TrajectoryRequestBatch,
@@ -24,9 +25,11 @@ from skyrl_train.trajectory_runners.trajectory_retention import (
     TrajectoryRetentionPublicationError,
     TrajectoryRetentionPublicationTimeout,
     build_trajectory_records,
+    execute_publication,
     parse_trajectory_retention_config,
 )
 from skyrl_train.trajectory_runners.trajectory_retention_publisher import (
+    InlineTrajectoryPublisher,
     ProcessTrajectoryPublisher,
     PublicationOperation,
     PublicationRequest,
@@ -125,7 +128,7 @@ def _empty_ledger():
     return {"schema_version": 1, "total_bytes": 0, "step_bytes": {}, "records": {}, "archives": {}}
 
 
-def _never_finishes(_request, _sender):
+def _never_finishes(_request):
     threading.Event().wait()
 
 
@@ -246,7 +249,8 @@ def _records(output_path: Path) -> list[dict]:
 
 
 def _sink(config, publisher=None) -> TrajectorySink:
-    sink = TrajectorySink(config, _Tokenizer(), publisher=publisher)
+    """Build a bound sink that stores in-process; only the process-boundary tests pay for a storage process."""
+    sink = TrajectorySink(config, _Tokenizer(), publisher=publisher or InlineTrajectoryPublisher(execute_publication))
     sink.bind_runner("SkyRLGymTrajectoryRunner")
     return sink
 
@@ -350,7 +354,9 @@ def test_verifier_tests_are_persisted_with_the_retained_trace():
 @pytest.mark.asyncio
 async def test_trajectory_runner_finalization_invokes_the_shared_sink(tmp_path):
     trajectory_runner = _NormalizedRunner()
-    trajectory_runner.set_trajectory_sink(TrajectorySink(_config(tmp_path), _Tokenizer()))
+    trajectory_runner.set_trajectory_sink(
+        TrajectorySink(_config(tmp_path), _Tokenizer(), publisher=InlineTrajectoryPublisher(execute_publication))
+    )
 
     output = await trajectory_runner.run(_input())
 
@@ -708,6 +714,28 @@ def test_storage_worker_is_terminated_at_the_publication_deadline():
     assert result.error is not None
 
 
+def test_storage_worker_process_writes_archives_and_returns_the_ledger(tmp_path):
+    publisher = ProcessTrajectoryPublisher(
+        execute_publication,
+        publish_timeout_seconds=120,
+        shutdown_timeout_seconds=30,
+    )
+    request = PublicationRequest(
+        "publish",
+        PublicationOperation.PUBLISH,
+        str(tmp_path),
+        archives={"archive.zip": b"payload"},
+        ledger=_empty_ledger(),
+        record_count=1,
+    )
+
+    result = publisher.execute(request)
+
+    assert result.error is None
+    assert result.ledger == _empty_ledger()
+    assert (tmp_path / "archive.zip").read_bytes() == b"payload"
+
+
 def test_initialization_reconciles_archive_written_before_ledger_commit(tmp_path):
     first_sink = _sink(_config(tmp_path))
     first_sink.retain(_input(), _output())
@@ -727,21 +755,18 @@ def test_retention_takes_the_run_id_the_initiator_set(monkeypatch):
     marin exports ``SKYRL_RUN_ID`` when it launches; a run started straight from MarinSkyRL has no
     such variable and falls back to the run name set there.
     """
-    from skyrl_train.config import utils
-
     monkeypatch.setenv("SKYRL_RUN_ID", "marin-run-42")
-    assert utils.get_default_config().generator.trajectory_retention.run_id == "marin-run-42"
+    assert get_default_config().generator.trajectory_retention.run_id == "marin-run-42"
 
     monkeypatch.delenv("SKYRL_RUN_ID")
-    config = utils.get_default_config()
+    config = get_default_config()
     assert config.generator.trajectory_retention.run_id == config.trainer.run_name
 
 
 @pytest.mark.asyncio
 async def test_best_effort_retention_does_not_end_the_run(tmp_path):
     """Retention runs inside the rollout worker, whose handler exits the process on an exception."""
-    sink = TrajectorySink(_config(tmp_path, required=False), _Tokenizer())
-    sink.bind_runner("SkyRLGymTrajectoryRunner")
+    sink = _sink(_config(tmp_path, required=False))
     sink.retain = _raises
 
     output = _output()
@@ -757,8 +782,7 @@ async def test_best_effort_retention_does_not_end_the_run(tmp_path):
 
 @pytest.mark.asyncio
 async def test_required_retention_still_raises(tmp_path):
-    sink = TrajectorySink(_config(tmp_path, required=True), _Tokenizer())
-    sink.bind_runner("SkyRLGymTrajectoryRunner")
+    sink = _sink(_config(tmp_path, required=True))
     sink.retain = _raises
 
     with pytest.raises(RuntimeError):

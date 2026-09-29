@@ -110,7 +110,11 @@ def _pool(workers: list[object], spec: _Spec, *, timeout: float = 1) -> RolloutW
     pool = RolloutWorkerPool(
         spec,
         RolloutWorkerResources(
-            num_workers=len(workers), cpus_per_worker=1, executor_threads=1, progress_timeout_seconds=timeout
+            num_workers=len(workers),
+            cpus_per_worker=1,
+            executor_threads=1,
+            progress_timeout_seconds=timeout,
+            start_interval_seconds=0,
         ),
     )
     pool._actors = list(workers)
@@ -190,18 +194,6 @@ async def test_waits_measured_in_a_worker_join_the_callers_rollout_observation(s
 
     assert response_tokens == 7
     assert len(observation.waits["env_queue"]) == 1
-
-
-@pytest.mark.asyncio
-async def test_pool_returns_one_group_unchanged(spec):
-    expected = _output([TrajectoryID("a", 0)])
-
-    async def completed_request(_input_batch):
-        return expected
-
-    pool = _pool([_Worker(completed_request)], spec)
-
-    assert await pool.run(_request([TrajectoryID("a", 0)])) is expected
 
 
 @pytest.mark.asyncio

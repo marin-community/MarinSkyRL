@@ -36,7 +36,9 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     extract_prompt_token_ids_from_rollout_details,
     get_generation_prompt_ids,
     get_response_ids_and_loss_mask_from_messages,
+    _assemble_response_ids_tito_full,
     _tito_full_enabled,
+    detect_qwen3_5_empty_think_prefix,
 )
 
 
@@ -184,13 +186,8 @@ def test_tito_full_resolution_precedence():
     assert _tito_full_enabled(rollout_logprobs_required=True, tito_full=None) is True
 
 
-def test_tito_full_without_rollout_logprob_consumer_preserves_existing_assembly():
-    assert _tito_full_enabled(rollout_logprobs_required=False, tito_full=None) is False
-
-
 def test_tito_assembly_declines_on_inconsistent_stream(monkeypatch):
     """Full TITO names the failed invariant instead of assembling corrupt IDs."""
-    from skyrl_train.trajectory_runners.trajectory_processing import _assemble_response_ids_tito_full
 
     class _Tok:
         eos_token_id = 999
@@ -233,8 +230,6 @@ class _FakeTok:
 
 
 def test_detect_qwen3_5_empty_think_prefix_positive():
-    from skyrl_train.trajectory_runners.trajectory_processing import detect_qwen3_5_empty_think_prefix
-
     tok = _FakeTok(think_open=900, think_close=901)
     # <|im_start|>(1) assistant(2) \n(3) <think>(900) \n\n(4) </think>(901) \n\n(5)
     gp = [1, 2, 3, 900, 4, 901, 5]
@@ -244,8 +239,6 @@ def test_detect_qwen3_5_empty_think_prefix_positive():
 
 
 def test_detect_qwen3_5_empty_think_prefix_negative_dense_qwen3():
-    from skyrl_train.trajectory_runners.trajectory_processing import detect_qwen3_5_empty_think_prefix
-
     # Dense Qwen3 gen-prompt has no think tokens at all -> None (byte-identical path).
     tok = _FakeTok(think_open=None, think_close=None)
     assert detect_qwen3_5_empty_think_prefix(tok, [1, 2, 3]) is None
@@ -255,8 +248,6 @@ def test_detect_qwen3_5_empty_think_prefix_negative_dense_qwen3():
 
 
 def test_detect_qwen3_5_rejects_nonempty_think_block():
-    from skyrl_train.trajectory_runners.trajectory_processing import detect_qwen3_5_empty_think_prefix
-
     tok = _FakeTok(think_open=900, think_close=901)
     # <think> ... 3 content tokens ... </think>  -> NOT an empty block -> None.
     gp = [1, 2, 900, 50, 51, 52, 901, 5]

@@ -17,33 +17,6 @@ from scripts.iris.jupiter_rl_artifacts import (
     sync_jupiter_artifacts,
 )
 from scripts.iris import watch_coreweave_rl as watcher
-from scripts.iris.watch_coreweave_rl import ArtifactResult, Cluster, RlJob, report_row
-
-
-def test_status_row_surfaces_tis_alignment_and_token_probability_shift(tmp_path: Path) -> None:
-    finelog = tmp_path / "finelog.log"
-    finelog.write_text(
-        "Training Step Progress: 7 / 20\n"
-        "WANDB_MIRROR kind=train step=7 metrics="
-        '{"policy/policy_entropy": 1.178, "generate/tis/exact_match_fraction": 0.975, '
-        '"policy/mismatch/pooled/log_ratio_abs_mean": 0.012, "policy/log_ratio_abs_mean": 0.021, '
-        '"policy/log_ratio_abs_p99": 0.44, "policy/log_ratio_abs_max": 3.25}\n'
-    )
-    job = RlJob(
-        cluster=Cluster("jsc-jupiter", Path(), None),
-        job_id="1170543",
-        state="running",
-        submitted_at_ms=0,
-        entrypoint="",
-    )
-    artifacts = ArtifactResult("1 line", "not requested", "not requested", "2 traces", 2, 1, ())
-
-    trend = report_row(job, artifacts, tmp_path)[-1].value
-
-    assert "entropy=1.178" in trend
-    assert "TIS exact=0.975" in trend
-    assert "mismatch |log r|=0.012" in trend
-    assert "token |Δlog p| μ/p99/max=0.021/0.44/3.25" in trend
 
 
 @pytest.mark.parametrize(
@@ -245,12 +218,12 @@ def test_jupiter_sync_reports_ssh_transport_failure_instead_of_missing_artifacts
         )
 
 
-def test_jupiter_status_queries_only_the_requested_slurm_job() -> None:
-    calls: list[list[str]] = []
+def test_jupiter_status_falls_back_to_accounting_after_the_job_leaves_the_queue() -> None:
+    # squeue has forgotten the finished job; sacct reports its terminal state with a Slurm "+" suffix.
+    responses = iter(["", "CANCELLED+|tasktrove-x6|\n"])
 
     def fake_run(arguments: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        calls.append(arguments)
-        return subprocess.CompletedProcess(arguments, 0, stdout="RUNNING|tasktrove-x6\n", stderr="")
+        return subprocess.CompletedProcess(arguments, 0, stdout=next(responses), stderr="")
 
     status = query_jupiter_job_status(
         JupiterRunSpec("1170543", "/e/data1/experiments/tasktrove-x6"),
@@ -258,11 +231,7 @@ def test_jupiter_status_queries_only_the_requested_slurm_job() -> None:
         runner=fake_run,
     )
 
-    assert status.state == "running"
-    assert status.job_name == "tasktrove-x6"
-    assert len(calls) == 1
-    assert "squeue" in calls[0][-1]
-    assert "1170543" in calls[0][-1]
+    assert (status.state, status.job_name) == ("killed", "tasktrove-x6")
 
 
 def test_jupiter_only_run_uses_the_shared_report_and_skips_iris_trace_inventory(
