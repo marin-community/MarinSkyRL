@@ -1,6 +1,7 @@
 """Contract checks for the asynchronous Snowball MOPD smoke against its synchronous baseline."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -14,14 +15,12 @@ SYNC_CONFIG = CONFIGS / "snowball_mopd_ultra_smoke.yaml"
 STUDENT = "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92"
 
 
-class _HPCStub:
-    gpus_per_node = 8
-
-
 def test_async_smoke_runs_the_in_process_async_trainer_and_passes_trainer_validation():
     parsed = parse_rl_config(str(ASYNC_CONFIG), model_override=STUDENT)
     compiled = compose_skyrl_config(
-        parsed, {"job_name": "mopd-async-smoke-test", "experiments_dir": "/tmp/exp", "num_nodes": 8}, _HPCStub()
+        parsed,
+        {"job_name": "mopd-async-smoke-test", "experiments_dir": "/tmp/exp", "num_nodes": 8},
+        SimpleNamespace(gpus_per_node=8),
     )
 
     assert compiled.entrypoint == "skyrl_train.entrypoints.main_base"
