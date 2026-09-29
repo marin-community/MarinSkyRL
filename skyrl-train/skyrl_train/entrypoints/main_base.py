@@ -28,7 +28,6 @@ from skyrl_train.config.trajectory_runner_capabilities import (
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
 )
-from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 from marinskyrl.speculative_decoding import (
     STANDARD_TRAINING_ENTRYPOINT,
     parse_speculative_decoding_config,
@@ -197,7 +196,6 @@ def create_ray_wrapped_inference_engines_from_config(
         role,
         engine_init_kwargs=engine_init_kwargs,
     )
-    engine_kwargs["weight_sync_pause_policy"] = resolve_weight_sync_pause_policy(cfg.generator)
 
     # Conditionally add LoRA parameters if LoRA is enabled
     if cfg.trainer.policy.model.lora.rank > 0:
