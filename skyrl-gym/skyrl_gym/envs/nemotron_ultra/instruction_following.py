@@ -33,6 +33,7 @@ def _ensure_nltk_data() -> None:
 def grade_instruction_following(text: str, record: dict[str, Any]) -> tuple[float, dict[str, Any]]:
     """Evaluate per-row constraints; a missing final answer cannot earn instruction reward."""
     _ensure_nltk_data()
+    has_answer = bool(text.strip())
     results: list[bool] = []
     errors: list[str | None] = []
     for instruction_id, kwargs in zip(record["instruction_id_list"], record["kwargs"]):
@@ -40,13 +41,12 @@ def grade_instruction_following(text: str, record: dict[str, Any]) -> tuple[floa
             instruction_cls = instructions_registry.INSTRUCTION_DICT[instruction_id]
             instruction = instruction_cls(instruction_id)
             instruction.build_description(**{key: value for key, value in (kwargs or {}).items() if value is not None})
-            results.append(bool(instruction.check_following(text)))
+            results.append(has_answer and bool(instruction.check_following(text)))
             errors.append(None)
         except Exception as error:
             results.append(False)
             errors.append(f"{type(error).__name__}: {error}")
 
-    has_answer = bool(text.strip())
     follow_all_instructions = has_answer and all(results)
     grading_mode = record.get("grading_mode", "binary")
     if grading_mode == "binary":

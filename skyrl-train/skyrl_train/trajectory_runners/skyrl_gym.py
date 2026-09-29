@@ -34,6 +34,7 @@ from skyrl_train.inference_engines.base import InferenceEngineInput, Conversatio
 from skyrl_train.error_treatment import ErrorTreatment
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_answer_text
 from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group, response_object
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
 from skyrl_gym.verification import (
@@ -970,17 +971,37 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         genrm_indices = [index for index in range(len(outputs)) if (ultra_at(index) or {}).get("agent") in genrm_agents]
         if not genrm_indices:
             return
+        final_responses: dict[int, str] = {}
+        for index in genrm_indices:
+            output = outputs[index]
+            if not output.disposition.loss_eligible or output.verification.status is not VerificationStatus.VERIFIED:
+                continue
+            final_response = final_answer_text(output.evidence.response or "")
+            if final_response.strip():
+                final_responses[index] = final_response
+                continue
+            output.verification = VerificationResult.verified(
+                0.0, passed=False, diagnostics={"empty_final_answer": True}
+            )
+            old_token_rewards = output.reward.token_rewards
+            output.reward = RewardResult(
+                unshaped_reward=0.0,
+                optimization_reward=0.0,
+                token_rewards=None if old_token_rewards is None else tuple(0.0 for _ in old_token_rewards),
+            )
         batch_metadata = input_batch.get("batch_metadata")
         if batch_metadata is not None and batch_metadata.training_phase == "eval":
             for index in genrm_indices:
                 outputs[index].env_metrics["genrm/cohort_skipped_eval"] = 1.0
-                if outputs[index].verification.status is not VerificationStatus.VERIFIED:
+                if index not in final_responses:
                     continue
                 outputs[index].verification = VerificationResult.unavailable(
                     "GenRM evaluation needs a comparison cohort"
                 )
                 outputs[index].reward = RewardResult(unshaped_reward=None, optimization_reward=0.0)
                 outputs[index].disposition = TrainingDisposition.mask("GenRM evaluation has no comparison cohort")
+            return
+        if not final_responses:
             return
         if self.genrm_judge is None:
             raise RuntimeError("Nemotron Ultra GenRM rows require environment.skyrl_gym.nemotron_ultra.genrm.judge")
@@ -997,12 +1018,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 raise ValueError(
                     f"GenRM cohort requires {expected_size} rollouts for a prompt, received {len(indices)}"
                 )
-            indices = [
-                index
-                for index in indices
-                if outputs[index].disposition.loss_eligible
-                and outputs[index].verification.status is VerificationStatus.VERIFIED
-            ]
+            indices = [index for index in indices if index in final_responses]
             if len(indices) < 2:
                 for index in indices:
                     outputs[index].verification = VerificationResult.unavailable("Insufficient valid GenRM peers")
@@ -1025,7 +1041,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     (dict(message) for message in reversed(messages) if message.get("role") == "assistant"),
                     {},
                 )
-                assistant_message["content"] = outputs[index].evidence.response or ""
+                assistant_message["content"] = final_responses[index]
                 response_objects.append(response_object(assistant_message))
             try:
                 rewards, metrics = await asyncio.to_thread(

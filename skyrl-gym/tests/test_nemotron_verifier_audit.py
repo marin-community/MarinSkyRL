@@ -1,13 +1,16 @@
 """Regression controls for Ultra answer extraction and verifier failures."""
 
 import json
+import re
+from importlib.resources import files
 import socket
 
 import pytest
 import requests
+import yaml
 from omegaconf import OmegaConf
 
-from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_answer_text
+from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_answer_text, final_verdict
 from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraEnv, _extract_reasoning_gym_answer
 from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group
 from skyrl_gym.envs.nemotron_ultra.genrm_utils import GenRMOutputParseError, parse_genrm_output
@@ -17,7 +20,7 @@ from skyrl_gym.envs.nemotron_ultra.judge_verifiers import grade_abstention, grad
 from skyrl_gym.envs.nemotron_ultra.lean_proof_utils import determine_proof_status
 from skyrl_gym.envs.nemotron_ultra.math_with_judge import grade_math
 from skyrl_gym.envs.nemotron_ultra.mcqa import grade_mcqa
-from skyrl_gym.envs.nemotron_ultra.nvarc import grade_inductive_arc, parse_grid
+from skyrl_gym.envs.nemotron_ultra.nvarc import grade_inductive_arc, grade_transductive_arc, parse_grid
 from skyrl_gym.envs.nemotron_ultra.ns_tools import execute_python_calls
 from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
@@ -323,6 +326,30 @@ def test_arc_accepts_compact_grids_and_selects_the_final_box():
 
 
 @pytest.mark.parametrize(
+    "answer",
+    [
+        "[[1,3],[1,3]]",
+        "```json\n[[1,3],[1,3]]\n```",
+        "```\n13\n13\n```",
+        "```text\n1 3\n1 3\n```",
+        "<|start_think|>Maybe color 2.<|end_think|>```json\n[[1,3],[1,3]]\n```",
+    ],
+)
+def test_arc_grid_representations_preserve_rows_and_exact_reward(answer):
+    assert grade_transductive_arc(answer, {"expected_output": [[1, 3], [1, 3]]})[0] == 1.0
+    assert grade_transductive_arc(answer, {"expected_output": [[1, 3, 1, 3]]})[0] == 0.0
+
+
+@pytest.mark.parametrize(
+    "answer", ["[[1,3],[1]]", "[[true,3]]", '[["1",3]]', "[[1,10]]", "<|start_think|>[[1,3],[1,3]]", "```json\n[[1,3]]"]
+)
+def test_arc_malformed_grid_cannot_receive_exact_reward(answer):
+    reward, details = grade_transductive_arc(answer, {"expected_output": [[1, 3]]})
+    assert reward == 0.0
+    assert details["extraction_successful"] is False
+
+
+@pytest.mark.parametrize(
     "output,expected",
     [
         ({"process_status": "completed", "stdout": "error: unknown tactic", "stderr": ""}, "failed"),
@@ -476,10 +503,11 @@ def test_grading_message_uses_final_content_without_mutating_retained_evidence()
     assert raw["content"] == "reasoning words Hello."
 
 
-def test_broken_instruction_verifier_is_not_a_verified_wrong_answer():
+@pytest.mark.parametrize("answer", ["answer", ""])
+def test_broken_instruction_verifier_is_not_a_verified_wrong_answer(answer):
     result = ultra_env(
         "instruction_following_simple_agent", {"instruction_id_list": ["missing:verifier"], "kwargs": [{}]}
-    ).step("answer")
+    ).step(answer)
     assert result["verification"].status is VerificationStatus.ERROR
     assert result["verification"].diagnostics["instruction_errors"][0].startswith("KeyError")
 
@@ -624,3 +652,42 @@ def test_instruction_negative_constraints_do_not_reward_a_missing_final_answer(g
     assert valid["reward"] == 1.0
     assert valid["verification"].passed is True
     assert valid["verification"].diagnostics["empty_final_answer"] is False
+
+
+@pytest.mark.parametrize("action", ["", "<|start_think|>The last word must be sky.<|eot_id|>"])
+def test_empty_instruction_answer_is_a_model_failure_not_a_verifier_outage(action):
+    env = ultra_env(
+        "instruction_following_simple_agent",
+        {
+            "instruction_id_list": ["last_word:last_word_answer"],
+            "kwargs": [{"last_word": "sky"}],
+        },
+    )
+    result = env.step(action)
+    assert result["verification"].status is VerificationStatus.VERIFIED
+    assert result["verification"].passed is False
+    assert result["verification"].diagnostics["instruction_errors"] == [None]
+    assert result["reward"] == 0.0
+
+
+@pytest.mark.parametrize("answer", ["13", "1 3", "[[1,3]]", "```json\n[[1,3]]\n```"])
+def test_arc_single_row_grid_keeps_its_shape(answer):
+    assert grade_transductive_arc(answer, {"expected_output": [[1, 3]]})[0] == 1.0
+    assert grade_transductive_arc(answer, {"expected_output": [[1], [3]]})[0] == 0.0
+
+
+def test_jailbreak_few_shot_verdicts_are_accepted_without_format_retry():
+    resource = files("skyrl_gym.envs.nemotron_ultra").joinpath("jailbreak_verifiers.yaml")
+    config = yaml.safe_load(resource.read_text())
+    verifier = config["overrefusal_check"]
+    examples = re.findall(r"===== Example \d+ \((.*?)\) =====\n(.*?)(?======)", verifier["prompt_template"], re.DOTALL)
+    assert examples
+    for expected, example in examples:
+        reply = example.split("MODEL RESPONSE:\n", 1)[1].strip()
+        assert final_verdict(reply, set(verifier["labels"].values())) == f"[[{expected}]]"
+        reward, diagnostics = grade_jailbreak(
+            "A substantive answer.", {"response_policy_mapped": "engagement"}, JudgeReplies(reply)
+        )
+        kind = "positive" if expected == "ENGAGED" else "negative"
+        assert reward == verifier["rewards"][kind]
+        assert diagnostics["judge_output_attempts"]["overrefusal_check"] == [reply]
