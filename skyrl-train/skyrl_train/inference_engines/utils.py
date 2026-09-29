@@ -1,5 +1,6 @@
 from collections.abc import Collection
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Any, Optional, Union
 import random
 import hashlib
@@ -226,14 +227,20 @@ def aggregate_completion_usage_info(
         raise ValueError(f"Unsupported backend: {backend}")
 
 
-_RENDEZVOUS_PORT_START = 20_000
-_RENDEZVOUS_PORT_STOP = 30_000
+# Some cluster kernels allocate outbound connections from 10240, so the
+# conventional 20000-30000 listener range overlaps their client ports.
+_RENDEZVOUS_PORT_START = 2_000
+_RENDEZVOUS_PORT_STOP = 10_000
+_EPHEMERAL_PORT_RANGE_FILE = Path("/proc/sys/net/ipv4/ip_local_port_range")
 
 
 def _find_available_rendezvous_port(excluded_ports: Collection[int] = ()) -> int:
-    """Choose a listener port outside Linux's default ephemeral client range."""
+    """Choose a listener port outside the kernel's configured ephemeral client range."""
 
     excluded = set(excluded_ports)
+    if _EPHEMERAL_PORT_RANGE_FILE.exists():
+        first_client_port, last_client_port = map(int, _EPHEMERAL_PORT_RANGE_FILE.read_text().split())
+        excluded.update(range(first_client_port, last_client_port + 1))
     candidates = list(range(_RENDEZVOUS_PORT_START, _RENDEZVOUS_PORT_STOP))
     random.shuffle(candidates)
     for port in candidates:

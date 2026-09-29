@@ -7,6 +7,7 @@ uv run --isolated --group dev --extra cpu pytest tests/cpu/inf_engines/test_infe
 """
 
 from http import HTTPStatus
+import skyrl_train.inference_engines.utils as engine_ports
 import base64
 import io
 import socket
@@ -47,6 +48,24 @@ def test_rendezvous_port_avoids_ephemeral_range_and_existing_listener(monkeypatc
 
     assert _RENDEZVOUS_PORT_START <= second < _RENDEZVOUS_PORT_STOP
     assert second == first + 1
+
+
+def test_rendezvous_reservation_avoids_configured_linux_client_ports(monkeypatch, tmp_path):
+    port_range = tmp_path / "ip_local_port_range"
+    first = engine_ports._RENDEZVOUS_PORT_START
+    port_range.write_text(f"{first} {first + 2}\n")
+    monkeypatch.setattr(engine_ports, "_EPHEMERAL_PORT_RANGE_FILE", port_range)
+    monkeypatch.setattr(engine_ports.random, "shuffle", lambda _ports: None)
+    reservations = engine_ports._reserve_available_rendezvous_ports(2)
+    try:
+        ports = [reserved.getsockname()[1] for reserved in reservations]
+        assert ports == [first + 3, first + 4]
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as contender:
+            with pytest.raises(OSError):
+                contender.bind(("", ports[0]))
+    finally:
+        for reserved in reservations:
+            reserved.close()
 
 
 def test_rendezvous_port_fails_when_range_is_excluded():
