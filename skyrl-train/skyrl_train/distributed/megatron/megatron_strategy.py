@@ -310,10 +310,7 @@ class MegatronStrategy(DistributedStrategy):
                 hf_dir = os.path.join(work_dir, "huggingface")
                 self.save_hf_configs(self.hf_config, hf_dir, tokenizer)
 
-                # Persist replicated client state (e.g. ZClip / StaleClip warmup
-                # counters + EMA stats) so they survive chain-restarts.
-                # client_state is global (not sharded), so a
-                # single rank-0 file suffices; every rank reads it back on load.
+                # Replicated client state is written by rank zero and read by every rank.
                 extra_state_path = os.path.join(work_dir, "extra_state.pt")
                 with io.open_file(extra_state_path, "wb") as f:
                     torch.save({"client_state": client_state, "tag": tag}, f)
@@ -409,15 +406,13 @@ class MegatronStrategy(DistributedStrategy):
         if load_training_state and "rng" in state_dict:
             self.load_rng_state(state_dict["rng"])
 
-        # Restore replicated client state (ZClip / StaleClip), if present. Guarded
-        # for backward-compat with checkpoints written before this file existed.
         states = {}
         extra_state_path = os.path.join(ckpt_dir, "extra_state.pt")
         if load_training_state and io.exists(extra_state_path):
             with io.open_file(extra_state_path, "rb") as f:
                 extra_state = torch.load(f, weights_only=False)
             states = extra_state.get("client_state", {}) or {}
-            self.log("Loaded client state (ZClip / StaleClip) from checkpoint.")
+            self.log("Loaded client state from checkpoint.")
 
         return ckpt_dir, states
 

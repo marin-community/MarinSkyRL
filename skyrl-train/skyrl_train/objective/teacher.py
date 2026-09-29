@@ -4,7 +4,7 @@ import torch
 
 from marinskyrl.distillation import DistillationObjectiveKind
 from skyrl_train.config.objective_spec import TopKLossParams
-from skyrl_train.distillation import TeacherTopKInput, TopKEvidence
+from skyrl_train.distillation import DISTILLATION_TOPK_METRIC, TeacherTopKInput, TopKEvidence
 from skyrl_train.objective.losses import TokenLoss
 from skyrl_train.tensor_math import safe_exp_delta
 
@@ -53,7 +53,7 @@ def topk_teacher_loss(
     selected = valid.unsqueeze(-1)
     current = torch.where(selected, student_log_probs_on_support, 0)
     denominator = valid.sum().clamp(min=1)
-    metrics = {"distillation_topk": float(current.shape[-1])}
+    metrics = {DISTILLATION_TOPK_METRIC: float(current.shape[-1])}
     if isinstance(evidence, TeacherTopKInput):
         if params.objective is not DistillationObjectiveKind.SPARSE_FORWARD_KL:
             raise ValueError(f"teacher-support evidence cannot use {params.objective}")

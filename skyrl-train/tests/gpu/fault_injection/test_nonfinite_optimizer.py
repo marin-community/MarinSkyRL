@@ -22,11 +22,11 @@ def assert_state_equal(actual, expected):
     actual_leaves, actual_structure = tree_flatten(actual)
     expected_leaves, expected_structure = tree_flatten(expected)
     assert actual_structure == expected_structure
-    for actual_leaf, expected_leaf in zip(actual_leaves, expected_leaves, strict=True):
+    for index, (actual_leaf, expected_leaf) in enumerate(zip(actual_leaves, expected_leaves, strict=True)):
         if isinstance(actual_leaf, torch.Tensor):
             torch.testing.assert_close(actual_leaf, expected_leaf, rtol=0, atol=0)
         else:
-            assert actual_leaf == expected_leaf
+            assert actual_leaf == expected_leaf, (index, actual_leaf, expected_leaf)
 
 
 def run_nonfinite_rank(rank, dtype, rendezvous):
@@ -62,8 +62,7 @@ def run_nonfinite_rank(rank, dtype, rendezvous):
             loss_scale=128 if dtype is torch.float16 else None,
         )
         optimizer = get_megatron_optimizer(optimizer_config, [ddp])
-        scheduler = OptimizerParamScheduler(
-            optimizer,
+        scheduler_args = dict(
             init_lr=0.01,
             max_lr=0.01,
             min_lr=0.001,
@@ -75,6 +74,7 @@ def run_nonfinite_rank(rank, dtype, rendezvous):
             wd_incr_steps=10,
             wd_incr_style="constant",
         )
+        scheduler = OptimizerParamScheduler(optimizer, **scheduler_args)
         strategy = MegatronStrategy(get_default_config().trainer.policy.megatron_config)
         tokens = torch.arange(16, device="cuda").reshape(2, 8)
 
@@ -100,6 +100,7 @@ def run_nonfinite_rank(rank, dtype, rendezvous):
         assert not torch.equal(before["model"]["logits.weight"], expected_recovery["model"]["logits.weight"])
         model.load_state_dict(before["model"])
         optimizer.load_state_dict(before["optimizer"])
+        scheduler = OptimizerParamScheduler(optimizer, **scheduler_args)
         scheduler.load_state_dict(before["scheduler"])
         assert_state_equal(snapshot(), before)
 
