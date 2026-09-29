@@ -10,11 +10,10 @@ import ray
 from omegaconf import DictConfig
 
 from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
-from skyrl_train.entrypoints.main_base import config_dir, run_ray_driver
-from skyrl_train.entrypoints.terminal_bench import TerminalBenchExp
+from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
 
 
-class TaskCompendiumExp(TerminalBenchExp):
+class TaskCompendiumExp(BasePPOExp):
     """Route answer-only tasks to native chat and richer tasks to Harbor."""
 
     def _api_base(self) -> str:

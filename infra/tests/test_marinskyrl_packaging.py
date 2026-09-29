@@ -93,14 +93,14 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
     assert "Extras `cpu` and `cuda` are incompatible" in conflict.stderr
 
 
-def test_rollout_runtime_resolves_harbor_main_into_the_frozen_lock() -> None:
+def test_rollout_runtime_resolves_pinned_harbor_into_the_frozen_lock() -> None:
     sources = PYPROJECT["tool"]["uv"]["sources"]
     lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
 
-    assert sources["harbor"] == {"git": "https://github.com/marin-community/harbor.git"}
+    assert sources["harbor"]["git"] == "https://github.com/marin-community/harbor.git"
+    assert re.fullmatch(r"[0-9a-f]{40}", sources["harbor"]["rev"])
     harbor = next(package for package in lock["package"] if package["name"] == "harbor")
-    assert harbor["source"]["git"].startswith("https://github.com/marin-community/harbor.git#")
-    assert len(harbor["source"]["git"].rsplit("#", 1)[-1]) == 40
+    assert harbor["source"]["git"].rsplit("#", 1)[-1] == sources["harbor"]["rev"]
 
 
 def test_harbor_config_release_matches_the_locked_harbor_commit() -> None:
