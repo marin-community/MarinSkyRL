@@ -7,7 +7,9 @@
 
 The fixture contains embeddings, dense attention, attention gates, routers,
 rank-3 routed experts, shared experts, GatedNorms, one-dimensional norms and
-biases, and the output head. It uses seed `20260730`, FP32 parameters and
+biases, and the output head. The grouped-query attention query matrix has
+shape `(12, 4)` and weights from `-0.1` to `0.1`; its fused test has two query
+heads per key/value group. It uses seed `20260730`, FP32 parameters and
 gradients, three steps, MuonH/AdamH LR `0.03`, Adam LR `0.004`, momentum
 `0.95`, Nesterov, five BF16 Newton--Schulz steps, betas `(0.9, 0.95)`, and
 epsilons `1e-8`. Final matrix axes are transposed when saved to match PyTorch
@@ -30,4 +32,4 @@ sha256sum grug_muonh_jax_golden.npz
 ```
 
 Expected SHA-256:
-`57a66c2b0d36f1fbaffe1646b016457b7b92773fbc631aac318ceac45c9cb387`.
+`333b546ed2d878fa675d8d1976c1eccd8075ff2a4cda014a50f682af644b27f2`.

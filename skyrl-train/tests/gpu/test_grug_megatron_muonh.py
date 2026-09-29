@@ -41,7 +41,7 @@ class _TinyGrug(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.config = SimpleNamespace(
-            num_attention_heads=2,
+            num_attention_heads=4,
             num_query_groups=2,
             kv_channels=3,
             tensor_model_parallel_size=1,
@@ -54,7 +54,7 @@ class _TinyGrug(nn.Module):
         self.decoder.layers = nn.ModuleList([nn.Module()])
         layer = self.decoder.layers[0]
         layer.self_attention = nn.Module()
-        layer.self_attention.linear_qkv = nn.Linear(4, 18, bias=False, device="cuda", dtype=torch.bfloat16)
+        layer.self_attention.linear_qkv = nn.Linear(4, 24, bias=False, device="cuda", dtype=torch.bfloat16)
         layer.mlp = nn.Module()
         layer.mlp.shared_experts = nn.Module()
         layer.mlp.shared_experts.linear_fc1 = nn.Linear(4, 12, bias=False, device="cuda", dtype=torch.bfloat16)
@@ -71,7 +71,10 @@ def test_megatron_wrapper_routes_updates_and_restores_muonh_state(distributed_pa
         query = golden[f"{prefix}__q_proj"]
         key = golden[f"{prefix}__shared"]
         value = golden[f"{prefix}__expert"][0]
-        qkv = torch.cat([part.reshape(2, 3, 4) for part in (query, key, value)], dim=1).reshape(18, 4)
+        gqa_query = golden[f"{prefix}__gqa_q_proj"]
+        qkv = torch.cat((gqa_query.reshape(2, 6, 4), key.reshape(2, 3, 4), value.reshape(2, 3, 4)), dim=1).reshape(
+            24, 4
+        )
         return qkv, torch.cat((query, key))
 
     fused_parameters = (

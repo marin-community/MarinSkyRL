@@ -12,6 +12,7 @@ FIXTURE = Path(__file__).with_name("fixtures") / "grug_muonh_jax_golden.npz"
 NAMES = {
     "embed": "embedding.word_embeddings.weight",
     "q_proj": "decoder.layers.0.self_attention.linear_qkv.weight",
+    "gqa_q_proj": "decoder.layers.1.self_attention.linear_qkv.weight",
     "attn_gate": "decoder.layers.0.self_attention.attn_gate.weight",
     "router": "decoder.layers.0.mlp.router.weight",
     "expert": "decoder.layers.0.mlp.experts.linear_fc1.weight",
@@ -87,24 +88,27 @@ def test_embedding_gate_route_matches_hf_gated_norm_route() -> None:
     assert grug_muonh_route("embed_norm.norm.weight", norm) == "adam"
 
 
-@pytest.mark.parametrize("layout", ["gate_up", "qkv"])
-def test_fused_projections_match_independent_jax_updates(layout: str) -> None:
+@pytest.mark.parametrize("layout,heads_per_group", [("gate_up", 1), ("qkv", 1), ("qkv", 2)])
+def test_fused_projections_match_independent_jax_updates(layout: str, heads_per_group: int) -> None:
     with np.load(FIXTURE, allow_pickle=False) as fixture:
-        names = ("q_proj", "shared") if layout == "gate_up" else ("q_proj", "shared", "expert")
+        query_name = "gqa_q_proj" if heads_per_group == 2 else "q_proj"
+        names = (query_name, "shared") if layout == "gate_up" else (query_name, "shared", "expert")
 
         def fused_value(prefix: str) -> torch.Tensor:
             tensors = [_tensor(fixture[f"{prefix}__{name}"]) for name in names]
             if layout == "gate_up":
                 return torch.cat(tensors)
             query, key, value = tensors[0], tensors[1], tensors[2][0]
-            return torch.cat([part.reshape(2, 3, 4) for part in (query, key, value)], dim=1).reshape(18, 4)
+            return torch.cat(
+                (query.reshape(2, heads_per_group * 3, 4), key.reshape(2, 3, 4), value.reshape(2, 3, 4)), dim=1
+            ).reshape(-1, 4)
 
         parameter = torch.nn.Parameter(fused_value("initial"))
         optimizer = GrugMegatronMuonH(
             [{"params": [parameter], "grug_route": "muonh", "grug_layout": layout}],
             lr=float(fixture["metadata_shared_lr"]),
             qkv_num_query_groups=2,
-            qkv_heads_per_group=1,
+            qkv_heads_per_group=heads_per_group,
             qkv_head_dim=3,
         )
         for step in range(1, 4):
