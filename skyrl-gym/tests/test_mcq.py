@@ -34,7 +34,8 @@ def test_env_constructs_from_a_prepared_row_extras_mapping():
 
     env = MCQEnv(OmegaConf.create(), extras=extras)
 
-    assert env.ground_truth == "H"
+    assert env.step("The answer is ($\\boxed{H}$)")["reward"] == 1.0
+    assert env.step("The answer is ($\\boxed{A}$)")["reward"] == 0.0
 
 
 @pytest.mark.parametrize(

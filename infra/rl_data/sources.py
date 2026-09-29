@@ -18,6 +18,7 @@ import numpy as np
 import reasoning_gym
 import requests
 from skyrl_gym.envs.aime.utils import last_boxed_only_string, remove_boxed
+from skyrl_gym.envs.mcq.utils import extract_mcq_answer
 from skyrl_gym.envs.text_to_sql import scoring as text_to_sql_scoring
 
 from infra.rl_data.contracts import VerifierDataContract
@@ -797,10 +798,10 @@ def _prepare_openscience(example: Mapping[str, Any], index: int, contract: Verif
         raise TypeError("OpenScience row input must be a string.")
     if not isinstance(output, str):
         raise TypeError("OpenScience row output must be a string.")
-    match = re.search(r"\\boxed\{([A-Za-z])\}", output)
-    if not match:
+    match = extract_mcq_answer(output)
+    if match is None:
         raise ValueError("OpenScience output missing \\boxed{X} answer letter.")
-    ground_truth = match.group(1).upper()
+    ground_truth = match
     if ground_truth not in _mcq_options(prompt_text):
         raise ValueError(f"OpenScience answer letter {ground_truth} is not among the offered options.")
     instruction = contract.prompt_instruction
