@@ -24,11 +24,22 @@ def _valid_grid(value: Any) -> bool:
 
 
 def parse_grid(text: str) -> list[list[int]] | None:
-    """Match NVIDIA Board.from_text with the integer color palette."""
+    """Extract a rectangular integer grid from JSON or digit rows."""
     text = final_answer_text(text)
     boxed = last_boxed_answer(text)
     if boxed is not None:
         text = boxed
+    text = text.strip()
+    fence = re.fullmatch(r"```(?:json|text)?[ \t]*\n(.*?)\n```", text, re.DOTALL)
+    if fence is not None:
+        text = fence.group(1).strip()
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    else:
+        if text.startswith("["):
+            return value if _valid_grid(value) else None
     rows = []
     for line in text.strip().splitlines():
         line = line.strip()

@@ -546,7 +546,8 @@ def validate_trajectory_batch(output: TrajectoryBatch) -> bool:
 
 
 @pytest.mark.asyncio
-async def test_genrm_rewards_replace_provisional_rewards_by_prompt_cohort(generator_cfg, mock_tokenizer):
+@pytest.mark.parametrize("reasoning", [False, True])
+async def test_genrm_rewards_replace_provisional_rewards_by_prompt_cohort(generator_cfg, mock_tokenizer, reasoning):
     skyrl_gym_cfg = DictConfig(
         {
             "max_env_workers": 0,
@@ -575,13 +576,14 @@ async def test_genrm_rewards_replace_provisional_rewards_by_prompt_cohort(genera
     runner.genrm_judge = _GenRMJudge()
 
     def output(answer):
+        raw_answer = f"<|start_think|>Candidate analysis<|end_think|>{answer}" if reasoning else answer
         return AgentLoopOutput(
             evidence=RolloutEvidence(
                 messages=(
                     {"role": "user", "content": "q"},
                     {"role": "assistant", "content": "unparsed reasoning then " + answer},
                 ),
-                response=answer,
+                response=raw_answer,
                 response_token_ids=(10, 11),
             ),
             verification=VerificationResult.verified(3.0),
@@ -613,14 +615,72 @@ async def test_genrm_rewards_replace_provisional_rewards_by_prompt_cohort(genera
 
 
 @pytest.mark.asyncio
-async def test_genrm_cohort_ranking_is_skipped_for_single_sample_evaluation(generator_cfg, mock_tokenizer):
+@pytest.mark.parametrize(
+    "answers",
+    [
+        ("<|start_think|>unfinished", "completed"),
+        ("<think>unfinished", "<|start_think|>also unfinished"),
+    ],
+)
+async def test_genrm_empty_final_answers_cannot_acquire_cohort_credit(generator_cfg, mock_tokenizer, answers):
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg,
+        DictConfig({"max_env_workers": 0, "nemotron_ultra": {"genrm": {"num_rollouts_per_prompt": 2}}}),
+        MagicMock(),
+        mock_tokenizer,
+    )
+    runner.genrm_judge = MagicMock()
+    outputs = [
+        AgentLoopOutput(
+            evidence=RolloutEvidence(
+                messages=({"role": "assistant", "content": answer},), response=answer, response_token_ids=(10, 11)
+            ),
+            verification=VerificationResult.verified(3.0),
+            reward=RewardResult(unshaped_reward=3.0, optimization_reward=3.0, token_rewards=(0.0, 3.0)),
+            disposition=TrainingDisposition.train(),
+            loss_mask=[1, 1],
+            env_metrics={},
+        )
+        for answer in answers
+    ]
+    request = {
+        "prompts": [[{"role": "user", "content": "q"}]] * 2,
+        "env_extras": [
+            {
+                "extra_info": {
+                    "nemotron_ultra": {"agent": "genrm_simple_agent", "record_json": '{"principle":"correct"}'}
+                }
+            }
+        ]
+        * 2,
+        "trajectory_ids": [TrajectoryID("prompt", i) for i in range(2)],
+        "batch_metadata": None,
+    }
+    await runner._apply_genrm_cohort_rewards(outputs, request)
+    assert outputs[0].verification.status is VerificationStatus.VERIFIED
+    assert outputs[0].verification.passed is False
+    assert outputs[0].reward.unshaped_reward == outputs[0].reward.optimization_reward == 0.0
+    assert outputs[0].reward.token_rewards == (0.0, 0.0)
+    assert outputs[0].disposition.loss_eligible
+    assert outputs[0].evidence.response == answers[0]
+    if answers[1] == "completed":
+        assert outputs[1].verification.status is VerificationStatus.UNAVAILABLE
+        assert not outputs[1].disposition.loss_eligible
+    else:
+        assert outputs[1].reward.optimization_reward == 0.0
+        assert outputs[1].disposition.loss_eligible
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["answer", "<|start_think|>unfinished"])
+async def test_genrm_cohort_ranking_is_skipped_for_single_sample_evaluation(generator_cfg, mock_tokenizer, answer):
     skyrl_gym_cfg = DictConfig({"max_env_workers": 0, "nemotron_ultra": {"genrm": {"num_rollouts_per_prompt": 16}}})
     runner = SkyRLGymTrajectoryRunner(generator_cfg, skyrl_gym_cfg, MagicMock(), mock_tokenizer)
     runner.genrm_judge = MagicMock()
     output = AgentLoopOutput(
         evidence=RolloutEvidence(
-            messages=({"role": "user", "content": "q"}, {"role": "assistant", "content": "answer"}),
-            response="answer",
+            messages=({"role": "user", "content": "q"}, {"role": "assistant", "content": answer}),
+            response=answer,
             response_token_ids=(10, 11),
         ),
         verification=VerificationResult.verified(3.0),
@@ -646,8 +706,14 @@ async def test_genrm_cohort_ranking_is_skipped_for_single_sample_evaluation(gene
 
     runner.genrm_judge.generate_response.assert_not_called()
     assert output.reward.optimization_reward == 0.0
-    assert not output.disposition.loss_eligible
-    assert output.verification.status.value == "unavailable"
+    if answer == "answer":
+        assert not output.disposition.loss_eligible
+        assert output.verification.status is VerificationStatus.UNAVAILABLE
+    else:
+        assert output.disposition.loss_eligible
+        assert output.verification.status is VerificationStatus.VERIFIED
+        assert output.verification.passed is False
+        assert output.reward.token_rewards == (0.0, 0.0)
     assert output.env_metrics["genrm/cohort_skipped_eval"] == 1.0
 
 
