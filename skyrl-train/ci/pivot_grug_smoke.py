@@ -22,6 +22,7 @@ from rigging.filesystem.storage_path import StoragePath
 from cloud.iris.hf_model_cache import ensure_hugging_face_model_cache
 from cloud.iris.launch import LaunchState, execute_launch
 from cloud.iris.launch_config import compose_launch_config, load_launch_config
+from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
 from cloud.iris.runtime_bundle import resolve_launcher_source
 from infra.rl_data.pivot_swe import (
     DATASET_ID,
@@ -107,6 +108,7 @@ def launch_config(
         recipe.trainer.algorithm.use_kl_loss = False
     elif arm != "rl":
         raise ValueError(f"Unknown experiment arm: {arm}")
+    role_plan = derive_role_plan(OmegaConf.to_container(recipe, resolve=True))
     source = {
         "kind": "directory",
         "uri": data_root,
@@ -129,7 +131,7 @@ def launch_config(
                 "max_retries": 0,
                 "timeout": 28800,
                 "allocation": {
-                    "num_nodes": recipe.trainer.placement.policy_num_nodes + recipe.generator.num_inference_engines,
+                    "num_nodes": derive_num_nodes(role_plan),
                     "gpus_per_node": recipe.trainer.placement.policy_num_gpus_per_node,
                     "gpu_variant": "H100",
                     "cpu": 32,

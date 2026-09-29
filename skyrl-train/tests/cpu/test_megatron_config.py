@@ -156,7 +156,7 @@ def test_grug_retry_preflight_preserves_sample_model_and_token_budget(tmp_path, 
             "--temporary-root",
             str(tmp_path / "retry-temporary"),
             "--recipe",
-            "cloud/iris/configs/grug_pivot_swe_64gpu.yaml",
+            "cloud/iris/configs/grug_pivot_swe_96gpu.yaml",
             "--cluster",
             "cw-rno2a",
             "--reuse-comparison-root",
@@ -173,8 +173,25 @@ def test_grug_retry_preflight_preserves_sample_model_and_token_budget(tmp_path, 
     assert retry.inputs.validation_data[0].uri == str(data_root)
     assert retry.skyrl.trainer.pivot_token_budget == 1_421_216_000
     assert retry.iris.cluster == "cw-rno2a"
-    assert retry.iris.allocation.num_nodes == 8
+    assert retry.iris.allocation.num_nodes == 12
     assert retry.iris.allocation.gpus_per_node == 8
+    assert retry.skyrl.trainer.placement.colocate_policy_ref is False
+    assert retry.skyrl.trainer.ref.megatron_config.pipeline_model_parallel_size == 4
+
+    sft = launch_config(
+        "retry-sft",
+        str(tmp_path / "sft-output"),
+        str(tmp_path / "sft-temporary"),
+        source_config.inputs.model.uri,
+        source_config.inputs.model.identity,
+        arm="sft",
+        data_root=str(data_root),
+        recipe_path="cloud/iris/configs/grug_pivot_swe_96gpu.yaml",
+    )
+    path = tmp_path / "sft-launch.yaml"
+    OmegaConf.save(sft, path)
+    validate_smoke_config(load_launch_config(path))
+    assert sft.iris.allocation.num_nodes == 8
 
 
 def test_grug_comparison_pairs_outputs_from_separate_runs(tmp_path):
