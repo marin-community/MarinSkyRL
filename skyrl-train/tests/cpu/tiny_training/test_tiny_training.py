@@ -22,10 +22,13 @@ from tests.cpu.tiny_training.experiment import (
 )
 from tests.cpu.tiny_training.tiny_model import CURRICULUM_BINS, build_tiny_policy
 
+pytestmark = pytest.mark.slow
+
 NUM_STEPS = 3
 RESUMED_STEP = 1
-# A run takes under half a minute locally; the margin absorbs slower and busier hosts, not hangs.
-RUN_TIMEOUT_SECONDS = 150
+# A run takes under half a minute on an idle host. The margin absorbs slower CI hosts and concurrent pytest-xdist
+# workers, and stays above the experiment's admission stall timeout so a stall reports its own error.
+RUN_TIMEOUT_SECONDS = 300
 
 
 @pytest.fixture(scope="module")

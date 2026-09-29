@@ -157,11 +157,12 @@ def test_entrypoint_node_resolution_rejects_unknown_node():
 def test_entrypoint_supervisor_allows_remote_cleanup_before_returning():
     events = Queue()
     entrypoint_ref = _wait_until_cancelled.remote(events)
-    assert events.get(timeout=10) == "started"
-    supervisor = EntrypointSupervisor(shutdown_timeout_seconds=10)
+    # Timeouts bound hangs only: starting a Ray worker on a loaded host can take tens of seconds.
+    assert events.get(timeout=60) == "started"
+    supervisor = EntrypointSupervisor(shutdown_timeout_seconds=60)
 
     supervisor.request_termination(signal.SIGTERM)
     exit_code = supervisor.wait(entrypoint_ref)
 
     assert exit_code == 128 + signal.SIGTERM
-    assert events.get(timeout=10) == "stopped"
+    assert events.get(timeout=60) == "stopped"

@@ -14,7 +14,6 @@ Without ``--model``, the experiment first writes the tiny policy under its root.
 
 import argparse
 import json
-import os
 from enum import StrEnum
 from pathlib import Path
 
@@ -34,9 +33,14 @@ from skyrl_train.utils import validate_cfg
 from tests.cpu.tiny_training.cpu_backend import CPUInferenceEngine, CPUPolicyWorker
 from tests.cpu.tiny_training.tiny_model import build_tiny_policy, write_gsm8k_dataset
 
+# The size of a CI runner, fixed so every host starts the same Ray cluster. Ray prestarts one idle worker per CPU,
+# which a larger count would multiply across concurrent test runs.
+LOGICAL_CPUS = 4
 LOGICAL_GPUS = 4
 METRICS_FILE = "metrics.jsonl"
-STALL_TIMEOUT_SECONDS = 30
+# Reports a stalled run with an admission error well inside the test's run timeout. Concurrent test workers can
+# starve a healthy run for tens of seconds, so this bounds hangs rather than measuring speed.
+STALL_TIMEOUT_SECONDS = 120
 TRAIN_BATCH_SIZE = 4
 # Workers import the CPU backend from this package whatever directory the run starts in.
 WORKER_ENV_VARS = {
@@ -201,10 +205,11 @@ def run_tiny_training(cfg: DictConfig) -> None:
     validate_cfg(cfg)
     validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM, EntrypointOperation.TRAIN)
     ray.init(
-        num_cpus=os.cpu_count(),
+        num_cpus=LOGICAL_CPUS,
         num_gpus=LOGICAL_GPUS,
-        include_dashboard=False,
         runtime_env={"env_vars": WORKER_ENV_VARS},
+        # No test reads the dashboard; skipping it saves each concurrent run its start-up time and memory.
+        include_dashboard=False,
     )
     try:
         TinyTrainingExp(cfg).run()

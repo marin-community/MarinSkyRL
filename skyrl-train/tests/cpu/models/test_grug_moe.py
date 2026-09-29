@@ -690,6 +690,8 @@ def test_router_matches_jax_lower_index_tie_rule():
 def test_router_remains_fp32_under_outer_autocast():
     torch.manual_seed(29)
     router = GrugMoeRouter(tiny_config(num_hidden_layers=1)).to(dtype=torch.bfloat16)
+    # The router allocates its weight uninitialized; leftover memory can hold NaNs.
+    torch.nn.init.normal_(router.weight)
     router.bias = torch.linspace(-0.2, 0.2, router.num_experts, dtype=torch.float32)
     hidden = torch.randn(5, 32, dtype=torch.bfloat16)
     mask = torch.tensor([True, True, False, True, True])
