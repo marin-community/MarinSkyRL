@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from megatron.core import parallel_state
@@ -40,8 +42,8 @@ class _TinyGrug(nn.Module):
         super().__init__()
         self.config = SimpleNamespace(
             num_attention_heads=2,
-            num_query_groups=1,
-            kv_channels=2,
+            num_query_groups=2,
+            kv_channels=3,
             tensor_model_parallel_size=1,
             expert_tensor_parallel_size=1,
         )
@@ -52,15 +54,33 @@ class _TinyGrug(nn.Module):
         self.decoder.layers = nn.ModuleList([nn.Module()])
         layer = self.decoder.layers[0]
         layer.self_attention = nn.Module()
-        layer.self_attention.linear_qkv = nn.Linear(4, 8, bias=False, device="cuda", dtype=torch.bfloat16)
+        layer.self_attention.linear_qkv = nn.Linear(4, 18, bias=False, device="cuda", dtype=torch.bfloat16)
         layer.mlp = nn.Module()
         layer.mlp.shared_experts = nn.Module()
-        layer.mlp.shared_experts.linear_fc1 = nn.Linear(4, 6, bias=False, device="cuda", dtype=torch.bfloat16)
+        layer.mlp.shared_experts.linear_fc1 = nn.Linear(4, 12, bias=False, device="cuda", dtype=torch.bfloat16)
 
 
 def test_megatron_wrapper_routes_updates_and_restores_muonh_state(distributed_parallel_state) -> None:
     torch.manual_seed(17)
     model = _TinyGrug()
+    path = Path(__file__).parents[1] / "cpu/distributed/fixtures/grug_muonh_jax_golden.npz"
+    with np.load(path, allow_pickle=False) as archive:
+        golden = {name: torch.from_numpy(value.copy()).cuda() for name, value in archive.items() if "__" in name}
+
+    def fused_values(prefix: str) -> tuple[torch.Tensor, torch.Tensor]:
+        query = golden[f"{prefix}__q_proj"]
+        key = golden[f"{prefix}__shared"]
+        value = golden[f"{prefix}__expert"][0]
+        qkv = torch.cat([part.reshape(2, 3, 4) for part in (query, key, value)], dim=1).reshape(18, 4)
+        return qkv, torch.cat((query, key))
+
+    fused_parameters = (
+        model.decoder.layers[0].self_attention.linear_qkv.weight,
+        model.decoder.layers[0].mlp.shared_experts.linear_fc1.weight,
+    )
+    with torch.no_grad():
+        for parameter, value in zip(fused_parameters, fused_values("initial")):
+            parameter.copy_(value)
     config = init_megatron_optim_config(
         {
             "optimizer": "MuonH",
@@ -84,10 +104,14 @@ def test_megatron_wrapper_routes_updates_and_restores_muonh_state(distributed_pa
     initial = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
     for parameter in model.parameters():
         parameter.grad = torch.full_like(parameter, 0.125)
+    for parameter, gradient in zip(fused_parameters, fused_values("gradient_1")):
+        parameter.grad = gradient.to(parameter.dtype)
     reference_parameter.grad = torch.full_like(reference_parameter, 0.125)
     reference_optimizer.step()
     success, _, _ = optimizer.step()
     assert success
+    for parameter, expected_value in zip(fused_parameters, fused_values("parameter_1")):
+        torch.testing.assert_close(parameter.float(), expected_value, rtol=5e-3, atol=3e-3)
     assert all(not torch.equal(parameter, initial[name]) for name, parameter in model.named_parameters())
     first_step_weights = copy.deepcopy(model.state_dict())
     base.initialize_state()
