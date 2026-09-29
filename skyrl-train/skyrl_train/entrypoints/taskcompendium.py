@@ -21,6 +21,11 @@ class TaskCompendiumExp(TerminalBenchExp):
         configured = str(self.cfg.terminal_bench_config.get("agent_api_base", "") or "").strip()
         if configured:
             return configured.rstrip("/")
+        if not self.cfg.generator.enable_http_endpoint:
+            raise ValueError(
+                "TaskCompendium Harbor rollouts require terminal_bench_config.agent_api_base "
+                "or generator.enable_http_endpoint=true"
+            )
         return f"http://{self.cfg.generator.http_endpoint_host}:{self.cfg.generator.http_endpoint_port}/v1"
 
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):

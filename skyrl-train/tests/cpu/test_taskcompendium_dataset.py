@@ -13,6 +13,7 @@ from taskcompendium.models import AnswerType, Source, TaskRequirements, TaskSpec
 from taskcompendium.resources import ResourceVisibility, TaskResource
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
 
+from skyrl_train.entrypoints.taskcompendium import TaskCompendiumExp
 from skyrl_train.trajectory_runners.taskcompendium import (
     HARBOR_ENV_CLASS,
     NATIVE_CHAT_ENV_CLASS,
@@ -60,6 +61,22 @@ def test_taskcompendium_dataset_routes_simple_chat_natively(tmp_path):
         "env_class": NATIVE_CHAT_ENV_CLASS,
         "env_extras": {"task_dir": str(native)},
     }
+
+
+def test_taskcompendium_requires_a_serving_policy_endpoint():
+    experiment = object.__new__(TaskCompendiumExp)
+    experiment.cfg = OmegaConf.create(
+        {
+            "terminal_bench_config": {"agent_api_base": None},
+            "generator": {"enable_http_endpoint": False, "http_endpoint_host": "127.0.0.1", "http_endpoint_port": 8000},
+        }
+    )
+
+    with pytest.raises(ValueError, match="generator.enable_http_endpoint=true"):
+        experiment._api_base()
+
+    experiment.cfg.generator.enable_http_endpoint = True
+    assert experiment._api_base() == "http://127.0.0.1:8000/v1"
 
 
 @pytest.mark.asyncio
