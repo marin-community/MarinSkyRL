@@ -167,6 +167,7 @@ Check the first PivotRL training step's retention archive before a full run:
 ```bash
 uv run python -m infra.rl_data.pivot_report "$FIRST_TRAIN_STEP_ARCHIVE" --check-geometry
 uv run python -m infra.rl_data.pivot_report "$ONE_CHECKPOINT_HELDOUT_ARCHIVES"
+uv run python -m infra.rl_data.pivot_report "$PIVOTRL_HELDOUT_ARCHIVES" --reference "$SFT_HELDOUT_ARCHIVES"
 uv run python -m infra.rl_data.pivot_report "$TRAINING_ARCHIVES" --exposure
 ```
 
@@ -184,6 +185,9 @@ dependence between neighboring prefixes. Its effective independent units are the
 19/20 heldout trajectories, not 262/256 independent tasks. Report one checkpoint's
 evaluation at a time. Infrastructure/verifier failures must be repaired, not scored
 as incorrect predictions.
+The paired comparison requires identical source rows and repetition IDs, and
+bootstraps whole source trajectories jointly across arms. Its difference interval
+therefore preserves shared successes and failures between checkpoints.
 
 After registering each exported checkpoint, run the existing Marin evaluation CLI
 from the Marin repository:

@@ -9,7 +9,7 @@ from datasets import Dataset
 
 from infra.rl_data.pivot import adapt_row, filter_candidates, heldout_trajectories
 from infra.rl_data.pivot_publish import publish_artifacts
-from infra.rl_data.pivot_report import summarize, summarize_exposure, check_rollout_geometry
+from infra.rl_data.pivot_report import summarize, summarize_exposure, check_rollout_geometry, compare
 
 
 def swe_row(index):
@@ -95,6 +95,20 @@ def test_report_clusters_correlated_prefixes_and_checks_rollout_geometry():
     assert check_rollout_geometry(training, 4, 1)["trajectories"] == 4
     with pytest.raises(ValueError, match="geometry"):
         check_rollout_geometry(training, 64, 16)
+
+
+def test_paired_report_preserves_shared_errors_and_aligns_reordered_rows():
+    rows = [adapt_row(swe_row(i), "swe", i, "validation") for i in range(4)]
+    reference = [retained(row, 0, reward) for row, reward in zip(rows, [0, 0, 1, 1])]
+    identical = compare(list(reversed(reference)), reference, bootstrap_samples=1000)
+    assert identical["candidate"]["swe"]["ci95"] == [0, 1]
+    assert identical["difference"]["swe"]["ci95"] == [0, 0]
+    candidate = [retained(row, 0, reward) for row, reward in zip(rows, [1, 0, 1, 1])]
+    result = compare(list(reversed(candidate)), reference, bootstrap_samples=1000)["difference"]["swe"]
+    assert result["accuracy_difference"] == .25
+    assert result["ci95"] == [0, .5]
+    with pytest.raises(ValueError, match="identical heldout rows"):
+        compare(candidate[:-1], reference, bootstrap_samples=100)
 
 
 def test_publish_is_content_addressed_and_rejects_changed_data(tmp_path):

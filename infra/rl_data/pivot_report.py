@@ -96,12 +96,57 @@ def summarize_exposure(records: list[dict]) -> dict:
     }
 
 
+def compare(candidate: list[dict], reference: list[dict], *, seed: int = 42,
+            bootstrap_samples: int = 10000) -> dict:
+    """Estimate paired accuracy differences on identical heldout source rows."""
+    summaries = {
+        "candidate": summarize(candidate, seed=seed, bootstrap_samples=bootstrap_samples),
+        "reference": summarize(reference, seed=seed, bootstrap_samples=bootstrap_samples),
+    }
+    indexed = []
+    for records in (candidate, reference):
+        if len({record["global_step"] for record in records}) != 1:
+            raise ValueError("Compare one checkpoint/evaluation per arm")
+        indexed.append({
+            (record["trajectory"]["environment_extras"]["extra_info"]["source_id"],
+             record["trajectory"]["repetition_id"]): record
+            for record in records
+        })
+    if indexed[0].keys() != indexed[1].keys():
+        raise ValueError("Paired comparison requires identical heldout rows and repetitions")
+    grouped = defaultdict(lambda: defaultdict(list))
+    for key in sorted(indexed[0]):
+        left, right = indexed[0][key], indexed[1][key]
+        extra = left["trajectory"]["environment_extras"]["extra_info"]
+        other = right["trajectory"]["environment_extras"]["extra_info"]
+        if extra["trajectory_id"] != other["trajectory_id"]:
+            raise ValueError("Source trajectory identities differ between arms")
+        grouped[key[0].split(":", 1)[0]][extra["trajectory_id"]].append(
+            left["reward"]["outcome"] - right["reward"]["outcome"]
+        )
+    rng = np.random.default_rng(seed)
+    differences = {}
+    for source, groups in grouped.items():
+        totals = np.array([sum(values) for values in groups.values()])
+        sizes = np.array([len(values) for values in groups.values()])
+        draws = rng.integers(len(sizes), size=(bootstrap_samples, len(sizes)))
+        means = totals[draws].sum(axis=1) / sizes[draws].sum(axis=1)
+        differences[source] = {
+            "examples": int(sizes.sum()), "trajectories": len(groups),
+            "accuracy_difference": float(totals.sum() / sizes.sum()),
+            "ci95": np.quantile(means, [0.025, 0.975]).tolist(),
+            "interval_method": "paired source-trajectory cluster bootstrap",
+        }
+    return summaries | {"difference": differences}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("records", type=Path, nargs="+")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check-geometry", action="store_true")
     mode.add_argument("--exposure", action="store_true")
+    mode.add_argument("--reference", type=Path, nargs="+", help="Aligned heldout reference-arm archives")
     parser.add_argument("--prompts", type=int, default=64)
     parser.add_argument("--samples", type=int, default=16)
     args = parser.parse_args()
@@ -112,6 +157,9 @@ def main():
         result = check_rollout_geometry(records, args.prompts, args.samples)
     elif args.exposure:
         result = summarize_exposure(records)
+    elif args.reference:
+        reference = [record for path in args.reference for record in iter_records(path)]
+        result = compare(records, reference)
     else:
         result = summarize(records)
     print(json.dumps(result, indent=2))
