@@ -7,6 +7,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 from uuid import uuid4
 
+import numpy as np
+
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import REASONING_DELIMITERS, final_answer_text
 
 from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInput, InferenceEngineOutput
@@ -64,12 +66,10 @@ class _ChatResult:
     text: str
     stop_reason: str
     assistant_message: dict[str, Any]
-    routed_experts: list[list[list[int]]] | None = None
+    routed_experts: np.ndarray | None = None
 
 
-def _choice_routed_experts(
-    choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]
-) -> list[list[list[int]]] | None:
+def _choice_routed_experts(choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]) -> np.ndarray | None:
     provider_fields = choice.get("provider_specific_fields") or {}
     routes = choice.get("routed_experts", provider_fields.get("routed_experts"))
     if routes is None:

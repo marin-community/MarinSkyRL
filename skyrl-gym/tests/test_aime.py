@@ -19,6 +19,10 @@ from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationSt
         ("Answer: \\boxed{25}", "025", 1.0),
         ("Answer: \\boxed{15/57}", "\\frac{15}{56}", -1.0),
         ("Answer: \\boxed{0.5}", "\\frac{1}{3}", -1.0),
+        ("Answer: \\boxed{20:7}", "20:7", 1.0),
+        ("Answer: \\boxed{40:14}", "20:7", 1.0),
+        ("Answer: \\boxed{22:18}", "11:9", 1.0),
+        ("Answer: \\boxed{7:20}", "20:7", -1.0),
         ("Answer: \\boxed{\\text{forty-two}}", "42", -1.0),
         # test EOS tokens
         ("<|im_start|>Answer: \\boxed{42}<|im_end|>", "42", 1.0),

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
 
+import numpy as np
 
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 from skyrl_train.distillation import DistillationInput, TeacherEvidenceBatch
@@ -112,7 +113,7 @@ class TrajectoryBatch(TypedDict):
     rollout_logprobs: Optional[List[List[float]]]
     student_topk_indices: Optional[List[List[List[int]]]]
     behavior_topk_logprobs: Optional[List[List[List[float]]]]
-    rollout_routed_experts: Optional[List[List[List[List[int]]]]]
+    rollout_routed_experts: Optional[List[np.ndarray]]
     teacher_evidence: Optional[TeacherEvidenceBatch]
     distillation: Optional[DistillationInput]
     token_level_shaping: Optional[List[List[float]]]
