@@ -1,0 +1,149 @@
+# Ten-step SWE Pivot RL retry on six H100 nodes: five learner, one inference.
+# Each update uses 512 prefixes x 16 responses = 8192 trajectories.
+# Keep the one-action 512-token cap within a 32K request window.
+entrypoint: standard
+context_budget:
+  request_window_tokens: 32768
+  max_new_tokens_per_turn: 512
+  max_turns: 1
+  generated_budget_fraction: 1.0
+trainer:
+  strategy: megatron
+  seed: 17
+  flash_attn: false
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+  offload_optimizer_during_rollouts: true
+  algorithm:
+    advantage_estimator: grpo
+    advantage_batch_normalize: false
+    eps_clip_low: 0.2
+    eps_clip_high: 0.2
+    use_entropy_loss: false
+    use_kl_loss: true
+    use_kl_in_reward: false
+    loss_reduction: token_mean
+    grpo_norm_by_std: true
+    kl_loss_coef: 0.001
+    dynamic_sampling:
+      type: null
+  epochs: 10
+  max_steps: 10
+  update_epochs_per_batch: 1
+  train_batch_size: 512
+  policy_mini_batch_size: 512
+  eval_batch_size: 16
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+  use_sample_packing: true
+  resume_mode: none
+  logger: wandb
+  project_name: pivot-rl
+  policy:
+    optimizer_config:
+      optimizer: AdamW
+      lr: 4.0e-06
+      weight_decay: 0.0
+      max_grad_norm: 0.5
+    megatron_config:
+      tensor_model_parallel_size: 5
+      pipeline_model_parallel_size: 4
+      context_parallel_size: 1
+      expert_model_parallel_size: 2
+      expert_tensor_parallel_size: 5
+      logprob_chunk_size: 128
+      optimizer_config_kwargs:
+        optimizer_cpu_offload: true
+        optimizer_offload_fraction: 1.0
+      transformer_config_kwargs:
+        num_layers_in_first_pipeline_stage: 6
+        num_layers_in_last_pipeline_stage: 6
+      optimizer_checkpoint_sharding_type: dp_reshardable
+      ddp_config:
+        overlap_grad_reduce: true
+        overlap_param_gather: true
+        grad_reduce_in_fp32: false
+  ref:
+    megatron_config:
+      tensor_model_parallel_size: 5
+      pipeline_model_parallel_size: 4
+      context_parallel_size: 1
+      expert_model_parallel_size: 2
+      expert_tensor_parallel_size: 5
+      logprob_chunk_size: 128
+      transformer_config_kwargs:
+        num_layers_in_first_pipeline_stage: 6
+        num_layers_in_last_pipeline_stage: 6
+  placement:
+    colocate_all: false
+    colocate_policy_ref: true
+    policy_num_nodes: 5
+    policy_num_gpus_per_node: 8
+    ref_num_nodes: 5
+    ref_num_gpus_per_node: 8
+  enable_db_registration: false
+  dump_eval_results: true
+  eval_before_train: true
+  eval_interval: 10
+  ckpt_interval: 10
+  max_ckpts_to_keep: 1
+generator:
+  backend: vllm
+  model_dtype: bfloat16
+  vllm_attention_backend: FLASH_ATTN
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_data_parallel_size: 8
+  inference_engine_expert_parallel_size: 8
+  num_inference_engines: 1
+  n_samples_per_prompt: 16
+  eval_n_samples_per_prompt: 1
+  gpu_memory_utilization: 0.8
+  max_num_seqs: 64
+  max_num_batched_tokens: 16384
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+  enforce_eager: false
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: false
+  enable_http_endpoint: true
+  sampling_params:
+    stop_token_ids: [128001, 128009]
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+  speculative_decoding:
+    method: eagle3
+    model:
+      source_uri: hf://laion/snowball-64k-eagle3-draft-r2egym
+      source_identity: 4bdb47c08e5b5190bea3c7a93c3e14470230e469
+    num_speculative_tokens: 3
+  engine_init_kwargs:
+    enable_auto_tool_choice: true
+    tool_call_parser: hermes
+  chat_template_kwargs:
+    enable_thinking: false
+  eval_sampling_params:
+    stop_token_ids: [128001, 128009]
+    max_generate_length: 512
+    temperature: 0.0
+    top_p: 1.0
+  trajectory_retention:
+    enabled: true
+    phases:
+    - train
+    sample_count_per_step: 8192
+    sample_fraction: 1.0
+    max_bytes_per_step: 5368709120
+    max_bytes_per_run: 53687091200
+    required: true
+environment:
+  env_class: nemotron_ultra
+data:
+  kind: parquet
+  train_data: []
+  val_data: []
+  shuffle: false
+extra_env:
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

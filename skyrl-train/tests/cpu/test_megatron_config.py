@@ -1,9 +1,12 @@
+import json
+import sys
 from unittest import mock
 
 from omegaconf import OmegaConf
 import pytest
-from ci.pivot_grug_smoke import MODEL_REVISION, launch_config, validate_smoke_config
+from ci.pivot_grug_smoke import MODEL, MODEL_REVISION, launch_config, main, validate_smoke_config
 from cloud.iris.launch_config import load_launch_config
+from infra.rl_data.pivot_swe import DATASET_ID, DATASET_REVISION
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.utils.utils import validate_cfg
 
@@ -86,3 +89,68 @@ def test_grug_smoke_rejects_uneven_pipeline_without_stage_layout(tmp_path, role)
 
     with pytest.raises(ValueError, match="26 layers cannot be divided"):
         validate_smoke_config(load_launch_config(path))
+
+
+def test_grug_retry_preflight_preserves_sample_model_and_token_budget(tmp_path, monkeypatch, capsys):
+    recipe = "cloud/iris/configs/grug_pivot_swe_tp5_retry.yaml"
+    source_root = tmp_path / "source"
+    data_root = source_root / "data"
+    source_config = launch_config(
+        "source-sft",
+        str(source_root / "sft"),
+        str(tmp_path / "temporary-source"),
+        "s3://marin-us-east-02a/cached-model",
+        "sha256:pinned-model",
+        arm="sft",
+        data_root=str(data_root),
+        recipe_path=recipe,
+    )
+    source_config.skyrl.trainer.pivot_token_budget = 1_421_216_000
+    (source_root / "sft").mkdir(parents=True)
+    (source_root / "sft" / "resolved-launch.yaml").write_text(
+        json.dumps({"config": OmegaConf.to_container(source_config, resolve=True)})
+    )
+    (source_root / "diagnostics").mkdir()
+    (source_root / "diagnostics" / "budget.json").write_text(
+        json.dumps(
+            {
+                "dataset": DATASET_ID,
+                "revision": DATASET_REVISION,
+                "tokenizer": MODEL,
+                "tokenizer_revision": MODEL_REVISION,
+                "learner_token_budget": 1_421_216_000,
+                "train_prefixes": 512,
+                "nominal_updates": 10,
+                "max_prompt_tokens": 32256,
+                "max_reference_tokens": 512,
+                "sequences_per_full_update": 8192,
+            }
+        )
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "pivot_grug_smoke",
+            "--run-id",
+            "retry-rl",
+            "--output-root",
+            str(tmp_path / "retry-output"),
+            "--temporary-root",
+            str(tmp_path / "retry-temporary"),
+            "--recipe",
+            recipe,
+            "--reuse-comparison-root",
+            str(source_root),
+        ],
+    )
+
+    main()
+
+    retry = OmegaConf.create(capsys.readouterr().out)
+    assert retry.inputs.model.uri == source_config.inputs.model.uri
+    assert retry.inputs.model.identity == source_config.inputs.model.identity
+    assert retry.inputs.train_data[0].uri == str(data_root)
+    assert retry.inputs.validation_data[0].uri == str(data_root)
+    assert retry.skyrl.trainer.pivot_token_budget == 1_421_216_000
+    assert retry.iris.allocation.num_nodes == 6
