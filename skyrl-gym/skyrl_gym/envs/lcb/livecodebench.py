@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import signal
 
-from io import StringIO
+from io import BytesIO, StringIO, TextIOWrapper
 from unittest.mock import patch, mock_open
 from types import ModuleType
 from enum import Enum
@@ -284,26 +284,12 @@ def call_method(method, inputs):
     if isinstance(inputs, list):
         inputs = "\n".join(inputs)
 
-    inputs_line_iterator = iter(inputs.split("\n"))
-
-    # sys.setrecursionlimit(10000)
-
-    # @patch('builtins.input', side_effect=inputs.split("\n"))
-    @patch("builtins.open", mock_open(read_data=inputs))
-    @patch("sys.stdin", StringIO(inputs))
-    @patch("sys.stdin.readline", lambda *args: next(inputs_line_iterator))
-    @patch("sys.stdin.readlines", lambda *args: inputs.split("\n"))
-    @patch("sys.stdin.read", lambda *args: inputs)
-    # @patch('sys.stdout.write', print)
-    def _inner_call_method(_method):
-        try:
-            return _method()
-        except SystemExit:
-            pass
-        finally:
-            pass
-
-    return _inner_call_method(method)
+    with TextIOWrapper(BytesIO(inputs.encode("utf-8")), encoding="utf-8") as stdin:
+        with patch("builtins.open", mock_open(read_data=inputs)), patch("sys.stdin", stdin):
+            try:
+                return method()
+            except SystemExit:
+                return None
 
 
 def get_function(compiled_sol, fn_name: str):  # type: ignore

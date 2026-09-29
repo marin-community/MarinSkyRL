@@ -233,3 +233,30 @@ def test_verifier_child_crash_retains_exit_status_instead_of_a_candidate_verdict
     assert results == [-1]
     assert metadata == {"execution_error": "child_crash", "exit_code": 7}
     assert multiprocessing.active_children() == []
+
+
+@pytest.mark.parametrize(
+    "solver",
+    [
+        "import sys\nprint(sum(map(int, sys.stdin.buffer.read().split())))",
+        "import sys\nprint(sum(int(x) for line in sys.stdin.buffer for x in line.split()))",
+        "import sys\nprint(sum(int(x) for line in sys.stdin for x in line.split()))",
+        "import sys\nprint(sum(map(int, (sys.stdin.read(2) + sys.stdin.read()).split())))",
+        "import sys\nprint(sum(map(int, sys.stdin.buffer.readline().split())))\nassert sys.stdin.buffer.readline() == b''",
+        "import sys\nprint(sum(map(int, sys.stdin.readline().split())))\nassert sys.stdin.readline() == ''",
+    ],
+)
+def test_stdin_verifier_supports_text_and_binary_input_with_fresh_streams(solver):
+    tests = [
+        {"input": "2 3\n", "output": "5\n", "testtype": "stdin"},
+        {"input": "11 -4\n", "output": "7\n", "testtype": "stdin"},
+    ]
+    results, metadata = lcb_execution_result(tests, solver, timeout=2)
+    assert results == [True, True], metadata
+
+
+def test_stdin_binary_input_preserves_utf8_and_wrong_answers_still_fail():
+    tests = [{"input": "こんにちは\n", "output": "こんにちは\n", "testtype": "stdin"}]
+    correct = "import sys\nprint(sys.stdin.buffer.read().decode('utf-8').strip())"
+    assert lcb_execution_result(tests, correct, timeout=2)[0] == [True]
+    assert lcb_execution_result(tests, "print('wrong')", timeout=2)[0] == [-2]
