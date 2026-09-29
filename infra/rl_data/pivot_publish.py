@@ -19,7 +19,9 @@ def publish_artifacts(artifacts: Path, destination: str) -> str:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         if digest != info["sha256"]:
             raise ValueError(f"Artifact checksum mismatch: {name}")
-    parent = manifest.get("parent", manifest)
+    parent = manifest
+    while "parent" in parent:
+        parent = parent["parent"]
     domain = "swe" if "SWE" in parent["dataset"] else "terminal"
     identity = hashlib.sha256(payload).hexdigest()
     relative = f"prepared/{domain}/{parent['revision']}/{identity}"

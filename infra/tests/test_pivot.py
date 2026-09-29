@@ -109,6 +109,14 @@ def test_publish_is_content_addressed_and_rejects_changed_data(tmp_path):
     assert (Path(uri) / "train.parquet").read_bytes() == b"test artifact"
     assert json.loads((Path(uri) / "manifest.json").read_text()) == manifest
     assert publish_artifacts(source, str(tmp_path / "store")) == uri
+    # A profiled pilot has two ancestors: the candidate slice and full release.
+    pilot_profile = {"parent": {"parent": manifest, "purpose": "pilot"},
+                     "profile_policy": "student", "profile_revision": "student-sha",
+                     "artifacts": manifest["artifacts"]}
+    (source / "manifest.json").write_text(json.dumps(pilot_profile))
+    pilot_uri = publish_artifacts(source, str(tmp_path / "store"))
+    assert "/profiles/swe/student/student-sha/" in pilot_uri
+    assert json.loads((Path(pilot_uri) / "manifest.json").read_text()) == pilot_profile
     (source / "train.parquet").write_bytes(b"changed")
     with pytest.raises(ValueError, match="checksum"):
         publish_artifacts(source, str(tmp_path / "store"))
