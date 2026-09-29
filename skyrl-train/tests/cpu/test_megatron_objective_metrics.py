@@ -213,12 +213,6 @@ def _megatron_mini_batch_metrics(
 # fixture (tests/cpu/conftest.py) so broadcast_object_list runs as a no-op.
 
 
-
-
-
-
-
-
 def test_megatron_mini_batch_completes_clip_metric_contract(single_rank_group, monkeypatch):
     _, rollout_lp, _ = _policy_tensors()
     metrics_list = _megatron_mini_batch_metrics(rollout_lp=rollout_lp, monkeypatch=monkeypatch)
