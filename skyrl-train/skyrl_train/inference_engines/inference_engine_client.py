@@ -17,6 +17,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
     is_engine_error_response,
 )
 from skyrl_train.inference_engines.chat_template import template_error_from_exception
+from skyrl_train.inference_engines.model_identity import served_model_name
 from transformers import PreTrainedTokenizerBase
 import asyncio
 from typing import List, Any, Optional, Dict, Union, Hashable
@@ -68,13 +69,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         self.engines = engines
         self.tokenizer = tokenizer
-        # Use served_model_name if configured (for Harbor/LiteLLM compatibility),
-        # otherwise fall back to the full model path.
-        # See https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
-        served_model_name = None
-        if hasattr(full_config.generator, "engine_init_kwargs"):
-            served_model_name = getattr(full_config.generator.engine_init_kwargs, "served_model_name", None)
-        self.model_name = served_model_name if served_model_name else full_config.trainer.policy.model.path
+        self.model_name = served_model_name(full_config)
         self.max_model_len = next((getattr(engine, "max_model_len", None) for engine in engines), None)
         self.backend = full_config.generator.backend
         self.enable_http_endpoint = full_config.generator.enable_http_endpoint

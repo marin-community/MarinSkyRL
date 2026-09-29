@@ -8,12 +8,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from omegaconf import OmegaConf
 from taskcompendium.grading import exact_answer
+from taskcompendium.importers.nemo_workplace import load_fixture
 from taskcompendium.lowering import HarborEnvironmentConfig, lower_to_harbor
 from taskcompendium.models import AnswerType, Source, TaskRequirements, TaskSpec
 from taskcompendium.resources import ResourceVisibility, TaskResource
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
 
 from skyrl_train.entrypoints.taskcompendium import TaskCompendiumExp
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.loader import PromptLoader, SeededPasses
 from skyrl_train.trajectory_runners.taskcompendium import (
@@ -94,6 +96,40 @@ def test_taskcompendium_requires_a_serving_policy_endpoint():
 
     experiment.cfg.generator.enable_http_endpoint = True
     assert experiment._api_base() == "http://127.0.0.1:8000/v1"
+
+
+@pytest.mark.parametrize(
+    ("served_alias", "expected_name"),
+    [("short-served-alias", "short-served-alias"), (None, "short-policy-path")],
+)
+def test_workplace_dataset_uses_policy_endpoint_model_name(tmp_path, served_alias, expected_name):
+    pytest.importorskip("harbor")
+    specification, convention, binding = load_fixture()
+    lower_to_harbor(specification, convention, binding, tmp_path / "workplace")
+    cfg = OmegaConf.create(
+        {
+            "terminal_bench_config": {"agent_api_base": "http://policy:8000/v1"},
+            "data": {"train_data": [str(tmp_path / "workplace")]},
+            "trainer": {"train_batch_size": 1, "policy": {"model": {"path": "short-policy-path"}}},
+            "generator": {
+                "model_name": "open-athena/full-generator-model",
+                "engine_init_kwargs": {"served_model_name": served_alias} if served_alias else {},
+                "backend": "vllm",
+                "enable_http_endpoint": False,
+                "http_endpoint_host": "127.0.0.1",
+                "http_endpoint_port": 8000,
+                "weight_sync_pause_timeout_seconds": 30.0,
+            },
+        }
+    )
+    experiment = object.__new__(TaskCompendiumExp)
+    experiment.cfg = cfg
+
+    dataset = experiment.get_train_dataset()
+    endpoint = InferenceEngineClient([], MagicMock(), cfg)
+
+    assert dataset[0]["env_class"] == HARBOR_ENV_CLASS
+    assert dataset[0]["env_extras"]["model_name"] == endpoint.model_name == expected_name
 
 
 @pytest.mark.asyncio
@@ -223,7 +259,6 @@ async def test_router_splits_mixed_batches_and_restores_order():
 async def test_mixed_batch_uses_live_scripted_policy_endpoint_and_produces_trainable_actions(tmp_path):
     pytest.importorskip("harbor")
     from tokenizers import Tokenizer, models, pre_tokenizers
-    from taskcompendium.importers.nemo_workplace import load_fixture
     from transformers import PreTrainedTokenizerFast
 
     _lowering(tmp_path, "chat")

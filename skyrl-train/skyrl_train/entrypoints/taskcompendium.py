@@ -11,6 +11,7 @@ from omegaconf import DictConfig
 
 from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
+from skyrl_train.inference_engines.model_identity import served_model_name
 
 
 class TaskCompendiumExp(BasePPOExp):
@@ -58,7 +59,7 @@ class TaskCompendiumExp(BasePPOExp):
         dataset = TaskCompendiumTaskDataset(
             self.cfg.data.train_data,
             api_base=self._api_base(),
-            model_name=str(self.cfg.generator.model_name),
+            model_name=served_model_name(self.cfg),
         )
         assert len(dataset) >= self.cfg.trainer.train_batch_size, (
             f"dataset should be at least as large as train_batch_size "
