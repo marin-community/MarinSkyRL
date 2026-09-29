@@ -71,7 +71,9 @@ def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatc
     trainer = object.__new__(RayPPOTrainer)
     trainer.context = SimpleNamespace(config=SimpleNamespace(batch_size=2, max_staleness_steps=2))
     trainer.cfg = SimpleNamespace(
-        trainer=SimpleNamespace(algorithm=SimpleNamespace(policy_loss_type="pg", tis_lcs_alert_threshold=0.0))
+        trainer=SimpleNamespace(
+            algorithm=SimpleNamespace(resolved_rollout_logprobs_required=False, tis_lcs_alert_threshold=0.0)
+        )
     )
     trainer.global_step = 10
     trainer.all_metrics = {}

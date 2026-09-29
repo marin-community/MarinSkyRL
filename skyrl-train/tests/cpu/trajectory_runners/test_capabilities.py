@@ -12,7 +12,7 @@ GYM = TrajectoryRunnerMode.SKYRL_GYM
 HARBOR = TrajectoryRunnerMode.HARBOR
 MINI_SWE = TrajectoryRunnerMode.MINI_SWE
 HARBOR_KEY = "terminal_bench_config.harbor"
-NO_TIS = {"trainer.algorithm.resolved_rollout_logprobs_required": False}
+NO_ROLLOUT_LOGPROBS = {"trainer.algorithm.resolved_rollout_logprobs_required": False}
 FULL_TITO = {"trainer.algorithm.resolved_rollout_logprobs_required": False, "trainer.algorithm.tito_full": True}
 OPENCODE = {f"{HARBOR_KEY}.version": SUPPORTED_OPENCODE_LITERAL_VERSION}
 EXACT_CHAT = {
@@ -77,7 +77,7 @@ ACCEPTED = [
     pytest.param(HARBOR, "pi", {}, False, id="harbor-pi"),
     pytest.param(GYM, None, {}, False, id="gym-tis"),
     pytest.param(GYM, None, {"trainer.step_wise_training": True}, False, id="gym-step-wise"),
-    pytest.param(GYM, None, {**NO_TIS, "trainer.algorithm.policy_loss_type": "behavior_clip"}, False, id="gym-clip"),
+    pytest.param(GYM, None, {"trainer.algorithm.policy_loss_type": "behavior_clip"}, False, id="gym-clip"),
     pytest.param(
         GYM,
         None,
@@ -85,14 +85,14 @@ ACCEPTED = [
         False,
         id="gym-full-tito-exact-chat",
     ),
-    pytest.param(GYM, None, NO_TIS, True, id="distill-gym"),
-    pytest.param(HARBOR, "terminus-2", NO_TIS, True, id="distill-harbor-terminus-2"),
-    pytest.param(HARBOR, "opencode", {**NO_TIS, **OPENCODE}, True, id="distill-harbor-opencode"),
-    pytest.param(HARBOR, "pi", NO_TIS, True, id="distill-harbor-pi"),
+    pytest.param(GYM, None, NO_ROLLOUT_LOGPROBS, True, id="distill-gym"),
+    pytest.param(HARBOR, "terminus-2", NO_ROLLOUT_LOGPROBS, True, id="distill-harbor-terminus-2"),
+    pytest.param(HARBOR, "opencode", {**NO_ROLLOUT_LOGPROBS, **OPENCODE}, True, id="distill-harbor-opencode"),
+    pytest.param(HARBOR, "pi", NO_ROLLOUT_LOGPROBS, True, id="distill-harbor-pi"),
     pytest.param(
         HARBOR,
         "terminus-2",
-        {**NO_TIS, "trainer.placement.colocate_all": False},
+        {**NO_ROLLOUT_LOGPROBS, "trainer.placement.colocate_all": False},
         True,
         id="distill-harbor-separate-placement",
     ),
@@ -162,7 +162,7 @@ REJECTED = [
     pytest.param(
         MINI_SWE,
         None,
-        {**NO_TIS, "trainer.algorithm.policy_loss_type": "behavior_clip"},
+        {"trainer.algorithm.policy_loss_type": "behavior_clip"},
         False,
         "train",
         "mini-swe",
@@ -180,15 +180,17 @@ REJECTED = [
     pytest.param(
         GYM,
         None,
-        {**EXACT_CHAT, **NO_TIS, "generator.sampling_params": {"logprobs": None}},
+        {**EXACT_CHAT, **NO_ROLLOUT_LOGPROBS, "generator.sampling_params": {"logprobs": None}},
         False,
         "train",
         "generator.sampling_params.logprobs",
         id="gym-exact-chat-without-logprobs",
     ),
-    pytest.param(MINI_SWE, None, NO_TIS, True, "train", "mini-swe", id="distill-mini-swe"),
-    pytest.param(HARBOR, "codex", NO_TIS, True, "train", "tokenized learner actions", id="distill-harbor-codex"),
-    pytest.param(HARBOR, "terminus-2", NO_TIS, True, "generate", "training-only", id="distill-generate"),
+    pytest.param(MINI_SWE, None, NO_ROLLOUT_LOGPROBS, True, "train", "mini-swe", id="distill-mini-swe"),
+    pytest.param(
+        HARBOR, "codex", NO_ROLLOUT_LOGPROBS, True, "train", "tokenized learner actions", id="distill-harbor-codex"
+    ),
+    pytest.param(HARBOR, "terminus-2", NO_ROLLOUT_LOGPROBS, True, "generate", "training-only", id="distill-generate"),
     pytest.param(GYM, None, FULL_TITO, False, "train", "SkyRL Gym does not support", id="full-tito-gym"),
     pytest.param(
         HARBOR, "terminus-kira", FULL_TITO, False, "train", "Harbor terminus-kira", id="full-tito-harbor-kira"
