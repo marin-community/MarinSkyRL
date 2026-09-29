@@ -1582,9 +1582,6 @@ def extract_routed_experts_from_rollout_details(
     return out
 
 
-SENTINEL_EXPERT_ID = 0  # unmatched and non-generated token rows
-
-
 def align_routed_experts_with_lcs(
     retokenized_ids: List[int],
     vllm_routed_experts: np.ndarray,
@@ -1780,8 +1777,6 @@ def _assemble_response_ids_tito_full(
             if t < len(assistant_routed_experts):
                 candidate_re = assistant_routed_experts[t]
                 if candidate_re is not None and len(candidate_re) > 0:
-                    if _re_sentinel_row is None and len(candidate_re) > 0:
-                        _re_sentinel_row = _sentinel_routed_experts_row(candidate_re[0])
                     vllm_token_strings = None
                     if assistant_logprobs and t < len(assistant_logprobs):
                         strs, _ = _normalize_candidate_logprobs(assistant_logprobs[t])
@@ -2173,9 +2168,6 @@ def get_response_ids_and_loss_mask_from_messages(
                 if assistant_msg_idx < len(assistant_routed_experts):
                     candidate_re = assistant_routed_experts[assistant_msg_idx]
                     if candidate_re is not None and len(candidate_re) > 0:
-                        # Lazily learn the [L, K] sentinel shape from the first real row.
-                        if _re_sentinel_row is None and len(candidate_re) > 0:
-                            _re_sentinel_row = _sentinel_routed_experts_row(candidate_re[0])
                         # Share the logprob LCS map: routed_experts rides the SAME
                         # vLLM response-token index space as the per-token logprobs,
                         # so reuse those token strings when present for an identical

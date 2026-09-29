@@ -38,6 +38,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     extract_routed_experts_from_rollout_details,
     normalize_token_ids,
     AlignmentStats,
+    _re_sentinel_rows,
 )
 from skyrl_train.utils.reward_shaping import (
     ParsedTestResult,
@@ -1339,9 +1340,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                     else:
                         # Sentinel-fill missing samples to match response_ids length.
                         rollout_routed_experts_list.append(
-                            np.zeros(
-                                (len(output.evidence.response_token_ids), *sentinel_row.shape), dtype=sentinel_row.dtype
-                            )
+                            _re_sentinel_rows(len(output.evidence.response_token_ids), sentinel_row)
                         )
 
         # Collect the Stage B per-token shaping channel + span tags. Gated on

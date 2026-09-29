@@ -240,10 +240,8 @@ def convert_prompts_responses_to_batch_tensors(
     # _check_consistency only validates dim-0.
     routed_experts_tensor = None
     if routed_experts:
-        # Routed expert ids arrive as
-        # per-sample np.int16 arrays (Ray-shipped out-of-band, GIL-released), so we
-        # collate by slice assignment into a dense NumPy canvas, avoiding the
-        # GIL-held element walk of torch.tensor over nested Python integers.
+        # Routes arrive as compact per-sample arrays. Slice assignment avoids
+        # rebuilding the nested Python integer graph during collation.
         routed_experts_tensor = _collate_routed_experts_from_arrays(routed_experts, action_mask.size(1), num_experts)
 
     # Loop-behavior reward shaping (Stage B / F5 + F4): right-pad the per-token
