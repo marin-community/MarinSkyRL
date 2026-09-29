@@ -16,13 +16,15 @@ from taskcompendium.models import (
     ConversationInput,
     ConversationToolCall,
     EnvironmentRequirements,
+    FinalTools,
+    FunctionDefinition,
     Source,
     TaskSpec,
     TextMessage,
     ToolResult,
 )
 from taskcompendium.resources import ResourceVisibility, TaskResource
-from taskcompendium.submission import AnswerFormat, SubmissionConvention
+from taskcompendium.submission import AnswerFormat, SubmissionConvention, chat_request
 
 from skyrl_train.entrypoints.taskcompendium import TaskCompendiumExp
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -114,6 +116,34 @@ def test_taskcompendium_dataset_preserves_tool_history_through_harbor(tmp_path):
     assert dataset[0]["env_class"] == HARBOR_ENV_CLASS
     assert dataset[0]["env_extras"]["task_dir"] == str(task)
     assert read_specification(task / SPECIFICATION_FILE).context == specification.context
+
+
+@pytest.mark.parametrize("answer_format", [AnswerFormat.PLAIN, AnswerFormat.JSON])
+def test_taskcompendium_dataset_keeps_advertised_tools_on_harbor_path(tmp_path, answer_format):
+    specification = TaskSpec(
+        id="text-with-tools",
+        context=ConversationInput(events=(TextMessage(role="user", content="Find the color and answer briefly."),)),
+        verifier=exact_answer("blue"),
+        environment_requirements=EnvironmentRequirements(),
+        source=Source(dataset="test", revision="revision", row="text-with-tools", importer_revision="importer"),
+        answer_type=AnswerType.TEXT,
+        final_tools=FinalTools(
+            functions=(FunctionDefinition(name="lookup_color", parameters={"type": "object", "properties": {}}),),
+            tool_choice="auto",
+            parallel_tool_calls=False,
+        ),
+    )
+    convention = SubmissionConvention(id=answer_format.value, answer_format=answer_format)
+    task = lower_to_harbor(specification, convention, HarborEnvironmentConfig(), tmp_path / "text-with-tools")
+
+    dataset = TaskCompendiumTaskDataset([str(task)], api_base="http://policy:8000/v1", model_name="policy")
+    exported = read_specification(task / SPECIFICATION_FILE)
+    request = chat_request(exported, convention)
+
+    assert dataset[0]["env_class"] == HARBOR_ENV_CLASS
+    assert request["tools"][0]["function"]["name"] == "lookup_color"
+    assert request["tool_choice"] == "auto"
+    assert request["parallel_tool_calls"] is False
 
 
 def test_taskcompendium_dataset_routes_answer_call_to_harbor(tmp_path):

@@ -65,6 +65,9 @@ def _native_chat_eligible(
         and convention.supports(specification.answer_type)
         and not specification.environment_requirements.capabilities
         and not specification.tool_providers
+        and not specification.final_tools.functions
+        and specification.final_tools.tool_choice is None
+        and specification.final_tools.parallel_tool_calls is None
         and not any(resource.visibility is ResourceVisibility.AGENT for resource in specification.resources)
         and binding == HarborEnvironmentConfig()
     )
