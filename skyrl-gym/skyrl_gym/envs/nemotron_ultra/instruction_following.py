@@ -31,7 +31,7 @@ def _ensure_nltk_data() -> None:
 
 
 def grade_instruction_following(text: str, record: dict[str, Any]) -> tuple[float, dict[str, Any]]:
-    """Evaluate every per-row constraint with NVIDIA's pinned instruction registry."""
+    """Evaluate per-row constraints; a missing final answer cannot earn instruction reward."""
     _ensure_nltk_data()
     results: list[bool] = []
     errors: list[str | None] = []
@@ -46,15 +46,18 @@ def grade_instruction_following(text: str, record: dict[str, Any]) -> tuple[floa
             results.append(False)
             errors.append(f"{type(error).__name__}: {error}")
 
+    has_answer = bool(text.strip())
+    follow_all_instructions = has_answer and all(results)
     grading_mode = record.get("grading_mode", "binary")
     if grading_mode == "binary":
-        reward = float(all(results))
+        reward = float(follow_all_instructions)
     elif grading_mode == "fraction":
-        reward = sum(results) / len(results) if results else 0.0
+        reward = sum(results) / len(results) if has_answer and results else 0.0
     else:
         raise ValueError(f"Invalid instruction-following grading mode: {grading_mode!r}")
     return reward, {
-        "follow_all_instructions": all(results),
+        "follow_all_instructions": follow_all_instructions,
+        "empty_final_answer": not has_answer,
         "follow_instruction_list": results,
         "instruction_errors": errors,
         "grading_mode": grading_mode,
