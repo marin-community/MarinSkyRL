@@ -142,6 +142,10 @@ async def _start_local_teacher_pool(
     engine_init_kwargs.pop("openai_sampling_params", None)
     engine_init_kwargs["revision"] = teacher.model.revision
     engine_init_kwargs["served_model_name"] = teacher.model.path
+    if "max_model_len" in engine_init_kwargs:
+        # Scoring prefills the whole student sequence, which may fill the student's window, and
+        # generates one token, so the teacher needs one position beyond that window.
+        engine_init_kwargs["max_model_len"] = int(engine_init_kwargs["max_model_len"]) + 1
     role = InferenceEngineRoleConfig(
         pretrain=teacher.model.path,
         backend=teacher.backend,

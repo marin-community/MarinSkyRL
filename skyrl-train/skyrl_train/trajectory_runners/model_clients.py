@@ -178,8 +178,11 @@ class DirectModelClient:
             result.pop("tools", None)
         if "max_output_tokens" in result:
             result["max_completion_tokens"] = result.pop("max_output_tokens")
-        if "max_generate_length" in sampling_params:
-            configured_max = int(sampling_params["max_generate_length"])
+        # The trainer converts max_generate_length to the backend's max_tokens before a request
+        # reaches this client, so either key carries the per-turn generation cap.
+        configured_limit = sampling_params.get("max_generate_length", sampling_params.get("max_tokens"))
+        if configured_limit is not None:
+            configured_max = int(configured_limit)
             requested_max = result.get("max_completion_tokens")
             result["max_completion_tokens"] = (
                 configured_max if requested_max is None else min(configured_max, int(requested_max))
