@@ -11,6 +11,7 @@ import torch
 from skyrl_train.models.megatron_router_replay import (
     LayerReplayHandle,
     MegatronRouterReplay,
+    RouterScoreType,
     filtered_replay_topk,
     capture_layer_indices,
     expand_moe_layer_freq,
@@ -23,17 +24,36 @@ from skyrl_train.models.megatron_router_replay import SENTINEL_EXPERT_ID, dense_
 
 
 @pytest.mark.parametrize("native_order", [(0, 1), (1, 0)], ids=["sorted-training", "unsorted-scoring"])
-def test_filtered_replay_keeps_positive_probability_choices_and_native_order(native_order):
-    scores = torch.tensor([[-0.1, -0.2, -0.85, -4.0], [-0.1, -0.2, -0.85, -4.0]])
+@pytest.mark.parametrize("score_type", [RouterScoreType.LOGITS, RouterScoreType.PROBABILITIES])
+def test_filtered_replay_keeps_positive_probability_choices_and_native_order(native_order, score_type):
+    logits = torch.tensor([[-0.1, -0.2, -0.85, -4.0], [-0.1, -0.2, -0.85, -4.0]])
     native = torch.tensor([native_order, native_order])
     captured = torch.tensor([[2, 1], [3, 2]])
-    probabilities = torch.softmax(scores, dim=-1)
+    probabilities = torch.softmax(logits, dim=-1)
+    scores = (logits if score_type is RouterScoreType.LOGITS else probabilities).requires_grad_()
     reference_kept = probabilities.gather(1, captured) >= 0.5 * probabilities[:, 1:2]
-    selected, replaced = filtered_replay_topk(scores, native, captured, torch.tensor([True, True]), 0.5)
+    controller = MegatronRouterReplay([0], recompute_enabled=False)
+    handle = LayerReplayHandle(controller, 0, score_type)
+    with controller.scoring_mode("router_replay_filtered", 0.5):
+        controller.begin_forward(
+            {0: captured},
+            torch.tensor([True, True]),
+            record_recompute=False,
+            probe_positions=torch.tensor([[0, 0], [1, 0]]),
+        )
+        weights, selected = handle.get_replay_topk(
+            scores, 2, default_compute_topk=lambda values, *_args, **_kwargs: (values.gather(1, native), native)
+        )
+        controller.end_forward()
+    replaced = torch.tensor([row["replaced"] for row in controller.take_probe_observations()], dtype=torch.bool)
     assert selected.tolist() == [[2, 1], [0, 2]]
     assert torch.equal(replaced, ~reference_kept)
-    offset_selected, _ = filtered_replay_topk(scores + 100, native, captured, torch.tensor([True, True]), 0.5)
-    assert torch.equal(selected, offset_selected)
+    assert torch.equal(weights, scores.gather(1, torch.tensor([[2, 1], [0, 2]])))
+    weights.sum().backward()
+    assert torch.equal(scores.grad, torch.tensor([[0.0, 1.0, 1.0, 0.0], [1.0, 0.0, 1.0, 0.0]]))
+    if score_type is RouterScoreType.LOGITS:
+        offset_selected, _ = filtered_replay_topk(scores + 100, native, captured, torch.tensor([True, True]), 0.5)
+        assert torch.equal(selected, offset_selected)
 
 
 def test_filtered_replay_zero_fraction_and_native_mask():
