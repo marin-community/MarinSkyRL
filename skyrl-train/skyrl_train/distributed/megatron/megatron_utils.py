@@ -239,8 +239,6 @@ def offload_megatron_copy_params(optimizers):
     for _opt in _iter_opts(optimizers):
         if hasattr(_opt, "shard_fp32_from_float16_groups"):
             offload_group_to_cpu(_opt.shard_fp32_from_float16_groups)
-        if hasattr(_opt, "fp32_from_float16_groups"):
-            offload_group_to_cpu(_opt.fp32_from_float16_groups)
 
 
 @torch.no_grad()
@@ -282,8 +280,6 @@ def load_megatron_copy_params(optimizers):
     for _opt in _iter_opts(optimizers):
         if hasattr(_opt, "shard_fp32_from_float16_groups"):
             load_group_to_gpu(_opt.shard_fp32_from_float16_groups)
-        if hasattr(_opt, "fp32_from_float16_groups"):
-            load_group_to_gpu(_opt.fp32_from_float16_groups)
 
 
 @torch.no_grad()
@@ -301,8 +297,6 @@ def offload_megatron_optimizer(optimizers):
                 v["exp_avg"] = v["exp_avg"].to("cpu", non_blocking=True)
             if "exp_avg_sq" in v:
                 v["exp_avg_sq"] = v["exp_avg_sq"].to("cpu", non_blocking=True)
-            if "momentum_buffer" in v:
-                v["momentum_buffer"] = v["momentum_buffer"].to("cpu", non_blocking=True)
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -326,8 +320,6 @@ def load_megatron_optimizer(optimizers):
                     v["exp_avg"] = v["exp_avg"].to(torch.cuda.current_device(), non_blocking=True)
                 if "exp_avg_sq" in v:
                     v["exp_avg_sq"] = v["exp_avg_sq"].to(torch.cuda.current_device(), non_blocking=True)
-                if "momentum_buffer" in v:
-                    v["momentum_buffer"] = v["momentum_buffer"].to(torch.cuda.current_device(), non_blocking=True)
         gc.collect()
         torch.cuda.empty_cache()
 
