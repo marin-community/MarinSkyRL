@@ -134,3 +134,26 @@ def test_checked_in_behavior_logprob_configs_use_validated_sampling():
         checked.append(path.name)
 
     assert checked
+
+
+def test_eval_sampling_is_independent_of_training_engine_defaults():
+    body = {"temperature": 0.0, "logprobs": None}
+    apply_openai_sampling(
+        body,
+        {"temperature": 1.0},
+        validate_rollout_logprob_sampling=True,
+        request_sampling_params={"temperature": 0.0, "top_p": 1.0, "top_k": -1},
+    )
+    assert body["temperature"] == 0.0
+    assert body["top_p"] == 1.0
+    assert body["logprobs"] is None
+
+
+def test_request_sampling_cannot_bypass_behavior_probability_validation():
+    with pytest.raises(ValueError, match="non-greedy sampling"):
+        apply_openai_sampling(
+            {"logprobs": True},
+            {"temperature": 1.0},
+            validate_rollout_logprob_sampling=True,
+            request_sampling_params={"temperature": 0.0},
+        )
