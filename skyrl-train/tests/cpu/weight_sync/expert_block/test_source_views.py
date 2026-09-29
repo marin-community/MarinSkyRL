@@ -82,6 +82,55 @@ def test_expert_sources_are_the_whole_gate_up_and_down_matrices_of_the_ranks_own
         assert entry.nbytes == matrix.numel() * 2
 
 
+def test_split_schema_expert_mappings_use_the_expert_schedule():
+    # The current Hero checkpoint exposes expert 2 as separate HF tensors.
+    prefix = "model.layers.0.mlp.experts.2"
+    fc1 = torch.arange(2 * INTERMEDIATE * HIDDEN, dtype=torch.bfloat16).reshape(2 * INTERMEDIATE, HIDDEN)
+    fc2 = torch.arange(HIDDEN * INTERMEDIATE, dtype=torch.bfloat16).reshape(HIDDEN, INTERMEDIATE)
+    local = local_source_slices(
+        [
+            task(
+                "decoder.layers.0.mlp.experts.linear_fc1.weight2",
+                fc1,
+                mapping("GatedMLPMapping", {part: f"{prefix}.{part}_proj.weight" for part in ("gate", "up")}),
+            ),
+            task(
+                "decoder.layers.0.mlp.experts.linear_fc2.weight2",
+                fc2,
+                mapping("AutoMapping", f"{prefix}.down_proj.weight"),
+            ),
+        ],
+        PROVIDER,
+        pp=0,
+    )
+    assert local.dense == []
+    sources = local_expert_sources(
+        local.experts,
+        local.sources,
+        TrainerRank(rank=1, dp=0, pp=0, ep=1),
+        num_experts=NUM_EXPERTS,
+        expert_parallel_size=2,
+        hidden_size=HIDDEN,
+        intermediate_size=INTERMEDIATE,
+    )
+    assert {(item.entry.layer, item.entry.expert, item.entry.projection) for item in sources} == {
+        (0, 2, "fc1"),
+        (0, 2, "fc2"),
+    }
+    assert torch.equal(expert_source_view(sources[0], local.sources), fc1.flatten())
+    assert torch.equal(expert_source_view(sources[1], local.sources), fc2.flatten())
+
+
+def test_split_schema_rejects_a_mismatched_expert_id():
+    bad = task(
+        "decoder.layers.0.mlp.experts.linear_fc2.weight2",
+        torch.zeros(HIDDEN, INTERMEDIATE, dtype=torch.bfloat16),
+        mapping("AutoMapping", "model.layers.0.mlp.experts.3.down_proj.weight"),
+    )
+    with pytest.raises(ValueError, match="disagrees with its HF tensors"):
+        local_source_slices([bad], PROVIDER, pp=0)
+
+
 def test_an_expert_outside_the_ranks_block_is_refused():
     local = local_source_slices(conversion_tasks(rank_parameters(experts=(0, 1))), PROVIDER, pp=0)
     with pytest.raises(ValueError, match="not owned by EP rank 1"):

@@ -23,6 +23,8 @@ from skyrl_train.weight_sync.expert_block.schedule import (
 )
 
 EXPERT_HF_NAME = re.compile(r"model\.layers\.(\d+)\.mlp\.experts\.(gate|up|down)_proj\.weight")
+SPLIT_EXPERT_HF_NAME = re.compile(r"model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate|up|down)_proj\.weight")
+EXPERT_SOURCE_KEY = re.compile(r"decoder\.layers\.(\d+)\.mlp\.experts\.linear_fc[12]\.weight(\d+)")
 LAYER_PREFIX = re.compile(r"model\.layers\.(\d+)\.")
 ROUTED_EXPERTS = "mlp.experts.routed_experts"
 ROUTER_WEIGHT_SUFFIX = ".mlp.router.weight"
@@ -100,6 +102,35 @@ def local_source_slices(tasks, config, *, pp: int) -> LocalSources:
                 for part in ("gate", "up"):
                     expert.append(ExpertSlice(mapping.hf_param[part], expert_id, part, key))
             continue
+
+        # The current Hero export uses one HF tensor per expert. Megatron-Bridge
+        # consequently chooses generic GatedMLPMapping/AutoMapping rather than
+        # the stacked-expert classes above. They still hold one whole local
+        # expert matrix at TP=ETP=1, so send them through the expert schedule.
+        if kind in ("GatedMLPMapping", "AutoMapping"):
+            names = [mapping.hf_param] if kind == "AutoMapping" else mapping.hf_param.values()
+            matches = [SPLIT_EXPERT_HF_NAME.fullmatch(name) for name in names]
+            if any(match is not None for match in matches):
+                if not all(match is not None for match in matches):
+                    raise ValueError(f"Split expert mapping for {key} has mixed HF tensors")
+                source_match = EXPERT_SOURCE_KEY.fullmatch(key)
+                if source_match is None or source.ndim != 2:
+                    raise ValueError(f"Split expert parameter {key} is not a single per-expert matrix")
+                expert_id = int(source_match[2])
+                layer = int(source_match[1])
+                expected_parts = {"down"} if kind == "AutoMapping" else {"gate", "up"}
+                if (
+                    {match[3] for match in matches} != expected_parts
+                    or any(int(match[1]) != layer or int(match[2]) != expert_id for match in matches)
+                    or (kind == "AutoMapping" and ".linear_fc2." not in key)
+                    or (kind == "GatedMLPMapping" and ".linear_fc1." not in key)
+                ):
+                    raise ValueError(f"Split expert mapping for {key} disagrees with its HF tensors")
+                for part in sorted(expected_parts):
+                    expert.append(
+                        ExpertSlice(f"model.layers.{layer}.mlp.experts.{part}_proj.weight", expert_id, part, key)
+                    )
+                continue
 
         def add(name, hf_offset, numel, source_offset):
             if source_offset < 0 or numel <= 0 or source_offset + numel > source.numel():
