@@ -91,8 +91,16 @@ def test_grug_smoke_rejects_uneven_pipeline_without_stage_layout(tmp_path, role)
         validate_smoke_config(load_launch_config(path))
 
 
-def test_grug_retry_preflight_preserves_sample_model_and_token_budget(tmp_path, monkeypatch, capsys):
-    recipe = "cloud/iris/configs/grug_pivot_swe_tp5_retry.yaml"
+@pytest.mark.parametrize(
+    "recipe,nodes,gpus_per_node",
+    [
+        ("cloud/iris/configs/grug_pivot_swe_tp5_retry.yaml", 6, 8),
+        ("cloud/iris/configs/grug_pivot_swe_tp5_25gpu.yaml", 5, 5),
+    ],
+)
+def test_grug_retry_preflight_preserves_sample_model_and_token_budget(
+    tmp_path, monkeypatch, capsys, recipe, nodes, gpus_per_node
+):
     source_root = tmp_path / "source"
     data_root = source_root / "data"
     source_config = launch_config(
@@ -103,7 +111,7 @@ def test_grug_retry_preflight_preserves_sample_model_and_token_budget(tmp_path, 
         "sha256:pinned-model",
         arm="sft",
         data_root=str(data_root),
-        recipe_path=recipe,
+        recipe_path="cloud/iris/configs/grug_pivot_swe_smoke.yaml",
     )
     source_config.skyrl.trainer.pivot_token_budget = 1_421_216_000
     (source_root / "sft").mkdir(parents=True)
@@ -153,4 +161,5 @@ def test_grug_retry_preflight_preserves_sample_model_and_token_budget(tmp_path, 
     assert retry.inputs.train_data[0].uri == str(data_root)
     assert retry.inputs.validation_data[0].uri == str(data_root)
     assert retry.skyrl.trainer.pivot_token_budget == 1_421_216_000
-    assert retry.iris.allocation.num_nodes == 6
+    assert retry.iris.allocation.num_nodes == nodes
+    assert retry.iris.allocation.gpus_per_node == gpus_per_node

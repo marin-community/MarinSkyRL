@@ -128,7 +128,7 @@ def launch_config(
                 "timeout": 28800,
                 "allocation": {
                     "num_nodes": recipe.trainer.placement.policy_num_nodes + recipe.generator.num_inference_engines,
-                    "gpus_per_node": 8,
+                    "gpus_per_node": recipe.trainer.placement.policy_num_gpus_per_node,
                     "gpu_variant": "H100",
                     "cpu": 32,
                     "memory": "1800GB",
