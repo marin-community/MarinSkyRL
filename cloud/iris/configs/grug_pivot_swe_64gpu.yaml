@@ -56,8 +56,8 @@ trainer:
         optimizer_cpu_offload: true
         optimizer_offload_fraction: 1.0
       transformer_config_kwargs:
-        num_layers_in_first_pipeline_stage: 5
-        num_layers_in_last_pipeline_stage: 5
+        num_layers_in_first_pipeline_stage: 4
+        num_layers_in_last_pipeline_stage: 2
       optimizer_checkpoint_sharding_type: dp_reshardable
       ddp_config:
         overlap_grad_reduce: true
@@ -72,8 +72,8 @@ trainer:
       expert_tensor_parallel_size: 1
       logprob_chunk_size: 128
       transformer_config_kwargs:
-        num_layers_in_first_pipeline_stage: 5
-        num_layers_in_last_pipeline_stage: 5
+        num_layers_in_first_pipeline_stage: 4
+        num_layers_in_last_pipeline_stage: 2
   placement:
     colocate_all: false
     colocate_policy_ref: true
