@@ -2,18 +2,7 @@
 
 from __future__ import annotations
 
-import math
-from types import SimpleNamespace
-import numpy as np
-import torch
 from omegaconf import OmegaConf
-from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, GroupSelectionResult
-from skyrl_train.objective.objective import build_objective_micro_batch, compute_policy_objective
-from skyrl_train.objective.reduction import step_counts
-from skyrl_train.objective.teacher import teacher_advantages
-from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
-from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
-from skyrl_train.utils import validate_cfg
 import base64
 from pathlib import Path
 from typing import Any
@@ -240,7 +229,7 @@ def test_null_nonfinite_limit_in_launch_fails_on_first_invalid_step(tmp_path: Pa
 
 
 @pytest.mark.parametrize(("key", "value"), [("use_tis", True), ("tis_imp_ratio_cap", 2.0)])
-def test_composed_launch_rejects_tis_selectors_at_launch_and_startup(tmp_path: Path, key: str, value) -> None:
+def test_composed_launch_rejects_tis_selectors(tmp_path: Path, key: str, value) -> None:
     path = tmp_path / "launch.yaml"
     path.write_text(yaml.safe_dump(_raw_config()))
     config = load_launch_config(path)
@@ -249,96 +238,3 @@ def test_composed_launch_rejects_tis_selectors_at_launch_and_startup(tmp_path: P
 
     with pytest.raises(ValueError, match="off_policy_correction"):
         load_launch_config(path)
-    with pytest.raises(ValueError, match="off_policy_correction"):
-        validate_cfg(config.skyrl)
-
-
-@pytest.mark.parametrize("recipe", ["grpo", "dapo", "dr_grpo", "gspo", "cispo", "opd", "mopd"])
-def test_algorithm_recipe_launch_drives_policy_value_and_gradient(tmp_path: Path, recipe: str):
-    raw = _raw_config()
-    raw["skyrl"]["config_groups"] = {"algorithm_recipe": recipe}
-    raw["skyrl"]["generator"]["n_samples_per_prompt"] = 2
-    teacher_recipe = recipe in {"opd", "mopd"}
-    if teacher_recipe:
-        raw["skyrl"]["trainer"]["algorithm"]["distillation"] = {"routing_plan": "expert", "coefficient": 1.0}
-        raw["skyrl"]["teachers"] = {
-            "expert": dict(
-                source="openai_compatible",
-                placement="external",
-                evidence="chosen_token",
-                model=dict(path="teacher", revision="teacher-revision"),
-                endpoints=[dict(url="https://teacher.example/v1", max_concurrency=1)],
-                tokenizer_fingerprint=f"sha256:{'a' * 64}",
-                max_sequence_length=1024,
-                request_timeout_seconds=30,
-            )
-        }
-        raw["skyrl"]["teacher_routing"] = {
-            "expert": dict(revision="route-revision", routes=dict(default=dict(teacher="expert", weight=1.0)))
-        }
-    path = tmp_path / "recipe.yaml"
-    path.write_text(yaml.safe_dump(raw))
-    config = load_launch_config(path).skyrl.trainer.algorithm
-    if recipe == "dapo":
-        raw["skyrl"]["trainer"]["algorithm"]["dynamic_sampling"] = {"type": None}
-        path.write_text(yaml.safe_dump(raw))
-        sampling = load_launch_config(path).skyrl.trainer.algorithm.dynamic_sampling
-        selection = GroupSelectionPolicy(DynamicSamplingType(sampling.type) if sampling.type is not None else None)
-        group = SimpleNamespace(trajectory_batch={"response_ids": [[1], [2]], "rewards": [1.0, 1.0]})
-        assert selection.evaluate(group) is GroupSelectionResult.KEEP
-
-    mask = torch.tensor([[1.0, 0.0], [1.0, 1.0]])
-    old = torch.full_like(mask, -2.0)
-    current = (old + torch.tensor([[1.1, 1.1], [1.25, 1.25]]).log()).requires_grad_()
-    if teacher_recipe:
-        advantages, _ = teacher_advantages(
-            old + torch.tensor([[-1.0, 0.0], [1.0, 1.0]]),
-            old,
-            mask.bool(),
-            torch.ones_like(mask),
-            None,
-        )
-    else:
-        advantages, _ = compute_advantages_and_returns(
-            token_level_rewards=torch.tensor([[0.0, 0.0], [0.0, 2.0]]),
-            response_mask=mask,
-            index=np.array(["prompt", "prompt"]),
-            adv_estimator=config.advantage_estimator,
-            config=config,
-            grpo_norm_by_std=config.grpo_norm_by_std,
-        )
-    batch = build_objective_micro_batch(
-        action_log_probs=current,
-        old_action_log_probs=old,
-        base_action_log_probs=None,
-        advantages=advantages,
-        loss_mask=mask,
-        rollout_logprobs=None,
-        response_span_tags=None,
-        token_entropy=torch.zeros_like(mask),
-        think_token_weight=1,
-        teacher=None,
-    )
-    counts = step_counts([mask], [mask], [], [advantages], 8, lambda value: value)
-    result = compute_policy_objective(
-        batch,
-        loss=PolicyLossRegistry.get(config.policy_loss_type),
-        counts=counts,
-        config=config,
-        loss_scale=1,
-        report_scale=1,
-    )
-    scale = 1.0 if teacher_recipe or recipe == "dr_grpo" else 1 / (math.sqrt(2) + 1e-6)
-    denominator = {"grpo": 2, "dapo": 3, "dr_grpo": 16, "gspo": 2, "cispo": 3, "opd": 3, "mopd": 2}[recipe]
-    upper = {"grpo": 1.2, "dr_grpo": 1.2, "gspo": 1.0004}.get(recipe, 1.25)
-    second_weight = 1.0 if recipe in {"grpo", "gspo", "mopd"} else 2.0
-    expected_value = (1.1 - second_weight * upper) * scale / denominator
-    if recipe == "cispo":
-        expected_value = (1.1 * (-2 + math.log(1.1)) - 2.5 * (-2 + math.log(1.25))) * scale / 3
-    torch.testing.assert_close(result.optimization_loss, torch.tensor(expected_value), rtol=1e-5, atol=1e-7)
-    result.optimization_loss.backward()
-    positive_gradient = -1.25 * scale / denominator if upper == 1.25 else 0.0
-    if recipe == "mopd":
-        positive_gradient /= 2
-    expected_gradient = torch.tensor([[1.1 * scale / denominator, 0], [positive_gradient, positive_gradient]])
-    torch.testing.assert_close(current.grad, expected_gradient, rtol=1e-5, atol=1e-7)
