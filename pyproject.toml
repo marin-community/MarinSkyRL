@@ -127,6 +127,9 @@ telemetry = [
 [project.scripts]
 marinskyrl = "cloud.iris.launch:main"
 
+[project.entry-points."vllm.general_plugins"]
+skyrl_xgrammar_stop_tokens = "skyrl_train.inference_engines.vllm.grammar_stop_tokens:register_xgrammar_stop_token_mask"
+
 [dependency-groups]
 analysis = [
     "matplotlib",
@@ -150,6 +153,7 @@ dev = [
     "pytest>=8.4",
     "pytest-asyncio",
     "universal-pathlib",
+    "xgrammar>=0.2.1,<1.0.0",
 ]
 harbor-test = ["harbor; sys_platform == 'linux'"]
 
