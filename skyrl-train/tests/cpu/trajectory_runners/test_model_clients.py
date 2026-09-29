@@ -473,6 +473,50 @@ async def test_chat_grading_recovers_reasoning_boundaries_without_changing_repla
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("row_options", "context_length", "expected_tokens"),
+    [
+        ({}, 65536, 32768),
+        ({"max_output_tokens": 16384}, 65536, 16384),
+        ({"max_completion_tokens": 65536}, 65536, 32768),
+        ({"max_tokens": 16384}, 65536, 16384),
+        ({}, 132, 1),
+    ],
+)
+async def test_chat_normalized_output_budget_cannot_be_overridden_by_context_capacity(
+    row_options, context_length, expected_tokens
+):
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "answer"
+    engine.tokenize.return_value = {"tokens": list(range(131))}
+
+    async def serve(request):
+        body = request["json"]
+        assert body["max_completion_tokens"] == expected_tokens
+        assert "max_tokens" not in body
+        assert "max_output_tokens" not in body
+        assert "max_generate_length" not in body
+        return {
+            "choices": [
+                {"message": {"role": "assistant", "content": "answer"}, "finish_reason": "stop", "token_ids": [7]}
+            ]
+        }
+
+    engine.chat_completion.side_effect = serve
+    output = await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "a short prompt"}]],
+            "chat_completion_params": [row_options],
+            "sampling_params": {"max_tokens": 32768},
+            "max_context_length": context_length,
+        }
+    )
+    assert output["response_ids"] == [[7]]
+
+
+@pytest.mark.asyncio
 async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
     engine = AsyncMock()
     engine.model_name = "snowball"
