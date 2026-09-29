@@ -1533,6 +1533,25 @@ class RayPPOTrainer:
             training_input = self.compute_advantages_and_returns(training_input)
             training_input = self.finalize_advantages_for_training(training_input)
 
+        original_advantages = training_input["advantages"]
+        valid_tokens = training_input["loss_mask"].bool()
+        selected_before = original_advantages.masked_select(valid_tokens)
+        assert selected_before.numel() > 0 and torch.isfinite(selected_before).all().item()
+        training_input["advantages"] = -original_advantages
+        selected_after = training_input["advantages"].masked_select(valid_tokens)
+        sign_residual = (selected_before + selected_after).abs().max().item()
+        assert sign_residual == 0.0
+        logger.warning(
+            "CAT_COUNT_MUTATION sign_flip step={} valid_tokens={} nonzero_advantage_tokens={} "
+            "finite=true sum_abs_before={} sum_abs_after={} max_sign_residual={}",
+            self.global_step,
+            selected_before.numel(),
+            torch.count_nonzero(selected_before).item(),
+            selected_before.abs().sum().item(),
+            selected_after.abs().sum().item(),
+            sign_residual,
+        )
+
         if self.cfg.trainer.dump_data_batch:
             if step_wall is not None:
                 step_wall.start("training_preparation")
