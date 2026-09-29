@@ -16,7 +16,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 from transformers import PreTrainedTokenizerFast
 
-from ci.pivot_grug_smoke import compare_arms, launch_config, validate_smoke_config
+from ci.pivot_grug_smoke import compare_arms, launch_config, retry_budget_manifest, validate_smoke_config
 from cloud.iris.launch_config import load_launch_config
 from skyrl_train.batch_sampling import filter_trajectory_batch
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
@@ -44,6 +44,32 @@ def _raw_row(trajectory_id):
         "pass_rate": 0.375,
         "metadata": {"instance_id": f"task-{trajectory_id}"},
     }
+
+
+def test_retry_smaller_updates_preserves_comparison_tokens_and_prefixes():
+    manifest = {
+        "train_prefixes": 512,
+        "train_trajectory_ids": list(range(512)),
+        "probe_trajectory_ids": list(range(512, 640)),
+        "max_prompt_tokens": 32256,
+        "max_reference_tokens": 512,
+        "nominal_updates": 10,
+        "sequences_per_full_update": 8192,
+        "learner_token_budget": 1421216000,
+    }
+    skyrl = OmegaConf.create({
+        "trainer": {"train_batch_size": 64, "max_prompt_length": 32256},
+        "generator": {"n_samples_per_prompt": 16, "sampling_params": {"max_generate_length": 512}},
+    })
+    retry = retry_budget_manifest(manifest, skyrl, train_prefixes=512, steps=80)
+    assert retry["learner_token_budget"] == manifest["learner_token_budget"]
+    assert retry["train_trajectory_ids"] == manifest["train_trajectory_ids"]
+    assert retry["probe_trajectory_ids"] == manifest["probe_trajectory_ids"]
+    assert retry["nominal_updates"] == 80
+    assert retry["sequences_per_full_update"] == 1024
+    assert manifest["nominal_updates"] == 10
+    with pytest.raises(ValueError, match="sample or token budget"):
+        retry_budget_manifest(manifest, skyrl, train_prefixes=512, steps=10)
 
 
 def test_prepared_swe_pivot_uses_local_action_grader():

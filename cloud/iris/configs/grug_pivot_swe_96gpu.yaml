@@ -1,5 +1,5 @@
-# Ten-step SWE Pivot RL retry on twelve H100 nodes: six policy, four reference, two inference.
-# Each update uses 512 prefixes x 16 responses = 8192 trajectories.
+# SWE Pivot RL retry on twelve H100 nodes: six policy, four reference, two inference.
+# Each update uses 64 prefixes x 16 responses = 1024 trajectories.
 # Keep the one-action 512-token cap within a 32K request window.
 entrypoint: standard
 context_budget:
@@ -30,8 +30,8 @@ trainer:
   epochs: 10
   max_steps: 10
   update_epochs_per_batch: 1
-  train_batch_size: 512
-  policy_mini_batch_size: 512
+  train_batch_size: 64
+  policy_mini_batch_size: 64
   eval_batch_size: 16
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
@@ -133,7 +133,7 @@ generator:
     enabled: true
     phases:
     - train
-    sample_count_per_step: 8192
+    sample_count_per_step: 1024
     sample_fraction: 1.0
     max_bytes_per_step: 5368709120
     max_bytes_per_run: 53687091200

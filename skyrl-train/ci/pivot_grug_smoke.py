@@ -80,6 +80,23 @@ def reused_smoke_inputs(root: str) -> ReusedSmokeInputs:
     )
 
 
+def retry_budget_manifest(
+    manifest: dict[str, Any], skyrl: DictConfig, *, train_prefixes: int, steps: int
+) -> dict[str, Any]:
+    """Preserve a comparison's data and token budget when changing update size."""
+    sequences_per_update = int(skyrl.trainer.train_batch_size) * int(skyrl.generator.n_samples_per_prompt)
+    if (
+        manifest["train_prefixes"] != train_prefixes
+        or manifest["max_prompt_tokens"] != int(skyrl.trainer.max_prompt_length)
+        or manifest["max_reference_tokens"] != int(skyrl.generator.sampling_params.max_generate_length)
+        or manifest["sequences_per_full_update"] // manifest["train_prefixes"]
+        != int(skyrl.generator.n_samples_per_prompt)
+        or manifest["nominal_updates"] * manifest["sequences_per_full_update"] != steps * sequences_per_update
+    ):
+        raise ValueError("The retry recipe changes the source comparison's sample or token budget")
+    return {**manifest, "nominal_updates": steps, "sequences_per_full_update": sequences_per_update}
+
+
 def launch_config(
     run_id: str,
     output_root: str,
@@ -333,8 +350,9 @@ def main() -> None:
             OmegaConf.save(config, config_path)
             resolved = load_launch_config(config_path)
             validate_smoke_config(resolved)
-            if args.train_prefixes != int(resolved.skyrl.trainer.train_batch_size):
-                raise ValueError("The paired smoke requires one full pass through the prefix set per update")
+            batch_size = int(resolved.skyrl.trainer.train_batch_size)
+            if args.train_prefixes % batch_size or (not reused and args.train_prefixes != batch_size):
+                raise ValueError("A retry batch must divide the prefix set; a new comparison requires a full-set batch")
             logger.info(
                 "Preflight {}: {} GPUs, {} prefixes x {} responses, {} safety-limit steps, runtime {}",
                 arm,
@@ -346,16 +364,9 @@ def main() -> None:
             )
             configs[arm] = (config, config_path, output, temporary)
         if reused:
-            manifest = reused.manifest
-            if (
-                manifest["train_prefixes"] != args.train_prefixes
-                or manifest["nominal_updates"] != args.steps
-                or manifest["max_prompt_tokens"] != int(resolved.skyrl.trainer.max_prompt_length)
-                or manifest["max_reference_tokens"] != int(resolved.skyrl.generator.sampling_params.max_generate_length)
-                or manifest["sequences_per_full_update"]
-                != args.train_prefixes * int(resolved.skyrl.generator.n_samples_per_prompt)
-            ):
-                raise ValueError("The retry recipe changes the source comparison's sample or token budget")
+            manifest = retry_budget_manifest(
+                reused.manifest, resolved.skyrl, train_prefixes=args.train_prefixes, steps=args.steps
+            )
             for config, config_path, _, _ in configs.values():
                 config.skyrl.trainer.pivot_token_budget = manifest["learner_token_budget"]
                 OmegaConf.save(config, config_path)
