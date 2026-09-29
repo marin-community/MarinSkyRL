@@ -861,7 +861,7 @@ def _path_allows_new_keys(path: str) -> bool:
 def _merge_config_mapping(config: DictConfig, values: Mapping[str, Any], prefix: str = "") -> None:
     """Merge launch values into declared SkyRL config paths."""
     for key, value in values.items():
-        if value is None or isinstance(value, Mapping) and not value:
+        if isinstance(value, Mapping) and not value:
             continue
         path = f"{prefix}.{key}" if prefix else key
         current = OmegaConf.select(config, path, default=...)
