@@ -19,6 +19,8 @@ from skyrl_train.entrypoints.main_base import (
 from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest, lora_disk_load_request
 from skyrl_train.utils.utils import validate_generator_cfg, initialize_ray
 from skyrl_train.evaluate import evaluate
+from skyrl_train.pivot_profiling import profile_candidates
+from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
 from skyrl_train.utils.trainer_utils import build_eval_dataloader
 
 
@@ -56,17 +58,27 @@ class EvalOnlyEntrypoint(BasePPOExp):
         await load_initial_policy_adapter(inference_engine_client, self.cfg)
         trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
 
-        await trajectory_runner.startup()
+        sink = make_trajectory_sink(self.cfg.generator, self.tokenizer)
+        trajectory_runner.set_trajectory_sink(sink)
         try:
-            results: dict[str, Any] = await evaluate(
-                eval_dataloader=build_eval_dataloader(self.cfg, self.eval_dataset),
-                trajectory_runner=trajectory_runner,
-                cfg=self.cfg,
-                global_step=None,
-                tokenizer=self.tokenizer,
-            )
+            await trajectory_runner.startup()
+            dataloader = build_eval_dataloader(self.cfg, self.eval_dataset)
+            if self.cfg.generator.pivot_profiling:
+                results = await profile_candidates(dataloader, trajectory_runner, self.cfg)
+            else:
+                results = await evaluate(
+                    eval_dataloader=dataloader,
+                    trajectory_runner=trajectory_runner,
+                    cfg=self.cfg,
+                    global_step=None,
+                    tokenizer=self.tokenizer,
+                    trajectory_sink=sink,
+                )
         finally:
-            await trajectory_runner.shutdown()
+            try:
+                await trajectory_runner.shutdown()
+            finally:
+                sink.close()
 
         tracker = self.get_tracker()
         tracker.log(results, step=0, commit=True)

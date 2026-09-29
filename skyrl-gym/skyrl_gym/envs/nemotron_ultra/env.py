@@ -31,6 +31,7 @@ from skyrl_gym.envs.nemotron_ultra.ns_tools import execute_python_calls
 from skyrl_gym.envs.nemotron_ultra.rdkit_chemistry import grade_rdkit_chemistry
 from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
+from skyrl_gym.envs.nemotron_ultra.terminal import grade_terminal
 from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
 from skyrl_gym.verification import RolloutEvidence, VerificationResult
 
@@ -230,6 +231,9 @@ class NemotronUltraEnv(BaseTextEnv):
                     verification=VerificationResult.unavailable("failed Lean attempt will be replaced by a correction"),
                     reset_conversation=[{"role": "user", "content": correction_prompt}],
                 )
+        elif self.agent == "terminus_judge_string_only_simple_agent":
+            reward, details = grade_terminal(action, self.record)
+            diagnostics.update(details)
         elif self.agent in _TOOL_COMPARISON_AGENTS:
             reward, category = grade_expected_action(
                 self.record["expected_action"],

@@ -683,3 +683,25 @@ def test_nemotron_ultra_environment_is_registered():
         },
     )
     assert env.step("No calendar changes are needed.")["reward"] == 1.0
+
+
+def test_terminal_release_verifier_checks_commands_and_completion_in_one_turn():
+    expected = {
+        "analysis": "inspect",
+        "plan": "list files",
+        "commands": [{"keystrokes": "ls\n"}],
+        "task_complete": True,
+    }
+    record = {"metadata": {"harness": "terminus_2"}, "expected_answer": json.dumps(expected)}
+    for candidate, reward in (
+        ({**expected, "analysis": "different explanation"}, 1.0),
+        ({**expected, "task_complete": False}, 0.0),
+        ({**expected, "commands": [{"keystrokes": "rm -rf /tmp/other\n"}]}, 0.0),
+        ({**expected, "unexpected_key": True}, 0.0),
+    ):
+        env = _ultra_env("terminus_judge_string_only_simple_agent", {}, record)
+        result = env.step(json.dumps(candidate))
+        assert result["done"]
+        assert result["reward"] == reward
+        assert result["verification"].status == VerificationStatus.VERIFIED
+        env.close()

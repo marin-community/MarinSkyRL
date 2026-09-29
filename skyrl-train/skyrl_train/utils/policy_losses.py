@@ -29,7 +29,7 @@ from skyrl_train.utils.loss_reduction import (
 )
 from skyrl_train.utils.algorithm_registry import PolicyLossType, register_policy_loss
 from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_delta
-from skyrl_train.utils.policy_math import differentiable_approx_kl
+from skyrl_train.utils.policy_math import differentiable_approx_kl, forward_kl_loss
 
 
 @dataclass(frozen=True)
@@ -160,6 +160,7 @@ def complete_clip_metrics(metrics: dict[str, float]) -> dict[str, float]:
 def _compute_policy_auxiliary_terms(
     *,
     action_log_probs: torch.Tensor,
+    old_action_log_probs: torch.Tensor,
     base_action_log_probs: Optional[torch.Tensor],
     token_entropy: torch.Tensor,
     loss_mask: Optional[torch.Tensor],
@@ -171,13 +172,17 @@ def _compute_policy_auxiliary_terms(
     if config.use_kl_loss:
         if base_action_log_probs is None:
             raise ValueError("base_action_log_probs are required when use_kl_loss is enabled")
-        kl_loss = differentiable_approx_kl(
-            action_log_probs,
-            base_action_log_probs,
-            loss_mask=loss_mask,
-            kl_estimator_type=config.kl_estimator_type,
-        )
-        kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
+        if config.kl_estimator_type == "forward":
+            kl_loss = forward_kl_loss(action_log_probs, base_action_log_probs, old_action_log_probs)
+            kl_loss = reduce_loss(kl_loss, loss_mask, config.loss_reduction, config.max_seq_len)
+        else:
+            kl_loss = differentiable_approx_kl(
+                action_log_probs,
+                base_action_log_probs,
+                loss_mask=loss_mask,
+                kl_estimator_type=config.kl_estimator_type,
+            )
+            kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
     else:
         kl_loss = action_log_probs.new_zeros(())
     return PolicyAuxiliaryTerms(
@@ -300,6 +305,7 @@ def compute_policy_objective(
     else:
         auxiliary = _compute_policy_auxiliary_terms(
             action_log_probs=action_log_probs,
+            old_action_log_probs=old_action_log_probs,
             base_action_log_probs=base_action_log_probs,
             token_entropy=token_entropy,
             loss_mask=loss_mask,

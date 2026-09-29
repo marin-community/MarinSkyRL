@@ -208,7 +208,17 @@ class DirectModelClient:
 
         async def generate_one(messages, row_options, session_id, continuation):
             chat_options = self._chat_options(row_options, sampling_params)
-            tokenize_options = {key: chat_options[key] for key in ("tools", "tool_choice") if key in chat_options}
+            if request.get("use_remaining_context", False):
+                # Pivot sampling follows the experiment recipe; keep original
+                # teacher request options in the retained source record.
+                for key in ("temperature", "top_p", "top_k"):
+                    if key in sampling_params:
+                        chat_options[key] = sampling_params[key]
+            tokenize_options = {
+                key: chat_options[key]
+                for key in ("tools", "tool_choice", "chat_template_kwargs")
+                if key in chat_options
+            }
             render_request = {
                 "json": {
                     "model": self._client.model_name,
@@ -225,7 +235,12 @@ class DirectModelClient:
                 if remaining_tokens <= 0:
                     raise ContextLengthExceededError(category="context_overflow", request_id=None, status_code=400)
                 requested_tokens = chat_options.get("max_completion_tokens", remaining_tokens)
-                chat_options["max_completion_tokens"] = min(int(requested_tokens), remaining_tokens)
+                chat_options["max_completion_tokens"] = (
+                    remaining_tokens
+                    if request.get("use_remaining_context", False)
+                    else min(int(requested_tokens), remaining_tokens)
+                )
+                chat_options.pop("max_tokens", None)
 
             body = {
                 "model": self._client.model_name,

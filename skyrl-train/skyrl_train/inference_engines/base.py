@@ -31,6 +31,7 @@ class InferenceEngineInput(TypedDict):
     chat_continuations: NotRequired[List[ChatContinuation | None]]
     # The request window, including the backend-rendered prompt and new tokens.
     max_context_length: NotRequired[int]
+    use_remaining_context: NotRequired[bool]
 
 
 class InferenceEngineOutput(TypedDict):

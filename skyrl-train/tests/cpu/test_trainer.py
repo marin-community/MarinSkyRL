@@ -1060,6 +1060,7 @@ def test_load_checkpoints_offloads_disaggregated_optimizer_before_policy_restore
     trainer.policy_model.optimizer_on_gpu = True
     trainer.critic_model = None
     trainer._domain_balancer = None
+    trainer.loss_token_budget = None
     monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
 
     global_step, restored_path = trainer.load_checkpoints()
@@ -1093,6 +1094,7 @@ def test_load_checkpoints_restores_rollout_state_only_when_requested(tmp_path, d
     trainer.policy_model.async_run_ray_method.return_value = []
     trainer.critic_model = None
     trainer._domain_balancer = None
+    trainer.loss_token_budget = None
 
     with patch("skyrl_train.trainer.ray.get", return_value=None):
         global_step, loaded_path = trainer.load_checkpoints()
@@ -1131,6 +1133,7 @@ def test_load_checkpoints_can_start_a_new_stage_with_continued_model_training_st
     trainer.critic_model = None
     trainer.colocate_all = True
     trainer._domain_balancer = None
+    trainer.loss_token_budget = None
 
     with patch("skyrl_train.trainer.ray.get", return_value=None):
         global_step, _ = trainer.load_checkpoints()

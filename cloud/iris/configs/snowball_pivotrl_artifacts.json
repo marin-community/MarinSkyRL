@@ -1,0 +1,113 @@
+{
+  "students": {
+    "snowball": {
+      "repo": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+      "revision": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab"
+    },
+    "grug": {
+      "repo": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+      "revision": "b8c07f7df1df65525abbfdbcd1572318ba11c42f"
+    }
+  },
+  "datasets": {
+    "terminal": {
+      "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/snowball-pivotrl/prepared/terminal/eaef26944643644c8a3dbbf361ce6128142f5976/a7d84ff33dc74d0cdc42c317e1458f043f48ed5ef432bae44c933d9d5c3cc478",
+      "manifest": {
+        "dataset": "nvidia/Nemotron-RL-Agentic-Terminal-Pivot-v1",
+        "revision": "eaef26944643644c8a3dbbf361ce6128142f5976",
+        "source_sha256": "2d55e4f135a3722cacc3e0987f018734ad61de0824a3ea870cf18fe9ac36f482",
+        "release_rows": 31111,
+        "expected_release_rows": 31111,
+        "split_seed": 42,
+        "validation_trajectory_ids": [
+          "1ff0e47a618be91c",
+          "2dfdcdaa0ebdaf36",
+          "356a2d0200573464",
+          "371c2a00b7eac3d0",
+          "3f97ef78f4e72db6",
+          "77adf2623d9d4695",
+          "7fa9bda3d19b1ecc",
+          "9ebee9ac70b2a73e",
+          "b167e5064caf1b52",
+          "b9431837bd8739e4",
+          "b9666d37940d541b",
+          "cb4311008eba66cf",
+          "cb85ee9641121515",
+          "d9aad542379a20ac",
+          "da84d64f1ff51563",
+          "df838c56d9ee13da",
+          "e09ca06de8b58600",
+          "ebcbc425d499bfd1",
+          "eff0ffebe242f93b",
+          "f3f6f14166469965"
+        ],
+        "train_rows": 30855,
+        "validation_rows": 256,
+        "validation_trajectories": 20,
+        "artifacts": {
+          "release": {
+            "sha256": "0b451a409de531d45111eeb1dfd63c4ca969e81851bc44ba9cbb39ad907b446b"
+          },
+          "candidates": {
+            "sha256": "88f339a0a6c2361bc3a602d7da5ec391badf4264db2f6783e47260fb88966092"
+          },
+          "validation": {
+            "sha256": "8792583392902aa7300153e5ac3220450fd4393f9bb46cb231d17426e4a51283"
+          }
+        }
+      }
+    },
+    "swe": {
+      "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/snowball-pivotrl/prepared/swe/4947a3c8ea803413a65f9eca14a96ef521b2ddf5/969d2314262106a7024a4b8bdf091a78bea0471f229f06662aec2d79d90fd808",
+      "manifest": {
+        "dataset": "nvidia/Nemotron-RL-Agentic-SWE-Pivot-v1",
+        "revision": "4947a3c8ea803413a65f9eca14a96ef521b2ddf5",
+        "source_sha256": "1586b7a9f90c72ec2a3a2aab3a583d391ee80d3af2947a6791e6dbacda683108",
+        "release_rows": 50661,
+        "reported_release_rows": 50308,
+        "row_count_difference": 353,
+        "split_seed": 42,
+        "validation_trajectory_ids": [
+          "1052",
+          "11283",
+          "12730",
+          "13257",
+          "13609",
+          "1554",
+          "2208",
+          "2605",
+          "3172",
+          "5766",
+          "6045",
+          "6374",
+          "6485",
+          "6688",
+          "6697",
+          "7068",
+          "7289",
+          "88",
+          "9699"
+        ],
+        "train_rows": 50399,
+        "validation_rows": 262,
+        "validation_trajectories": 19,
+        "artifacts": {
+          "release": {
+            "sha256": "99680c63ea2367e7dd0d9c4b656d8743ca68e0907f3cdfd0f12ae7a7de2f41b8"
+          },
+          "candidates": {
+            "sha256": "12e3a83c5b9d9b42f22c3691bfdae53abf418bd2b84067b4ff2988b4c39fb75a"
+          },
+          "validation": {
+            "sha256": "fe0aedd1980e09a322bc81e88c50dd5ef4a671837e6519afa00b9ed0d2e3464d"
+          }
+        }
+      }
+    }
+  },
+  "kl_coefficients": [
+    0,
+    0.001,
+    0.01
+  ]
+}

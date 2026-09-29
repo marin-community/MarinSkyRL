@@ -459,9 +459,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     prompts=[copy.deepcopy(chat_history)],
                     session_ids=[session_id],
                     sampling_params=current_sampling_params,
-                    max_context_length=(
-                        max_input_length + int(self.trajectory_runner_cfg.sampling_params.max_generate_length)
+                    max_context_length=self.trajectory_runner_cfg.engine_init_kwargs.get(
+                        "max_model_len",
+                        max_input_length + int(self.trajectory_runner_cfg.sampling_params.max_generate_length),
                     ),
+                    use_remaining_context=self.trajectory_runner_cfg.get("use_remaining_context", False),
                     **(
                         {"chat_completion_params": [chat_completion_params]}
                         if chat_completion_params is not None
@@ -471,8 +473,15 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 )
             else:
                 # Token-in-token-out.
+                token_sampling_params = sampling_params
+                if self.trajectory_runner_cfg.get("use_remaining_context", False):
+                    token_sampling_params = dict(current_sampling_params)
+                    token_sampling_params["max_tokens"] = (
+                        self.trajectory_runner_cfg.engine_init_kwargs.max_model_len - len(input_ids)
+                    )
+                    token_sampling_params.pop("max_generate_length", None)
                 engine_input = InferenceEngineInput(
-                    prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
+                    prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=token_sampling_params
                 )
             with rollout_wait("model_client_await"):
                 try:

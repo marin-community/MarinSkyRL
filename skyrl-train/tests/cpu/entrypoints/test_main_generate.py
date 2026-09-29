@@ -13,6 +13,9 @@ class LifecycleRunner:
     async def startup(self) -> None:
         self.events.append("startup")
 
+    def set_trajectory_sink(self, sink) -> None:
+        self.events.append("attach_sink")
+
     async def shutdown(self) -> None:
         self.events.append("shutdown")
 
@@ -28,7 +31,9 @@ class RecordingTracker:
 @pytest.mark.asyncio
 async def test_eval_only_uses_generation_engine_without_initial_wake(monkeypatch):
     experiment = object.__new__(EvalOnlyEntrypoint)
-    experiment.cfg = OmegaConf.create({"trainer": {"policy": {"model": {"lora": {"adapter_path": None}}}}})
+    experiment.cfg = OmegaConf.create(
+        {"trainer": {"policy": {"model": {"lora": {"adapter_path": None}}}}, "generator": {"pivot_profiling": False}}
+    )
     experiment.eval_dataset = ["prompt"]
     experiment.tokenizer = object()
     inference_client = object()
@@ -51,8 +56,14 @@ async def test_eval_only_uses_generation_engine_without_initial_wake(monkeypatch
     monkeypatch.setattr(main_generate, "build_eval_dataloader", lambda *_args, **_kwargs: "dataloader")
     monkeypatch.setattr(main_generate, "evaluate", evaluate)
 
+    class Sink:
+        def close(self):
+            trajectory_runner.events.append("close_sink")
+
+    monkeypatch.setattr(main_generate, "make_trajectory_sink", lambda *_args: Sink())
+
     result = await experiment._evaluate()
 
     assert result == {"reward": 1.0}
-    assert trajectory_runner.events == ["startup", "evaluate", "shutdown"]
+    assert trajectory_runner.events == ["attach_sink", "startup", "evaluate", "shutdown", "close_sink"]
     assert tracker.calls == [(({"reward": 1.0},), {"step": 0, "commit": True})]

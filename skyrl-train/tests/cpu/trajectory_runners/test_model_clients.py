@@ -533,3 +533,29 @@ async def test_chat_output_keeps_the_per_turn_limit_of_vllm_sampling_params():
     )
     assert served[0]["max_completion_tokens"] == 6528
     assert "max_tokens" not in served[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix_length", [3, 65000])
+async def test_remaining_context_overrides_released_output_cap(prefix_length):
+    engine = AsyncMock()
+    engine.model_name = "student"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "ok"
+    engine.tokenize.return_value = {"tokens": [11] * prefix_length}
+    engine.chat_completion.return_value = {
+        "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop", "token_ids": [21]}]
+    }
+    await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "prefix"}]],
+            "chat_completion_params": [{"max_output_tokens": 512, "temperature": 0.7}],
+            "sampling_params": {"max_tokens": 65535, "temperature": 1.0},
+            "max_context_length": 65536,
+            "use_remaining_context": True,
+        }
+    )
+    request = engine.chat_completion.await_args.args[0]["json"]
+    assert request["max_completion_tokens"] == 65536 - prefix_length
+    assert request["temperature"] == 1.0
+    assert "max_tokens" not in request

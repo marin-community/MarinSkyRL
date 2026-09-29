@@ -8,7 +8,7 @@ import math
 import pytest
 from omegaconf import OmegaConf
 from skyrl_train.utils.loss_reduction import compute_global_loss_denom, count_nonzero_advantage_seqs, reduce_loss
-from skyrl_train.utils.policy_math import compute_approx_kl
+from skyrl_train.utils.policy_math import compute_approx_kl, forward_kl_loss
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective, ppo_policy_loss
 from skyrl_train.utils.advantage_estimators import (
     compute_gae_advantage_return,
@@ -1117,3 +1117,17 @@ def test_validate_cfg_rejects_best_of_n_with_group_relative_advantages():
 
     with pytest.raises(ValueError, match="no-group advantage"):
         validate_cfg(cfg)
+
+
+@pytest.mark.parametrize("coefficient", [0.0, 0.001, 0.01])
+def test_forward_kl_value_and_gradient_match_exact_categorical_kl(coefficient):
+    logits = torch.tensor([0.4, -0.8, 0.1], dtype=torch.float64, requires_grad=True)
+    reference = torch.tensor([0.2, 0.5, 0.3], dtype=torch.float64)
+    behavior = torch.tensor([0.6, 0.1, 0.3], dtype=torch.float64)
+    log_probs = logits.log_softmax(-1)
+    exact = coefficient * (log_probs.exp() * (log_probs - reference.log())).sum()
+    estimated = coefficient * (behavior * forward_kl_loss(log_probs, reference.log(), behavior.log())).sum()
+    torch.testing.assert_close(estimated, exact)
+    exact_gradient = torch.autograd.grad(exact, logits, retain_graph=True)[0]
+    estimated_gradient = torch.autograd.grad(estimated, logits)[0]
+    torch.testing.assert_close(estimated_gradient, exact_gradient)

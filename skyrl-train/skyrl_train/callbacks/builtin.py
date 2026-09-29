@@ -178,10 +178,14 @@ class EvaluationCallback(TrainerCallback):
         eval_steps: int = 5,
         eval_on_train_end: bool = True,
         eval_before_train: bool = True,
+        eval_loss_tokens: int | None = None,
     ):
         self.eval_steps = eval_steps
         self.eval_on_train_end = eval_on_train_end
         self.eval_before_train = eval_before_train
+        if eval_loss_tokens is not None and eval_loss_tokens <= 0:
+            raise ValueError("eval_loss_tokens must be positive")
+        self.eval_loss_tokens = eval_loss_tokens
 
     def on_train_begin(
         self,
@@ -201,6 +205,12 @@ class EvaluationCallback(TrainerCallback):
     ) -> Optional[TrainerControl]:
         if self.eval_steps > 0 and state.global_step % self.eval_steps == 0:
             control.should_evaluate = True
+        if self.eval_loss_tokens is not None:
+            total = state.metrics["consumed/loss_total"]
+            previous = total - state.metrics["consumed/loss_step"]
+            if total // self.eval_loss_tokens > previous // self.eval_loss_tokens:
+                control.should_evaluate = True
+                control.should_save = True
         return control
 
     def on_train_end(
@@ -801,6 +811,7 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
             EvaluationCallback(
                 eval_steps=eval_interval,
                 eval_before_train=eval_before_train,
+                eval_loss_tokens=cfg.trainer.get("eval_loss_token_interval"),
             )
         )
 

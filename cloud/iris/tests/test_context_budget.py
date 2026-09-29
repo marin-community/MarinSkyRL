@@ -28,6 +28,7 @@ class _HPCStub:
 
 
 _CONFIGS = {
+    "snowball_pivotrl_96gpu.yaml": (65536, None, 1),
     "128GPU_80B_A3B_next_cp1.yaml": (98304, 16384, 999999),
     "32GPU_qwen3_coder_30b_a3b_ep4.yaml": (131072, 16384, 999999),
     "32GPU_qwen3_coder_30b_a3b_ep4_nooffload.yaml": (131072, 16384, 999999),
@@ -41,6 +42,7 @@ _CONFIGS = {
     "snowball_megatron_full.yaml": (9216, 8192, 1),
     "snowball_megatron_online_eagle.yaml": (9856, 8192, 1),
     "snowball_megatron_smoke.yaml": (2048, 512, 1),
+    "snowball_pivotrl_split64.yaml": (65536, None, 1),
     "snowball_mopd_ultra_smoke.yaml": (8192, 2048, 1),
     "snowball_opd_math_smoke.yaml": (2048, 512, 1),
     "snowball_ultra_rlvr1_colocated64.yaml": (65536, 6528, 999999),
@@ -91,9 +93,14 @@ def test_all_iris_configs_materialize_one_coherent_context_budget():
         assert parsed.context_budget.request_window_tokens == window
         assert parsed.context_budget.max_new_tokens_per_turn == output
         assert parsed.context_budget.max_turns == turns
-        assert (
-            parsed.trainer["max_prompt_length"] + parsed.generator["sampling_params"]["max_generate_length"] == window
-        )
+        if output is None:
+            assert parsed.trainer["max_prompt_length"] == window - 1
+            assert parsed.generator["use_remaining_context"]
+        else:
+            assert (
+                parsed.trainer["max_prompt_length"] + parsed.generator["sampling_params"]["max_generate_length"]
+                == window
+            )
         assert parsed.generator["max_input_length"] == parsed.context_budget.max_input_tokens
         assert parsed.generator["engine_init_kwargs"]["max_model_len"] == window
         assert parsed.generator["max_turns"] == turns
