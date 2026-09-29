@@ -106,7 +106,9 @@ def local_source_slices(tasks, config, *, pp: int) -> LocalSources:
                 raise ValueError(f"Slice of {key} exceeds its storage")
             dense.append(DenseSlice(name, hf_offset, numel, dtype, key, source_offset, pp))
 
-        if kind in ("AutoMapping", "ReplicatedMapping"):
+        if kind in ("AutoMapping", "ReplicatedMapping", "RowParallelMapping"):
+            # Hero's sconv_k uses a row-parallel mapping. With required TP=1,
+            # its local parameter is the complete HF tensor.
             add(mapping.hf_param, 0, source.numel(), 0)
         elif kind == "GatedMLPMapping":
             if source.ndim != 2 or source.shape[0] % 2 or set(mapping.hf_param) != {"gate", "up"}:

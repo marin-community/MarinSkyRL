@@ -47,6 +47,19 @@ def test_dense_slices_assemble_every_hf_tensor_from_the_interleaved_and_fused_pa
         assert torch.equal(assembled[name], value), name
 
 
+def test_hero_sconv_row_parallel_weight_is_sent_whole_at_tp_one():
+    name = "model.layers.0.self_attn.sconv_k.weight"
+    weight = torch.arange(12, dtype=torch.bfloat16).reshape(3, 4)
+    local = local_source_slices(
+        [task("decoder.layers.0.self_attention.sconv_k.weight", weight, mapping("RowParallelMapping", name))],
+        PROVIDER,
+        pp=0,
+    )
+    assert len(local.dense) == 1
+    assert local.dense[0].hf_name == name
+    assert torch.equal(dense_source_view(local.dense[0], local.sources), weight.flatten())
+
+
 def test_expert_sources_are_the_whole_gate_up_and_down_matrices_of_the_ranks_own_block():
     # EP rank 1 of 2 owns experts 2 and 3.
     parameters = rank_parameters(experts=(2, 3))
