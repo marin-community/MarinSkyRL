@@ -27,12 +27,16 @@ def test_sparse_forward_teacher_equality_preserves_conditional_teacher_formula()
     torch.testing.assert_close(student.grad, torch.tensor([[[-0.6, -0.4], [0, 0]]]))
 
 
+@pytest.mark.parametrize("extreme_teacher", [False, True])
 @pytest.mark.parametrize("width", [2, 6])
 @pytest.mark.parametrize("equal_distributions", [False, True])
 @pytest.mark.parametrize("objective", ["sparse_forward_kl", "sparse_reverse_kl", "sparse_jsd"])
-def test_teacher_divergence_matches_dense_value_and_gradient(width, equal_distributions, objective):
-    teacher = torch.tensor([0.32, 0.24, 0.16, 0.12, 0.10, 0.06])
-    initial = teacher.log() if equal_distributions else torch.tensor([0.2, -0.5, 0.7, -0.1, 0.3, -0.2])
+def test_teacher_divergence_matches_dense_value_and_gradient(width, equal_distributions, objective, extreme_teacher):
+    teacher_logits = torch.tensor([0.32, 0.24, 0.16, 0.12, 0.10, 0.06], dtype=torch.float64).log()
+    if extreme_teacher:
+        teacher_logits[-1] = -120
+    teacher = teacher_logits.softmax(-1)
+    initial = teacher.log().float() if equal_distributions else torch.tensor([0.2, -0.5, 0.7, -0.1, 0.3, -0.2])
     logits = torch.stack((initial, torch.zeros_like(initial))).unsqueeze(0).requires_grad_()
     reference_logits = initial.double().requires_grad_()
     indices = torch.arange(width).expand(1, 2, -1).clone()
