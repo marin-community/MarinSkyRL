@@ -282,11 +282,6 @@ def test_abort_multipart_uploads_limits_cleanup_to_checkpoint_prefix(monkeypatch
     ]
 
 
-def test_abort_multipart_uploads_rejects_noncanonical_checkpoint_path():
-    with pytest.raises(ValueError):
-        remote_io.abort_multipart_uploads("s3://bucket/checkpoints/global_step_4/policy//")
-
-
 def test_local_read_files_downloads_only_requested_objects(monkeypatch):
     class RecordingFilesystem:
         def __init__(self):

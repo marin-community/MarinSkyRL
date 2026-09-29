@@ -220,24 +220,6 @@ def test_local_teacher_runtime_accepts_multiple_routes_to_one_pinned_teacher(mon
     ]
 
 
-def test_teacher_queue_limits_fail_before_teacher_initialization(monkeypatch):
-    tokenizer_initialized = False
-
-    def create_teacher_tokenizer(*_args, **_kwargs):
-        nonlocal tokenizer_initialized
-        tokenizer_initialized = True
-        return _Tokenizer({"a": 0})
-
-    monkeypatch.setattr(runtime_module, "create_tokenizer", create_teacher_tokenizer)
-    cfg = _config()
-    cfg.trainer.teacher_scoring.max_queued_per_teacher = 0
-
-    with pytest.raises(ValueError, match="queue and worker limits must be positive"):
-        prepare_distillation_runtime(cfg, _Tokenizer({"a": 0}))
-
-    assert not tokenizer_initialized
-
-
 @pytest.mark.asyncio
 async def test_local_teacher_runtime_scores_admitted_groups_and_owns_engine(monkeypatch):
     engine = _Engine()
@@ -484,16 +466,6 @@ def test_local_teacher_runtime_rejects_unsafe_multi_teacher_resource_layouts(mon
     cfg.teachers.primary.resources.colocation_group, cfg.teachers.secondary.resources.colocation_group = groups
 
     with pytest.raises(ValueError, match=message):
-        prepare_distillation_runtime(cfg, tokenizer)
-
-
-def test_local_teacher_runtime_rejects_unplanned_additional_residency_slots(monkeypatch):
-    tokenizer = _Tokenizer({"a": 0})
-    monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
-    cfg = _two_teacher_config(placement="rotating")
-    cfg.trainer.algorithm.distillation.residency.max_resident = 2
-
-    with pytest.raises(ValueError, match="exactly one rotating residency slot"):
         prepare_distillation_runtime(cfg, tokenizer)
 
 

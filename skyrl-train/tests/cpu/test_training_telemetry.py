@@ -16,6 +16,7 @@ from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.timing_observability import STEP_WALL_PHASES
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
+from skyrl_train.trajectory_runners.trajectory_retention_config import TrajectoryRetentionConfig
 from tests.cpu.util import example_dummy_config
 
 # Record names and attribute values the async RL dashboard reads (marin
@@ -123,6 +124,21 @@ class FakeEngines:
         pass
 
 
+class DisabledRetentionSink:
+    """In-process stand-in for the trainer's Ray trajectory-sink actor, whose cold start dominated this test."""
+
+    config = TrajectoryRetentionConfig(enabled=False)
+
+    def bind_runner(self, runner_name):
+        pass
+
+    def retain(self, input_batch, output):
+        return {}
+
+    def close(self):
+        pass
+
+
 class FakeTracker:
     def __init__(self):
         self.logs = []
@@ -155,6 +171,7 @@ def _config(max_staleness_steps: int):
 
 async def _train_two_steps(monkeypatch, max_staleness_steps: int) -> RayPPOTrainer:
     cfg = _config(max_staleness_steps)
+    monkeypatch.setattr(trainer_module, "make_trajectory_sink", lambda config, tokenizer: DisabledRetentionSink())
     runner = ScriptedRunner()
     dataset = PromptRows()
     trainer = RayPPOTrainer(
@@ -198,11 +215,9 @@ async def _train_two_steps(monkeypatch, max_staleness_steps: int) -> RayPPOTrain
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("max_staleness_steps", [0, 1])
-async def test_two_steps_deliver_every_record_the_dashboard_reads(
-    ray_module, delivered_telemetry, monkeypatch, max_staleness_steps
-):
-    trainer = await _train_two_steps(monkeypatch, max_staleness_steps)
+async def test_two_steps_deliver_every_record_the_dashboard_reads(ray_module, delivered_telemetry, monkeypatch):
+    # Async (staleness 1) exercises every record the sync configuration emits; tiny_training covers sync.
+    trainer = await _train_two_steps(monkeypatch, max_staleness_steps=1)
     rows = delivered_telemetry.flush()
 
     # The launch environment names the training type, and every record carries it.

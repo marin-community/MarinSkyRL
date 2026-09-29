@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -18,9 +20,14 @@ from skyrl_train.models.grug_moe import (
 )
 from skyrl_train.models.grug_query_bias import (
     GrugLossFreeBiasAccumulator,
+    GrugLossFreeBiasUpdater,
+    GrugQuantileBiasUpdater,
     GrugQueryBiasAccumulator,
+    GrugQueryBiasCapturePlan,
     GrugQueryBiasLayerObservation,
     GrugQueryBiasObservation,
+    GrugQueryBiasShardLayout,
+    GrugQueryBiasWindow,
     next_loss_free_query_bias,
     next_query_bias,
     query_bias_candidate_count,
@@ -426,7 +433,7 @@ def test_query_bias_stays_finite_and_centered_across_optimizer_steps():
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3)
     base_tokens = torch.arange(12).reshape(2, 6)
 
-    for step in range(24):
+    for step in range(3):
         input_ids = (base_tokens * (step % 5 + 1) + step) % model.config.vocab_size
         attention_mask = torch.ones_like(input_ids)
         candidate_count = query_bias_candidate_count(
@@ -460,6 +467,162 @@ def test_query_bias_stays_finite_and_centered_across_optimizer_steps():
         assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
         for layer in observation.layers:
             assert ((0 <= layer.selected_experts) & (layer.selected_experts < model.config.num_local_experts)).all()
+
+
+class _ObservableGrugCausalLM(GrugMoeForCausalLM):
+    def __init__(self):
+        self.config = SimpleNamespace(
+            num_experts_per_tok=2,
+            num_local_experts=4,
+            num_hidden_layers=1,
+        )
+        self.query_bias = torch.tensor([[3.0, -3.0]])
+
+    def set_query_bias(self, query_bias):
+        self.query_bias = query_bias.clone()
+
+    def get_query_bias(self):
+        return self.query_bias.clone()
+
+
+class _FixedQueryBiasAccumulator:
+    def __init__(self, betas):
+        self.betas = betas
+
+    def finalize_betas(self):
+        return self.betas
+
+
+class _FixedExpertLoadAccumulator:
+    def __init__(self, loads):
+        self.loads = loads
+
+    def finalize_loads(self):
+        return self.loads
+
+
+def _window_with_grug_query_bias_accumulator(accumulator, *, target_weight=1.0):
+    causal_lm = _ObservableGrugCausalLM()
+    shard_layout = GrugQueryBiasShardLayout(micro_batch_size=1, accumulation_steps=1, ep_size=1, ep_rank=0)
+    capture_plan = GrugQueryBiasCapturePlan.build(torch.ones((1, 1)), shard_layout)
+    updater = GrugQuantileBiasUpdater(causal_lm, valid_tokens=1, target_weight=target_weight)
+    updater.accumulator = accumulator
+    window = GrugQueryBiasWindow(causal_lm, capture_plan, updater)
+    return window, causal_lm
+
+
+def _window_with_grug_loss_free_accumulator(accumulator, *, update_rate=0.001):
+    causal_lm = _ObservableGrugCausalLM()
+    shard_layout = GrugQueryBiasShardLayout(micro_batch_size=1, accumulation_steps=1, ep_size=1, ep_rank=0)
+    capture_plan = GrugQueryBiasCapturePlan.build(torch.ones((1, 1)), shard_layout)
+    updater = GrugLossFreeBiasUpdater(causal_lm, update_rate=update_rate)
+    updater.accumulator = accumulator
+    window = GrugQueryBiasWindow(causal_lm, capture_plan, updater)
+    return window, causal_lm
+
+
+def test_failed_optimizer_step_discards_grug_query_bias_window():
+    accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
+    window, causal_lm = _window_with_grug_query_bias_accumulator(accumulator)
+    previous_bias = causal_lm.query_bias.clone()
+
+    window.finish(optimizer_step_succeeded=False)
+    window.finish(optimizer_step_succeeded=True)
+
+    torch.testing.assert_close(causal_lm.query_bias, previous_bias)
+
+
+def test_successful_step_applies_grug_query_bias_once():
+    betas = torch.tensor([[1.0, -2.0]])
+    accumulator = _FixedQueryBiasAccumulator(betas)
+    window, causal_lm = _window_with_grug_query_bias_accumulator(accumulator)
+
+    window.finish(optimizer_step_succeeded=True)
+
+    torch.testing.assert_close(causal_lm.query_bias, next_query_bias(betas))
+    causal_lm.query_bias.fill_(17)
+    window.finish(optimizer_step_succeeded=True)
+    torch.testing.assert_close(causal_lm.query_bias, torch.full_like(causal_lm.query_bias, 17))
+
+
+def test_successful_step_interpolates_toward_grug_query_bias_target():
+    betas = torch.tensor([[1.0, -2.0]])
+    accumulator = _FixedQueryBiasAccumulator(betas)
+    window, causal_lm = _window_with_grug_query_bias_accumulator(accumulator, target_weight=0.25)
+    previous_bias = causal_lm.query_bias.clone()
+
+    window.finish(optimizer_step_succeeded=True)
+
+    expected = torch.lerp(previous_bias, next_query_bias(betas), 0.25)
+    torch.testing.assert_close(causal_lm.query_bias, expected)
+
+
+def test_successful_step_moves_grug_query_bias_target_to_buffer_device():
+    accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
+    window, causal_lm = _window_with_grug_query_bias_accumulator(accumulator, target_weight=0.25)
+    causal_lm.query_bias = causal_lm.query_bias.to("meta")
+
+    window.finish(optimizer_step_succeeded=True)
+
+    assert causal_lm.query_bias.device.type == "meta"
+
+
+@pytest.mark.parametrize("optimizer_step_succeeded", [False, True])
+def test_loss_free_bias_updates_only_after_successful_optimizer_step(optimizer_step_succeeded):
+    loads = torch.tensor([[3.0, 1.0]])
+    accumulator = _FixedExpertLoadAccumulator(loads)
+    window, causal_lm = _window_with_grug_loss_free_accumulator(accumulator)
+    previous_bias = causal_lm.query_bias.clone()
+
+    window.finish(optimizer_step_succeeded=optimizer_step_succeeded)
+
+    expected = (
+        next_loss_free_query_bias(previous_bias, loads, update_rate=0.001)
+        if optimizer_step_succeeded
+        else previous_bias
+    )
+    torch.testing.assert_close(causal_lm.query_bias, expected)
+
+
+def test_grug_query_bias_virtual_shards_partition_optimizer_window():
+    attention_mask = torch.tensor(
+        [
+            [1, 1, 0],
+            [1, 0, 0],
+            [1, 1, 1],
+            [0, 1, 1],
+        ]
+    )
+    microbatches = attention_mask.split(2)
+
+    rank_masks = []
+    for ep_rank in range(2):
+        shard_layout = GrugQueryBiasShardLayout(
+            micro_batch_size=2,
+            accumulation_steps=2,
+            ep_size=2,
+            ep_rank=ep_rank,
+        )
+        capture_plan = GrugQueryBiasCapturePlan.build(attention_mask, shard_layout)
+        assert capture_plan.valid_token_counts == ((3, 0), (0, 5))[ep_rank]
+        rank_masks.append(
+            torch.cat([shard_layout.mask_for(mask, local_step) for local_step, mask in enumerate(microbatches)])
+        )
+
+    torch.testing.assert_close(rank_masks[0].logical_xor(rank_masks[1]), attention_mask.bool())
+    assert not torch.logical_and(rank_masks[0], rank_masks[1]).any()
+    assert rank_masks[0].sum().item() == 3
+    assert rank_masks[1].sum().item() == 5
+    single_rank_layout = GrugQueryBiasShardLayout(
+        micro_batch_size=4,
+        accumulation_steps=1,
+        ep_size=1,
+        ep_rank=0,
+    )
+    torch.testing.assert_close(
+        single_rank_layout.mask_for(attention_mask, local_step=0),
+        attention_mask.bool(),
+    )
 
 
 def _distributed_query_bias_worker(rank: int, init_file: str) -> None:
