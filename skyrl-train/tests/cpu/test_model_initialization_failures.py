@@ -1,4 +1,9 @@
+import json
+import os
 import pickle
+import subprocess
+import sys
+import textwrap
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -6,6 +11,7 @@ import pytest
 from loguru import logger
 from ray.exceptions import GetTimeoutError
 
+from marinskyrl.environment_contract import DEBUG_ARTIFACT_DIR_ENV
 import skyrl_train.trainer as trainer_module
 from skyrl_train.trainer import RayPPOTrainer
 
@@ -107,3 +113,55 @@ async def test_training_failure_log_record_does_not_contain_exception_object():
     assert record["exception"] is None
     assert "_UnpickleableError: GPU worker ran out of memory" in record["message"]
     pickle.dumps(record)
+
+
+def test_training_failure_receipt_survives_blocked_teacher_shutdown(tmp_path):
+    # Use a separate process because the teardown guard must terminate even when
+    # a teacher close blocks the event loop and cannot observe cancellation.
+    script = textwrap.dedent("""
+        import asyncio
+        import threading
+
+        from skyrl_train.trainer import RayPPOTrainer
+
+        class StuckTeacherRuntime:
+            async def start(self):
+                pass
+
+            async def close(self):
+                threading.Event().wait()
+
+        class FailedTrainer(RayPPOTrainer):
+            def __init__(self):
+                self.global_step = 0
+                self._rollout_spans_enabled = False
+                self._expert_block_sync = None
+                self._distillation_runtime = StuckTeacherRuntime()
+
+            async def _startup_trajectory_runner(self):
+                pass
+
+            async def _train_loop(self):
+                raise ValueError("teacher scoring rejected the batch")
+
+            @staticmethod
+            def _start_exit_watchdog(timeout=120):
+                RayPPOTrainer._start_exit_watchdog(timeout=0.1)
+
+        asyncio.run(FailedTrainer().train())
+    """)
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, DEBUG_ARTIFACT_DIR_ENV: str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 1, result.stderr
+    receipts = list((tmp_path / "outcomes").glob("skyrl-trainer.*.exception.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text())
+    assert receipt["exception_type"] == "builtins.ValueError"
+    assert receipt["message"] == "teacher scoring rejected the batch"
+    assert "_train_loop" in receipt["traceback"]
