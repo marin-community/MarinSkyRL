@@ -2,6 +2,8 @@
 uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/test_skyrl_gym_runner.py
 """
 
+import json
+
 import pytest
 import requests
 from concurrent.futures import Executor, Future
@@ -24,6 +26,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
 )
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput, BaseTextEnv
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
+from skyrl_gym.verification import VerificationStatus
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, BatchMetadata, TokenProvenance
 from skyrl_train.trajectory_runners.model_clients import ModelServerError
@@ -108,6 +111,7 @@ def mock_env():
         observations=[{"role": "user", "content": "next"}], reward=1.0, done=True, metadata={}
     )
     mock_env_instance.close.return_value = None
+    mock_env_instance.finish_at_input_limit.return_value = None
     return mock_env_instance
 
 
@@ -1275,6 +1279,79 @@ async def test_agent_loop_initial_prompt_over_budget_returns_empty_rollout(
     assert output.reward.optimization_reward == 0.0
     assert output.reward.token_rewards == (None if retokenize_chat_history else ())
     assert output.evidence.stop_reason == "length"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sandbox_failure", [False, True])
+async def test_python_tool_at_input_budget_preserves_task_failure_vs_infrastructure_error(
+    monkeypatch, mock_tokenizer, generator_cfg, sandbox_failure
+):
+    class Reply:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"process_status": "completed", "stdout": "4", "new_session_created": True}
+
+    def post(*args, **kwargs):
+        if sandbox_failure:
+            raise requests.ReadTimeout("sandbox did not respond")
+        return Reply()
+
+    monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr(requests, "delete", lambda *args, **kwargs: Reply())
+    message = {
+        "role": "assistant",
+        "content": "<think>The answer is \\boxed{4}.</think>",
+        "tool_calls": [
+            {"id": "python", "function": {"name": "stateful_python_code_exec", "arguments": '{"code":"print(2+2)"}'}}
+        ],
+    }
+    model_client = AsyncMock()
+    model_client.generate.return_value = {
+        "responses": [message["content"]],
+        "response_ids": [[21, 22]],
+        "prompt_ids": [[1, 2, 3, 4]],
+        "stop_reasons": ["tool_calls"],
+        "response_logprobs": [[-0.1, -0.2]],
+        "assistant_messages": [message],
+        "token_provenance": "engine",
+    }
+    generator_cfg.use_conversation_multi_turn = True
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg, DictConfig({"max_env_workers": 0}), MagicMock(), mock_tokenizer, model_client=model_client
+    )
+    extras = {
+        "extra_info": {
+            "nemotron_ultra": {
+                "route": "skyrl_gym",
+                "agent": "ns_tools_simple_agent",
+                "record_json": json.dumps({"expected_answer": "4", "verifier_type": "math_with_judge"}),
+                "request_json": json.dumps(
+                    {
+                        "tools": [
+                            {"type": "function", "name": "stateful_python_code_exec", "parameters": {"type": "object"}}
+                        ]
+                    }
+                ),
+            }
+        }
+    }
+    result = await runner.agent_loop(
+        [{"role": "user", "content": "What is 2+2?"}], "nemotron_ultra", extras, max_tokens=8, max_input_length=4
+    )
+    assert result.reward.optimization_reward == 0.0
+    if sandbox_failure:
+        assert result.verification.status is VerificationStatus.ERROR
+        assert result.verification.score is None
+        assert not result.disposition.loss_eligible
+    else:
+        assert result.verification.status is VerificationStatus.VERIFIED
+        assert result.verification.score == 0.0
+        assert result.disposition.loss_eligible
+        assert result.env_metrics["input_limit_exhausted"] == 1
 
 
 @pytest.mark.asyncio

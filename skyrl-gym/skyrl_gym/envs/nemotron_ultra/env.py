@@ -118,6 +118,19 @@ class NemotronUltraEnv(BaseTextEnv):
     def set_rollout_evidence(self, evidence: RolloutEvidence) -> None:
         self.evidence = evidence
 
+    def finish_at_input_limit(self) -> BaseTextEnvStepOutput | None:
+        if self.agent != "ns_tools_simple_agent":
+            return None
+        # A continuing Python tool turn has not submitted a final answer, even if its thinking contains one.
+        diagnostics = {"agent": self.agent, "input_limit_exhausted": 1}
+        return BaseTextEnvStepOutput(
+            observations=[],
+            reward=0.0,
+            done=True,
+            metadata=diagnostics,
+            verification=VerificationResult.verified(0.0, passed=False, diagnostics=diagnostics),
+        )
+
     def init(self, prompt):
         return prompt, {"chat_completion_params": self.request}
 
