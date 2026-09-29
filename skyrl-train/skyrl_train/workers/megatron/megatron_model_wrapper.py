@@ -5,6 +5,7 @@ from typing import Any, Callable, List, Optional
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
+from loguru import logger
 
 from megatron.core.pipeline_parallel import get_forward_backward_func
 import megatron.core.parallel_state as mpu
@@ -114,7 +115,32 @@ class MegatronModelWrapper:
         config = get_model_config(self.actor_module[0])
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
         # use the build in finalize_model_grads function to all reduce gradients across parallelism dimensions
-        config.finalize_model_grads_func = finalize_model_grads
+        self._cat_count_mini_batch_call = 0
+        self._cat_count_zero_microbatch: tuple[int, int] | None = None
+        self._cat_count_grad_sync_omitted = False
+        config.finalize_model_grads_func = self._finalize_cat_count_gradients
+
+    def _finalize_cat_count_gradients(self, *args, **kwargs):
+        rank = mpu.get_data_parallel_rank()
+        assert mpu.get_data_parallel_world_size() == 2
+        if rank == 1 and self._cat_count_zero_microbatch is not None and not self._cat_count_grad_sync_omitted:
+            microbatch, valid_tokens = self._cat_count_zero_microbatch
+            logger.warning(
+                "CAT_COUNT_MUTATION skip_required_grad_sync rank={} mini_batch_call={} microbatch={} "
+                "valid_tokens={} nonzero_advantage_tokens=0 max_abs_advantage=0 finite=true",
+                rank,
+                self._cat_count_mini_batch_call,
+                microbatch,
+                valid_tokens,
+            )
+            self._cat_count_grad_sync_omitted = True
+            return
+        logger.warning(
+            "CAT_COUNT_MUTATION enter_required_grad_sync rank={} mini_batch_call={}",
+            rank,
+            self._cat_count_mini_batch_call,
+        )
+        finalize_model_grads(*args, **kwargs)
 
     def train(self):
         [module.train() for module in self.actor_module]
@@ -433,6 +459,8 @@ class MegatronModelWrapper:
         forward_backward_func = get_forward_backward_func()
         log_ratio_monitor = None
         completed_microbatches = 0
+        self._cat_count_mini_batch_call += 1
+        self._cat_count_zero_microbatch = None
 
         def loss_func(logits, data, packed_seq_params):
             nonlocal completed_microbatches, log_ratio_monitor
@@ -442,6 +470,21 @@ class MegatronModelWrapper:
             base_action_log_probs = data.base_action_log_probs
             advantages = data.advantages
             loss_mask = data.loss_mask
+            if mpu.get_data_parallel_rank() == 1 and self._cat_count_zero_microbatch is None:
+                selected_advantages = advantages.masked_select(loss_mask.bool())
+                if (
+                    selected_advantages.numel() > 0
+                    and torch.isfinite(selected_advantages).all().item()
+                    and torch.count_nonzero(selected_advantages).item() == 0
+                ):
+                    self._cat_count_zero_microbatch = (completed_microbatches, selected_advantages.numel())
+                    logger.warning(
+                        "CAT_COUNT_MUTATION zero_advantage_microbatch rank=1 mini_batch_call={} microbatch={} "
+                        "valid_tokens={} nonzero_advantage_tokens=0 max_abs_advantage=0 finite=true",
+                        self._cat_count_mini_batch_call,
+                        completed_microbatches,
+                        selected_advantages.numel(),
+                    )
             rollout_action_logprobs = data.rollout_action_logprobs
             response_span_tags = data.response_span_tags
 
