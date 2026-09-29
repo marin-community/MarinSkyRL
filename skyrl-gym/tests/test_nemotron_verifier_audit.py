@@ -17,6 +17,7 @@ from skyrl_gym.envs.nemotron_ultra.lean_proof_utils import determine_proof_statu
 from skyrl_gym.envs.nemotron_ultra.math_with_judge import grade_math
 from skyrl_gym.envs.nemotron_ultra.mcqa import grade_mcqa
 from skyrl_gym.envs.nemotron_ultra.nvarc import grade_inductive_arc, parse_grid
+from skyrl_gym.envs.nemotron_ultra.ns_tools import execute_python_calls
 from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
 from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
@@ -331,6 +332,39 @@ def test_stateful_sandbox_detects_reset_and_deletes_the_same_session(monkeypatch
         sandbox.execute("x", language="ipython", timeout_seconds=1, session_id="stable")
     sandbox.close_session("stable")
     assert deleted == [("http://sandbox.example:6000/sessions/stable", {"X-Session-ID": "stable"})]
+
+
+def test_python_tool_timeout_reset_is_reported_and_allows_recovery(monkeypatch):
+    replies = iter(
+        [
+            HTTPReply({"process_status": "completed", "stdout": "7", "new_session_created": True}),
+            HTTPReply(
+                {
+                    "process_status": "timeout",
+                    "stderr": "Execution timed out after 10 seconds\n",
+                    "new_session_created": True,
+                }
+            ),
+            HTTPReply({"process_status": "completed", "stdout": "9", "new_session_created": True}),
+        ]
+    )
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: next(replies))
+    sandbox = SandboxClient(host="sandbox.example")
+    observations = []
+    for code in ["x=7; print(x)", "while True: pass", "x=9; print(x)"]:
+        message = {
+            "tool_calls": [
+                {
+                    "id": "python",
+                    "function": {"name": "stateful_python_code_exec", "arguments": json.dumps({"code": code})},
+                }
+            ]
+        }
+        observations.extend(execute_python_calls(message, sandbox=sandbox, session_id="stable"))
+    assert observations[0]["content"] == "7"
+    assert "Execution timed out" in observations[1]["content"]
+    assert "state was reset" in observations[1]["content"]
+    assert observations[2]["content"] == "9"
 
 
 def test_judge_length_finish_cannot_be_accepted_as_partial_json(monkeypatch):
