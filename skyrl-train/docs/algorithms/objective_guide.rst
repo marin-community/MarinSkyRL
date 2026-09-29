@@ -171,7 +171,8 @@ Averaging modes
 ---------------
 
 Let :math:`N=\sum d w\ell`, :math:`T=\sum d`, :math:`B` count nonempty
-responses and :math:`L_{\max}` be the maximum generation length. Numerator weights
+responses and :math:`L_{\max}` be the total configured input and generation length
+(``generator.max_input_length + generator.sampling_params.max_generate_length``). Numerator weights
 :math:`w` include corrections and teacher route weights. Counts include only
 data weights :math:`d`. The `reduction source`_ implements all four modes;
 :doc:`objective` gives the full formulas, empty-row behavior and 10/1,000-token
@@ -294,7 +295,7 @@ normalization. The `advantage source`_ defines exact masking and singleton behav
    * - ``advantage_estimator: rloo_n_pbs``
      - :math:`A=A^{\rm RLOO-N}+\mathrm{token\_level\_shaping}\times\mathrm{response\_mask}`.
      - Add the existing potential-based token shaping channel to RLOO-N. Without that channel it equals RLOO-N; avoid for strictly sequence-level GSPO credit.
-   * - ``advantage_estimator: reinforce_plus_plus``
+   * - ``advantage_estimator: reinforce++``
      - :math:`A_t=\operatorname{whiten}(\sum_{k\ge t}\gamma^{k-t}r_k)`.
      - Critic-free discounted returns with masked whitening. Set ``gamma: 1.0`` for undiscounted returns; use a group estimator for a prompt-relative baseline. See `REINFORCE++`_.
    * - ``advantage_estimator: gae``
