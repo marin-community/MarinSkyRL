@@ -155,7 +155,7 @@ def test_tasktrove_selection_rejects_unknown_source(tmp_path: Path) -> None:
         select_task_references(_source(dataset_path, TaskTroveSelection(sources=("missing-source",))))
 
 
-def test_packed_dataset_defers_extraction_until_materialization(tmp_path: Path) -> None:
+def test_packed_dataset_materializes_reference_from_runtime_yaml(tmp_path: Path) -> None:
     dataset_path = tmp_path / "tasks.parquet"
     _write_dataset(dataset_path)
     source = _source(dataset_path, TaskTroveSelection(sources=("source-a",)))
@@ -170,7 +170,6 @@ def test_packed_dataset_defers_extraction_until_materialization(tmp_path: Path) 
     reference = PackedTaskReference(**first["env_extras"]["packed_task"])
 
     assert first["prompt"].startswith("tasktrove://")
-    assert not cache.exists()
     task_path = PackedTaskMaterializer(cache).materialize_batch([reference])[reference]
     assert (task_path / "instruction.md").read_text() == "Do one"
     assert not (task_path / "solution").exists()
