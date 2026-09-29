@@ -85,6 +85,7 @@ def launch_config(
     model_uri: str,
     model_identity: str,
     *,
+    cluster: str = CLUSTER,
     steps: int = 10,
     arm: str = "rl",
     data_root: str | None = None,
@@ -120,8 +121,8 @@ def launch_config(
                 "profile": "megatron",
             },
             "iris": {
-                "cluster": CLUSTER,
-                "cluster_config": str(files("iris") / "config" / f"{CLUSTER}.yaml"),
+                "cluster": cluster,
+                "cluster_config": str(files("iris") / "config" / f"{cluster}.yaml"),
                 "job_name": run_id,
                 "wandb_entity": "marin-community",
                 "max_retries": 0,
@@ -296,6 +297,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--train-prefixes", type=int, default=512)
     parser.add_argument("--recipe", type=Path, default=RECIPE)
+    parser.add_argument("--cluster", choices=("cw-us-east-02a", "cw-rno2a"), default=CLUSTER)
     parser.add_argument("--reuse-comparison-root")
     parser.add_argument("--compare-sft", action="store_true")
     parser.add_argument("--run", action="store_true")
@@ -316,6 +318,7 @@ def main() -> None:
                 temporary,
                 reused.model_uri if reused else "s3://marin-us-east-02a/preflight/grug",
                 reused.model_identity if reused else MODEL_REVISION,
+                cluster=args.cluster,
                 steps=args.steps,
                 arm=arm,
                 data_root=reused.data_root if reused else f"{args.output_root}/data",
