@@ -209,15 +209,15 @@ def filtered_replay_topk(
     threshold_offset = math.log(keep_fraction) if keep_fraction else -math.inf
     native_scores = scores.detach().gather(1, native_idx)
     cutoff_scores = native_scores.amin(dim=-1)
-    cutoffs = (
-        cutoff_scores + threshold_offset if score_type is RouterScoreType.LOGITS else cutoff_scores * keep_fraction
-    )
     ranked_native = native_idx.gather(1, torch.argsort(native_scores, dim=-1, descending=True, stable=True))
     for row in torch.nonzero(mask, as_tuple=False).flatten().tolist():
         captured = targets[row].tolist()
         if len(set(captured)) != len(captured):
             raise ValueError("filtered replay captured experts must be distinct within a row")
-        cutoff_score = cutoffs[row].item()
+        cutoff_score = cutoff_scores[row].item()
+        cutoff_score = (
+            cutoff_score + threshold_offset if score_type is RouterScoreType.LOGITS else cutoff_score * keep_fraction
+        )
         kept = [scores[row, expert].item() >= cutoff_score for expert in captured]
         used = {expert for expert, accepted in zip(captured, kept, strict=True) if accepted}
         native_candidates = iter(expert for expert in ranked_native[row].tolist() if expert not in used)
