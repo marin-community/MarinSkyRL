@@ -128,6 +128,19 @@ def test_trial_attempt_timeout_remains_unset_when_omitted():
     assert _trial_config({}).trial_attempt_timeout_sec is None
 
 
+def test_custom_agent_import_path_reaches_harbor_agent_config():
+    trial_config = _trial_config({"agent_import_path": "shellbox.agent:BashAgent"})
+
+    assert trial_config.agent.name is None
+    assert trial_config.agent.import_path == "shellbox.agent:BashAgent"
+    assert "agent_import_path" in get_exposed_harbor_fields()["agent"]
+
+
+def test_custom_agent_import_path_rejects_a_named_agent():
+    with pytest.raises(ValueError, match="Set only one of harbor.name and harbor.agent_import_path"):
+        _trial_config({"name": "oracle", "agent_import_path": "shellbox.agent:BashAgent"})
+
+
 def test_daytona_ttl_reaches_harbor_environment_config():
     trial_config = _trial_config({"ttl_minutes": 90})
 

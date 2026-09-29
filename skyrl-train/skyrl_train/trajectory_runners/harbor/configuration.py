@@ -92,6 +92,7 @@ AGENT_SCHEMA = SectionSchema(
     fields={
         # Direct fields on AgentConfig
         "name": FieldMapping("name", default=DEFAULT_HARBOR_AGENT_NAME),  # Maps to AgentConfig.name (Harbor AgentName)
+        "agent_import_path": FieldMapping("import_path"),
         # Agent-log push-back control (direct field on AgentConfig, read by Trial._upload_agent_logs).
         # DEFAULT True (preserves current behavior). Set false to SKIP the best-effort re-upload of
         # host-side agent logs BACK into the (non-mounted) sandbox after the agent phase — those pushed-back
@@ -916,9 +917,14 @@ class HarborConfigBuilder:
         if self._turn_callback is not None:
             agent_kwargs["turn_callback"] = self._turn_callback
 
-        # Get agent name from harbor config (defaults to "terminus-2")
-        # This is the Harbor AgentName value directly (e.g., "terminus-2", "oracle")
+        # Use a registered name by default. A custom import path must be the
+        # only explicit agent selector because Harbor treats them as alternatives.
+        agent_import_path = agent_direct_fields.pop("import_path", None)
         agent_name = agent_direct_fields.pop("name", DEFAULT_HARBOR_AGENT_NAME)
+        if agent_import_path is not None:
+            if self._harbor_cfg.get("name") is not None or self._cfg.get("name") is not None:
+                raise ValueError("Set only one of harbor.name and harbor.agent_import_path")
+            agent_name = None
 
         # Apply timeout override if provided (e.g., for eval runs)
         if timeout_override_sec is not None:
@@ -927,6 +933,7 @@ class HarborConfigBuilder:
         # Build AgentConfig
         agent_config = AgentConfig(
             name=agent_name,
+            import_path=agent_import_path,
             model_name=model_name,
             kwargs=agent_kwargs,
             **agent_direct_fields,
