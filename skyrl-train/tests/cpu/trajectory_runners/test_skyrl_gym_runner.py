@@ -750,7 +750,6 @@ async def test_agent_loop_required_exact_chat_rejects_environment_without_chat_o
 async def test_fixture_exact_chat_preserves_backend_tokens_routes_and_distinct_rewards(
     mock_tokenizer, generator_cfg, mock_env_cfg
 ):
-    generator_cfg.batched = False
     generator_cfg.use_conversation_multi_turn = True
     generator_cfg.require_exact_chat_transport = True
     generator_cfg.sampling_params.logprobs = 0
