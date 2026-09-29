@@ -187,7 +187,7 @@ def filtered_replay_topk(
     mask: torch.Tensor,
     keep_fraction: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Keep captured experts above the fractional cutoff in softmax selection-score probability."""
+    """Keep captured experts above the fractional cutoff in softmax selection-logit probability."""
     validate_replay_keep_fraction(keep_fraction, "filtered replay keep_fraction")
     if scores.ndim != 2 or native_idx.shape != targets.shape or native_idx.shape[0] != scores.shape[0]:
         raise ValueError("filtered replay scores, native choices and captured choices have incompatible shapes")
