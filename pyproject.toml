@@ -149,6 +149,7 @@ dev = [
     "prometheus-client",
     "pytest>=8.4",
     "pytest-asyncio",
+    "pytest-xdist",
     "universal-pathlib",
 ]
 harbor-test = ["harbor; sys_platform == 'linux'"]
@@ -282,4 +283,5 @@ markers = [
     "vllm",
     "integrations",
     "megatron",
+    "slow: long-running test with its own Ray cluster; started first, with concurrency bounded by host memory",
 ]

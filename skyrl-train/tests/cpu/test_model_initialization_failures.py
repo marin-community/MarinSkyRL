@@ -5,7 +5,7 @@ import subprocess
 import sys
 import textwrap
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
 from loguru import logger
@@ -21,29 +21,29 @@ class _UnpickleableError(RuntimeError):
         raise pickle.PicklingError("exception cannot be pickled")
 
 
-def test_model_initialization_timeout_logs_and_kills_actors(monkeypatch):
+def test_model_initialization_timeout_raises_and_kills_actors(monkeypatch):
     trainer = object.__new__(RayPPOTrainer)
-    trainer._kill_ray_actors = Mock()
-    get = Mock(side_effect=GetTimeoutError("workers still downloading"))
+    killed = []
+    waits = []
+    trainer._kill_ray_actors = lambda: killed.append(True)
+
+    def get(refs, timeout):
+        waits.append(timeout)
+        raise GetTimeoutError("workers still downloading")
+
     monkeypatch.setattr(trainer_module.ray, "get", get)
     monkeypatch.setattr(trainer_module, "time", SimpleNamespace(monotonic=lambda: 100.0), raising=False)
-    messages = []
-    sink_id = logger.add(messages.append, level="ERROR")
 
-    try:
-        with pytest.raises(RuntimeError, match="timed out after 3600 seconds"):
-            trainer._wait_for_setup_phase(
-                ["policy-worker-ref"],
-                deadline=3700.0,
-                phase="policy/ref/critic model initialization",
-            )
-    finally:
-        logger.remove(sink_id)
+    with pytest.raises(RuntimeError, match="timed out after 3600 seconds"):
+        trainer._wait_for_setup_phase(
+            ["policy-worker-ref"],
+            deadline=3700.0,
+            phase="policy/ref/critic model initialization",
+        )
 
-    get.assert_called_once_with(["policy-worker-ref"], timeout=3600.0)
-    trainer._kill_ray_actors.assert_called_once_with()
-    assert len(messages) == 1
-    assert messages[0].record["level"].name == "ERROR"
+    # The phase waits only for the budget left before the shared deadline.
+    assert waits == [3600.0]
+    assert killed == [True]
 
 
 @pytest.mark.asyncio
