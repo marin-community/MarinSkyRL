@@ -235,7 +235,7 @@ async def test_gym_terminal_error_retains_only_completed_turn(
         "response_ids": [[10, 12]],
         "stop_reasons": ["stop"],
         "response_logprobs": [[-0.1, -0.2]],
-        "routed_experts": [[[[1, 2]], [[3, 4]]]],
+        "routed_experts": [np.array([[[1, 2]], [[3, 4]]], dtype=np.int16)],
         "token_provenance": "engine",
     }
     model_client.generate.side_effect = [
@@ -663,10 +663,14 @@ async def test_agent_loop_single_turn(
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
+@pytest.mark.parametrize("append_stop_eos", [False, True])
 async def test_agent_loop_forwards_environment_chat_options_and_structured_assistant_message(
-    mock_make, mock_tokenizer, mock_env, generator_cfg, mock_env_cfg
+    mock_make, mock_tokenizer, mock_env, generator_cfg, mock_env_cfg, append_stop_eos
 ):
     generator_cfg.use_conversation_multi_turn = True
+    generator_cfg.append_eos_token_after_stop_str_in_multi_turn = append_stop_eos
+    generator_cfg.sampling_params.stop = ["<tool-call tokens>"] if append_stop_eos else None
+    mock_tokenizer.eos_token_id = 4
     generator_cfg.require_exact_chat_transport = True
     generator_cfg.sampling_params.logprobs = 0
     tools = [{"type": "function", "name": "search", "parameters": {"type": "object"}}]
@@ -689,7 +693,7 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
         "prompt_ids": [[11, 12, 13]],
         "stop_reasons": ["tool_calls"],
         "response_logprobs": [[-0.1, -0.2]],
-        "routed_experts": [[[[1, 2]], [[3, 4]]]],
+        "routed_experts": [np.array([[[1, 2]], [[3, 4]]], dtype=np.int16)],
         "prompt_logprobs": None,
         "assistant_messages": [assistant_message],
         "token_provenance": "engine",
@@ -716,8 +720,9 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
     evidence = mock_env.set_rollout_evidence.call_args.args[0]
     assert evidence.metadata["assistant_message"] == assistant_message
     assert output.evidence.prompt_token_ids == (11, 12, 13)
-    assert output.evidence.response_token_ids == (21, 22)
-    np.testing.assert_array_equal(output.evidence.routed_experts, [[[1, 2]], [[3, 4]]])
+    assert output.evidence.response_token_ids == ((21, 22, 4) if append_stop_eos else (21, 22))
+    expected_routes = [[[1, 2]], [[3, 4]], [[0, 0]]] if append_stop_eos else [[[1, 2]], [[3, 4]]]
+    np.testing.assert_array_equal(output.evidence.routed_experts, expected_routes)
 
 
 @pytest.mark.asyncio
@@ -1024,7 +1029,7 @@ async def test_generate_multiturn_aligns_rollout_logprobs(
             "stop_reasons": ["stop"],
             "response_ids": [[10, 4]],
             "response_logprobs": [[-0.1, -0.2]],
-            "routed_experts": [[[[1, 2]], [[3, 4]]]],
+            "routed_experts": [np.array([[[1, 2]], [[3, 4]]], dtype=np.int16)],
             "student_topk_indices": [[[11, 12], [13, 14]]],
             "behavior_topk_logprobs": [[[-0.1, -2.0], [-0.2, -1.9]]],
         },
@@ -1033,7 +1038,7 @@ async def test_generate_multiturn_aligns_rollout_logprobs(
             "stop_reasons": ["stop"],
             "response_ids": [[20, 4]],
             "response_logprobs": [[-0.3, -0.4]],
-            "routed_experts": [[[[5, 6]], [[7, 8]]]],
+            "routed_experts": [np.array([[[5, 6]], [[7, 8]]], dtype=np.int16)],
             "student_topk_indices": [[[21, 22], [23, 24]]],
             "behavior_topk_logprobs": [[[-0.3, -1.8], [-0.4, -1.7]]],
         },
