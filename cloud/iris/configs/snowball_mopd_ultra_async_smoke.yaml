@@ -1,14 +1,11 @@
-# Snowball 67B-A2B three-teacher on-policy distillation on the fully asynchronous trainer: the
-# #749 smoke (cloud/iris/configs/snowball_mopd_ultra_smoke.yaml) with the same eight nodes, data,
-# teachers, and 48-prompt batches, run by FullyAsyncRayPPOTrainer through the in-process SkyRL Gym
-# runner so rollout groups for the next update generate while the learner trains on the current one.
+# Snowball 67B-A2B three-teacher distillation with one-step asynchronous rollouts.
+# Uses the synchronous smoke's eight nodes, data, teachers, and 48-prompt batches.
+# The standard entrypoint runs SkyRL Gym in process; rolling admission lets the next
+# groups generate while the learner trains on the current batch.
 #
-# Staleness is bounded at one update and nothing corrects for it: sampled_reverse_kl uses the
-# learner's pre-update log-probs as the behavior term, so a group sampled one update earlier is
-# scored as if the current policy drew it. Compare against the synchronous smoke at matched prompt
-# count and label the result as uncorrected staleness-1. The asynchronous trainer rejects
-# data.sampling.kind, so batches follow the subset's route mix instead of an exact third per route.
-entrypoint: fully_async_in_process
+# Staleness is bounded at one update. Token-level truncated importance sampling
+# corrects against rollout logprobs with a ratio cap of 2; prefix drift is not corrected.
+entrypoint: standard
 
 context_budget:
   request_window_tokens: 8192
@@ -28,6 +25,9 @@ trainer:
     # The distillation term replaces the reward-driven loss; the uniform estimator leaves
     # the per-token teacher gap as the only advantage.
     advantage_estimator: uniform
+    policy_loss_type: importance_sampling
+    use_tis: true
+    tis_imp_ratio_cap: 2.0
     use_kl_loss: false
     use_entropy_loss: false
     loss_reduction: token_mean
@@ -49,10 +49,11 @@ trainer:
   ckpt_interval: 4
   resume_mode: none
   logger: console
-  fully_async:
+  rollout_buffer:
     max_staleness_steps: 1
     # Two updates' worth of prompts: one batch training while the next generates.
-    num_parallel_generation_workers: 96
+    batch_policy: rolling
+    max_in_flight: 96
   policy:
     optimizer_config:
       lr: 1.0e-6
@@ -82,8 +83,6 @@ generator:
   enforce_eager: false
   run_engines_locally: true
   weight_sync_backend: nccl
-  async_engine: true
-  batched: false
   sampling_params:
     temperature: 1.0
     top_p: 1.0

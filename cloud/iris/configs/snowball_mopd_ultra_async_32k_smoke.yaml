@@ -1,11 +1,11 @@
 # Four-step asynchronous Snowball MOPD smoke on the 4,800-row blend at 32K.
 # Nine H100 nodes: four PP2 x EP8 learners, two rollout nodes, three pinned teachers.
 # This uses the same data and memory settings as snowball_mopd_ultra_32k.yaml.
-# Staleness 1 uses an uncorrected estimator: sampled reverse KL uses the learner's
-# pre-update logprobs, not the policy that generated each trajectory.
+# Staleness is bounded at one update. Token-level truncated importance sampling
+# corrects against rollout logprobs with a ratio cap of 2; prefix drift is not corrected.
 # SWE rows require the TaskTrove task parquet and Harbor/Daytona credentials;
 # ns_tools and Lean rows use the in-cluster NeMo Skills sandbox.
-entrypoint: fully_async_in_process
+entrypoint: standard
 
 config_groups:
   terminal_bench_config: terminal_bench
@@ -61,6 +61,9 @@ trainer:
   gradient_checkpointing_use_reentrant: false
   algorithm:
     advantage_estimator: uniform
+    policy_loss_type: importance_sampling
+    use_tis: true
+    tis_imp_ratio_cap: 2.0
     use_kl_loss: false
     use_entropy_loss: false
     loss_reduction: token_mean
@@ -83,9 +86,10 @@ trainer:
   max_ckpts_to_keep: 2
   resume_mode: none
   logger: console
-  fully_async:
+  rollout_buffer:
     max_staleness_steps: 1
-    num_parallel_generation_workers: 96
+    batch_policy: rolling
+    max_in_flight: 96
   policy:
     optimizer_config:
       lr: 1.0e-6
@@ -128,8 +132,6 @@ generator:
   enforce_eager: false
   run_engines_locally: true
   weight_sync_backend: nccl
-  async_engine: true
-  batched: false
   enable_http_endpoint: true
   sampling_params:
     temperature: 1.0

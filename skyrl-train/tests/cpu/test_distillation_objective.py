@@ -687,3 +687,51 @@ def test_training_batch_iterator_slices_distillation_payload_per_micro_batch(
     assert isinstance(distillation, payload_type)
     torch.testing.assert_close(getattr(distillation, field), expected_second_row)
     torch.testing.assert_close(distillation.loss_weights, torch.tensor([[0.6, 0.6]]))
+
+
+@pytest.mark.parametrize(
+    "sampling_probs,cap", [([0.2, 0.3, 0.5], 2.0), ([0.05, 0.6, 0.35], 10.0), ([0.05, 0.6, 0.35], 2.0)]
+)
+def test_replace_mode_tis_matches_enumerated_reverse_kl_gradient(sampling_probs, cap):
+    # Enumerate every possible sampled token, weighted by its sampling probability.
+    # With an inactive cap this must recover the exact categorical KL gradient.
+    learner = torch.tensor([0.2, 0.3, 0.5], dtype=torch.float64)
+    sampling = torch.tensor(sampling_probs, dtype=torch.float64)
+    teacher = torch.tensor([0.4, 0.4, 0.2], dtype=torch.float64)
+    logits = learner.log().requires_grad_()
+    old = learner.log().reshape(3, 1).requires_grad_()
+    rollout = sampling.log().reshape(3, 1).requires_grad_()
+    actions = logits.log_softmax(-1).reshape(3, 1)
+    config = _policy_config(reward_mode="replace")
+    config.use_tis = True
+    config.tis_imp_ratio_cap = cap
+    objective = _composed_objective(
+        action_log_probs=actions,
+        old_action_log_probs=old,
+        base_action_log_probs=None,
+        advantages=torch.zeros_like(actions),
+        loss_mask=torch.ones_like(actions),
+        rollout_logprobs=rollout,
+        response_span_tags=None,
+        token_entropy=torch.zeros_like(actions),
+        config=config,
+        policy_loss_fn=importance_sampling_policy_loss,
+        distillation=ChosenTokenTeacherInput(
+            teacher_action_log_probs=teacher.log().reshape(3, 1),
+            valid_mask=torch.ones_like(actions, dtype=torch.bool),
+            loss_weights=(3 * sampling).reshape(3, 1),
+        ),
+    )
+    objective.optimization_loss.backward()
+    # Analytic categorical gradient; the cap limits how much probability mass
+    # each sampled token can represent. Teacher gap always uses learner, not q.
+    gap = (learner / teacher).log()
+    retained_fraction = torch.minimum(torch.ones_like(learner), cap * sampling / learner)
+    coefficient = retained_fraction * gap
+    expected_loss = learner.dot(coefficient)
+    expected_gradient = learner * (coefficient - expected_loss)
+    torch.testing.assert_close(objective.optimization_loss, expected_loss)
+    torch.testing.assert_close(logits.grad, expected_gradient)
+    assert old.grad is None
+    assert rollout.grad is None
+

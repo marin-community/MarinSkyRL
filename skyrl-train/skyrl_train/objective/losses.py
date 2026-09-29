@@ -11,7 +11,7 @@ import torch
 from omegaconf import DictConfig
 
 from marinskyrl.runtime_options import PolicyLossType
-from skyrl_train.tensor_math import masked_mean, safe_exp_delta
+from skyrl_train.tensor_math import masked_mean, safe_exp_delta, truncated_importance_weights
 from skyrl_train.utils.algorithm_registry import register_policy_loss
 
 
@@ -98,9 +98,16 @@ def _ppo_terms(inputs: PolicyLossInputs, config: DictConfig) -> tuple[torch.Tens
 
 
 def _tis_weights(inputs: PolicyLossInputs, config: DictConfig) -> torch.Tensor | float:
-    if not config.use_tis or inputs.rollout_log_probs is None:
+    if not config.use_tis:
         return 1.0
-    return safe_exp_delta(inputs.old_log_probs - inputs.rollout_log_probs).clamp(max=config.tis_imp_ratio_cap)
+    if inputs.rollout_log_probs is None:
+        raise ValueError("use_tis requires rollout logprobs")
+    rollout_values = inputs.rollout_log_probs[inputs.loss_mask > 0]
+    if not torch.all(torch.isfinite(rollout_values)) or torch.any(rollout_values > 0):
+        raise ValueError("use_tis requires finite nonpositive rollout logprobs on scored tokens")
+    return truncated_importance_weights(
+        inputs.old_log_probs, inputs.rollout_log_probs, config.tis_imp_ratio_cap, inputs.log_probs.dtype
+    )
 
 
 @register_policy_loss(PolicyLossType.REGULAR)
@@ -122,8 +129,8 @@ def dual_clip_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> Token
 @register_policy_loss(PolicyLossType.IMPORTANCE_SAMPLING)
 def importance_sampling_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     """Return the unclipped importance-weighted advantage against the old policy."""
-    ratio = safe_exp_delta(inputs.log_probs - inputs.old_log_probs)
-    return _token_loss(-ratio * inputs.advantages, inputs, {})
+    ratio = safe_exp_delta(inputs.log_probs - inputs.old_log_probs.detach())
+    return _token_loss(-ratio * inputs.advantages * _tis_weights(inputs, config), inputs, {})
 
 
 @register_policy_loss(PolicyLossType.SFT)
