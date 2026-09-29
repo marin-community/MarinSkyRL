@@ -148,6 +148,7 @@ def checkpoint_export_launch_config(
     # rollout/reference/critic/teacher bundles that the export entrypoint never uses.
     config.skyrl.trainer.placement.colocate_all = True
     config.skyrl.trainer.placement.colocate_policy_ref = True
+    config.skyrl.trainer.offload_optimizer_during_rollouts = False
     algorithm = config.skyrl.trainer.setdefault("algorithm", {})
     algorithm["use_kl_loss"] = False
     algorithm["use_kl_in_reward"] = False
