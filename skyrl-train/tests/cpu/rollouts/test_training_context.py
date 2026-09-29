@@ -7,6 +7,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import ray
 from ray.actor import ActorHandle
@@ -471,15 +472,18 @@ async def test_writer_requires_behavior_evidence_only_at_trainable_tokens(ray_mo
     batch.update(
         response_ids=[[2, 3], [4, 5]],
         loss_masks=[[1, 0], [0, 0]],
-        rollout_logprobs=[[-0.2, None], [None, None]],
-        student_topk_indices=[[[1, 2], None], [None, None]],
-        behavior_topk_logprobs=[[[-0.3, -1.4], None], [None, None]],
+        rollout_logprobs=[np.asarray([-0.2, np.nan], dtype=np.float32), np.full(2, np.nan, dtype=np.float32)],
+        student_topk_indices=[np.asarray([[1, 2], [-1, -1]], dtype=np.int32), np.full((2, 2), -1, dtype=np.int32)],
+        behavior_topk_logprobs=[
+            np.asarray([[-0.3, -1.4], [np.nan, np.nan]], dtype=np.float32),
+            np.full((2, 2), np.nan, dtype=np.float32),
+        ],
     )
     try:
         await buffer.publish.remote(1)
         lease = await buffer.acquire_lease.remote()
         invalid = deepcopy(batch)
-        invalid[missing_field][0][0] = None
+        invalid[missing_field][0][0] = -1 if missing_field == "student_topk_indices" else np.nan
         with pytest.raises(TrainingGroupInvariantError) as error:
             await writer.write_rollout(lease, RolloutGroup(invalid, "a", 1, _prompt("a")))
         expected = (
@@ -491,6 +495,6 @@ async def test_writer_requires_behavior_evidence_only_at_trainable_tokens(ray_mo
         await writer.write_rollout(lease, RolloutGroup(batch, "a", 1, _prompt("a")))
         admission = await buffer.admit.remote(STALL_TIMEOUT)
         groups = await payloads.fetch(admission.payloads)
-        assert [group.trajectory_batch for group in groups] == [batch]
+        np.testing.assert_equal([group.trajectory_batch for group in groups], [batch])
     finally:
         ray.kill(buffer)
