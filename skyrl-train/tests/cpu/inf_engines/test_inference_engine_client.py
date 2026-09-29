@@ -815,9 +815,12 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations():
             "return_tokens_as_token_ids": True,
         },
         "headers": {"Content-Type": "application/json"},
+        "sampling_params": {"temperature": 0.7, "top_p": 1.0, "top_k": -1},
     }
 
     out = await client.chat_completion(original)
+
+    assert all(call["sampling_params"] == original["sampling_params"] for call in engines[0].calls)
 
     # Verify engine received 3 calls
     assert len(engines[0].calls) == 3

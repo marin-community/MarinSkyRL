@@ -241,7 +241,9 @@ class DirectModelClient:
                 body["top_logprobs"] = requested_top_k + 1
                 body["return_tokens_as_token_ids"] = True
             request_id = uuid4().hex
-            response = await self._client.chat_completion({"json": body, "headers": {"x-request-id": request_id}})
+            response = await self._client.chat_completion(
+                {"json": body, "headers": {"x-request-id": request_id}, "sampling_params": sampling_params}
+            )
             if "choices" not in response:
                 error = response.get("error") or {}
                 error_type = (
