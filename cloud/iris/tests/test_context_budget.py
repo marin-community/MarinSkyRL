@@ -386,3 +386,15 @@ def test_opencode_limit_at_32k_budget():
     assert budget.max_input_tokens == 28672
     assert budget.opencode_limit_output == 4096
     assert budget.opencode_limit_context == 23552
+
+
+def test_sandbox_replica_service_survives_runtime_config_composition(tmp_path):
+    source = yaml.safe_load((_REPO_ROOT / "cloud/iris/configs/snowball_ultra_rlvr1_split64.yaml").read_text())
+    source["environment"]["skyrl_gym"]["nemotron_ultra"]["sandbox"]["replica_service"] = "replicas.example"
+    path = tmp_path / "replica-routing.yaml"
+    path.write_text(yaml.safe_dump(source))
+    parsed = parse_rl_config(str(path))
+    # Marin preflight renders launch YAML; the runtime's strict Hydra merge must also accept the endpoint.
+    config = compose_skyrl_config(parsed, {"job_name": "replica-routing", "num_nodes": 8}, _HPCStub()).config
+    assert config.environment.skyrl_gym.nemotron_ultra.sandbox.replica_service == "replicas.example"
+    assert config.environment.skyrl_gym.nemotron_ultra.sandbox.port == 6000
