@@ -62,7 +62,6 @@ generator:
 
   run_engines_locally: true
   weight_sync_backend: nccl
-  async_engine: true
 
   sampling_params:
     temperature: 0.7

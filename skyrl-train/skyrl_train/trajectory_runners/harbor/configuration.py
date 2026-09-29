@@ -151,7 +151,7 @@ AGENT_SCHEMA = SectionSchema(
         # request+response (whole message history, MBs, growing) written SYNCHRONOUSLY
         # by litellm's logger_fn on every LLM call. With a remote (s3://) trials_dir
         # that per-turn write is a blocking object-store upload that stalls the shared
-        # RolloutCoordinator event loop -> serializes all trials -> starves the vLLM
+        # rollout worker event loop -> serializes all trials -> starves the vLLM
         # engines (py-spy confirmed). RL training does NOT read it (logprobs come from
         # rollout_details; the trajectory from trajectory.json, both written
         # independently). Set true only for local debugging.

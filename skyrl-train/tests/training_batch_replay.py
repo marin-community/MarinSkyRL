@@ -14,7 +14,8 @@ from typing import Any, TypedDict
 
 from omegaconf import DictConfig, OmegaConf
 
-from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
+from skyrl_train.timing_observability import StepWallTime
+from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
 
 
@@ -186,8 +187,8 @@ def load_training_batch_artifact(
     return batch
 
 
-class CapturingFullyAsyncRayPPOTrainer(FullyAsyncRayPPOTrainer):
-    """Fully-async trainer variant that captures one batch before policy forward."""
+class CapturingRayPPOTrainer(RayPPOTrainer):
+    """Trainer variant that captures one batch before policy forward."""
 
     def __init__(
         self,
@@ -200,14 +201,14 @@ class CapturingFullyAsyncRayPPOTrainer(FullyAsyncRayPPOTrainer):
         self.capture_provenance = capture_provenance
         super().__init__(*args, **kwargs)
 
-    async def _run_training(self, training_input: TrainingInputBatch):
+    async def _run_training(self, training_input: TrainingInputBatch, *, step_wall: StepWallTime | None = None):
         if self.global_step == self.capture_provenance.target_step:
             save_training_batch_artifact(
                 self.capture_artifact_path,
                 training_input,
                 self.capture_provenance,
             )
-        return await super()._run_training(training_input)
+        return await super()._run_training(training_input, step_wall=step_wall)
 
 
 class _PolicyForwardComplete(Exception):
@@ -215,9 +216,7 @@ class _PolicyForwardComplete(Exception):
         self.result = result
 
 
-async def replay_policy_forward(
-    trainer: FullyAsyncRayPPOTrainer, training_input: TrainingInputBatch
-) -> TrainingInputBatch:
+async def replay_policy_forward(trainer: RayPPOTrainer, training_input: TrainingInputBatch) -> TrainingInputBatch:
     """Run the production training-step prefix through policy forward."""
 
     production_forward = trainer.fwd_logprobs_values_reward

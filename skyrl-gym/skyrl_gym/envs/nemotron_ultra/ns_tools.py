@@ -29,19 +29,21 @@ def execute_python_calls(
         except (json.JSONDecodeError, TypeError) as error:
             output = json.dumps({"error": f"Invalid tool call arguments: {error!r}"})
         else:
-            try:
-                if function.get("name") != "stateful_python_code_exec":
-                    raise ValueError(f"Unknown tool: {function.get('name')}")
-                if not isinstance(arguments, dict) or not isinstance(arguments.get("code"), str):
-                    raise ValueError("stateful_python_code_exec requires a string code argument")
+            if function.get("name") != "stateful_python_code_exec":
+                output = json.dumps({"error": f"Unknown tool: {function.get('name')}"})
+            elif not isinstance(arguments, dict) or not isinstance(arguments.get("code"), str):
+                output = json.dumps({"error": "stateful_python_code_exec requires a string code argument"})
+            else:
                 result = sandbox.execute(
                     arguments["code"],
                     language="ipython",
                     timeout_seconds=timeout_seconds,
                     session_id=session_id,
                 )
+                if result.get("process_status") == "unknown" or (
+                    result.get("process_status") == "error" and not sandbox_output_text(result)
+                ):
+                    raise RuntimeError(f"Sandbox execution unavailable: {result}")
                 output = sandbox_output_text(result)
-            except Exception as error:
-                output = json.dumps({"error": f"{type(error).__name__}: {error}"})
         observations.append({"role": "tool", "tool_call_id": str(call_id), "content": output})
     return observations

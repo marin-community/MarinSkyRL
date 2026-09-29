@@ -176,7 +176,6 @@ def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, me
             model=MODEL_NAME,
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",

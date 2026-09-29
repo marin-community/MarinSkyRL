@@ -1,3 +1,5 @@
+from dataclasses import asdict
+from skyrl_gym.verification import VerificationResult
 import gzip
 import json
 from pathlib import Path
@@ -14,8 +16,6 @@ from skyrl_train.trajectory_runners.base import (
     TrajectoryBatch,
     TrajectoryID,
 )
-from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec, ProcessPoolResources
-from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import RolloutDispatcher
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import (
     RETENTION_METRIC_PREFIX,
@@ -60,6 +60,31 @@ class _BlockingPublisher:
 
     def close(self):
         return None
+
+
+class _HeldPublisher:
+    """Publishes to storage, but reports a best-effort publication finished only once released."""
+
+    def __init__(self, storage):
+        self._storage = storage
+        self._result = None
+        self.released = False
+
+    def execute(self, request):
+        return self._storage.execute(request)
+
+    def submit(self, request):
+        self._result = self._storage.execute(request)
+        return True
+
+    def poll(self):
+        if not self.released:
+            return None
+        result, self._result = self._result, None
+        return result
+
+    def close(self):
+        return self.poll()
 
 
 class _FailingPublisher:
@@ -249,15 +274,34 @@ def test_normalized_output_produces_complete_core_trace_schema():
         "reward",
         "disposition",
         "verifier",
+        "verification_result",
         "metrics",
         "provenance",
     }
     assert record["prompt"]["messages"] == [{"role": "user", "content": "first"}]
     assert record["response"]["text"] == "10 11"
     assert record["verifier"] is None
-    assert record["schema_version"] == 3
-    assert record["disposition"] == {"exception_type": None, "error_treatment": None}
+    assert record["schema_version"] == 5
+    assert record["disposition"] == {"exception_type": None, "error_treatment": None, "server_error": None}
     assert record["provenance"]["runner"] == "SkyRLGymTrajectoryRunner"
+
+
+def test_server_error_identity_is_retained_with_the_masked_row():
+    output = _output()
+    output["server_errors"] = [
+        None,
+        {"category": "constrained_decoding", "request_id": "request-123", "status_code": 500},
+        None,
+    ]
+    records = build_trajectory_records(
+        _input(), output, _config(Path("/unused")), _Tokenizer(), runner_name="SkyRLGymTrajectoryRunner"
+    )
+
+    assert records[1].to_json()["disposition"]["server_error"] == {
+        "category": "constrained_decoding",
+        "request_id": "request-123",
+        "status_code": 500,
+    }
 
 
 def test_verifier_tests_are_persisted_with_the_retained_trace():
@@ -324,11 +368,27 @@ async def test_best_effort_retention_does_not_wait_for_blocked_storage(tmp_path)
     )
 
     output = await asyncio.wait_for(trajectory_runner.run(_input()), 0.1)
-    backpressured = await asyncio.wait_for(trajectory_runner.run(_input(step=8)), 0.1)
+    queued = await asyncio.wait_for(trajectory_runner.run(_input(step=8)), 0.1)
 
     assert publisher.pending
     assert output["rollout_metrics"]["generate/trajectory_retention/enqueued"] == 3.0
-    assert backpressured["rollout_metrics"]["generate/trajectory_retention/dropped_by_backpressure"] == 3.0
+    assert queued["rollout_metrics"]["generate/trajectory_retention/selected"] == 3.0
+    assert queued["rollout_metrics"]["generate/trajectory_retention/enqueued"] == 0.0
+
+
+def test_groups_retained_during_a_publication_are_published_after_it(tmp_path):
+    sink = _sink(_config(tmp_path, required=False))
+    publisher = sink.publisher = _HeldPublisher(sink.publisher)
+
+    for step in (7, 8, 9):
+        sink.retain(_input(step=step), _output())
+    publisher.released = True
+    sink.close()
+
+    records = _records(tmp_path)
+    assert len(records) == 9
+    assert {record["global_step"] for record in records} == {7, 8, 9}
+    assert len(list(tmp_path.rglob("*.zip"))) == 3
 
 
 def test_step_wise_rows_form_one_replayable_trajectory_with_explicit_boundaries():
@@ -428,6 +488,7 @@ def test_train_phase_retains_sample_and_anomalies(tmp_path):
     assert failed["disposition"] == {
         "exception_type": "TurnCapExhaustedError",
         "error_treatment": "passthrough",
+        "server_error": None,
     }
 
 
@@ -660,46 +721,6 @@ def test_initialization_reconciles_archive_written_before_ledger_commit(tmp_path
     assert len(list(tmp_path.rglob("*.zip"))) == 1
 
 
-class _ProcessCoordinator:
-    """One coordinator actor that returns a finished batch, standing in for the Ray RPC."""
-
-    def __init__(self):
-        self.run_shard = _ProcessRemote()
-
-
-class _ProcessRemote:
-    def remote(self, input_batch, *_args):
-        positions = {trajectory_id.to_string(): index for index, trajectory_id in enumerate(_input()["trajectory_ids"])}
-        indices = [positions[trajectory_id.to_string()] for trajectory_id in input_batch["trajectory_ids"]]
-        _, output = _select_batch_rows(indices)
-        future = asyncio.get_running_loop().create_future()
-        future.set_result(output)
-        return future
-
-
-def _process_dispatcher(harbor_runner_spec: HarborRunnerSpec) -> RolloutDispatcher:
-    dispatcher = RolloutDispatcher(
-        spec=harbor_runner_spec,
-        resources=ProcessPoolResources(1, 1, 1, 30),
-    )
-    dispatcher._actors = [_ProcessCoordinator()]
-    return dispatcher
-
-
-@pytest.mark.asyncio
-async def test_process_dispatcher_retains_its_coordinators_batch_under_the_harbor_runner(tmp_path, harbor_runner_spec):
-    """Retention when the process dispatcher replaces the runner the sink was attached to."""
-    dispatcher = _process_dispatcher(harbor_runner_spec)
-    dispatcher.set_trajectory_sink(TrajectorySink(_config(tmp_path), _Tokenizer()))
-
-    output = await dispatcher.run(_input())
-
-    assert output["rollout_metrics"]["generate/trajectory_retention/written"] == 3.0
-    assert {record["trajectory"]["instance_id"] for record in _records(tmp_path)} == {"a", "b", "c"}
-    # The proxy must not stamp its own name: retained provenance is independent of process placement.
-    assert {record["provenance"]["runner"] for record in _records(tmp_path)} == {"HarborTrajectoryRunner"}
-
-
 def test_retention_takes_the_run_id_the_initiator_set(monkeypatch):
     """Retained trajectories must carry the same run id as telemetry, or they cannot be joined.
 
@@ -759,3 +780,36 @@ def test_retention_counters_survive_group_concatenation():
     combined = concatenate_trajectory_batches(groups, tis_lcs_alert_threshold=1.0)
 
     assert combined["rollout_metrics"][f"{RETENTION_METRIC_PREFIX}/written"] == 5.0
+
+
+def test_retained_record_preserves_calls_observations_and_verifier_diagnostics():
+    output = _output()
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "analysis",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {"name": "python", "arguments": '{"code":"x=7"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "Sandbox connection refused"},
+    ]
+    verdict = VerificationResult.error(
+        "verifier unavailable",
+        diagnostics={
+            "compiler_output": {"stderr": "error: bad tactic"},
+            "judge_output": "malformed verdict",
+        },
+    )
+    output["evidence_messages"] = [messages, [], []]
+    output["verification_results"] = [verdict, None, None]
+    record = build_trajectory_records(
+        _input(), output, _config(Path("/unused")), _Tokenizer(), runner_name="SkyRLGymTrajectoryRunner"
+    )[0].to_json()
+    assert record["response"]["messages"] == messages
+    assert record["verification_result"] == asdict(verdict)
+    assert record["response"]["token_ids"] == [10, 11]

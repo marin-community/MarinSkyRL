@@ -83,15 +83,19 @@ class TerminalBenchTaskDataset:
                 "prompt": path,
                 "env_class": None,
                 "env_extras": {"data_source": path},
-                "uid": item.name,
+                "uid": self.uid(index),
             }
         uri = item.stable_uri()
         return {
             "prompt": uri,
             "env_class": None,
             "env_extras": {"data_source": uri, "packed_task": asdict(item)},
-            "uid": item.uid(),
+            "uid": self.uid(index),
         }
+
+    def uid(self, index: int) -> str:
+        item = self._items[index]
+        return item.name if isinstance(item, Path) else item.uid()
 
     def __len__(self) -> int:
         return len(self._items)

@@ -1,12 +1,12 @@
 import torch
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol, Sequence
+from typing import List, Tuple, Union, Optional, Dict, Any, Sequence
 from collections import defaultdict
 from enum import StrEnum
 import numpy as np
 from skyrl_train.group_admission import group_is_fully_excluded_from_training
-from skyrl_train.trajectory_runners.base import (
+from skyrl_train.trajectory_runners.types import (
     TrajectoryBatch,
     TrajectoryRequestBatch,
     TrajectoryID,
@@ -42,6 +42,7 @@ from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
+from skyrl_gym.verification import VerificationStatus
 
 
 BATCH_ERROR_METRIC_PREFIX = "generate/errors/"
@@ -659,12 +660,13 @@ def get_metrics_from_trajectory_batch(trajectory_batch: TrajectoryBatch, uids: L
     Rewards can be either per-trajectory or per-token. The returned mean describes
     the optimization reward. ``pass_at_n`` uses ``unshaped_rewards`` when supplied,
     so optimization-specific shaping cannot change the task-success metric.
+    Explicit verifier pass verdicts take precedence over positive partial rewards.
     """
     rewards: Union[List[float], List[List[float]]] = trajectory_batch["rewards"]
     if not len(rewards):
         raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
-    outcome_rewards = get_outcome_rewards(trajectory_batch)
+    trajectory_passes = get_trajectory_passes(trajectory_batch)
 
     if isinstance(rewards[0], list):
         # Token-level rewards: rewards is List[List[float]]
@@ -673,17 +675,11 @@ def get_metrics_from_trajectory_batch(trajectory_batch: TrajectoryBatch, uids: L
     else:
         mean_reward = float(np.mean(rewards))
 
-    # TODO: We should make metrics customizable by the environment.
-    # Map from the example's uid to each trajectory's unshaped outcome on that example.
-    uid_to_trajectory_rewards = defaultdict(list)
-    for i, reward in enumerate(outcome_rewards):
-        uid_to_trajectory_rewards[uids[i]].append(reward)
+    uid_to_trajectory_passes = defaultdict(list)
+    for uid, passed in zip(uids, trajectory_passes, strict=True):
+        uid_to_trajectory_passes[uid].append(passed)
 
-    # For each example, pass@n = 1 if any trajectory achieves a positive reward.
-    # The explicit unshaped channel, when present, makes this invariant to reward shaping.
-    pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if any(r > 0.0 for r in v)) / len(
-        uid_to_trajectory_rewards
-    )
+    pass_at_n = sum(any(passes) for passes in uid_to_trajectory_passes.values()) / len(uid_to_trajectory_passes)
 
     return mean_reward, pass_at_n
 
@@ -700,6 +696,23 @@ def get_outcome_rewards(trajectory_batch: TrajectoryBatch) -> List[float]:
             )
         return [float(reward) for reward in unshaped_rewards]
     return [NormalizedReward.from_output(reward).outcome for reward in rewards]
+
+
+def get_trajectory_passes(trajectory_batch: TrajectoryBatch) -> List[bool]:
+    """Return task success, honoring explicit verifier verdicts when available."""
+    outcomes = get_outcome_rewards(trajectory_batch)
+    results = trajectory_batch.get("verification_results")
+    if results is None:
+        return [outcome > 0.0 for outcome in outcomes]
+    passes = []
+    for outcome, result in zip(outcomes, results, strict=True):
+        if result is None:
+            passes.append(outcome > 0.0)
+        elif result.status is not VerificationStatus.VERIFIED:
+            passes.append(False)
+        else:
+            passes.append(result.passed if result.passed is not None else outcome > 0.0)
+    return passes
 
 
 def _rollout_logprob_presence(trajectory_batches: List[TrajectoryBatch], *, required: bool) -> List[bool]:
@@ -786,6 +799,14 @@ def concatenate_trajectory_batches(
     elif any(output.get("behavior_topk_logprobs") is not None for output in trajectory_batches):
         raise ValueError("student-selected behavior scores require selected token IDs")
 
+    data_sources_concat = None
+    if any(output.get("data_sources") is not None for output in trajectory_batches):
+        data_sources_concat = [
+            source
+            for output in trajectory_batches
+            for source in (output.get("data_sources") or [None] * len(output["response_ids"]))
+        ]
+
     unshaped_rewards_concat = None
     unshaped_reward_available_concat = None
     if any(output.get("unshaped_rewards") is not None for output in trajectory_batches):
@@ -803,8 +824,8 @@ def concatenate_trajectory_batches(
                 )
             ]
 
-    disposition_channels: dict[str, list[str | None]] = {}
-    for key in ("exception_types", "error_treatments"):
+    disposition_channels: dict[str, list[Any]] = {}
+    for key in ("exception_types", "error_treatments", "server_errors"):
         if any(output.get(key) is not None for output in trajectory_batches):
             disposition_channels[key] = [
                 value
@@ -906,6 +927,8 @@ def concatenate_trajectory_batches(
     if selected_topk_concat is not None:
         result["student_topk_indices"] = selected_topk_concat
         result["behavior_topk_logprobs"] = behavior_topk_concat
+    if data_sources_concat is not None:
+        result["data_sources"] = data_sources_concat
     if token_level_shaping_concat is not None:
         result["token_level_shaping"] = token_level_shaping_concat
     if response_span_tags_concat is not None:
@@ -918,6 +941,14 @@ def concatenate_trajectory_batches(
         result[key] = values
     if baseline_exclusions_concat is not None:
         result["exclude_from_baseline"] = baseline_exclusions_concat
+
+    for key in ("verification_results", "evidence_messages"):
+        if any(batch.get(key) is not None for batch in trajectory_batches):
+            result[key] = [
+                value
+                for batch in trajectory_batches
+                for value in (batch.get(key) or [None] * len(batch["response_ids"]))
+            ]
 
     # propagate additional keys with list values as-is
     additional_keys = [
@@ -1017,13 +1048,26 @@ def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatc
         raise RuntimeError("No outputs generated")
 
     num_responses = len(trajectory_batch["response_ids"])
+    data_sources = trajectory_batch.get("data_sources")
+    if data_sources is not None and len(data_sources) != num_responses:
+        raise ValueError(
+            f"data_sources must match response_ids: got {len(data_sources)} sources for {num_responses} rows"
+        )
     num_prompt_tokens = len(trajectory_batch["prompt_token_ids"])
     assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
     assert num_responses == num_prompt_tokens, (
         f"Mismatch between responses ({num_responses}) and prompt_token_ids ({num_prompt_tokens})"
     )
 
-    for key in ("response_ids", "loss_masks", "rewards", "rollout_logprobs", "verifier_tests"):
+    for key in (
+        "response_ids",
+        "loss_masks",
+        "rewards",
+        "rollout_logprobs",
+        "verifier_tests",
+        "verification_results",
+        "evidence_messages",
+    ):
         value = trajectory_batch.get(key)
         if isinstance(value, list):
             assert len(value) == num_responses, (
@@ -1261,18 +1305,6 @@ def prepare_trajectory_request(
     }
 
     return trajectory_request, uids
-
-
-class HasCapturedGlobalStep(Protocol):
-    captured_global_step: Optional[int]
-
-
-def minimum_captured_global_step(outputs: Iterable[HasCapturedGlobalStep]) -> Optional[int]:
-    """Return the minimum model-step value recorded across a rollout group."""
-    return min(
-        (output.captured_global_step for output in outputs if output.captured_global_step is not None),
-        default=None,
-    )
 
 
 def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None, chat_template_kwargs=None):

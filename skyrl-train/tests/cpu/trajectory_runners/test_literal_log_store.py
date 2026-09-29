@@ -210,10 +210,10 @@ def test_path_change_resets_state(tmp_path):
 def test_ingest_does_not_retain_payload_bytes(tmp_path):
     """Ingesting the shared log must retain an O(1)-per-row index, NOT the row payloads.
 
-    Every RolloutCoordinator ingests the ONE shared log while release_trial only fires
+    Every rollout worker ingests the ONE shared log while release_trial only fires
     for the trials THAT process consumes, so any per-payload retention grows without
-    bound with the log (measured: 4 coordinators each permanently held the other
-    coordinators' ~3/4 of a 98 GB log as parsed objects, ~85 GiB/h of RSS growth).
+    bound with the log (measured: 4 workers each permanently held the other
+    workers' ~3/4 of a 98 GB log as parsed objects, ~85 GiB/h of RSS growth).
     Here trial B plays the foreign trial this process never consumes: after ingest, the
     store's retained containers must stay tiny relative to B's payload bytes, while B's
     rows remain fully readable on demand."""
