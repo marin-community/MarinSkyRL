@@ -539,8 +539,8 @@ environment:
   env_class: "gsm8k"
 
 trajectory_runner:
-  # Rollout worker processes for runners that generate outside the trainer process (Harbor, and SkyRL-Gym under
-  # the gym_worker_pool entrypoint). Every worker runs on the trainer's node.
+  # Rollout worker processes, which run SkyRL-Gym and Harbor outside the trainer process. Every worker runs on the
+  # trainer's node; each runner type (Gym, and Harbor under terminal-bench routing) gets its own pool of this size.
   rollout_workers:
     num_workers: 4
     cpus_per_worker: 8

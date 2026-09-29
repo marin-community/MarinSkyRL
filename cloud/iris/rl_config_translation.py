@@ -38,7 +38,6 @@ class RLEntrypoint(StrEnum):
     """Execution modes supported by Iris RL configurations."""
 
     GENERATE = "generate"
-    GYM_WORKER_POOL = "gym_worker_pool"
     MINI_SWE = "mini_swe"
     STANDARD = "standard"
     TERMINAL_BENCH = "terminal_bench"
@@ -48,7 +47,6 @@ class RLEntrypoint(StrEnum):
 RL_ENTRYPOINTS = MappingProxyType(
     {
         RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
-        RLEntrypoint.GYM_WORKER_POOL: "skyrl_train.entrypoints.gym_worker_pool",
         RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
         RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
         RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",

@@ -503,7 +503,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 engine_input["sampling_params_per_prompt"] = [per_prompt_sampling_params]
 
             # 3.2. Send the request.
-            logger.debug(f"generate() request sent (including potential retries): {engine_input}")
+            logger.debug("generate() request sent (including potential retries): {}", engine_input)
             try:
                 partial_response: InferenceEngineOutput = await self.engines[engine_idx].generate(engine_input)
             except (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError) as e:
@@ -652,7 +652,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             )
 
             # 1.2. Send the request.
-            logger.debug(f"/chat/completions request sent (including potential retries): {cur_request_json}")
+            logger.debug("/chat/completions request sent (including potential retries): {}", cur_request_json)
             try:
                 partial_response = await self.engines[engine_idx].chat_completion(
                     {"json": cur_request_json, "headers": headers}
