@@ -30,7 +30,7 @@ from cloud.iris.rl_data import (
     resolve_rl_train_data_with_sources,
 )
 from marinskyrl.process_diagnostics import ProcessOutcomeKind, write_process_outcome
-from marinskyrl.resource_locator import model_source_for_path
+from marinskyrl.resource_locator import is_hugging_face_repo_id, model_source_for_path
 from cloud.iris.launch_config import RunMode, load_launch_config
 from cloud.iris.rl_config_translation import TaskLocalSkyRLValues, apply_task_local_values
 
@@ -455,15 +455,16 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
-    args = create_parser().parse_args()
-    launch_config = load_launch_config(args.config)
+def local_rl_config_from_launch(launch_config: DictConfig) -> LocalRLConfig:
+    """Resolve the task-local runner configuration from a validated launch."""
     allocation = launch_config.iris.allocation
-    config = LocalRLConfig(
+    model_path = str(launch_config.skyrl.trainer.policy.model.path)
+    hugging_face_model = is_hugging_face_repo_id(model_path)
+    return LocalRLConfig(
         job_name=str(launch_config.iris.job_name),
-        model_path=str(launch_config.skyrl.trainer.policy.model.path),
-        model_source_uri=str(launch_config.inputs.model.uri),
-        model_source_identity=str(launch_config.inputs.model.identity),
+        model_path=model_path,
+        model_source_uri=None if hugging_face_model else str(launch_config.inputs.model.uri),
+        model_source_identity=None if hugging_face_model else str(launch_config.inputs.model.identity),
         train_data=list(launch_config.inputs.train_data),
         val_data=list(launch_config.inputs.validation_data),
         experiments_dir=str(launch_config.runtime.experiments_dir),
@@ -481,6 +482,10 @@ def main() -> None:
         launch_config=launch_config,
     )
 
+
+def main() -> None:
+    args = create_parser().parse_args()
+    config = local_rl_config_from_launch(load_launch_config(args.config))
     runner = LocalRLRunner(config)
     runner.setup()
     sys.exit(runner.run())

@@ -13,6 +13,7 @@ import yaml
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config, parse_rl_config
 from cloud.iris.task_runtime import _runtime_namespace
+from cloud.iris.training_driver import local_rl_config_from_launch
 
 
 def _raw_config() -> dict[str, Any]:
@@ -133,6 +134,10 @@ def test_pinned_hugging_face_policy_reaches_skyrl_without_object_store_staging(t
     assert config.skyrl.trainer.policy.model.revision == revision
     assert config.skyrl.trainer.policy.model.get("source_uri") is None
     assert _runtime_namespace(config).prestage_model == repo
+    runner_config = local_rl_config_from_launch(config)
+    assert runner_config.model_path == repo
+    assert runner_config.model_source_uri is None
+    assert runner_config.model_source_identity is None
 
 
 def test_taskcompendium_source_recipe_selects_its_entrypoint(tmp_path: Path) -> None:
