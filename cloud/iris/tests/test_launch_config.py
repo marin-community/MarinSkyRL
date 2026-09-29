@@ -9,9 +9,11 @@ from typing import Any
 
 import pytest
 import yaml
+from omegaconf import OmegaConf
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
+from skyrl_train.utils import validate_cfg
 
 
 def _raw_config() -> dict[str, Any]:
@@ -121,6 +123,20 @@ def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path, lo
         path.write_text(yaml.safe_dump(raw, sort_keys=False))
         with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):
             load_launch_config(path)
+
+
+@pytest.mark.parametrize("switch", ["use_abs_kl", "use_kl_estimator_k3"])
+def test_composed_launch_rejects_kl_switches_at_launch_and_startup(tmp_path: Path, switch: str) -> None:
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(_raw_config()))
+    config = load_launch_config(path)
+    OmegaConf.update(config.skyrl.trainer.algorithm, switch, True, force_add=True)
+    OmegaConf.save(config, path)
+
+    with pytest.raises(ValueError, match="kl_estimator_type"):
+        load_launch_config(path)
+    with pytest.raises(ValueError, match="kl_estimator_type"):
+        validate_cfg(config.skyrl)
 
 
 @pytest.mark.parametrize(

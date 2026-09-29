@@ -145,7 +145,12 @@ def test_unbiased_kl_keeps_k3_values_and_clamps_only_log_ratio_gradients():
     mask = torch.tensor([1, 1, 1, 1, 1, 1, 1, 0])
     values = differentiable_approx_kl(log_probs, reference, mask, "k3_unbiased_gradient")
     reported = compute_approx_kl(log_probs, reference, mask, "k3")
-    torch.testing.assert_close(values, reported, rtol=0, atol=0)
+    expected = torch.tensor(
+        [10, 10, math.exp(0.3) - 0.3 - 1, 0, math.exp(-0.2) + 0.2 - 1, math.exp(-5) + 5 - 1, 10, 0],
+        dtype=torch.float64,
+    )
+    torch.testing.assert_close(values, expected, rtol=0, atol=0)
+    torch.testing.assert_close(reported, expected, rtol=0, atol=0)
     values.sum().backward()
     torch.testing.assert_close(
         log_probs.grad,
