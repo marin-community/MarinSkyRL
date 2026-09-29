@@ -42,7 +42,7 @@ Configuration
   before training fails. The ``null`` default allows 30 minutes before any step timing exists, then adapts to
   ``max(5 * recent median step time, 10 minutes)``. Set a positive value only when the workload needs a fixed
   deadline.
-- ``generator.weight_sync_pause``: Local vLLM's weight-sync pause policy. The default is ``mode: abort`` with
+- ``generator.weight_sync_pause``: Local vLLM's weight-sync pause policy. The default is ``mode: keep`` with
   ``clear_cache: true``. See `Weight sync`_.
 
 A positive staleness needs separate GPUs for training and generation. The following snippet dedicates 4 GPUs to
@@ -147,15 +147,15 @@ step. While generation runs ahead of training, the sync pauses generation first.
 pause wait for it to end. ``generator.weight_sync_pause.mode`` controls requests already running in local vLLM
 engines:
 
-- ``abort`` (the default) ends them. The client continues a non-streaming chat completion or single-prompt
+- ``abort`` ends them. The client continues a non-streaming chat completion or single-prompt
   ``generate`` call from its generated tokens, so the response can contain tokens sampled under both policies.
   It re-issues a single-prompt ``/completions`` request once from the start. A streaming chat completion ends
   early with finish reason ``abort`` because a stream cannot be re-issued mid-response. Agents that stream, such
   as OpenCode under Harbor, see that turn cut short.
 - ``wait`` lets them finish before syncing weights, which may hold up the training step. It requires a vLLM
   EngineCore process (``generator.vllm_v1_disable_multiproc=false``).
-- ``keep`` freezes them in place and resumes them after syncing weights. Streams and batched requests remain
-  active across the sync; the runner does not need to re-issue them.
+- ``keep`` (the default) freezes them in place and resumes them after syncing weights. Streams and batched
+  requests remain active across the sync; the runner does not need to re-issue them.
 
 A batched ``generate`` or ``/completions`` request that starts during any pause fails. A trajectory interacting
 with its environment when the sync happens is unaffected.

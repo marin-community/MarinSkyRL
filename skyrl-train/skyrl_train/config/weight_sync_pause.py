@@ -22,7 +22,7 @@ class WeightSyncPausePolicy:
     clear_cache: bool
 
 
-DEFAULT_WEIGHT_SYNC_PAUSE_POLICY = WeightSyncPausePolicy(WeightSyncPauseMode.ABORT, True)
+DEFAULT_WEIGHT_SYNC_PAUSE_POLICY = WeightSyncPausePolicy(WeightSyncPauseMode.KEEP, True)
 
 
 def validate_weight_sync_pause_backend(

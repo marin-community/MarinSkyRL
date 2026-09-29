@@ -447,7 +447,7 @@ Generator Configuration
     backend: "vllm"
     weight_sync_backend: "nccl"
     weight_sync_pause:
-      mode: abort
+      mode: keep
       clear_cache: true
     inference_engine_tensor_parallel_size: 4
     inference_engine_pipeline_parallel_size: 1
@@ -572,11 +572,11 @@ Weight Transfer Configuration
 ``generator.weight_sync_pause`` sets the local vLLM pause policy during weight sync when
 ``trainer.rollout_buffer.max_staleness_steps`` is positive:
 
-- ``mode: abort`` (default) ends in-flight requests. Non-streaming single-prompt requests can continue or retry;
+- ``mode: abort`` ends in-flight requests. Non-streaming single-prompt requests can continue or retry;
   streaming chat completions end with ``finish_reason=abort``.
 - ``mode: wait`` lets in-flight requests finish before the sync. It requires
   ``generator.vllm_v1_disable_multiproc=false`` and can delay a step behind long requests.
-- ``mode: keep`` freezes in-flight requests and resumes them after the sync, including streams and batches.
+- ``mode: keep`` (default) freezes in-flight requests and resumes them after the sync, including streams and batches.
 
 ``clear_cache: true`` (default) clears KV and prefix caches during the pause. With ``keep``, running requests
 re-prefill their prompt and generated tokens under the new weights. ``keep`` with ``clear_cache: false`` retains
