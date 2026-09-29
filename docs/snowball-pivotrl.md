@@ -10,9 +10,11 @@ Never select examples using NVIDIA's profiling columns.
 [PivotRL](https://arxiv.org/html/2603.21383v1) Eq. 5 selects prefixes with positive
 reward variance and mean success below a difficulty threshold. Algorithm 1 freezes
 this selection before optimization. Eq. 7 penalizes KL(policy || initial reference).
-The threshold is explicitly defined as `lambda_diff`; a numerical setting has not
-been located in Eq. 5, Algorithm 1, or Appendix A.2–A.3. Keep its value explicit
-pending verification of the cited setting. Report all three preregistered KL coefficients: 0, 0.001,
+The threshold is explicitly defined as `lambda_diff`. Sweep the user-approved values
+0.25, 0.5, 0.75, and 1.0, using 0.5 for the initial comparison. These are experiment
+settings, not claimed numerical defaults from the paper. With eight profiling samples
+and the strict inequality in Eq. 5, they retain 1, 1–3, 1–5, and 1–7 successes,
+respectively. Report all three preregistered KL coefficients: 0, 0.001,
 and 0.01. Use eight frozen-policy samples per candidate, binary outcomes, no shaping,
 and no online replacement. The implemented KL is a conditional token forward-KL
 estimator, importance weighted under the behavior policy, with differentiable weights.
@@ -139,9 +141,15 @@ Generate recipes using the selected immutable train URI. Run `--mode pivotrl` fo
 each `--kl-coefficient 0`, `0.001`, and `0.01`; run `--mode sft` on that identical URI.
 Run `--mode sft_random --train-data <immutable-random_train.parquet-uri>` for the
 random control. The filter manifest stores its seed, pool size, count, overlap,
-and checksum. For the fast pilot, first draw 512 SWE training candidates with a
-fixed seed, profile Grug on that pool, and derive all three arms from it. Keep both
-full heldout sets. Start with KL 0.001; report the preregistered 0 and 0.01 runs as
+and checksum. Profile the full training candidate splits for each student: 50,399 SWE
+rows and 30,855 Terminal rows, after excluding heldout trajectories. Both the pilot
+and full training comparisons derive their selected and random-control artifacts
+from these complete pools. Small subsets are only for mechanics checks. They must
+not define the experimental training pool. Stream profiling in bounded batches;
+eight samples per row give up to 403,192 SWE and 246,840 Terminal responses per
+student, with context exclusions reported separately. Reuse these frozen profiles
+for all four thresholds and all three KL coefficients. Keep both full heldout sets.
+Start with KL 0.001; report the preregistered 0 and 0.01 runs as
 follow-ups, before making conclusions about KL choice.
 Add `--smoke` for one training step before the full arm. The template preserves the
 split64 Megatron and vLLM geometry. Batch sizes count prefixes in this trainer:
@@ -165,7 +173,7 @@ uv run python -m infra.rl_data.pivot_report "$TRAINING_ARCHIVES" --exposure
 Exposure reports distinguish unique source rows, prefix visits, and responses per
 row. Their token totals describe retained trajectories before the final loss-budget
 mask; the trainer's `consumed/loss_total` is the authoritative loss-token count.
-Heldout aggregate scores appear in W&B as `eval/pivot_swe/avg_score` and
+Use W&B team/project `marin-community/pivot-rl`. Heldout aggregate scores appear as `eval/pivot_swe/avg_score` and
 `eval/pivot_terminal/avg_score`, mirrored to Iris stdout as `WANDB_MIRROR`.
 Per-row predictions and verification results remain in the run's immutable
 `attempts/trajectories` archives. Confidence intervals are computed by the report

@@ -46,7 +46,7 @@ trainer:
   max_ckpts_to_keep: 3
   resume_mode: none
   logger: wandb
-  project_name: snowball-pivotrl
+  project_name: pivot-rl
   policy:
     optimizer_config:
       optimizer: AdamW
