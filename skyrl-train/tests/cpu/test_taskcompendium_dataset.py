@@ -14,6 +14,7 @@ from taskcompendium.resources import ResourceVisibility, TaskResource
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
 
 from skyrl_train.entrypoints.taskcompendium import TaskCompendiumExp
+from skyrl_train.rollouts.loader import PromptLoader, SeededPasses
 from skyrl_train.trajectory_runners.taskcompendium import (
     HARBOR_ENV_CLASS,
     NATIVE_CHAT_ENV_CLASS,
@@ -61,6 +62,21 @@ def test_taskcompendium_dataset_routes_simple_chat_natively(tmp_path):
         "env_class": NATIVE_CHAT_ENV_CLASS,
         "env_extras": {"task_dir": str(native)},
     }
+
+
+def test_taskcompendium_dataset_supplies_distinct_uids_to_prompt_loader(tmp_path):
+    _lowering(tmp_path, "chat-a")
+    _lowering(tmp_path, "chat-b")
+    dataset = TaskCompendiumTaskDataset([str(tmp_path)], api_base="http://policy:8000/v1", model_name="snowball")
+    loader = PromptLoader(dataset, SeededPasses(len(dataset), seed=17, shuffle=False), batch_size=2)
+
+    first = loader.next_prompt(set())
+    assert first is not None
+    second = loader.next_prompt({first["uid"]})
+
+    assert first["uid"] == "chat-a"
+    assert second is not None
+    assert second["uid"] == "chat-b"
 
 
 def test_taskcompendium_requires_a_serving_policy_endpoint():

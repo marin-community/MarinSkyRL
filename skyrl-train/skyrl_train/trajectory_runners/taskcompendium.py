@@ -121,6 +121,9 @@ class TaskCompendiumTaskDataset:
     def __getitem__(self, index: int) -> dict[str, Any]:
         return self._rows[index]
 
+    def uid(self, index: int) -> str:
+        return str(self._rows[index]["uid"])
+
     def __len__(self) -> int:
         return len(self._rows)
 
