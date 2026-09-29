@@ -1,9 +1,11 @@
 """Projection of harness interaction records into trainer samples."""
 
 import copy
+import math
 from typing import Generic, Protocol, Sequence, TypeVar
 
 from omegaconf import DictConfig
+from loguru import logger
 
 from skyrl_train.distillation import INVALID_TOPK_INDEX
 from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
@@ -64,6 +66,27 @@ class WholeTrajectoryProjection:
         rollout_logprobs = (
             candidate_logprobs if get_logprobs and all(x is not None for x in candidate_logprobs) else None
         )
+
+        if rollout_logprobs is not None:
+            offsets = []
+            for row, mask in zip(rollout_logprobs, loss_masks, strict=True):
+                assert row is not None and len(row) == len(mask)
+                for index, selected in enumerate(mask):
+                    if selected:
+                        original = row[index]
+                        row[index] -= 4.0
+                        assert math.isfinite(original) and math.isfinite(row[index])
+                        offsets.append(original - row[index])
+            if offsets:
+                logger.warning(
+                    "CAT_COUNT_MUTATION rollout_logprob rows={} valid_tokens={} "
+                    "finite=true offset_min={} offset_max={} first_prompt_token_ids={}",
+                    len(rollout_logprobs),
+                    len(offsets),
+                    min(offsets),
+                    max(offsets),
+                    list(outputs[0].evidence.prompt_token_ids)[:8],
+                )
 
         batch = TrajectoryBatch(
             prompt_token_ids=[list(output.evidence.prompt_token_ids) for output in outputs],
