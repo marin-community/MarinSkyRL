@@ -77,6 +77,10 @@ trainer:
       routing_plan: opd
       coefficient: 1.0
       reward_mode: replace
+    group_admission:
+      # A SWE group may spend a Harbor trial's full budget (600 s setup, 1800 s agent, 300 s
+      # verifier), which exceeds the adaptive deadline of five ~260 s steps.
+      stall_timeout: 3600
   epochs: 1
   max_steps: 100
   update_epochs_per_batch: 1
