@@ -103,10 +103,9 @@ def local_source_slices(tasks, config, *, pp: int) -> LocalSources:
                     expert.append(ExpertSlice(mapping.hf_param[part], expert_id, part, key))
             continue
 
-        # The current Hero export uses one HF tensor per expert. Megatron-Bridge
-        # consequently chooses generic GatedMLPMapping/AutoMapping rather than
-        # the stacked-expert classes above. They still hold one whole local
-        # expert matrix at TP=ETP=1, so send them through the expert schedule.
+        # Split expert artifacts use one HF tensor per expert. Megatron-Bridge
+        # maps them with generic GatedMLPMapping/AutoMapping rather than the
+        # stacked-expert classes above. At TP=ETP=1, each is a whole matrix.
         if kind in ("GatedMLPMapping", "AutoMapping"):
             names = [mapping.hf_param] if kind == "AutoMapping" else mapping.hf_param.values()
             matches = [SPLIT_EXPERT_HF_NAME.fullmatch(name) for name in names]
