@@ -655,7 +655,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             logger.debug(f"/chat/completions request sent (including potential retries): {cur_request_json}")
             try:
                 partial_response = await self.engines[engine_idx].chat_completion(
-                    {"json": cur_request_json, "headers": headers}
+                    {**original_request_payload, "json": cur_request_json, "headers": headers}
                 )
             except (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError) as e:
                 self._mark_engine_dead(engine_idx, e)

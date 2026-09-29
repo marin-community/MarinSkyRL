@@ -153,6 +153,7 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
         "tools": expected_tools,
         "add_generation_prompt": True,
     }
+    assert engine.chat_completion.await_args.args[0]["sampling_params"] == {"temperature": 0.7, "logprobs": 0}
     chat_body = engine.chat_completion.await_args.args[0]["json"]
     assert chat_body == {
         "model": "snowball",
