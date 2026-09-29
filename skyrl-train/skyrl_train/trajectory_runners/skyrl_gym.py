@@ -568,7 +568,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     if response_routes is not None:
                         if route_sentinel is None:
                             route_sentinel = _sentinel_routed_experts_row(response_routes[0])
-                        response_routes.append(route_sentinel)
+                        response_routes = np.concatenate((response_routes, np.asarray(route_sentinel)[None]))
                     added_eos = True
 
             # 2. Environment step
@@ -657,7 +657,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                         rollout_logprobs = None
                     else:
                         rollout_logprobs += response_logprobs
-                if response_routes:
+                if response_routes is not None and len(response_routes):
                     if route_sentinel is None:
                         route_sentinel = _sentinel_routed_experts_row(response_routes[0])
                     if rollout_routes is None:
@@ -714,7 +714,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 if retokenize_chat_history:
                     rollout_routes = None
                     route_sentinel = None
-                elif response_routes:
+                elif response_routes is not None and len(response_routes):
                     if route_sentinel is None:
                         route_sentinel = _sentinel_routed_experts_row(response_routes[0])
                     if rollout_routes is None:
