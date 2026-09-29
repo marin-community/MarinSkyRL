@@ -3,6 +3,7 @@ uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/te
 """
 
 import pytest
+import requests
 from concurrent.futures import Executor, Future
 from typing import List, Dict, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -373,6 +374,32 @@ async def test_agent_loop_failure_closes_environment_before_masking(generator_cf
     assert batch["response_ids"] == [[0]]
     assert batch["loss_masks"] == [[0]]
     assert batch["exception_types"] == ["AgentTimeoutError"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("generation_fails", [False, True])
+async def test_cleanup_timeout_preserves_reward_or_original_failure(
+    generator_cfg, mock_tokenizer, mock_llm, mock_env, generation_fails
+):
+    mock_env.init.return_value = ([{"role": "user", "content": "What is 2 + 2?"}], {})
+    mock_env.step.side_effect = lambda action: BaseTextEnvStepOutput(
+        observations=[], reward=1.0, done=True, metadata={}
+    )
+    mock_env.close.side_effect = requests.ReadTimeout("sandbox session deletion timed out")
+    if generation_fails:
+        mock_llm.generate.side_effect = TimeoutError("generation timed out")
+    runner = SkyRLGymTrajectoryRunner(generator_cfg, DictConfig({"max_env_workers": 0}), mock_llm, mock_tokenizer)
+    with patch("skyrl_train.trajectory_runners.skyrl_gym.skyrl_gym.make", return_value=mock_env):
+        if generation_fails:
+            with pytest.raises(TimeoutError, match="generation timed out"):
+                await runner.agent_loop([{"role": "user", "content": "What is 2 + 2?"}], "gsm8k", {}, 8, 512)
+            return
+        output = await runner.agent_loop([{"role": "user", "content": "What is 2 + 2?"}], "gsm8k", {}, 8, 512)
+    assert output.reward.optimization_reward == 1.0
+    assert output.loss_mask == [1] * len(MOCK_LLM_OUTPUT_IDS)
+    assert output.disposition.loss_eligible
+    assert output.verification.diagnostics["cleanup_exception_type"] == "ReadTimeout"
+    assert output.env_metrics["environment_cleanup_error"] == 1.0
 
 
 def test_tis_config_does_not_select_a_generation_strategy():
