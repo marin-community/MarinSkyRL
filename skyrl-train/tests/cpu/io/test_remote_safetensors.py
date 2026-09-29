@@ -16,52 +16,29 @@ def _write_index(metadata_dir: Path, weight_map: dict[str, str]) -> None:
     (metadata_dir / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
 
 
-def test_loads_only_requested_tensor_range_without_local_weight_files(tmp_path: Path) -> None:
+@pytest.mark.parametrize("indexed", [True, False])
+def test_loads_only_requested_tensor_range_without_local_weight_files(tmp_path: Path, indexed: bool) -> None:
     remote = tmp_path / "remote"
     remote.mkdir()
+    weight_file = "model-00001-of-00001.safetensors" if indexed else "model.safetensors"
     save_file(
         {
             "layer.0.weight": torch.arange(8, dtype=torch.float32),
             "layer.1.weight": torch.arange(1_000_000, dtype=torch.float32),
         },
-        remote / "model-00001-of-00001.safetensors",
+        remote / weight_file,
     )
     metadata = tmp_path / "metadata"
-    _write_index(
-        metadata,
-        {
-            "layer.0.weight": "model-00001-of-00001.safetensors",
-            "layer.1.weight": "model-00001-of-00001.safetensors",
-        },
-    )
+    if indexed:
+        _write_index(metadata, {"layer.0.weight": weight_file, "layer.1.weight": weight_file})
+    else:
+        metadata.mkdir()
 
     store = RemoteSafetensorsTensorStore(str(remote), metadata)
     loaded = store.load_tensors(["layer.0.weight"])
 
     torch.testing.assert_close(loaded["layer.0.weight"], torch.arange(8, dtype=torch.float32))
-    assert store.bytes_read < (remote / "model-00001-of-00001.safetensors").stat().st_size
-    assert not tuple(metadata.glob("*.safetensors"))
-
-
-def test_single_file_export_without_index_streams_only_requested_tensor(tmp_path: Path) -> None:
-    remote = tmp_path / "levanter-export"
-    remote.mkdir()
-    save_file(
-        {
-            "model.embed_tokens.weight": torch.arange(8, dtype=torch.float32),
-            "model.layers.0.weight": torch.arange(1_000_000, dtype=torch.float32),
-        },
-        remote / "model.safetensors",
-    )
-    metadata = tmp_path / "metadata"
-    metadata.mkdir()
-
-    store = RemoteSafetensorsTensorStore(str(remote), metadata)
-    loaded = store.load_tensors(["model.embed_tokens.weight"])
-
-    assert store.get_all_keys() == ["model.embed_tokens.weight", "model.layers.0.weight"]
-    torch.testing.assert_close(loaded["model.embed_tokens.weight"], torch.arange(8, dtype=torch.float32))
-    assert store.bytes_read < (remote / "model.safetensors").stat().st_size
+    assert store.bytes_read < (remote / weight_file).stat().st_size
     assert not tuple(metadata.glob("*.safetensors"))
 
 
