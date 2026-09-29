@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import socket
 from typing import Any
 
 import requests
@@ -12,6 +14,7 @@ import threading
 
 
 MAX_VERIFIER_OUTPUT_CHARACTERS = 65536
+SANDBOX_HTTP_GRACE_SECONDS = 30.0
 # Share the limit across clients so increasing Gym workers cannot exhaust the sandbox.
 _SANDBOX_SLOTS = threading.BoundedSemaphore(16)
 
@@ -22,6 +25,17 @@ class SandboxClient:
     port: int = 6000
     _sessions: set[str] = field(default_factory=set, compare=False, repr=False)
     _requested_sessions: set[str] = field(default_factory=set, compare=False, repr=False)
+
+    @classmethod
+    def for_session(cls, *, host: str, port: int, session_id: str) -> SandboxClient:
+        """Select one headless-service replica for the entire stateful session."""
+        addresses = sorted(
+            {entry[4][0] for entry in socket.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)}
+        )
+        if not addresses:
+            raise RuntimeError(f"Sandbox replica service {host} has no IPv4 addresses")
+        index = int.from_bytes(hashlib.blake2b(session_id.encode(), digest_size=8).digest(), "big") % len(addresses)
+        return cls(host=addresses[index], port=port)
 
     def execute(
         self,
@@ -47,7 +61,7 @@ class SandboxClient:
                     "max_output_characters": max_output_characters,
                     **({"traceback_verbosity": "Plain"} if language == "ipython" else {}),
                 },
-                timeout=timeout_seconds + 5.0,
+                timeout=timeout_seconds + SANDBOX_HTTP_GRACE_SECONDS,
             )
         response.raise_for_status()
         value = response.json()
@@ -76,7 +90,7 @@ class SandboxClient:
         response = requests.delete(
             f"http://{self.host}:{self.port}/sessions/{session_id}",
             headers={"X-Session-ID": session_id},
-            timeout=5.0,
+            timeout=SANDBOX_HTTP_GRACE_SECONDS,
         )
         if response.status_code != 404:
             response.raise_for_status()
