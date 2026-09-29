@@ -469,7 +469,7 @@ def _boxed_answer(solution: str) -> str:
 def _plain_numeric_answer(answer: Any) -> str:
     normalized = str(answer).split("(", 1)[0].strip().replace(",", "")
     if not _PLAIN_NUMERIC_ANSWER.fullmatch(normalized):
-        raise ValueError("answer is not a plain number or fraction.")
+        raise ValueError("answer is not a plain number, fraction, or ratio.")
     if normalized.endswith(".0"):
         return normalized[: -len(".0")]
     return normalized
