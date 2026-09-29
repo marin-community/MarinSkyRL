@@ -72,9 +72,13 @@ def _layout_config(tmp_path, layout) -> tuple:
 
 
 def _routed_batch(pad_token_id: int, *, captured: bool, variable_lengths: bool = False) -> TrainingInputBatch:
-    batch = _padded_batch(pad_token_id, variable_lengths=variable_lengths)
+    batch = _padded_batch(
+        pad_token_id,
+        response_length=2 * RESPONSE_LENGTH if variable_lengths else RESPONSE_LENGTH,
+        variable_lengths=variable_lengths,
+    )
     generator = torch.Generator().manual_seed(31)
-    shape = (batch["sequences"].shape[0], RESPONSE_LENGTH, NUM_LAYERS, TOPK)
+    shape = (batch["sequences"].shape[0], batch.metadata["response_length"], NUM_LAYERS, TOPK)
     if not captured:
         routes = torch.zeros(shape, dtype=torch.long)  # empty capture: everything routes natively
     else:
