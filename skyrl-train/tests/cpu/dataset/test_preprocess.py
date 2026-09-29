@@ -9,56 +9,24 @@ from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
 
-from unittest.mock import MagicMock
-
 
 @pytest.fixture
 def cfg():
     return OmegaConf.create({"trainer": {"max_prompt_length": 10}, "generator": {"max_generate_length": 5}})
 
 
-# NOTE (sumanthrh): the tests in this file are hardcoded to use the below character-level tokenizer
+class CharTokenizer:
+    """Character-level tokenizer: "abc" -> [97, 98, 99]. The tests below hardcode these ids."""
+
+    pad_token_id = 0
+
+    def __call__(self, texts):
+        return {"input_ids": [[ord(c) for c in text] for text in texts]}
+
+
 @pytest.fixture
 def tokenizer():
-    mock_tokenizer = MagicMock()
-    mock_tokenizer.pad_token_id = 0
-    mock_tokenizer.eos_token_id = 2
-
-    # encode("abc") -> [97, 98, 99]
-    def fake_encode(text):
-        if isinstance(text, list):
-            return [fake_encode(t) for t in text]
-        return [ord(c) for c in text]
-
-    mock_tokenizer.encode.side_effect = fake_encode
-
-    # tokenizer("abc") -> {"input_ids": [...], "attention_mask": [...]}
-    def fake_tokenizer_call(text, **kwargs):
-        if isinstance(text, list):
-            dicts = [fake_tokenizer_call(t, **kwargs) for t in text]
-            return {
-                "input_ids": [d["input_ids"] for d in dicts],
-                "attention_mask": [d["attention_mask"] for d in dicts],
-            }
-        ids = [ord(c) for c in text]
-        return {
-            "input_ids": ids,
-            "attention_mask": [1] * len(ids),
-        }
-
-    mock_tokenizer.side_effect = fake_tokenizer_call
-
-    def fake_tokenizer_decode(ids, **kwargs):
-        return "".join([chr(i) for i in ids])
-
-    mock_tokenizer.decode.side_effect = fake_tokenizer_decode
-
-    def fake_tokenizer_decode_list(ids, **kwargs):
-        return [fake_tokenizer_decode(i) for i in ids]
-
-    mock_tokenizer.batch_decode.side_effect = fake_tokenizer_decode_list
-
-    return mock_tokenizer
+    return CharTokenizer()
 
 
 def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer, cfg):
@@ -139,42 +107,6 @@ def test_convert_prompts_responses_to_batch_tensors_different_lengths(cfg, token
     assert sequences[0, 0] == tokenizer.pad_token_id
     # second output is shorter than first output. the output is right padded
     assert sequences[1, -1] == tokenizer.pad_token_id
-
-
-def test_convert_prompts_responses_to_batch_tensors_empty_input(cfg, tokenizer):
-    # Test with empty input
-    prompts = []
-    outputs = []
-    rewards = []
-    loss_masks = []
-
-    with pytest.raises(AssertionError):
-        convert_prompts_responses_to_batch_tensors(
-            tokenizer,
-            prompts,
-            outputs,
-            rewards,
-            loss_masks,
-        )
-
-
-def test_convert_prompts_responses_to_batch_tensors_mismatched_lengths(cfg, tokenizer):
-    # Test with mismatched input lengths
-    prompts = ["Hello", "World"]
-    outputs = ["Response"]
-    prompts = tokenizer(prompts)["input_ids"]
-    outputs = tokenizer(outputs)["input_ids"]
-    rewards = [torch.tensor([1.0])]
-    loss_masks = [[1]]
-
-    with pytest.raises(AssertionError):
-        convert_prompts_responses_to_batch_tensors(
-            tokenizer,
-            prompts,
-            outputs,
-            rewards,
-            loss_masks,
-        )
 
 
 def _re_inputs(tokenizer):

@@ -27,10 +27,6 @@ from skyrl_train.worker_setup import configure_worker_process
 
 _Result = TypeVar("_Result")
 
-# Each worker imports its runner stack and loads its tokenizer from a shared filesystem; spacing the starts keeps
-# those page-ins from overlapping each other and the engines' weight loads.
-WORKER_START_INTERVAL_SECONDS = 2.0
-
 
 class RolloutWorkers(Protocol):
     """The rollout processes a coordinator hands tasks to."""
@@ -63,12 +59,18 @@ class RunnerSpec(Protocol):
 
 @dataclass(frozen=True)
 class RolloutWorkerResources:
-    """Size of a rollout worker pool, and how long a worker may go without completing a request."""
+    """Size of a rollout worker pool, how its workers start, and how long a worker may go without completing a request.
+
+    Workers start one at a time, each ``start_interval_seconds`` after the previous one is up, because each imports
+    its runner stack and loads its tokenizer from a shared filesystem, and spacing the starts keeps those page-ins
+    from overlapping each other and the engines' weight loads. An interval of zero starts every worker at once.
+    """
 
     num_workers: int
     cpus_per_worker: int
     executor_threads: int
     progress_timeout_seconds: float
+    start_interval_seconds: float
 
     @classmethod
     def from_config(cls, config: DictConfig) -> RolloutWorkerResources:
@@ -78,6 +80,7 @@ class RolloutWorkerResources:
             cpus_per_worker=int(workers.cpus_per_worker),
             executor_threads=int(workers.executor_threads),
             progress_timeout_seconds=float(workers.progress_timeout_seconds),
+            start_interval_seconds=float(workers.start_interval_seconds),
         )
 
 
@@ -146,7 +149,7 @@ class RolloutWorkerPool:
     ``RolloutWorkerStalledError`` when its worker completes nothing for the progress timeout.
 
     Workers run on the driver's node, beside the rollout buffer actor they commit to and the Harbor proxy whose
-    node-local log they read. They start one at a time.
+    node-local log they read.
     """
 
     def __init__(self, spec: RunnerSpec, resources: RolloutWorkerResources):
@@ -171,16 +174,28 @@ class RolloutWorkerPool:
         self._sink = sink
 
     async def startup(self) -> None:
-        node = NodeAffinitySchedulingStrategy(node_id=ray.get_runtime_context().get_node_id(), soft=False)
-        worker = RolloutWorker.options(num_cpus=self._resources.cpus_per_worker, scheduling_strategy=node)
         count = self._resources.num_workers
+        interval = self._resources.start_interval_seconds
+        if interval == 0:
+            actors = [self._launch_worker(index) for index in range(count)]
+            await asyncio.gather(*(actor.startup.remote() for actor in actors))
+            self._actors = actors
+            logger.info("Rollout workers started: count={}", count)
+            return
         for index in range(count):
             if index:
-                await asyncio.sleep(WORKER_START_INTERVAL_SECONDS)
-            actor = worker.remote(self._spec, WorkerShard(index, count), self._sink, self._resources.executor_threads)
+                await asyncio.sleep(interval)
+            actor = self._launch_worker(index)
             await actor.startup.remote()
             self._actors.append(actor)
             logger.info("Rollout worker {}/{} started", index + 1, count)
+
+    def _launch_worker(self, index: int) -> ActorHandle:
+        node = NodeAffinitySchedulingStrategy(node_id=ray.get_runtime_context().get_node_id(), soft=False)
+        worker = RolloutWorker.options(num_cpus=self._resources.cpus_per_worker, scheduling_strategy=node)
+        return worker.remote(
+            self._spec, WorkerShard(index, self._resources.num_workers), self._sink, self._resources.executor_threads
+        )
 
     async def shutdown(self) -> None:
         actors, self._actors = self._actors, []
