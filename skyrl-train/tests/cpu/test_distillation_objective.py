@@ -17,7 +17,7 @@ from skyrl_train.distillation import (
     TopKTeacherEvidence,
     distillation_input_from_tensors,
     prepare_sampled_reverse_kl,
-    prepare_sparse_forward_kl,
+    prepare_teacher_topk,
     student_topk_logprobs,
     validate_sampled_reverse_kl_attachment,
     validate_teacher_evidence,
@@ -44,7 +44,12 @@ def _topk_params(distillation, config):
 def _topk_teacher_row(student_selected_logprobs, distillation, loss_mask, config=None):
     config = _policy_config() if config is None else config
     evidence = mask_teacher_evidence(distillation, loss_mask)
-    row = topk_teacher_loss(evidence, student_selected_logprobs, _topk_params(evidence, config))
+    row = topk_teacher_loss(
+        evidence,
+        student_selected_logprobs,
+        _topk_params(evidence, config),
+        vocabulary_size=student_selected_logprobs.shape[-1],
+    )
     weight = evidence.valid_mask * loss_mask
     counts = step_counts(
         [weight], [weight], [weight], [torch.zeros_like(weight)], config.max_seq_len, lambda value: value
@@ -90,7 +95,9 @@ def _composed_objective(
             )
             advantages = advantages + credit
         else:
-            teacher = TopKTeacherBatch(distillation, student_topk_logprobs, _topk_params(distillation, config))
+            teacher = TopKTeacherBatch(
+                distillation, student_topk_logprobs, _topk_params(distillation, config), student_topk_logprobs.shape[-1]
+            )
     batch = build_objective_micro_batch(
         action_log_probs=action_log_probs,
         old_action_log_probs=old_action_log_probs,
@@ -142,8 +149,6 @@ def _policy_config(loss_reduction: str = "token_mean", reward_mode: str = "add")
             "use_kl_loss": False,
             "kl_loss_coef": 0.0,
             "kl_estimator_type": "k1",
-            "use_tis": False,
-            "tis_imp_ratio_cap": 2.0,
             "distillation": {"reward_mode": reward_mode},
         }
     )
@@ -324,7 +329,7 @@ def test_sparse_forward_kl_reports_top20_top256_and_full_retained_mass_and_learn
     assert abs(losses[1] - losses[2]) < abs(losses[0] - losses[2])
 
 
-def test_prepare_sparse_forward_kl_preserves_mass_and_route_weights():
+def test_prepare_teacher_topk_preserves_mass_and_route_weights():
     request = replace(_request(), evidence=TeacherEvidenceKind.TOPK_DISTRIBUTION, top_k=2)
     evidence = TopKTeacherEvidence(
         trajectory_ids=request.trajectory_ids,
@@ -342,7 +347,7 @@ def test_prepare_sparse_forward_kl_preserves_mass_and_route_weights():
         retained_mass=torch.tensor([[0.9, 0.8, 0.6], [0.95, torch.nan, torch.nan]]),
     )
 
-    prepared = prepare_sparse_forward_kl(
+    prepared = prepare_teacher_topk(
         request,
         evidence,
         coefficient=0.5,

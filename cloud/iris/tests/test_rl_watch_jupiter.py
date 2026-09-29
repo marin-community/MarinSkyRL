@@ -26,7 +26,7 @@ def test_status_row_surfaces_tis_alignment_and_token_probability_shift(tmp_path:
         "Training Step Progress: 7 / 20\n"
         "WANDB_MIRROR kind=train step=7 metrics="
         '{"policy/policy_entropy": 1.178, "generate/tis/exact_match_fraction": 0.975, '
-        '"policy/tis/log_ratio_abs_mean": 0.012, "policy/log_ratio_abs_mean": 0.021, '
+        '"policy/mismatch/pooled/log_ratio_abs_mean": 0.012, "policy/log_ratio_abs_mean": 0.021, '
         '"policy/log_ratio_abs_p99": 0.44, "policy/log_ratio_abs_max": 3.25}\n'
     )
     job = RlJob(
@@ -42,7 +42,7 @@ def test_status_row_surfaces_tis_alignment_and_token_probability_shift(tmp_path:
 
     assert "entropy=1.178" in trend
     assert "TIS exact=0.975" in trend
-    assert "TIS |log r|=0.012" in trend
+    assert "mismatch |log r|=0.012" in trend
     assert "token |Δlog p| μ/p99/max=0.021/0.44/3.25" in trend
 
 

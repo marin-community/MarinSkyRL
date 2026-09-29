@@ -217,7 +217,7 @@ def distillation_input_from_tensors(
             student_topk_indices, behavior_topk_logprobs, teacher_on_student_logprobs, valid_mask, loss_weights
         )
     if any(value is None for value in topk_values):
-        raise ValueError("sparse forward KL requires top-K indices, logprobs, and retained_mass together")
+        raise ValueError("teacher-support evidence requires top-K indices, logprobs, and retained_mass together")
     assert teacher_topk_indices is not None
     assert teacher_topk_logprobs is not None
     assert teacher_retained_mass is not None
@@ -480,7 +480,7 @@ def prepare_sampled_reverse_kl(
     )
 
 
-def prepare_sparse_forward_kl(
+def prepare_teacher_topk(
     request: TeacherScoreRequest,
     evidence: TopKTeacherEvidence,
     *,

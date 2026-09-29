@@ -12,7 +12,8 @@ from skyrl_train.config.behavior_logprobs import (
 )
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
 from skyrl_train.inference_engines.vllm.utils import apply_openai_sampling, pop_vllm_wrapper_kwargs
-from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
+from skyrl_train.config.objective_spec import resolve_objective_config
+from skyrl_train.config.utils import get_default_config
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -124,11 +125,11 @@ def test_checked_in_behavior_logprob_configs_use_validated_sampling():
     checked = []
     for path in sorted((REPO_ROOT / "cloud" / "iris" / "configs").glob("*.yaml")):
         config = yaml.safe_load(path.read_text()) or {}
-        algorithm = (config.get("trainer") or {}).get("algorithm") or {}
-        algorithm = OmegaConf.create(
-            {"use_tis": algorithm.get("use_tis", False), "policy_loss_type": algorithm.get("policy_loss_type")}
-        )
-        if not rollout_logprobs_enabled(algorithm):
+        cfg = get_default_config()
+        OmegaConf.set_struct(cfg, False)
+        cfg = OmegaConf.merge(cfg, config)
+        resolve_objective_config(cfg)
+        if not cfg.trainer.algorithm.resolved_rollout_logprobs_required:
             continue
         validate_behavior_logprob_sampling((config.get("generator") or {}).get("sampling_params") or {})
         checked.append(path.name)

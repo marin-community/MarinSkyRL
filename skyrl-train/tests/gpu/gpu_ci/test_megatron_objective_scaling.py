@@ -174,7 +174,7 @@ def run_scaling_rank(rank, world_size, cp_size, teacher, rendezvous):
         config.trainer.use_sample_packing = cp_size > 1
         algorithm = config.trainer.algorithm
         algorithm.policy_loss_type = "importance_sampling"
-        algorithm.use_tis = False
+        algorithm.off_policy_correction = "none"
         algorithm.use_kl_loss = True
         algorithm.kl_estimator_type = "k2"
         algorithm.kl_loss_coef = 0.3

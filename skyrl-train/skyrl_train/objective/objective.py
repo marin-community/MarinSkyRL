@@ -7,7 +7,6 @@ from skyrl_train.config.objective_spec import LossReduction, TopKLossParams
 from skyrl_train.objective.losses import PolicyLoss, PolicyLossInputs, TokenLoss, complete_clip_metrics
 from skyrl_train.objective.reduction import StepCounts, policy_data_weights, reduce_to_step
 from skyrl_train.objective.teacher import TopKEvidence, mask_teacher_evidence, topk_teacher_loss
-from skyrl_train.utils.importance_ratio_diagnostics import compute_tis_diagnostics
 from skyrl_train.utils.policy_math import differentiable_approx_kl
 
 
@@ -16,6 +15,7 @@ class TopKTeacherBatch:
     evidence: TopKEvidence
     student_log_probs_on_support: torch.Tensor
     params: TopKLossParams
+    vocabulary_size: int
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,7 @@ class ObjectiveMicroBatch:
     ref_log_probs: torch.Tensor | None
     token_entropy: torch.Tensor
     teacher: TopKTeacherBatch | None
+    correction_weights: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,7 @@ def build_objective_micro_batch(
     token_entropy: torch.Tensor,
     think_token_weight: float,
     teacher: TopKTeacherBatch | None,
+    correction_weights: torch.Tensor | None = None,
 ) -> ObjectiveMicroBatch:
     """Prepare finite values at masked positions before objective formulas run."""
     valid = loss_mask > 0
@@ -64,7 +66,10 @@ def build_objective_micro_batch(
 
     if teacher is not None:
         teacher = TopKTeacherBatch(
-            mask_teacher_evidence(teacher.evidence, loss_mask), teacher.student_log_probs_on_support, teacher.params
+            mask_teacher_evidence(teacher.evidence, loss_mask),
+            teacher.student_log_probs_on_support,
+            teacher.params,
+            teacher.vocabulary_size,
         )
     return ObjectiveMicroBatch(
         policy=PolicyLossInputs(
@@ -78,6 +83,7 @@ def build_objective_micro_batch(
         ref_log_probs=None if base_action_log_probs is None else sanitize(base_action_log_probs),
         token_entropy=sanitize(token_entropy),
         teacher=teacher,
+        correction_weights=None if correction_weights is None else sanitize(correction_weights).detach(),
     )
 
 
@@ -96,7 +102,14 @@ def compute_policy_objective(
     assert policy.values.shape == batch.policy.log_probs.shape
     common = {"max_seq_len": counts.max_seq_len, "nonzero_advantage_rows": counts.nonzero_advantage_rows}
     mode = LossReduction(config.loss_reduction)
-    policy_row = reduce_to_step(policy.values, batch.policy_data_weights, counts.policy, mode, **common)
+    policy_row = reduce_to_step(
+        policy.values,
+        batch.policy_data_weights,
+        counts.policy,
+        mode,
+        numerator_weights=batch.correction_weights,
+        **common,
+    )
     mask = batch.policy.loss_mask
     entropy = reduce_to_step(batch.token_entropy, mask, counts.mask, LossReduction.TOKEN_MEAN, **common)
     if config.use_kl_loss:
@@ -112,16 +125,15 @@ def compute_policy_objective(
     if config.use_entropy_loss:
         combined = combined - config.entropy_loss_coef * entropy
     metrics = complete_clip_metrics(policy.metrics)
-    if config.use_tis or config.policy_loss_type == "behavior_clip":
-        metrics.update(
-            compute_tis_diagnostics(
-                batch.policy.old_log_probs, batch.policy.rollout_log_probs, mask, cap=config.tis_imp_ratio_cap
-            )
-        )
     teacher_row = None
     if batch.teacher is not None:
         teacher = batch.teacher
-        result = topk_teacher_loss(teacher.evidence, teacher.student_log_probs_on_support, teacher.params)
+        result = topk_teacher_loss(
+            teacher.evidence,
+            teacher.student_log_probs_on_support,
+            teacher.params,
+            vocabulary_size=teacher.vocabulary_size,
+        )
         assert result.values.shape == mask.shape
         teacher_row = reduce_to_step(
             result.values,

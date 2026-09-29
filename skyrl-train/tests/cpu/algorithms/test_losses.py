@@ -47,7 +47,6 @@ def _clipping_config(loss_name: str, *, eps_clip_low: float, eps_clip_high: floa
             "policy_loss_type": loss_name,
             "loss_reduction": "sequence_mean",
             "max_seq_len": 2,
-            "use_tis": False,
             "cispo": {
                 "cispo_eps_clip_low": eps_clip_low,
                 "cispo_eps_clip_high": eps_clip_high,
@@ -128,7 +127,6 @@ def test_policy_loss_dual_clip():
             "policy_loss_type": "dual_clip",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "use_tis": False,
         }
     )
 
@@ -219,20 +217,6 @@ def test_behavior_clip_requires_rollout_logprobs():
         )
 
 
-def test_behavior_clip_rejects_tis_multiplication():
-    config = _clipping_config("behavior_clip", eps_clip_low=0.2, eps_clip_high=0.2)
-    config.use_tis = True
-
-    with pytest.raises(ValueError, match="cannot be combined with use_tis"):
-        _policy_loss("behavior_clip")(
-            torch.zeros((1, 1)),
-            torch.zeros((1, 1)),
-            torch.ones((1, 1)),
-            config,
-            rollout_logprobs=torch.zeros((1, 1)),
-        )
-
-
 def test_policy_loss_cispo():
     """Tests CISPO in PolicyLoss function."""
 
@@ -252,7 +236,6 @@ def test_policy_loss_cispo():
             "policy_loss_type": "cispo",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "use_tis": False,
         }
     )
 
@@ -353,7 +336,6 @@ def test_gspo_importance_sampling_levels():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "use_tis": False,
         }
     )
     ppo_loss_fn = _policy_loss("regular")
@@ -368,7 +350,6 @@ def test_gspo_importance_sampling_levels():
             "policy_loss_type": "gspo",
             "loss_reduction": "sequence_mean",  # GSPO recommended reduction
             "max_seq_len": 4,
-            "use_tis": False,
         }
     )
     gspo_loss_fn = _policy_loss("gspo")
@@ -495,7 +476,6 @@ def test_clip_cov_policy_loss():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "use_tis": False,
         }
     )
 
@@ -557,7 +537,6 @@ def test_kl_cov_policy_loss():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "use_tis": False,
         }
     )
 
@@ -625,63 +604,3 @@ def test_sapo_policy_loss_basic():
     torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-5, atol=1e-8)
 
     assert metrics == {}
-
-
-def test_tis_graceful_degrade_on_none_logprobs():
-    """Fix A: use_tis=True but a batch with no rollout logprobs must degrade to
-    the standard (non-TIS) policy loss for THAT batch instead of crashing.
-
-    Guards:
-      1. use_tis=True + rollout_logprobs=None  == use_tis=False loss (TIS skipped).
-      2. use_tis=True + rollout_logprobs given  != the degraded loss (TIS applied),
-         i.e. the importance ratio is NOT silently dropped when logprobs ARE present.
-    """
-    device = "cpu"
-
-    advantages = torch.tensor([[1.0, -1.0, 2.0]], device=device)
-    old_log_probs = torch.tensor([[-1.0, -1.0, -3.0]], device=device)
-    log_probs = torch.tensor([[-1.2, -0.9, -2.7]], device=device)
-    # rollout logprobs deliberately offset from old_log_probs so the TIS ratio != 1.
-    rollout_logprobs = torch.tensor([[-0.5, -1.5, -2.0]], device=device)
-
-    base_cfg = {
-        "eps_clip_low": 0.2,
-        "eps_clip_high": 0.2,
-        "clip_ratio_c": 3.0,
-        "policy_loss_type": "regular",
-        "loss_reduction": "token_mean",
-        "max_seq_len": 4,
-        "tis_imp_ratio_cap": 2.0,
-    }
-    loss_fn = _policy_loss("regular")
-
-    # Reference: TIS off.
-    cfg_off = DictConfig({**base_cfg, "use_tis": False})
-    loss_off, _ = loss_fn(
-        log_probs=log_probs,
-        old_log_probs=old_log_probs,
-        advantages=advantages,
-        config=cfg_off,
-        rollout_logprobs=None,
-    )
-
-    # 1. TIS on but logprobs missing -> must equal the TIS-off loss (degraded).
-    cfg_on = DictConfig({**base_cfg, "use_tis": True})
-    loss_degraded, _ = loss_fn(
-        log_probs=log_probs,
-        old_log_probs=old_log_probs,
-        advantages=advantages,
-        config=cfg_on,
-        rollout_logprobs=None,
-    )
-    torch.testing.assert_close(loss_degraded, loss_off, rtol=1e-6, atol=1e-8)
-
-    # 2. TIS on WITH logprobs -> ratio applied -> loss differs from degraded.
-    loss_tis, _ = loss_fn(
-        log_probs=log_probs,
-        old_log_probs=old_log_probs,
-        advantages=advantages,
-        config=cfg_on,
-        rollout_logprobs=rollout_logprobs,
-    )
-    assert not torch.allclose(loss_tis, loss_off), "TIS ratio should be applied when rollout_logprobs is present"

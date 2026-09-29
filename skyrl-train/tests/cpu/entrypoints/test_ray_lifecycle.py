@@ -100,8 +100,7 @@ def test_local_ray_owner_returns_through_normal_process_exit(monkeypatch):
 def test_runner_evidence_rejection_happens_before_ray_initialization(monkeypatch):
     cfg = get_default_config()
     cfg.trainer.logger = "console"
-    cfg.trainer.algorithm.use_tis = True
-    cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
+    cfg.trainer.algorithm.off_policy_correction = "tis"
     initialize_ray = Mock()
     monkeypatch.setattr(trainer_utils, "initialize_ray", initialize_ray)
 

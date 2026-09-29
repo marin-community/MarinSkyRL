@@ -1164,6 +1164,7 @@ class PolicyWorkerBase(Worker):
                     experience.distillation,
                     sparse_student_logprobs,
                     TopKLossParams.from_config(self.cfg.trainer.algorithm.resolved_topk_loss_params),
+                    output["logits"].shape[-1],
                 )
             batch = build_objective_micro_batch(
                 action_log_probs=action_log_probs,
@@ -1172,6 +1173,7 @@ class PolicyWorkerBase(Worker):
                 advantages=advantages,
                 loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
+                correction_weights=experience.correction_weights,
                 response_span_tags=response_span_tags,
                 token_entropy=token_entropy,
                 think_token_weight=self.cfg.trainer.algorithm.think_token_weight,

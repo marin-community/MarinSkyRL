@@ -480,7 +480,6 @@ class BasePPOExp:
         from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources  # noqa: PLC0415
         from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec  # noqa: PLC0415
         from skyrl_train.trajectory_runners.nemotron_ultra import NemotronUltraTrajectoryRouter  # noqa: PLC0415
-        from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
 
         if not cfg.get("terminal_bench_config"):
             raise ValueError("data.terminal_bench_data requires terminal_bench_config")
@@ -489,7 +488,7 @@ class BasePPOExp:
             gym_runner=gym_runner,
             harbor_runner=harbor_runner,
             terminal_bench_data=terminal_bench_data,
-            require_rollout_logprobs=rollout_logprobs_enabled(cfg.trainer.algorithm),
+            require_rollout_logprobs=cfg.trainer.algorithm.resolved_rollout_logprobs_required,
             tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
         )
 

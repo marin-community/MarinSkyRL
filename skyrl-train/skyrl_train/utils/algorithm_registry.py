@@ -13,7 +13,6 @@ from typing import Callable, Union
 
 import ray
 from loguru import logger
-from omegaconf import DictConfig
 
 from marinskyrl.runtime_options import AdvantageEstimator
 from skyrl_train.config.objective_spec import BUILTIN_LOSS_SPECS, LossSpec
@@ -87,16 +86,6 @@ class PolicyLossType(StrEnum):
     SAPO = "sapo"
     SFT = "sft"
     IMPORTANCE_SAMPLING = "importance_sampling"
-
-
-def policy_loss_requires_rollout_logprobs(policy_loss_type: str) -> bool:
-    """Return whether a policy objective requires behavior-policy logprobs."""
-    return policy_loss_type == PolicyLossType.BEHAVIOR_CLIP
-
-
-def rollout_logprobs_enabled(algorithm_config: DictConfig) -> bool:
-    """Return whether training consumes rollout logprobs for loss or diagnostics."""
-    return bool(algorithm_config.use_tis) or policy_loss_requires_rollout_logprobs(algorithm_config.policy_loss_type)
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):

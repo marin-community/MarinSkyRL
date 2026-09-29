@@ -5,10 +5,13 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from omegaconf import DictConfig, open_dict
 
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.config.objective_spec import load_correction
+from skyrl_train.objective.correction import compute_correction
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection
 from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner, TrajectoryPipeline
@@ -27,7 +30,7 @@ class _RecordingInferenceEngine:
             "responses": ["ok"],
             "response_ids": [[7, 8]],
             "stop_reasons": ["stop"],
-            "response_logprobs": [self.response_logprobs],
+            "response_logprobs": [None if self.response_logprobs is None else list(self.response_logprobs)],
         }
         if self.topk is not None:
             output["student_topk_indices"] = [self.topk[0]]
@@ -100,10 +103,18 @@ async def test_step_wise_stop_eos_keeps_published_behavior_evidence_aligned(mock
 
     environment = MagicMock()
     environment.init.return_value = ([{"role": "user", "content": "task"}], {})
-    environment.step.return_value = BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+    environment.step.side_effect = [
+        BaseTextEnvStepOutput(
+            observations=[{"role": "user", "content": "tool output"}], reward=0.0, done=False, metadata={}
+        ),
+        BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={}),
+    ]
     environment.get_metrics.return_value = {}
     mock_make.return_value = environment
     tokenizer = _tokenizer()
+    tokenizer.apply_chat_template.side_effect = lambda messages, **kwargs: (
+        [1, 2, 3, 4, 11, 12, 13, 14] if messages[-1]["content"] == "tool output" else [1, 2, 3, 4]
+    )
     runner = SkyRLGymTrajectoryRunner(
         cfg,
         DictConfig({"max_env_workers": 0}),
@@ -117,13 +128,23 @@ async def test_step_wise_stop_eos_keeps_published_behavior_evidence_aligned(mock
         "test_env",
         {},
         max_tokens=16,
-        max_input_length=4,
+        max_input_length=32,
     )
 
     published = environment.set_rollout_evidence.call_args.args[0]
     assert published.response_token_ids == (7, 8, tokenizer.eos_token_id)
     assert published.behavior_logprobs == (-0.1, -0.2, 0.0)
-    assert outputs[0].evidence.behavior_logprobs == (-0.1, -0.2, 0.0)
+    assert [output.loss_mask for output in outputs] == [[1, 1, 0, 0, 0, 0, 0], [1, 1, 0]]
+    for output in outputs:
+        behavior = torch.tensor([output.evidence.behavior_logprobs])
+        mask = torch.tensor([output.loss_mask])
+        ratios = torch.full_like(behavior, torch.nan)
+        ratios[0, :2] = torch.tensor([4.0, 0.25])
+        correction = compute_correction(behavior + ratios.log(), behavior, mask, load_correction("seq_mask_tis"))
+        expected = torch.zeros_like(behavior)
+        expected[0, :2] = torch.tensor([2.0, 0.25])
+        torch.testing.assert_close(correction.weights, expected)
+        assert correction.metrics["policy/correction/weight_mean"] == pytest.approx(1.125)
 
 
 @pytest.mark.asyncio

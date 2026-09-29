@@ -38,8 +38,6 @@ def loss_config():
             "eps_clip_low": 0.2,
             "eps_clip_high": 0.2,
             "clip_ratio_c": 3.0,
-            "use_tis": False,
-            "tis_imp_ratio_cap": 2.0,
             "cispo": {"cispo_eps_clip_low": 1.0, "cispo_eps_clip_high": 0.2},
             "sapo": {"tau_pos": 1.0, "tau_neg": 1.05},
             "clip_cov": {"clip_ratio": 0.2, "clip_cov_lb": 1.0, "clip_cov_ub": 5.0},

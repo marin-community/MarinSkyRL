@@ -8,6 +8,7 @@ from concurrent.futures import Executor, Future
 from typing import List, Dict, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
+import torch
 from omegaconf import DictConfig
 
 from marinskyrl.distillation import TeacherEvidenceKind
@@ -25,6 +26,8 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput, BaseTextEnv
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.config.objective_spec import load_correction
+from skyrl_train.objective.correction import compute_correction
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, BatchMetadata, TokenProvenance
 from skyrl_train.trajectory_runners.model_clients import ModelServerError
 
@@ -381,8 +384,7 @@ def test_tis_config_does_not_select_a_generation_strategy():
 
     cfg = get_default_config()
     cfg.trainer.logger = "console"
-    cfg.trainer.algorithm.use_tis = True
-    cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
+    cfg.trainer.algorithm.off_policy_correction = "tis"
     cfg.generator.sampling_params.logprobs = None
 
     validate_cfg(cfg)
@@ -1149,6 +1151,14 @@ async def test_generate_multiturn_aligns_rollout_logprobs(
     assert output["behavior_topk_logprobs"][0][:2] == [[-0.1, -2.0], [-0.2, -1.9]]
     assert output["behavior_topk_logprobs"][0][-2:] == [[-0.3, -1.8], [-0.4, -1.7]]
     assert output["behavior_topk_logprobs"][0][2:6] == [[0.0, 0.0]] * 4
+    behavior = torch.tensor(output["rollout_logprobs"])
+    ratios = torch.tensor([[1.5, 4.0, torch.nan, torch.nan, torch.nan, torch.nan, 1.0, 0.5]])
+    correction = compute_correction(
+        behavior + ratios.log(), behavior, torch.tensor(output["loss_masks"]), load_correction("tis")
+    )
+    torch.testing.assert_close(correction.weights, torch.tensor([[1.5, 2.0, 0, 0, 0, 0, 1.0, 0.5]]))
+    assert correction.metrics["policy/correction/weight_mean"] == pytest.approx(1.25)
+    assert correction.metrics["policy/correction/truncated_fraction"] == pytest.approx(0.25)
     output["trajectory_ids"] = [TrajectoryID("tool-trajectory", 0)]
     work = build_teacher_scoring_work(
         output,

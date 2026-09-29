@@ -19,7 +19,7 @@ def _harbor_config(agent_name, **harbor_overrides):
         {
             "trainer": {
                 "algorithm": {
-                    "use_tis": True,
+                    "resolved_rollout_logprobs_required": True,
                     "policy_loss_type": "regular",
                     "tito_full": None,
                 },
@@ -31,12 +31,12 @@ def _harbor_config(agent_name, **harbor_overrides):
     )
 
 
-def _skyrl_config(*, use_tis=True, policy_loss_type="regular"):
+def _skyrl_config(*, rollout_logprobs_required=True, policy_loss_type="regular"):
     return OmegaConf.create(
         {
             "trainer": {
                 "algorithm": {
-                    "use_tis": use_tis,
+                    "resolved_rollout_logprobs_required": rollout_logprobs_required,
                     "policy_loss_type": policy_loss_type,
                     "tito_full": None,
                 },
@@ -101,23 +101,16 @@ def test_harbor_behavior_logprobs_require_supported_pi_thinking_format(thinking_
         )
 
 
-@pytest.mark.parametrize(
-    ("use_tis", "policy_loss_type"),
-    [(True, "regular"), (False, "behavior_clip")],
-)
-def test_behavior_logprobs_reject_runners_without_exact_evidence(use_tis, policy_loss_type):
-    cfg = _skyrl_config(use_tis=use_tis, policy_loss_type=policy_loss_type)
+def test_behavior_logprobs_reject_runners_without_exact_evidence():
+    cfg = _skyrl_config()
 
     with pytest.raises(ValueError, match="mini-swe"):
         validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.MINI_SWE)
 
 
-@pytest.mark.parametrize(
-    ("step_wise_training", "use_tis", "policy_loss_type"),
-    [(False, True, "regular"), (True, True, "regular"), (False, False, "behavior_clip")],
-)
-def test_behavior_logprobs_accept_exact_skyrl_gym_paths(step_wise_training, use_tis, policy_loss_type):
-    cfg = _skyrl_config(use_tis=use_tis, policy_loss_type=policy_loss_type)
+@pytest.mark.parametrize("step_wise_training", [False, True])
+def test_behavior_logprobs_accept_exact_skyrl_gym_paths(step_wise_training):
+    cfg = _skyrl_config()
     cfg.trainer.step_wise_training = step_wise_training
 
     validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
@@ -132,7 +125,7 @@ def test_behavior_logprobs_reject_multiturn_custom_template_retokenization():
 
 
 def test_full_tito_accepts_exact_structured_chat_transport():
-    cfg = _skyrl_config(use_tis=True)
+    cfg = _skyrl_config(rollout_logprobs_required=True)
     cfg.trainer.algorithm.tito_full = True
     cfg.generator.chat_template.name_or_path = "qwen2_5_with_generation_tag_simplified"
     cfg.generator.sampling_params = {"logprobs": 0}
@@ -142,7 +135,7 @@ def test_full_tito_accepts_exact_structured_chat_transport():
 
 
 def test_exact_structured_chat_transport_requires_logprobs():
-    cfg = _skyrl_config(use_tis=False)
+    cfg = _skyrl_config(rollout_logprobs_required=False)
     cfg.generator.chat_template.name_or_path = "qwen2_5_with_generation_tag_simplified"
     cfg.generator.sampling_params = {"logprobs": None}
     cfg.generator.require_exact_chat_transport = True
@@ -152,7 +145,7 @@ def test_exact_structured_chat_transport_requires_logprobs():
 
 
 def test_distillation_accepts_skyrl_gym_learner_tokens(local_distillation_config):
-    cfg = local_distillation_config(_skyrl_config(use_tis=False))
+    cfg = local_distillation_config(_skyrl_config(rollout_logprobs_required=False))
 
     validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
 
@@ -160,14 +153,14 @@ def test_distillation_accepts_skyrl_gym_learner_tokens(local_distillation_config
 @pytest.mark.parametrize(("agent_name", "version"), [("terminus-2", None), ("opencode", "1.18.2"), ("pi", None)])
 def test_distillation_accepts_exact_synchronous_harbor_paths(agent_name, version, local_distillation_config):
     cfg = local_distillation_config(_harbor_config(agent_name, version=version))
-    cfg.trainer.algorithm.use_tis = False
+    cfg.trainer.algorithm.resolved_rollout_logprobs_required = False
 
     validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
 
 
 def test_distillation_rejects_harbor_without_exact_token_evidence(local_distillation_config):
     cfg = local_distillation_config(_harbor_config("codex"))
-    cfg.trainer.algorithm.use_tis = False
+    cfg.trainer.algorithm.resolved_rollout_logprobs_required = False
 
     with pytest.raises(ValueError, match="Harbor codex cannot supply tokenized learner actions"):
         validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
@@ -175,14 +168,14 @@ def test_distillation_rejects_harbor_without_exact_token_evidence(local_distilla
 
 def test_distillation_accepts_separately_placed_harbor_with_exact_token_evidence(local_distillation_config):
     cfg = local_distillation_config(_harbor_config("terminus-2"))
-    cfg.trainer.algorithm.use_tis = False
+    cfg.trainer.algorithm.resolved_rollout_logprobs_required = False
     cfg.trainer.placement.colocate_all = False
 
     validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
 
 
 def test_distillation_rejects_mini_swe_before_allocation(local_distillation_config):
-    cfg = local_distillation_config(_skyrl_config(use_tis=False))
+    cfg = local_distillation_config(_skyrl_config(rollout_logprobs_required=False))
 
     with pytest.raises(ValueError, match="mini-swe"):
         validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.MINI_SWE)
@@ -190,7 +183,7 @@ def test_distillation_rejects_mini_swe_before_allocation(local_distillation_conf
 
 def test_distillation_rejects_generate_only_entrypoint_before_allocation(local_distillation_config):
     cfg = local_distillation_config(_harbor_config("terminus-2"))
-    cfg.trainer.algorithm.use_tis = False
+    cfg.trainer.algorithm.resolved_rollout_logprobs_required = False
 
     with pytest.raises(ValueError, match="training-only"):
         validate_trajectory_runner_capabilities(
@@ -209,7 +202,7 @@ def test_distillation_rejects_generate_only_entrypoint_before_allocation(local_d
 )
 def test_explicit_full_tito_rejects_runners_without_exact_continuation(mode, agent_name, version, expected_runner):
     cfg = _skyrl_config() if agent_name is None else _harbor_config(agent_name, version=version)
-    cfg.trainer.algorithm.use_tis = False
+    cfg.trainer.algorithm.resolved_rollout_logprobs_required = False
     cfg.trainer.algorithm.tito_full = True
 
     with pytest.raises(ValueError, match=expected_runner):
@@ -219,7 +212,7 @@ def test_explicit_full_tito_rejects_runners_without_exact_continuation(mode, age
 @pytest.mark.parametrize(("agent_name", "version"), [("terminus-2", None), ("opencode", "1.18.2"), ("pi", None)])
 def test_explicit_full_tito_accepts_exact_harbor_continuation(agent_name, version):
     cfg = _harbor_config(agent_name, version=version)
-    cfg.trainer.algorithm.use_tis = False
+    cfg.trainer.algorithm.resolved_rollout_logprobs_required = False
     cfg.trainer.algorithm.tito_full = True
 
     validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)

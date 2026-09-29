@@ -10,7 +10,6 @@ from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.rollouts.workers import WorkerShard
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
-from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 
 DEFAULT_CONCURRENT_TRIALS = 16
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", None)
@@ -83,7 +82,7 @@ class HarborRunnerSpec:
             eval_concurrent_trials=configured_concurrent_trials(self.terminal_bench_config),
             tokenizer=tokenizer,
             moe_router_replay=bool(self.config.trainer.policy.megatron_config.get("moe_router_replay", False)),
-            rollout_logprobs_required=rollout_logprobs_enabled(algorithm),
+            rollout_logprobs_required=algorithm.resolved_rollout_logprobs_required,
             tito_full=algorithm.get("tito_full", None),
             tis_splice=bool(algorithm.tis_splice),
             tis_lcs_alert_threshold=float(algorithm.tis_lcs_alert_threshold),

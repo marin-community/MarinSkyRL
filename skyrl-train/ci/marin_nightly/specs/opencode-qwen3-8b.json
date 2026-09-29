@@ -23,8 +23,7 @@
     "generate/tis/lcs_fallback_fraction",
     "generate/tis/unaligned_fraction",
     "generate/tis/tito_full/success_fraction",
-    "generate/tis/tito_full/decline_count",
-    "tis/skipped_fraction"
+    "generate/tis/tito_full/decline_count"
   ],
   "bounds": {
     "reward/avg_raw_reward": { "minimum": 0.0, "maximum": 1.0 },
@@ -35,8 +34,7 @@
     "generate/tis/lcs_fallback_fraction": { "minimum": 0.0, "maximum": 0.0 },
     "generate/tis/unaligned_fraction": { "minimum": 0.0, "maximum": 0.0 },
     "generate/tis/tito_full/success_fraction": { "minimum": 1.0, "maximum": 1.0 },
-    "generate/tis/tito_full/decline_count": { "minimum": 0.0, "maximum": 0.0 },
-    "tis/skipped_fraction": { "minimum": 0.0, "maximum": 0.0 }
+    "generate/tis/tito_full/decline_count": { "minimum": 0.0, "maximum": 0.0 }
   },
   "max_wall_clock_seconds": 2400
 }

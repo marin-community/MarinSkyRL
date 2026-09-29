@@ -97,17 +97,11 @@ def _ppo_terms(inputs: PolicyLossInputs, config: DictConfig) -> tuple[torch.Tens
     )
 
 
-def _tis_weights(inputs: PolicyLossInputs, config: DictConfig) -> torch.Tensor | float:
-    if not config.use_tis or inputs.rollout_log_probs is None:
-        return 1.0
-    return safe_exp_delta(inputs.old_log_probs - inputs.rollout_log_probs).clamp(max=config.tis_imp_ratio_cap)
-
-
 @register_policy_loss("regular", LossSpec(RatioAnchor.OLD))
 def ppo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     """Return the pessimistic clipped policy surrogate against the old policy."""
     values, metrics = _ppo_terms(inputs, config)
-    return _token_loss(values * _tis_weights(inputs, config), inputs, metrics)
+    return _token_loss(values, inputs, metrics)
 
 
 @register_policy_loss("dual_clip", LossSpec(RatioAnchor.OLD))
@@ -116,7 +110,7 @@ def dual_clip_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> Token
     values, metrics = _ppo_terms(inputs, config)
     bound = torch.minimum(-inputs.advantages * config.clip_ratio_c, values)
     values = torch.where(inputs.advantages < 0, bound, values)
-    return _token_loss(values * _tis_weights(inputs, config), inputs, metrics)
+    return _token_loss(values, inputs, metrics)
 
 
 @register_policy_loss("importance_sampling", LossSpec(RatioAnchor.OLD))
@@ -136,8 +130,6 @@ def behavior_clipped_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -
     """Return pessimistic PPO clipping against the policy that generated each token."""
     if inputs.rollout_log_probs is None:
         raise ValueError("rollout_logprobs are required for behavior_clip policy loss")
-    if config.use_tis:
-        raise ValueError("behavior_clip cannot be combined with use_tis")
     ratio = safe_exp_delta(inputs.log_probs - inputs.rollout_log_probs)
     unclipped = -inputs.advantages * ratio
     clipped = -inputs.advantages * ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high)

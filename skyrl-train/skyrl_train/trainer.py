@@ -62,6 +62,8 @@ from marinskyrl.distillation import (
     compile_distillation_plan_from_config,
 )
 from skyrl_train.objective.teacher import teacher_advantages
+from skyrl_train.objective.correction import compute_correction
+from skyrl_train.config.objective_spec import OffPolicyCorrection
 from skyrl_train.distributed.dispatch import (
     ActorInfo,
     MeshRank,
@@ -109,7 +111,6 @@ from skyrl_train.utils.utils import (
     policy_force_cvd_mask_enabled,
 )
 
-from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
@@ -306,9 +307,6 @@ class RayPPOTrainer:
         self.all_startup_timings = {}
         self._checkpoint_save_failures = 0.0
         # Whether the last converted batch lacked rollout logprobs, and the run's TIS skip counts.
-        self._tis_batch_skipped_no_logprobs = 0.0
-        self._tis_skipped_count = 0.0
-        self._tis_total_count = 0.0
         self._shutdown_complete = False
         self._restored_rollout_state: TrainingContextState | None = None
         self.global_step = 0
@@ -1416,8 +1414,6 @@ class RayPPOTrainer:
         if scored_distillation is not None:
             self._attach_teacher_evidence(training_input, scored_distillation)
         self._log_rollout_batch_completed(groups, duration_seconds=rollout_wait_timer.duration)
-        if self.cfg.trainer.algorithm.use_tis:
-            self._record_tis_skip()
 
         step_wall.start("training_preparation")
         with (
@@ -1472,20 +1468,6 @@ class RayPPOTrainer:
             duration_seconds,
         )
 
-    def _record_tis_skip(self) -> None:
-        """Record whether this batch lacked rollout logprobs, so TIS fell back to the standard policy loss.
-
-        A skipped fraction near 1.0 means rollout-logprob capture is broken.
-        """
-        self._tis_skipped_count += self._tis_batch_skipped_no_logprobs
-        self._tis_total_count += 1.0
-        self.all_metrics.update(
-            {
-                "tis/batch_skipped_no_logprobs": self._tis_batch_skipped_no_logprobs,
-                "tis/skipped_fraction": self._tis_skipped_count / self._tis_total_count,
-            }
-        )
-
     async def _end_epoch(self, epoch: int) -> None:
         self._control.reset()
         self._control = await self.callback_handler.call_event_async(
@@ -1519,6 +1501,17 @@ class RayPPOTrainer:
             if training_input.get("teacher_valid_mask") is None:
                 raise ValueError("distillation reward_mode=replace requires teacher evidence on every training batch")
             training_input["loss_mask"] = training_input["loss_mask"] * training_input["teacher_valid_mask"]
+
+        correction = OffPolicyCorrection.from_config(self.cfg.trainer.algorithm.resolved_off_policy_correction)
+        if correction.rules:
+            rollout_logprobs = training_input.get("rollout_logprobs")
+            if rollout_logprobs is None:
+                raise ValueError("off_policy_correction requires rollout_logprobs")
+            result = compute_correction(
+                training_input["action_log_probs"], rollout_logprobs, training_input["loss_mask"], correction
+            )
+            training_input["correction_weights"] = result.weights
+            self.all_metrics.update(result.metrics)
 
         if self.cfg.trainer.algorithm.use_kl_in_reward:
             with Timer("apply_reward_kl_penalty", self.all_timings):
@@ -1600,9 +1593,7 @@ class RayPPOTrainer:
 
             trajectory_batch = concatenate_trajectory_batches(
                 [group.trajectory_batch for group in groups],
-                require_rollout_logprobs=policy_loss_requires_rollout_logprobs(
-                    self.cfg.trainer.algorithm.policy_loss_type
-                ),
+                require_rollout_logprobs=self.cfg.trainer.algorithm.resolved_rollout_logprobs_required,
                 tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
             )
             assert trajectory_batch["rollout_metrics"] is not None, "Rollout metrics should be non-null."
@@ -2040,27 +2031,10 @@ class RayPPOTrainer:
             response_span_tags,
             num_experts,
         )
-        behavior_logprobs_required = policy_loss_requires_rollout_logprobs(self.cfg.trainer.algorithm.policy_loss_type)
-        if behavior_logprobs_required and rollout_logprobs_tensor is None:
-            raise ValueError("rollout_logprobs are required for behavior_clip policy loss")
-
-        # sanity check for tis
-        #
-        # Batches without rollout logprobs use uncorrected policy loss and increment the TIS skip metric.
-        self._tis_batch_skipped_no_logprobs = 0.0
-        if self.cfg.trainer.algorithm.use_tis:
-            if rollout_logprobs_tensor is None:
-                self._tis_batch_skipped_no_logprobs = 1.0
-                logger.warning(
-                    "use_tis is True but this training batch has NO rollout logprobs "
-                    "(all-None). Degrading to standard (non-TIS) policy loss for THIS "
-                    "batch and continuing. tis/batch_skipped_no_logprobs=1. If this "
-                    "persists (skip-fraction ~1.0) the rollout-logprob capture is "
-                    "systematically broken (e.g. routed_experts capture displacing "
-                    "logprobs); a low/intermittent rate is context-length errors."
-                )
-            else:
-                assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
+        if self.cfg.trainer.algorithm.resolved_rollout_logprobs_required and rollout_logprobs_tensor is None:
+            raise ValueError("rollout_logprobs are required by the configured objective")
+        if rollout_logprobs_tensor is not None:
+            assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
         # Stage 1 invariant (scope Q3 #2): routed_experts.shape[:2] == loss_mask.shape.
         if rollout_routed_experts_tensor is not None:
             assert rollout_routed_experts_tensor.shape[:2] == loss_masks_tensor.shape, (
@@ -2591,14 +2565,6 @@ class RayPPOTrainer:
             )
 
         if self.cfg.generator.sampling_params.logprobs is not None and training_input["rollout_logprobs"] is not None:
-            # calculates the difference in probs between inference and trainer components
-            # only consider response tokens.
-            # NOTE (Fix A-extend, 2026-06-07): rollout_logprobs can be None for a
-            # whole batch when use_tis is on but every trajectory lacked logprobs
-            # (graceful-degrade path in convert_to_training_input). Subscripting None
-            # here is what crashed the 80B R3+TIS train loop at global_step 1
-            # ('NoneType' object is not subscriptable). Skip the inference/train prob-diff
-            # diagnostic for that batch; the batch still trains as standard (non-TIS) loss.
             logprobs_diff = (
                 training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
                 - action_log_probs[training_input["loss_mask"] > 0]

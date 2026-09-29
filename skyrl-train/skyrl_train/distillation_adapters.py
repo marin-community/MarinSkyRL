@@ -23,7 +23,7 @@ from skyrl_train.distillation import (
     TeacherScoreRequest,
     TopKTeacherEvidence,
     prepare_sampled_reverse_kl,
-    prepare_sparse_forward_kl,
+    prepare_teacher_topk,
     prepare_student_topk_policy_surrogate,
 )
 from skyrl_train.teacher_oracle import TeacherOracleCollection
@@ -356,7 +356,7 @@ class TeacherEvidenceCoordinator:
                 route_weights=work.route_weights,
             )
         elif isinstance(evidence, TopKTeacherEvidence):
-            distillation = prepare_sparse_forward_kl(
+            distillation = prepare_teacher_topk(
                 work.request,
                 evidence,
                 coefficient=work.coefficient,

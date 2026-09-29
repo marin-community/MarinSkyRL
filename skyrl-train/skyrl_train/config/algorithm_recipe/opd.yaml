@@ -1,0 +1,13 @@
+# @package trainer.algorithm
+# https://arxiv.org/abs/2306.13649
+advantage_estimator: uniform
+policy_loss_type: importance_sampling
+loss_reduction: token_mean
+advantage_batch_normalize: false
+use_kl_in_reward: false
+use_kl_loss: false
+dynamic_sampling:
+  type: null
+distillation:
+  objective: sampled_reverse_kl
+  reward_mode: replace

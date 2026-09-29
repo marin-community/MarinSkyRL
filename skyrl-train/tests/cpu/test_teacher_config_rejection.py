@@ -77,6 +77,15 @@ def test_packaged_entrypoints_accept_distillation_only_replace_mode():
     torch.testing.assert_close(current.grad, torch.tensor([[-0.5]]))
 
 
+def test_sampled_teacher_add_rejects_sft_that_ignores_teacher_credit():
+    cfg = replace_mode_config()
+    cfg.trainer.algorithm.policy_loss_type = "sft"
+    cfg.trainer.algorithm.distillation.reward_mode = "add"
+
+    with pytest.raises(ValueError, match="sampled_reverse_kl requires a policy loss that consumes advantages"):
+        validate_cfg(cfg)
+
+
 def skipped_grading_config() -> DictConfig:
     cfg = replace_mode_config()
     cfg.environment.skyrl_gym.nemotron_ultra.grading = "skip"
@@ -168,7 +177,10 @@ def test_selected_topk_rollouts_require_matching_teacher_width():
         torch.ones(1, 1),
     )
     result = topk_teacher_loss(
-        evidence, current, TopKLossParams.from_config(transported.trainer.algorithm.resolved_topk_loss_params)
+        evidence,
+        current,
+        TopKLossParams.from_config(transported.trainer.algorithm.resolved_topk_loss_params),
+        vocabulary_size=32,
     )
     result.values.sum().backward()
     expected = -torch.tensor(2.0).log()

@@ -1,0 +1,11 @@
+# @package trainer.algorithm
+# https://arxiv.org/abs/2507.18071
+advantage_estimator: grpo
+policy_loss_type: gspo
+loss_reduction: sequence_mean
+grpo_norm_by_std: true
+advantage_batch_normalize: false
+eps_clip_low: 0.0003
+eps_clip_high: 0.0004
+dynamic_sampling:
+  type: null

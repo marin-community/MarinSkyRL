@@ -2,14 +2,22 @@
 
 import asyncio
 from collections import defaultdict
+from copy import deepcopy
 
 import pytest
+import ray
 
-from skyrl_train.dynamic_sampling import GroupSelectionPolicy
-from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
+from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, resolve_dynamic_sampling_criteria
+from skyrl_train.group_admission import (
+    AdmissionRejection,
+    GroupAdmissionPolicy,
+    GroupAdvantageInvariant,
+    TrainingGroupInvariantError,
+)
 from skyrl_train.rollouts.buffer import (
     BatchPolicy,
     ReadyRollout,
+    RolloutBuffer,
     RolloutBufferConfig,
     RolloutContentPolicy,
     RolloutGroup,
@@ -151,6 +159,93 @@ def payloads(request, tmp_path) -> PayloadStore:
     if request.param == "memory":
         return MemoryPayloads()
     return ObjectStorePayloads(str(tmp_path / "rollouts"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_field", ["rollout_logprobs", "student_topk_indices", "behavior_topk_logprobs"])
+async def test_writer_requires_behavior_evidence_only_at_trainable_tokens(ray_module, payloads, missing_field):
+    policy = RolloutContentPolicy(
+        GroupAdmissionPolicy(
+            GroupAdvantageInvariant.no_group_advantage(physical_group_size=2),
+            rollout_logprobs_required=True,
+            student_topk_width=2,
+        ),
+        GroupSelectionPolicy(None),
+    )
+    buffer = ray.remote(RolloutBuffer).remote(RolloutBufferConfig(1, 1, 0, BatchPolicy.FULL_BATCH, None, None))
+    writer = payloads.writer(buffer, policy)
+    batch = _batch()
+    batch.update(
+        response_ids=[[2, 3], [4, 5]],
+        loss_masks=[[1, 0], [0, 0]],
+        rollout_logprobs=[[-0.2, None], [None, None]],
+        student_topk_indices=[[[1, 2], None], [None, None]],
+        behavior_topk_logprobs=[[[-0.3, -1.4], None], [None, None]],
+    )
+    try:
+        await buffer.publish.remote(1)
+        lease = await buffer.acquire_lease.remote()
+        invalid = deepcopy(batch)
+        invalid[missing_field][0][0] = None
+        with pytest.raises(TrainingGroupInvariantError) as error:
+            await writer.write_rollout(lease, RolloutGroup(invalid, "a", 1, _prompt("a")))
+        expected = (
+            AdmissionRejection.MISSING_ROLLOUT_LOGPROBS
+            if missing_field == "rollout_logprobs"
+            else AdmissionRejection.MISSING_BEHAVIOR_TOPK
+        )
+        assert error.value.rejections == (expected,)
+        await writer.write_rollout(lease, RolloutGroup(batch, "a", 1, _prompt("a")))
+        admission = await buffer.admit.remote(STALL_TIMEOUT)
+        groups = await payloads.fetch(admission.payloads)
+        assert [group.trajectory_batch for group in groups] == [batch]
+    finally:
+        ray.kill(buffer)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("rejected", "accepted"), [([0.5], [0.25]), ([0.8, 1.0], [0.0, 0.5])])
+async def test_writer_filters_success_ceiling_using_final_outcomes(ray_module, payloads, rejected, accepted):
+    policy = RolloutContentPolicy(
+        GroupAdmissionPolicy(
+            GroupAdvantageInvariant.no_group_advantage(physical_group_size=2),
+            rollout_logprobs_required=False,
+        ),
+        GroupSelectionPolicy(
+            DynamicSamplingType.FILTER,
+            criteria=resolve_dynamic_sampling_criteria(max_mean_reward=0.5),
+        ),
+    )
+    buffer = ray.remote(RolloutBuffer).remote(
+        RolloutBufferConfig(1, 3, 1, BatchPolicy.FULL_BATCH, DynamicSamplingType.FILTER, 3)
+    )
+    writer = payloads.writer(buffer, policy)
+    try:
+        await buffer.publish.remote(1)
+        for uid, rewards, final in [
+            ("easy", [0.0, *rejected], [False, *([True] * len(rejected))]),
+            ("keep", [100.0, *accepted], [False, *([True] * len(accepted))]),
+        ]:
+            rows = len(rewards)
+            batch = dict(
+                prompt_token_ids=[[1]] * rows,
+                response_ids=[[2]] * rows,
+                loss_masks=[[1]] * rows,
+                rewards=rewards,
+                is_last_step=final,
+            )
+            lease = await buffer.acquire_lease.remote()
+            await writer.write_rollout(lease, RolloutGroup(batch, uid, 1, _prompt(uid)))
+        admitted = []
+        while True:
+            admission = await buffer.admit.remote(STALL_TIMEOUT)
+            admitted.extend(await payloads.fetch(admission.payloads))
+            if admission.selection is not None:
+                break
+        assert [group.uid for group in admitted] == ["keep"]
+        assert admission.selection.metrics["async/dynamic_sampling/discarded_count"] == 1
+    finally:
+        ray.kill(buffer)
 
 
 async def _ignore(groups: list[RolloutGroup]) -> None:

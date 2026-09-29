@@ -344,7 +344,7 @@ except ImportError:
                 # every successful trial would be a needless per-trial stall at
                 # high n_concurrent_trials. TIS-agnostic: this neither reads nor
                 # mutates rollout_details / logprobs — it only reclaims orphaned
-                # Python objects, so behavior is identical with use_tis on or off.
+                # Python objects carry response positions independently of logprob collection.
                 if (
                     rollback_result.action
                     in (

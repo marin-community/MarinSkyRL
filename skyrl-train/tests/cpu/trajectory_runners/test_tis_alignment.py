@@ -13,7 +13,11 @@ import math
 from types import SimpleNamespace
 
 import pytest
+import torch
 from transformers import AutoTokenizer
+
+from skyrl_train.config.objective_spec import load_correction
+from skyrl_train.objective.correction import compute_correction
 
 from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.metric_names import (
@@ -336,6 +340,15 @@ def test_valid_multi_turn_full_tito_preserves_all_training_logprobs():
     assert stats.n_tito_full_attempts == 1
     assert stats.n_tito_full_successes == 1
     assert not stats.tito_full_declines
+
+    mask = torch.tensor([loss_mask])
+    behavior = torch.tensor([rollout_logprobs])
+    ratios = torch.full_like(behavior, torch.nan)
+    ratios[mask.bool()] = 1.5
+    correction = compute_correction(behavior + ratios.log(), behavior, mask, load_correction("icepop"))
+    torch.testing.assert_close(correction.weights, mask.float() * 1.5)
+    assert correction.metrics["policy/correction/weight_mean"] == pytest.approx(1.5)
+    assert correction.metrics["policy/correction/masked_fraction"] == 0
 
 
 def test_full_tito_treats_assistant_messages_before_selected_segment_as_context():

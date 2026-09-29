@@ -224,7 +224,6 @@ def test_opencode_spec_requires_exact_concurrent_literal_coverage():
         "generate/tis/unaligned_fraction": 0.0,
         "generate/tis/tito_full/success_fraction": 1.0,
         "generate/tis/tito_full/decline_count": 0.0,
-        "tis/skipped_fraction": 0.0,
     }
     healthy = parse_metrics(mirror_line(1, **exact_metrics))
     assert check_run(healthy, spec, wall_clock_seconds=900) == []

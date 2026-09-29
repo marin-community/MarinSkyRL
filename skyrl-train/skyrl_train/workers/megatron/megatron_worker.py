@@ -557,6 +557,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         advantages=experience.advantages,
                         loss_mask=experience.loss_mask,
                         rollout_action_logprobs=experience.rollout_logprobs,
+                        correction_weights=experience.correction_weights,
                         response_span_tags=experience.response_span_tags,
                         distillation=experience.distillation,
                         rollout_routed_experts=experience.rollout_routed_experts,

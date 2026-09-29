@@ -27,7 +27,6 @@ from skyrl_train.utils.algorithm_registry import (
     PolicyLossRegistry,
     register_policy_loss,
 )
-from skyrl_train.utils.importance_ratio_diagnostics import compute_tis_diagnostics, TIS_DIAG_KEYS
 from skyrl_train.utils.utils import validate_cfg
 import numpy as np
 
@@ -47,6 +46,22 @@ def advantage_test_data():
     response_mask = torch.tensor([[1.0, 1.0, 1.0]])
     index = np.array(["0", "0", "0"])
     return rewards, values, response_mask, index
+
+
+def test_reward_estimator_broadcasts_eligible_reward_without_centering():
+    rewards = torch.tensor([[1.0, torch.nan, 2.0], [-4.0, 1.0, torch.nan], [torch.nan] * 3], requires_grad=True)
+    mask = torch.tensor([[1, 0, 1], [1, 1, 0], [0, 0, 0]])
+    advantages, returns = compute_advantages_and_returns(
+        token_level_rewards=rewards,
+        response_mask=mask,
+        index=np.array(["a", "b", "b"]),
+        adv_estimator="reward",
+        config={},
+    )
+    expected = torch.tensor([[3.0, 0.0, 3.0], [-3.0, -3.0, 0.0], [0.0, 0.0, 0.0]])
+    torch.testing.assert_close(advantages, expected)
+    torch.testing.assert_close(returns, expected)
+    assert not advantages.requires_grad
 
 
 def test_compute_approx_kl(dummy_data):
@@ -88,7 +103,6 @@ def test_policy_objective_kl_gradient_matches_analytic_derivative(coefficient):
             "use_kl_loss": True,
             "kl_loss_coef": coefficient,
             "kl_estimator_type": "k3",
-            "use_tis": False,
         }
     )
     batch = build_objective_micro_batch(
@@ -435,9 +449,9 @@ def test_validate_cfg_rejects_stacked_behavior_clip_and_tis():
 
     cfg = _validatable_dummy_config()
     cfg.trainer.algorithm.policy_loss_type = "behavior_clip"
-    cfg.trainer.algorithm.use_tis = True
+    cfg.trainer.algorithm.off_policy_correction = "tis"
 
-    with pytest.raises(ValueError, match="cannot be combined with use_tis"):
+    with pytest.raises(ValueError, match="off_policy_correction requires an OLD-anchored policy loss"):
         validate_cfg(cfg)
 
 
@@ -791,88 +805,16 @@ def test_registry_reconnects_after_ray_shutdown():
         ray.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# compute_tis_diagnostics — the shared TIS importance-ratio diagnostics used by
-# the Megatron
-# (MegatronModelWrapper.forward_backward_mini_batch) backends.
-# ---------------------------------------------------------------------------
-
-
-def test_tis_diagnostics_on_policy_is_exact():
-    """Identical old/rollout logprobs => ratio exactly 1.0, zero abs log-ratio."""
-    lp = torch.tensor([[-0.5, -1.0, -2.0]])
-    mask = torch.ones_like(lp)
-    out = compute_tis_diagnostics(lp, lp.clone(), mask, cap=2.0)
-    assert out == {
-        "tis/imp_ratio_mean": 1.0,
-        "tis/imp_ratio_capped_fraction": 0.0,
-        "tis/log_ratio_abs_mean": 0.0,
-    }
-
-
-def test_tis_diagnostics_hand_computed_masked_means():
-    """Mask-weighted means over a hand-computed case; masked tokens must not count.
-
-    Two valid tokens with ratios 2 and 0.5 (deltas +/-log 2) and one masked token
-    with a huge delta that would dominate every metric if the mask leaked.
-    """
-    log2 = math.log(2.0)
-    old_lp = torch.tensor([[log2, -log2, 100.0]])
-    rollout_lp = torch.tensor([[0.0, 0.0, -100.0]])
-    mask = torch.tensor([[1.0, 1.0, 0.0]])
-    out = compute_tis_diagnostics(old_lp, rollout_lp, mask, cap=1.5)
-    assert out["tis/imp_ratio_mean"] == pytest.approx((2.0 + 0.5) / 2)
-    # Only the ratio-2 token exceeds cap=1.5.
-    assert out["tis/imp_ratio_capped_fraction"] == pytest.approx(0.5)
-    assert out["tis/log_ratio_abs_mean"] == pytest.approx(log2)
-
-
-def test_tis_diagnostics_clamps_ratio_but_not_log_ratio():
-    """delta=60 exponentiates at the +/-20 clamp; the abs log-ratio stays unclamped."""
-    old_lp = torch.tensor([[30.0]])
-    rollout_lp = torch.tensor([[-30.0]])
-    mask = torch.ones_like(old_lp)
-    out = compute_tis_diagnostics(old_lp, rollout_lp, mask, cap=2.0)
-    assert out["tis/imp_ratio_mean"] == pytest.approx(math.exp(20.0), rel=1e-6)
-    assert out["tis/log_ratio_abs_mean"] == pytest.approx(60.0)
-    assert out["tis/imp_ratio_capped_fraction"] == pytest.approx(1.0)
-
-
-def test_tis_diagnostics_none_rollout_keyset_identical_fallback():
-    """Absent rollout logprobs must still emit the full keyset (all_reduce safety)."""
-    old_lp = torch.tensor([[0.1, 0.2]])
-    mask = torch.ones_like(old_lp)
-    out = compute_tis_diagnostics(old_lp, None, mask, cap=2.0)
-    assert tuple(out.keys()) == TIS_DIAG_KEYS
-    assert out == {
-        "tis/imp_ratio_mean": 1.0,
-        "tis/imp_ratio_capped_fraction": 0.0,
-        "tis/log_ratio_abs_mean": 0.0,
-    }
-
-
-def test_tis_diagnostics_all_masked_batch_emits_zeros_not_nan():
-    """A fully-masked micro-batch divides by the clamped denom, never NaN."""
-    old_lp = torch.tensor([[1.0, 2.0]])
-    rollout_lp = torch.tensor([[0.0, 0.0]])
-    mask = torch.zeros_like(old_lp)
-    out = compute_tis_diagnostics(old_lp, rollout_lp, mask, cap=2.0)
-    assert out["tis/imp_ratio_mean"] == 0.0
-    assert out["tis/imp_ratio_capped_fraction"] == 0.0
-    assert out["tis/log_ratio_abs_mean"] == 0.0
-
-
 @pytest.mark.parametrize("temperature", [0.7, 1.2])
 @pytest.mark.parametrize(
-    ("use_tis", "policy_loss_type"),
-    [(True, "regular"), (False, "behavior_clip")],
+    ("correction", "policy_loss_type"),
+    [("tis", "regular"), ("none", "behavior_clip")],
     ids=["tis", "behavior-clip"],
 )
-def test_validate_cfg_configures_behavior_logprob_probability_convention(temperature, use_tis, policy_loss_type):
+def test_validate_cfg_configures_behavior_logprob_probability_convention(temperature, correction, policy_loss_type):
     cfg = _validatable_dummy_config()
-    cfg.trainer.algorithm.use_tis = use_tis
+    cfg.trainer.algorithm.off_policy_correction = correction
     cfg.trainer.algorithm.policy_loss_type = policy_loss_type
-    cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
     cfg.generator.sampling_params.temperature = temperature
     cfg.generator.inference_engine_tensor_parallel_size = 1
     cfg.generator.inference_engine_expert_parallel_size = 1
@@ -888,8 +830,7 @@ def test_validate_cfg_configures_behavior_logprob_probability_convention(tempera
 
 def test_validate_cfg_rejects_raw_tis_logprobs():
     cfg = _validatable_dummy_config()
-    cfg.trainer.algorithm.use_tis = True
-    cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
+    cfg.trainer.algorithm.off_policy_correction = "tis"
     cfg.generator.inference_engine_tensor_parallel_size = 1
     cfg.generator.inference_engine_expert_parallel_size = 1
     cfg.generator.num_inference_engines = 1
@@ -901,7 +842,7 @@ def test_validate_cfg_rejects_raw_tis_logprobs():
 
 def test_validate_cfg_rejects_behavior_clip_top_p_filter():
     cfg = _validatable_dummy_config()
-    cfg.trainer.algorithm.use_tis = False
+    cfg.trainer.algorithm.off_policy_correction = "none"
     cfg.trainer.algorithm.policy_loss_type = "behavior_clip"
     cfg.generator.sampling_params.top_p = 0.95
 

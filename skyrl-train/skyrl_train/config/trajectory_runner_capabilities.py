@@ -264,10 +264,6 @@ def validate_trajectory_runner_capabilities(
     operation: EntrypointOperation = EntrypointOperation.TRAIN,
 ) -> None:
     """Reject operation and runner combinations that cannot supply required training evidence."""
-    # Keep launcher imports Torch-free. Importing a skyrl_train.utils submodule
-    # executes that package's eager registration imports, including Torch.
-    from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
-
     distillation_plan = compile_distillation_plan_from_config(cfg)
     capabilities = trajectory_runner_capabilities(cfg, mode)
     if cfg.generator.get("require_exact_chat_transport", False):
@@ -278,7 +274,7 @@ def validate_trajectory_runner_capabilities(
         _validate_teacher_scoreable_tokens(capabilities)
 
     algorithm = cfg.trainer.algorithm
-    behavior_logprobs_required = rollout_logprobs_enabled(algorithm)
+    behavior_logprobs_required = algorithm.resolved_rollout_logprobs_required
     full_tito_required = bool(algorithm.get("tito_full", False))
     if not behavior_logprobs_required and not full_tito_required:
         return
