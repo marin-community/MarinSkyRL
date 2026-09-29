@@ -462,7 +462,9 @@ class MismatchProbeCallback(TrainerCallback):
 
     def _route_observations(self, trainer, outputs, mode: str):
         """Gather PP-owned router choices by frozen sample and captured layer."""
-        if all(row.routed_experts is None for row in self.probes):
+        if not self.cfg.trainer.policy.megatron_config.moe_router_replay or all(
+            row.routed_experts is None for row in self.probes
+        ):
             return [None] * len(self.probes)
         choices = []
         replacements = []
