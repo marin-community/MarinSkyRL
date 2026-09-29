@@ -205,6 +205,7 @@ def run_scaling_rank(rank, world_size, cp_size, teacher, rendezvous):
         if teacher:
             algorithm.resolved_topk_loss_params = {
                 "objective": teacher,
+                "entry_clip": None,
                 "jsd_beta": 0.3 if teacher == "sparse_jsd" else None,
                 "eps_clip_low": 0.2,
                 "eps_clip_high": 0.2,

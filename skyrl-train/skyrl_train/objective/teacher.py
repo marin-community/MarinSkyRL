@@ -81,7 +81,11 @@ def topk_teacher_loss(
             student_bins = torch.cat((student_support, student_tail), dim=-1)
             teacher_bins = torch.cat((teacher.exp(), teacher_tail), dim=-1)
             if params.objective is DistillationObjectiveKind.SPARSE_REVERSE_KL:
-                values = _relative_entropy(student_bins, teacher_bins).sum(-1)
+                positive = student_support > 0
+                student_logprobs = torch.where(positive, current.float(), 0)
+                teacher_logprobs = torch.where(positive, teacher, 0)
+                support = student_support * (student_logprobs - teacher_logprobs)
+                values = support.sum(-1) + _relative_entropy(student_tail, teacher_tail).sum(-1)
             else:
                 assert params.jsd_beta is not None
                 beta = params.jsd_beta
