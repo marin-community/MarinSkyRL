@@ -5,8 +5,7 @@ import sys
 
 import pytest
 
-from marinskyrl.inference_placement import validate_expert_block_trainer, validate_expert_block_transport
-from skyrl_train.entrypoints.main_base import BasePPOExp
+from marinskyrl.inference_placement import validate_expert_block_transport
 from skyrl_train.utils.utils import validate_cfg
 from tests.cpu.util import example_dummy_config
 
@@ -19,7 +18,6 @@ def expert_block_config():
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = 8
     cfg.generator.update(
         backend="vllm",
-        async_engine=True,
         run_engines_locally=True,
         weight_sync_backend="nccl",
         weight_sync_transport="expert_block",
@@ -54,9 +52,8 @@ def test_the_default_transport_needs_nothing():
         ("trainer.policy.megatron_config.tensor_model_parallel_size", 2, "tensor_model_parallel_size 1"),
         ("trainer.policy.megatron_config.expert_tensor_parallel_size", 2, "expert_tensor_parallel_size 1"),
         ("trainer.policy.megatron_config.expert_model_parallel_size", 0, "must be positive"),
-        ("generator.backend", "sglang", "non-colocated async vLLM"),
-        ("generator.async_engine", False, "non-colocated async vLLM"),
-        ("trainer.placement.colocate_all", True, "non-colocated async vLLM"),
+        ("generator.backend", "sglang", "non-colocated vLLM"),
+        ("trainer.placement.colocate_all", True, "non-colocated vLLM"),
         ("generator.weight_sync_backend", "gloo", "must be nccl"),
         ("generator.inference_engine_tensor_parallel_size", 2, "TP=1"),
         ("generator.inference_engine_expert_parallel_size", 4, "EP equal to DP"),
@@ -93,25 +90,6 @@ def test_validate_cfg_runs_the_transport_check():
     cfg.generator.weight_sync_transport = "expert_block"
     with pytest.raises(ValueError, match="weight_sync_transport=expert_block requires"):
         validate_cfg(cfg)
-
-
-def test_only_an_entrypoint_running_the_fully_async_trainer_may_select_expert_block():
-    cfg = expert_block_config()
-    # Must not raise: the fully async trainer runs the transport.
-    validate_expert_block_trainer(cfg, uses_fully_async_trainer=True)
-    with pytest.raises(ValueError, match="FullyAsyncRayPPOTrainer"):
-        validate_expert_block_trainer(cfg, uses_fully_async_trainer=False)
-    # Must not raise: every trainer supports broadcast.
-    validate_expert_block_trainer(example_dummy_config(), uses_fully_async_trainer=False)
-
-
-def test_the_standard_entrypoint_refuses_expert_block_instead_of_syncing_by_broadcast():
-    # BasePPOExp runs RayPPOTrainer, which ignores the option. The check is the first line of
-    # trainer setup, so the test skips tokenizer and dataset loading.
-    exp = object.__new__(BasePPOExp)
-    exp.cfg = expert_block_config()
-    with pytest.raises(ValueError, match="FullyAsyncRayPPOTrainer"):
-        exp._setup_trainer()
 
 
 def test_the_model_package_imports_before_the_trainer_utilities():

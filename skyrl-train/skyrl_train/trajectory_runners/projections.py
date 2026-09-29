@@ -18,7 +18,6 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     _sentinel_routed_experts_row,
     apply_overlong_filtering,
     get_rollout_metrics,
-    minimum_captured_global_step,
     scalar_reward_token_credit,
 )
 
@@ -40,13 +39,6 @@ class TrajectoryProjection(Protocol, Generic[InteractionT]):
     """Convert structured interaction results into a trainer batch."""
 
     def project(self, outputs: InteractionT, request: TrajectoryRequestBatch) -> TrajectoryBatch: ...
-
-
-class IdentityTrajectoryProjection:
-    """Return a batch that a collector has already normalized."""
-
-    def project(self, outputs: TrajectoryBatch, request: TrajectoryRequestBatch) -> TrajectoryBatch:
-        return outputs
 
 
 class WholeTrajectoryProjection:
@@ -85,12 +77,13 @@ class WholeTrajectoryProjection:
             prompt_token_ids=[list(output.evidence.prompt_token_ids) for output in outputs],
             response_ids=responses,
             rewards=rewards,
+            verification_results=[output.verification for output in outputs],
+            evidence_messages=[[dict(message) for message in output.evidence.messages] for output in outputs],
             loss_masks=loss_masks,
             stop_reasons=[output.evidence.stop_reason for output in outputs],
             rollout_metrics=rollout_metrics,
             rollout_logprobs=rollout_logprobs,
             exclude_from_baseline=[not output.disposition.baseline_eligible for output in outputs],
-            actual_global_step=minimum_captured_global_step(outputs),
         )
         attach_student_topk(batch, outputs, responses, loss_masks)
         attach_routed_experts(batch, outputs, responses)
@@ -146,6 +139,8 @@ class StepWiseTrajectoryProjection:
             prompt_token_ids=[list(step.evidence.prompt_token_ids) for step in steps],
             response_ids=responses,
             rewards=rewards,
+            verification_results=[step.verification for step in steps],
+            evidence_messages=[[dict(message) for message in step.evidence.messages] for step in steps],
             loss_masks=loss_masks,
             stop_reasons=[step.evidence.stop_reason for step in steps],
             rollout_metrics=rollout_metrics,
@@ -153,7 +148,6 @@ class StepWiseTrajectoryProjection:
             trajectory_ids=projected_ids,
             is_last_step=is_last_step,
             exclude_from_baseline=[not step.disposition.baseline_eligible for step in steps],
-            actual_global_step=minimum_captured_global_step(steps),
         )
         attach_student_topk(batch, steps, responses, loss_masks)
         attach_routed_experts(batch, steps, responses)

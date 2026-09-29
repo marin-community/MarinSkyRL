@@ -13,9 +13,15 @@ class RecordingTrajectoryRunner:
     async def startup(self) -> None:
         self.events.append("startup")
 
+    async def start_eval_session(self, *, run_name: str, eval_step: int) -> None:
+        self.events.append(f"start_eval {run_name} {eval_step}")
+
     async def run(self, request: TrajectoryRequestBatch) -> None:
         self.events.append("run")
         self.request = request
+
+    async def stop_eval_session(self) -> None:
+        self.events.append("stop_eval")
 
     async def shutdown(self) -> None:
         self.events.append("shutdown")
@@ -41,13 +47,14 @@ def test_terminal_bench_generate_builds_complete_evaluation_request():
             "environment": {"env_class": "terminal_bench"},
             # run() configures progress and enters the trainer telemetry lifecycle before _run().
             "trainer": {
+                "run_name": "generate",
                 "progress": {
                     "mode": "tqdm",
                     "min_interval_seconds": 0.5,
                     "heartbeat_seconds": 15,
                     "percent_step": 5,
                     "count_step": 1000,
-                }
+                },
             },
         }
     )
@@ -67,7 +74,7 @@ def test_terminal_bench_generate_builds_complete_evaluation_request():
 
     experiment.run()
 
-    assert runner.events == ["startup", "run", "shutdown"]
+    assert runner.events == ["startup", "start_eval generate 0", "run", "stop_eval", "shutdown"]
     assert runner.request is not None
     assert runner.request["prompts"] == ["task-a-path"] * 8 + ["task-b-path"] * 8
     trajectory_ids = runner.request["trajectory_ids"]
