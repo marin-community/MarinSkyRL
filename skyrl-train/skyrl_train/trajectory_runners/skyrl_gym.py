@@ -242,7 +242,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 generated_token_count=0,
                 prompt_token_ids=(0,),
                 response_token_ids=(0,),
-                behavior_logprobs=(0.0,),
+                behavior_logprobs=np.zeros(1, dtype=np.float32),
             ),
             verification=VerificationResult.error(
                 "SkyRL-Gym agent loop failed",
@@ -408,7 +408,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     generated_token_count=0,
                     prompt_token_ids=tuple(input_ids),
                     response_token_ids=(),
-                    behavior_logprobs=(),
+                    behavior_logprobs=np.empty(0, dtype=np.float32),
                 ),
                 verification=VerificationResult.unavailable("initial prompt exceeds the model input limit"),
                 reward=RewardResult(
@@ -907,7 +907,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             generated_token_count=sum(bool(value) for value in loss_mask),
             prompt_token_ids=tuple(prompt_ids),
             response_token_ids=tuple(response_ids),
-            behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
+            behavior_logprobs=None if rollout_logprobs is None else np.asarray(rollout_logprobs, dtype=np.float32),
             student_topk_indices=None if selected is None else selected.indices,
             behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
             routed_experts=rollout_routes,

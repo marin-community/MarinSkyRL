@@ -145,7 +145,7 @@ def convert_prompts_responses_to_batch_tensors(
     responses: List[List[int]],
     rewards: List[List[float]],
     loss_masks: List[List[int]],
-    logprobs: Optional[List[List[float]]] = None,
+    logprobs: Optional[List[np.ndarray]] = None,
     routed_experts: Optional[List[np.ndarray]] = None,
     token_level_shaping: Optional[List[List[float]]] = None,
     response_span_tags: Optional[List[List[int]]] = None,

@@ -1985,7 +1985,7 @@ class RayPPOTrainer:
         rewards: List[List[float]] = trajectory_batch["rewards"]
         loss_masks: List[List[int]] = trajectory_batch["loss_masks"]
 
-        logprobs: Optional[List[List[float]]] = trajectory_batch.get("rollout_logprobs", None)
+        logprobs: Optional[List[np.ndarray]] = trajectory_batch.get("rollout_logprobs", None)
 
         # MoE router-replay capture rail (Stage 1): only pull routed_experts when
         # the flag is on. Gated so the flag-off TrainingInputBatch is byte-identical

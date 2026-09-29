@@ -139,10 +139,13 @@ async def test_step_wise_stop_eos_keeps_published_behavior_evidence_aligned(mock
 
     published = environment.set_rollout_evidence.call_args.args[0]
     assert published.response_token_ids == (7, 8, tokenizer.eos_token_id)
-    assert published.behavior_logprobs == (-0.1, -0.2, 0.0)
+    np.testing.assert_allclose(published.behavior_logprobs, [-0.1, -0.2, 0.0])
     assert [output.loss_mask for output in outputs] == [[1, 1, 0, 0, 0, 0, 0], [1, 1, 0]]
     for output in outputs:
-        behavior = torch.tensor([output.evidence.behavior_logprobs])
+        np.testing.assert_allclose(
+            output.evidence.behavior_logprobs, [-0.1, -0.2] + [0.0] * (len(output.loss_mask) - 2)
+        )
+        behavior = torch.from_numpy(output.evidence.behavior_logprobs).unsqueeze(0)
         mask = torch.tensor([output.loss_mask])
         ratios = torch.full_like(behavior, torch.nan)
         ratios[0, :2] = torch.tensor([4.0, 0.25])
@@ -185,5 +188,5 @@ async def test_step_wise_collector_preserves_student_topk(mock_make):
         [{"role": "user", "content": "task"}], "test_env", {}, max_tokens=16, max_input_length=4
     )
 
-    assert outputs[0].evidence.student_topk_indices == ((7, 9), (8, 10))
-    assert outputs[0].evidence.behavior_topk_logprobs == ((-0.1, -1.1), (-0.2, -1.2))
+    np.testing.assert_array_equal(outputs[0].evidence.student_topk_indices, [[7, 9], [8, 10]])
+    np.testing.assert_allclose(outputs[0].evidence.behavior_topk_logprobs, [[-0.1, -1.1], [-0.2, -1.2]])

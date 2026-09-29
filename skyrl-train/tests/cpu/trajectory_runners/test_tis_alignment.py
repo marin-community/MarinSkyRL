@@ -12,6 +12,7 @@ Run:
 import math
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from transformers import AutoTokenizer
@@ -446,7 +447,7 @@ def test_failed_multi_turn_full_tito_cannot_enter_required_logprob_training(trun
         trajectory_batch={
             "response_ids": [response_ids],
             "loss_masks": [loss_mask],
-            "rollout_logprobs": [rollout_logprobs],
+            "rollout_logprobs": [np.asarray(rollout_logprobs, dtype=np.float32)],
         },
     )
     policy = GroupAdmissionPolicy(
