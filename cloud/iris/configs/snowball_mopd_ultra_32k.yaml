@@ -60,7 +60,9 @@ trainer:
   strategy: megatron
   flash_attn: true
   use_sample_packing: true
-  offload_optimizer_during_rollouts: true
+  # Megatron keeps the optimizer on the CPU (optimizer_config_kwargs below), so there is no
+  # rollout-time optimizer offload to do.
+  offload_optimizer_during_rollouts: false
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
   algorithm:
@@ -101,6 +103,12 @@ trainer:
       expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
       optimizer_checkpoint_sharding_type: dp_reshardable
+      # Without CP, a 32K sequence's last-stage vocabulary log-softmax ran out of memory next to
+      # ~60 GB of optimizer and master-weight state; the optimizer runs on the CPU instead.
+      optimizer_config_kwargs:
+        optimizer_cpu_offload: true
+        optimizer_offload_fraction: 1.0
+      logprob_chunk_size: 512
   placement:
     colocate_all: false
     policy_num_nodes: 4
