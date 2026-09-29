@@ -1,6 +1,7 @@
 """Regression controls for Ultra answer extraction and verifier failures."""
 
 import json
+import socket
 
 import pytest
 import requests
@@ -474,3 +475,60 @@ def test_sandbox_transport_outage_is_preserved_as_verification_error(monkeypatch
     result = env.step("")
     assert result["verification"].status is VerificationStatus.ERROR
     assert "connection refused" in result["verification"].diagnostics["error_message"]
+
+
+def test_sandbox_replica_discovery_preserves_sessions_and_distributes_clients(monkeypatch):
+    addresses = ["10.0.0.1", "10.0.0.2"]
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 6000)) for address in addresses],
+    )
+    sessions = {}
+    deleted = []
+
+    def post(url, *, headers, json, **kwargs):
+        key = (url, headers["X-Session-ID"])
+        if json["generated_code"] == "x=7":
+            sessions[key] = 7
+            return HTTPReply({"process_status": "completed", "stdout": "", "new_session_created": True})
+        return HTTPReply({"process_status": "completed", "stdout": str(sessions[key])})
+
+    def delete(url, **kwargs):
+        deleted.append(url)
+        return HTTPReply({})
+
+    monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr(requests, "delete", delete)
+    for session_id in ("alpha", "beta", "gamma", "delta"):
+        addresses[:] = ["10.0.0.1", "10.0.0.2"]
+        client = SandboxClient.for_session(host="replicas.example", port=6000, session_id=session_id)
+        client.execute("x=7", language="ipython", timeout_seconds=10, session_id=session_id)
+        # A DNS membership change must not move an already-active session.
+        addresses[:] = ["10.0.0.99"]
+        result = client.execute("x", language="ipython", timeout_seconds=10, session_id=session_id)
+        assert result["stdout"] == "7"
+        client.close_session(session_id)
+    assert {url for url, _ in sessions} == {"http://10.0.0.1:6000/execute", "http://10.0.0.2:6000/execute"}
+    assert all(url.replace("/execute", "/sessions/" + session) in deleted for url, session in sessions)
+
+
+def test_sandbox_http_budget_allows_execution_and_worker_queue_but_propagates_transport_failure(monkeypatch):
+    def post(url, *, json, timeout, **kwargs):
+        # Observed synchronous-worker queue + execution exceeded the old 15-second deadline.
+        if timeout < 25:
+            raise requests.exceptions.ReadTimeout("worker queue exceeded HTTP deadline")
+        return HTTPReply({"process_status": "timeout", "stderr": "execution timed out", "new_session_created": True})
+
+    monkeypatch.setattr(requests, "post", post)
+    client = SandboxClient(host="sandbox.example")
+    result = client.execute("while True: pass", language="ipython", timeout_seconds=10, session_id="slow")
+    assert result["process_status"] == "timeout"
+    assert "state was reset" in result["stderr"]
+
+    def unavailable(*args, **kwargs):
+        raise requests.exceptions.ReadTimeout("sandbox unavailable")
+
+    monkeypatch.setattr(requests, "post", unavailable)
+    with pytest.raises(requests.exceptions.ReadTimeout, match="sandbox unavailable"):
+        client.execute("1", language="ipython", timeout_seconds=10, session_id="slow")
