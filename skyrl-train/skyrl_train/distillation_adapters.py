@@ -225,8 +225,8 @@ def _collate_student_selected_rollout(
     for row, (selected, scores, response) in enumerate(zip(index_rows, behavior_rows, response_token_ids, strict=True)):
         if len(selected) != len(response) or len(scores) != len(response):
             raise ValueError("student-selected rollout fields must align with response tokens")
-        indices[row, : len(response)] = torch.tensor(selected, dtype=torch.long)
-        behavior[row, : len(response)] = torch.tensor(scores, dtype=torch.float32)
+        indices[row, : len(response)] = torch.from_numpy(selected)
+        behavior[row, : len(response)] = torch.from_numpy(scores)
     indices.masked_fill_(~selected_mask.unsqueeze(-1), INVALID_TOPK_INDEX)
     behavior.masked_fill_(~selected_mask.unsqueeze(-1), torch.nan)
     return indices, behavior, selected_mask

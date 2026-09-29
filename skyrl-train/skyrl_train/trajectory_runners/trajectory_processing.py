@@ -796,7 +796,7 @@ def concatenate_trajectory_batches(
                 # Fill in placeholder logprobs for batches that don't have them
                 # Each trajectory needs logprobs matching its response_ids length
                 for response_ids in output["response_ids"]:
-                    rollout_logprobs_concat.append([0.0] * len(response_ids))
+                    rollout_logprobs_concat.append(np.zeros(len(response_ids), dtype=np.float32))
 
     selected_topk_concat = None
     behavior_topk_concat = None
