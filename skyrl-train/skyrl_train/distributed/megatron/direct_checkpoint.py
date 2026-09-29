@@ -5,6 +5,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from loguru import logger
 from megatron.core.dist_checkpointing.dict_utils import nested_values
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict, ShardedTensor
 from megatron.core.dist_checkpointing.strategies.torch import (
@@ -74,11 +75,12 @@ def _local_checkpoint_load_slot():
                 try:
                     yield
                 finally:
-                    print(
-                        f"Local DCP load pid={os.getpid()} slot={slot} "
-                        f"wait={acquired_at - waiting_since:.2f}s "
-                        f"read={time.monotonic() - acquired_at:.2f}s",
-                        flush=True,
+                    logger.info(
+                        "Local DCP load pid={} slot={} wait={:.2f}s read={:.2f}s",
+                        os.getpid(),
+                        slot,
+                        acquired_at - waiting_since,
+                        time.monotonic() - acquired_at,
                     )
                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
                 return

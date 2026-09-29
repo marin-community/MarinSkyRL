@@ -120,10 +120,10 @@ four-H100 disaggregated cycle with Marin vLLM. Run it on Iris with
 
 ## Restore memory and deadlines
 
-Set `SKYRL_MEGATRON_LOCAL_DCP_LOAD_SLOTS=1` to serialize the S3 tensor reads
-inside each pod. Larger positive values allow that many readers; zero keeps
-reads unrestricted. This bounds simultaneous reader scratch, while the model
-and optimizer destination tensors still need to fit in host and device memory.
+Set `SKYRL_MEGATRON_LOCAL_DCP_LOAD_SLOTS` to cap simultaneous S3 tensor readers
+inside each pod. The default, zero, leaves reads unrestricted. One serializes
+reads; two readers completed the 5.36 TB Hero restore. This limits reader scratch,
+while model and optimizer destination tensors still need to fit in memory.
 
 Serial reads can take longer than the default collective deadline. Set
 `trainer.distributed.worker_collective_timeout_seconds` before starting workers;
