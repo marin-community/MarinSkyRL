@@ -17,6 +17,7 @@ from marinskyrl.packed_tasks import (
     EmptyTaskSelectionError,
     PackedTaskArchiveError,
     PackedTaskMaterializer,
+    PackedTaskReference,
     select_task_references,
 )
 from marinskyrl.task_sources import (
@@ -159,14 +160,17 @@ def test_packed_dataset_defers_extraction_until_materialization(tmp_path: Path) 
     _write_dataset(dataset_path)
     source = _source(dataset_path, TaskTroveSelection(sources=("source-a",)))
     resolved = rl_data.resolve_rl_train_data_with_sources([asdict(source)], kind="tasks", verbose=False)
-    document = OmegaConf.create({"data": {"train_data": list(resolved.paths)}})
+    config_path = tmp_path / "runtime-config.yaml"
+    OmegaConf.save(OmegaConf.create({"data": {"train_data": list(resolved.paths)}}), config_path)
+    document = OmegaConf.load(config_path)
     dataset = TerminalBenchTaskDataset(OmegaConf.to_container(document, resolve=True)["data"]["train_data"])
     cache = tmp_path / "cache"
 
     first = dataset[0]
-    reference = next(iter(select_task_references(source).references))
+    reference = PackedTaskReference(**first["env_extras"]["packed_task"])
 
     assert first["prompt"].startswith("tasktrove://")
+    assert not cache.exists()
     task_path = PackedTaskMaterializer(cache).materialize_batch([reference])[reference]
     assert (task_path / "instruction.md").read_text() == "Do one"
     assert not (task_path / "solution").exists()
