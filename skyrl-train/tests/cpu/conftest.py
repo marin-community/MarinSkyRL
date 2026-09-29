@@ -1,6 +1,8 @@
 import json
 import os
 import sys
+import subprocess
+from pathlib import Path
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -8,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from omegaconf import OmegaConf
+from taskcompendium.importers.nemo_workplace import PROVIDER_GIT_REVISION, PROVIDER_REPOSITORY
 
 # CPU tests already run in the locked uv environment. Ray's uv hook would package
 # this checkout and create another environment for every local Ray session.
@@ -62,6 +65,15 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     group_count = min(int(worker_count), max(1, round(host_memory / HOST_MEMORY_PER_SLOW_TEST_BYTES)))
     for index, item in enumerate(slow):
         item.add_marker(pytest.mark.xdist_group(f"slow-{index % group_count}"))
+
+
+@pytest.fixture(scope="session")
+def trusted_workplace_checkout(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Resolve the pinned provider before exporting tasks for Harbor trials."""
+    checkout = tmp_path_factory.mktemp("workplace-source") / "nemo_workplace"
+    subprocess.run(["git", "clone", "--quiet", PROVIDER_REPOSITORY, str(checkout)], check=True)
+    subprocess.run(["git", "-C", str(checkout), "checkout", "--quiet", "--detach", PROVIDER_GIT_REVISION], check=True)
+    return checkout
 
 
 @pytest.fixture

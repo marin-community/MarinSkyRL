@@ -34,7 +34,7 @@ from skyrl_train.config.utils import get_default_config
 
 @pytest.mark.integrations
 @pytest.mark.asyncio
-async def test_mixed_taskcompendium_rollout_updates_cpu_policy(tmp_path: Path):
+async def test_mixed_taskcompendium_rollout_updates_cpu_policy(tmp_path: Path, trusted_workplace_checkout: Path):
     pytest.importorskip("harbor")
     chat = TaskSpec(
         id="chat",
@@ -47,7 +47,13 @@ async def test_mixed_taskcompendium_rollout_updates_cpu_policy(tmp_path: Path):
     plain = SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN)
     lower_to_harbor(chat, plain, HarborEnvironmentConfig(), tmp_path / "chat")
     workplace, convention, binding = load_fixture()
-    lower_to_harbor(workplace, convention, binding, tmp_path / "workplace")
+    lower_to_harbor(
+        workplace,
+        convention,
+        binding,
+        tmp_path / "workplace",
+        trusted_provider_sources={"workplace": trusted_workplace_checkout},
+    )
     source_row = json.loads(
         next(resource.content for resource in workplace.resources if resource.path == "source-row.json")
     )
