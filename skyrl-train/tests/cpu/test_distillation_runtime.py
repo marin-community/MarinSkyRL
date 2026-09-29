@@ -4,7 +4,7 @@ import torch
 from marinskyrl.distillation import DomainGradientBalanceSpec
 from skyrl_train.distillation import SampledReverseKLInput, StudentTopKPolicySurrogateInput
 from skyrl_train.distillation_adapters import RoutedScoredDistillationBatch
-from skyrl_train.distillation_runtime import AsyncDistillationRuntime
+from skyrl_train.distillation_runtime import DistillationRuntime
 from skyrl_train.domain_gradient_balance import DomainGradientBalancer
 from skyrl_train.teacher_routing import TeacherRoute
 from skyrl_train.training_batch import TrainingInputBatch
@@ -33,8 +33,8 @@ def _scored_group(trajectory_id: str, logprobs: list[float], *, revision: str):
     )
 
 
-def test_async_runtime_attaches_admission_ordered_evidence_with_safe_padding():
-    runtime = object.__new__(AsyncDistillationRuntime)
+def test_runtime_attaches_admission_ordered_evidence_with_safe_padding():
+    runtime = object.__new__(DistillationRuntime)
     runtime.domain_balancer = None
     training_input = TrainingInputBatch({"response_mask": torch.tensor([[1, 1, 0], [1, 0, 0], [1, 1, 0]])})
     training_input.metadata = {"pad_size": 1}
@@ -61,8 +61,8 @@ def test_async_runtime_attaches_admission_ordered_evidence_with_safe_padding():
     assert training_input.metadata["distillation_plan_versions"] == ("routes-r1", "routes-r1")
 
 
-def test_async_runtime_rejects_evidence_that_does_not_match_the_unpadded_batch():
-    runtime = object.__new__(AsyncDistillationRuntime)
+def test_runtime_rejects_evidence_that_does_not_match_the_unpadded_batch():
+    runtime = object.__new__(DistillationRuntime)
     runtime.domain_balancer = None
     training_input = TrainingInputBatch({"response_mask": torch.ones((2, 2), dtype=torch.bool)})
     training_input.metadata = {"pad_size": 0}
@@ -99,8 +99,8 @@ def _topk_group(route_id: str, width: int) -> RoutedScoredDistillationBatch:
     )
 
 
-def test_async_runtime_balances_assembled_domains_without_weighting_padding():
-    runtime = object.__new__(AsyncDistillationRuntime)
+def test_runtime_balances_assembled_domains_without_weighting_padding():
+    runtime = object.__new__(DistillationRuntime)
     runtime.domain_balancer = DomainGradientBalancer(
         DomainGradientBalanceSpec(target_shares=(("math", 1.0), ("code", 1.0), ("if", 1.0)), gap_scale_alpha=1.0)
     )

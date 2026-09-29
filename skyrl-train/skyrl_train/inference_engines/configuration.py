@@ -51,7 +51,6 @@ def inference_engine_kwargs_from_config(
         "engine_init_timeout_seconds": cfg.generator.engine_init_timeout_seconds,
         "gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
         "inference_engine_enable_sleep": role.inference_engine_enable_sleep,
-        "async_engine": cfg.generator.async_engine,
         "max_num_batched_tokens": cfg.generator.max_num_batched_tokens,
         "max_num_seqs": cfg.generator.max_num_seqs,
         "tokenizer": tokenizer,

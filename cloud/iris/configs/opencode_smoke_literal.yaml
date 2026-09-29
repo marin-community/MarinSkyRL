@@ -134,6 +134,10 @@ trainer:
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
       max_grad_norm: 0.9
+    megatron_config:
+      # The default format gathers the full optimizer state into one rank's host memory,
+      # which pushes the colocated node past Ray's memory-kill threshold at the final save.
+      optimizer_checkpoint_sharding_type: dp_reshardable
   placement:
     colocate_all: true
     policy_num_nodes: null
@@ -152,7 +156,9 @@ generator:
   n_samples_per_prompt: 1
   eval_n_samples_per_prompt: 1
 
-  gpu_memory_utilization: 0.85
+  # Colocated Megatron keeps more than 25 GiB per H100 after an optimizer step even when
+  # offloaded, so vLLM must wake its KV cache into the remainder.
+  gpu_memory_utilization: 0.5
 
   max_num_seqs: 24
   max_num_batched_tokens: 16384
@@ -162,8 +168,6 @@ generator:
 
   run_engines_locally: true
   weight_sync_backend: nccl
-  async_engine: true
-  batched: false
   enable_http_endpoint: true
   inference_stats_interval: 1
   append_eos_token_after_stop_str_in_multi_turn: true

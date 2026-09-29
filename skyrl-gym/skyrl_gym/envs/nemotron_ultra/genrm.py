@@ -19,14 +19,14 @@ from skyrl_gym.envs.nemotron_ultra.genrm_utils import (
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
 
 
-def response_object(assistant_message: dict[str, Any], fallback_text: str) -> dict[str, Any]:
+def response_object(assistant_message: dict[str, Any]) -> dict[str, Any]:
     """Rebuild the Response-API fields consumed by NVIDIA's GenRM utilities."""
     output = []
     reasoning = assistant_message.get("reasoning_content")
     if isinstance(reasoning, str) and reasoning:
         output.append({"type": "reasoning", "summary": [{"type": "summary_text", "text": reasoning}]})
     content = assistant_message.get("content")
-    answer = content if isinstance(content, str) else fallback_text
+    answer = content if isinstance(content, str) else ""
     output.append(
         {
             "type": "message",
@@ -46,7 +46,6 @@ def grade_genrm_group(
     config: dict[str, Any],
 ) -> tuple[list[float], dict[str, float]]:
     default_score = float(config.get("default_score", 3.0))
-    default_ranking = float(config.get("default_ranking", 3.5))
     pairs = generate_comparison_pairs("circular", len(response_objects))
     max_workers = int(config.get("max_concurrent_comparisons", len(pairs)))
     if max_workers < 1:
@@ -60,6 +59,7 @@ def grade_genrm_group(
             "principle": principle,
         }
         attempts = int(config.get("genrm_parse_retries", 1)) + 1
+        last_error = None
         for attempt in range(attempts):
             try:
                 output = judge.generate_response(
@@ -69,12 +69,13 @@ def grade_genrm_group(
                     temperature=float(config.get("temperature", 1.0)),
                     top_p=float(config.get("top_p", 0.95)),
                 )
-                return parse_genrm_output(output, default_score, default_ranking, raise_on_fail=True)
+                return parse_genrm_output(output)
             except Exception as error:
+                last_error = error
                 logger.warning("GenRM comparison attempt {} failed: {}", attempt + 1, error)
                 if attempt + 1 < attempts:
                     time.sleep(float(config.get("genrm_parse_retry_sleep_seconds", 0.2)))
-        return default_score, default_score, default_ranking
+        raise RuntimeError(f"GenRM comparison unavailable after bounded retries: {last_error}") from last_error
 
     with ThreadPoolExecutor(max_workers=min(max_workers, len(pairs))) as executor:
         comparisons = list(executor.map(compare, pairs))
