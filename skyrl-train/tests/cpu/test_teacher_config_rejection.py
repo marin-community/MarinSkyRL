@@ -77,6 +77,16 @@ def test_packaged_entrypoints_accept_distillation_only_replace_mode():
     torch.testing.assert_close(current.grad, torch.tensor([[-0.5]]))
 
 
+@pytest.mark.parametrize("reward_mode", ["add", "replace"])
+def test_sampled_teacher_rejects_sft_that_ignores_teacher_credit(reward_mode):
+    cfg = replace_mode_config()
+    cfg.trainer.algorithm.policy_loss_type = "sft"
+    cfg.trainer.algorithm.distillation.reward_mode = reward_mode
+
+    with pytest.raises(ValueError, match="sampled_reverse_kl requires a policy loss that consumes advantages"):
+        validate_cfg(cfg)
+
+
 def skipped_grading_config() -> DictConfig:
     cfg = replace_mode_config()
     cfg.environment.skyrl_gym.nemotron_ultra.grading = "skip"

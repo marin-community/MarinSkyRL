@@ -137,6 +137,10 @@ def validate_objective(cfg: DictConfig) -> None:
         raise ValueError("think_token_weight != 1 requires trainer.algorithm.enable_token_reward_channel=true")
     if plan is None:
         return
+    if not topk and algorithm.policy_loss_type == "sft":
+        raise ValueError(
+            "sampled_reverse_kl requires a policy loss that consumes advantages; sft ignores teacher credit"
+        )
     if topk:
         policy = cfg.trainer.policy
         if (
