@@ -471,8 +471,7 @@ async def test_chat_grading_recovers_reasoning_boundaries_without_changing_repla
     assert result["assistant_messages"] == [raw_message]
 
 
-@pytest.mark.asyncio
-async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
+def _single_turn_chat_engine(expected_max_completion_tokens: int) -> AsyncMock:
     engine = AsyncMock()
     engine.model_name = "snowball"
     engine.tokenizer = MagicMock()
@@ -480,13 +479,18 @@ async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
     engine.tokenize.return_value = {"tokens": [1, 2, 3, 4]}
 
     async def serve(request):
-        tokens = request["json"]["max_completion_tokens"]
-        assert tokens == 1
+        assert request["json"]["max_completion_tokens"] == expected_max_completion_tokens
         return {
             "choices": [{"message": {"role": "assistant", "content": "7"}, "finish_reason": "stop", "token_ids": [7]}]
         }
 
     engine.chat_completion.side_effect = serve
+    return engine
+
+
+@pytest.mark.asyncio
+async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
+    engine = _single_turn_chat_engine(expected_max_completion_tokens=1)
     result = await DirectModelClient(engine).generate(
         {
             "prompts": [[{"role": "user", "content": "a correction prompt"}]],
@@ -500,26 +504,15 @@ async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
 
 
 @pytest.mark.asyncio
-async def test_chat_output_budget_honors_the_trainer_converted_turn_cap():
+@pytest.mark.parametrize("cap_key", ["max_generate_length", "max_tokens"])
+async def test_chat_output_budget_honors_the_per_turn_cap_under_either_key(cap_key):
     """get_vllm_sampling_params renames max_generate_length to max_tokens before the client sees it."""
-    engine = AsyncMock()
-    engine.model_name = "snowball"
-    engine.tokenizer = MagicMock()
-    engine.tokenizer.decode.return_value = "7"
-    engine.tokenize.return_value = {"tokens": [1, 2, 3, 4]}
-
-    async def serve(request):
-        assert request["json"]["max_completion_tokens"] == 3
-        return {
-            "choices": [{"message": {"role": "assistant", "content": "7"}, "finish_reason": "stop", "token_ids": [7]}]
-        }
-
-    engine.chat_completion.side_effect = serve
+    engine = _single_turn_chat_engine(expected_max_completion_tokens=3)
     result = await DirectModelClient(engine).generate(
         {
             "prompts": [[{"role": "user", "content": "question"}]],
             "chat_completion_params": [{}],
-            "sampling_params": {"max_tokens": 3},
+            "sampling_params": {cap_key: 3},
             "max_context_length": 100,
         }
     )
