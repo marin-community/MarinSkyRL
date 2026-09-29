@@ -220,6 +220,7 @@ def test_context_budget_derives_overlong_window_for_single_and_multi_turn(
     assert parsed.generator["trajectory_reward_shaping"]["overlong"] == {
         "l_max": expected_l_max,
         "l_cache": expected_l_cache,
+        "penalty_scale": 1.0,
     }
 
 
@@ -234,6 +235,7 @@ def test_context_budget_allows_overlong_fraction_overrides(tmp_path):
                     "max_turns": 30,
                     "generated_budget_fraction": 0.375,
                     "overlong_cache_fraction": 0.25,
+                    "overlong_penalty_scale": 0.2,
                 }
             }
         )
@@ -241,7 +243,11 @@ def test_context_budget_allows_overlong_fraction_overrides(tmp_path):
 
     parsed = parse_rl_config(str(config))
 
-    assert parsed.generator["trajectory_reward_shaping"]["overlong"] == {"l_max": 12288, "l_cache": 3072}
+    assert parsed.generator["trajectory_reward_shaping"]["overlong"] == {
+        "l_max": 12288,
+        "l_cache": 3072,
+        "penalty_scale": 0.2,
+    }
 
 
 def test_context_budget_rejects_low_level_overlong_window(tmp_path):
@@ -270,6 +276,8 @@ def test_context_budget_rejects_low_level_overlong_window(tmp_path):
         ("generated_budget_fraction", 1.1),
         ("overlong_cache_fraction", -0.1),
         ("overlong_cache_fraction", "quarter"),
+        ("overlong_penalty_scale", -0.1),
+        ("overlong_penalty_scale", "mild"),
     ],
 )
 def test_context_budget_rejects_invalid_overlong_fractions(tmp_path, field_name, value):
@@ -342,6 +350,7 @@ def test_resolved_context_budget_artifact_is_reproducible(tmp_path):
             "opencode_limit_output": 16384,
             "overlong_cache_fraction": 0.25,
             "overlong_cache_tokens": 16384,
+            "overlong_penalty_scale": 1.0,
             "request_window_tokens": 131072,
         },
     }

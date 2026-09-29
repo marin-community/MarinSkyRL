@@ -446,6 +446,9 @@ Generator Configuration
     num_inference_engines: 1
     backend: "vllm"
     weight_sync_backend: "nccl"
+    weight_sync_pause:
+      mode: keep
+      clear_cache: true
     inference_engine_tensor_parallel_size: 4
     inference_engine_pipeline_parallel_size: 1
     inference_engine_expert_parallel_size: 1  
@@ -566,6 +569,21 @@ Weight Transfer Configuration
 - ``generator.expert_block_sync.verify``: If set, replay synchronization and verify it against the trainer values.
 - ``generator.override_existing_update_group``: Whether to override the existing update group for the inference engine. This is applicable only for remote inference engines. During training, `skyrl-train` forms a custom process group ("update group") with the rank 0 training worker and all the inference engine ranks.  If ``override_existing_update_group=enable``, then during initialization, a previous weight update group will be overriden in the inference engine. For example, if you have a remote server setup and you run training for the same model multiple times, it is helpful to override the previous update group. We recommend leaving this to ``auto`` - since it will automatically determine if the previous update group should be overridden based on ``run_engines_locally``.
 
+``generator.weight_sync_pause`` sets the local vLLM pause policy during weight sync when
+``trainer.rollout_buffer.max_staleness_steps`` is positive:
+
+- ``mode: abort`` ends in-flight requests. Non-streaming single-prompt requests can continue or retry;
+  streaming chat completions end with ``finish_reason=abort``.
+- ``mode: wait`` lets in-flight requests finish before the sync. It requires
+  ``generator.vllm_v1_disable_multiproc=false`` and can delay a step behind long requests.
+- ``mode: keep`` (default) freezes in-flight requests and resumes them after the sync, including streams and batches.
+
+``clear_cache: true`` (default) clears KV and prefix caches during the pause. With ``keep``, running requests
+re-prefill their prompt and generated tokens under the new weights. ``keep`` with ``clear_cache: false`` retains
+KV from the old weights across the sync, which is faster but can mix weight policies in later generation. Only
+``keep`` permits ``clear_cache: false``. Non-default pause settings require local vLLM engines; SGLang and remote
+engines do not support pausing.
+
 Inference Engine Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -607,7 +625,7 @@ Generation Parameters
 Misc Configuration
 ~~~~~~~~~~~~~~~~~~
 
-- ``generator.trajectory_reward_shaping``: Generator-independent optimization shaping applied after trajectory normalization. ``non_termination`` penalizes stop reasons outside its accepted set. ``overlong`` applies DAPO's outcome-independent linear penalty to the full trajectory between ``l_max - l_cache`` and ``l_max``; the penalty is stored on the final row, and ``l_cache=0`` disables it. The default ``l_max`` follows the generation limit, so multi-turn runners should set it to their intended full-trajectory token budget. ``successful_length`` penalizes trainable response tokens beyond ``free_tokens`` only when the raw task outcome is positive. ``loop`` searches the final trainable segment's tail for the smallest repeating period, then emits capped negative per-token advantage credit for the excess repetitions. This loop credit is applied after advantage normalization and never enters the outcome reward or its group statistics. The raw outcome remains in ``unshaped_rewards`` for pass-rate and verifier-accuracy metrics. ``schema_version`` is stored with the run configuration and emitted on each shaped trajectory.
+- ``generator.trajectory_reward_shaping``: Generator-independent optimization shaping applied after trajectory normalization. ``non_termination`` penalizes stop reasons outside its accepted set. ``overlong`` applies DAPO's outcome-independent linear penalty to the full trajectory between ``l_max - l_cache`` and ``l_max``; the penalty is stored on the final row, and ``l_cache=0`` disables it. Its ``penalty_scale`` sets the maximum reward deduction. Iris launches can set this through ``context_budget.overlong_penalty_scale`` while the context-budget translator derives ``l_max`` and ``l_cache``. The default ``l_max`` follows the generation limit, so multi-turn runners should set it to their intended full-trajectory token budget. ``successful_length`` penalizes trainable response tokens beyond ``free_tokens`` only when the raw task outcome is positive. ``loop`` searches the final trainable segment's tail for the smallest repeating period, then emits capped negative per-token advantage credit for the excess repetitions. This loop credit is applied after advantage normalization and never enters the outcome reward or its group statistics. The raw outcome remains in ``unshaped_rewards`` for pass-rate and verifier-accuracy metrics. ``schema_version`` is stored with the run configuration and emitted on each shaped trajectory.
 - ``generator.trajectory_retention``: Generator-independent bounded capture of normalized training trajectories. It samples deterministically per step, always retains configured anomalies, and writes content-addressed compressed records plus a resume-safe ledger. ``required=false`` reports storage failures without stopping training; ``required=true`` fails the run.
 - ``generator.apply_overlong_filtering``: Whether to apply DAPO Overlong Filtering to the loss masks. For each trajectory that exceeds the max length (i.e., truncated and does not end with an EOS token), this masks out every token in the loss mask.
 - ``trainer.step_wise_training``: Whether to use step-wise training. If ``true``, then the generator will return multi-turn generations with each turn being a separate trajectory. Advantages are computed based on the last step of each trajectory and propagated to the previous steps.

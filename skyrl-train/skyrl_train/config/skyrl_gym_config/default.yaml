@@ -1,5 +1,5 @@
 # @package environment.skyrl_gym
-max_env_workers: 32
+max_env_workers: 32 # environment threads in each rollout worker
 
 gsm8k:
   # Select final_line when only a completed response's last #### line should earn reward.
@@ -22,6 +22,11 @@ search:
 # separate judge and NeMo Skills services. Production configs should replace
 # these loopback defaults with their deployed services.
 nemotron_ultra:
+  # verify runs each row's verifier. skip keeps tool turns but returns no verdict, so
+  # judge-backed rows need no judge; Lean refinement rows are still verified because the
+  # verdict drives their correction turn. Valid only for pure on-policy distillation
+  # (distillation reward_mode=replace, uniform advantages, no eval).
+  grading: verify
   sandbox:
     host: "127.0.0.1"
     replica_service: null

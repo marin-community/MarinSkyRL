@@ -26,6 +26,7 @@ from marinskyrl.resource_locator import join_resource_path, model_source_for_pat
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 from marinskyrl.remote_io import filesystem_and_path, open_output_stream
+from marinskyrl.rollout_grading import validate_nemotron_ultra_grading
 
 # Directory containing the bundled example RL config YAML files.
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
@@ -37,7 +38,6 @@ class RLEntrypoint(StrEnum):
     """Execution modes supported by Iris RL configurations."""
 
     GENERATE = "generate"
-    GYM_WORKER_POOL = "gym_worker_pool"
     MINI_SWE = "mini_swe"
     STANDARD = "standard"
     TERMINAL_BENCH = "terminal_bench"
@@ -47,7 +47,6 @@ class RLEntrypoint(StrEnum):
 RL_ENTRYPOINTS = MappingProxyType(
     {
         RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
-        RLEntrypoint.GYM_WORKER_POOL: "skyrl_train.entrypoints.gym_worker_pool",
         RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
         RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
         RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
@@ -106,10 +105,13 @@ _REQUIRED_CONTEXT_BUDGET_FIELDS = frozenset(
         "max_turns",
     }
 )
-_CONTEXT_BUDGET_FRACTION_FIELDS = frozenset({"generated_budget_fraction", "overlong_cache_fraction"})
-_CONTEXT_BUDGET_FIELDS = _REQUIRED_CONTEXT_BUDGET_FIELDS | _CONTEXT_BUDGET_FRACTION_FIELDS
+_CONTEXT_BUDGET_OPTIONAL_FIELDS = frozenset(
+    {"generated_budget_fraction", "overlong_cache_fraction", "overlong_penalty_scale"}
+)
+_CONTEXT_BUDGET_FIELDS = _REQUIRED_CONTEXT_BUDGET_FIELDS | _CONTEXT_BUDGET_OPTIONAL_FIELDS
 _DEFAULT_GENERATED_BUDGET_FRACTION = 0.5
 _DEFAULT_OVERLONG_CACHE_FRACTION = 0.25
+_DEFAULT_OVERLONG_PENALTY_SCALE = 1.0
 
 _DERIVED_CONTEXT_FIELDS = (
     ("trainer", "max_prompt_length"),
@@ -124,6 +126,7 @@ _DERIVED_CONTEXT_FIELDS = (
     ("terminal_bench", "model_info", "max_output_tokens"),
     ("generator", "trajectory_reward_shaping", "overlong", "l_max"),
     ("generator", "trajectory_reward_shaping", "overlong", "l_cache"),
+    ("generator", "trajectory_reward_shaping", "overlong", "penalty_scale"),
 )
 
 
@@ -136,6 +139,7 @@ class ContextBudget:
     max_turns: int
     generated_budget_fraction: float = _DEFAULT_GENERATED_BUDGET_FRACTION
     overlong_cache_fraction: float = _DEFAULT_OVERLONG_CACHE_FRACTION
+    overlong_penalty_scale: float = _DEFAULT_OVERLONG_PENALTY_SCALE
 
     @property
     def max_input_tokens(self) -> int:
@@ -180,6 +184,7 @@ class ContextBudget:
             "max_turns": self.max_turns,
             "generated_budget_fraction": self.generated_budget_fraction,
             "overlong_cache_fraction": self.overlong_cache_fraction,
+            "overlong_penalty_scale": self.overlong_penalty_scale,
             "max_input_tokens": self.max_input_tokens,
             "generated_tokens_per_trajectory": self.generated_tokens_per_trajectory,
             "overlong_cache_tokens": self.overlong_cache_tokens,
@@ -223,6 +228,12 @@ def _require_fraction(value: Any, field_name: str, config_path: Path, *, allow_z
     return float(value)
 
 
+def _require_nonnegative_finite(value: Any, field_name: str, config_path: Path) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError(f"{config_path}: context_budget.{field_name} must be finite and non-negative, got {value!r}")
+    return float(value)
+
+
 def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBudget:
     """Validate and resolve the single public context budget declaration.
 
@@ -261,6 +272,11 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
             config_path,
             allow_zero=True,
         ),
+        overlong_penalty_scale=_require_nonnegative_finite(
+            config.get("overlong_penalty_scale", _DEFAULT_OVERLONG_PENALTY_SCALE),
+            "overlong_penalty_scale",
+            config_path,
+        ),
     )
     if budget.max_input_tokens <= 0:
         raise ValueError(
@@ -287,6 +303,7 @@ def _materialize_context_budget(
     generator.setdefault("trajectory_reward_shaping", {})["overlong"] = {
         "l_max": budget.generated_tokens_per_trajectory,
         "l_cache": budget.overlong_cache_tokens,
+        "penalty_scale": budget.overlong_penalty_scale,
     }
 
     if terminal_bench is not None:
@@ -894,6 +911,7 @@ def compose_skyrl_config(
     """Compose the final SkyRL subtree from its config groups and launch values."""
     config = _compose_base_config(parsed.config_groups)
     _merge_config_mapping(config, _skyrl_config_sections(parsed, exp_args, hpc))
+    validate_nemotron_ultra_grading(config, parsed.distillation_plan)
     return CompiledSkyRLConfig(
         entrypoint=registered_rl_entrypoint_module(parsed.entrypoint),
         config=config,

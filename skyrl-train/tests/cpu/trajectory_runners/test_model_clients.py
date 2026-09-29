@@ -5,8 +5,10 @@ from unittest.mock import AsyncMock, MagicMock
 import numpy as np
 import pytest
 from jinja2 import TemplateError
+from omegaconf import OmegaConf
 
 from skyrl_train.inference_engines.chat_template import SINGLE_TOOL_CALL_TEMPLATE_ERROR
+from skyrl_train.inference_engines.utils import get_vllm_sampling_params
 from skyrl_train.trajectory_runners.model_clients import ContextLengthExceededError, DirectModelClient, ModelServerError
 
 
@@ -542,3 +544,37 @@ async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
     )
     assert result["responses"] == ["7"]
     assert result["prompt_ids"] == [[1, 2, 3, 4]]
+
+
+@pytest.mark.asyncio
+async def test_chat_output_keeps_the_per_turn_limit_of_vllm_sampling_params():
+    """Training passes vLLM-form sampling params; a large request window must not lift their per-turn limit."""
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "7"
+    engine.tokenize.return_value = {"tokens": [1, 2, 3, 4]}
+    served = []
+
+    async def serve(request):
+        served.append(request["json"])
+        return {
+            "choices": [{"message": {"role": "assistant", "content": "7"}, "finish_reason": "stop", "token_ids": [7]}]
+        }
+
+    engine.chat_completion.side_effect = serve
+    sampling_params = get_vllm_sampling_params(
+        OmegaConf.create(
+            {"max_generate_length": 6528, "temperature": 1.0, "top_p": 1.0, "top_k": -1, "min_p": 0.0, "logprobs": None}
+        )
+    )
+    await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "question"}]],
+            "chat_completion_params": [{}],
+            "sampling_params": sampling_params,
+            "max_context_length": 32768,
+        }
+    )
+    assert served[0]["max_completion_tokens"] == 6528
+    assert "max_tokens" not in served[0]

@@ -70,6 +70,8 @@ class VerificationStatus(StrEnum):
     VERIFIED = "verified"
     UNAVAILABLE = "unavailable"
     ERROR = "error"
+    # The environment was configured not to verify; the trajectory still trains.
+    SKIPPED = "skipped"
 
 
 @dataclass(frozen=True)
@@ -114,6 +116,14 @@ class VerificationResult:
     def unavailable(cls, reason: str, *, diagnostics: Mapping[str, Any] | None = None) -> "VerificationResult":
         return cls(
             status=VerificationStatus.UNAVAILABLE,
+            reason=reason,
+            diagnostics={} if diagnostics is None else diagnostics,
+        )
+
+    @classmethod
+    def skipped(cls, reason: str, *, diagnostics: Mapping[str, Any] | None = None) -> "VerificationResult":
+        return cls(
+            status=VerificationStatus.SKIPPED,
             reason=reason,
             diagnostics={} if diagnostics is None else diagnostics,
         )

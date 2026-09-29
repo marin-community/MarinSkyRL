@@ -35,6 +35,7 @@ from skyrl_train.error_treatment import ErrorTreatment
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_answer_text
+from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraGrading
 from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group, response_object
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
 from skyrl_gym.verification import (
@@ -117,6 +118,9 @@ class ExactChatTransportError(RuntimeError):
     """The configured exact structured-chat contract was violated at runtime."""
 
 
+_NEMOTRON_ULTRA_ENV_CLASS = "nemotron_ultra"
+
+
 class SkyRLGymTrajectoryRunner(TrajectoryRunner):
     def __init__(
         self,
@@ -193,6 +197,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
 
         ultra_config = skyrl_gym_cfg.get("nemotron_ultra", {})
+        self.nemotron_ultra_grading = NemotronUltraGrading(ultra_config.get("grading", NemotronUltraGrading.VERIFY))
+        self._warned_skip_without_ultra_rows = False
         self.genrm_config = dict(ultra_config.get("genrm", {}))
         genrm_judge = self.genrm_config.get("judge")
         self.genrm_judge = OpenAIJudge(**dict(genrm_judge)) if genrm_judge is not None else None
@@ -875,7 +881,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
         error_treatment = None
         disposition = TrainingDisposition.train()
-        if verification.status is not VerificationStatus.VERIFIED:
+        if verification.status is VerificationStatus.SKIPPED:
+            disposition = TrainingDisposition.train(reason="verification skipped")
+        elif verification.status is not VerificationStatus.VERIFIED:
             disposition = TrainingDisposition.mask("verifier unavailable", exception_type="VerifierUnavailable")
             optimization_reward = 0.0
             if token_rewards is not None:
@@ -946,6 +954,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """Run the configured environment loop and project its interaction records."""
+        self._warn_if_skip_has_no_ultra_rows(input_batch)
         with rollout_phase("collect"):
             outputs = await self.collector.collect(input_batch, disable_tqdm=disable_tqdm)
         if isinstance(outputs, list) and outputs and isinstance(outputs[0], AgentLoopOutput):
@@ -955,11 +964,26 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             propagate_data_sources(input_batch, batch)
             return batch
 
+    def _warn_if_skip_has_no_ultra_rows(self, input_batch: TrajectoryRequestBatch) -> None:
+        """Warn once when skipped grading is configured but a batch has no row it applies to."""
+        if self.nemotron_ultra_grading is not NemotronUltraGrading.SKIP or self._warned_skip_without_ultra_rows:
+            return
+        if _NEMOTRON_ULTRA_ENV_CLASS in (input_batch.get("env_classes") or []):
+            return
+        self._warned_skip_without_ultra_rows = True
+        logger.warning(
+            "environment.skyrl_gym.nemotron_ultra.grading=skip is set, but this batch has no {} rows; "
+            "every rollout in it is still graded",
+            _NEMOTRON_ULTRA_ENV_CLASS,
+        )
+
     async def _apply_genrm_cohort_rewards(
         self,
         outputs: list[AgentLoopOutput],
         input_batch: TrajectoryRequestBatch,
     ) -> None:
+        if self.nemotron_ultra_grading is NemotronUltraGrading.SKIP:
+            return
         env_extras = input_batch.get("env_extras") or []
         genrm_agents = {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}
 
