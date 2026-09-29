@@ -49,11 +49,12 @@ from cloud.iris.ray_storage import (
     resolve_ray_spill_target,
 )
 from cloud.iris.rl_config_translation import (
-    IMPORT_PATH_TO_ENV_TYPE,
+    DAYTONA_ENVIRONMENT_TYPE,
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
     RL_ENTRYPOINTS,
     RLEntrypoint,
+    harbor_environment_type,
 )
 from marinskyrl.resource_locator import (
     is_cloud_uri,
@@ -754,10 +755,7 @@ def _rl_config_uses_daytona(config: DictConfig) -> bool:
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH_GENERATE],
     }:
         harbor = config.skyrl.get("terminal_bench", {}).get("harbor", {})
-        import_path = harbor.get("import_path")
-        if import_path:
-            return IMPORT_PATH_TO_ENV_TYPE.get(str(import_path)) == "daytona"
-        return str(harbor.get("environment_type", "daytona")) == "daytona"
+        return harbor_environment_type(harbor) == DAYTONA_ENVIRONMENT_TYPE
     return bool(config.skyrl.get("data", {}).get("terminal_bench_data"))
 
 
