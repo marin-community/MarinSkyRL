@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-import math
 from typing import Mapping, Protocol, Sequence
 
 import numpy as np
@@ -266,6 +265,8 @@ def _inspect_group(group: GeneratedGroup) -> _GroupFacts:
                     f"rollout_logprobs row {row_index} must align with response_ids, "
                     f"got {len(logprobs)} and {len(response)}"
                 )
+            if not np.isfinite(logprobs[np.asarray(loss_mask, dtype=bool)]).all():
+                has_trainable_rollout_logprobs = False
 
     return _GroupFacts(
         physical_count=len(final_indices),
@@ -292,18 +293,13 @@ def _has_behavior_topk(batch: Mapping[str, object], width: int) -> bool:
         if not any(mask):
             continue
         for values in (row_indices, row_logprobs):
-            if not isinstance(values, Sequence) or len(values) != len(mask):
+            if not isinstance(values, np.ndarray) or values.shape != (len(mask), width):
                 return False
-        for eligible, token_indices, token_logprobs in zip(mask, row_indices, row_logprobs, strict=True):
-            if not eligible:
-                continue
-            for values in (token_indices, token_logprobs):
-                if not isinstance(values, Sequence) or len(values) != width:
-                    return False
-            if any(not isinstance(index, int) or index < 0 for index in token_indices):
-                return False
-            if any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in token_logprobs):
-                return False
+        if not np.issubdtype(row_indices.dtype, np.integer) or row_logprobs.dtype.kind not in "iuf":
+            return False
+        eligible = np.asarray(mask, dtype=bool)
+        if (row_indices[eligible] < 0).any() or not np.isfinite(row_logprobs[eligible]).all():
+            return False
     return True
 
 
