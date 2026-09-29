@@ -34,9 +34,11 @@ from skyrl_train.trajectory_runners.base import (
     TrajectoryRunner,
 )
 import copy
+from skyrl_train.batch_sampling import RowOwnership, filter_trajectory_batch
 from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
     get_metrics_from_trajectory_batch,
+    graded_row_indices,
     scalar_reward_token_credit,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
@@ -86,6 +88,7 @@ from marinskyrl.checkpoint_paths import (
     GLOBAL_STEP_PREFIX,
     LATEST_CHECKPOINT_FILE,
 )
+from marinskyrl.process_diagnostics import write_exception_receipt
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculativeDecodingConfig, runai_model_uri
 from skyrl_train.checkpoint_listing import extract_step_from_path
@@ -522,19 +525,23 @@ class RayPPOTrainer:
     async def _teardown(self) -> None:
         """Best-effort cleanup after training ends (normal or abnormal).
 
-        Each step uses a timeout so a blocked operation cannot prevent
-        subsequent cleanup from running.  Errors are logged as warnings
-        but never re-raised.
+        Async steps use cooperative timeouts. A process watchdog also bounds
+        blocked cleanup and subsequent executor shutdown. Cleanup errors are
+        logged as warnings so teardown can continue.
 
         Order matters:
-        1. HTTP endpoint shutdown – cuts off the request path so in-flight
+        1. Teacher oracle shutdown – releases teacher engines.
+        2. HTTP endpoint shutdown – cuts off the request path so in-flight
            Harbor trials get connection-refused instead of retrying against
            dead inference engines indefinitely.
-        2. Trajectory runner shutdown – waits for QueueOrchestrator to drain (should
+        3. Trajectory runner shutdown – waits for QueueOrchestrator to drain (should
            be fast now that trials can't make new requests).
-        3. Inference engine teardown – sends teardown RPC to each engine.
-        4. Ray actor cleanup – force-kills remaining actors.
+        4. Inference engine teardown – sends teardown RPC to each engine.
+        5. Ray actor cleanup – force-kills remaining actors.
         """
+        # Teacher cleanup can block or resist cancellation. Arm the process guard
+        # before any teardown awaits, including executor shutdown after asyncio.run.
+        self._start_exit_watchdog()
         if self._expert_block_sync is not None:
             await self._guarded_async(
                 self._expert_block_sync.close(),
@@ -569,14 +576,6 @@ class RayPPOTrainer:
         )
         self._guarded_sync(self._kill_ray_actors, label="Ray actor cleanup")
 
-        # Safety net: force-exit the process if it's still alive after a
-        # generous grace period.  After this point, asyncio.run() will try to
-        # cancel remaining tasks (_cancel_all_tasks).  If orphaned tasks are
-        # stuck in retry loops (e.g. Harbor trials retrying against dead
-        # inference engines), that cleanup hangs indefinitely.  The watchdog
-        # ensures the process eventually terminates.
-        self._start_exit_watchdog(timeout=120)
-
     async def shutdown(self) -> None:
         """Run trainer teardown once, including after partial startup."""
         if getattr(self, "_shutdown_complete", False):
@@ -593,7 +592,9 @@ class RayPPOTrainer:
         """Start a daemon thread that force-exits the process after *timeout* seconds."""
 
         def _force_exit():
-            logger.error(f"Process still alive {timeout}s after teardown — forcing exit to prevent zombie process")
+            logger.error(
+                f"Process still alive {timeout}s after teardown began — forcing exit to prevent zombie process"
+            )
             os._exit(1)
 
         t = threading.Timer(timeout, _force_exit)
@@ -612,8 +613,11 @@ class RayPPOTrainer:
                 await self._distillation_runtime.start()
             await self._startup_trajectory_runner()
             await self._train_loop()
-        except Exception as e:
-            log_exception_as_text(f"Train loop failed at global_step {self.global_step}", e)
+        except Exception as error:
+            log_exception_as_text(f"Train loop failed at global_step {self.global_step}", error)
+            receipt = write_exception_receipt("skyrl-trainer", error)
+            if receipt is not None:
+                logger.error("Preserved original trainer exception at {}", receipt)
             raise
         finally:
             if loop_monitor is not None:
@@ -2160,10 +2164,7 @@ class RayPPOTrainer:
 
         # only use `trajectory_batch_for_metrics` for metrics calculation
         # For step-wise training, we only calculate metrics for the last step of each trajectory
-        mean_reward, pass_at_n = get_metrics_from_trajectory_batch(
-            trajectory_batch_for_metrics,
-            uids_for_metrics,
-        )
+        self._record_reward_metrics(trajectory_batch_for_metrics, uids_for_metrics)
 
         # Per-sample scalar rewards for this step, kept for callbacks that need the
         # distribution rather than its mean (PreflightGateCallback reads this). Captured
@@ -2191,6 +2192,22 @@ class RayPPOTrainer:
                 scalar_reward_token_credit(reward, response) for reward, response in zip(rewards, responses)
             ]
 
+        # re-assign reward but now it's per token rewards
+        trajectory_batch["rewards"] = per_token_rewards
+        return trajectory_batch
+
+    def _record_reward_metrics(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> None:
+        """Record reward metrics over graded rows; a step with none records no reward metrics."""
+        graded_indices = graded_row_indices(trajectory_batch)
+        if not graded_indices:
+            return
+        if len(graded_indices) < len(trajectory_batch["rewards"]):
+            trajectory_batch = filter_trajectory_batch(
+                trajectory_batch, graded_indices, row_ownership=RowOwnership.BORROWED
+            )
+            uids = [uids[index] for index in graded_indices]
+        mean_reward, pass_at_n = get_metrics_from_trajectory_batch(trajectory_batch, uids)
+        rewards = trajectory_batch["rewards"]
         n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
 
         reward_metrics = {
@@ -2199,26 +2216,21 @@ class RayPPOTrainer:
         }
         # A group whose rewards all tie carries no advantage signal.
         grouped_rewards = defaultdict(list)
-        for uid, reward in zip(uids_for_metrics, step_rewards):
+        for uid, reward in zip(uids, rewards):
             grouped_rewards[uid].append(float(np.sum(reward)))
-        if grouped_rewards:
-            reward_metrics["reward/informative_group_fraction"] = sum(
-                max(values) > min(values) for values in grouped_rewards.values()
-            ) / len(grouped_rewards)
+        reward_metrics["reward/informative_group_fraction"] = sum(
+            max(values) > min(values) for values in grouped_rewards.values()
+        ) / len(grouped_rewards)
         self.all_metrics.update(reward_metrics)
-        data_sources = trajectory_batch_for_metrics.get("data_sources")
+        data_sources = trajectory_batch.get("data_sources")
         if data_sources is not None:
             self.all_metrics.update(
                 _domain_reward_metrics(
                     data_sources,
-                    [float(sum(reward) if isinstance(reward, list) else reward) for reward in step_rewards],
+                    [float(sum(reward) if isinstance(reward, list) else reward) for reward in rewards],
                 )
             )
         logger.info(f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, reward/avg_raw_reward: {mean_reward}")
-
-        # re-assign reward but now it's per token rewards
-        trajectory_batch["rewards"] = per_token_rewards
-        return trajectory_batch
 
     def select_trajectories(
         self, trajectory_batch: TrajectoryBatch, uids: List[str]

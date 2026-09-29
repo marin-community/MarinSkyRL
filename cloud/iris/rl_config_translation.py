@@ -26,6 +26,7 @@ from marinskyrl.resource_locator import join_resource_path, model_source_for_pat
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 from marinskyrl.remote_io import filesystem_and_path, open_output_stream
+from marinskyrl.rollout_grading import validate_nemotron_ultra_grading
 
 # Directory containing the bundled example RL config YAML files.
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
@@ -896,6 +897,7 @@ def compose_skyrl_config(
     _merge_config_mapping(config, _skyrl_config_sections(parsed, exp_args, hpc))
     from skyrl_train.config.objective_spec import validate_objective
 
+    validate_nemotron_ultra_grading(config, parsed.distillation_plan)
     validate_objective(config)
     return CompiledSkyRLConfig(
         entrypoint=registered_rl_entrypoint_module(parsed.entrypoint),

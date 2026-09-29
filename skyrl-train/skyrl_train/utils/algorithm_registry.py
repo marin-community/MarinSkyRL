@@ -15,17 +15,9 @@ import ray
 from loguru import logger
 from omegaconf import DictConfig
 
+from marinskyrl.runtime_options import AdvantageEstimator
 from skyrl_train.config.objective_spec import BUILTIN_LOSS_SPECS, LossSpec
 from skyrl_train.utils.function_registry import BaseFunctionRegistry
-
-
-class AdvantageEstimator(StrEnum):
-    GAE = "gae"
-    GRPO = "grpo"
-    RLOO = "rloo"
-    RLOO_N = "rloo_n"  # RLOO-Neutral: excludes masked samples from baseline
-    REINFORCE_PP = "reinforce++"
-    UNIFORM = "uniform"
 
 
 @dataclass(frozen=True)
