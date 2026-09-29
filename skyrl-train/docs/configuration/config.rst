@@ -339,7 +339,7 @@ Algorithm Configuration
   The default has k3's reported value and k2's gradient through the clamped log probability ratio.
   Under on-policy sampling, away from the log-ratio clamp, its expected gradient is that of
   reverse KL, ``KL(policy || reference)``. The k3 value clamp does not limit that gradient.
-  Plain ``k3`` has the forward-KL gradient under the same sampling assumption.
+  Plain ``k3`` has the forward-KL gradient under on-policy sampling when neither clamp is active.
   Metrics and the KL-in-reward penalty use values only. verl calls this value/gradient
   combination ``k3+``; see `Approximating KL Divergence <http://joschu.net/blog/kl-approx.html>`_
   for the k1, k2 and k3 value estimators.

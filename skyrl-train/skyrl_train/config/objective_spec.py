@@ -124,6 +124,9 @@ def validate_objective(cfg: DictConfig) -> None:
     if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
         raise ValueError("trainer.policy.max_consecutive_nonfinite_steps must be null or an integer >= 1")
     algorithm = cfg.trainer.algorithm
+    for key in ("use_abs_kl", "use_kl_estimator_k3"):
+        if key in algorithm:
+            raise ValueError(f"trainer.algorithm.{key} is unsupported; configure trainer.algorithm.kl_estimator_type")
     try:
         KLEstimator(algorithm.kl_estimator_type)
     except ValueError as error:
