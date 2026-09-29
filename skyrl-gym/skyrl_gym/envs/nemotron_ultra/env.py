@@ -77,11 +77,15 @@ class NemotronUltraEnv(BaseTextEnv):
         self.request = self._decode_mapping(ultra.get("request_json"), "request_json")
         self.evidence: RolloutEvidence | None = None
         sandbox_config = env_config.get("sandbox", {})
-        self.sandbox = SandboxClient(
-            host=str(sandbox_config.get("host", "127.0.0.1")),
-            port=int(sandbox_config.get("port", 6000)),
-        )
         self.sandbox_session_id = str(uuid.uuid4())
+        sandbox_port = int(sandbox_config.get("port", 6000))
+        replica_service = sandbox_config.get("replica_service")
+        if replica_service:
+            self.sandbox = SandboxClient.for_session(
+                host=str(replica_service), port=sandbox_port, session_id=self.sandbox_session_id
+            )
+        else:
+            self.sandbox = SandboxClient(host=str(sandbox_config.get("host", "127.0.0.1")), port=sandbox_port)
         self.genrm_config = dict(env_config.get("genrm", {}))
         code_verifier = env_config.get("code_verifier", {})
         if not isinstance(code_verifier, Mapping):

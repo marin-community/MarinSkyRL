@@ -9,7 +9,7 @@ import xgrammar as xgr
 from skyrl_train.inference_engines.vllm.grammar_stop_tokens import fill_xgrammar_bitmask
 
 
-VOCAB = ['{', '}', '"', 'value', ':', 'foo', '<EOS>', '<EOT>', ' ', '\n', 'bar', '{"value":"']
+VOCAB = ["{", "}", '"', "value", ":", "foo", "<EOS>", "<EOT>", " ", "\n", "bar", '{"value":"']
 # Most tokens must be invalid in a JSON string to exercise the compiler's
 # cached accepted-token mask, rather than its complementary rejected mask.
 VOCAB += [f"\ninvalid_{index}" for index in range(len(VOCAB), 96)]
