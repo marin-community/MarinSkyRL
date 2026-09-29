@@ -120,14 +120,23 @@ def symbolic_math_reward(
         receiving.close()
 
 
+_JUDGE_TOKEN_BUDGETS = (8192, 16384)
+
+
 def _judge_equal(judge: Judge, question: str, first: str, second: str) -> tuple[bool, str]:
-    output = judge.generate(
-        [
-            {"role": "system", "content": _JUDGE_SYSTEM},
-            {"role": "user", "content": _JUDGE_PROMPT.format(question=question, first=first, second=second)},
-        ]
-    )
-    return final_verdict(output, {"[[A=B]]", "[[A!=B]]"}) == "[[A=B]]", output
+    messages = [
+        {"role": "system", "content": _JUDGE_SYSTEM},
+        {"role": "user", "content": _JUDGE_PROMPT.format(question=question, first=first, second=second)},
+    ]
+    incomplete: ValueError | None = None
+    for max_tokens in _JUDGE_TOKEN_BUDGETS:
+        try:
+            output = judge.generate(messages, max_tokens=max_tokens)
+        except ValueError as error:
+            incomplete = error
+            continue
+        return final_verdict(output, {"[[A=B]]", "[[A!=B]]"}) == "[[A=B]]", output
+    raise incomplete
 
 
 def grade_math(

@@ -565,6 +565,43 @@ def test_math_reward_avoids_forking_the_multithreaded_worker(monkeypatch):
     assert requested_methods == ["forkserver"]
 
 
+def test_math_judge_retries_length_capped_output_with_a_larger_budget():
+    class LengthCappedJudge:
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, messages, *, max_tokens=8192):
+            self.calls.append(max_tokens)
+            if len(self.calls) == 1:
+                raise ValueError("Incomplete judge response: finish_reason=length")
+            return "[[A=B]]"
+
+    judge = LengthCappedJudge()
+    reward, details = grade_math(
+        r"The answer is \boxed{0.25}.",
+        {"question": "What is one half?", "expected_answer": r"\frac{1}{2}"},
+        judge=judge,
+    )
+
+    assert reward == 1.0
+    assert judge.calls == [8192, 16384, 8192]
+
+
+def test_math_judge_persistent_output_cap_keeps_the_attempt_ungraded():
+    class CappedJudge:
+        def generate(self, messages, *, max_tokens=8192):
+            raise ValueError("Incomplete judge response: finish_reason=length")
+
+    env = _ultra_env("math_with_judge_simple_agent", {}, {"question": "What is one half?", "expected_answer": "1/2"})
+    env.general_judge = CappedJudge()
+
+    result = env.step(r"The answer is \boxed{0.25}.")
+
+    assert result["verification"].status is VerificationStatus.ERROR
+    assert result["verification"].score is None
+    assert result["reward"] == 0.0
+
+
 class _Judge:
     def __init__(self, outputs):
         self.outputs = iter(outputs)
