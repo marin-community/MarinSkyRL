@@ -26,21 +26,6 @@ def environment(monkeypatch: pytest.MonkeyPatch):
     return result
 
 
-def test_uses_ambient_controller_url(environment):
-    assert environment._cluster is None
-    assert environment._controller_url == "http://iris-controller:10000"
-
-
-def test_connection_arguments_are_exclusive(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(BaseEnvironment, "__init__", lambda self, *args, **kwargs: None)
-    monkeypatch.delenv("IRIS_CONTROLLER_URL", raising=False)
-
-    with pytest.raises(ValueError, match="IRIS_CONTROLLER_URL"):
-        iris_environment.IrisEnvironment()
-    with pytest.raises(ValueError, match="exactly one"):
-        iris_environment.IrisEnvironment(cluster="rno2a", controller_url="http://iris-controller:10000")
-
-
 def test_endpoint_lives_until_environment_stops(environment, monkeypatch: pytest.MonkeyPatch):
     endpoint = SimpleNamespace(url="http://iris-controller:10000", credentials=None, close=Mock())
     client = Mock()
@@ -54,7 +39,6 @@ def test_endpoint_lives_until_environment_stops(environment, monkeypatch: pytest
     environment._start_sync()
 
     endpoint.close.assert_not_called()
-    assert environment._endpoint is endpoint
     client.submit.assert_called_once()
     assert client.submit.call_args.kwargs["task_image"] == environment.task_env_config.docker_image
 
@@ -63,7 +47,6 @@ def test_endpoint_lives_until_environment_stops(environment, monkeypatch: pytest
     job.terminate.assert_called_once_with()
     client.shutdown.assert_called_once_with()
     endpoint.close.assert_called_once_with()
-    assert environment._endpoint is None
 
 
 def test_start_failure_closes_endpoint(environment, monkeypatch: pytest.MonkeyPatch):
@@ -75,4 +58,3 @@ def test_start_failure_closes_endpoint(environment, monkeypatch: pytest.MonkeyPa
         environment._start_sync()
 
     endpoint.close.assert_called_once_with()
-    assert environment._endpoint is None

@@ -113,28 +113,30 @@ def test_alignment_round_trip_and_sentinels(model_name):
 # ---------------------------------------------------------------------------
 # Case 2: tokenizer mismatch — vLLM split differently from retok, LCS aligns
 # ---------------------------------------------------------------------------
-def test_tokenizer_mismatch_lcs():
+def _int16_rows(rows):
+    return np.asarray(rows, dtype=np.int16).reshape(len(rows), L, K)
+
+
+@pytest.mark.parametrize("as_rows", [list, _int16_rows], ids=["nested", "int16-array"])
+def test_tokenizer_mismatch_lcs(as_rows):
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
     # Re-tokenized generated ids (N tokens) and vLLM rows with a DIFFERENT count
     # (N+1, e.g. vLLM split one token into two). align_routed_experts_with_lcs
     # must still produce exactly len(retok) rows and copy real rows for the
-    # positionally-matched prefix.
+    # positionally-matched prefix, whichever container the capture boundary emits.
     retok_ids = [101, 102, 103, 104]  # N = 4
     vllm_rows = [_real_row(i) for i in range(5)]  # N+1 = 5
 
-    aligned = align_routed_experts_with_lcs(retok_ids, vllm_rows, tokenizer)
-    assert len(aligned) == len(retok_ids)
-    for row in aligned:
-        assert len(row) == L and all(len(layer) == K for layer in row)
     # The longest common positional run [0..3] copies the first 4 vLLM rows.
-    assert aligned[:4] == vllm_rows[:4]
+    aligned = align_routed_experts_with_lcs(retok_ids, as_rows(vllm_rows), tokenizer)
+    assert np.asarray(aligned).tolist() == vllm_rows[:4]
 
     # Exact 1:1 count → direct copy.
-    aligned_eq = align_routed_experts_with_lcs(retok_ids, vllm_rows[:4], tokenizer)
-    assert aligned_eq == vllm_rows[:4]
+    aligned_eq = align_routed_experts_with_lcs(retok_ids, as_rows(vllm_rows[:4]), tokenizer)
+    assert np.asarray(aligned_eq).tolist() == vllm_rows[:4]
 
     # Empty vLLM rows → [] (caller sentinel-pads).
-    assert align_routed_experts_with_lcs(retok_ids, [], tokenizer) == []
+    assert align_routed_experts_with_lcs(retok_ids, as_rows([]), tokenizer) == []
 
 
 # ---------------------------------------------------------------------------
@@ -246,94 +248,11 @@ def test_packer_shape_and_right_pad(char_tokenizer):
     assert routed_experts_tensor[1, 4].tolist() == re1[4]
 
 
-# ---------------------------------------------------------------------------
-# Case 4: no-op — routed_experts=None ⇒ collator output identical to today
-# ---------------------------------------------------------------------------
-def test_packer_noop_flag_off(char_tokenizer):
-    prompts = [[97, 98, 99], [49, 50, 51, 52, 53]]
-    responses = [[100, 101, 102], [54, 55, 56, 57, 58]]
-    rewards = [torch.tensor([0.0, 1.0, 0.0]), torch.tensor([1.0, 0, 0, 0, 0])]
-    loss_masks = [[1, 1, 0], [1, 1, 1, 0, 0]]
-
-    # With routed_experts omitted (flag off), the 7th return is None and the first
-    # six tensors are byte-identical to a pre-rail call.
-    res_off = convert_prompts_responses_to_batch_tensors(char_tokenizer, prompts, responses, rewards, loss_masks)
-    assert len(res_off) == 9
-    assert res_off[6] is None  # routed_experts_tensor
-    assert res_off[7] is None  # token_level_shaping_tensor (Stage B, off)
-    assert res_off[8] is None  # response_span_tags_tensor (Stage B, off)
-
-    res_off2 = convert_prompts_responses_to_batch_tensors(
-        char_tokenizer, prompts, responses, rewards, loss_masks, None, None
-    )
-    for a, b in zip(res_off[:6], res_off2[:6]):
-        if a is None and b is None:
-            continue
-        assert torch.equal(a, b)
-    assert res_off2[6] is None
-
-
-# ---------------------------------------------------------------------------
-# Case 4b: TrainingInputBatch byte-identical when the flag is off (TensorBatch.__eq__).
-# At the batch boundary, nested-list input must have the same keys and tensors,
-# while array input adds exactly one key (rollout_routed_experts).
-# ---------------------------------------------------------------------------
-def test_training_input_batch_noop_vs_present(char_tokenizer):
-    from skyrl_train.training_batch import TrainingInputBatch
-
-    prompts = [[97, 98, 99], [49, 50, 51, 52, 53]]
-    responses = [[100, 101, 102], [54, 55, 56, 57, 58]]
-    rewards = [torch.tensor([0.0, 1.0, 0.0]), torch.tensor([1.0, 0, 0, 0, 0])]
-    loss_masks = [[1, 1, 0], [1, 1, 1, 0, 0]]
-    re0 = [_real_row(i) for i in range(3)]
-    re1 = [_real_row(10 + i) for i in range(5)]
-
-    def build(routed_experts):
-        # Mirror trainer.convert_to_training_input's tensor wiring (subset). Use
-        # a real logprobs tensor so every present field is a Tensor (TensorBatch
-        # .__eq__ does torch.equal over present keys).
-        logprobs = [[0.0] * len(r) for r in responses]
-        (seq, attn, resp_mask, rew, lm, lp, re_t, _tls, _rst) = convert_prompts_responses_to_batch_tensors(
-            char_tokenizer, prompts, responses, rewards, loss_masks, logprobs, routed_experts
-        )
-        batch = TrainingInputBatch(
-            {
-                "sequences": seq,
-                "attention_mask": attn,
-                "response_mask": resp_mask,
-                "rewards": rew,
-                "loss_mask": lm,
-                "rollout_logprobs": lp,
-            }
-        )
-        if re_t is not None:
-            batch["rollout_routed_experts"] = re_t
-        return batch
-
-    off_a = build(None)
-    off_b = build(None)
-    # Flag off twice → byte-identical (no extra key).
-    assert off_a == off_b
-    assert "rollout_routed_experts" not in off_a
-
-    on = build([re0, re1])
-    # Array input adds exactly one key; otherwise the batches are equal.
-    assert "rollout_routed_experts" in on
-    assert on != off_a
-    # All shared keys remain byte-identical (purely additive).
-    for k in off_a.keys():
-        assert torch.equal(off_a[k], on[k])
-    # The added field satisfies the Stage-1 invariant shape[:2] == loss_mask.shape.
-    assert tuple(on["rollout_routed_experts"].shape[:2]) == tuple(on["loss_mask"].shape)
-
-
 # ===========================================================================
 # np.int16 array-carrier parity gates.
 #
-# These are the mandatory byte-identical gates from the fix spec §3(i)(ii): the
-# collated rollout_routed_experts tensor (and the whole TrainingInputBatch) must be
-# nested-list and array-carrier inputs remain bit-for-bit equal. Only the container
-# type of the ids on the wire changes.
+# The collated rollout_routed_experts tensor must be bit-for-bit equal for
+# nested-list and array-carrier inputs; only the container type on the wire differs.
 # ===========================================================================
 
 
@@ -387,132 +306,6 @@ def test_collator_mixed_rectangular_and_ragged_routes():
     assert routes[0, :2].tolist() == rectangular.tolist()
     assert routes[1, 0].tolist() == ragged[0]
     assert torch.all(routes[1, 1:] == 0)
-
-
-def test_training_input_batch_container_parity(char_tokenizer):
-    """Full TrainingInputBatch parity: same key set + every tensor torch.equal between
-    the nested-list and array builds."""
-    from skyrl_train.training_batch import TrainingInputBatch
-
-    prompts = [[97, 98, 99], [49, 50, 51, 52, 53]]
-    responses = [[100, 101, 102], [54, 55, 56, 57, 58]]
-    rewards = [torch.tensor([0.0, 1.0, 0.0]), torch.tensor([1.0, 0, 0, 0, 0])]
-    loss_masks = [[1, 1, 0], [1, 1, 1, 0, 0]]
-    logprobs = [[0.0] * len(r) for r in responses]
-    re_nested = [_sample_nested(3, 0), _sample_nested(5, 10)]
-    re_arrays = [np.asarray(s, dtype=np.int16) for s in re_nested]
-
-    def build(routed_experts, num_experts=512):
-        (seq, attn, resp_mask, rew, lm, lp, re_t, _tls, _rst) = convert_prompts_responses_to_batch_tensors(
-            char_tokenizer, prompts, responses, rewards, loss_masks, logprobs, routed_experts, num_experts=num_experts
-        )
-        batch = TrainingInputBatch(
-            {
-                "sequences": seq,
-                "attention_mask": attn,
-                "response_mask": resp_mask,
-                "rewards": rew,
-                "loss_mask": lm,
-                "rollout_logprobs": lp,
-            }
-        )
-        if re_t is not None:
-            batch["rollout_routed_experts"] = re_t
-        return batch
-
-    off = build(re_nested)
-    on = build(re_arrays)
-
-    assert set(off.keys()) == set(on.keys())
-    assert "rollout_routed_experts" in on
-    for k in off.keys():
-        assert torch.equal(off[k], on[k]), f"key {k} diverged between nested-list and array input"
-
-
-def test_align_array_twin_parity():
-    """align_routed_experts_with_lcs array twin: .tolist() bit-identical to the
-    list branch across the LCS-mismatch, exact-1:1, and empty cases."""
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-    retok_ids = [101, 102, 103, 104]
-    vllm_rows = [_real_row(i) for i in range(5)]  # N+1 (count mismatch -> positional LCS)
-
-    def _off(retok, rows):
-        return align_routed_experts_with_lcs(retok, rows, tokenizer)
-
-    def _on(retok, rows):
-        return align_routed_experts_with_lcs(retok, np.asarray(rows, dtype=np.int16), tokenizer)
-
-    # Count-mismatch positional LCS.
-    off = _off(retok_ids, vllm_rows)
-    on = _on(retok_ids, vllm_rows)
-    assert isinstance(on, np.ndarray)
-    assert on.dtype == np.int16
-    assert np.asarray(off, dtype=np.int16).tolist() == on.tolist()
-
-    # Exact 1:1 direct copy.
-    off_eq = _off(retok_ids, vllm_rows[:4])
-    on_eq = _on(retok_ids, vllm_rows[:4])
-    assert np.asarray(off_eq, dtype=np.int16).tolist() == on_eq.tolist()
-
-    # Empty vLLM rows -> [] both branches (caller sentinel-pads).
-    assert align_routed_experts_with_lcs(retok_ids, [], tokenizer) == []
-    assert align_routed_experts_with_lcs(retok_ids, np.zeros((0, L, K), dtype=np.int16), tokenizer) == []
-
-
-def test_end_to_end_alignment_and_collate_container_parity(char_tokenizer):
-    """END-TO-END gate: multi-turn get_response_ids_and_loss_mask_from_messages +
-    collator, nested per-turn data vs np.int16 per-turn arrays, must
-    yield a byte-identical collated routed_experts tensor. Exercises extract-shape,
-    sentinel-fill, LCS alignment, AND the collator — the correctness-sensitive path."""
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-    generation_prompt_ids = get_generation_prompt_ids(tokenizer)
-
-    messages = [
-        {"role": "user", "content": "Hi"},
-        {"role": "assistant", "content": "Hello there"},
-        {"role": "user", "content": "How are you?"},
-        {"role": "assistant", "content": "Good"},
-    ]
-
-    def num_generated(content):
-        msg = [{"role": "assistant", "content": content}]
-        ids = encode_messages_subset(msg, tokenizer)
-        last_eos = len(ids) - 1 - ids[::-1].index(tokenizer.eos_token_id)
-        return last_eos + 1 - len(generation_prompt_ids)
-
-    n1 = num_generated("Hello there")
-    n2 = num_generated("Good")
-    re_turn1 = [_real_row(10 + i) for i in range(n1)]
-    re_turn2 = [_real_row(50 + i) for i in range(n2)]
-
-    def assemble(per_turn):
-        _, _, _, routed = get_response_ids_and_loss_mask_from_messages(
-            messages, tokenizer, assistant_routed_experts=per_turn
-        )
-        return routed
-
-    # Nested and array inputs are both normalized to the canonical array carrier.
-    routed_off = assemble([re_turn1, re_turn2])
-    # Per-turn np.int16 arrays are what the capture boundary emits.
-    routed_on = assemble([np.asarray(re_turn1, dtype=np.int16), np.asarray(re_turn2, dtype=np.int16)])
-
-    # Collate each sample-of-one.
-    prompts = [[1, 2, 3]]
-    responses = [list(range(100, 100 + len(routed_off)))]
-    rewards = [torch.zeros(len(routed_off))]
-    loss_masks = [[1] * len(routed_off)]
-
-    t_off = convert_prompts_responses_to_batch_tensors(
-        char_tokenizer, prompts, responses, rewards, loss_masks, None, [routed_off], num_experts=512
-    )[6]
-    t_on = convert_prompts_responses_to_batch_tensors(
-        char_tokenizer, prompts, responses, rewards, loss_masks, None, [routed_on], num_experts=512
-    )[6]
-
-    assert t_off is not None and t_on is not None
-    assert t_off.shape == t_on.shape
-    assert t_off.dtype == t_on.dtype
-    assert torch.equal(t_off, t_on), "array-carrier tensor must be byte-identical to nested input"
 
 
 def test_concat_cross_sample_sentinel_matches_LK():

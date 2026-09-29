@@ -334,21 +334,11 @@ async def test_direct_chat_continuation_preserves_sampled_tool_call_tokens():
     )
 
     assert output["prompt_ids"] == [[11, 12, 21, 22, 30, 40, 41]]
-    assert engine.chat_completion.await_args.args[0]["json"]["_skyrl_exact_prompt_token_ids"] == [
-        11,
-        12,
-        21,
-        22,
-        30,
-        40,
-        41,
-    ]
-
-
-def test_direct_model_client_omits_empty_tools_from_vllm_request():
-    options = DirectModelClient._chat_options({"tools": [], "temperature": 0.4}, {})
-
-    assert options == {"temperature": 0.4}
+    chat_body = engine.chat_completion.await_args.args[0]["json"]
+    assert chat_body["_skyrl_exact_prompt_token_ids"] == [11, 12, 21, 22, 30, 40, 41]
+    # A row with `tools: []` is served as a tool-free request.
+    assert "tools" not in chat_body
+    assert all("tools" not in call.args[0]["json"] for call in engine.tokenize.await_args_list)
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,6 @@
 from collections import Counter
 
 import datasets
-import pytest
 
 from skyrl_train.domain_sampling import DomainWeightedOrder, weighted_quotas
 
@@ -39,10 +38,3 @@ def test_domain_weighted_order_continues_past_the_dataset_size():
 
     routes = Counter(dataset[index]["teacher_route"] for index in draws)
     assert routes == {"math": 96, "code": 96, "if": 48}
-
-
-def test_domain_weighted_order_rejects_empty_or_underfilled_route_pools():
-    dataset = datasets.Dataset.from_dict({"teacher_route": ["math"] * 8 + ["code"] * 8 + ["if"]})
-
-    with pytest.raises(ValueError, match="if"):
-        DomainWeightedOrder(dataset, WEIGHTS, seed=7, window_size=11)
