@@ -148,6 +148,44 @@ def test_multichallenge_malformed_reply_is_never_a_successful_no(reply):
         )
 
 
+@pytest.mark.parametrize(
+    "response",
+    ["", "   ", "<|start_think|>The startup is $100,000, not $80,000<|eot_id|>", "<think>checking</think>"],
+)
+def test_multichallenge_empty_final_answer_cannot_receive_context_credit(response):
+    # A retained rollout received 3/4 credit from prior conversation context despite having no final answer.
+    env = ultra_env(
+        "multichallenge_simple_agent",
+        {
+            "context": "Earlier assistant: Startup is $100,000. Monthly saving is $2,875. Inflation is 5%.",
+            "rubric": [
+                {"question": "Does the response affirm startup is $100,000?"},
+                {"question": "Does the response state $8,000/month is required?"},
+                {"question": "Does the response state $2,875/month is required?"},
+                {"question": "Does the response state 5% inflation was used?"},
+            ],
+        },
+    )
+    env.general_judge = JudgeReplies("[[YES]]", "[[NO]]", "[[YES]]", "[[YES]]")
+    result = env.step(response)
+    assert result["verification"].status is VerificationStatus.VERIFIED
+    assert result["reward"] == 0.0
+    assert result["verification"].passed is False
+    assert result["verification"].diagnostics["empty_final_answer"] is True
+    assert result["verification"].diagnostics["grading_action"] == ""
+
+
+def test_multichallenge_nonempty_final_answer_keeps_partial_rubric_credit():
+    reward, details = grade_multichallenge(
+        "<think>checking</think>Startup is $100,000. Save $2,875 monthly. Inflation is 5%.",
+        {"rubric": [{"question": question} for question in ["startup?", "saving?", "monthly?", "inflation?"]]},
+        JudgeReplies("[[YES]]", "[[NO]]", "[[YES]]", "[[YES]]"),
+    )
+    assert reward == 0.75
+    assert details["num_passed"] == 3
+    assert details["num_total"] == 4
+
+
 def test_jailbreak_transport_failure_is_an_error_not_a_verified_zero():
     env = ultra_env("jailbreak_refusal_with_explanation", {"response_policy_mapped": "refusal_with_explanation"})
     env.safety_judge = JudgeReplies(requests.ConnectionError("judge down"))
