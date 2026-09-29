@@ -22,6 +22,7 @@ from cloud.iris.hf_model_cache import (
     stage_model_metadata,
 )
 from marinskyrl.model_manifest import ModelManifest, snapshot_model_manifest
+from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore
 
 
 def _snapshot_file(path: str, payload: bytes) -> HuggingFaceSnapshotFile:
@@ -300,7 +301,15 @@ def test_artifact_metadata_staging_leaves_weight_shards_remote(tmp_path: Path) -
 
     metadata_bytes = stage_artifact_model_metadata(source.as_uri(), "artifact@v1:abc123", str(destination))
 
-    assert metadata_bytes == sum(path.stat().st_size for path in (source / "config.json", source / "tokenizer.json"))
+    store = RemoteSafetensorsTensorStore(source.as_uri(), destination)
+    assert store.load_tensors(["weight"])["weight"].tolist() == [0.0, 1.0, 2.0, 3.0]
+    metadata_files = (
+        destination / "config.json",
+        destination / "tokenizer.json",
+        destination / "model.safetensors.index.json",
+    )
+    assert metadata_bytes == sum(path.stat().st_size for path in metadata_files)
+    assert not (source / "model.safetensors.index.json").exists()
     assert (destination / "config.json").read_text() == "{}"
     assert (destination / "tokenizer.json").read_text() == "{}"
     assert not (destination / "model.safetensors").exists()

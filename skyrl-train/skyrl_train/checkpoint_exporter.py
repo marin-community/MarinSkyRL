@@ -21,7 +21,7 @@ from skyrl_train.hf_export_schema import (
     TRAINER_STATE_FILENAME,
 )
 from skyrl_train.hf_publisher import HuggingFacePublisher
-from skyrl_train.tokenizer import create_tokenizer
+from skyrl_train.tokenizer import tokenizer_from_config
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.io import io
 from skyrl_train.utils.utils import (
@@ -206,15 +206,6 @@ def policy_export_workers(cfg: DictConfig) -> RayPolicyExportWorkers:
     return RayPolicyExportWorkers(actor_group, placement=policy_placement)
 
 
-def export_tokenizer(cfg: DictConfig) -> PreTrainedTokenizerBase:
-    return create_tokenizer(
-        model_path=cfg.trainer.policy.model.tokenizer_path,
-        disable_fast_tokenizer=cfg.trainer.disable_fast_tokenizer,
-        padding_side="left",
-        revision=cfg.trainer.policy.model.get("tokenizer_revision"),
-    )
-
-
 def hub_publisher(cfg: DictConfig) -> HuggingFacePublisher | None:
     repo_id = cfg.checkpoint_export.get("hf_hub_repo_id")
     if not repo_id:
@@ -232,6 +223,6 @@ def checkpoint_exporter(cfg: DictConfig) -> CheckpointExporter:
     return CheckpointExporter(
         checkpoint_export_plan(cfg),
         policy_export_workers(cfg),
-        export_tokenizer(cfg),
+        tokenizer_from_config(cfg),
         hub_publisher(cfg),
     )

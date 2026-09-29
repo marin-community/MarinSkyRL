@@ -77,6 +77,10 @@ class DistributedStrategy(ABC):
         """Get current process rank"""
         return dist.get_rank()
 
+    def collective_device(self) -> torch.device:
+        """Device holding tensors passed to this strategy's process-group collectives."""
+        return torch.device("cuda", torch.cuda.current_device())
+
     def all_reduce(self, data: DataT, op="mean") -> DataT:
         """Perform all_reduce across all processes"""
         assert op in ("mean", "max", "sum")
@@ -93,7 +97,7 @@ class DistributedStrategy(ABC):
             is_cpu_tensor = data.device.type == "cpu"
 
             if is_cpu_tensor:
-                data = data.to(torch.cuda.current_device())
+                data = data.to(self.collective_device())
             if op == "mean":
                 data /= self.world_size
             dist.all_reduce(data, op=dist.ReduceOp.MAX if op == "max" else dist.ReduceOp.SUM)
@@ -113,8 +117,9 @@ class DistributedStrategy(ABC):
                 data = torch.Tensor([data])
             is_cpu_tensor = data.device.type == "cpu"
 
-            ret = [torch.zeros_like(data).to(torch.cuda.current_device()) for _ in range(self.world_size)]
-            dist.all_gather(ret, data.to(torch.cuda.current_device()))
+            device = self.collective_device()
+            ret = [torch.zeros_like(data).to(device) for _ in range(self.world_size)]
+            dist.all_gather(ret, data.to(device))
             return torch.cat(ret).cpu() if is_cpu_tensor else torch.cat(ret)
 
     def save_hf_configs(self, model_config: PretrainedConfig, hf_dir: str, tokenizer: PreTrainedTokenizer = None):
