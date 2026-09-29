@@ -67,7 +67,7 @@ _HENDRYCKS_MATH_SUBJECTS = (
     "precalculus",
 )
 _ASDIV_XML_URL = "https://raw.githubusercontent.com/chaochun/nlu-asdiv-dataset/{revision}/dataset/ASDiv.xml"
-_PLAIN_NUMERIC_ANSWER = re.compile(r"^-?\d+(?:\.\d+)?(?:/\d+)?$")
+_PLAIN_NUMERIC_ANSWER = re.compile(r"^-?\d+(?:\.\d+)?(?:/\d+)?$|^-?\d+:-?\d+$")
 
 
 PreparedRow = dict[str, Any]
