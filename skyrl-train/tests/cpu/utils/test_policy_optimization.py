@@ -7,7 +7,8 @@ import torch
 import math
 import pytest
 from omegaconf import OmegaConf
-from skyrl_train.utils.policy_math import compute_approx_kl
+from skyrl_train.utils.policy_math import compute_approx_kl, differentiable_approx_kl
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.objective.losses import PolicyLossInputs, TokenLoss, ppo_policy_loss
 from skyrl_train.objective.objective import build_objective_micro_batch, compute_policy_objective
 from skyrl_train.objective.reduction import step_counts
@@ -68,6 +69,21 @@ def test_compute_approx_kl(dummy_data):
     log_ratio = log_probs - log_probs_base
     expected_k3 = (torch.exp(-log_ratio) - 1 + log_ratio) * mask
     assert torch.allclose(kl_k3, expected_k3, atol=1e-4), "k3 estimator is not correct"
+
+
+def test_default_kl_estimator_loss_gradient_is_the_reverse_kl_gradient():
+    config = get_default_config().trainer.algorithm
+    logits = torch.tensor([0.2, -0.4, 0.7, 0.1, -0.2, 0.4], dtype=torch.float64, requires_grad=True)
+    reference = torch.tensor([0.10, 0.23, 0.18, 0.12, 0.22, 0.15], dtype=torch.float64)
+    log_policy = logits.log_softmax(-1)
+    policy = log_policy.exp()
+    sampled_values = differentiable_approx_kl(log_policy, reference.log(), kl_estimator_type=config.kl_estimator_type)
+    estimate = (policy.detach() * sampled_values).sum()
+    reverse_kl = (policy * (log_policy - reference.log())).sum()
+    torch.testing.assert_close(estimate, reverse_kl, rtol=1e-12, atol=1e-12)
+    actual_gradient = torch.autograd.grad(estimate, logits, retain_graph=True)[0]
+    expected_gradient = torch.autograd.grad(reverse_kl, logits)[0]
+    torch.testing.assert_close(actual_gradient, expected_gradient, rtol=1e-12, atol=1e-12)
 
 
 @pytest.mark.parametrize("coefficient", [0.0, 0.1, 1.0])
