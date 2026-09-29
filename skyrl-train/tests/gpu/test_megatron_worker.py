@@ -9,6 +9,8 @@ import hydra
 from omegaconf import DictConfig
 import torch
 import asyncio
+import copy
+from types import SimpleNamespace
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from omegaconf import OmegaConf
 from tests.gpu.utils import (
@@ -35,6 +37,49 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # this might be a model specific mbridge issue - see if this persists when we transition to Megatron-Bridge
 # MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
+
+
+@pytest.mark.parametrize("megatron_overrides", [False, True])
+def test_native_adamw_recipe_matches_torch_weight_updates(megatron_overrides):
+    from megatron.core import parallel_state
+    from skyrl_train.distributed.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
+
+    torch.distributed.init_process_group("nccl", store=torch.distributed.HashStore(), rank=0, world_size=1)
+    try:
+        parallel_state.initialize_model_parallel()
+        torch.manual_seed(17)
+        model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.LayerNorm(4)).cuda()
+        model.config = SimpleNamespace()
+        reference = copy.deepcopy(model)
+        recipe = {
+            "optimizer": "AdamW",
+            "lr": 0.03,
+            "weight_decay": 0.2,
+            "max_grad_norm": 0.0,
+            "adam_betas": [0.7, 0.8],
+            "optimizer_kwargs": {"eps": 1e-3},
+        }
+        kwargs = {"use_distributed_optimizer": False, "bf16": False, "params_dtype": torch.float32}
+        betas, epsilon = (0.7, 0.8), 1e-3
+        if megatron_overrides:
+            kwargs.update(adam_beta1=0.6, adam_beta2=0.75, adam_eps=2e-3)
+            betas, epsilon = (0.6, 0.75), 2e-3
+        optimizer = get_megatron_optimizer([model], init_megatron_optim_config(recipe, kwargs))
+        adamw = torch.optim.AdamW(reference.parameters(), lr=0.03, betas=betas, eps=epsilon, weight_decay=0.2)
+        for amplitude in (0.125, -0.25, 0.5):
+            for parameter, expected in zip(model.parameters(), reference.parameters(), strict=True):
+                gradient = torch.linspace(-amplitude, amplitude, parameter.numel(), device="cuda").reshape_as(parameter)
+                parameter.grad = gradient.clone()
+                parameter.main_grad = parameter.grad
+                expected.grad = gradient.clone()
+            success, _, _ = optimizer.step()
+            adamw.step()
+            assert success
+            for parameter, expected in zip(model.parameters(), reference.parameters(), strict=True):
+                torch.testing.assert_close(parameter, expected, rtol=1e-6, atol=1e-6)
+    finally:
+        parallel_state.destroy_model_parallel()
+        torch.distributed.destroy_process_group()
 
 
 def test_megatron_flash_attention_cp2_forward_backward(ray_init_fixture):
