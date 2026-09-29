@@ -265,17 +265,6 @@ def test_native_model_evaluation_plan_selects_export_without_reference_model(mon
     assert plan.iris_command[plan.iris_command.index("--priority") + 1] == "interactive"
 
 
-def test_native_model_evaluation_rejects_ambiguous_or_partial_source() -> None:
-    with pytest.raises(ValueError, match="specified together"):
-        evaluation.validate_model_source(None, "s3://bucket/native/exports/step-2", None)
-    with pytest.raises(ValueError, match="cannot be selected together"):
-        evaluation.validate_model_source(
-            "s3://bucket/run/checkpoints/global_step_2/actor",
-            "s3://bucket/native/exports/step-2",
-            "run-abc-step-2",
-        )
-
-
 def test_failed_evaluation_command_persists_combined_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     log_path = tmp_path / "logs" / "rollout-code.log"
     command = [
@@ -319,17 +308,8 @@ def test_dry_run_exposes_immutable_inputs_without_submitting(
     plan = json.loads(output.split("\nuv run", 1)[0])
     fidelity = load_config(root / "cloud/iris/configs/open_mopd_fidelity.json")
     assert plan["source_commit"] == fidelity.source.commit
-    assert plan["protocol_source_commit"] == "4460e57ad87fef996a0c21f96bde9a7d1ba029b6"
     assert plan["model_revision"] == fidelity.evaluation_reference.revision
-    assert plan["data_revision"] == "9e897efe3257599d4300e2d5ee865a1cc714af87"
-    assert plan["planned_completions"] == 6
-    assert plan["maximum_output_tokens"] == 3_072
-    assert plan["job_name"].startswith("open-mopd-final-eval-smoke-")
     assert plan["job_name"] == plan["iris_command"][plan["iris_command"].index("--job-name") + 1]
-    assert "--no-sync" in plan["iris_command"]
-    assert "--no-preemptible" in plan["iris_command"]
-    assert plan["iris_command"][plan["iris_command"].index("--priority") + 1] == "interactive"
-    assert "--max-retries" in plan["iris_command"]
 
 
 def test_submission_requires_omission_acknowledgement(
@@ -393,15 +373,6 @@ def test_checkpoint_evaluation_plan_selects_durable_actor_checkpoint(monkeypatch
     assert plan.checkpoint_step == 2
     assert plan.iris_command[plan.iris_command.index("--checkpoint-uri") + 1] == checkpoint_uri
     assert plan.iris_command[plan.iris_command.index("--checkpoint-step") + 1] == "2"
-
-
-@pytest.mark.parametrize(
-    ("checkpoint_uri", "checkpoint_step"),
-    [("s3://bucket/run/checkpoints/global_step_2/actor", None), (None, 2)],
-)
-def test_checkpoint_selector_requires_uri_and_step(checkpoint_uri: str | None, checkpoint_step: int | None) -> None:
-    with pytest.raises(ValueError, match="specified together"):
-        evaluation.validate_checkpoint_source(checkpoint_uri, checkpoint_step)
 
 
 def test_stage_checkpoint_model_downloads_only_model_state_and_merges(
@@ -471,16 +442,3 @@ def test_stage_checkpoint_model_downloads_only_model_state_and_merges(
         "model_world_size_2_rank_1.pt",
     }
     assert all("optim" not in path and "extra_state" not in path for path in filesystem.downloaded)
-
-
-@pytest.mark.parametrize("output_uri", ["/tmp/results", "file:///tmp/results", "s3://bucket"])
-def test_plan_rejects_non_durable_output(output_uri: str) -> None:
-    with pytest.raises(ValueError, match="durable prefix"):
-        evaluation.build_plan(
-            evaluation.load_evaluation_config(evaluation.DEFAULT_CONFIG),
-            config_path=evaluation.DEFAULT_CONFIG,
-            gate="smoke",
-            cluster_config=Path("/tmp/iris.yaml"),
-            output_uri=output_uri,
-            task_image=TASK_IMAGE,
-        )

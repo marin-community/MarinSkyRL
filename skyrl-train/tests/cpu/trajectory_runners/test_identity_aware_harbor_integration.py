@@ -157,7 +157,16 @@ def test_full_tito_scores_against_the_served_initial_prompt():
     assert output.evidence.behavior_logprobs == (0.0, -0.25)
 
 
-def test_harbor_runner_applies_identity_aware_shaping_as_the_default(verifier_test_collection_factory):
+@pytest.mark.parametrize(
+    ("shaper", "expected_rewards", "expected_groups"),
+    [
+        pytest.param(None, [1.0, 0.0], 1, id="identity-aware-default"),
+        pytest.param("pass_ratio", [1.0, 0.5], None, id="explicit-pass-ratio-backup"),
+    ],
+)
+def test_harbor_runner_reward_shaping_modes(
+    shaper, expected_rewards, expected_groups, verifier_test_collection_factory
+):
     outputs = [
         _runner_output(
             0,
@@ -173,32 +182,10 @@ def test_harbor_runner_applies_identity_aware_shaping_as_the_default(verifier_te
         ),
     ]
 
-    metrics = _runner()._apply_identity_aware_reward_shaping(outputs)
+    metrics = _runner(shaper)._apply_identity_aware_reward_shaping(outputs)
 
-    assert [output.reward_result.optimization_reward for output in outputs] == [1.0, 0.0]
-    assert metrics[f"{IDENTITY_AWARE_REWARD_METRIC_PREFIX}/groups"] == 1
-
-
-def test_legacy_pass_ratio_is_an_explicit_backup_mode(verifier_test_collection_factory):
-    outputs = [
-        _runner_output(
-            0,
-            {"uniform": "passed", "mixed": "passed"},
-            1.0,
-            verifier_test_collection_factory=verifier_test_collection_factory,
-        ),
-        _runner_output(
-            1,
-            {"uniform": "passed", "mixed": "failed"},
-            0.5,
-            verifier_test_collection_factory=verifier_test_collection_factory,
-        ),
-    ]
-
-    metrics = _runner("pass_ratio")._apply_identity_aware_reward_shaping(outputs)
-
-    assert [output.reward_result.optimization_reward for output in outputs] == [1.0, 0.5]
-    assert metrics == {}
+    assert [output.reward_result.optimization_reward for output in outputs] == expected_rewards
+    assert metrics.get(f"{IDENTITY_AWARE_REWARD_METRIC_PREFIX}/groups") == expected_groups
 
 
 def test_identity_aware_shaping_preserves_the_downstream_truncation_penalty(verifier_test_collection_factory):

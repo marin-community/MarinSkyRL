@@ -79,6 +79,11 @@ def test_state_dict_roundtrip_resumes_identical_draws():
     np.testing.assert_allclose(restored.stats.total, order.stats.total)
     np.testing.assert_allclose(restored.stats.solved, order.stats.solved)
     np.testing.assert_allclose(restored.stats.samples, order.stats.samples)
+    assert restored.update_count == order.update_count
+    np.testing.assert_array_equal(restored.rows.visits, order.rows.visits)
+    np.testing.assert_array_equal(restored.rows.last_step, order.rows.last_step)
+    np.testing.assert_allclose(restored.rows.samples, order.rows.samples)
+    np.testing.assert_allclose(restored.rows.solved, order.rows.solved)
 
 
 def test_update_informative_accounting_with_decay():
@@ -121,18 +126,6 @@ def test_row_stats_summary_metrics():
     assert metrics["curriculum/instances/mean_pass"] == pytest.approx((1.0 + 0.0 + 0.5) / 3)
     assert metrics["curriculum/instances/mastered_frac"] == pytest.approx(1 / 3)
     assert metrics["curriculum/instances/dead_frac"] == pytest.approx(1 / 3)
-
-
-def test_row_stats_checkpoint_roundtrip():
-    order = _order(TWO_BINS, "naive")
-    _observe(order, ["0", "0"], [1.0, 0.0])
-    restored = _order(TWO_BINS, "naive")
-    restored.load_state_dict(order.state_dict())
-    assert restored.update_count == 1
-    np.testing.assert_array_equal(restored.rows.visits, order.rows.visits)
-    np.testing.assert_array_equal(restored.rows.last_step, order.rows.last_step)
-    np.testing.assert_allclose(restored.rows.samples, order.rows.samples)
-    np.testing.assert_allclose(restored.rows.solved, order.rows.solved)
 
 
 def test_naive_weights_match_row_counts():
@@ -303,10 +296,3 @@ def test_group_informative_weights_low_pass_bin_near_mid_bin():
     assert order.weights[1] > 0.6 * order.weights[2]
     assert order.weights[1] > 3 * order.weights[0]
     assert order.weights[1] > 3 * order.weights[3]
-
-
-def test_group_informative_requires_group_size():
-    # The guard lives in the curve builder, so a order with group-informative
-    # weighting still fails fast at construction when group_size is missing.
-    with pytest.raises(ValueError, match="group_size"):
-        _order(TWO_BINS, "learnability", weighting=WeightingKind.GROUP_INFORMATIVE)

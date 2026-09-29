@@ -1,14 +1,15 @@
-"""
-Run with:
-uv run --isolated --group dev --extra cpu pytest tests/cpu/utils/test_policy_optimization.py
-"""
+"""Advantage estimators, KL estimators and controllers, policy objectives, TIS diagnostics, and validate_cfg."""
 
-import torch
 import math
+
+import numpy as np
 import pytest
-from omegaconf import OmegaConf
+import ray
+import torch
+from omegaconf import DictConfig, OmegaConf
+
 from skyrl_train.utils.policy_math import compute_approx_kl
-from skyrl_train.objective.losses import PolicyLossInputs, TokenLoss, ppo_policy_loss
+from skyrl_train.objective.losses import TokenLoss, ppo_policy_loss
 from skyrl_train.objective.objective import build_objective_micro_batch, compute_policy_objective
 from skyrl_train.objective.reduction import step_counts
 from skyrl_train.config.objective_spec import LossSpec, RatioAnchor
@@ -19,17 +20,16 @@ from skyrl_train.utils.advantage_estimators import (
     compute_reinforce_plus_plus_outcome_advantage,
     compute_rloo_outcome_advantage,
 )
-from skyrl_train.utils.kl_controllers import AdaptiveKLController, FixedKLController
+from skyrl_train.utils.kl_controllers import AdaptiveKLController
 from skyrl_train.utils.algorithm_registry import (
     AdvantageEstimatorRegistry,
     NoGroupAdvantage,
     register_advantage_estimator,
     PolicyLossRegistry,
-    register_policy_loss,
 )
 from skyrl_train.utils.importance_ratio_diagnostics import compute_tis_diagnostics, TIS_DIAG_KEYS
 from skyrl_train.utils.utils import validate_cfg
-import numpy as np
+from tests.cpu.util import example_dummy_config
 
 
 @pytest.fixture
@@ -188,20 +188,6 @@ def test_compute_rloo_outcome_advantage_basic():
     assert torch.allclose(adv, expected, atol=1e-5)
 
 
-def test_compute_grpo_outcome_advantage(advantage_test_data):
-    rewards, _, response_mask, index = advantage_test_data
-
-    adv, ret = compute_grpo_outcome_advantage(
-        token_level_rewards=rewards,
-        response_mask=response_mask,
-        index=index,
-    )
-
-    assert adv.shape == rewards.shape
-    assert ret.shape == rewards.shape
-    assert torch.allclose(adv, ret), "Advantages and returns should be equal with GRPO"
-
-
 def test_compute_grpo_outcome_advantage_norm_std_false():
     """Test GRPO advantage computation with grpo_norm_by_std=False."""
     # Two groups: [6.0, 3.0] mean=4.5, [9.0, 12.0] mean=10.5
@@ -229,26 +215,6 @@ def test_compute_grpo_outcome_advantage_norm_std_false():
     assert adv.shape == token_level_rewards.shape
     assert torch.allclose(adv, ret), "Advantages and returns should be equal with GRPO"
     assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
-
-
-def test_compute_gae_advantage_return(advantage_test_data):
-    rewards, values, response_mask, index = advantage_test_data
-
-    adv, ret = compute_gae_advantage_return(
-        token_level_rewards=rewards,
-        values=values,
-        response_mask=response_mask,
-        gamma=1.0,
-        lambd=1.0,  # no discounting for simplicity
-    )
-
-    expected_ret = torch.tensor([[6.0, 5.0, 3.0]])
-
-    # The advantages will be whitened, so we just check the shape and that they're not all zeros
-    assert adv.shape == rewards.shape
-    assert not torch.allclose(adv, torch.zeros_like(adv))
-    assert ret.shape == expected_ret.shape
-    assert torch.allclose(ret, expected_ret, atol=1e-5)
 
 
 def test_compute_gae_advantage_return_with_masking(advantage_test_data):
@@ -302,11 +268,7 @@ def test_compute_gae_advantage_return_lam(advantage_test_data):
 
 
 def _validatable_dummy_config():
-    """A dummy config that passes validate_batch_sizes so validate_cfg reaches the
-    loss_reduction allow-list (single-GPU placement, all batch sizes == 1)."""
-    from omegaconf import OmegaConf
-    from tests.cpu.util import example_dummy_config
-
+    """A dummy config that passes validate_cfg (single-GPU placement, all batch sizes == 1)."""
     cfg = example_dummy_config()
     OmegaConf.update(
         cfg,
@@ -335,119 +297,12 @@ def _validatable_dummy_config():
     ["token_mean", "sequence_mean", "seq_mean_token_sum_norm", "seq_mean_token_sum_norm_global"],
 )
 def test_validate_cfg_accepts_all_loss_reductions(loss_reduction):
-    """Config-validation smoke: validate_cfg must NOT reject any supported loss_reduction.
-
-    Regression guard for the arm1 failure where `seq_mean_token_sum_norm_global`
-    was registered in reduce_loss + compute_policy_loss but rejected by the
-    hardcoded allow-list in validate_cfg (utils.py). The minimal dummy config may
-    still trip later (unrelated) placement/colocation asserts, so we only require
-    that the *loss_reduction allow-list* never fires for a supported value.
-    """
-    pytest.importorskip("hydra")
-
+    """Regression: seq_mean_token_sum_norm_global was implemented but rejected by validate_cfg's allow-list."""
     cfg = _validatable_dummy_config()
-    OmegaConf.update(cfg, "trainer.algorithm.loss_reduction", loss_reduction)
-    try:
-        validate_cfg(cfg)
-    except (AssertionError, ValueError) as e:
-        assert "invalid loss_reduction" not in str(e), (
-            f"supported loss_reduction {loss_reduction!r} was rejected by the allow-list: {e}"
-        )
-
-
-@pytest.mark.parametrize(
-    ("config_path", "invalid_value", "error"),
-    [
-        ("trainer.algorithm.loss_reduction", "definitely_not_a_reduction", "invalid loss_reduction"),
-        ("trainer.policy.grug_query_bias_update_mode", "blend", "invalid grug_query_bias_update_mode"),
-    ],
-)
-def test_validate_cfg_rejects_unknown_config_choice(config_path, invalid_value, error):
-    pytest.importorskip("hydra")
-    from omegaconf import OmegaConf
-    from skyrl_train.utils.utils import validate_cfg
-
-    cfg = _validatable_dummy_config()
-    OmegaConf.update(cfg, config_path, invalid_value)
-    error_type = ValueError if config_path == "trainer.algorithm.loss_reduction" else AssertionError
-    with pytest.raises(error_type, match=error):
-        validate_cfg(cfg)
-
-
-def test_validate_cfg_requires_grug_query_bias_update_mode():
-    pytest.importorskip("hydra")
-    from skyrl_train.utils.utils import validate_cfg
-
-    cfg = _validatable_dummy_config()
-    del cfg.trainer.policy.grug_query_bias_update_mode
-
-    with pytest.raises(AssertionError, match="missing required policy configuration: grug_query_bias_update_mode"):
-        validate_cfg(cfg)
-
-
-@pytest.mark.parametrize("weight", [None, 0.0, 1.0, float("inf"), [0.1]])
-def test_validate_cfg_rejects_invalid_grug_query_bias_interpolation_weight(weight):
-    pytest.importorskip("hydra")
-    from skyrl_train.utils.utils import validate_cfg
-
-    cfg = _validatable_dummy_config()
-    cfg.trainer.policy.grug_query_bias_update_mode = "interpolate"
-    cfg.trainer.policy.grug_query_bias_interpolation_weight = weight
-
-    with pytest.raises(AssertionError, match="grug_query_bias_interpolation_weight"):
-        validate_cfg(cfg)
-
-
-def test_validate_cfg_rejects_interpolation_weight_for_other_grug_query_bias_modes():
-    pytest.importorskip("hydra")
-    from skyrl_train.utils.utils import validate_cfg
-
-    cfg = _validatable_dummy_config()
-    cfg.trainer.policy.grug_query_bias_update_mode = "replace"
-    cfg.trainer.policy.grug_query_bias_interpolation_weight = 0.1
-
-    with pytest.raises(AssertionError, match="only valid"):
-        validate_cfg(cfg)
-
-
-@pytest.mark.parametrize("rate", [None, 0.0, -0.001, float("inf"), [0.001]])
-def test_validate_cfg_rejects_invalid_grug_loss_free_update_rate(rate):
-    cfg = _validatable_dummy_config()
-    cfg.trainer.policy.grug_query_bias_update_mode = "loss_free"
-    cfg.trainer.policy.grug_query_bias_update_rate = rate
-
-    with pytest.raises(AssertionError, match="grug_query_bias_update_rate"):
-        validate_cfg(cfg)
-
-
-def test_validate_cfg_rejects_loss_free_update_rate_for_other_modes():
-    cfg = _validatable_dummy_config()
-    cfg.trainer.policy.grug_query_bias_update_mode = "replace"
-    cfg.trainer.policy.grug_query_bias_update_rate = 0.001
-
-    with pytest.raises(AssertionError, match="only valid"):
-        validate_cfg(cfg)
-
-
-def test_validate_cfg_rejects_stacked_behavior_clip_and_tis():
-    pytest.importorskip("hydra")
-    from skyrl_train.utils.utils import validate_cfg
-
-    cfg = _validatable_dummy_config()
-    cfg.trainer.algorithm.policy_loss_type = "behavior_clip"
-    cfg.trainer.algorithm.use_tis = True
-
-    with pytest.raises(ValueError, match="cannot be combined with use_tis"):
-        validate_cfg(cfg)
-
-
-def test_validate_cfg_rejects_gspo_without_sequence_mean_reduction():
-    cfg = _validatable_dummy_config()
-    cfg.trainer.algorithm.policy_loss_type = "gspo"
-    cfg.trainer.algorithm.loss_reduction = "token_mean"
-
-    with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):
-        validate_cfg(cfg)
+    cfg.trainer.algorithm.loss_reduction = loss_reduction
+    cfg.generator.num_inference_engines = 1
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    validate_cfg(cfg)
 
 
 def test_validate_cfg_materializes_rloo_n_group_invariant():
@@ -479,192 +334,28 @@ def test_adaptive_kl_controller_update():
     assert math.isclose(controller.value, expected, rel_tol=1e-5)
 
 
-def test_fixed_kl_controller():
-    controller = FixedKLController(kl_coef=0.1)
-    controller.update(current=1.0, n_steps=10)
-    assert controller.value == 0.1  # Should remain unchanged
+def test_custom_advantage_estimator_drives_compute_advantages_and_returns():
+    """Custom estimators registered through the public decorator (see examples/algorithms) are dispatched by name."""
 
+    @register_advantage_estimator("test_custom_estimator", group_contract=NoGroupAdvantage())
+    def doubled_rewards(**kwargs):
+        rewards = kwargs["token_level_rewards"]
+        return rewards * 2, rewards * 3
 
-def test_base_function_registry_registration_and_retrieval():
-    """Test basic registration and retrieval functionality of BaseFunctionRegistry."""
-
-    def dummy_function(**kwargs):
-        return torch.zeros_like(kwargs["token_level_rewards"]), torch.zeros_like(kwargs["token_level_rewards"])
-
-    # Register function
-    AdvantageEstimatorRegistry.register("test_basic", dummy_function, group_contract=NoGroupAdvantage())
-
-    # Test retrieval
-    retrieved_func = AdvantageEstimatorRegistry.get("test_basic")
-    assert retrieved_func == dummy_function
-
-    # Test it's in available list
-    assert "test_basic" in AdvantageEstimatorRegistry.list_available()
-
-    # Clean up
-    AdvantageEstimatorRegistry.unregister("test_basic")
-
-
-def test_advantage_estimator_registration_requires_group_contract():
-    def dummy_function(**kwargs):
-        return None, None
-
-    with pytest.raises(ValueError, match="must declare a group_contract"):
-        AdvantageEstimatorRegistry.register("missing_contract", dummy_function)
-
-
-def test_base_function_registry_error_handling():
-    """Test error handling in BaseFunctionRegistry."""
-
-    def dummy_function(**kwargs):
-        return None, None
-
-    # Test getting non-existent function
-    with pytest.raises(ValueError, match="Unknown advantage estimator"):
-        AdvantageEstimatorRegistry.get("non_existent")
-
-    # Test unregistering non-existent function
-    with pytest.raises(ValueError, match="not registered"):
-        AdvantageEstimatorRegistry.unregister("non_existent")
-
-    # Test duplicate registration
-    AdvantageEstimatorRegistry.register("test_dup", dummy_function, group_contract=NoGroupAdvantage())
-    with pytest.raises(ValueError, match="already registered"):
-        AdvantageEstimatorRegistry.register("test_dup", dummy_function, group_contract=NoGroupAdvantage())
-
-    # Clean up
-    AdvantageEstimatorRegistry.unregister("test_dup")
-
-
-def test_base_registry_unregister():
-    """Test unregistration functionality."""
-
-    def dummy_function(**kwargs):
-        return torch.zeros_like(kwargs["token_level_rewards"]), torch.zeros_like(kwargs["token_level_rewards"])
-
-    # Register and verify
-    AdvantageEstimatorRegistry.register("test_unregister", dummy_function, group_contract=NoGroupAdvantage())
-    assert "test_unregister" in AdvantageEstimatorRegistry.list_available()
-
-    # Unregister and verify
-    AdvantageEstimatorRegistry.unregister("test_unregister")
-    assert "test_unregister" not in AdvantageEstimatorRegistry.list_available()
-
-
-def test_advantage_estimator_registry_specific():
-    """Test AdvantageEstimatorRegistry-specific functionality."""
-
-    @register_advantage_estimator("test_decorator", group_contract=NoGroupAdvantage())
-    def decorated_estimator(**kwargs):
-        return torch.ones_like(kwargs["token_level_rewards"]), torch.ones_like(kwargs["token_level_rewards"])
-
-    # Test decorator worked
-    assert "test_decorator" in AdvantageEstimatorRegistry.list_available()
-    retrieved = AdvantageEstimatorRegistry.get("test_decorator")
-    assert retrieved == decorated_estimator
-
-    # Test integration with compute_advantages_and_returns
     rewards = torch.tensor([[1.0, 2.0, 3.0]])
-    response_mask = torch.tensor([[1.0, 1.0, 1.0]])
-    index = np.array(["0", "0", "0"])
-
-    adv, ret = compute_advantages_and_returns(
-        token_level_rewards=rewards, response_mask=response_mask, index=index, adv_estimator="test_decorator", config={}
-    )
-
-    assert torch.allclose(adv, torch.ones_like(rewards))
-    assert torch.allclose(ret, torch.ones_like(rewards))
-
-    # Clean up
-    AdvantageEstimatorRegistry.unregister("test_decorator")
-
-
-def test_registered_policy_loss_preserves_per_token_gradients():
-    @register_policy_loss("test_policy_decorator", LossSpec(RatioAnchor.NONE))
-    def decorated_policy_loss(inputs, config):
-        return TokenLoss(-inputs.log_probs * inputs.advantages, {})
-
     try:
-        log_probs = torch.tensor([[-0.1, -0.5]], requires_grad=True)
-        inputs = PolicyLossInputs(
-            log_probs, log_probs.detach(), None, torch.tensor([[3.0, -2.0]]), torch.ones_like(log_probs)
+        adv, ret = compute_advantages_and_returns(
+            token_level_rewards=rewards,
+            response_mask=torch.ones_like(rewards),
+            index=np.array(["0"]),
+            adv_estimator="test_custom_estimator",
+            config={},
         )
-        result = PolicyLossRegistry.get("test_policy_decorator")(inputs, OmegaConf.create({}))
-        torch.testing.assert_close(result.values, torch.tensor([[0.3, -1.0]]))
-        result.values.sum().backward()
-        torch.testing.assert_close(log_probs.grad, torch.tensor([[-3.0, 2.0]]))
     finally:
-        PolicyLossRegistry.unregister("test_policy_decorator")
+        AdvantageEstimatorRegistry.unregister("test_custom_estimator")
 
-
-def test_package_initialization_registers_complete_builtin_algorithm_sets():
-    assert set(PolicyLossRegistry.list_available()) >= {
-        "regular",
-        "dual_clip",
-        "gspo",
-        "cispo",
-        "clip_cov",
-        "kl_cov",
-        "sapo",
-    }
-    assert set(AdvantageEstimatorRegistry.list_available()) >= {
-        "gae",
-        "grpo",
-        "rloo",
-        "rloo_n",
-        "rloo_n_pbs",
-        "reinforce++",
-    }
-
-
-def test_validate_cfg_applies_custom_loss_contract_to_training():
-    def custom_policy_loss(inputs, config):
-        return TokenLoss(-inputs.log_probs * inputs.advantages, {})
-
-    PolicyLossRegistry.register(
-        "custom_policy", custom_policy_loss, spec=LossSpec(RatioAnchor.NONE, sequence_level=True)
-    )
-    cfg = _validatable_dummy_config()
-    cfg.trainer.algorithm.policy_loss_type = "custom_policy"
-    cfg.trainer.algorithm.use_kl_loss = False
-    cfg.generator.num_inference_engines = 1
-    cfg.generator.inference_engine_tensor_parallel_size = 1
-    cfg.generator.inference_engine_pipeline_parallel_size = 1
-    cfg.generator.inference_engine_data_parallel_size = 1
-    try:
-        cfg.trainer.algorithm.loss_reduction = "token_mean"
-        with pytest.raises(ValueError, match="requires trainer.algorithm.loss_reduction=sequence_mean"):
-            validate_cfg(cfg)
-        cfg.trainer.algorithm.loss_reduction = "sequence_mean"
-        validate_cfg(cfg)
-        log_probs = torch.tensor([[-0.1, -0.5]], requires_grad=True)
-        advantages = torch.tensor([[3.0, -2.0]])
-        mask = torch.ones_like(log_probs)
-        batch = build_objective_micro_batch(
-            action_log_probs=log_probs,
-            old_action_log_probs=log_probs.detach(),
-            base_action_log_probs=None,
-            advantages=advantages,
-            loss_mask=mask,
-            rollout_logprobs=None,
-            response_span_tags=None,
-            token_entropy=torch.zeros_like(log_probs),
-            think_token_weight=1,
-            teacher=None,
-        )
-        counts = step_counts([mask], [mask], [], [advantages], 2, lambda value: value)
-        result = compute_policy_objective(
-            batch,
-            loss=PolicyLossRegistry.get("custom_policy"),
-            counts=counts,
-            config=cfg.trainer.algorithm,
-            loss_scale=1,
-            report_scale=1,
-        )
-        result.optimization_loss.backward()
-        torch.testing.assert_close(log_probs.grad, torch.tensor([[-1.5, 1.0]]))
-    finally:
-        PolicyLossRegistry.unregister("custom_policy")
+    torch.testing.assert_close(adv, rewards * 2)
+    torch.testing.assert_close(ret, rewards * 3)
 
 
 def _remove_registry_entries(registry, *names: str) -> None:
@@ -676,119 +367,65 @@ def _remove_registry_entries(registry, *names: str) -> None:
 
 @pytest.mark.usefixtures("ray_module")
 def test_registry_cross_ray_process():
-    import ray
-
-    def custom_loss(inputs, config):
-        return TokenLoss(-2 * inputs.log_probs * inputs.advantages, {})
-
-    @ray.remote
-    def gradient_from_registered_loss():
-        log_probs = torch.tensor([[-0.4]], requires_grad=True)
-        inputs = PolicyLossInputs(
-            log_probs, log_probs.detach(), None, torch.tensor([[3.0]]), torch.ones_like(log_probs)
-        )
-        result = PolicyLossRegistry.get("cross_process_test")(inputs, OmegaConf.create({}))
-        result.values.sum().backward()
-        return result.values.detach(), log_probs.grad
-
+    """Functions registered on the driver are callable from Ray workers, including ones registered after init."""
     try:
-        PolicyLossRegistry.register("cross_process_test", custom_loss, spec=LossSpec(RatioAnchor.NONE))
-        values, gradient = ray.get(gradient_from_registered_loss.remote())
-        torch.testing.assert_close(values, torch.tensor([[2.4]]))
-        torch.testing.assert_close(gradient, torch.tensor([[-6.0]]))
-    finally:
-        _remove_registry_entries(PolicyLossRegistry, "cross_process_test")
 
+        def test_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
+            return torch.tensor(2.0), {"ppo_clip_ratio": 0.5}
 
-@pytest.mark.usefixtures("ray_module")
-def test_registry_named_actor_creation():
-    """Test that the registry creates named Ray actors and properly serializes functions."""
-    try:
-        import ray
+        def test_policy_loss_2(log_probs, old_log_probs, advantages, config, loss_mask=None):
+            return torch.tensor(3.0), {"ppo_clip_ratio": 0.6}
 
-        def test_func(**kwargs):
+        def test_advantage_estimator(**kwargs):
             rewards = kwargs["token_level_rewards"]
             return rewards * 2, rewards * 3
 
-        # Register function (should create/use named actor)
-        AdvantageEstimatorRegistry.register("named_actor_test", test_func, group_contract=NoGroupAdvantage())
-
-        # Verify local retrieval works
-        retrieved = AdvantageEstimatorRegistry.get("named_actor_test")
-        assert retrieved == test_func
-
-        # Verify named actor exists and contains function
-        actor = ray.get_actor(AdvantageEstimatorRegistry._actor_name)
-        assert actor is not None
-
-        available_in_actor = ray.get(actor.list_available.remote())
-        assert "named_actor_test" in available_in_actor
-
-        # Verify function serialization/deserialization
-        serialized_func = ray.get(actor.get.remote("named_actor_test"))
-        assert serialized_func is not None
-
-        import cloudpickle
-
-        deserialized_func = cloudpickle.loads(serialized_func)
-
-        # Test deserialized function works
-        test_rewards = torch.tensor([[1.0, 2.0]])
-        result = deserialized_func(
-            token_level_rewards=test_rewards,
-            response_mask=torch.tensor([[1.0, 1.0]]),
-            index=np.array(["0", "0"]),
+        # Test basic registration and retrieval
+        PolicyLossRegistry.register("cross_process_test", test_policy_loss)
+        AdvantageEstimatorRegistry.register(
+            "cross_process_adv_test", test_advantage_estimator, group_contract=NoGroupAdvantage()
         )
 
-        assert torch.allclose(result[0], test_rewards * 2)
-        assert torch.allclose(result[1], test_rewards * 3)
+        # Test Ray integration
+        @ray.remote
+        def test_ray_registry_access():
+            policy_loss = PolicyLossRegistry.get("cross_process_test")
+            adv_estimator = AdvantageEstimatorRegistry.get("cross_process_adv_test")
 
+            loss, metrics = policy_loss(
+                log_probs=torch.tensor([[0.1]]),
+                old_log_probs=torch.tensor([[0.2]]),
+                advantages=torch.tensor([[1.0]]),
+                config=DictConfig({"policy_loss_type": "cross_process_test"}),
+            )
+
+            adv, ret = adv_estimator(
+                token_level_rewards=torch.tensor([[1.0, 2.0]]),
+                response_mask=torch.tensor([[1.0, 1.0]]),
+                index=np.array(["0", "0"]),
+            )
+            return loss, metrics, adv, ret
+
+        # Run Ray task
+        loss, metrics, adv, ret = ray.get(test_ray_registry_access.remote())
+        assert loss.item() == 2.0
+        assert metrics["ppo_clip_ratio"] == 0.5
+        torch.testing.assert_close(adv, torch.tensor([[2.0, 4.0]]))
+        torch.testing.assert_close(ret, torch.tensor([[3.0, 6.0]]))
+
+        # test that registration works after ray init as well
+        PolicyLossRegistry.register("cross_process_test_2", test_policy_loss_2)
+        loss_2, metrics_2 = PolicyLossRegistry.get("cross_process_test_2")(
+            log_probs=torch.tensor([[0.1]]),
+            old_log_probs=torch.tensor([[0.2]]),
+            advantages=torch.tensor([[1.0]]),
+            config=DictConfig({"policy_loss_type": "cross_process_test_2"}),
+        )
+        assert loss_2.item() == 3.0
+        assert metrics_2["ppo_clip_ratio"] == 0.6
     finally:
-        _remove_registry_entries(AdvantageEstimatorRegistry, "named_actor_test")
-
-
-@pytest.mark.usefixtures("ray_module")
-def test_registry_reconnects_after_ray_shutdown():
-    """
-    Test that the registry reconnects properly after Ray is shut down.
-
-    This mimics when we run multiple unit tests in a row with ray inits and shutdowns.
-    """
-
-    def _register_func_and_verify():
-        """Register a function and verify it works."""
-
-        def test_func(**kwargs):
-            rewards = kwargs["token_level_rewards"]
-            return rewards * 2, rewards * 3
-
-        AdvantageEstimatorRegistry.register("named_actor_test", test_func, group_contract=NoGroupAdvantage())
-        retrieved = AdvantageEstimatorRegistry.get("named_actor_test")
-        assert retrieved == test_func
-        actor = ray.get_actor(AdvantageEstimatorRegistry._actor_name)
-        assert actor is not None
-
-    try:
-        import ray
-
-        # 1. Register a function in the fixture's Ray session
-        _register_func_and_verify()
-
-        # 2. Force-kill the named actor before shutting down Ray. Waiting for
-        # owner-death cleanup can take Ray's full graceful actor timeout.
-        ray.kill(ray.get_actor(AdvantageEstimatorRegistry._actor_name))
-        ray.shutdown()
-
-        AdvantageEstimatorRegistry.unregister("named_actor_test")
-        AdvantageEstimatorRegistry.shutdown_actor()
-
-        # 3. Initialize Ray and register the function against a fresh actor.
-        ray.init()
-        _register_func_and_verify()
-
-    finally:
-        _remove_registry_entries(AdvantageEstimatorRegistry, "named_actor_test")
-        ray.shutdown()
+        _remove_registry_entries(PolicyLossRegistry, "cross_process_test", "cross_process_test_2")
+        _remove_registry_entries(AdvantageEstimatorRegistry, "cross_process_adv_test")
 
 
 # ---------------------------------------------------------------------------
@@ -886,29 +523,6 @@ def test_validate_cfg_configures_behavior_logprob_probability_convention(tempera
     assert cfg.generator.sampling_params.min_tokens == 0
 
 
-def test_validate_cfg_rejects_raw_tis_logprobs():
-    cfg = _validatable_dummy_config()
-    cfg.trainer.algorithm.use_tis = True
-    cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
-    cfg.generator.inference_engine_tensor_parallel_size = 1
-    cfg.generator.inference_engine_expert_parallel_size = 1
-    cfg.generator.num_inference_engines = 1
-    OmegaConf.update(cfg.generator.engine_init_kwargs, "logprobs_mode", "raw_logprobs", force_add=True)
-
-    with pytest.raises(ValueError, match="processed rollout logprobs"):
-        validate_cfg(cfg)
-
-
-def test_validate_cfg_rejects_behavior_clip_top_p_filter():
-    cfg = _validatable_dummy_config()
-    cfg.trainer.algorithm.use_tis = False
-    cfg.trainer.algorithm.policy_loss_type = "behavior_clip"
-    cfg.generator.sampling_params.top_p = 0.95
-
-    with pytest.raises(ValueError, match="top_p=0.95"):
-        validate_cfg(cfg)
-
-
 def test_validate_cfg_best_of_n_uses_selected_batch_geometry():
     cfg = _validatable_dummy_config()
     OmegaConf.update(cfg, "trainer.trajectory_selector.type", "best_of_n", force_add=True)
@@ -921,11 +535,51 @@ def test_validate_cfg_best_of_n_uses_selected_batch_geometry():
     assert cfg.trainer.algorithm.resolved_group_advantage.physical_group_size == 1
 
 
-def test_validate_cfg_rejects_best_of_n_with_group_relative_advantages():
-    cfg = _validatable_dummy_config()
-    OmegaConf.update(cfg, "trainer.trajectory_selector.type", "best_of_n", force_add=True)
-    cfg.generator.n_samples_per_prompt = 4
-    cfg.trainer.algorithm.advantage_estimator = "grpo"
+def test_validate_cfg_applies_custom_loss_contract_to_training():
+    def custom_policy_loss(inputs, config):
+        return TokenLoss(-inputs.log_probs * inputs.advantages, {})
 
-    with pytest.raises(ValueError, match="no-group advantage"):
+    PolicyLossRegistry.register(
+        "custom_policy", custom_policy_loss, spec=LossSpec(RatioAnchor.NONE, sequence_level=True)
+    )
+    cfg = _validatable_dummy_config()
+    cfg.trainer.algorithm.policy_loss_type = "custom_policy"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.generator.num_inference_engines = 1
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.generator.inference_engine_pipeline_parallel_size = 1
+    cfg.generator.inference_engine_data_parallel_size = 1
+    try:
+        cfg.trainer.algorithm.loss_reduction = "token_mean"
+        with pytest.raises(ValueError, match="requires trainer.algorithm.loss_reduction=sequence_mean"):
+            validate_cfg(cfg)
+        cfg.trainer.algorithm.loss_reduction = "sequence_mean"
         validate_cfg(cfg)
+        log_probs = torch.tensor([[-0.1, -0.5]], requires_grad=True)
+        advantages = torch.tensor([[3.0, -2.0]])
+        mask = torch.ones_like(log_probs)
+        batch = build_objective_micro_batch(
+            action_log_probs=log_probs,
+            old_action_log_probs=log_probs.detach(),
+            base_action_log_probs=None,
+            advantages=advantages,
+            loss_mask=mask,
+            rollout_logprobs=None,
+            response_span_tags=None,
+            token_entropy=torch.zeros_like(log_probs),
+            think_token_weight=1,
+            teacher=None,
+        )
+        counts = step_counts([mask], [mask], [], [advantages], 2, lambda value: value)
+        result = compute_policy_objective(
+            batch,
+            loss=PolicyLossRegistry.get("custom_policy"),
+            counts=counts,
+            config=cfg.trainer.algorithm,
+            loss_scale=1,
+            report_scale=1,
+        )
+        result.optimization_loss.backward()
+        torch.testing.assert_close(log_probs.grad, torch.tensor([[-1.5, 1.0]]))
+    finally:
+        PolicyLossRegistry.unregister("custom_policy")

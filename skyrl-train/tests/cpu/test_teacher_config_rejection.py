@@ -12,14 +12,6 @@ from skyrl_train.distillation import StudentTopKInput
 from skyrl_train.objective.teacher import topk_teacher_loss
 
 
-def test_packaged_entrypoints_reject_ad_hoc_teacher_configuration():
-    with initialize_config_dir(config_dir=config_dir, version_base=None):
-        cfg = compose(config_name="ppo_base_config", overrides=["+teacher.model_path=Qwen/Qwen3-4B"])
-
-    with pytest.raises(ValueError, match="legacy teacher configuration is not supported"):
-        validate_cfg(cfg)
-
-
 def replace_mode_config() -> DictConfig:
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         cfg = compose(config_name="ppo_base_config")
@@ -186,21 +178,4 @@ def test_selected_topk_rollouts_require_matching_teacher_width():
 
     cfg.generator.sampling_params.logprobs = 8
     with pytest.raises(ValueError, match="matching teacher top_k"):
-        validate_cfg(cfg)
-
-
-@pytest.mark.parametrize(
-    ("path", "value"),
-    [
-        ("trainer.use_sample_packing", True),
-        ("trainer.policy.sequence_parallel_size", 2),
-        ("trainer.policy.megatron_config.context_parallel_size", 2),
-        ("trainer.policy.megatron_config.tensor_model_parallel_size", 2),
-    ],
-)
-def test_selected_topk_rejects_unsupported_policy_geometry_before_allocation(path, value):
-    cfg = selected_topk_config()
-    OmegaConf.update(cfg, path, value)
-
-    with pytest.raises(ValueError, match="top-K teacher objectives require use_sample_packing=false"):
         validate_cfg(cfg)

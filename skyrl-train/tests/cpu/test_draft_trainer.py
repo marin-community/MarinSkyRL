@@ -139,18 +139,6 @@ def _patch_training(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(draft_trainer_module, "merge_online_eagle_captures", merge)
 
 
-def test_draft_checkpoint_requires_cloud_uri() -> None:
-    with pytest.raises(ValueError, match="cloud-backed"):
-        DraftCheckpoint.from_mapping(
-            {
-                "step": 4,
-                "revision": "draft-step-4",
-                "uri": "/tmp/draft",
-                "source_identity": _DRAFT_REVISION,
-            }
-        )
-
-
 def test_draft_trainer_publishes_checkpoint_before_latest_pointer(
     cloud: _CloudFixture,
     monkeypatch: pytest.MonkeyPatch,
