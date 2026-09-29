@@ -6,6 +6,7 @@ import pytest
 import ray
 from omegaconf import DictConfig, OmegaConf
 
+from skyrl_train.rollout_observability import measure_rollout, observe_rollout_call, rollout_wait
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.workers import (
     RolloutWorkerPool,
@@ -39,7 +40,10 @@ class _RemoteMethod:
 
 class _Worker:
     def __init__(self, call: Callable[..., Awaitable[dict]]):
-        self.run = _RemoteMethod(call)
+        async def run(input_batch, _observe):
+            return await call(input_batch), None
+
+        self.run = _RemoteMethod(run)
 
 
 class _SessionWorker(_Worker):
@@ -49,8 +53,9 @@ class _SessionWorker(_Worker):
             calls.append((name, phase))
             return _output(input_batch["trajectory_ids"])
 
-        async def run_task(task, _writer):
+        async def run_task(task, _writer, _observe):
             calls.append((name, f"task {task.prompt['uid']}"))
+            return 0, None
 
         async def start_eval_session(**_kwargs):
             calls.append((name, "start_eval"))
@@ -165,6 +170,29 @@ async def test_a_single_worker_defers_training_until_the_eval_session_ends(spec)
 
 
 @pytest.mark.asyncio
+async def test_waits_measured_in_a_worker_join_the_callers_rollout_observation(spec):
+    class _MeasuringWorker:
+        async def _run_task(self, task, _writer, observe):
+            # A worker process has no caller observation; its waits reach the caller only through the return value.
+            with measure_rollout(enabled=observe) as observation:
+                with rollout_wait("env_queue"):
+                    await asyncio.sleep(0)
+            return 7, None if observation is None else observation.timings()
+
+        def __init__(self):
+            self.run_task = _RemoteMethod(self._run_task)
+
+    pool = _pool([_MeasuringWorker()], spec)
+    task = RolloutTask(RolloutLease("lease", 1, 1), {"uid": "a"}, _request([TrajectoryID("a", 0)], "train"))
+
+    with observe_rollout_call(step=1, mode="async", enabled=True) as observation:
+        response_tokens = await pool.run_task(task, writer=None)
+
+    assert response_tokens == 7
+    assert len(observation.waits["env_queue"]) == 1
+
+
+@pytest.mark.asyncio
 async def test_pool_returns_one_group_unchanged(spec):
     expected = _output([TrajectoryID("a", 0)])
 
@@ -191,7 +219,7 @@ async def test_progress_deadline_resets_when_the_same_worker_completes_a_request
             if slow_task is None:
                 slow_task = current_task
             elif current_task is slow_task and not slow_result.done():
-                slow_result.set_result(_output([TrajectoryID("a", 0)]))
+                slow_result.set_result((_output([TrajectoryID("a", 0)]), None))
             return self
 
         async def __aexit__(self, exception_type, _exception, _traceback):
@@ -204,7 +232,7 @@ async def test_progress_deadline_resets_when_the_same_worker_completes_a_request
             return self._expired
 
     class _TimedRemoteMethod:
-        def remote(self, input_batch):
+        def remote(self, input_batch, _observe):
             nonlocal slow_result
             instance_id = input_batch["trajectory_ids"][0].instance_id
             result = asyncio.get_running_loop().create_future()
@@ -212,7 +240,7 @@ async def test_progress_deadline_resets_when_the_same_worker_completes_a_request
                 slow_result = result
                 return result
 
-            result.set_result(_output(input_batch["trajectory_ids"]))
+            result.set_result((_output(input_batch["trajectory_ids"]), None))
             asyncio.get_running_loop().call_soon(slow_task.cancel)
             return result
 

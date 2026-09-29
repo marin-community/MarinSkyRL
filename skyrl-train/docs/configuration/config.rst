@@ -446,6 +446,9 @@ Generator Configuration
     num_inference_engines: 1
     backend: "vllm"
     weight_sync_backend: "nccl"
+    weight_sync_pause:
+      mode: keep
+      clear_cache: true
     inference_engine_tensor_parallel_size: 4
     inference_engine_pipeline_parallel_size: 1
     inference_engine_expert_parallel_size: 1  
@@ -565,6 +568,21 @@ Weight Transfer Configuration
 - ``generator.expert_block_sync.timeout_seconds``: Timeout for creating the sync groups at startup and for the broadcasts of each sync.
 - ``generator.expert_block_sync.verify``: If set, replay synchronization and verify it against the trainer values.
 - ``generator.override_existing_update_group``: Whether to override the existing update group for the inference engine. This is applicable only for remote inference engines. During training, `skyrl-train` forms a custom process group ("update group") with the rank 0 training worker and all the inference engine ranks.  If ``override_existing_update_group=enable``, then during initialization, a previous weight update group will be overriden in the inference engine. For example, if you have a remote server setup and you run training for the same model multiple times, it is helpful to override the previous update group. We recommend leaving this to ``auto`` - since it will automatically determine if the previous update group should be overridden based on ``run_engines_locally``.
+
+``generator.weight_sync_pause`` sets the local vLLM pause policy during weight sync when
+``trainer.rollout_buffer.max_staleness_steps`` is positive:
+
+- ``mode: abort`` ends in-flight requests. Non-streaming single-prompt requests can continue or retry;
+  streaming chat completions end with ``finish_reason=abort``.
+- ``mode: wait`` lets in-flight requests finish before the sync. It requires
+  ``generator.vllm_v1_disable_multiproc=false`` and can delay a step behind long requests.
+- ``mode: keep`` (default) freezes in-flight requests and resumes them after the sync, including streams and batches.
+
+``clear_cache: true`` (default) clears KV and prefix caches during the pause. With ``keep``, running requests
+re-prefill their prompt and generated tokens under the new weights. ``keep`` with ``clear_cache: false`` retains
+KV from the old weights across the sync, which is faster but can mix weight policies in later generation. Only
+``keep`` permits ``clear_cache: false``. Non-default pause settings require local vLLM engines; SGLang and remote
+engines do not support pausing.
 
 Inference Engine Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

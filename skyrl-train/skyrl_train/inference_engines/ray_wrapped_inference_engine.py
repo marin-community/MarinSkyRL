@@ -20,6 +20,11 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
+from skyrl_train.config.weight_sync_pause import (
+    DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
+    WeightSyncPausePolicy,
+    validate_weight_sync_pause_backend,
+)
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
 from skyrl_train.inference_engines.utils import (
     ReservedRendezvousPorts,
@@ -508,6 +513,7 @@ def create_ray_wrapped_inference_engines(
     require_v1_model_runner: bool = False,
     mp_backend: bool = False,
     placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
+    weight_sync_pause_policy: WeightSyncPausePolicy = DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
@@ -524,6 +530,8 @@ def create_ray_wrapped_inference_engines(
         still require the ray backend for shared-GPU resource management.
     """
     engine_init_kwargs = dict(engine_init_kwargs)
+    # Direct factory callers bypass generator config validation.
+    validate_weight_sync_pause_backend(weight_sync_pause_policy, backend=backend, run_engines_locally=True)
     model_metadata_path = engine_init_kwargs.pop(MODEL_METADATA_PATH_KEY, pretrain)
     if backend == "vllm":
         import vllm
@@ -865,6 +873,7 @@ def create_ray_wrapped_inference_engines(
                     dtype=model_dtype,
                     trust_remote_code=True,
                     vllm_v1_disable_multiproc=vllm_v1_disable_multiproc,
+                    weight_sync_pause_policy=weight_sync_pause_policy,
                     gpu_memory_utilization=gpu_memory_utilization,
                     bundle_indices=dp_rank_bundles,
                     num_gpus=0.2 if use_hybrid_engine else 1,
