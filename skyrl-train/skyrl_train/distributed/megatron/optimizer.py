@@ -41,6 +41,10 @@ class _GrugMuonHParamScheduler(OptimizerParamScheduler):
         init_lr = self.init_lr * max_lr / self.max_lr if self.max_lr else 0.0
         return init_lr + (max_lr - init_lr) * self.num_steps / self.lr_warmup_steps
 
+    def load_state_dict(self, state_dict: dict) -> None:
+        self.num_steps = 0
+        super().load_state_dict(state_dict)
+
 
 def _grug_muonh_extra(optim_config: Mapping) -> dict:
     raw = optim_config.get("optimizer_kwargs", {})

@@ -491,6 +491,8 @@ def test_grug_megatron_muonh_pp2_ep2_checkpoint_continues_exactly(tmp_path):
     cfg.trainer.policy.optimizer_config.adam_betas = [0.9, 0.95]
     cfg.trainer.policy.optimizer_config.optimizer_kwargs = {"adam_lr": 2.0e-2}
     cfg.trainer.policy.optimizer_config.max_grad_norm = 1.0
+    cfg.trainer.policy.optimizer_config.num_warmup_steps = 10
+    cfg.trainer.policy.optimizer_config.lr_warmup_init = 2.0e-3
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     batch = _padded_batch(tokenizer.pad_token_id, prompt_length=48, response_length=48, variable_lengths=True)
     names = [

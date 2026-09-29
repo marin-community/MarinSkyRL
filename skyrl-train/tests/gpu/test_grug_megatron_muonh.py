@@ -67,12 +67,15 @@ def _recipe(**kwargs):
         "adam_betas": [0.9, 0.95],
         "optimizer_kwargs": {"adam_lr": 0.004},
         "max_grad_norm": 0.0,
+        "num_warmup_steps": 0,
         **kwargs,
     }
 
 
 def _optimizer(model, recipe):
-    return get_megatron_optimizer([model], init_megatron_optim_config(recipe, {}), grug_optimizer_config=recipe)
+    optimizer = get_megatron_optimizer([model], init_megatron_optim_config(recipe, {}), grug_optimizer_config=recipe)
+    scheduler = get_megatron_optimizer_param_scheduler(optimizer, OmegaConf.create(recipe), num_training_steps=3)
+    return optimizer, scheduler
 
 
 def _reference_optimizers(model):
@@ -139,7 +142,7 @@ def test_native_factory_matches_three_jax_steps_and_adam(distributed_parallel_st
         for parameter, value in zip(fused_parameters, fused_values("initial")):
             parameter.copy_(value)
     recipe = _recipe(optimizer_kwargs={"adam_lr": 0.004, "offload_momentum": offload_momentum})
-    optimizer = _optimizer(model, recipe)
+    optimizer, _ = _optimizer(model, recipe)
     reference = nn.Parameter(model.embedding.weight.detach().clone())
     adam = torch.optim.Adam([reference], lr=0.004, betas=(0.9, 0.95), eps=1e-8)
     for step in range(1, 4):
@@ -160,7 +163,7 @@ def test_native_factory_clips_all_routes_by_the_global_norm(distributed_parallel
     torch.manual_seed(17)
     model = _TinyGrug()
     reference = copy.deepcopy(model)
-    optimizer = _optimizer(model, _recipe(max_grad_norm=1.0))
+    optimizer, _ = _optimizer(model, _recipe(max_grad_norm=1.0))
     muon, adam = _reference_optimizers(reference)
     for amplitude in (8.0, -0.5, 4.0):
         _gradients(model, amplitude)
@@ -180,15 +183,12 @@ def test_route_warmup_and_scheduler_resume_match_weight_updates(distributed_para
     model = _TinyGrug()
     reference = copy.deepcopy(model)
     recipe = _recipe(num_warmup_steps=2, lr_warmup_init=0.006)
-    optimizer = _optimizer(model, recipe)
-    scheduler = get_megatron_optimizer_param_scheduler(optimizer, OmegaConf.create(recipe), num_training_steps=3)
+    optimizer, scheduler = _optimizer(model, recipe)
     muon, adam = _reference_optimizers(reference)
     for step, (matrix_lr, adam_lr) in enumerate(((0.006, 0.0008), (0.018, 0.0024), (0.03, 0.004))):
         if step == 1:
             state = scheduler.state_dict()
-            scheduler = get_megatron_optimizer_param_scheduler(
-                optimizer, OmegaConf.create(recipe), num_training_steps=3
-            )
+            scheduler.step(1)
             scheduler.load_state_dict(state)
         _gradients(model, step + 1)
         _gradients(reference, step + 1)
