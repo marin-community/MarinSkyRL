@@ -178,6 +178,7 @@ def test_policy_worker_reports_skips_and_resets_streak_after_clean_update(ray_in
     cfg.trainer.train_batch_size = 4
     cfg.trainer.policy_mini_batch_size = 4
     cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.trainer.micro_forward_batch_size_per_gpu = 1
     cfg.generator.n_samples_per_prompt = 1
     validate_cfg(cfg)
     policy = init_worker_with_type("policy", num_gpus_per_node=4, cfg=cfg)
