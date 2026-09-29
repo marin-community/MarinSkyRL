@@ -14,6 +14,7 @@ from taskcompendium.resources import ResourceVisibility, TaskResource
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
 
 from skyrl_train.entrypoints.taskcompendium import TaskCompendiumExp
+from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.loader import PromptLoader, SeededPasses
 from skyrl_train.trajectory_runners.taskcompendium import (
     HARBOR_ENV_CLASS,
@@ -197,8 +198,17 @@ async def test_router_splits_mixed_batches_and_restores_order():
         "batch_metadata": SimpleNamespace(training_phase="train"),
     }
 
-    result = await router.run(request)
+    lease = RolloutLease(lease_id="mixed", policy_step=3, batch_id=4)
+    writer = AsyncMock()
+    response_tokens = await router.run_task(RolloutTask(lease, {"uid": "mixed"}, request), writer)
+    writer.write_rollout.assert_awaited_once()
+    written_lease, group = writer.write_rollout.await_args.args
+    result = group.trajectory_batch
 
+    assert response_tokens == 3
+    assert written_lease == lease
+    assert group.uid == "mixed"
+    assert group.policy_step == 3
     assert result["response_ids"] == [[2], [1], [2]]
     assert result["rewards"] == [2.0, 1.0, 2.0]
     assert result["rollout_logprobs"] is None

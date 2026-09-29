@@ -32,7 +32,9 @@ from skyrl_train.trajectory_runners.base import (
     TrajectoryRequestBatch,
     TrajectoryRunner,
     propagate_teacher_routes,
+    run_rollout_task,
 )
+from skyrl_train.rollouts.buffer import RolloutTask, RolloutWriter
 from skyrl_train.trajectory_runners.model_clients import ModelClient
 from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
@@ -431,6 +433,9 @@ class TaskCompendiumTrajectoryRouter:
 
     async def stop_eval_session(self) -> None:
         await asyncio.gather(self.native_runner.stop_eval_session(), self.harbor_runner.stop_eval_session())
+
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
+        return await run_rollout_task(self, task, writer)
 
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         classes = input_batch["env_classes"]
