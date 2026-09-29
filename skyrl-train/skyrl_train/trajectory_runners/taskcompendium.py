@@ -14,7 +14,6 @@ from taskcompendium.grading import Outcome
 from taskcompendium.lowering import (
     ENVIRONMENT_CONFIG_FILE,
     SPECIFICATION_FILE,
-    STATEFUL_ENVIRONMENT,
     SUBMISSION_CONVENTION_FILE,
     HarborEnvironmentConfig,
     read_environment_config,
@@ -318,11 +317,7 @@ class TaskCompendiumHarborRunner(TrajectoryRunner):
             launch = ChatLaunch(
                 model=extra["model_name"],
                 api_base=extra["api_base"],
-                strategy=(
-                    AgentStrategy.STATEFUL_TOOLS
-                    if binding.environment == STATEFUL_ENVIRONMENT
-                    else AgentStrategy.DIRECT_CHAT
-                ),
+                strategy=(AgentStrategy.CHAT_TOOLS if binding.tool_binding is not None else AgentStrategy.DIRECT_CHAT),
                 max_turns=self.max_turns,
                 request_timeout=self.timeout,
                 trial_timeout=self.timeout,
