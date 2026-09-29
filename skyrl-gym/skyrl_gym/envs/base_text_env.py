@@ -85,6 +85,10 @@ class BaseTextEnv(Env[ConversationType, str]):
         """
         del evidence
 
+    def finish_at_input_limit(self) -> BaseTextEnvStepOutput | None:
+        """Return a terminal task verdict when context exhaustion interrupts a continuing episode."""
+        return None
+
     def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
         """
         Return the first prompt to be given to the model and optional metadata.
