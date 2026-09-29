@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+import numpy as np
 import pytest
 
 from skyrl_train.dynamic_sampling import (
@@ -29,7 +30,7 @@ def _group(
     *,
     loss_masks: list[list[int]],
     exclude_from_baseline: list[bool] | None = None,
-    rollout_logprobs: list[list[float | None]] | None = None,
+    rollout_logprobs: list[list[float | None] | np.ndarray] | None = None,
 ) -> _Group:
     group_size = len(loss_masks)
     trajectory_batch = {
@@ -165,6 +166,19 @@ def test_required_logprobs_allow_placeholders_only_at_masked_tokens():
     assert decision.primary_rejection is AdmissionRejection.MISSING_ROLLOUT_LOGPROBS
 
     group.trajectory_batch["rollout_logprobs"] = [[-0.5], [None]]
+    assert policy.evaluate(group).accepted
+
+
+def test_required_logprobs_accept_numpy_rows():
+    policy = GroupAdmissionPolicy(
+        GroupAdvantageInvariant.exact_physical(physical_group_size=2),
+        rollout_logprobs_required=True,
+    )
+    group = _group(
+        loss_masks=[[1], [0]],
+        rollout_logprobs=[np.asarray([-0.5], dtype=np.float32), np.zeros(1, dtype=np.float32)],
+    )
+
     assert policy.evaluate(group).accepted
 
 
