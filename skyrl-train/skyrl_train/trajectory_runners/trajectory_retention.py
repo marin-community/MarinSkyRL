@@ -713,7 +713,8 @@ def _publish_archives(request: PublicationRequest) -> _RetentionLedger:
     return ledger
 
 
-def _publication_worker(request: PublicationRequest, sender) -> None:
+def execute_publication(request: PublicationRequest) -> PublicationResult:
+    """Perform one storage operation, reporting any failure in the result rather than raising."""
     try:
         if request.operation is PublicationOperation.INITIALIZE:
             ledger = _initialize_publication(request)
@@ -721,23 +722,17 @@ def _publication_worker(request: PublicationRequest, sender) -> None:
             ledger = _publish_archives(request)
         else:
             raise ValueError(f"unknown trajectory publication operation: {request.operation}")
-        sender.send(
-            PublicationResult(
-                request_id=request.request_id,
-                record_count=request.record_count,
-                ledger=to_jsonable(ledger),
-            )
+    except Exception as error:
+        return PublicationResult(
+            request_id=request.request_id,
+            record_count=request.record_count,
+            error=f"{type(error).__name__}: {error}",
         )
-    except BaseException as error:
-        sender.send(
-            PublicationResult(
-                request_id=request.request_id,
-                record_count=request.record_count,
-                error=f"{type(error).__name__}: {error}",
-            )
-        )
-    finally:
-        sender.close()
+    return PublicationResult(
+        request_id=request.request_id,
+        record_count=request.record_count,
+        ledger=to_jsonable(ledger),
+    )
 
 
 def _empty_metrics() -> dict[str, float]:
@@ -783,7 +778,7 @@ class TrajectorySink:
         self.config = config
         self.tokenizer = tokenizer
         self.publisher = publisher or ProcessTrajectoryPublisher(
-            _publication_worker,
+            execute_publication,
             publish_timeout_seconds=config.publish_timeout_seconds,
             shutdown_timeout_seconds=config.shutdown_timeout_seconds,
         )
