@@ -56,6 +56,7 @@ _CONFIGS = {
 }
 
 _FLASH_ATTN_CONFIGS = {
+    "snowball_pivotrl_96gpu.yaml",
     "128GPU_80B_A3B_next_cp1.yaml",
     "32GPU_qwen3_coder_30b_a3b_ep4.yaml",
     "32GPU_qwen3_coder_30b_a3b_ep4_nooffload.yaml",

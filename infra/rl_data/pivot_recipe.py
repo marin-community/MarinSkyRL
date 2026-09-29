@@ -14,7 +14,7 @@ TEMPLATE = Path(__file__).resolve().parents[2] / "cloud/iris/configs/snowball_pi
 
 def recipe(student: str, mode: str, train_data: str, validation_data: list[str], kl_coefficient: float,
            template: Path = TEMPLATE) -> dict:
-    """Pin initialization/reference identity and preserve the split64 engine geometry."""
+    """Pin initialization/reference identity and preserve the template's geometry."""
     raw = yaml.safe_load(template.read_text())
     model, revision = STUDENTS[student]
     raw["pivot"]["mode"] = mode
@@ -31,8 +31,9 @@ def recipe(student: str, mode: str, train_data: str, validation_data: list[str],
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--student", choices=STUDENTS, required=True)
-    parser.add_argument("--mode", choices=("profile", "pivotrl", "sft"), required=True)
-    parser.add_argument("--train-data", required=True, help="candidates.parquet for profiling; frozen train.parquet otherwise")
+    parser.add_argument("--mode", choices=("profile", "pivotrl", "sft", "sft_random"), required=True)
+    parser.add_argument("--train-data", required=True,
+                        help="candidates.parquet for profile; random_train.parquet for sft_random; train.parquet otherwise")
     parser.add_argument("--validation-data", nargs="+", required=True)
     parser.add_argument("--kl-coefficient", type=float, choices=(0, .001, .01), default=.001)
     parser.add_argument("--output", type=Path, required=True)

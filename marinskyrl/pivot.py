@@ -5,14 +5,14 @@ from typing import Any
 
 
 def apply_pivot_mode(raw: dict[str, Any]) -> dict[str, Any]:
-    """Select sampled GRPO or teacher-forced SFT without changing data or placement."""
+    """Compile profiling, sampled GRPO, or teacher-forced SFT on the chosen data."""
     if "pivot" not in raw:
         return raw
     raw = deepcopy(raw)
     mode = raw["pivot"]["mode"]
     raw["data"]["prompt_length_policy"] = "keep"
-    if mode not in {"pivotrl", "sft", "profile"}:
-        raise ValueError("pivot.mode must be pivotrl, sft, or profile")
+    if mode not in {"pivotrl", "sft", "sft_random", "profile"}:
+        raise ValueError("pivot.mode must be pivotrl, sft, sft_random, or profile")
     trainer, generator = raw["trainer"], raw["generator"]
     algorithm = trainer["algorithm"]
     if raw["context_budget"]["max_turns"] != 1:
@@ -21,10 +21,10 @@ def apply_pivot_mode(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Pivot experiments require binary rewards without shaping")
     if algorithm.get("dynamic_sampling", {}).get("type") is not None:
         raise ValueError("Pivot selection must be frozen before training")
-    generator["reference_actions"] = mode == "sft"
+    generator["reference_actions"] = mode in {"sft", "sft_random"}
     generator["pivot_profiling"] = mode == "profile"
     algorithm["use_kl_in_reward"] = False
-    if mode == "sft":
+    if mode in {"sft", "sft_random"}:
         algorithm.update(
             policy_loss_type="sft",
             advantage_estimator="uniform",

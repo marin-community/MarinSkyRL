@@ -65,10 +65,18 @@ def test_filter_persists_all_student_statistics_and_only_mixed_difficult_rows(tm
                                  rollouts=path, profile_policy="student@immutable", profile_revision="revision", samples_per_prefix=4)
     selected = Dataset.from_parquet(str(tmp_path / "filtered/train.parquet"))
     profiles = Dataset.from_parquet(str(tmp_path / "filtered/profiled_candidates.parquet"))
+    random_rows = Dataset.from_parquet(str(tmp_path / "filtered/random_train.parquet"))
     assert [row["extra_info"]["index"] for row in selected] == [1]
     assert [row["student_profile"]["mean"] for row in profiles] == [0, .25, .5, 1]
     assert [row["student_profile"]["variance"] for row in profiles] == [0, .1875, .25, 0]
     assert manifest["selected_rows"] + manifest["rejected_rows"] == 4
+    # Seed 42 draws the all-fail candidate, which the pivot arm excluded.
+    assert [row["extra_info"]["index"] for row in random_rows] == [0]
+    assert len(random_rows) == len(selected)
+    assert manifest["random_control"] == {
+        "seed": 42, "sampling": "uniform_without_replacement", "eligible_rows": 4,
+        "selected_rows": 1, "overlap_with_pivots": 0,
+    }
     # Incomplete coverage must never silently produce a biased filtered dataset.
     path.write_text("".join(json.dumps(record) + "\n" for record in records[:-1]))
     with pytest.raises(ValueError, match="Incomplete profiling"):

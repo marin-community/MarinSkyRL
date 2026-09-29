@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import math
+import random
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -179,7 +180,7 @@ def prepare(source: Path, output: Path, dataset: str, *, minimum_rows: int, seed
 
 def filter_candidates(
     artifacts: Path, output: Path, *, difficulty_threshold: float, rollouts: Path,
-    profile_policy: str, profile_revision: str, samples_per_prefix: int,
+    profile_policy: str, profile_revision: str, samples_per_prefix: int, random_seed: int = 42,
 ) -> dict[str, Any]:
     """Select pivots from our frozen policy's retained trajectories, never release counts.
 
@@ -242,8 +243,13 @@ def filter_candidates(
             selected.append(index)
     if not selected:
         raise ValueError("Profiling selected no pivots")
+    # Outcome-independent control: all context-eligible candidates remain in the
+    # sampling pool, including all-pass/all-fail groups and selected pivots.
+    eligible = [index for index, item in enumerate(statistics) if item["exclusion"] is None]
+    random_selected = sorted(random.Random(random_seed).sample(eligible, len(selected)))
     output.mkdir(parents=True, exist_ok=False)
     candidates.select(selected).to_parquet(str(output / "train.parquet"))
+    candidates.select(random_selected).to_parquet(str(output / "random_train.parquet"))
     candidates.add_column("student_profile", statistics).to_parquet(str(output / "profiled_candidates.parquet"))
     with (output / "statistics.jsonl").open("w") as stream:
         for item in statistics:
@@ -256,8 +262,13 @@ def filter_candidates(
         "candidate_rows": len(candidates), "selected_rows": len(selected),
         "rejected_rows": len(candidates) - len(selected),
         "context_excluded_rows": sum(item["exclusion"] is not None for item in statistics),
+        "random_control": {
+            "seed": random_seed, "sampling": "uniform_without_replacement",
+            "eligible_rows": len(eligible), "selected_rows": len(random_selected),
+            "overlap_with_pivots": len(set(selected) & set(random_selected)),
+        },
         "artifacts": {name: {"sha256": file_sha256(output / f"{name}.parquet")}
-                      for name in ("train", "profiled_candidates")},
+                      for name in ("train", "random_train", "profiled_candidates")},
         "rollout_records_sha256": digest.hexdigest(),
     }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -286,6 +297,7 @@ def main() -> None:
     filt.add_argument("--profile-policy", required=True)
     filt.add_argument("--profile-revision", required=True)
     filt.add_argument("--difficulty-threshold", type=float, required=True)
+    filt.add_argument("--random-seed", type=int, default=42)
     args = parser.parse_args()
     if args.command == "prepare":
         release = RELEASES[args.dataset]
@@ -297,7 +309,7 @@ def main() -> None:
     else:
         result = filter_candidates(args.artifacts, args.output, difficulty_threshold=args.difficulty_threshold,
                                    rollouts=args.rollouts, profile_policy=args.profile_policy, profile_revision=args.profile_revision,
-                                   samples_per_prefix=args.samples_per_prefix)
+                                   samples_per_prefix=args.samples_per_prefix, random_seed=args.random_seed)
     print(json.dumps(result, indent=2))
 
 

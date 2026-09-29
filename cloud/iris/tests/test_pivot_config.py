@@ -12,7 +12,7 @@ from infra.rl_data.pivot_recipe import recipe, STUDENTS
 CONFIGS = Path(__file__).parents[1] / "configs"
 
 
-@pytest.mark.parametrize("mode,loss,samples", [("pivotrl", "regular", 16), ("sft", "sft", 1)])
+@pytest.mark.parametrize("mode,loss,samples", [("pivotrl", "regular", 16), ("sft", "sft", 1), ("sft_random", "sft", 1)])
 def test_pivot_mode_compiles_same_data_and_geometry(tmp_path, mode, loss, samples):
     baseline = yaml.safe_load((CONFIGS / "snowball_ultra_rlvr1_split64.yaml").read_text())
     raw = yaml.safe_load((CONFIGS / "snowball_pivotrl_split64.yaml").read_text())
@@ -29,7 +29,7 @@ def test_pivot_mode_compiles_same_data_and_geometry(tmp_path, mode, loss, sample
     ).config
     validate_batch_sizes(cfg)
     assert cfg.trainer.algorithm.policy_loss_type == loss
-    assert cfg.generator.reference_actions == (mode == "sft")
+    assert cfg.generator.reference_actions == (mode in {"sft", "sft_random"})
     assert cfg.generator.n_samples_per_prompt == samples
     assert cfg.trainer.train_batch_size * samples == (1024 if mode == "pivotrl" else 64)
     assert list(cfg.data.train_data) == raw["data"]["train_data"]

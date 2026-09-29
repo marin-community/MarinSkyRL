@@ -17,13 +17,25 @@ and 0.01. Use eight frozen-policy samples per candidate, binary outcomes, no sha
 and no online replacement. The implemented KL is a conditional token forward-KL
 estimator, importance weighted under the behavior policy, with differentiable weights.
 
-`pivot.mode: pivotrl` uses sampled GRPO actions. `pivot.mode: sft` uses standard
-next-action cross entropy on the released demonstration, with one target per prefix
-and no KL. Both modes consume the **same student-selected train.parquet**. An SFT
-run on all candidates is a separate data-selection ablation and must be labeled so.
+The comparison has three arms, each with the same loss-token budget:
+
+| Mode | Training data | Objective |
+| --- | --- | --- |
+| `sft_random` | `random_train.parquet` | Next-action cross entropy, no KL |
+| `sft` | Student-selected `train.parquet` | Next-action cross entropy, no KL |
+| `pivotrl` | Identical student-selected `train.parquet` | Sampled GRPO with reference KL |
+
+Random SFT samples uniformly without replacement from the context-eligible training
+candidate pool, with seed 42 and the same row count as the selected pivots. It does
+not condition on success statistics; overlap with selected pivots is allowed and
+reported. The two SFT arms isolate the effect of selection. Selected SFT versus
+PivotRL compares objectives on identical data. Heldout trajectories are excluded
+before either selection. All arms share initialization, tokenizer, Flash Attention,
+context window, optimizer settings, and heldout evaluation. Response lengths, prompt
+exposure, and update counts can differ and must be reported.
 
 The released data supports a method comparison, not an exact paper reproduction.
-The requested default SWE verifier compares tool names and arguments; the paper's
+The default SWE verifier compares tool names and arguments; the paper's
 appendix describes a tool-name comparator. Terminal uses the released agent's
 [Terminus-2 string-only verifier](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/terminus_judge):
 JSON schema, completion state, and command-string similarity. Neither verifier
@@ -93,17 +105,19 @@ Selection rejects wrong policy identities, updated/resumed policies, missing sam
 duplicate repetitions, validation contamination, nonbinary outcomes, and verifier
 failures. Context-overflow exclusions are recorded separately from incorrect answers.
 Outputs include every candidate's student mean/variance in
-`profiled_candidates.parquet`, `statistics.jsonl`, the selected `train.parquet`, and a
+`profiled_candidates.parquet`, `statistics.jsonl`, the selected `train.parquet`, the
+count-matched `random_train.parquet`, and a
 manifest with selected/rejected/excluded counts and profiling provenance. Filtering
 will reduce row counts; it must not duplicate selected rows to match the release.
 
 ## Training and evaluation
 
 The controlled pilot uses [the 96-GPU recipe](../cloud/iris/configs/snowball_pivotrl_96gpu.yaml),
-with the user-specified six-stage policy, four-stage reference, and CPU optimizer
-offload settings. Select it with `pivot_recipe --template`. Both methods receive
+with a six-stage policy, four-stage reference, and CPU optimizer
+offload settings. Select it with `pivot_recipe --template`. All three arms receive
 `trainer.loss_token_budget: 1000000`, constant learning rate with no warmup, one
-update epoch per batch, and identical selected data. The epoch/step ceilings are
+update epoch per batch. The selected SFT and PivotRL arms use identical data; random
+SFT uses the count-matched control. The epoch/step ceilings are
 safety bounds; compare only runs that actually reach the token budget.
 
 The last batch masks surplus loss positions without shortening generated actions.
@@ -123,6 +137,12 @@ do not equalize these quantities. Use this pilot's throughput to size a longer r
 
 Generate recipes using the selected immutable train URI. Run `--mode pivotrl` for
 each `--kl-coefficient 0`, `0.001`, and `0.01`; run `--mode sft` on that identical URI.
+Run `--mode sft_random --train-data <immutable-random_train.parquet-uri>` for the
+random control. The filter manifest stores its seed, pool size, count, overlap,
+and checksum. For the fast pilot, first draw 512 SWE training candidates with a
+fixed seed, profile Grug on that pool, and derive all three arms from it. Keep both
+full heldout sets. Start with KL 0.001; report the preregistered 0 and 0.01 runs as
+follow-ups, before making conclusions about KL choice.
 Add `--smoke` for one training step before the full arm. The template preserves the
 split64 Megatron and vLLM geometry. Batch sizes count prefixes in this trainer:
 `train_batch_size: 64`, `policy_mini_batch_size: 64`, and 16 responses give 1,024

@@ -7,7 +7,7 @@ context_budget:
 trainer:
   strategy: megatron
   seed: 42
-  flash_attn: false
+  flash_attn: true
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
   offload_optimizer_during_rollouts: true
