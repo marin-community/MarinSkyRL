@@ -8,7 +8,7 @@ from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_conf
 from cloud.iris.role_plan import derive_role_plan
 from skyrl_train.utils import validate_cfg
 
-CONFIGS = Path(__file__).parents[1] / "configs"
+CONFIGS = Path(__file__).parents[3] / "cloud" / "iris" / "configs"
 ASYNC_CONFIG = CONFIGS / "snowball_mopd_ultra_async_smoke.yaml"
 SYNC_CONFIG = CONFIGS / "snowball_mopd_ultra_smoke.yaml"
 STUDENT = "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92"
