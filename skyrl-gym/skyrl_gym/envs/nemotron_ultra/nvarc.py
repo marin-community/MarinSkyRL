@@ -24,7 +24,7 @@ def _valid_grid(value: Any) -> bool:
 
 
 def parse_grid(text: str) -> list[list[int]] | None:
-    """Match NVIDIA Board.from_text with the integer color palette."""
+    """Parse a JSON array or NVIDIA Board.from_text digit rows, 0-9 palette."""
     text = final_answer_text(text)
     boxed = last_boxed_answer(text)
     if boxed is not None:
