@@ -21,6 +21,7 @@ from ray.util.placement_group import (
 from skyrl_train.batch_invariant import BATCH_INVARIANT_NCCL_ENV
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
+from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
@@ -40,6 +41,7 @@ from skyrl_train.env_vars import (
 from skyrl_train.group_admission import resolve_group_advantage_invariant
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt, trajectory_selector_from_config
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
+from marinskyrl.rollout_grading import validate_nemotron_ultra_grading
 from marinskyrl.process_diagnostics import initialize_process_diagnostics
 from marinskyrl.distillation import (
     DistillationObjectiveKind,
@@ -486,6 +488,7 @@ def validate_cfg(cfg: DictConfig):
         raise ValueError("Megatron does not support a critic worker")
     distillation_plan = compile_distillation_plan_from_config(cfg)
     validate_distillation_runtime_support(distillation_plan)
+    validate_nemotron_ultra_grading(cfg, distillation_plan)
     if (
         distillation_plan is not None
         and distillation_plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
@@ -536,6 +539,11 @@ def validate_cfg(cfg: DictConfig):
     for path, value in runtime_values.items():
         if value <= 0:
             raise ValueError(f"{path} must be positive; got {value}")
+    start_interval = cfg.trajectory_runner.rollout_workers.start_interval_seconds
+    if start_interval < 0:
+        raise ValueError(
+            f"trajectory_runner.rollout_workers.start_interval_seconds must be non-negative; got {start_interval}"
+        )
     if cfg.trainer.model_load_retry.max_retries < 0:
         raise ValueError(
             f"trainer.model_load_retry.max_retries must be non-negative; got {cfg.trainer.model_load_retry.max_retries}"
@@ -559,6 +567,7 @@ def validate_cfg(cfg: DictConfig):
         )
     if cfg.generator.gdn_backend not in set(GDNBackend):
         raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
+    resolve_weight_sync_pause_policy(cfg.generator)
     validate_generator_cfg(cfg)
     validate_batch_invariant_config(cfg)
     validate_hf_export_config(cfg)

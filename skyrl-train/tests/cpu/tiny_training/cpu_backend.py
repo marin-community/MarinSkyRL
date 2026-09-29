@@ -10,9 +10,6 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from torch import nn
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.inference_engines.base import (
@@ -24,8 +21,9 @@ from skyrl_train.inference_engines.base import (
 from skyrl_train.io import io
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from skyrl_train.workers.worker import PolicyWorkerBase
+from torch import nn
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-ABORT_STOP_REASON = "abort"
 CHECKPOINT_FILE_TEMPLATE = "rank_{rank}.pt"
 # Sampling controls the CPU engine implements; any other non-neutral control fails fast.
 NEUTRAL_SAMPLING_PARAMS = {"top_p": 1.0, "top_k": -1, "min_p": 0.0, "repetition_penalty": 1.0}
@@ -38,6 +36,7 @@ class CausalLMPolicy(nn.Module):
         super().__init__()
         self.model = model
 
+    @torch.autocast(device_type="cpu", enabled=False)
     def forward(
         self,
         sequences: torch.Tensor,
@@ -51,6 +50,7 @@ class CausalLMPolicy(nn.Module):
     ):
         if rollout_routed_experts is not None:
             raise ValueError("router replay requires a mixture-of-experts policy")
+        # FP32 keeps the CPU reference's backward arithmetic stable across batch splits.
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
         # Callers read only the trailing response-aligned positions, so skip the vocabulary
@@ -115,7 +115,6 @@ class CPUStrategy(DistributedStrategy):
         }
         torch.save(states, os.path.join(ckpt_dir, CHECKPOINT_FILE_TEMPLATE.format(rank=dist.get_rank())))
         dist.barrier()
-        return None
 
     def load_checkpoint(
         self, model, ckpt_dir, optimizer=None, scheduler=None, load_module_strict=True, load_training_state=True
@@ -198,8 +197,8 @@ class CPUPolicyWorker(PolicyWorkerBase):
 class CPUInferenceEngine(InferenceEngineInterface):
     """Sample from a Hugging Face causal LM with vLLM's pause, abort, and weight-update semantics.
 
-    Pausing aborts in-flight requests at their next token, returning the tokens generated so far with
-    stop reason ``abort``; requests that arrive while paused wait for the resume.
+    Pausing preserves in-flight requests at their next token, matching the production keep policy;
+    requests that arrive while paused wait for the resume.
     """
 
     def __init__(self, model_path: str, seed: int):
@@ -208,7 +207,10 @@ class CPUInferenceEngine(InferenceEngineInterface):
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.eos_token_id = self.model.config.eos_token_id
         self.max_model_len = self.model.config.max_position_embeddings
-        self._paused = False
+        torch.set_num_threads(1)
+        self._pending = []
+        self._wake = asyncio.Event()
+        self._decoder = None
         self._resumed = asyncio.Event()
         self._resumed.set()
 
@@ -216,9 +218,9 @@ class CPUInferenceEngine(InferenceEngineInterface):
         await self._resumed.wait()
         sampling_params = input_batch["sampling_params"]
         _check_sampling_params(sampling_params)
-        results = [
-            await self._generate_one(prompt_ids, sampling_params) for prompt_ids in input_batch["prompt_token_ids"]
-        ]
+        results = await asyncio.gather(
+            *(self._generate_one(prompt_ids, sampling_params) for prompt_ids in input_batch["prompt_token_ids"])
+        )
         return InferenceEngineOutput(
             responses=[self.tokenizer.decode(ids, skip_special_tokens=True) for ids, _, _ in results],
             response_ids=[ids for ids, _, _ in results],
@@ -229,46 +231,96 @@ class CPUInferenceEngine(InferenceEngineInterface):
             prompt_logprobs=None,
         )
 
-    async def _generate_one(self, prompt_ids: list[int], sampling_params: dict[str, Any]):
-        temperature = float(sampling_params["temperature"])
-        min_tokens = int(sampling_params.get("min_tokens", 0))
-        response_ids: list[int] = []
-        response_logprobs: list[float] = []
-        input_ids = torch.tensor([prompt_ids])
-        past_key_values = None
-        stop_reason = "length"
-        for _ in range(int(sampling_params["max_tokens"])):
-            if self._paused:
-                stop_reason = ABORT_STOP_REASON
-                break
-            with torch.no_grad(), torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-                output = self.model(input_ids, past_key_values=past_key_values, use_cache=True)
-            past_key_values = output.past_key_values
-            logits = output.logits[0, -1].float()
-            if len(response_ids) < min_tokens:
-                logits[self.eos_token_id] = float("-inf")
+    async def _generate_one(self, prompt_ids, sampling_params):
+        if self._decoder is None:
+            self._decoder = asyncio.get_running_loop().create_task(self._decode_loop())
+        fut = asyncio.get_running_loop().create_future()
+        self._pending.append((list(prompt_ids), dict(sampling_params), fut))
+        self._wake.set()
+        return await fut
+
+    async def _decode_loop(self):
+        while True:
+            await self._wake.wait()
+            # Let the other concurrent requests of this wave enqueue before decoding.
+            for _ in range(3):
+                await asyncio.sleep(0)
+            await self._resumed.wait()
+            self._wake.clear()
+            batch, self._pending = self._pending, []
+            if not batch:
+                continue
+            groups = {}
+            for item in batch:
+                sp = item[1]
+                key = (float(sp["temperature"]), int(sp.get("min_tokens", 0)))
+                groups.setdefault(key, []).append(item)
+            for (temperature, min_tokens), items in groups.items():
+                try:
+                    results = await self._decode_batch(items, temperature, min_tokens)
+                    for (_, _, fut), res in zip(items, results):
+                        if not fut.done():
+                            fut.set_result(res)
+                except Exception as e:  # noqa: BLE001
+                    for _, _, fut in items:
+                        if not fut.done():
+                            fut.set_exception(e)
+
+    async def _decode_batch(self, items, temperature, min_tokens):
+        n = len(items)
+        max_new = [int(sp["max_tokens"]) for _, sp, _ in items]
+        lengths = [len(p) for p, _, _ in items]
+        width = max(lengths)
+        pad = self.model.config.pad_token_id or 0
+        input_ids = torch.full((n, width), pad, dtype=torch.long)
+        attn = torch.zeros((n, width), dtype=torch.long)
+        for i, (p, _, _) in enumerate(items):
+            input_ids[i, width - len(p) :] = torch.tensor(p)
+            attn[i, width - len(p) :] = 1
+        out_ids = [[] for _ in range(n)]
+        out_lps = [[] for _ in range(n)]
+        stop = ["length"] * n
+        live = torch.ones(n, dtype=torch.bool)
+        pkv = None
+        cur = input_ids
+        pos = (attn.cumsum(-1) - 1).clamp(min=0)
+        for t in range(max(max_new)):
+            await self._resumed.wait()
+            with torch.no_grad(), torch.autocast(device_type="cpu", dtype=torch.bfloat16, enabled=True):
+                o = self.model(cur, attention_mask=attn, position_ids=pos, past_key_values=pkv, use_cache=True)
+            pkv = o.past_key_values
+            logits = o.logits[:, -1].float()
+            if t < min_tokens:
+                logits[:, self.eos_token_id] = float("-inf")
             if temperature == 0.0:
-                log_probs = torch.log_softmax(logits, dim=-1)
-                token_id = int(torch.argmax(logits))
+                lp = torch.log_softmax(logits, -1)
+                tok = logits.argmax(-1)
             else:
-                log_probs = torch.log_softmax(logits / temperature, dim=-1)
-                token_id = int(torch.multinomial(log_probs.exp(), 1))
-            response_ids.append(token_id)
-            response_logprobs.append(float(log_probs[token_id]))
-            if token_id == self.eos_token_id:
-                stop_reason = "stop"
+                lp = torch.log_softmax(logits / temperature, -1)
+                tok = torch.multinomial(lp.exp(), 1).squeeze(-1)
+            tok_lp = lp.gather(-1, tok[:, None]).squeeze(-1)
+            for i in range(n):
+                if not live[i]:
+                    continue
+                out_ids[i].append(int(tok[i]))
+                out_lps[i].append(float(tok_lp[i]))
+                if int(tok[i]) == self.eos_token_id:
+                    stop[i] = "stop"
+                    live[i] = False
+                elif len(out_ids[i]) >= max_new[i]:
+                    live[i] = False
+            if not live.any():
                 break
-            input_ids = torch.tensor([[token_id]])
-            # Yield so a pause or weight update can interleave between tokens.
+            cur = torch.where(live, tok, torch.full_like(tok, pad))[:, None]
+            attn = torch.cat([attn, live.long()[:, None]], 1)
+            pos = pos[:, -1:] + 1
             await asyncio.sleep(0)
-        return response_ids, response_logprobs, stop_reason
+        return [(out_ids[i], out_lps[i], stop[i]) for i in range(n)]
 
     async def pause_generation(self) -> None:
-        self._paused = True
         self._resumed.clear()
 
     async def resume_generation(self) -> None:
-        self._paused = False
         self._resumed.set()
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
@@ -304,7 +356,9 @@ class CPUInferenceEngine(InferenceEngineInterface):
         """The CPU engine keeps no prefix cache across requests."""
 
     async def teardown(self):
-        """Ray releases the actor's resources."""
+        if self._decoder is not None:
+            self._decoder.cancel()
+            await asyncio.gather(self._decoder, return_exceptions=True)
 
     def tp_size(self) -> int:
         return 1

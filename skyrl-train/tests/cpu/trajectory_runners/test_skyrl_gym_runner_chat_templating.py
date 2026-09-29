@@ -11,7 +11,6 @@ from omegaconf import OmegaConf
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from omegaconf import DictConfig
-from transformers import AutoTokenizer
 from skyrl_gym.envs import register
 from skyrl_train.trajectory_runners.trajectory_processing import get_custom_chat_template, normalize_token_ids
 from skyrl_train.config.utils import get_default_config
@@ -40,7 +39,7 @@ class CPUTestEnv(BaseTextEnv):
         done = self.turns >= self.max_turns
         return BaseTextEnvStepOutput(
             observations=[{"role": "user", "content": f"{self.turns}"}] if not done else [],
-            reward=0,
+            reward=float(self.turns),
             done=done,
             metadata={},
         )
@@ -122,7 +121,7 @@ def _make_input_batch(prompt, extras):
         "qwen3-custom_chat_template_builtin",
     ],
 )
-async def test_skyrl_gym_runner_chat_templating_exact(model_name, tokenization_codepath, expected_str):
+async def test_skyrl_gym_runner_chat_templating_exact(model_name, tokenization_codepath, expected_str, load_tokenizer):
     """
     Tests the behavior of chat templating for various models in multi-turn conversation.
 
@@ -134,7 +133,7 @@ async def test_skyrl_gym_runner_chat_templating_exact(model_name, tokenization_c
     """
     # 1. Preparations to mock the generation.
     _register_test_env_if_needed()  # Register only when needed
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = load_tokenizer(model_name)
     mock_llm = MagicMock()
 
     # Parameterize mock response: Qwen3 uses thinking tokens, others use simple 'b'
@@ -282,9 +281,16 @@ async def test_skyrl_gym_runner_chat_templating_exact(model_name, tokenization_c
     assert len(expected_loss_masks) == len(trajectory_batch["loss_masks"][0])
     assert trajectory_batch["loss_masks"][0] == expected_loss_masks
 
+    # 5. Token-in-token-out keeps every step reward at its turn; re-tokenizing the history keeps only the final
+    # step's reward as a scalar because it cannot place turn rewards on tokens.
+    if tokenization_codepath == "tito":
+        assert sum(trajectory_batch["rewards"][0]) == 1.0 + 2.0 + 3.0
+    else:
+        assert trajectory_batch["rewards"][0] == 3.0
 
-def test_qwen3_original_vs_without_thinking_chat_template():
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
+
+def test_qwen3_original_vs_without_thinking_chat_template(load_tokenizer):
+    tokenizer = load_tokenizer("Qwen/Qwen3-0.6B")
 
     messages = [
         {"content": "hi", "role": "system"},
@@ -327,7 +333,7 @@ def test_qwen3_original_vs_without_thinking_chat_template():
         ("Qwen/Qwen3-0.6B", "custom_chat_template_builtin"),
     ],
 )
-async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepath):
+async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepath, load_tokenizer):
     """
     Test the behavior of `append_eos_token_after_stop_str_in_multi_turn`, which is applicable
     when `sampling_params.stop` is not `null` and `use_conversation_multi_turn` is `true` in
@@ -338,7 +344,7 @@ async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepat
     `skyrl_gym_runner.rst`. For Qwen3, we also test `generator.chat_template` being defined.
     """
     _register_test_env_if_needed()
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = load_tokenizer(model_name)
 
     stop_tag = "</solution>"
     mock_text = "b" + stop_tag

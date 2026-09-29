@@ -8,6 +8,8 @@ from uuid import uuid4
 import skyrl_gym
 from typing import List, Dict, Any, Optional, Tuple
 
+import numpy as np
+
 from skyrl_train.trajectory_runners.base import TrajectoryID, TrajectoryRequestBatch
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
@@ -175,6 +177,10 @@ class StepWiseRolloutCollector:
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             sampled_ids = list(output_ids)
+            routes_batch = engine_output.get("routed_experts")
+            response_routes = routes_batch[0] if routes_batch is not None else None
+            if response_routes is not None and len(response_routes) != len(sampled_ids):
+                raise ValueError("routed_experts must align with generated token IDs")
             topk_ids_batch = engine_output.get("student_topk_indices")
             topk_scores_batch = engine_output.get("behavior_topk_logprobs")
             if (topk_ids_batch is None) != (topk_scores_batch is None):
@@ -201,6 +207,10 @@ class StepWiseRolloutCollector:
                     output_ids.append(self.tokenizer.eos_token_id)
                     if response_logprobs is not None:
                         response_logprobs.append(0.0)
+                    if response_routes is not None:
+                        response_routes = np.concatenate(
+                            (response_routes, np.zeros((1, *response_routes.shape[1:]), dtype=response_routes.dtype))
+                        )
 
             # 2. Environment step
             publish_rollout_evidence(
@@ -232,6 +242,10 @@ class StepWiseRolloutCollector:
 
             per_step_rewards.append((step_reward, response_end_idx))
             response_ids = copy.deepcopy(input_ids[current_prompt_length:])
+            routed_experts = None
+            if response_routes is not None and not retokenize_chat_history:
+                routed_experts = np.zeros((len(response_ids), *response_routes.shape[1:]), dtype=response_routes.dtype)
+                routed_experts[: len(response_routes)] = response_routes
             selected = (
                 align_student_topk(
                     response_ids,
@@ -250,9 +264,12 @@ class StepWiseRolloutCollector:
                     generated_token_count=sum(bool(value) for value in loss_mask),
                     prompt_token_ids=tuple(input_ids[:current_prompt_length]),
                     response_token_ids=tuple(response_ids),
-                    behavior_logprobs=None if response_logprobs is None else tuple(response_logprobs),
+                    behavior_logprobs=None
+                    if response_logprobs is None
+                    else np.asarray(response_logprobs, dtype=np.float32),
                     student_topk_indices=None if selected is None else selected.indices,
                     behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
+                    routed_experts=routed_experts,
                 ),
                 verification=verification,
                 reward=reward_from_env_step(env_step_output, verification),

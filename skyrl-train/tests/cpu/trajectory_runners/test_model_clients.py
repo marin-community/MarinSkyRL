@@ -5,8 +5,10 @@ from unittest.mock import AsyncMock, MagicMock
 import numpy as np
 import pytest
 from jinja2 import TemplateError
+from omegaconf import OmegaConf
 
 from skyrl_train.inference_engines.chat_template import SINGLE_TOOL_CALL_TEMPLATE_ERROR
+from skyrl_train.inference_engines.utils import get_vllm_sampling_params
 from skyrl_train.trajectory_runners.model_clients import ContextLengthExceededError, DirectModelClient, ModelServerError
 
 
@@ -332,21 +334,11 @@ async def test_direct_chat_continuation_preserves_sampled_tool_call_tokens():
     )
 
     assert output["prompt_ids"] == [[11, 12, 21, 22, 30, 40, 41]]
-    assert engine.chat_completion.await_args.args[0]["json"]["_skyrl_exact_prompt_token_ids"] == [
-        11,
-        12,
-        21,
-        22,
-        30,
-        40,
-        41,
-    ]
-
-
-def test_direct_model_client_omits_empty_tools_from_vllm_request():
-    options = DirectModelClient._chat_options({"tools": [], "temperature": 0.4}, {})
-
-    assert options == {"temperature": 0.4}
+    chat_body = engine.chat_completion.await_args.args[0]["json"]
+    assert chat_body["_skyrl_exact_prompt_token_ids"] == [11, 12, 21, 22, 30, 40, 41]
+    # A row with `tools: []` is served as a tool-free request.
+    assert "tools" not in chat_body
+    assert all("tools" not in call.args[0]["json"] for call in engine.tokenize.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -400,7 +392,8 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
     assert body["return_tokens_as_token_ids"] is True
     assert output["student_topk_indices"] == [[[2, 3], [10, 11]]]
     assert output["behavior_topk_logprobs"] == [[[-0.1, -0.2], [-0.1, -0.2]]]
-    assert output["routed_experts"] == [[[[4, 7]], [[0, 0]]]]
+    np.testing.assert_array_equal(output["routed_experts"][0], [[[4, 7]], [[0, 0]]])
+    assert output["routed_experts"][0].dtype == np.uint8
 
 
 @pytest.mark.asyncio
@@ -454,7 +447,7 @@ async def test_chat_grading_recovers_reasoning_boundaries_without_changing_repla
                 "finish_reason": "stop",
                 "token_ids": [3, 4, 5],
                 "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}, {"logprob": -0.3}]},
-                "routed_experts": [[[1, 2]], [[3, 4]], [[5, 6]]],
+                "routed_experts": _encoded_routes([[[0, 0]], [[0, 0]], [[1, 2]], [[3, 4]]]),
             }
         ]
     }
@@ -467,7 +460,7 @@ async def test_chat_grading_recovers_reasoning_boundaries_without_changing_repla
     assert result["responses"] == [expected]
     assert result["response_ids"] == [[3, 4, 5]]
     assert result["response_logprobs"] == [[-0.1, -0.2, -0.3]]
-    assert result["routed_experts"] == [[[[1, 2]], [[3, 4]], [[5, 6]]]]
+    np.testing.assert_array_equal(result["routed_experts"][0], [[[1, 2]], [[3, 4]], [[0, 0]]])
     assert result["assistant_messages"] == [raw_message]
 
 
@@ -497,3 +490,37 @@ async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
     )
     assert result["responses"] == ["7"]
     assert result["prompt_ids"] == [[1, 2, 3, 4]]
+
+
+@pytest.mark.asyncio
+async def test_chat_output_keeps_the_per_turn_limit_of_vllm_sampling_params():
+    """Training passes vLLM-form sampling params; a large request window must not lift their per-turn limit."""
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "7"
+    engine.tokenize.return_value = {"tokens": [1, 2, 3, 4]}
+    served = []
+
+    async def serve(request):
+        served.append(request["json"])
+        return {
+            "choices": [{"message": {"role": "assistant", "content": "7"}, "finish_reason": "stop", "token_ids": [7]}]
+        }
+
+    engine.chat_completion.side_effect = serve
+    sampling_params = get_vllm_sampling_params(
+        OmegaConf.create(
+            {"max_generate_length": 6528, "temperature": 1.0, "top_p": 1.0, "top_k": -1, "min_p": 0.0, "logprobs": None}
+        )
+    )
+    await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "question"}]],
+            "chat_completion_params": [{}],
+            "sampling_params": sampling_params,
+            "max_context_length": 32768,
+        }
+    )
+    assert served[0]["max_completion_tokens"] == 6528
+    assert "max_tokens" not in served[0]

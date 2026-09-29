@@ -1,22 +1,33 @@
 """The coordinator loop between the group loader, rollout workers, and the rollout buffer actor."""
 
 import asyncio
+import inspect
 from collections import defaultdict
+from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
+import ray
+from ray.actor import ActorHandle
 
 from skyrl_train.dynamic_sampling import GroupSelectionPolicy
 from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.rollouts.buffer import (
     BatchPolicy,
     ReadyRollout,
+    RolloutBuffer,
     RolloutBufferConfig,
     RolloutContentPolicy,
     RolloutGroup,
     RolloutTask,
     RolloutWriter,
 )
-from skyrl_train.rollouts.context import RolloutRequestSpec, TrainingContext, TrainingContextState
+from skyrl_train.rollouts.context import (
+    RolloutRequestSpec,
+    TrainingContext,
+    TrainingContextState,
+    start_rollout_buffer,
+)
 from skyrl_train.rollouts.loader import PromptLoader, PromptLoaderState, JudgedGroup, PromptOrder, SeededPasses
 from skyrl_train.rollouts.payloads import MemoryPayloads, ObjectStorePayloads, PayloadStore
 
@@ -124,9 +135,46 @@ class _RecordingOrder:
         self._passes.load_state_dict(state)
 
 
+class _InProcessActor:
+    """Serves an actor's ``method.remote(...)`` calls on the caller's event loop.
+
+    Starting a real buffer actor spawns a Ray worker that imports the trainer, which takes seconds per test.
+    """
+
+    def __init__(self, instance):
+        self._instance = instance
+
+    def __getattr__(self, name: str) -> SimpleNamespace:
+        method = getattr(self._instance, name)
+
+        async def call(*args):
+            result = method(*args)
+            return await result if inspect.isawaitable(result) else result
+
+        return SimpleNamespace(remote=lambda *args: asyncio.ensure_future(call(*args)))
+
+
+def _in_process_buffer(config: RolloutBufferConfig) -> _InProcessActor:
+    return _InProcessActor(RolloutBuffer(config))
+
+
+StartBuffer = Callable[[RolloutBufferConfig], ActorHandle]
+
+
+@pytest.fixture
+def start_buffer(request, monkeypatch) -> StartBuffer:
+    """Start each context's buffer in-process, or as a Ray actor when parametrized with ``"ray_actor"``."""
+    if getattr(request, "param", "in_process") == "ray_actor":
+        return start_rollout_buffer
+    # An in-process buffer has no actor for ``TrainingContext.close`` to kill.
+    monkeypatch.setattr(ray, "kill", lambda _actor: None)
+    return _in_process_buffer
+
+
 def _context(
     uids: list[str],
     workers: _Workers,
+    start_buffer: StartBuffer,
     *,
     batch_size: int,
     max_in_flight: int,
@@ -135,22 +183,17 @@ def _context(
     order: PromptOrder | None = None,
     payloads: PayloadStore | None = None,
 ) -> TrainingContext:
+    config = RolloutBufferConfig(batch_size, max_in_flight, max_staleness_steps, batch_policy, None, None)
     return TrainingContext(
         PromptLoader(_Prompts(uids), order or SeededPasses(len(uids), seed=0, shuffle=False), batch_size=batch_size),
-        RolloutBufferConfig(batch_size, max_in_flight, max_staleness_steps, batch_policy, None, None),
+        config,
+        start_buffer(config),
         CONTENT_POLICY,
         RolloutRequestSpec(samples_per_prompt=SAMPLES_PER_PROMPT, sampling_params={}, environment_class="test"),
         workers,
         payloads or MemoryPayloads(),
         rollout_spans=False,
     )
-
-
-@pytest.fixture(params=["memory", "object_store"])
-def payloads(request, tmp_path) -> PayloadStore:
-    if request.param == "memory":
-        return MemoryPayloads()
-    return ObjectStorePayloads(str(tmp_path / "rollouts"))
 
 
 async def _ignore(groups: list[RolloutGroup]) -> None:
@@ -163,9 +206,11 @@ async def _next_uids(context: TrainingContext) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_rolling_batches_do_not_wait_for_a_slow_rollout(ray_module):
+async def test_rolling_batches_do_not_wait_for_a_slow_rollout(ray_module, start_buffer):
     workers = _Workers(blocked=frozenset({"slow"}))
-    context = _context(["slow", "a", "b"], workers, batch_size=1, max_in_flight=2, batch_policy=BatchPolicy.ROLLING)
+    context = _context(
+        ["slow", "a", "b"], workers, start_buffer, batch_size=1, max_in_flight=2, batch_policy=BatchPolicy.ROLLING
+    )
     context.start()
     try:
         await context.publish(1)
@@ -178,9 +223,9 @@ async def test_rolling_batches_do_not_wait_for_a_slow_rollout(ray_module):
 
 
 @pytest.mark.asyncio
-async def test_full_batches_train_a_slow_rollout_in_its_own_step(ray_module):
+async def test_full_batches_train_a_slow_rollout_in_its_own_step(ray_module, start_buffer):
     workers = _Workers(blocked=frozenset({"slow"}))
-    context = _context(["slow", "a", "b"], workers, batch_size=1, max_in_flight=2)
+    context = _context(["slow", "a", "b"], workers, start_buffer, batch_size=1, max_in_flight=2)
     context.start()
     try:
         await context.publish(1)
@@ -194,9 +239,9 @@ async def test_full_batches_train_a_slow_rollout_in_its_own_step(ray_module):
 
 
 @pytest.mark.asyncio
-async def test_a_slow_row_does_not_regenerate_rows_already_in_the_batch(ray_module):
+async def test_a_slow_row_does_not_regenerate_rows_already_in_the_batch(ray_module, start_buffer):
     workers = _Workers(blocked=frozenset({"b"}))
-    context = _context(["a", "b", "c"], workers, batch_size=3, max_in_flight=6)
+    context = _context(["a", "b", "c"], workers, start_buffer, batch_size=3, max_in_flight=6)
     context.start()
     try:
         await context.publish(1)
@@ -213,9 +258,9 @@ async def test_a_slow_row_does_not_regenerate_rows_already_in_the_batch(ray_modu
 
 
 @pytest.mark.asyncio
-async def test_a_rejected_row_is_generated_again_within_a_synchronous_step(ray_module):
+async def test_a_rejected_row_is_generated_again_within_a_synchronous_step(ray_module, start_buffer):
     workers = _Workers(masked_once=frozenset({"m"}))
-    context = _context(["m", "a"], workers, batch_size=2, max_in_flight=2, max_staleness_steps=0)
+    context = _context(["m", "a"], workers, start_buffer, batch_size=2, max_in_flight=2, max_staleness_steps=0)
     context.start()
     try:
         await context.publish(1)
@@ -229,13 +274,13 @@ async def test_a_rejected_row_is_generated_again_within_a_synchronous_step(ray_m
 
 
 @pytest.mark.asyncio
-async def test_resume_does_not_regenerate_a_committed_group(ray_module):
+async def test_resume_does_not_regenerate_a_committed_group(ray_module, start_buffer):
     group = RolloutGroup(_batch(), "c", 1, _prompt("c"))
     committed = ReadyRollout("committed", 1, 1, group.prompt, CONTENT_POLICY.verdict(group), [group], None)
     # The order's next draw is row "c", which the checkpoint already holds.
     state = TrainingContextState(PromptLoaderState({"epoch": 0, "position": 2}, []), [committed], None)
     workers = _Workers()
-    context = _context(["a", "b", "c"], workers, batch_size=2, max_in_flight=4)
+    context = _context(["a", "b", "c"], workers, start_buffer, batch_size=2, max_in_flight=4)
     await context.load_state_dict(state)
     context.start()
     try:
@@ -250,9 +295,9 @@ async def test_resume_does_not_regenerate_a_committed_group(ray_module):
 
 
 @pytest.mark.asyncio
-async def test_each_batch_reports_its_judged_groups_to_the_prompt_order(ray_module):
+async def test_each_batch_reports_its_judged_groups_to_the_prompt_order(ray_module, start_buffer):
     order = _RecordingOrder(3)
-    context = _context(["a", "b", "c"], _Workers(), batch_size=2, max_in_flight=2, order=order)
+    context = _context(["a", "b", "c"], _Workers(), start_buffer, batch_size=2, max_in_flight=2, order=order)
     context.start()
     try:
         await context.publish(1)
@@ -264,10 +309,10 @@ async def test_each_batch_reports_its_judged_groups_to_the_prompt_order(ray_modu
     assert metrics["order/groups"] == 2.0
 
 
-async def _checkpoint_with_committed_group(payloads: PayloadStore) -> TrainingContextState:
+async def _checkpoint_with_committed_group(payloads: PayloadStore, start_buffer: StartBuffer) -> TrainingContextState:
     """Train "a", then checkpoint once "c" is committed while "b" is still generating."""
     workers = _Workers(blocked=frozenset({"b"}))
-    context = _context(["a", "b", "c"], workers, batch_size=1, max_in_flight=2, payloads=payloads)
+    context = _context(["a", "b", "c"], workers, start_buffer, batch_size=1, max_in_flight=2, payloads=payloads)
     context.start()
     try:
         await context.publish(1)
@@ -280,14 +325,23 @@ async def _checkpoint_with_committed_group(payloads: PayloadStore) -> TrainingCo
 
 
 @pytest.mark.asyncio
-async def test_resume_regenerates_uncommitted_prompts_and_keeps_committed_groups(ray_module, payloads):
-    state = await _checkpoint_with_committed_group(payloads)
+@pytest.mark.parametrize(
+    ("payload_kind", "start_buffer"),
+    # The real actor covers Ray's handling of in-memory payload references across the actor boundary.
+    [("memory", "ray_actor"), ("object_store", "in_process")],
+    indirect=["start_buffer"],
+)
+async def test_resume_regenerates_uncommitted_prompts_and_keeps_committed_groups(
+    ray_module, payload_kind, start_buffer, tmp_path
+):
+    payloads = MemoryPayloads() if payload_kind == "memory" else ObjectStorePayloads(str(tmp_path / "rollouts"))
+    state = await _checkpoint_with_committed_group(payloads, start_buffer)
 
     assert [rollout.verdict.uid for rollout in state.ready] == ["c"]
     assert [prompt["uid"] for prompt in state.loader.retries] == ["b"]
 
     resumed_workers = _Workers()
-    resumed = _context(["a", "b", "c"], resumed_workers, batch_size=1, max_in_flight=2, payloads=payloads)
+    resumed = _context(["a", "b", "c"], resumed_workers, start_buffer, batch_size=1, max_in_flight=2, payloads=payloads)
     await resumed.load_state_dict(state)
     resumed.start()
     try:
@@ -302,8 +356,8 @@ async def test_resume_regenerates_uncommitted_prompts_and_keeps_committed_groups
 
 
 @pytest.mark.asyncio
-async def test_failed_rollout_fails_the_next_batch(ray_module):
-    context = _context(["bad"], _Workers(failing=frozenset({"bad"})), batch_size=1, max_in_flight=1)
+async def test_failed_rollout_fails_the_next_batch(ray_module, start_buffer):
+    context = _context(["bad"], _Workers(failing=frozenset({"bad"})), start_buffer, batch_size=1, max_in_flight=1)
     context.start()
     try:
         await context.publish(1)
@@ -314,10 +368,10 @@ async def test_failed_rollout_fails_the_next_batch(ray_module):
 
 
 @pytest.mark.asyncio
-async def test_resume_rejects_committed_groups_from_another_payload_store(ray_module, tmp_path):
-    state = await _checkpoint_with_committed_group(ObjectStorePayloads(str(tmp_path / "rollouts")))
+async def test_resume_rejects_committed_groups_from_another_payload_store(ray_module, tmp_path, start_buffer):
+    state = await _checkpoint_with_committed_group(ObjectStorePayloads(str(tmp_path / "rollouts")), start_buffer)
 
-    resumed = _context(["a", "b", "c"], _Workers(), batch_size=1, max_in_flight=2)
+    resumed = _context(["a", "b", "c"], _Workers(), start_buffer, batch_size=1, max_in_flight=2)
     try:
         with pytest.raises(ValueError, match="object_store_root"):
             await resumed.load_state_dict(state)
@@ -326,11 +380,11 @@ async def test_resume_rejects_committed_groups_from_another_payload_store(ray_mo
 
 
 @pytest.mark.asyncio
-async def test_resume_under_a_new_object_store_root_trains_the_checkpointed_objects(ray_module, tmp_path):
-    state = await _checkpoint_with_committed_group(ObjectStorePayloads(str(tmp_path / "attempt-1")))
+async def test_resume_under_a_new_object_store_root_trains_the_checkpointed_objects(ray_module, tmp_path, start_buffer):
+    state = await _checkpoint_with_committed_group(ObjectStorePayloads(str(tmp_path / "attempt-1")), start_buffer)
 
     payloads = ObjectStorePayloads(str(tmp_path / "attempt-2"))
-    resumed = _context(["a", "b", "c"], _Workers(), batch_size=1, max_in_flight=2, payloads=payloads)
+    resumed = _context(["a", "b", "c"], _Workers(), start_buffer, batch_size=1, max_in_flight=2, payloads=payloads)
     await resumed.load_state_dict(state)
     resumed.start()
     try:

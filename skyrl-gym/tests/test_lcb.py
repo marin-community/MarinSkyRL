@@ -37,6 +37,20 @@ if __name__ == "__main__":
             ),
             1.0,
         ),
+        # Correct code reading stdin through the bytes view
+        (
+            """```python
+import sys
+print(sum(map(int, sys.stdin.buffer.read().split())))
+```""",
+            json.dumps(
+                [
+                    {"input": "4 7\n", "output": "11\n", "testtype": "stdin"},
+                    {"input": "2 3\n", "output": "5\n", "testtype": "stdin"},
+                ]
+            ),
+            1.0,
+        ),
         # Wrong logic: returns index of largest
         (
             """```python

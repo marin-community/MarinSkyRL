@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 import pytest
 
 from skyrl_gym.verification import (
@@ -42,23 +43,23 @@ def test_reward_channels_validate_against_rollout_evidence():
 
 def test_rollout_evidence_rejects_misaligned_behavior_logprobs():
     with pytest.raises(ValueError, match="behavior_logprobs must align"):
-        RolloutEvidence(response_token_ids=(11, 12), behavior_logprobs=(-0.1,))
+        RolloutEvidence(response_token_ids=(11, 12), behavior_logprobs=np.asarray([-0.1], dtype=np.float32))
 
 
 def test_rollout_evidence_requires_aligned_student_topk_pairs():
     with pytest.raises(ValueError, match="provided together"):
-        RolloutEvidence(response_token_ids=(11,), student_topk_indices=((2, 3),))
+        RolloutEvidence(response_token_ids=(11,), student_topk_indices=np.asarray([[2, 3]], dtype=np.int32))
     with pytest.raises(ValueError, match="align with response_token_ids"):
         RolloutEvidence(
             response_token_ids=(11, 12),
-            student_topk_indices=((2, 3),),
-            behavior_topk_logprobs=((-0.1, -0.2),),
+            student_topk_indices=np.asarray([[2, 3]], dtype=np.int32),
+            behavior_topk_logprobs=np.asarray([[-0.1, -0.2]], dtype=np.float32),
         )
     with pytest.raises(ValueError, match="matching widths"):
         RolloutEvidence(
             response_token_ids=(11,),
-            student_topk_indices=((2, 3),),
-            behavior_topk_logprobs=((-0.1,),),
+            student_topk_indices=np.asarray([[2, 3]], dtype=np.int32),
+            behavior_topk_logprobs=np.asarray([[-0.1]], dtype=np.float32),
         )
 
 

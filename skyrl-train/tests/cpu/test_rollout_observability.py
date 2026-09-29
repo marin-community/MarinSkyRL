@@ -54,6 +54,7 @@ def test_training_metrics_keep_selected_finite_values_and_count_nonfinite_ones(d
             "policy/entropy": 1.25,
             "async/staleness_max": 2,
             "eval/all/avg_score": 0.625,
+            "environment/exact_n10": 0.75,
             "policy/loss": float("nan"),
             "policy/grad_norm": float("inf"),
             "policy/details": [1, 2],
@@ -68,6 +69,7 @@ def test_training_metrics_keep_selected_finite_values_and_count_nonfinite_ones(d
         "policy/entropy": 1.25,
         "async/staleness_max": 2.0,
         "eval/all/avg_score": 0.625,
+        "environment/exact_n10": 0.75,
     }
     nonfinite = delivered_telemetry.select("training_nonfinite_values", step="8")
     assert {row["attributes"]["metric"] for row in nonfinite} == {"policy/loss", "policy/grad_norm"}

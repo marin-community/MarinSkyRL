@@ -97,6 +97,7 @@ def record_training_metrics(metrics: Mapping[str, object], *, step: int, kind: s
                 "val/",
                 "eval/",
                 "env/",
+                "environment/",
                 "tis/",
             )
         ):
