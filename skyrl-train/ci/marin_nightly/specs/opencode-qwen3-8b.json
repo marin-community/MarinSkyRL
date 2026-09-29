@@ -1,6 +1,6 @@
 {
   "provenance": {
-    "what": "Gate for one production-shaped OpenCode terminal-bench RL step: eight concurrent Daytona trials, Qwen/Qwen3-8B, RecordProxy literal capture, exact full-TITO assembly, TIS, FSDP2 policy forward/backward, and vLLM weight synchronization on one RNO2A H100x8 node.",
+    "what": "Gate for one production-shaped OpenCode terminal-bench RL step: eight concurrent Daytona trials, Qwen/Qwen3-8B, RecordProxy literal capture, exact full-TITO assembly, TIS, Megatron policy forward/backward, and vLLM weight synchronization on one RNO2A H100x8 node.",
     "produced_by": "skyrl-train/ci/marin_nightly/run_opencode.sh, submitted by .github/workflows/marin-nightly.yaml",
     "why_these_thresholds": [
       "One optimizer step is enough for this infrastructure gate: the signal is whether all eight distinct three-turn tasks traverse OpenCode, Daytona, the controller RecordProxy, full-TITO assembly, TIS, and the policy update without a fallback or masked failure.",

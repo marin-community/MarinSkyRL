@@ -104,14 +104,9 @@ def make_dummy_experience(seq_len=10, num_actions=4) -> Experience:
 
 
 def import_worker(strategy: str, worker_type: str):
-    if strategy == "deepspeed":
-        module_path = "skyrl_train.workers.deepspeed.deepspeed_worker"
-    elif strategy in ("fsdp", "fsdp2"):
-        module_path = "skyrl_train.workers.fsdp.fsdp_worker"
-    elif strategy == "megatron":
-        module_path = "skyrl_train.workers.megatron.megatron_worker"
-    else:
+    if strategy != "megatron":
         raise ValueError(f"Unknown strategy type for {worker_type}: {strategy}")
+    module_path = "skyrl_train.workers.megatron.megatron_worker"
 
     module = importlib.import_module(module_path)
     return getattr(module, f"{worker_type.capitalize()}Worker")
@@ -348,7 +343,6 @@ def init_inference_engines(
     cfg,
     model,
     use_local,
-    async_engine,
     tp_size,
     colocate_all,
     backend,
@@ -384,7 +378,6 @@ def init_inference_engines(
         engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
         gpu_memory_utilization=gpu_memory_utilization,
         inference_engine_enable_sleep=sleep,
-        async_engine=async_engine,
         max_num_batched_tokens=8192,
         max_num_seqs=max_num_seqs,
         tokenizer=tokenizer,

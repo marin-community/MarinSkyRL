@@ -162,7 +162,6 @@ def _config(model_path: str, *, world_size: int, pp: int, ep: int):
     cfg.trainer.policy.optimizer_config.lr = 2.0e-2
     cfg.trainer.policy.optimizer_config.max_grad_norm = 0.0
     cfg.generator.backend = "vllm"
-    cfg.generator.async_engine = True
     cfg.generator.weight_sync_backend = "nccl"
     cfg.generator.inference_engine_tensor_parallel_size = 1
     cfg.generator.inference_engine_data_parallel_size = ROLLOUT_WORLD_SIZE
@@ -330,7 +329,7 @@ def test_grug_megatron_train_forward_matches_eval_forward(
     """The training forward must reproduce the eval-mode log-probs it is scored against.
 
     With one update per batch the PPO ratio is exp(train_logprob - eval_logprob), so any
-    train/eval drift shows up as spurious clipping. FSDP2 reports exactly zero here. Top-4
+    train/eval drift shows up as spurious clipping. Top-4
     routing exposed Megatron's unfused, atomic unpermute (the bridge now forces the fused
     kernels), and Snowball's width exposed cuBLAS kernel selection changing with the
     micro-batch shape (the two passes must use equal micro-batch sizes).

@@ -130,7 +130,10 @@ class OpenAIJudge:
             timeout=self.timeout_seconds,
         )
         body: dict[str, Any] = response.json()
-        content = body["choices"][0]["message"].get("content")
+        choice = body["choices"][0]
+        if choice.get("finish_reason") in {"length", "content_filter"}:
+            raise ValueError(f"Incomplete judge response: {body}")
+        content = choice["message"].get("content")
         if not isinstance(content, str):
             raise RuntimeError(f"Judge returned no message content: {body}")
         return content
@@ -175,14 +178,20 @@ class OpenAIJudge:
                 "max_output_tokens": max_output_tokens,
                 "temperature": temperature,
                 "top_p": top_p,
+                **({"reasoning": {"effort": self.reasoning_effort}} if self.reasoning_effort is not None else {}),
             },
             timeout=self.timeout_seconds,
         )
         body: dict[str, Any] = response.json()
-        for item in reversed(body.get("output", [])):
+        if body.get("status") == "incomplete":
+            raise ValueError(f"Incomplete judge response: {body}")
+        texts = []
+        for item in body.get("output", []):
             if item.get("type") != "message":
                 continue
             for content in item.get("content", []):
                 if content.get("type") == "output_text" and isinstance(content.get("text"), str):
-                    return content["text"]
+                    texts.append(content["text"])
+        if texts:
+            return "".join(texts)
         raise RuntimeError(f"GenRM judge returned no output text: {body}")

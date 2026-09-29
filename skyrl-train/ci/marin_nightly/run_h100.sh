@@ -14,15 +14,9 @@
 set -euo pipefail
 
 REPOSITORY_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-# The two backends resolve different dependency closures, so each gets its own environment path
-# and its own spec: thresholds cut from one backend say nothing about the other.
-STRATEGY="${STRATEGY:-fsdp2}"
-case "$STRATEGY" in
-  fsdp2) RUNTIME_PROFILE=fsdp ;;
-  megatron) RUNTIME_PROFILE=megatron ;;
-  *) echo "unsupported STRATEGY: $STRATEGY (expected fsdp2 or megatron)" >&2; exit 2 ;;
-esac
-NIGHTLY_RL_ENV="${NIGHTLY_RL_ENV:-$REPOSITORY_ROOT/.iris-nightly-env-$STRATEGY}"
+RUNTIME_PROFILE=megatron
+STRATEGY=megatron
+NIGHTLY_RL_ENV="${NIGHTLY_RL_ENV:-$REPOSITORY_ROOT/.iris-nightly-env-megatron}"
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 MAX_STEPS="${MAX_STEPS:-30}"
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k_nightly}"
@@ -47,6 +41,28 @@ N_SAMPLES="${N_SAMPLES:-8}"
 MAX_GEN_LEN="${MAX_GEN_LEN:-512}"
 MAX_PROMPT_LEN="${MAX_PROMPT_LEN:-512}"
 LR="${LR:-2.0e-6}"
+# The nightly trains synchronously with vLLM sharing the policy GPU. An asynchronous run
+# (MAX_STALENESS_STEPS >= 1) needs COLOCATE_ALL=false and a second GPU for the engine.
+MAX_STALENESS_STEPS="${MAX_STALENESS_STEPS:-0}"
+COLOCATE_ALL="${COLOCATE_ALL:-true}"
+# A directory for rollout payloads, one object per group, in the cluster's own region; unset keeps them in
+# Ray's object store.
+OBJECT_STORE_ROOT="${OBJECT_STORE_ROOT:-null}"
+# Positive staleness trains on rollouts from older policies, which needs an off-policy correction.
+if (( MAX_STALENESS_STEPS > 0 )); then POLICY_LOSS_TYPE=behavior_clip; else POLICY_LOSS_TYPE=regular; fi
+# Above 1, the run uses multi-turn GSM8K, which asks again after a wrong answer, and trains it step-wise.
+MAX_TURNS="${MAX_TURNS:-1}"
+if (( MAX_TURNS > 1 )); then
+  DATASET_ARGS=(examples/turn_level_rewards/gsm8k_multi_turn_dataset.py --max_turns "$MAX_TURNS")
+  TURN_ARGS=(
+    environment.env_class=gsm8k_multi_turn
+    generator.max_turns="$MAX_TURNS"
+    trainer.step_wise_training=true
+  )
+else
+  DATASET_ARGS=(examples/gsm8k/gsm8k_dataset.py)
+  TURN_ARGS=(environment.env_class=gsm8k)
+fi
 
 # train_batch_size * MAX_STEPS prompts get consumed; keep some margin. Evaluation is off, but
 # data.val_data still has to resolve, so a handful of rows is enough.
@@ -70,7 +86,7 @@ echo "::: using the frozen root environment at ${NIGHTLY_RL_ENV}"
 "$PYTHON" -c "import torch, vllm; print(f'torch {torch.__version__} | vllm {vllm.__version__}')"
 
 echo "::: preparing a ${TRAIN_ROWS}-prompt GSM8K slice"
-"$PYTHON" examples/gsm8k/gsm8k_dataset.py --output_dir "$DATA_DIR"
+"$PYTHON" "${DATASET_ARGS[@]}" --output_dir "$DATA_DIR"
 DATA_DIR="$DATA_DIR" TRAIN_ROWS="$TRAIN_ROWS" VAL_ROWS="$VAL_ROWS" "$PYTHON" - <<'PY'
 import os
 import pathlib
@@ -85,29 +101,21 @@ for name, rows in (("train", int(os.environ["TRAIN_ROWS"])), ("validation", int(
     print(f"{path}: {frame.height} rows")
 PY
 
-echo "::: training ${MODEL} for ${MAX_STEPS} steps on one GPU"
+echo "::: training ${MODEL} for ${MAX_STEPS} steps"
 echo "::: shape: batch=${TRAIN_BATCH_SIZE} samples=${N_SAMPLES} gen_len=${MAX_GEN_LEN} lr=${LR}"
+echo "::: rollouts: max_staleness_steps=${MAX_STALENESS_STEPS} colocate_all=${COLOCATE_ALL} object_store_root=${OBJECT_STORE_ROOT} max_turns=${MAX_TURNS}"
 # vLLM warms up DeepGEMM FP8 kernels whenever the GPU supports them (is_deep_gemm_supported() is
 # true on Hopper) regardless of whether the `deep_gemm` package actually imported -- and it is not
 # in this environment, so the warmup hard-fails at engine start. This is a bf16 model that never
 # uses FP8, so disable DeepGEMM outright. Exported so the Ray-spawned vLLM workers inherit it.
 export VLLM_USE_DEEP_GEMM=0
-# fsdp2 asks for flash attention and sample packing; bootstrap_runtime.sh asserts the import for
-# that profile, so the assertion that makes packing unusable cannot fire. Megatron needs neither.
-case "$STRATEGY" in
-  fsdp2) STRATEGY_ARGS=(
-    trainer.strategy=fsdp2
-    trainer.flash_attn=true
-    trainer.use_sample_packing=true
-  ) ;;
-  megatron) STRATEGY_ARGS=(
-    trainer.strategy=megatron
-    trainer.policy.megatron_config.tensor_model_parallel_size=1
-    trainer.policy.megatron_config.pipeline_model_parallel_size=1
-    trainer.ref.megatron_config.tensor_model_parallel_size=1
-    trainer.ref.megatron_config.pipeline_model_parallel_size=1
-  ) ;;
-esac
+STRATEGY_ARGS=(
+  trainer.strategy=megatron
+  trainer.policy.megatron_config.tensor_model_parallel_size=1
+  trainer.policy.megatron_config.pipeline_model_parallel_size=1
+  trainer.ref.megatron_config.tensor_model_parallel_size=1
+  trainer.ref.megatron_config.pipeline_model_parallel_size=1
+)
 START=$(date +%s)
 # This lane runs the standalone Hydra entrypoint inside its already-allocated one-GPU Iris task.
 # Marin-launched jobs exercise the config-native task runtime in their own smoke workflows.
@@ -119,7 +127,10 @@ START=$(date +%s)
   trainer.policy.model.path="$MODEL" \
   trainer.policy.optimizer_config.lr="$LR" \
   "${STRATEGY_ARGS[@]}" \
-  trainer.placement.colocate_all=true \
+  trainer.placement.colocate_all="$COLOCATE_ALL" \
+  trainer.rollout_buffer.max_staleness_steps="$MAX_STALENESS_STEPS" \
+  trainer.algorithm.policy_loss_type="$POLICY_LOSS_TYPE" \
+  trainer.rollout_buffer.object_store_root="$OBJECT_STORE_ROOT" \
   trainer.placement.policy_num_gpus_per_node=1 \
   trainer.placement.critic_num_gpus_per_node=1 \
   trainer.placement.ref_num_gpus_per_node=1 \
@@ -148,9 +159,7 @@ START=$(date +%s)
   generator.gpu_memory_utilization=0.7 \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.async_engine=true \
-  generator.batched=true \
-  environment.env_class=gsm8k \
+  "${TURN_ARGS[@]}" \
   2>&1 | tee "$LOG"
 ELAPSED=$(( $(date +%s) - START ))
 

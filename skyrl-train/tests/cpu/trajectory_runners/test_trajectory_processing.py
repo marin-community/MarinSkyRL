@@ -3,30 +3,18 @@ uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/te
 """
 
 import pytest
-from types import SimpleNamespace
 
 from skyrl_train.trajectory_runners.trajectory_processing import (
     AlignmentStats,
     TitoFullDeclineReason,
     apply_overlong_filtering,
     concatenate_trajectory_batches,
-    minimum_captured_global_step,
     encode_messages_subset,
     get_batch_failure_metrics,
     get_response_ids_and_loss_mask_from_messages,
     get_generation_prompt_ids,
 )
 from transformers import AutoTokenizer
-
-
-def test_minimum_captured_global_step_uses_oldest_sample_in_group():
-    outputs = [
-        SimpleNamespace(captured_global_step=9),
-        SimpleNamespace(captured_global_step=None),
-        SimpleNamespace(captured_global_step=6),
-    ]
-
-    assert minimum_captured_global_step(outputs) == 6
 
 
 @pytest.mark.parametrize(
@@ -934,6 +922,28 @@ def test_failure_metrics_survive_concatenation():
     assert merged["rollout_metrics"]["generate/failed_trajectory_fraction"] == pytest.approx(4 / 6)
     assert merged["rollout_metrics"]["generate/errors/SandboxError"] == 3
     assert merged["rollout_metrics"]["generate/errors/ContextLengthExceededError"] == 1
+
+
+def test_data_sources_survive_async_batch_concatenation():
+    first = _generated_group(1, 0)
+    first["data_sources"] = ["math"]
+    second = _generated_group(2, 0)
+    second["data_sources"] = ["tools", None]
+
+    merged = concatenate_trajectory_batches([first, second], tis_lcs_alert_threshold=0.005)
+
+    assert merged["data_sources"] == ["math", "tools", None]
+
+
+def test_server_error_identity_stays_with_its_row_after_concatenation():
+    failed = _generated_group(1, 1)
+    failed["server_errors"] = [{"category": "constrained_decoding", "request_id": "request-123", "status_code": 500}]
+    merged = concatenate_trajectory_batches([failed, _generated_group(1, 0)], tis_lcs_alert_threshold=0.005)
+
+    assert merged["server_errors"] == [
+        {"category": "constrained_decoding", "request_id": "request-123", "status_code": 500},
+        None,
+    ]
 
 
 def test_unaligned_logprob_alert_survives_concatenation():

@@ -9,7 +9,7 @@ from typing import Protocol
 from loguru import logger
 
 from skyrl_train.inference_engines.vllm.stats import (
-    HTTP_BRIDGE_METRIC_NAMES,
+    HTTP_BRIDGE_SUMMARY_METRIC_NAMES,
     VLLM_NUM_ENGINES_METRIC,
     InferenceStatsSnapshot,
     VLLMEngineStatsSnapshot,
@@ -49,7 +49,7 @@ def trainer_metrics(snapshot: InferenceStatsSnapshot) -> dict[str, float]:
     else:
         metrics = _engine_trainer_metrics(engines)
     if snapshot.http_bridge is not None:
-        for name in HTTP_BRIDGE_METRIC_NAMES:
+        for name in HTTP_BRIDGE_SUMMARY_METRIC_NAMES:
             summary = getattr(snapshot.http_bridge, name)
             for statistic in ("count", "mean", "p95", "maximum"):
                 metrics[f"inference_bridge/{name}/{statistic}"] = float(getattr(summary, statistic))

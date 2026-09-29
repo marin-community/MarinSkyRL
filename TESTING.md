@@ -33,7 +33,7 @@ remain withheld must use isolated worker processes, separate setup and execution
 and bounded cleanup. No test may leave a process, process group, Ray actor, or cluster job running.
 
 Do not treat a compact collective smoke test as evidence for a production topology it does not exercise. Record
-the GPU type, world size, EP/FSDP dimensions, dependency image or lock revision, command, branch commit, and
+the GPU type, world size, Megatron parallel dimensions, dependency image or lock revision, command, branch commit, and
 complete pass/fail result for on-demand distributed runs.
 
 The two-run debug artifact acceptance contract and its Jupiter command are documented in

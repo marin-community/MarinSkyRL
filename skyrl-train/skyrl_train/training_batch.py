@@ -357,6 +357,8 @@ class TrainingInput(TypedDict, total=False):
     kl: Float[torch.Tensor, "batch_size seq_len"]
     rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    # Policy versions this row is behind at consumption; one entry per row.
+    rollout_staleness: Optional[Integer[torch.Tensor, "batch_size"]]  # noqa: F821
     teacher_action_log_probs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     teacher_topk_indices: Optional[Integer[torch.Tensor, "batch_size seq_len top_k"]]
     teacher_topk_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len top_k"]]
@@ -368,7 +370,7 @@ class TrainingInput(TypedDict, total=False):
     distillation_loss_weights: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     # MoE router-replay capture rail (Stage 1): per-token expert-selection indices
     # captured from vLLM, [batch, response_len, L, K] (L = MoE layers, K = top-k).
-    # Present only when trainer.policy.fsdp_config.moe_router_replay is True.
+    # Present only when trainer.policy.megatron_config.moe_router_replay is True.
     # TensorBatch._check_consistency only validates dim-0, so 4-D is accepted.
     # Consumed in Stage 2 (replay), not here.
     rollout_routed_experts: Optional[Integer[torch.Tensor, "batch_size seq_len L K"]]

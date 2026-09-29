@@ -47,6 +47,22 @@ def test_the_startup_payload_reaches_the_gate_parser_as_its_own_kind(mirror_line
     assert trainer.tracker.calls == [(expected, 0, False)]
 
 
+def test_telemetry_failure_keeps_the_stdout_metric_payload(mirror_lines, monkeypatch):
+    trainer = _trainer({})
+    trainer._training_metrics_enabled = True
+
+    def broken_publication(*_args, **_kwargs):
+        raise RuntimeError("invalid telemetry record")
+
+    monkeypatch.setattr("skyrl_train.trainer.record_training_metrics", broken_publication)
+    with pytest.raises(RuntimeError, match="invalid telemetry record"):
+        trainer._log_metrics_stdout({"reward/avg_raw_reward": 0.5}, step=2)
+
+    assert parse_metrics(mirror_lines.getvalue()) == [
+        StepMetrics(kind="train", step=2, values={"reward/avg_raw_reward": 0.5})
+    ]
+
+
 def test_startup_work_recorded_into_the_step_payload_is_moved_out_of_it(mirror_lines):
     """The weight sync at startup writes to all_timings, and Timer accumulates into it.
 

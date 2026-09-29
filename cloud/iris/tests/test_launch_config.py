@@ -29,8 +29,8 @@ def _raw_config() -> dict[str, Any]:
         },
         "runtime": {
             "launcher_commit": "a" * 40,
-            "profile": "fsdp",
-            "entrypoint": "skyrl_train.entrypoints.fully_async",
+            "profile": "megatron",
+            "entrypoint": "skyrl_train.entrypoints.gym_worker_pool",
         },
         "iris": {
             "cluster": "cw-us-east-08a",
@@ -73,7 +73,7 @@ def _raw_config() -> dict[str, Any]:
             "validation_data": [],
         },
         "skyrl": {
-            "entrypoint": "fully_async",
+            "entrypoint": "gym_worker_pool",
             "context_budget": {
                 "request_window_tokens": 1024,
                 "max_new_tokens_per_turn": 256,
@@ -82,7 +82,7 @@ def _raw_config() -> dict[str, Any]:
             "model_num_attention_heads": 8,
             "trainer": {
                 "seed": 42,
-                "strategy": "fsdp2",
+                "strategy": "megatron",
                 "algorithm": {"use_kl_loss": False},
                 "placement": {
                     "colocate_all": True,
@@ -155,19 +155,70 @@ def test_taskcompendium_source_recipe_selects_its_entrypoint(tmp_path: Path) -> 
     assert parsed.entrypoint == "skyrl_train.entrypoints.taskcompendium"
 
 
+@pytest.mark.parametrize(
+    ("entrypoint", "max_staleness_steps", "expected"),
+    [
+        ("gym_worker_pool", 0, "sync"),
+        ("gym_worker_pool", 2, "async"),
+        ("standard", 0, "sync"),
+        ("terminal_bench", 1, "async"),
+        ("generate", 0, None),
+        ("taskcompendium", 0, "sync"),
+    ],
+)
+def test_composed_launch_records_whether_training_runs_ahead_of_its_updates(
+    tmp_path: Path, entrypoint: str, max_staleness_steps: int, expected: str | None
+) -> None:
+    raw = _raw_config()
+    raw["skyrl"]["entrypoint"] = entrypoint
+    raw["skyrl"]["trainer"]["placement"]["colocate_all"] = False
+    raw["skyrl"]["trainer"]["rollout_buffer"] = {"max_staleness_steps": max_staleness_steps}
+    raw["iris"]["allocation"]["num_nodes"] = 2
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    assert load_launch_config(path).runtime.training_type == expected
+
+
+def test_object_store_uris_in_skyrl_config_reach_the_task_unchanged(tmp_path: Path) -> None:
+    raw = _raw_config()
+    raw["skyrl"]["trainer"]["rollout_buffer"] = {"object_store_root": "s3://runs/smoke/rollouts"}
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    config = load_launch_config(path)
+
+    assert config.skyrl.trainer.rollout_buffer.object_store_root == "s3://runs/smoke/rollouts"
+
+
+def test_qwen_smoke_accepts_hugging_face_model_input(tmp_path: Path) -> None:
+    config = _raw_config()
+    config["skyrl"] = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "configs/qwen_megatron_smoke.yaml").read_text()
+    )
+    config["inputs"]["model"] = {
+        "uri": "Qwen/Qwen3-0.6B",
+        "identity": "main",
+        "local_path": "Qwen/Qwen3-0.6B",
+        "tokenizer_uri": "Qwen/Qwen3-0.6B",
+        "tokenizer_revision": "main",
+    }
+    config["inputs"]["data_kind"] = "parquet"
+    path = tmp_path / "qwen-launch.yaml"
+    path.write_text(yaml.safe_dump(config, sort_keys=False))
+
+    resolved = load_launch_config(path)
+
+    assert resolved.skyrl.trainer.policy.model.path == "Qwen/Qwen3-0.6B"
+    assert resolved.skyrl.trainer.policy.model.source_uri is None
+    assert resolved.runtime.entrypoint == "skyrl_train.entrypoints.main_base"
+
+
 def test_launch_config_rejects_allocation_smaller_than_role_plan() -> None:
     raw = _raw_config()
     raw["iris"]["allocation"]["num_nodes"] = 0
 
     with pytest.raises(ValueError, match="num_nodes"):
-        validate_launch_config(compose_launch_config(raw))
-
-
-def test_fully_async_launch_requires_equal_training_batches() -> None:
-    raw = deepcopy(_raw_config())
-    raw["skyrl"]["trainer"]["policy_mini_batch_size"] = 4
-
-    with pytest.raises(ValueError, match="train_batch_size == trainer.policy_mini_batch_size"):
         validate_launch_config(compose_launch_config(raw))
 
 

@@ -20,6 +20,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from cloud.iris.paths import resolve_paths_in_dict
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT as CHECKPOINT_EXPORT_MODULE
+from marinskyrl.environment_contract import TrainingType
 from marinskyrl.distillation import DistillationPlan, compile_distillation_plan, validate_distillation_runtime_support
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
@@ -35,8 +36,8 @@ RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
 class RLEntrypoint(StrEnum):
     """Execution modes supported by Iris RL configurations."""
 
-    FULLY_ASYNC = "fully_async"
     GENERATE = "generate"
+    GYM_WORKER_POOL = "gym_worker_pool"
     MINI_SWE = "mini_swe"
     STANDARD = "standard"
     TASKCOMPENDIUM = "taskcompendium"
@@ -46,8 +47,8 @@ class RLEntrypoint(StrEnum):
 
 RL_ENTRYPOINTS = MappingProxyType(
     {
-        RLEntrypoint.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async",
         RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
+        RLEntrypoint.GYM_WORKER_POOL: "skyrl_train.entrypoints.gym_worker_pool",
         RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
         RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
         RLEntrypoint.TASKCOMPENDIUM: "skyrl_train.entrypoints.taskcompendium",
@@ -71,6 +72,20 @@ def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
         ) from error
 
     return RL_ENTRYPOINTS[entrypoint]
+
+
+_RL_ENTRYPOINTS_BY_MODULE = MappingProxyType({module: name for name, module in RL_ENTRYPOINTS.items()})
+
+
+def training_type_for_entrypoint(module: str, *, max_staleness_steps: int) -> TrainingType | None:
+    """How an entrypoint module trains, or None for a module that trains nothing.
+
+    Every training entrypoint runs the rollout-buffer loop, which is synchronous at staleness 0.
+    """
+    entrypoint = _RL_ENTRYPOINTS_BY_MODULE.get(module)
+    if entrypoint is None or entrypoint in (RLEntrypoint.GENERATE, RLEntrypoint.TERMINAL_BENCH_GENERATE):
+        return None
+    return TrainingType.SYNC if max_staleness_steps == 0 else TrainingType.ASYNC
 
 
 def registered_rl_entrypoint_module(module: str) -> str:
@@ -537,7 +552,7 @@ def parse_rl_config(
     # regardless of the working directory at runtime. Skip data.train_data /
     # data.val_data as they may be HF repo IDs.
     trainer = resolve_paths_in_dict(trainer, skip_keys={"policy.model.path"})
-    generator = resolve_paths_in_dict(generator, skip_keys={"speculative_decoding.model.source_uri"})
+    generator = resolve_paths_in_dict(generator)
 
     parse_speculative_decoding_config(
         generator.get("speculative_decoding"),
@@ -548,7 +563,6 @@ def parse_rl_config(
         num_inference_engines=generator.get("num_inference_engines", 1),
         tensor_parallel_size=generator.get("inference_engine_tensor_parallel_size", 4),
         pipeline_parallel_size=generator.get("inference_engine_pipeline_parallel_size", 1),
-        async_engine=generator.get("async_engine", True),
         engine_init_kwargs=generator.get("engine_init_kwargs", {}),
         context=f"{path}: generator.speculative_decoding",
     )
@@ -634,6 +648,7 @@ def extract_terminal_bench_agent_env(parsed: ParsedRLConfig) -> tuple:
 
 _OPTIONAL_HYDRA_PATTERNS = {
     ".distillation",
+    ".domain_weights",
     ".engine_init_kwargs",
     ".speculative_decoding",
     ".hf_hub_",

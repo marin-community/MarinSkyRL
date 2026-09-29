@@ -21,7 +21,7 @@ MEGATRON_EP=8
 MEGATRON_ETP=1
 
 MICRO_TRAIN_BATCH_SIZE_PER_GPU=1
-MICRO_FORWARD_BATCH_SIZE_PER_GPU=2
+MICRO_FORWARD_BATCH_SIZE_PER_GPU=1
 
 NUM_INFERENCE_ENGINES=4
 INFERENCE_ENGINE_TP=8
@@ -67,8 +67,6 @@ uv run --isolated --frozen --extra vllm --extra megatron -m skyrl_train.entrypoi
   trainer.max_prompt_length=2048 \
   generator.max_input_length=4096 \
   generator.sampling_params.max_generate_length=500 \
-  generator.async_engine=true \
-  generator.batched=false \
   generator.use_conversation_multi_turn=false \
   generator.n_samples_per_prompt=5 \
   generator.max_turns=4 \

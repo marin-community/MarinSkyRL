@@ -13,15 +13,14 @@ from omegaconf import MISSING, DictConfig, OmegaConf
 from cloud.iris.ray_storage import RaySpillBackend, resolve_ray_spill_target
 from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
 from cloud.iris.rl_config_translation import (
-    RL_ENTRYPOINTS,
-    RLEntrypoint,
     compose_skyrl_config,
     parse_rl_config,
     registered_rl_entrypoint_module,
+    training_type_for_entrypoint,
     validate_tp_divides_heads,
 )
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
-from marinskyrl.resource_locator import is_hugging_face_repo_id, join_resource_path
+from marinskyrl.resource_locator import is_cloud_uri, is_hugging_face_repo_id, join_resource_path
 from marinskyrl.task_sources import data_source
 
 
@@ -58,6 +57,7 @@ class RuntimeConfig:
     launcher_commit: str = MISSING
     profile: str = MISSING
     entrypoint: str = ""
+    training_type: str | None = None
     experiments_dir: str = "/app/experiments"
     task_env: dict[str, str] = field(default_factory=dict)
 
@@ -190,11 +190,11 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
     if not isinstance(raw_skyrl, dict):
         raise TypeError("skyrl must be a mapping")
     model_path = str(config.inputs.model.local_path)
-    hugging_face_model = is_hugging_face_repo_id(model_path)
-    if hugging_face_model and str(config.inputs.model.uri) != model_path:
+    model_uri = str(config.inputs.model.uri)
+    model_identity = str(config.inputs.model.identity)
+    if is_hugging_face_repo_id(model_path) and model_uri != model_path:
         raise ValueError("Hugging Face model URI and task model path must identify the same pinned repository")
-    model_source_uri = None if hugging_face_model else str(config.inputs.model.uri)
-    model_source_identity = None if hugging_face_model else str(config.inputs.model.identity)
+    model_is_cloud = is_cloud_uri(model_uri)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", encoding="utf-8") as source_file:
         OmegaConf.save(OmegaConf.create(raw_skyrl), source_file.name, resolve=False)
         parsed = parse_rl_config(source_file.name)
@@ -206,9 +206,9 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
                 "num_nodes": int(config.iris.allocation.num_nodes),
                 "gpus_per_node": int(config.iris.allocation.gpus_per_node),
                 "model_path": model_path,
-                "model_source_uri": model_source_uri,
-                "model_source_identity": model_source_identity,
-                "model_revision": str(config.inputs.model.identity),
+                "model_source_uri": model_uri if model_is_cloud else None,
+                "model_source_identity": model_identity if model_is_cloud else None,
+                "model_revision": model_identity,
                 "train_data": list(config.inputs.train_data),
                 "val_data": list(config.inputs.validation_data),
                 "checkpoint_root": str(config.artifacts.checkpoint_root),
@@ -225,6 +225,10 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
     resolved = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
     OmegaConf.set_struct(resolved, False)
     resolved.runtime.entrypoint = compiled.entrypoint
+    training_type = training_type_for_entrypoint(
+        compiled.entrypoint, max_staleness_steps=compiled.config.trainer.rollout_buffer.max_staleness_steps
+    )
+    resolved.runtime.training_type = None if training_type is None else training_type.value
     resolved.inputs.data_kind = parsed.data_kind
     resolved.skyrl = compiled.config
     return compose_launch_config(resolved)
@@ -345,10 +349,6 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
         int(generator["inference_engine_tensor_parallel_size"]),
         skyrl.get("model_num_attention_heads"),
     )
-    if entrypoint == RL_ENTRYPOINTS[RLEntrypoint.FULLY_ASYNC]:
-        trainer = skyrl.get("trainer", {})
-        if trainer.get("train_batch_size") != trainer.get("policy_mini_batch_size"):
-            raise ValueError("fully async SkyRL requires trainer.train_batch_size == trainer.policy_mini_batch_size")
     trainer_seed = skyrl.get("trainer", {}).get("seed")
     if trainer_seed != run["seed"]:
         raise ValueError(f"run.seed={run['seed']} does not match skyrl.trainer.seed={trainer_seed!r}")

@@ -3,6 +3,7 @@ from copy import deepcopy
 import pytest
 
 from marinskyrl.distillation import (
+    validate_distillation_runtime_support,
     DistillationObjectiveKind,
     DistillationRewardMode,
     TeacherEvidenceKind,
@@ -315,3 +316,61 @@ def test_compile_distillation_plan_rejects_legacy_teacher_block():
 
     with pytest.raises(ValueError, match="legacy teacher configuration.*teachers and teacher_routing"):
         compile_distillation_plan(config)
+
+
+def test_compile_distillation_plan_preserves_data_and_expert_parallel_teacher_engines():
+    config = _mopd_config()
+    config["teachers"]["swe"]["resources"] = {
+        "num_nodes": 1,
+        "gpus_per_node": 8,
+        "tensor_parallel_size": 1,
+        "data_parallel_size": 8,
+        "expert_parallel_size": 8,
+        "colocation_group": "teacher",
+    }
+    plan = compile_distillation_plan(config)
+    assert plan is not None
+    resources = next(teacher.resources for teacher in plan.teachers if teacher.id == "swe")
+    assert resources is not None
+    assert (resources.data_parallel_size, resources.expert_parallel_size, resources.gpus_per_engine) == (8, 8, 8)
+
+
+def test_compile_distillation_plan_defaults_teacher_engines_to_one_data_parallel_rank():
+    config = _mopd_config()
+    config["teachers"]["swe"]["resources"] = {
+        "num_nodes": 1,
+        "gpus_per_node": 2,
+        "tensor_parallel_size": 2,
+        "colocation_group": "teacher",
+    }
+    plan = compile_distillation_plan(config)
+    assert plan is not None
+    resources = next(teacher.resources for teacher in plan.teachers if teacher.id == "swe")
+    assert resources is not None
+    assert (resources.data_parallel_size, resources.expert_parallel_size, resources.gpus_per_engine) == (1, 1, 2)
+
+
+@pytest.mark.parametrize(
+    ("resources", "message"),
+    [
+        (
+            {"num_nodes": 1, "gpus_per_node": 8, "tensor_parallel_size": 1, "data_parallel_size": 3},
+            "not divisible by tensor_parallel_size=1 x data_parallel_size=3",
+        ),
+        (
+            {
+                "num_nodes": 1,
+                "gpus_per_node": 8,
+                "tensor_parallel_size": 1,
+                "data_parallel_size": 8,
+                "expert_parallel_size": 4,
+            },
+            "expert_parallel_size must be 1 or equal to tensor_parallel_size x data_parallel_size",
+        ),
+    ],
+)
+def test_runtime_support_rejects_engine_layouts_that_do_not_tile_the_reservation(resources, message):
+    config = _mopd_config()
+    config["teachers"]["swe"]["resources"] = {**resources, "colocation_group": "teacher"}
+    with pytest.raises(ValueError, match=message):
+        validate_distillation_runtime_support(compile_distillation_plan(config))

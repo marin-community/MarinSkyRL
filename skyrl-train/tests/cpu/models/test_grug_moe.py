@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 NovaSkyAI
 # SPDX-License-Identifier: Apache-2.0
 
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -9,7 +8,6 @@ import torch.nn.functional as F
 from accelerate import init_empty_weights
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.models.grug_moe import (
     GrugMoeAttention,
     GrugMoeConfig,
@@ -208,7 +206,7 @@ def test_gradient_checkpointing_preserves_logits_and_gradients():
         )
 
 
-def test_checkpoint_loads_under_fsdp_meta_initialization(tmp_path):
+def test_checkpoint_loads_under_meta_initialization(tmp_path):
     torch.manual_seed(13)
     GrugMoeForCausalLM(tiny_config()).save_pretrained(tmp_path, safe_serialization=True)
 
@@ -584,24 +582,3 @@ def test_weight_sync_stages_query_bias_on_cuda(monkeypatch):
     assert staged.device.type == "meta"
     assert staged.dtype == torch.float32
     assert untouched.device.type == "cpu"
-
-
-def test_fsdp_strategy_exposes_finite_step_outcome():
-    strategy = FSDPStrategy(
-        fsdp_config={},
-        optimizer_config=SimpleNamespace(max_grad_norm=1.0, get=lambda _key, default: default),
-        model_config=SimpleNamespace(lora=SimpleNamespace(rank=0)),
-        fsdp_strategy="fsdp2",
-    )
-    model = torch.nn.Linear(2, 1, bias=False)
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
-
-    model.weight.grad = torch.ones_like(model.weight)
-    strategy.optimizer_step(optimizer, model, scheduler=None)
-    assert strategy.last_optimizer_step_succeeded is True
-
-    before = model.weight.detach().clone()
-    model.weight.grad = torch.full_like(model.weight, float("nan"))
-    strategy.optimizer_step(optimizer, model, scheduler=None)
-    assert strategy.last_optimizer_step_succeeded is False
-    torch.testing.assert_close(model.weight, before)

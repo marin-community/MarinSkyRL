@@ -47,7 +47,7 @@ python -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.policy_loss_type=$POLICY_LOSS \
   trainer.policy.model.path=$STUDENT_MODEL \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$INFERENCE_ENGINE_TP_SIZE \
@@ -76,8 +76,6 @@ python -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.use_kl_in_reward=$USE_KL_IN_REWARD \
   generator.backend=vllm \
   generator.run_engines_locally=true \
-  generator.async_engine=false \
-  generator.batched=true \
   environment.env_class=aime \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   trainer.trajectory_selector.type=best_of_n \

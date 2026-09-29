@@ -31,7 +31,7 @@ Next, let's set up the training configuration. You can find a complete example i
       trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
       
       # Model placement and training strategy (colocate or disaggregate, sharding, etc.)
-      trainer.strategy=fsdp2 \
+      trainer.strategy=megatron \
       trainer.placement.colocate_all=true \
       trainer.placement.policy_num_gpus_per_node=4 \
 
@@ -96,6 +96,6 @@ What's Next?
 Now that you've got the basics down, you might want to explore:
 
 - :doc:`../tutorials/new_env`: Creating a new environment without touching the training loop
-- :doc:`../tutorials/one_step_off_async`: Asynchronous off-by-one training in < 100 lines of code!
+- :doc:`../tutorials/fully_async`: Letting generation run ahead of training with the rollout buffer
 - :doc:`../recipes/overview`: A collection of end-to-end recipes with SkyRL.
 
