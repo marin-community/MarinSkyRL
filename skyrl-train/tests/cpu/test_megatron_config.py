@@ -4,7 +4,7 @@ from unittest import mock
 
 from omegaconf import OmegaConf
 import pytest
-from ci.pivot_grug_smoke import MODEL, MODEL_REVISION, launch_config, main, validate_smoke_config
+from ci.pivot_grug_smoke import MODEL, MODEL_REVISION, compare_arms, launch_config, main, validate_smoke_config
 from cloud.iris.launch_config import load_launch_config
 from infra.rl_data.pivot_swe import DATASET_ID, DATASET_REVISION
 from skyrl_train.config.utils import get_default_config
@@ -163,3 +163,49 @@ def test_grug_retry_preflight_preserves_sample_model_and_token_budget(
     assert retry.skyrl.trainer.pivot_token_budget == 1_421_216_000
     assert retry.iris.allocation.num_nodes == nodes
     assert retry.iris.allocation.gpus_per_node == gpus_per_node
+
+
+def test_grug_comparison_pairs_outputs_from_separate_runs(tmp_path):
+    arm_outputs = {arm: str(tmp_path / arm) for arm in ("sft", "rl")}
+    for arm, scores in {"rl": (1.0, 0.0), "sft": (0.0, 1.0)}.items():
+        diagnostics = tmp_path / arm / "diagnostics"
+        diagnostics.mkdir(parents=True)
+        rows = [
+            {
+                "trajectory_id": trajectory_id,
+                "before": {"score": [0.0], "exception_type": None},
+                "after": {"score": [score], "exception_type": None},
+            }
+            for trajectory_id, score in zip((11, 22), scores)
+        ]
+        (diagnostics / "comparison.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    manifest = {
+        "learner_token_budget": 1000,
+        "revision": DATASET_REVISION,
+        "train_prefixes": 2,
+        "probe_trajectory_ids": [11, 22],
+    }
+    arm_summaries = {
+        arm: {
+            "training_input_tokens": 1000,
+            "training_response_tokens": 100,
+            "training_responses_per_step": {1: 2},
+        }
+        for arm in arm_outputs
+    }
+    comparison_root = tmp_path / "paired"
+    (comparison_root / "diagnostics").mkdir(parents=True)
+
+    summary = compare_arms(str(comparison_root), arm_outputs, manifest, arm_summaries)
+
+    assert summary["rl_wins"] == 1
+    assert summary["sft_wins"] == 1
+    assert summary["probe_count"] == 2
+    assert summary["training_input_tokens"] == {"rl": 1000, "sft": 1000}
+    paired = [
+        json.loads(line) for line in (comparison_root / "diagnostics" / "comparison.jsonl").read_text().splitlines()
+    ]
+    assert paired == [
+        {"trajectory_id": 11, "rl_before": 0.0, "rl_after": 1.0, "sft_before": 0.0, "sft_after": 0.0},
+        {"trajectory_id": 22, "rl_before": 0.0, "rl_after": 0.0, "sft_before": 0.0, "sft_after": 1.0},
+    ]

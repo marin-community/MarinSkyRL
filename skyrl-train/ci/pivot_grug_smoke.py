@@ -194,7 +194,7 @@ def validate_smoke_config(config: DictConfig) -> None:
         raise ValueError(f"{module_name} must expose run(cfg) for the Iris training driver")
 
 
-def compare_arms(output_root: str, manifest: dict, arm_summaries: dict) -> dict:
+def compare_arms(comparison_root: str, arm_outputs: dict[str, str], manifest: dict, arm_summaries: dict) -> dict:
     """Pair RL and SFT predictions on the same held-out trajectories."""
     target_tokens = manifest["learner_token_budget"]
     for arm, summary in arm_summaries.items():
@@ -203,7 +203,7 @@ def compare_arms(output_root: str, manifest: dict, arm_summaries: dict) -> dict:
             raise ValueError(f"{arm} did not match the common learner token budget")
     rows_by_arm = {}
     for arm in ("rl", "sft"):
-        path = StoragePath(f"{output_root}/{arm}/diagnostics/comparison.jsonl")
+        path = StoragePath(f"{arm_outputs[arm]}/diagnostics/comparison.jsonl")
         rows_by_arm[arm] = {
             row["trajectory_id"]: row for line in path.read_text().splitlines() if (row := json.loads(line))
         }
@@ -243,10 +243,48 @@ def compare_arms(output_root: str, manifest: dict, arm_summaries: dict) -> dict:
         "rl_wins": sum(row["rl_after"] > row["sft_after"] for row in paired),
         "sft_wins": sum(row["sft_after"] > row["rl_after"] for row in paired),
     }
-    StoragePath(f"{output_root}/diagnostics/comparison.jsonl").write_text(
+    StoragePath(f"{comparison_root}/diagnostics/comparison.jsonl").write_text(
         "".join(json.dumps(row) + "\n" for row in paired)
     )
-    StoragePath(f"{output_root}/diagnostics/summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    StoragePath(f"{comparison_root}/diagnostics/summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    return summary
+
+
+def finish_arm(arm: str, output: str, retention_root: str, manifest: dict) -> dict:
+    """Verify a completed arm against its learner ledger and retained probes."""
+    ledger = json.loads(StoragePath(f"{output}/exports/learner-token-budget.json").read_text())
+    remaining = ledger["target_tokens"] - ledger["input_tokens"]
+    if (
+        not ledger["steps"]
+        or ledger["target_tokens"] != manifest["learner_token_budget"]
+        or not 0 <= remaining <= TOKEN_MATCH_TOLERANCE * ledger["target_tokens"]
+    ):
+        raise RuntimeError(f"{arm} did not reach the shared token budget")
+    final_step = ledger["steps"][-1]["step"]
+    consumed = {
+        (step["step"], str(instance), repetition)
+        for step in ledger["steps"]
+        for instance, repetition in step["trajectory_ids"]
+    }
+    summary = write_smoke_report(
+        f"{output}/exports",
+        f"{output}/diagnostics",
+        retention_root,
+        manifest,
+        final_step=final_step,
+        training_completed=True,
+        consumed_trajectories=consumed,
+    )
+    expected_counts = {step["step"]: len(step["trajectory_ids"]) for step in ledger["steps"]}
+    if (
+        summary["training_responses_per_step"] != expected_counts
+        or summary["training_input_tokens"] != ledger["input_tokens"]
+    ):
+        raise RuntimeError(f"{arm} retained records do not match the completed learner updates")
+    if arm == "rl" and summary["mixed_reward_groups"] == 0:
+        raise RuntimeError("RL run had no mixed-reward groups")
+    if (summary["before_probe_count"], summary["after_probe_count"]) != (manifest["probe_prefixes"],) * 2:
+        raise RuntimeError(f"{arm} did not evaluate all held-out probes before and after training")
     return summary
 
 
@@ -377,44 +415,21 @@ def main() -> None:
                 logger.info("{} launch result: {}", arm, json.dumps(asdict(result), sort_keys=True))
                 if result.state != LaunchState.SUCCEEDED:
                     raise RuntimeError(f"Grug Pivot {arm} failed: {result.failure}")
-                ledger = json.loads(StoragePath(f"{output}/exports/learner-token-budget.json").read_text())
-                final_step = ledger["steps"][-1]["step"]
-                consumed = {
-                    (step["step"], str(instance), repetition)
-                    for step in ledger["steps"]
-                    for instance, repetition in step["trajectory_ids"]
-                }
-                summary = write_smoke_report(
-                    f"{output}/exports",
-                    f"{output}/diagnostics",
-                    f"{temporary}/attempts/trajectories",
-                    manifest,
-                    final_step=final_step,
-                    training_completed=True,
-                    consumed_trajectories=consumed,
-                )
+                summary = finish_arm(arm, output, f"{temporary}/attempts/trajectories", manifest)
                 logger.info("{} report: {}", arm, json.dumps(summary, sort_keys=True))
-                expected_counts = {step["step"]: len(step["trajectory_ids"]) for step in ledger["steps"]}
-                if (
-                    summary["training_responses_per_step"] != expected_counts
-                    or summary["training_input_tokens"] != ledger["input_tokens"]
-                ):
-                    raise RuntimeError(f"{arm} retained records do not match the completed learner updates")
-                remaining = ledger["target_tokens"] - ledger["input_tokens"]
-                if (
-                    ledger["target_tokens"] != manifest["learner_token_budget"]
-                    or not 0 <= remaining <= TOKEN_MATCH_TOLERANCE * ledger["target_tokens"]
-                ):
-                    raise RuntimeError(f"{arm} did not reach the shared token budget")
-                if arm == "rl" and summary["mixed_reward_groups"] == 0:
-                    raise RuntimeError("RL run had no mixed-reward groups")
-                if (summary["before_probe_count"], summary["after_probe_count"]) != (manifest["probe_prefixes"],) * 2:
-                    raise RuntimeError(f"{arm} did not evaluate all held-out probes before and after training")
                 arm_summaries[arm] = summary
         if args.compare_sft:
             logger.info(
                 "RL/SFT comparison: {}",
-                json.dumps(compare_arms(args.output_root, manifest, arm_summaries), sort_keys=True),
+                json.dumps(
+                    compare_arms(
+                        args.output_root,
+                        {arm: f"{args.output_root}/{arm}" for arm in arms},
+                        manifest,
+                        arm_summaries,
+                    ),
+                    sort_keys=True,
+                ),
             )
 
 
