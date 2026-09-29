@@ -23,7 +23,7 @@ from skyrl_gym.envs.nemotron_ultra.genrm_utils import (
 from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group
 from skyrl_gym.envs.nemotron_ultra.instruction_following import grade_instruction_following
 from skyrl_gym.envs.nemotron_ultra.jailbreak import grade_jailbreak
-from skyrl_gym.envs.nemotron_ultra.judge import GenRMResponseTransport, OpenAIJudge
+from skyrl_gym.envs.nemotron_ultra.judge import GenRMResponseTransport, IncompleteJudgeResponse, OpenAIJudge
 from skyrl_gym.envs.nemotron_ultra.judge_verifiers import grade_abstention, grade_multichallenge
 from skyrl_gym.envs.nemotron_ultra.lean import verify_lean_attempt
 from skyrl_gym.envs.nemotron_ultra import math_with_judge
@@ -599,6 +599,43 @@ def test_math_reward_avoids_forking_the_multithreaded_worker(monkeypatch):
 
     assert reward == 1.0
     assert requested_methods == ["forkserver"]
+
+
+def test_math_judge_retries_length_capped_output_with_a_larger_budget():
+    class LengthCappedJudge:
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, messages, *, max_tokens=8192):
+            self.calls.append(max_tokens)
+            if len(self.calls) == 1:
+                raise IncompleteJudgeResponse("finish_reason=length")
+            return "[[A=B]]"
+
+    judge = LengthCappedJudge()
+    reward, details = grade_math(
+        r"The answer is \boxed{0.25}.",
+        {"question": "What is one half?", "expected_answer": r"\frac{1}{2}"},
+        judge=judge,
+    )
+
+    assert reward == 1.0
+    assert judge.calls == [8192, 16384, 8192]
+
+
+def test_math_judge_persistent_output_cap_keeps_the_attempt_ungraded():
+    class CappedJudge:
+        def generate(self, messages, *, max_tokens=8192):
+            raise IncompleteJudgeResponse("finish_reason=length")
+
+    env = _ultra_env("math_with_judge_simple_agent", {}, {"question": "What is one half?", "expected_answer": "1/2"})
+    env.general_judge = CappedJudge()
+
+    result = env.step(r"The answer is \boxed{0.25}.")
+
+    assert result["verification"].status is VerificationStatus.ERROR
+    assert result["verification"].score is None
+    assert result["reward"] == 0.0
 
 
 class _Judge:
