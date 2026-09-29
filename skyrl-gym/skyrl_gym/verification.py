@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping, Protocol, TypeAlias
 
+import numpy as np
+
 
 Message: TypeAlias = Mapping[str, Any]
 UNKNOWN_STOP_REASON = "unknown"
@@ -36,7 +38,7 @@ class RolloutEvidence:
     behavior_logprobs: tuple[float, ...] | None = None
     student_topk_indices: tuple[tuple[int, ...], ...] | None = None
     behavior_topk_logprobs: tuple[tuple[float, ...], ...] | None = None
-    routed_experts: tuple[tuple[tuple[int, ...], ...], ...] | None = None
+    routed_experts: np.ndarray | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

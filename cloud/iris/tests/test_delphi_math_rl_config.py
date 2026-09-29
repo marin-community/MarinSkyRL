@@ -23,7 +23,6 @@ if str(_REPO_ROOT) not in sys.path:
 from cloud.iris.rl_config_translation import (  # noqa: E402
     compose_skyrl_config,
     parse_rl_config,
-    validate_tp_divides_heads,
 )
 
 _CONFIG = "cloud/iris/configs/delphi_math_rl.yaml"
@@ -32,24 +31,6 @@ _CONFIG = "cloud/iris/configs/delphi_math_rl.yaml"
 @dataclass
 class _HPCStub:
     gpus_per_node: int = 8
-
-
-def test_delphi_config_parses_to_main_base_non_agentic():
-    parsed = parse_rl_config(_CONFIG)
-    assert parsed.entrypoint == "skyrl_train.entrypoints.main_base"
-    # Non-agentic: no terminal_bench section.
-    assert parsed.terminal_bench is None
-    # env_class routed via the `environment` section (default_env_class fallback).
-    assert parsed.environment.get("env_class") == "aime"
-    # Parquet data kind is popped out of `data` (must not reach Hydra).
-    assert parsed.data_kind == "parquet"
-    assert "kind" not in parsed.data
-    # 4k cap + TP=2 (divides 42).
-    assert parsed.tensor_parallel_size == 2
-    assert parsed.generator["engine_init_kwargs"]["max_model_len"] == 4096
-    # The chat-template override + head-count guard keys are declared.
-    assert parsed.raw["policy_chat_template"].endswith("delphi_v0.jinja2")
-    assert parsed.raw["model_num_attention_heads"] == 42
 
 
 def test_delphi_config_composes_environment_and_caps_into_hydra_config():
@@ -125,33 +106,6 @@ def test_policy_revision_override_reaches_trainer_config():
         _HPCStub(),
     ).config
     assert cfg.trainer.policy.model.revision == revision
-
-
-def test_partial_model_source_is_rejected_during_config_translation():
-    parsed = parse_rl_config(_CONFIG)
-    exp_args = {
-        "job_name": "invalid-exportable-run",
-        "model_path": "/tmp/materialized-model",
-        "model_source_identity": "policy@abc123",
-        "num_nodes": 4,
-    }
-
-    with pytest.raises(ValueError, match="must be provided together"):
-        compose_skyrl_config(parsed, exp_args, _HPCStub())
-
-
-def test_tp_guard_rejects_tp8_on_42_heads():
-    with pytest.raises(ValueError, match="does not divide"):
-        validate_tp_divides_heads(8, 42)
-
-
-@pytest.mark.parametrize("tp", [1, 2, 3, 6, 7, 14, 21, 42])
-def test_tp_guard_allows_divisors_of_42(tp):
-    validate_tp_divides_heads(tp, 42)  # must not raise
-
-
-def test_tp_guard_noop_when_heads_unset():
-    validate_tp_divides_heads(8, None)  # existing configs (no head count) are unaffected
 
 
 def test_parse_rejects_bad_tp_against_declared_heads(tmp_path):

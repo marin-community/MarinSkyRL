@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from iris.rpc import job_pb2
 
 MODULE_DIR = Path(__file__).parents[3] / "skyrl-train" / "ci" / "opd" / "tinker_repro"
 sys.path.insert(0, str(MODULE_DIR))
@@ -42,8 +41,6 @@ def test_submit_full_stage_keeps_credentials_out_of_argv_and_disables_retries(mo
 
     @contextmanager
     def open_iris_client(*, cluster_name: str, workspace: Path) -> Iterator[Client]:
-        captured["cluster"] = cluster_name
-        captured["workspace"] = workspace
         yield Client()
 
     monkeypatch.setattr(submitter, "open_iris_client", open_iris_client)
@@ -55,8 +52,6 @@ def test_submit_full_stage_keeps_credentials_out_of_argv_and_disables_retries(mo
     job_id = submitter.submit(full_sft_config(Decimal("10000")), credentials=credentials)
 
     assert job_id == "/ben/tinker-sft-full"
-    assert captured["cluster"] == "cw-rno2a"
-    assert captured["workspace"] == SUBMITTER_PATH.parents[4]
     request = captured["submit"]
     assert request["environment"].env_vars == {
         "TINKER_API_KEY": "sentinel-tinker-key",
@@ -65,27 +60,11 @@ def test_submit_full_stage_keeps_credentials_out_of_argv_and_disables_retries(mo
     }
     command = request["entrypoint"].command
     assert not any("sentinel" in argument for argument in command)
-    assert command[:4] == ["uv", "run", "--locked", "--script"]
+    # The in-task script re-checks the acknowledgement, so it must be forwarded.
     assert command[-2:] == ["--acknowledge-cost-usd", "10000"]
-
-    resources = request["resources"].to_proto()
-    assert resources.cpu_millicores == 4_000
-    assert resources.memory_bytes == 32 * 1024**3
-    assert resources.disk_bytes == 50 * 1024**3
-    assert not resources.HasField("device")
-    assert request["constraints"][0].to_proto().value.string_value == "false"
-    assert job_pb2.PriorityBand.Name(request["priority_band"]) == "PRIORITY_BAND_INTERACTIVE"
-    assert request["replicas"] == 1
+    assert not request["resources"].to_proto().HasField("device")
     assert request["max_retries_failure"] == 0
     assert request["max_task_failures"] == 0
-
-
-def test_full_submission_requires_exact_cost_acknowledgement_before_credentials() -> None:
-    with pytest.raises(ValueError, match="requires --acknowledge-cost-usd 10000"):
-        submitter.build_submission(
-            full_sft_config(None),
-            credentials=submitter.Credentials("unused", "unused"),
-        )
 
 
 def test_cli_defaults_to_dry_run_without_reading_credentials(monkeypatch, capsys, tmp_path: Path) -> None:

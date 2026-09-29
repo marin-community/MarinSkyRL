@@ -1,5 +1,4 @@
 import argparse
-import os
 from pathlib import Path
 
 import ray
@@ -11,13 +10,20 @@ from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import validate_cfg
 from skyrl_train.workers.worker import PPORayActorGroup
 from tests.cpu.tiny_training.cpu_backend import CausalLMPolicy, CPUPolicyWorker
-from tests.cpu.tiny_training.experiment import WORKER_ENV_VARS, RolloutShape, TrainingMode, tiny_training_config
+from tests.cpu.tiny_training.experiment import (
+    LOGICAL_CPUS,
+    WORKER_ENV_VARS,
+    RolloutShape,
+    TrainingMode,
+    tiny_training_config,
+)
+from tests.cpu.tiny_training.tiny_model import build_tiny_policy
 
 
 def fixed_training_batch(model_dir: str) -> TrainingInputBatch:
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    answer = tokenizer.encode("#### 1", add_special_tokens=False)
-    eos = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    answer = tokenizer.encode("123", add_special_tokens=False)
+    eos = tokenizer.eos_token_id
     response = [*answer, eos]
     assert len(response) == 4
     mask = torch.tensor([[1, 0, 0, 0]] * 4 + [[1, 1, 1, 1]] * 4, dtype=torch.int64).repeat(2, 1)
@@ -45,27 +51,24 @@ def fixed_training_batch(model_dir: str) -> TrainingInputBatch:
     return batch
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Run one CPU policy update on fixed unequal-length rows.")
-    parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--micro-batch-size", type=int, required=True)
-    args = parser.parse_args()
+def run_fixed_update(root: Path, model_dir: Path, micro_batch_size: int) -> None:
     cfg = tiny_training_config(
-        args.root,
+        root,
+        model_dir,
         TrainingMode.SYNC,
         RolloutShape.SINGLE_TURN,
         max_steps=1,
         checkpoint_interval=1,
         dp_size=2,
-        micro_batch_size=args.micro_batch_size,
+        micro_batch_size=micro_batch_size,
         max_in_flight=1,
     )
     validate_cfg(cfg)
     batch = fixed_training_batch(cfg.trainer.policy.model.path)
-    dump_dir = args.root / "exports/dumped_data"
+    dump_dir = root / "exports/dumped_data"
     dump_dir.mkdir(parents=True, exist_ok=True)
     batch.save(dump_dir / "global_step_1_training_input.pkl")
-    ray.init(num_cpus=os.cpu_count(), num_gpus=2, runtime_env={"env_vars": WORKER_ENV_VARS})
+    ray.init(num_cpus=LOGICAL_CPUS, num_gpus=2, runtime_env={"env_vars": WORKER_ENV_VARS}, include_dashboard=False)
     try:
         workers = PPORayActorGroup(cfg, 1, 2, ray.remote(num_gpus=1)(CPUPolicyWorker))
         ray.get(workers.async_init_model(cfg.trainer.policy.model.path, num_training_steps=1))
@@ -74,11 +77,19 @@ def main() -> None:
         workers.run_method(
             "pass_through",
             "save_checkpoint",
-            ckpt_dir=str(args.root / "ckpts/global_step_1" / POLICY_CHECKPOINT_SUBDIRECTORY),
+            ckpt_dir=str(root / "ckpts/global_step_1" / POLICY_CHECKPOINT_SUBDIRECTORY),
         )
         workers.kill_actors()
     finally:
         ray.shutdown()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run one CPU policy update on fixed unequal-length rows.")
+    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--micro-batch-size", type=int, required=True)
+    args = parser.parse_args()
+    run_fixed_update(args.root, build_tiny_policy(args.root / "model"), args.micro_batch_size)
 
 
 if __name__ == "__main__":

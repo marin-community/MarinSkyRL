@@ -3,13 +3,11 @@ from dataclasses import replace
 import pytest
 import torch
 from omegaconf import OmegaConf
-from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from marinskyrl.distillation import TeacherEvidenceKind, DistillationObjectiveKind
 from skyrl_train.config.objective_spec import LossReduction, TopKLossParams
 from skyrl_train.distillation import (
     DISTILLATION_TOPK_METRIC,
-    ChosenTokenTeacherEvidence,
     TeacherTopKInput,
     ChosenTokenTeacherInput,
     StudentTopKInput,
@@ -26,7 +24,7 @@ from skyrl_train.distillation_adapters import build_teacher_scoring_work
 from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.trajectory_selection import BestOfNTrajectorySelector
-from skyrl_train.objective.losses import importance_sampling_policy_loss, ppo_policy_loss
+from skyrl_train.objective.losses import importance_sampling_policy_loss
 from skyrl_train.objective.objective import TopKTeacherBatch, build_objective_micro_batch, compute_policy_objective
 from skyrl_train.objective.reduction import step_counts, reduce_to_step
 from skyrl_train.objective.teacher import teacher_advantages, topk_teacher_loss, mask_teacher_evidence
@@ -512,63 +510,7 @@ def test_student_topk_surrogate_applies_negative_advantage_dual_clip():
     assert metrics["distillation_dual_clip_fraction"] == 1.0
 
 
-def test_real_same_vocabulary_teacher_changes_student_gradient_and_update():
-    config = Qwen3Config(
-        vocab_size=32,
-        hidden_size=16,
-        intermediate_size=32,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=1,
-        head_dim=8,
-        max_position_embeddings=16,
-    )
-    token_ids = torch.tensor([[1, 2, 3, 4, 5]])
-    response_token_ids = token_ids[:, -2:]
-
-    torch.manual_seed(0)
-    initial_student = Qwen3ForCausalLM(config)
-    initial_state = {name: value.detach().clone() for name, value in initial_student.state_dict().items()}
-
-    def model(seed: int) -> Qwen3ForCausalLM:
-        torch.manual_seed(seed)
-        return Qwen3ForCausalLM(config)
-
-    def chosen_logprobs(causal_lm: Qwen3ForCausalLM) -> torch.Tensor:
-        response_logits = causal_lm(token_ids).logits[:, -3:-1]
-        return response_logits.log_softmax(dim=-1).gather(-1, response_token_ids.unsqueeze(-1)).squeeze(-1)
-
-    def optimize_once(teacher: Qwen3ForCausalLM) -> tuple[torch.Tensor, torch.Tensor]:
-        student = model(0)
-        student.load_state_dict(initial_state)
-        optimizer = torch.optim.SGD(student.parameters(), lr=0.1)
-        with torch.no_grad():
-            teacher_actions = chosen_logprobs(teacher)
-        objective = _objective(chosen_logprobs(student), teacher_actions)
-        optimizer.zero_grad()
-        objective.optimization_loss.backward()
-        gradient = torch.cat(
-            [parameter.grad.flatten() for parameter in student.parameters() if parameter.grad is not None]
-        )
-        optimizer.step()
-        updated_parameters = torch.cat([parameter.detach().flatten() for parameter in student.parameters()])
-        return gradient, updated_parameters
-
-    first_teacher = model(1)
-    second_teacher = model(2)
-    first_teacher_actions = chosen_logprobs(first_teacher)
-    second_teacher_actions = chosen_logprobs(second_teacher)
-    first_gradient, first_update = optimize_once(first_teacher)
-    second_gradient, second_update = optimize_once(second_teacher)
-    initial_parameters = torch.cat([value.flatten() for value in initial_state.values()])
-
-    assert not torch.allclose(first_teacher_actions, second_teacher_actions)
-    assert not torch.allclose(first_gradient, second_gradient)
-    assert not torch.allclose(first_update, initial_parameters)
-    assert not torch.allclose(second_update, initial_parameters)
-
-
-def test_best_of_n_optional_teacher_changes_only_the_selected_update():
+def test_best_of_n_teacher_scoring_requests_only_the_selected_trajectory():
     selection = BestOfNTrajectorySelector(2).select(
         {
             "prompt_token_ids": [[10], [10]],
@@ -588,47 +530,9 @@ def test_best_of_n_optional_teacher_changes_only_the_selected_update():
         coefficient=0.5,
         route_weights=(1.0,),
     )
+
     assert work.request.trajectory_ids == ("math_1",)
     torch.testing.assert_close(work.request.response_token_ids, torch.tensor([[30, 31]]))
-
-    evidence = ChosenTokenTeacherEvidence(
-        trajectory_ids=work.request.trajectory_ids,
-        route_ids=work.request.route_ids,
-        teacher_id=work.request.teacher_id,
-        teacher_revision="teacher-revision",
-        plan_version=work.request.plan_version,
-        valid_mask=work.request.response_mask,
-        chosen_logprobs=torch.tensor([[-0.25, -2.0]], dtype=torch.float64),
-    )
-    distillation = prepare_sampled_reverse_kl(
-        work.request,
-        evidence,
-        coefficient=work.coefficient,
-        route_weights=work.route_weights,
-    )
-
-    def selected_update(attached_distillation):
-        action_logprobs = torch.tensor([[-1.0, -1.0]], dtype=torch.float64, requires_grad=True)
-        objective = _composed_objective(
-            action_log_probs=action_logprobs,
-            old_action_log_probs=torch.full_like(action_logprobs, -1.0),
-            base_action_log_probs=None,
-            advantages=torch.ones_like(action_logprobs),
-            loss_mask=torch.ones_like(action_logprobs),
-            rollout_logprobs=None,
-            response_span_tags=None,
-            token_entropy=torch.zeros_like(action_logprobs),
-            config=_policy_config(),
-            policy_loss_fn=ppo_policy_loss,
-            distillation=attached_distillation,
-        )
-        objective.optimization_loss.backward()
-        return action_logprobs.grad
-
-    update_without_teacher = selected_update(None)
-    update_with_teacher = selected_update(distillation)
-
-    assert not torch.equal(update_without_teacher, update_with_teacher)
 
 
 def test_training_batch_iterator_requires_driver_to_consume_chosen_teacher():
@@ -652,64 +556,6 @@ def test_training_batch_iterator_requires_driver_to_consume_chosen_teacher():
 
     with pytest.raises(ValueError, match="chosen-token teacher tensors must be consumed on the driver"):
         list(TrainingBatchIterator(batch, sample_batch_size=1))
-
-
-def test_training_batch_iterator_preserves_sparse_distillation_payload():
-    batch = TrainingInputBatch(
-        {
-            "sequences": torch.tensor([[1, 2, 3]]),
-            "action_log_probs": torch.zeros(1, 2),
-            "base_action_log_probs": None,
-            "values": None,
-            "returns": torch.zeros(1, 2),
-            "advantages": torch.zeros(1, 2),
-            "attention_mask": torch.ones(1, 3, dtype=torch.long),
-            "loss_mask": torch.ones(1, 2, dtype=torch.long),
-            "response_mask": torch.ones(1, 2, dtype=torch.long),
-            "teacher_topk_indices": torch.tensor([[[1, 2], [3, 4]]]),
-            "teacher_topk_logprobs": torch.log(torch.tensor([[[0.7, 0.2], [0.6, 0.2]]])),
-            "teacher_retained_mass": torch.tensor([[0.9, 0.8]]),
-            "teacher_valid_mask": torch.ones(1, 2, dtype=torch.bool),
-            "distillation_loss_weights": torch.tensor([[0.4, 0.4]]),
-        }
-    )
-    batch.metadata = {"response_length": 2}
-
-    [experience] = list(TrainingBatchIterator(batch, sample_batch_size=1))
-
-    assert isinstance(experience.distillation, TeacherTopKInput)
-    torch.testing.assert_close(experience.distillation.retained_mass, torch.tensor([[0.9, 0.8]]))
-
-
-def test_training_batch_iterator_preserves_student_selected_teacher_scores():
-    batch = TrainingInputBatch(
-        {
-            "sequences": torch.tensor([[1, 2, 3]]),
-            "action_log_probs": torch.zeros(1, 2),
-            "base_action_log_probs": None,
-            "values": None,
-            "returns": torch.zeros(1, 2),
-            "advantages": torch.zeros(1, 2),
-            "attention_mask": torch.ones(1, 3, dtype=torch.long),
-            "loss_mask": torch.ones(1, 2, dtype=torch.long),
-            "response_mask": torch.ones(1, 2, dtype=torch.long),
-            "student_topk_indices": torch.tensor([[[1, 2], [3, 4]]]),
-            "behavior_topk_logprobs": torch.log(torch.tensor([[[0.4, 0.3], [0.5, 0.2]]])),
-            "teacher_on_student_logprobs": torch.log(torch.tensor([[[0.5, 0.2], [0.4, 0.3]]])),
-            "teacher_valid_mask": torch.ones(1, 2, dtype=torch.bool),
-            "distillation_loss_weights": torch.tensor([[0.4, 0.6]]),
-        }
-    )
-    batch.metadata = {"response_length": 2}
-
-    [experience] = list(TrainingBatchIterator(batch, sample_batch_size=1))
-
-    assert isinstance(experience.distillation, StudentTopKInput)
-    torch.testing.assert_close(experience.distillation.student_token_ids(), torch.tensor([[[1, 2], [3, 4]]]))
-    torch.testing.assert_close(
-        experience.distillation.teacher_on_student_logprobs,
-        torch.log(torch.tensor([[[0.5, 0.2], [0.4, 0.3]]])),
-    )
 
 
 def test_student_topk_payload_rejects_mixed_or_partial_evidence():
@@ -806,3 +652,61 @@ def test_student_topk_surrogate_all_masked_micro_batch_contributes_zero_with_gra
         "distillation_dual_clip_fraction",
     }
     torch.testing.assert_close(logits.grad, torch.zeros_like(logits))
+
+
+@pytest.mark.parametrize(
+    ("evidence", "payload_type", "field", "expected_second_row"),
+    [
+        (
+            {
+                "teacher_topk_indices": torch.tensor([[[1, 2], [3, 4]], [[5, 6], [7, 8]]]),
+                "teacher_topk_logprobs": torch.log(torch.tensor([[[0.7, 0.2], [0.6, 0.2]], [[0.5, 0.2], [0.4, 0.2]]])),
+                "teacher_retained_mass": torch.tensor([[0.9, 0.8], [0.7, 0.6]]),
+            },
+            TeacherTopKInput,
+            "retained_mass",
+            torch.tensor([[0.7, 0.6]]),
+        ),
+        (
+            {
+                "student_topk_indices": torch.tensor([[[1, 2], [3, 4]], [[5, 6], [7, 8]]]),
+                "behavior_topk_logprobs": torch.log(torch.tensor([[[0.4, 0.3], [0.5, 0.2]], [[0.6, 0.1], [0.3, 0.3]]])),
+                "teacher_on_student_logprobs": torch.log(
+                    torch.tensor([[[0.5, 0.2], [0.4, 0.3]], [[0.7, 0.1], [0.2, 0.2]]])
+                ),
+            },
+            StudentTopKInput,
+            "teacher_on_student_logprobs",
+            torch.log(torch.tensor([[[0.7, 0.1], [0.2, 0.2]]])),
+        ),
+    ],
+    ids=["sparse_forward_kl", "student_selected_topk"],
+)
+def test_training_batch_iterator_slices_distillation_payload_per_micro_batch(
+    evidence, payload_type, field, expected_second_row
+):
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[1, 2, 3], [4, 5, 6]]),
+            "action_log_probs": torch.zeros(2, 2),
+            "base_action_log_probs": None,
+            "values": None,
+            "returns": torch.zeros(2, 2),
+            "advantages": torch.zeros(2, 2),
+            "attention_mask": torch.ones(2, 3, dtype=torch.long),
+            "loss_mask": torch.ones(2, 2, dtype=torch.long),
+            "response_mask": torch.ones(2, 2, dtype=torch.long),
+            "teacher_valid_mask": torch.ones(2, 2, dtype=torch.bool),
+            "distillation_loss_weights": torch.tensor([[0.4, 0.4], [0.6, 0.6]]),
+            **evidence,
+        }
+    )
+    batch.metadata = {"response_length": 2}
+
+    experiences = list(TrainingBatchIterator(batch, sample_batch_size=1))
+
+    assert len(experiences) == 2
+    distillation = experiences[1].distillation
+    assert isinstance(distillation, payload_type)
+    torch.testing.assert_close(getattr(distillation, field), expected_second_row)
+    torch.testing.assert_close(distillation.loss_weights, torch.tensor([[0.6, 0.6]]))

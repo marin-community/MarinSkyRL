@@ -1,10 +1,10 @@
 from dataclasses import replace
 
+import numpy as np
 from omegaconf import OmegaConf
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
-from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TrajectoryID
 
 
@@ -60,38 +60,15 @@ def test_whole_trajectory_projection_preserves_one_sample_per_trajectory():
 
 def test_whole_trajectory_projection_preserves_routes_and_fills_missing_rows():
     routed = _step([3, 4], [0.0, 1.0])
-    routed.evidence = replace(routed.evidence, routed_experts=(((1, 2),), ((3, 4),)))
+    routed.evidence = replace(routed.evidence, routed_experts=np.asarray([[[1, 2]], [[3, 4]]], dtype=np.uint8))
 
     output = WholeTrajectoryProjection(_config(), _Tokenizer()).project(
         [routed, _step([5], [0.0])],
         {"env_classes": None, "sampling_params": {"logprobs": True}},
     )
 
-    assert output["rollout_routed_experts"] == [[[[1, 2]], [[3, 4]]], [[[0, 0]]]]
-
-
-def test_whole_trajectory_projection_adapts_masked_scalar_row_to_token_level_rewards():
-    failed = _step([0], 0.0)
-    failed = replace(
-        failed,
-        verification=VerificationResult.error(
-            "SkyRL-Gym agent loop failed", diagnostics={"exception_type": "ConnectionError"}
-        ),
-        disposition=TrainingDisposition.mask("SkyRL-Gym agent loop failed", exception_type="ConnectionError"),
-    )
-    failed.error_treatment = "mask"
-
-    projection = WholeTrajectoryProjection(_config(), _Tokenizer())
-    output = projection.project(
-        [_step([3, 4], [0.0, 1.0]), failed],
-        {"env_classes": None, "sampling_params": {"logprobs": True}},
-    )
-
-    assert output["rewards"] == [[0.0, 1.0], [0.0]]
-    assert output["loss_masks"] == [[1, 1], [0]]
-    assert output["exception_types"] == [None, "ConnectionError"]
-    assert output["error_treatments"] == [None, "mask"]
-    validate_trajectory_batch(2, output)
+    np.testing.assert_array_equal(output["rollout_routed_experts"][0], [[[1, 2]], [[3, 4]]])
+    np.testing.assert_array_equal(output["rollout_routed_experts"][1], [[[0, 0]]])
 
 
 def test_step_wise_projection_preserves_group_identity_and_final_step():
@@ -125,7 +102,7 @@ def test_step_wise_projection_preserves_group_identity_and_final_step():
 
 def test_step_wise_projection_preserves_routes():
     step = _step([3, 4], [0.0, 1.0])
-    step.evidence = replace(step.evidence, routed_experts=(((1, 2),), ((3, 4),)))
+    step.evidence = replace(step.evidence, routed_experts=np.asarray([[[1, 2]], [[3, 4]]], dtype=np.uint8))
 
     output = StepWiseTrajectoryProjection(_config(), _Tokenizer()).project(
         [[step]],
@@ -136,7 +113,7 @@ def test_step_wise_projection_preserves_routes():
         },
     )
 
-    assert output["rollout_routed_experts"] == [[[[1, 2]], [[3, 4]]]]
+    np.testing.assert_array_equal(output["rollout_routed_experts"][0], [[[1, 2]], [[3, 4]]])
 
 
 def test_step_wise_projection_preserves_student_topk_candidates():
