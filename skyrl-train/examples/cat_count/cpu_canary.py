@@ -34,6 +34,7 @@ HELD_OUT_N = [3, 5, 13, 16]
 TRAIN_N = [n for n in range(1, 21) if n not in HELD_OUT_N]
 GROUP_SIZE = 8
 MAX_NEW_TOKENS = 64
+MAX_SEQUENCE_LENGTH = 128
 DEFAULT_CKPT = Path.home() / ".cache/oa/cat-count-canary/base-530k"
 
 
@@ -87,7 +88,7 @@ def pretrain(args) -> None:
         num_hidden_layers=args.layers,
         num_attention_heads=4,
         num_key_value_heads=4,
-        max_position_embeddings=128,
+        max_position_embeddings=MAX_SEQUENCE_LENGTH,
         bos_token_id=None,
         eos_token_id=tok.eos_token_id,
         pad_token_id=tok.pad_token_id,
@@ -195,7 +196,7 @@ def rl(args) -> int:
             clip_ratio_c=3.0,
             use_tis=False,
             tis_imp_ratio_cap=2.0,
-            max_seq_len=128,
+            max_seq_len=MAX_SEQUENCE_LENGTH,
         )
     )
     group_index = np.array([i // GROUP_SIZE for i in range(len(TRAIN_N) * GROUP_SIZE)])
