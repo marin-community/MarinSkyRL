@@ -42,7 +42,11 @@ MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 @pytest.mark.parametrize("megatron_overrides", [False, True])
 def test_native_adamw_recipe_matches_torch_weight_updates(megatron_overrides):
     from megatron.core import parallel_state
-    from skyrl_train.distributed.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
+    from skyrl_train.distributed.megatron.optimizer import (
+        get_megatron_optimizer,
+        get_megatron_optimizer_param_scheduler,
+        init_megatron_optim_config,
+    )
 
     torch.distributed.init_process_group("nccl", store=torch.distributed.HashStore(), rank=0, world_size=1)
     try:
@@ -50,12 +54,14 @@ def test_native_adamw_recipe_matches_torch_weight_updates(megatron_overrides):
         torch.manual_seed(17)
         model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.LayerNorm(4)).cuda()
         model.config = SimpleNamespace()
+        model.ddp_config = SimpleNamespace(use_megatron_fsdp=False, num_distributed_optimizer_instances=1)
         reference = copy.deepcopy(model)
         recipe = {
             "optimizer": "AdamW",
             "lr": 0.03,
             "weight_decay": 0.2,
             "max_grad_norm": 0.0,
+            "num_warmup_steps": 0,
             "adam_betas": [0.7, 0.8],
             "optimizer_kwargs": {"eps": 1e-3},
         }
@@ -65,6 +71,7 @@ def test_native_adamw_recipe_matches_torch_weight_updates(megatron_overrides):
             kwargs.update(adam_beta1=0.6, adam_beta2=0.75, adam_eps=2e-3)
             betas, epsilon = (0.6, 0.75), 2e-3
         optimizer = get_megatron_optimizer([model], init_megatron_optim_config(recipe, kwargs))
+        get_megatron_optimizer_param_scheduler(optimizer, OmegaConf.create(recipe), num_training_steps=3)
         adamw = torch.optim.AdamW(reference.parameters(), lr=0.03, betas=betas, eps=epsilon, weight_decay=0.2)
         for amplitude in (0.125, -0.25, 0.5):
             for parameter, expected in zip(model.parameters(), reference.parameters(), strict=True):
