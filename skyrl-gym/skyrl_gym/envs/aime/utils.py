@@ -16,6 +16,7 @@
 
 import math
 import re
+from fractions import Fraction
 from typing import Optional, Dict, Any
 
 
@@ -170,6 +171,27 @@ def normalize_final_answer(final_answer: str) -> str:
     return final_answer.strip()
 
 
+_TEX_FRACTION = re.compile(r"\\[dt]?frac\{(-?\d+(?:\.\d+)?)\}\{(-?\d+(?:\.\d+)?)\}")
+_PLAIN_NUMBER = re.compile(r"-?\d+(?:\.\d+)?(?:/-?\d+(?:\.\d+)?)?")
+
+
+def rational_value(answer: str) -> Optional[Fraction]:
+    """Parse a normalized answer as an exact rational, accepting TeX fraction forms."""
+    candidate = answer.replace(r"\left", "").replace(r"\right", "").strip()
+    match = _TEX_FRACTION.fullmatch(candidate)
+    if match is not None:
+        try:
+            return Fraction(match.group(1)) / Fraction(match.group(2))
+        except ZeroDivisionError:
+            return None
+    if not _PLAIN_NUMBER.fullmatch(candidate):
+        return None
+    try:
+        return Fraction(candidate)
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
 def is_correct_minerva(
     solution_str: str, gt: str, gt_need_extract: bool = False, answer_pattern: str = r"(?i)Answer\s*:\s*([^\n<]+)"
 ) -> tuple[bool, str]:
@@ -198,7 +220,11 @@ def is_correct_minerva(
     else:
         gt = normalize_final_answer(gt)
 
-    return (pred == gt), pred
+    if pred == gt:
+        return True, pred
+    pred_value = rational_value(pred)
+    gt_value = rational_value(gt)
+    return pred_value is not None and pred_value == gt_value, pred
 
 
 def is_correct_strict_box(
