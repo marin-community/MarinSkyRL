@@ -497,3 +497,30 @@ async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
     )
     assert result["responses"] == ["7"]
     assert result["prompt_ids"] == [[1, 2, 3, 4]]
+
+
+@pytest.mark.asyncio
+async def test_chat_output_budget_honors_the_trainer_converted_turn_cap():
+    """get_vllm_sampling_params renames max_generate_length to max_tokens before the client sees it."""
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "7"
+    engine.tokenize.return_value = {"tokens": [1, 2, 3, 4]}
+
+    async def serve(request):
+        assert request["json"]["max_completion_tokens"] == 3
+        return {
+            "choices": [{"message": {"role": "assistant", "content": "7"}, "finish_reason": "stop", "token_ids": [7]}]
+        }
+
+    engine.chat_completion.side_effect = serve
+    result = await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "question"}]],
+            "chat_completion_params": [{}],
+            "sampling_params": {"max_tokens": 3},
+            "max_context_length": 100,
+        }
+    )
+    assert result["responses"] == ["7"]
