@@ -46,6 +46,8 @@ train:
   - source: openscience # MCQ substitute until an SCP-116K judge env exists
     revision: <dataset-commit>
     cap: 25000
+    parameters:
+      subset: OS-Q2.5-32B-10
   - source: reasoning_gym
     revision: 0.1.25
     parameters:
@@ -103,7 +105,12 @@ Set `environment.skyrl_gym.lcb.reward_mode=fractional` to reward Eurus code traj
 fraction of unit tests passed. The default `binary` mode remains all-or-nothing. Nemotron IF rows
 retain all constraints in one example and receive the fraction satisfied. A free-form SCP-116K
 judge environment is not yet available; use the existing `openscience` MCQ source for the STEM
-slice when an explicit task substitution is acceptable.
+slice when an explicit task substitution is acceptable. `openscience` requires
+`parameters.subset` selecting one of the four Hugging Face subsets (`OS-Q2.5-32B-10`,
+`OS-Q2.5-32B-4`, `OS-Q2.5-72B-10`, `OS-Q3-235B-4`); the chosen subset is recorded in each row's
+`extra_info`, and ten-choice subsets carry answers A–J. Rows whose prompt repeats an option label
+with conflicting text, or whose boxed answer is not an offered option, are skipped with recorded
+reasons.
 
 The DAPO adapter streams by default and stops after 20,000 unique prompts unless
 `--unique-cap` overrides it. DAPO's default minimum of 1,000 unique prompts catches cleanup
