@@ -75,3 +75,19 @@ def test_snowball_mopd_smoke_route_weights_survive_config_composition():
 
     assert cfg.data.sampling.kind == "domain-weighted"
     assert dict(cfg.data.sampling.domain_weights) == {"math": 1.0, "swe": 1.0, "terminal": 1.0}
+
+
+def test_snowball_mopd_32k_recipe_composes_against_the_base_config():
+    """compose_skyrl_config rejects keys the base config dropped, which only a launch would reveal."""
+
+    class _HPCStub:
+        gpus_per_node = 8
+
+    config = Path(__file__).parents[1] / "configs" / "snowball_mopd_ultra_32k.yaml"
+    parsed = parse_rl_config(str(config), model_override=STUDENT)
+    cfg = compose_skyrl_config(
+        parsed, {"job_name": "mopd-32k-test", "experiments_dir": "/tmp/exp", "num_nodes": 9}, _HPCStub()
+    ).config
+
+    assert cfg.trainer.policy.megatron_config.context_parallel_size == 1
+    assert cfg.environment.skyrl_gym.nemotron_ultra.grading == "skip"
