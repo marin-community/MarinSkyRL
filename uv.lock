@@ -38,7 +38,7 @@ overrides = [
     { name = "flashinfer-cubin", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1", index = "https://flashinfer.ai/whl" },
     { name = "flashinfer-python", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1" },
     { name = "fsspec", specifier = "==2026.4.0" },
-    { name = "marin-finestore", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ffinestore&rev=8068a1c40dd303c254cacf73f4ef863120253435" },
+    { name = "marin-finestore", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ffinestore&rev=e9bcb610e49d550d098b9d75965584d8d34d3818" },
     { name = "marin-rigging", extras = ["prometheus", "secrets"], specifier = "==0.2.123.dev35633925924" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'never'" },
     { name = "opentelemetry-api", marker = "sys_platform != 'linux'" },
@@ -2813,7 +2813,7 @@ wheels = [
 [[package]]
 name = "marin-finestore"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ffinestore&rev=8068a1c40dd303c254cacf73f4ef863120253435#8068a1c40dd303c254cacf73f4ef863120253435" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ffinestore&rev=e9bcb610e49d550d098b9d75965584d8d34d3818#e9bcb610e49d550d098b9d75965584d8d34d3818" }
 dependencies = [
     { name = "marin-rigging", extra = ["prometheus", "secrets"] },
     { name = "pyarrow" },
