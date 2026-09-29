@@ -79,9 +79,13 @@ def skyrl_entrypoint(cfg: DictConfig):
     TaskCompendiumExp(cfg).run()
 
 
+def run(cfg: DictConfig) -> None:
+    run_ray_driver(cfg, skyrl_entrypoint, TrajectoryRunnerMode.TASKCOMPENDIUM)
+
+
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    run_ray_driver(cfg, skyrl_entrypoint, TrajectoryRunnerMode.TASKCOMPENDIUM)
+    run(cfg)
 
 
 if __name__ == "__main__":

@@ -12,8 +12,11 @@ import yaml
 
 from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config, parse_rl_config
+from cloud.iris.skyrl_entrypoint import run_config
 from cloud.iris.task_runtime import _runtime_namespace
 from cloud.iris.training_driver import local_rl_config_from_launch
+from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
+from skyrl_train.entrypoints import taskcompendium
 
 
 def _raw_config() -> dict[str, Any]:
@@ -153,6 +156,27 @@ def test_taskcompendium_source_recipe_selects_its_entrypoint(tmp_path: Path) -> 
     parsed = parse_rl_config(str(path))
 
     assert parsed.entrypoint == "skyrl_train.entrypoints.taskcompendium"
+
+
+def test_taskcompendium_launch_dispatches_to_its_ray_driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    raw = _raw_config()
+    raw["runtime"]["entrypoint"] = "skyrl_train.entrypoints.taskcompendium"
+    raw["skyrl"]["entrypoint"] = "taskcompendium"
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    calls = []
+
+    def record_driver(cfg, entrypoint, mode):
+        calls.append((cfg, entrypoint, mode))
+
+    monkeypatch.setattr(taskcompendium, "run_ray_driver", record_driver)
+
+    run_config(path)
+
+    assert len(calls) == 1
+    assert calls[0][0].trainer.seed == 42
+    assert calls[0][1] is taskcompendium.skyrl_entrypoint
+    assert calls[0][2] == TrajectoryRunnerMode.TASKCOMPENDIUM
 
 
 @pytest.mark.parametrize(
