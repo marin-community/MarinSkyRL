@@ -1,12 +1,14 @@
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from importlib.metadata import version
 import time
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from omegaconf import open_dict
 from megatron.core import parallel_state as mpu
 from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig
 from megatron.core.enums import ModelType
@@ -180,7 +182,8 @@ def run_scaling_rank(rank, world_size, cp_size, teacher, rendezvous):
         algorithm.entropy_loss_coef = 0.2
         algorithm.think_token_weight = 0.4
         algorithm.enable_token_reward_channel = True
-        algorithm.max_seq_len = 8
+        with open_dict(algorithm):
+            algorithm.max_seq_len = 8
         if teacher:
             algorithm.resolved_topk_loss_params = {
                 "objective": "sparse_forward_kl",
@@ -225,8 +228,8 @@ def run_scaling_rank(rank, world_size, cp_size, teacher, rendezvous):
         dist.destroy_process_group()
 
 
-def spawn_scaling(world_size, cp_size, teacher, rendezvous):
-    context = mp.spawn(run_scaling_rank, args=(world_size, cp_size, teacher, rendezvous), nprocs=world_size, join=False)
+def run_distributed(target, world_size, args):
+    context = mp.spawn(target, args=args, nprocs=world_size, join=False)
     deadline = time.monotonic() + 240
     try:
         while not context.join(timeout=1):
@@ -246,5 +249,10 @@ def spawn_scaling(world_size, cp_size, teacher, rendezvous):
 @pytest.mark.parametrize("cp_size,teacher", [(2, False), (1, True)])
 def test_megatron_objective_gradients_and_rows_match_full_batch(tmp_path, cp_size, teacher):
     assert torch.cuda.device_count() >= 2 * cp_size, "Run on an allocation with four GPUs"
-    spawn_scaling(1, 1, teacher, (tmp_path / "single").as_uri())
-    spawn_scaling(2 * cp_size, cp_size, teacher, (tmp_path / "distributed").as_uri())
+    print(
+        f"GPU={torch.cuda.get_device_name()} torch={torch.__version__} "
+        f"megatron-core={version('megatron-core')} TP=1 PP=1",
+        flush=True,
+    )
+    run_distributed(run_scaling_rank, 1, (1, 1, teacher, (tmp_path / "single").as_uri()))
+    run_distributed(run_scaling_rank, 2 * cp_size, (2 * cp_size, cp_size, teacher, (tmp_path / "distributed").as_uri()))
