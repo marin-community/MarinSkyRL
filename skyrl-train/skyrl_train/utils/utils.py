@@ -18,6 +18,7 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
+from skyrl_train.batch_invariant import BATCH_INVARIANT_NCCL_ENV
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
 from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
@@ -29,7 +30,13 @@ from skyrl_train.debug_mode import apply_debug_mode
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.trajectory_runners.trajectory_retention_config import parse_trajectory_retention_config
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
-from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, DEBUG_MODE_ENV, EnvVarManager, EnvVarScope
+from skyrl_train.env_vars import (
+    DEBUG_ARTIFACT_DIR_ENV,
+    DEBUG_MODE_ENV,
+    VLLM_BATCH_INVARIANT_ENV,
+    EnvVarManager,
+    EnvVarScope,
+)
 from skyrl_train.group_admission import resolve_group_advantage_invariant
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt, trajectory_selector_from_config
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
@@ -1299,6 +1306,11 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         if os.environ.get(_net_env):
             logger.info(f"Exporting `{_net_env}` to ray runtime env: {os.environ[_net_env]}")
             env_vars[_net_env] = os.environ[_net_env]
+
+    if env_vars.get(VLLM_BATCH_INVARIANT_ENV) == "1" or os.environ.get(VLLM_BATCH_INVARIANT_ENV) == "1":
+        # Megatron and vLLM share a weight-update NCCL group; mismatched settings broke its first broadcast.
+        # Remove this override if publication no longer joins their ranks; it also affects learner collectives.
+        env_vars.update(BATCH_INVARIANT_NCCL_ENV)
 
     # EnvVarManager owns NCCL verbosity through trainer.debug_mode. Do not copy
     # ambient NCCL_DEBUG values into Ray workers: stale launcher extra_env once

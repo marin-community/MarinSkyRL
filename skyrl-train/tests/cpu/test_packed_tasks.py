@@ -9,6 +9,9 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from omegaconf import OmegaConf
+
+from cloud.iris import rl_data
 
 from marinskyrl.packed_tasks import (
     EmptyTaskSelectionError,
@@ -155,7 +158,9 @@ def test_packed_dataset_defers_extraction_until_materialization(tmp_path: Path) 
     dataset_path = tmp_path / "tasks.parquet"
     _write_dataset(dataset_path)
     source = _source(dataset_path, TaskTroveSelection(sources=("source-a",)))
-    dataset = TerminalBenchTaskDataset([asdict(source)])
+    resolved = rl_data.resolve_rl_train_data_with_sources([asdict(source)], kind="tasks", verbose=False)
+    document = OmegaConf.create({"data": {"train_data": list(resolved.paths)}})
+    dataset = TerminalBenchTaskDataset(OmegaConf.to_container(document, resolve=True)["data"]["train_data"])
     cache = tmp_path / "cache"
 
     first = dataset[0]
