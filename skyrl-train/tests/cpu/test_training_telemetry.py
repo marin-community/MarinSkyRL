@@ -5,6 +5,7 @@ import collections
 import functools
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
@@ -100,7 +101,10 @@ class ScriptedRunner(TrajectoryRunner):
             "loss_masks": [[0] * 3] * 2 if uid == "masked" else [[1] * 3] * 2,
             "stop_reasons": ["stop", "length"],
             "rollout_metrics": {},
-            "rollout_logprobs": [[-1.0, -0.5, -0.25], [-1.0, -0.5, -0.25]],
+            "rollout_logprobs": [
+                np.asarray([-1.0, -0.5, -0.25], dtype=np.float32),
+                np.asarray([-1.0, -0.5, -0.25], dtype=np.float32),
+            ],
         }
         return output
 
