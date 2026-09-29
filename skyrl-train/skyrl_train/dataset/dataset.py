@@ -1,4 +1,5 @@
 import datasets
+from datasets.fingerprint import generate_random_fingerprint
 from loguru import logger
 import os
 from collections.abc import Mapping
@@ -55,12 +56,16 @@ class PromptDataset:
 
         logger.info(f"Total dataset size: {len(self.dataframe)}")
 
-        # filter out too long prompts
+        # Filter out too long prompts. Fingerprinting the filter for the dataset cache would hash the tokenizer,
+        # which takes seconds; the filter is cheaper to rerun than to cache, so it runs in memory under a fresh
+        # fingerprint. `datasets` spawns a process pool for any `num_proc`, so one worker filters in this process.
         tokenizer = self.tokenizer
         prompt_key = self.prompt_key
         self.dataframe = self.dataframe.filter(
             lambda doc: _prompt_token_count(tokenizer, doc[prompt_key]) <= self.max_prompt_length,
-            num_proc=self.num_workers,
+            num_proc=self.num_workers if self.num_workers > 1 else None,
+            keep_in_memory=True,
+            new_fingerprint=generate_random_fingerprint(),
             desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
         )
 

@@ -1153,8 +1153,6 @@ class SharedTrajectorySink:
         ray.get(self._actor.bind_runner.remote(runner_name))
 
     def retain(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> dict[str, float]:
-        if not self.config.enabled:
-            return {}
         return ray.get(self._actor.retain.remote(input_batch, output))
 
     def close(self) -> None:
@@ -1162,9 +1160,27 @@ class SharedTrajectorySink:
         ray.kill(self._actor)
 
 
-def make_trajectory_sink(config: DictConfig, tokenizer: PreTrainedTokenizerBase) -> SharedTrajectorySink:
+class DisabledTrajectorySink:
+    """The sink of a run that retains nothing, which needs no actor."""
+
+    def __init__(self, config: TrajectoryRetentionConfig):
+        self.config = config
+
+    def bind_runner(self, runner_name: str) -> None:
+        """Nothing is retained, so no runner identity is recorded."""
+
+    def retain(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> dict[str, float]:
+        return {}
+
+    def close(self) -> None:
+        """The sink holds no resources."""
+
+
+def make_trajectory_sink(config: DictConfig, tokenizer: PreTrainedTokenizerBase) -> RetentionSink:
     """Start the run's sink on this node, where a local ``output_path`` resolves as it does here."""
     retention = parse_trajectory_retention_config(config.get("trajectory_retention"))
+    if not retention.enabled:
+        return DisabledTrajectorySink(retention)
     node = NodeAffinitySchedulingStrategy(node_id=ray.get_runtime_context().get_node_id(), soft=False)
     actor = ray.remote(TrajectorySink).options(num_cpus=0, scheduling_strategy=node).remote(retention, tokenizer)
     return SharedTrajectorySink(retention, actor)

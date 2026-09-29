@@ -110,7 +110,11 @@ def _pool(workers: list[object], spec: _Spec, *, timeout: float = 1) -> RolloutW
     pool = RolloutWorkerPool(
         spec,
         RolloutWorkerResources(
-            num_workers=len(workers), cpus_per_worker=1, executor_threads=1, progress_timeout_seconds=timeout
+            num_workers=len(workers),
+            cpus_per_worker=1,
+            executor_threads=1,
+            progress_timeout_seconds=timeout,
+            start_interval_seconds=0,
         ),
     )
     pool._actors = list(workers)
