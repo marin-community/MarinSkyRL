@@ -9,6 +9,11 @@ from skyrl_train.config.objective_spec import (
     SequenceAggregate,
     SequenceRule,
 )
+from skyrl_train.metric_names import (
+    CORRECTION_WEIGHT_MEAN_METRIC,
+    CORRECTION_TRUNCATED_FRACTION_METRIC,
+    CORRECTION_MASKED_FRACTION_METRIC,
+)
 from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP
 
 
@@ -60,9 +65,9 @@ def compute_correction(
     count = valid.sum().clamp(min=1)
     metrics = (
         {
-            "policy/correction/weight_mean": (weights.sum() / count).item(),
-            "policy/correction/truncated_fraction": ((truncated & valid).sum() / count).item(),
-            "policy/correction/masked_fraction": ((masked & valid).sum() / count).item(),
+            CORRECTION_WEIGHT_MEAN_METRIC: (weights.sum() / count).item(),
+            CORRECTION_TRUNCATED_FRACTION_METRIC: ((truncated & valid).sum() / count).item(),
+            CORRECTION_MASKED_FRACTION_METRIC: ((masked & valid).sum() / count).item(),
         }
         if correction.rules
         else {}
