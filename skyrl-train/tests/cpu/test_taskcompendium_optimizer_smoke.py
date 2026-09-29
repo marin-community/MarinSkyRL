@@ -13,7 +13,7 @@ from omegaconf import OmegaConf
 from taskcompendium.grading import exact_answer
 from taskcompendium.importers.nemo_workplace import load_fixture
 from taskcompendium.lowering import HarborEnvironmentConfig, lower_to_harbor
-from taskcompendium.models import AnswerType, Source, TaskRequirements, TaskSpec
+from taskcompendium.models import AnswerType, ConversationInput, Source, TaskRequirements, TaskSpec, TextMessage
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
@@ -38,7 +38,7 @@ async def test_mixed_taskcompendium_rollout_updates_cpu_policy(tmp_path: Path):
     pytest.importorskip("harbor")
     chat = TaskSpec(
         id="chat",
-        instructions="Reply with blue.",
+        context=ConversationInput(events=(TextMessage(role="user", content="Reply with blue."),)),
         verifier=exact_answer("blue"),
         source=Source(dataset="test", revision="revision", row="chat", importer_revision="importer"),
         requirements=TaskRequirements(),

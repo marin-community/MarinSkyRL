@@ -10,7 +10,7 @@ from omegaconf import OmegaConf
 from taskcompendium.grading import exact_answer
 from taskcompendium.importers.nemo_workplace import load_fixture
 from taskcompendium.lowering import HarborEnvironmentConfig, lower_to_harbor
-from taskcompendium.models import AnswerType, Source, TaskRequirements, TaskSpec
+from taskcompendium.models import AnswerType, ConversationInput, Source, TaskRequirements, TaskSpec, TextMessage
 from taskcompendium.resources import ResourceVisibility, TaskResource
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
 
@@ -34,7 +34,12 @@ from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_te
 def _lowering(root: Path, name: str) -> Path:
     specification = TaskSpec(
         id=name,
-        instructions="Reply with the word blue.",
+        context=ConversationInput(
+            events=(
+                TextMessage(role="system", content="Answer briefly."),
+                TextMessage(role="user", content="Reply with the word blue."),
+            )
+        ),
         verifier=exact_answer("blue"),
         requirements=TaskRequirements(),
         source=Source(dataset="test", revision="revision", row=name, importer_revision="importer"),
@@ -61,7 +66,11 @@ def test_taskcompendium_dataset_routes_simple_chat_natively(tmp_path):
     assert [row["uid"] for row in dataset] == ["chat"]
     assert dataset[0] == {
         "uid": "chat",
-        "prompt": [{"role": "user", "content": "Reply with the word blue.\n\nGive your answer as plain text.\n"}],
+        "prompt": [
+            {"role": "system", "content": "Answer briefly."},
+            {"role": "user", "content": "Reply with the word blue."},
+            {"role": "user", "content": "Give your answer as plain text."},
+        ],
         "env_class": NATIVE_CHAT_ENV_CLASS,
         "env_extras": {"task_dir": str(native)},
     }

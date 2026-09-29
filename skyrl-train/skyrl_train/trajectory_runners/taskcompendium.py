@@ -20,8 +20,9 @@ from taskcompendium.lowering import (
     read_specification,
     read_submission_convention,
 )
-from taskcompendium.models import AnswerType, VerifierKind
+from taskcompendium.models import AnswerType, TaskSpec, VerifierKind
 from taskcompendium.resources import ResourceVisibility
+from taskcompendium.submission import SubmissionConvention, chat_request
 from taskcompendium.verifier_registry import grade_answer
 from transformers import PreTrainedTokenizerBase
 
@@ -52,11 +53,10 @@ class UngradedTaskCompendiumBatchError(RuntimeError):
     """A verifier or task failure prevented construction of a numeric batch."""
 
 
-def _native_chat_eligible(task_dir: Path) -> bool:
+def _native_chat_eligible(
+    specification: TaskSpec, convention: SubmissionConvention, binding: HarborEnvironmentConfig
+) -> bool:
     """Return whether the lowering can run as one host-graded chat completion."""
-    specification = read_specification(task_dir / SPECIFICATION_FILE)
-    convention = read_submission_convention(task_dir / SUBMISSION_CONVENTION_FILE)
-    binding = read_environment_config(task_dir / ENVIRONMENT_CONFIG_FILE)
     return (
         specification.answer_type in (AnswerType.TEXT, AnswerType.NUMBER)
         and specification.verifier.kind is VerifierKind.EXACT_ANSWER
@@ -98,11 +98,14 @@ class TaskCompendiumTaskDataset:
             if not isinstance(value, str):
                 value = str(value["local_path"])
             for task_dir in cls._task_directories(Path(value)):
-                if _native_chat_eligible(task_dir):
+                specification = read_specification(task_dir / SPECIFICATION_FILE)
+                convention = read_submission_convention(task_dir / SUBMISSION_CONVENTION_FILE)
+                binding = read_environment_config(task_dir / ENVIRONMENT_CONFIG_FILE)
+                if _native_chat_eligible(specification, convention, binding):
                     rows.append(
                         {
                             "uid": task_dir.name,
-                            "prompt": [{"role": "user", "content": (task_dir / "instruction.md").read_text()}],
+                            "prompt": chat_request(specification, convention)["messages"],
                             "env_class": NATIVE_CHAT_ENV_CLASS,
                             "env_extras": {"task_dir": str(task_dir)},
                         }
