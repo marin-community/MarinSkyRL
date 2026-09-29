@@ -225,11 +225,24 @@ def run_tiny_training(cfg: DictConfig) -> None:
 
 
 def run_experiment(
-    root: Path, model_dir: Path, mode: TrainingMode, shape: RolloutShape, *, max_steps: int, checkpoint_interval: int
+    root: Path,
+    model_dir: Path,
+    mode: TrainingMode,
+    shape: RolloutShape,
+    *,
+    max_steps: int,
+    checkpoint_interval: int,
+    dump_data_batch: bool,
 ) -> None:
     """Train the policy in ``model_dir`` under ``root``, resuming from a checkpoint an earlier run left there."""
     cfg = tiny_training_config(
-        root, model_dir, mode, shape, max_steps=max_steps, checkpoint_interval=checkpoint_interval
+        root,
+        model_dir,
+        mode,
+        shape,
+        max_steps=max_steps,
+        checkpoint_interval=checkpoint_interval,
+        dump_data_batch=dump_data_batch,
     )
     run_tiny_training(cfg)
 
