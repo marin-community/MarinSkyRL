@@ -40,6 +40,13 @@ def _normalize_answer(value: str) -> str:
 
 def grade_abstention(response: str, record: dict[str, Any], judge: OpenAIJudge) -> tuple[float, dict[str, Any]]:
     response = final_answer_text(response)
+    if not response.strip():
+        return 0.0, {
+            "empty_final_answer": True,
+            "verdict": "missing_final_answer",
+            "extracted_answer": "",
+            "omniscience_index": -1.0,
+        }
     extracted = last_boxed_answer(response) or response
     if _normalize_answer(extracted) == _normalize_answer("[IDK]"):
         return 0.5, {"verdict": "abstain", "extracted_answer": extracted}
