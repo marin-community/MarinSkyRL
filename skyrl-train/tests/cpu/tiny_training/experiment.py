@@ -2,9 +2,8 @@
 
 The experiments swap only the Megatron policy worker and the vLLM engines for the CPU backend.
 Ray runs locally with logical GPUs so placement code runs unchanged. Synchronous training runs the standard
-entrypoint at staleness 0; asynchronous training runs the Gym worker-pool entrypoint at positive staleness, so
-the two modes also cover both rollout-worker topologies. The asynchronous run also writes each rollout payload
-to its own object. Either mode runs single-turn groups, or multi-turn groups trained step-wise.
+entrypoint at staleness 0 and asynchronous training at positive staleness; the asynchronous run also writes each
+rollout payload to its own object. Either mode runs single-turn groups, or multi-turn groups trained step-wise.
 
 Usage::
 
@@ -26,7 +25,6 @@ from skyrl_train.config.trajectory_runner_capabilities import (
 )
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset import PromptDataset
-from skyrl_train.entrypoints.gym_worker_pool import GymWorkerPoolExp
 from skyrl_train.entrypoints.main_base import BasePPOExp, EntrypointOperation
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
@@ -189,20 +187,13 @@ class TinyTrainingExp(BasePPOExp):
         return InferenceEngineClient(engines, self.tokenizer, self.cfg)
 
 
-class TinyWorkerPoolTrainingExp(TinyTrainingExp, GymWorkerPoolExp):
-    """The Gym worker-pool entrypoint with the CPU backend."""
-
-
-EXPERIMENTS = {TrainingMode.SYNC: TinyTrainingExp, TrainingMode.ASYNC: TinyWorkerPoolTrainingExp}
-
-
-def run_tiny_training(cfg: DictConfig, mode: TrainingMode) -> None:
+def run_tiny_training(cfg: DictConfig) -> None:
     """Validate the config as the production driver does, then run in a fresh local Ray session."""
     validate_cfg(cfg)
     validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM, EntrypointOperation.TRAIN)
     ray.init(num_cpus=os.cpu_count(), num_gpus=LOGICAL_GPUS, runtime_env={"env_vars": WORKER_ENV_VARS})
     try:
-        EXPERIMENTS[mode](cfg).run()
+        TinyTrainingExp(cfg).run()
     finally:
         ray.shutdown()
 
@@ -218,7 +209,7 @@ def main() -> None:
     cfg = tiny_training_config(
         args.root, args.mode, args.shape, max_steps=args.steps, checkpoint_interval=args.checkpoint_interval
     )
-    run_tiny_training(cfg, args.mode)
+    run_tiny_training(cfg)
 
 
 if __name__ == "__main__":
