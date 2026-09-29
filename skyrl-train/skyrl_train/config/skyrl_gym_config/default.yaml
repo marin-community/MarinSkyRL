@@ -24,6 +24,7 @@ search:
 nemotron_ultra:
   sandbox:
     host: "127.0.0.1"
+    replica_service: null
     port: 6000
   # Verifier child bounds for code_gen_simple_agent. max_memory_bytes caps the
   # subprocess address space (RLIMIT_AS/DATA/STACK); total_timeout_seconds is a
