@@ -39,7 +39,9 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
     get_metrics_from_trajectory_batch,
     graded_row_indices,
+    normalized_verifier_scores,
     scalar_reward_token_credit,
+    verifier_score_summary,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
 from skyrl_train.dataset.preprocess import (
@@ -2248,6 +2250,20 @@ class RayPPOTrainer:
         reward_metrics["reward/informative_group_fraction"] = sum(
             max(values) > min(values) for values in grouped_rewards.values()
         ) / len(grouped_rewards)
+        verifier_scores = normalized_verifier_scores(trajectory_batch)
+        if verifier_scores is not None:
+            coverage, average = verifier_score_summary(verifier_scores)
+            reward_metrics["reward/verifier_score_coverage"] = coverage
+            if average is not None:
+                reward_metrics["reward/avg_verifier_score"] = average
+            results = trajectory_batch["verification_results"]
+            scores_by_agent: Dict[str, List[float]] = defaultdict(list)
+            for result, score in zip(results, verifier_scores, strict=True):
+                if result is not None and score is not None and isinstance(result.diagnostics.get("agent"), str):
+                    agent = _domain_metric_source_key(result.diagnostics["agent"])
+                    scores_by_agent[agent].append(score)
+            for agent in sorted(scores_by_agent)[:MAX_DOMAIN_REWARD_METRICS]:
+                reward_metrics[f"reward/agent/{agent}/avg_verifier_score"] = float(np.mean(scores_by_agent[agent]))
         self.all_metrics.update(reward_metrics)
         data_sources = trajectory_batch.get("data_sources")
         if data_sources is not None:
