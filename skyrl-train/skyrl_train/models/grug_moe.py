@@ -42,7 +42,9 @@ GRUG_EP_COMM_BACKEND = "torch"
 GRUG_ROUTER_BIAS_SUFFIX = ".mlp.router.bias"
 GRUG_MOE_ARCHITECTURE = "GrugMoeForCausalLM"
 GRUG_MOE_ATTENTION_MODE = "production"
-GRUG_MOE_ARTIFACT_SCHEMA_VERSION = 1
+GRUG_STACKED_EXPERT_SCHEMA_VERSION = 1
+GRUG_SPLIT_EXPERT_SCHEMA_VERSION = 2
+GRUG_DEFAULT_GLOBAL_EVERY = 4
 GRUG_EAGER_ATTENTION_BACKEND = "eager"
 GRUG_FLASH_ATTENTION_BACKEND = "flash_attention_2"
 GRUG_SUPPORTED_ATTENTION_BACKENDS = frozenset({GRUG_EAGER_ATTENTION_BACKEND, GRUG_FLASH_ATTENTION_BACKEND})
@@ -71,14 +73,14 @@ def validate_grug_training_strategy(model_type: str | None, training_strategy: s
         )
 
 
-def grug_long_layer_flags(num_layers: int) -> tuple[bool, ...]:
+def grug_long_layer_flags(num_layers: int, global_every: int = GRUG_DEFAULT_GLOBAL_EVERY) -> tuple[bool, ...]:
     """Return which decoder layers use full causal attention without RoPE.
 
-    Grug makes every fourth layer and the final layer a "long" layer; the
+    Every ``global_every``-th layer and the final layer are "long" layers; the
     remaining layers use sliding-window attention with half-RoPE.
     """
 
-    return tuple(idx % 4 == 3 or idx == num_layers - 1 for idx in range(num_layers))
+    return tuple((idx + 1) % global_every == 0 or idx == num_layers - 1 for idx in range(num_layers))
 
 
 def _validate_flash_attention_mask(attention_mask: torch.Tensor) -> None:
@@ -173,7 +175,16 @@ class GrugMoeConfig(PretrainedConfig):
         disable_long_rope: bool = True,
         router_z_loss_coef: float = 0.0,
         grugmoe_attention_mode: str = GRUG_MOE_ATTENTION_MODE,
-        grugmoe_artifact_schema_version: int = GRUG_MOE_ARTIFACT_SCHEMA_VERSION,
+        grugmoe_artifact_schema_version: int = GRUG_STACKED_EXPERT_SCHEMA_VERSION,
+        latent_dim: int | None = None,
+        num_shared_experts: int = 1,
+        local_kv_heads: int | None = None,
+        global_kv_heads: int | None = None,
+        global_every: int = GRUG_DEFAULT_GLOBAL_EVERY,
+        rope_fused: bool = False,
+        sconv: bool = False,
+        sconv_kernel: int = 4,
+        sconv_sites: tuple[str, ...] = ("k", "attn", "mlp"),
         use_cache: bool = False,
         tie_word_embeddings: bool = False,
         **kwargs: Any,
@@ -258,11 +269,27 @@ class GrugMoeConfig(PretrainedConfig):
             raise ValueError("Grug training supports only disable_long_rope=true")
         if grugmoe_attention_mode != GRUG_MOE_ATTENTION_MODE:
             raise ValueError(f"unsupported Grug attention mode {grugmoe_attention_mode!r}")
-        if int(grugmoe_artifact_schema_version) != GRUG_MOE_ARTIFACT_SCHEMA_VERSION:
+        if int(grugmoe_artifact_schema_version) not in (
+            GRUG_STACKED_EXPERT_SCHEMA_VERSION,
+            GRUG_SPLIT_EXPERT_SCHEMA_VERSION,
+        ):
             raise ValueError(
                 f"unsupported Grug artifact schema {grugmoe_artifact_schema_version}; "
-                f"expected {GRUG_MOE_ARTIFACT_SCHEMA_VERSION}"
+                "expected 1 (stacked experts) or 2 (split experts)"
             )
+        if latent_dim is not None and not 0 < latent_dim <= hidden_size:
+            raise ValueError("latent_dim must be in (0, hidden_size]")
+        if num_shared_experts < 1 or global_every < 1 or sconv_kernel < 1:
+            raise ValueError("shared expert count, global period, and convolution width must be positive")
+        if (local_kv_heads is None) != (global_kv_heads is None):
+            raise ValueError("local_kv_heads and global_kv_heads must be specified together")
+        if local_kv_heads is not None:
+            if any(n <= 0 or num_attention_heads % n for n in (local_kv_heads, global_kv_heads)):
+                raise ValueError("local and global KV head counts must divide the query head count")
+            if max(local_kv_heads, global_kv_heads) != num_key_value_heads:
+                raise ValueError("num_key_value_heads must equal the stored maximum local/global KV heads")
+        if set(sconv_sites) - {"k", "attn", "mlp"}:
+            raise ValueError("ShortConv sites must be k, attn, or mlp")
         if use_cache:
             raise ValueError("Grug training does not support KV cache")
         if tie_word_embeddings:
@@ -301,7 +328,28 @@ class GrugMoeConfig(PretrainedConfig):
         self.disable_long_rope = True
         self.router_z_loss_coef = float(router_z_loss_coef)
         self.grugmoe_attention_mode = grugmoe_attention_mode
-        self.grugmoe_artifact_schema_version = GRUG_MOE_ARTIFACT_SCHEMA_VERSION
+        self.grugmoe_artifact_schema_version = int(grugmoe_artifact_schema_version)
+        self.latent_dim = latent_dim
+        self.num_shared_experts = num_shared_experts
+        self.local_kv_heads = local_kv_heads
+        self.global_kv_heads = global_kv_heads
+        self.global_every = global_every
+        self.rope_fused = rope_fused
+        self.sconv = sconv
+        self.sconv_kernel = sconv_kernel
+        self.sconv_sites = tuple(sconv_sites)
+
+    @property
+    def uses_hero_architecture(self) -> bool:
+        return (
+            self.latent_dim is not None
+            or self.sconv
+            or self.local_kv_heads is not None
+            or self.num_shared_experts != 1
+            or self.rope_fused
+            or self.global_every != GRUG_DEFAULT_GLOBAL_EVERY
+            or self.grugmoe_artifact_schema_version == GRUG_SPLIT_EXPERT_SCHEMA_VERSION
+        )
 
 
 class GrugMoeRMSNorm(nn.Module):
@@ -809,6 +857,8 @@ class GrugMoePreTrainedModel(PreTrainedModel):
 class GrugMoeModel(GrugMoePreTrainedModel):
     def __init__(self, config: GrugMoeConfig) -> None:
         super().__init__(config)
+        if config.uses_hero_architecture:
+            raise ValueError("Hero architecture requires the Megatron backend; the eager model supports Snowball only")
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.embed_norm = GrugMoeRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.embed_gated_norm = GrugMoeGatedNorm(config.hidden_size)
