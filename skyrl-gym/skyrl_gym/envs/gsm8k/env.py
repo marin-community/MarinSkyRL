@@ -13,9 +13,10 @@ class GSM8kEnv(BaseTextEnv):
     def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
         super().__init__()
 
-        assert "reward_spec" in extras, "reward_spec field is required"
-        assert "ground_truth" in extras["reward_spec"], "ground_truth is required in reward_spec field"
-        self.ground_truth = extras["reward_spec"]["ground_truth"]
+        reward_spec = extras.get("reward_spec") or extras.get("reward_model")
+        assert reward_spec is not None, "reward_spec (or reward_model) field is required"
+        assert "ground_truth" in reward_spec, "ground_truth is required in reward_spec field"
+        self.ground_truth = reward_spec["ground_truth"]
         self.reward_method = env_config.get("reward_method", "strict")
         self.stop_reason = None
 
