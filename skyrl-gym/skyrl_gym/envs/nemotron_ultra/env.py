@@ -32,6 +32,7 @@ from skyrl_gym.envs.nemotron_ultra.rdkit_chemistry import grade_rdkit_chemistry
 from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
 from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
+from skyrl_gym.envs.reasoning_gym.scoring import extract_answer
 from skyrl_gym.verification import RolloutEvidence, VerificationResult
 
 _NS_TOOLS_AGENT = "ns_tools_simple_agent"
@@ -68,7 +69,7 @@ def _extract_reasoning_gym_answer(text: str) -> str:
     matches = list(re.finditer(r"<answer>(.*?)</answer>", text, re.DOTALL))
     if matches:
         return matches[-1].group(1).strip()
-    return last_boxed_answer(text) or text.strip()
+    return last_boxed_answer(text) or extract_answer(text)
 
 
 class NemotronUltraEnv(BaseTextEnv):

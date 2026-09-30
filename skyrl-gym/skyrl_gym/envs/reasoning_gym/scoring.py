@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -33,11 +34,16 @@ def normalize_ground_truth(ground_truth: Any) -> str:
 
 
 def extract_answer(response: str) -> str:
-    """Return the text after the last ``Answer:`` marker, or the whole response if absent.
+    """Return a labeled final answer, or the whole response if none is labeled.
 
     Reasoning Gym verifiers expect the bare answer: scoring a full chain-of-thought
     response yields only length-ratio fuzz credit even when the final answer is correct.
     """
+    for line in reversed(response.splitlines()):
+        plain_line = line.strip().strip("*").strip()
+        match = re.fullmatch(r"(?:the\s+)?(?:final\s+)?answer\s*(?::|is)\s*(.+)", plain_line, re.IGNORECASE)
+        if match:
+            return match.group(1).strip().removesuffix(".")
     _, marker, answer = response.rpartition(ANSWER_MARKER)
     return answer.strip() if marker else response.strip()
 
