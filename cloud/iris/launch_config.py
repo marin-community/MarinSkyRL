@@ -9,6 +9,7 @@ import tempfile
 from typing import Any, Mapping
 
 from omegaconf import MISSING, DictConfig, OmegaConf
+from iris.cluster.types import parse_memory_string
 
 from cloud.iris.ray_storage import RaySpillBackend, resolve_ray_spill_target
 from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
@@ -83,6 +84,7 @@ class IrisAllocationConfig:
     gpu_variant: str = MISSING
     cpu: float = MISSING
     memory: str = MISSING
+    minimum_host_memory: str | None = None
     disk: str = MISSING
 
 
@@ -221,6 +223,11 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
         OmegaConf.resolve(compiled.config)
     resolved = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
     OmegaConf.set_struct(resolved, False)
+    recipe_minimum = raw_skyrl.get("minimum_host_memory")
+    if recipe_minimum is not None:
+        existing_minimum = resolved.iris.allocation.minimum_host_memory
+        if existing_minimum is None or parse_memory_string(recipe_minimum) > parse_memory_string(existing_minimum):
+            resolved.iris.allocation.minimum_host_memory = recipe_minimum
     resolved.runtime.entrypoint = compiled.entrypoint
     training_type = training_type_for_entrypoint(
         compiled.entrypoint, max_staleness_steps=compiled.config.trainer.rollout_buffer.max_staleness_steps
@@ -274,6 +281,16 @@ def validate_iris_allocation(config: dict[str, Any]) -> IrisAllocationConfig:
         raise TypeError("skyrl must be a mapping")
     plan = derive_role_plan(skyrl)
     allocation = config["iris"]["allocation"]
+    minimum_memory = allocation.get("minimum_host_memory")
+    if minimum_memory is not None:
+        required = parse_memory_string(minimum_memory)
+        if required <= 0:
+            raise ValueError("minimum_host_memory must be a positive memory size")
+        if parse_memory_string(allocation["memory"]) < required:
+            raise ValueError(
+                f"iris.allocation.memory={allocation['memory']} is below the recipe minimum_host_memory="
+                f"{minimum_memory} per node; increase the host-memory allocation before launching"
+            )
     policy = plan.claim("policy")
     checkpoint_export = config["run"]["mode"] == RunMode.CHECKPOINT_EXPORT
     expected_nodes = policy.num_nodes if checkpoint_export else derive_num_nodes(plan)

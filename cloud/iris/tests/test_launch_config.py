@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 import yaml
+from omegaconf import OmegaConf
 
 from cloud.iris import training_driver
 from cloud.iris.launch_config import load_launch_config, validate_launch_config
@@ -200,3 +201,27 @@ def test_task_materializes_the_forwarded_launch_document(tmp_path: Path) -> None
 
     assert path == str(destination)
     assert destination.read_bytes() == contents
+
+
+@pytest.mark.parametrize("memory", ["512GB", "768GB", "1TB"])
+def test_async_32k_checkpoint_memory_requirement_survives_composition(tmp_path: Path, memory: str) -> None:
+    raw = _raw_config()
+    recipe_path = Path(__file__).parents[1] / "configs" / "snowball_mopd_ultra_async_32k_smoke.yaml"
+    raw["skyrl"] = yaml.safe_load(recipe_path.read_text())
+    raw["iris"]["allocation"].update(num_nodes=9, memory=memory)
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    if memory == "512GB":
+        with pytest.raises(ValueError, match="below the recipe minimum_host_memory"):
+            load_launch_config(path)
+        return
+
+    config = load_launch_config(path)
+    # Persisting the composed document must not discard the recipe's memory requirement.
+    materialized = tmp_path / "resolved.yaml"
+    materialized.write_text(OmegaConf.to_yaml(config))
+    assert load_launch_config(materialized).iris.allocation.memory == memory
+    config.iris.allocation.memory = "512GB"
+    with pytest.raises(ValueError, match="below the recipe minimum_host_memory"):
+        validate_launch_config(config)
