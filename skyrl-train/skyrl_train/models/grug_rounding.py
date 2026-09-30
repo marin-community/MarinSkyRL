@@ -15,6 +15,12 @@ def rms_norm_single_rounding(x: torch.Tensor, weight: torch.Tensor, eps: float) 
     return (x * torch.rsqrt(variance + eps) * weight.float()).to(weight.dtype)
 
 
+def rms_norm_hybrid(rounded: torch.Tensor, unrounded: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """Compiled vLLM's input norm: variance from the unrounded sum, applied to the rounded stored sum."""
+    variance = unrounded.pow(2).mean(dim=-1, keepdim=True)
+    return (rounded.float() * torch.rsqrt(variance + eps) * weight.float()).to(weight.dtype)
+
+
 def gated_norm_product_fp32(normalized: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
     """``norm(x) * sigmoid(gate)`` in fp32 from the bf16 norm output and gate projection, unrounded."""
     return normalized.float() * torch.sigmoid(gate.float())

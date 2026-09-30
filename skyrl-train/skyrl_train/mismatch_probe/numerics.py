@@ -5,16 +5,17 @@ to bf16 once when it stores the result. The Megatron trainer runs op by op and r
 operations. Each flag makes one chain compute in fp32 and round once, as compiled vLLM does:
 
 - ``gated_norm``: ``norm(x) * sigmoid(gate)``;
-- ``qk_rope``: q/k RMS norm, RoPE with the bf16 cos/sin table, and the query scale;
+- ``qk_rope``: q/k RMS norm, RoPE with the bf16 cos/sin table, and the query scale: k rounds once, q's
+  rotary half rounds after RoPE and again after the two scale factors, q's pass-through half once;
 - ``xsa_gate``: XSA followed by the ``2 * sigmoid`` head gate;
 - ``shared_swiglu``: ``silu(gate) * up`` in the shared expert;
-- ``router_input``: the router reads the unrounded gated-norm product in fp32, with an fp32
-  router GEMM (requires ``gated_norm``);
+- ``router_gemm``: router logits from an fp32 GEMM on the bf16 router input and the bf16-valued weight;
 - ``route_weight``: each routed expert's down projection accumulates in fp32 and is multiplied by
   its route weight before one rounding, instead of weighting the activation before the projection;
 - ``mlp_residual``: the next residual is ``h + (routed + shared)`` in fp32, rounded once;
-- ``residual_norm``: the post-attention norm, the next layer's input norm and the final norm read
-  the unrounded fp32 residual sum, as when Inductor fuses a residual add into the following norm.
+- ``input_norm_variance``: each layer's input norm takes its variance from the unrounded residual sum
+  (the unrounded embedding gated-norm product for layer 0) and normalizes the rounded residual;
+- ``final_norm_fp32``: the final norm normalizes the unrounded residual sum.
 
 Probe modes set flags for one scoring forward; the flags default to the current trainer numerics.
 """
@@ -32,10 +33,11 @@ class GrugNumerics:
     qk_rope: bool = False
     xsa_gate: bool = False
     shared_swiglu: bool = False
-    router_input: bool = False
+    router_gemm: bool = False
     route_weight: bool = False
     mlp_residual: bool = False
-    residual_norm: bool = False
+    input_norm_variance: bool = False
+    final_norm_fp32: bool = False
 
 
 NUMERICS_FLAGS = tuple(field.name for field in fields(GrugNumerics))
@@ -54,8 +56,6 @@ def grug_numerics(**flags: bool) -> Iterator[GrugNumerics]:
     if unknown:
         raise ValueError(f"unknown Grug numerics flags: {sorted(unknown)}")
     updated = replace(_active, **flags)
-    if updated.router_input and not updated.gated_norm:
-        raise ValueError("router_input reads the fp32 gated-norm product and requires gated_norm")
     previous, _active = _active, updated
     try:
         yield updated

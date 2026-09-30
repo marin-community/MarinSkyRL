@@ -67,11 +67,14 @@ TRAINER_MODES: dict[str, ModeSpec] = {
 }
 
 # Candidate rounding points (see ``mismatch_probe/numerics.py``), each scored under re-read replay (the
-# prefill metric) and under native routing (route agreement); ``all_rounding`` enables every flag.
-ALL_ROUNDING = "all_rounding"
+# prefill metric) and under native routing (route agreement). ``compiled_stack`` enables every flag
+# except ``route_weight``, whose fp32 per-expert projection is slow; ``compiled_stack_all`` adds it.
+COMPILED_STACK = "compiled_stack"
+COMPILED_STACK_ALL = "compiled_stack_all"
 _NUMERICS_CANDIDATES = {
-    **{flag: {flag: True, **({"gated_norm": True} if flag == "router_input" else {})} for flag in NUMERICS_FLAGS},
-    ALL_ROUNDING: dict.fromkeys(NUMERICS_FLAGS, True),
+    **{flag: {flag: True} for flag in NUMERICS_FLAGS},
+    COMPILED_STACK: {flag: flag != "route_weight" for flag in NUMERICS_FLAGS},
+    COMPILED_STACK_ALL: dict.fromkeys(NUMERICS_FLAGS, True),
 }
 
 

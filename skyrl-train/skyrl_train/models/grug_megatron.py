@@ -17,6 +17,8 @@ Megatron-Core settings chosen by ``GrugModelProvider`` in
 ``grug_megatron_bridge``.
 """
 
+from enum import StrEnum
+
 import torch
 import torch.nn.functional as F
 from megatron.core.extensions.transformer_engine import TEColumnParallelLinear, TENorm
@@ -44,6 +46,7 @@ from torch import nn
 from skyrl_train.mismatch_probe.numerics import active_numerics
 from skyrl_train.models.grug_rounding import (
     gated_norm_product_fp32,
+    rms_norm_hybrid,
     rms_norm_single_rounding,
     weighted_down_projection_single_rounding,
     rotate_neox_fp32,
@@ -67,37 +70,22 @@ def _first_present(preferred: torch.Tensor | None, fallback: torch.Tensor | None
     return fallback if preferred is None else preferred
 
 
-# Unrounded gated-norm products awaiting the router, keyed by the bf16 tensor handed to the MoE layer.
-_ROUTER_FP32_INPUTS: dict[int, torch.Tensor] = {}
-# Unrounded residual sums awaiting the next norm, keyed by the bf16 residual tensor.
+# Unrounded residual sums (and the embedding's unrounded gated-norm product) awaiting the next norm,
+# keyed by the bf16 tensor that norm receives.
 _RESIDUAL_FP32: dict[int, torch.Tensor] = {}
 
 
 def _install_residual_hooks(layer: TransformerLayer) -> None:
-    """Rebuild each residual in fp32 for the ``mlp_residual`` and ``residual_norm`` numerics."""
+    """Rebuild the MLP residual in fp32 for the ``mlp_residual`` and norm-input numerics."""
     stored: dict[str, torch.Tensor] = {}
 
     def active() -> bool:
         numerics = active_numerics()
-        return numerics.mlp_residual or numerics.residual_norm
+        return numerics.mlp_residual or numerics.input_norm_variance or numerics.final_norm_fp32
 
-    def keep_input(module, args, kwargs):
+    def keep_residual(module, args):
         if active():
-            stored["input"] = args[0] if args else kwargs["hidden_states"]
-
-    def keep_attention(module, args, output):
-        if active():
-            # Without gradients, the attention bias-dropout-add adds the residual into this tensor in
-            # place (megatron/core/fusions/fused_bias_dropout.py), so keep a copy made before it runs.
-            attention = output[0] if isinstance(output, tuple) else output
-            stored["attention"] = attention.to(torch.float32, copy=True)
-
-    def attention_residual(module, args):
-        if not active():
-            return
-        stored["residual"] = args[0]
-        if active_numerics().residual_norm:
-            _RESIDUAL_FP32[id(args[0])] = stored["input"].float() + stored["attention"].float()
+            stored["residual"] = args[0]
 
     postprocess = layer.mlp.postprocess
     combine_postprocess = layer.mlp.token_dispatcher.combine_postprocess
@@ -116,20 +104,22 @@ def _install_residual_hooks(layer: TransformerLayer) -> None:
         return postprocess(output, shared_expert_output)
 
     def mlp_residual(module, args, output):
-        numerics = active_numerics()
         if not active():
             return None
+        numerics = active_numerics()
         routed, shared = stored.pop("routed"), stored.pop("shared")
-        mlp_output = routed.float() + shared.float() if numerics.mlp_residual else (routed + shared).float()
-        next_residual = stored.pop("residual").float() + mlp_output
-        hidden = next_residual.to(output[0].dtype)
-        if numerics.residual_norm:
-            _RESIDUAL_FP32[id(hidden)] = next_residual
+        # Compiled vLLM: h + (routed + shared) in fp32; the trainer rounds routed + shared first.
+        unrounded = stored["residual"].float() + (routed.float() + shared.float())
+        if numerics.mlp_residual:
+            hidden = unrounded.to(output[0].dtype)
+        else:
+            hidden = (stored["residual"].float() + (routed + shared).float()).to(output[0].dtype)
+        stored.pop("residual")
+        if numerics.input_norm_variance or numerics.final_norm_fp32:
+            _RESIDUAL_FP32[id(hidden)] = unrounded
         return (hidden, *output[1:])
 
-    layer.register_forward_pre_hook(keep_input, with_kwargs=True)
-    layer.self_attention.register_forward_hook(keep_attention)
-    layer.pre_mlp_layernorm.register_forward_pre_hook(attention_residual)
+    layer.pre_mlp_layernorm.register_forward_pre_hook(keep_residual)
     layer.mlp.token_dispatcher.combine_postprocess = keep_routed
     layer.mlp.postprocess = keep_shared
     layer.register_forward_hook(mlp_residual)
@@ -191,7 +181,7 @@ def install_numerics_hooks(root: nn.Module) -> None:
             _install_route_weight_hooks(module)
         if isinstance(module, TransformerLayer) and isinstance(module.pre_mlp_layernorm, GrugGatedRMSNorm):
             _install_residual_hooks(module)
-            module.pre_mlp_layernorm.feeds_router = True
+            module.input_layernorm.role = NormRole.INPUT
 
 
 def clear_numerics_handoffs() -> None:
@@ -200,8 +190,16 @@ def clear_numerics_handoffs() -> None:
     Each forward starts empty: a pipeline stage's last residual has no reader, and the entries are keyed
     by ``id()`` of tensors that a later forward may reuse.
     """
-    _ROUTER_FP32_INPUTS.clear()
     _RESIDUAL_FP32.clear()
+
+
+class NormRole(StrEnum):
+    """Where a gated norm sits, which decides the residual it reads under the norm-input numerics."""
+
+    INPUT = "input"
+    POST_ATTENTION = "post_attention"
+    FINAL = "final"
+    EMBEDDING = "embedding"
 
 
 class GrugGatedRMSNorm(nn.Module):
@@ -209,8 +207,7 @@ class GrugGatedRMSNorm(nn.Module):
 
     def __init__(self, config: TransformerConfig, hidden_size: int, eps: float):
         super().__init__()
-        # True on the pre-MLP norm, whose output the router reads.
-        self.feeds_router = False
+        self.role = NormRole.POST_ATTENTION
         self.eps = eps
         self.norm = TENorm(config=config, hidden_size=hidden_size, eps=eps)
         device = torch.cuda.current_device()
@@ -226,18 +223,19 @@ class GrugGatedRMSNorm(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         numerics = active_numerics()
-        residual = _RESIDUAL_FP32.pop(id(hidden_states), None) if numerics.residual_norm else None
-        if residual is None:
-            normalized = self.norm(hidden_states)
+        unrounded = _RESIDUAL_FP32.pop(id(hidden_states), None)
+        if unrounded is not None and self.role is NormRole.INPUT and numerics.input_norm_variance:
+            normalized = rms_norm_hybrid(hidden_states, unrounded, self.norm.weight, self.eps)
+        elif unrounded is not None and self.role is NormRole.FINAL and numerics.final_norm_fp32:
+            normalized = rms_norm_single_rounding(unrounded, self.norm.weight, self.eps)
         else:
-            normalized = rms_norm_single_rounding(residual, self.norm.weight, self.eps)
+            normalized = self.norm(hidden_states)
         gate = self.up_proj(F.silu(self.down_proj(normalized)))
-        if not numerics.gated_norm:
-            return normalized * torch.sigmoid(gate)
         product = gated_norm_product_fp32(normalized, gate)
-        output = product.to(normalized.dtype)
-        if numerics.router_input and self.feeds_router:
-            _ROUTER_FP32_INPUTS[id(output)] = product
+        output = product.to(normalized.dtype) if numerics.gated_norm else normalized * torch.sigmoid(gate)
+        if self.role is NormRole.EMBEDDING and numerics.input_norm_variance:
+            # Layer 0's input norm takes its variance from the unrounded embedding gated-norm product.
+            _RESIDUAL_FP32[id(output)] = product
         return output
 
 
@@ -279,6 +277,9 @@ class GrugSelfAttention(SelfAttention):
         )
         is_long = grug_long_layer_flags(config.num_layers)[layer_number - 1]
         self.query_scale = config.grug_qk_mult * (config.grug_qk_mult_long_scale if is_long else 1.0)
+        # Compiled vLLM applies the two query factors one after the other.
+        self.qk_mult = config.grug_qk_mult
+        self.qk_mult_scale = config.grug_qk_mult_long_scale if is_long else 1.0
         self.skip_rope = bool(config.no_rope_freq[layer_number - 1])
 
     def forward(
@@ -313,8 +314,12 @@ class GrugSelfAttention(SelfAttention):
                 raise NotImplementedError("qk_rope numerics support unpacked sequences only")
             if rotary_pos_emb is not None and not self.skip_rope:
                 q_pos_emb, k_pos_emb = rotary_pos_emb if isinstance(rotary_pos_emb, tuple) else (rotary_pos_emb,) * 2
-                query, key = rotate_neox_fp32(query, q_pos_emb), rotate_neox_fp32(key, k_pos_emb)
-            query = (query.float() * self.query_scale).to(value.dtype)
+                rotary_dim = q_pos_emb.shape[-1]
+                query = rotate_neox_fp32(query, q_pos_emb)
+                # The rotated half of q is stored once before the scale; the pass-through half is not.
+                query = torch.cat((query[..., :rotary_dim].to(value.dtype).float(), query[..., rotary_dim:]), dim=-1)
+                key = rotate_neox_fp32(key, k_pos_emb)
+            query = (query.float() * self.qk_mult * self.qk_mult_scale).to(value.dtype)
             key = key.to(value.dtype)
         else:
             if rotary_pos_emb is not None and not self.skip_rope:
@@ -445,12 +450,9 @@ class GrugTopKRouter(TopKRouter):
 
     def forward(self, input: torch.Tensor, padding_mask: torch.Tensor | None = None):
         self._maintain_float32_expert_bias()
-        if active_numerics().router_input:
-            fp32_input = _ROUTER_FP32_INPUTS.pop(id(input), None)
-            if fp32_input is None:
-                raise RuntimeError("router_input requires the fp32 gated-norm product of this MoE input")
-            # Compiled vLLM runs an fp32 GEMM on fp32 router weights holding the bf16 values.
-            logits = F.linear(fp32_input, self.weight.float())
+        if active_numerics().router_gemm:
+            # Compiled vLLM runs an fp32 GEMM on the stored bf16 input and fp32 weights holding the bf16 values.
+            logits = F.linear(input.float(), self.weight.float())
         else:
             logits = self.gating(input)
         return self.routing(logits, padding_mask)
@@ -462,10 +464,13 @@ class GrugGPTModel(GPTModel):
     def __init__(self, config: TransformerConfig, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
         install_numerics_hooks(self)
+        if self.post_process and isinstance(self.decoder.final_layernorm, GrugGatedRMSNorm):
+            self.decoder.final_layernorm.role = NormRole.FINAL
         if self.pre_process:
             self.embed_norm = GrugGatedRMSNorm(
                 config=config, hidden_size=config.hidden_size, eps=config.layernorm_epsilon
             )
+            self.embed_norm.role = NormRole.EMBEDDING
 
     def forward(self, *args, **kwargs):
         clear_numerics_handoffs()

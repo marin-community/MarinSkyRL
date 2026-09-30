@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from skyrl_train.models.grug_moe import GRUG_XSA_EPS
 from skyrl_train.models.grug_rounding import (
     gated_norm_product_fp32,
+    rms_norm_hybrid,
     rms_norm_single_rounding,
     rotate_neox_fp32,
     swiglu_single_rounding,
@@ -96,3 +97,14 @@ def test_rms_norm_of_an_unrounded_residual_rounds_once_like_compiled_vllm():
     assert torch.equal(rms_norm_single_rounding(residual, weight, 1e-6), expected)
     rounded_first = residual.to(torch.bfloat16).float()
     assert not torch.equal(rms_norm_single_rounding(rounded_first, weight, 1e-6), expected)
+
+
+def test_input_norm_takes_variance_from_the_unrounded_sum_and_normalizes_the_rounded_one():
+    unrounded = _bf16(16, 64, seed=30).float() + _bf16(16, 64, seed=31).float()
+    rounded = unrounded.to(torch.bfloat16)
+    weight = _bf16(64, seed=32)
+    # Compiled vLLM (fusion map, triton_red_fused_add_rms_norm): sum of squares from the unrounded
+    # residual, then the stored bf16 residual times that rsqrt times the weight, rounded once.
+    scale = torch.rsqrt(unrounded.pow(2).mean(dim=-1, keepdim=True) + 1e-6)
+    expected = (rounded.float() * scale * weight.float()).to(torch.bfloat16)
+    assert torch.equal(rms_norm_hybrid(rounded, unrounded, weight, 1e-6), expected)
