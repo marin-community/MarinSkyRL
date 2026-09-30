@@ -12,7 +12,6 @@ from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.distillation import distillation_input_from_tensors
 
 DictType = TypeVar("DictType")
-GLOBAL_LOSS_DENOM_METADATA_KEY = "global_loss_denom"
 
 
 def per_data_parallel_batch_size(mini_batch_size: int, samples_per_prompt: int, data_parallel_size: int) -> int:
@@ -408,6 +407,10 @@ class TrainingBatchIterator(Iterator[Experience]):
 
     def __len__(self) -> int:
         return self._length
+
+    def chunks(self, start: int, stop: int) -> list[TrainingInputBatch]:
+        """Return the source microbatches in an accumulation window."""
+        return self._chunks[start:stop]
 
     def __iter__(self) -> "TrainingBatchIterator":
         return self

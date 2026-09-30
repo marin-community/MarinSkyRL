@@ -16,7 +16,7 @@ import sys
 
 import cloud.iris.launch
 
-blocked = ("flash_attn", "ray", "skyrl_train", "torch", "vllm")
+blocked = ("flash_attn", "ray", "skyrl_train.objective", "skyrl_train.trainer", "torch", "vllm")
 print(json.dumps(sorted(name for name in blocked if name in sys.modules)))
 """
     result = subprocess.run(

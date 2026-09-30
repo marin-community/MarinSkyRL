@@ -11,6 +11,7 @@ METRIC_REDUCTION: dict[str, Callable[[Sequence[float]], float]] = {
     "n_tokens_dp_gt_10pct": sum,
     "n_tokens_dp_gt_50pct": sum,
     "policy_lr": itemgetter(-1),
+    "skipped_steps": sum,
 }
 
 

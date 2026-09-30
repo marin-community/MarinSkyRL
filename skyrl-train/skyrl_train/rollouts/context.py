@@ -45,7 +45,8 @@ from skyrl_train.rollouts.workers import RolloutWorkers
 from skyrl_train.telemetry import record_generated_work, record_rollout_buffer
 from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request
 from skyrl_train.trajectory_runners.types import TrajectoryRequestBatch
-from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.config.objective_spec import rollout_logprobs_required
+from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 
 _T = TypeVar("_T")
 
@@ -174,7 +175,9 @@ class TrainingContext:
         )
         admission = GroupAdmissionPolicy(
             GroupAdvantageInvariant.from_config(algorithm.resolved_group_advantage),
-            rollout_logprobs_required=policy_loss_requires_rollout_logprobs(algorithm.policy_loss_type),
+            rollout_logprobs_required=rollout_logprobs_required(
+                algorithm, loss_spec=PolicyLossRegistry.spec(algorithm.policy_loss_type)
+            ),
         )
         object_store_root = config.trainer.rollout_buffer.object_store_root
         return cls(
