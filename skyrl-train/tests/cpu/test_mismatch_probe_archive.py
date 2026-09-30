@@ -297,3 +297,26 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     assert {row.sample_id: row.expert_choices for row in frozen_rows} == {
         sample: row.expert_choices for sample, row in rereads.items()
     }
+
+
+def test_archive_write_splits_rows_across_transactions_under_the_size_limit(tmp_path):
+    uri = str(tmp_path / "split")
+    rows = [
+        mismatch.ScoreRow(
+            probe_hash="hash",
+            sample_id=f"sample-{index}",
+            scorer="trainer",
+            mode="native",
+            update=0,
+            weights_hash="weights",
+            logprobs=[-0.5] * 2000,
+        )
+        for index in range(6)
+    ]
+    archive = MismatchArchive(uri, writer_id="test", max_buffer_bytes=40_000)
+    try:
+        archive.write(scores=rows)
+    finally:
+        archive.close()
+    stored = [mismatch.ScoreRow.model_validate(row) for row in ReadView(uri).scan(mismatch.SCORES_TABLE).to_pylist()]
+    assert sorted(row.sample_id for row in stored) == [row.sample_id for row in rows]

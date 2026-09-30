@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from finestore import mismatch_probe as mismatch
 from finestore.reader import ReadView
-from finestore.store import DataStore
+from finestore.store import DataStore, TransactionTooLarge
 
 from skyrl_train.config.mismatch_probe import CACHE_OFF, FROZEN_RESCORE_SCORER, GENERATION_SCORER, RESCORE_SCORER
 
@@ -29,9 +29,9 @@ class FrozenProbeSource:
 class MismatchArchive:
     """Write each supplied group of archive rows in one transaction."""
 
-    def __init__(self, uri: str, *, writer_id: str):
+    def __init__(self, uri: str, *, writer_id: str, **store_options):
         self.uri = uri
-        self.store = DataStore.open(uri, writer_id=writer_id)
+        self.store = DataStore.open(uri, writer_id=writer_id, **store_options)
         mismatch.register_mismatch_tables(self.store)
 
     def write(
@@ -41,15 +41,28 @@ class MismatchArchive:
         scores: Sequence[mismatch.ScoreRow] | None = None,
         manifest: mismatch.ManifestRow | None = None,
     ) -> None:
-        with self.store.transaction() as transaction:
-            for table, rows in (
-                (mismatch.PROBE_TABLE, probes),
-                (mismatch.SCORES_TABLE, scores),
-            ):
-                for row in rows or ():
-                    transaction.table(table).add(row.model_dump())
-            if manifest is not None:
-                transaction.table(mismatch.MANIFEST_TABLE).add(manifest.model_dump())
+        """Commit the rows in as few transactions as FineStore's size limit allows, manifest last.
+
+        Readers accept only an archive whose manifest is complete, so a write split across
+        transactions is never read half-finished.
+        """
+        pending = [
+            *((mismatch.PROBE_TABLE, row) for row in probes or ()),
+            *((mismatch.SCORES_TABLE, row) for row in scores or ()),
+            *(((mismatch.MANIFEST_TABLE, manifest),) if manifest is not None else ()),
+        ]
+        while pending:
+            added = 0
+            with self.store.transaction() as transaction:
+                for table, row in pending:
+                    try:
+                        transaction.table(table).add(row.model_dump())
+                    except TransactionTooLarge:
+                        if not added:
+                            raise
+                        break
+                    added += 1
+            pending = pending[added:]
 
     def close(self) -> None:
         self.store.close()
