@@ -466,11 +466,14 @@ class _EvidenceWorkers:
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
         invalid = deepcopy(self.batch)
         invalid[self.missing_field][0][0] = -1 if self.missing_field == "student_topk_indices" else np.nan
-        with pytest.raises(TrainingGroupInvariantError) as error:
+        try:
             await writer.write_rollout(
                 task.lease, RolloutGroup(invalid, task.prompt["uid"], task.lease.policy_step, task.prompt)
             )
-        self.rejections = error.value.rejections
+        except TrainingGroupInvariantError as error:
+            self.rejections = error.rejections
+        else:
+            return SAMPLES_PER_PROMPT
         await writer.write_rollout(
             task.lease, RolloutGroup(self.batch, task.prompt["uid"], task.lease.policy_step, task.prompt)
         )
@@ -485,6 +488,7 @@ async def test_configured_context_requires_behavior_evidence_only_at_trainable_t
     cfg = selected_topk_config()
     cfg.teachers.primary.top_k = 2
     cfg.generator.sampling_params.logprobs = 2
+    cfg.generator.inference_engine_tensor_parallel_size = 1
     cfg.generator.n_samples_per_prompt = SAMPLES_PER_PROMPT
     cfg.trainer.train_batch_size = 1
     cfg.trainer.policy_mini_batch_size = 1
