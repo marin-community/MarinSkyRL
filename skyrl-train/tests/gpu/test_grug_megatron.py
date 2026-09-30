@@ -228,8 +228,7 @@ def _padded_batch(
     return batch
 
 
-@ray.remote(num_gpus=1)
-def _hf_response_logprobs(model_path: str, batch: TrainingInputBatch) -> torch.Tensor:
+def _hf_response_logprobs_direct(model_path: str, batch: TrainingInputBatch) -> torch.Tensor:
     model = GrugMoeForCausalLM.from_pretrained(model_path, dtype=torch.bfloat16, attn_implementation="eager")
     model.eval().to("cuda")
     sequences = batch["sequences"].to("cuda")
@@ -241,6 +240,11 @@ def _hf_response_logprobs(model_path: str, batch: TrainingInputBatch) -> torch.T
         logits = model(sequences, attention_mask=attention_mask, position_ids=position_ids).logits
         log_probs = logprobs_from_logits(logits, torch.roll(sequences, shifts=-1, dims=1))
     return log_probs[:, -num_actions - 1 : -1].float().cpu()
+
+
+@ray.remote(num_gpus=1)
+def _hf_response_logprobs(model_path: str, batch: TrainingInputBatch) -> torch.Tensor:
+    return _hf_response_logprobs_direct(model_path, batch)
 
 
 def _megatron_response_logprobs(policy, batch: TrainingInputBatch) -> torch.Tensor:
@@ -265,7 +269,7 @@ def _init_policy(cfg, world_size: int):
 
 
 def _train_step(policy, batch: TrainingInputBatch) -> dict[str, float]:
-    train_output = ray.get(policy.async_run_ray_method("pass_through", "ppo_train", batch))[0]
+    train_output = ray.get(policy.async_run_ray_method("mesh", "ppo_train", batch))[0]
     status = train_output.metadata["train_status"]
     assert math.isfinite(status["policy_loss"])
     return status
@@ -462,7 +466,8 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
         for name in names:
             torch.testing.assert_close(exported[name].float(), after[name], rtol=0, atol=0)
         assert all(exported[name].dtype == torch.float32 for name in BIAS_NAMES)
-        reloaded = ray.get(_hf_response_logprobs.remote(str(export_dir), batch))
+        policy.kill_actors()
+        reloaded = _hf_response_logprobs_direct(str(export_dir), batch)
         _assert_logprobs_close(post_update, reloaded, batch["response_mask"])
     finally:
         ray.shutdown()
