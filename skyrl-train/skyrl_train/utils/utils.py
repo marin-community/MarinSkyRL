@@ -655,7 +655,9 @@ def validate_cfg(cfg: DictConfig):
         "off-policy correction: set trainer.algorithm.use_tis=true or trainer.algorithm.policy_loss_type=behavior_clip"
     )
 
-    behavior_logprobs_required = rollout_logprobs_enabled(cfg.trainer.algorithm)
+    behavior_logprobs_required = rollout_logprobs_enabled(cfg.trainer.algorithm) or bool(
+        cfg.trainer.mismatch_probe.get("enabled", False)
+    )
     if behavior_logprobs_required:
         if cfg.generator.sampling_params.logprobs is None:
             logger.warning(
