@@ -170,18 +170,16 @@ def create_ray_wrapped_inference_engines_from_config(
             engine_init_kwargs["async_scheduling"] = False
             engine_init_kwargs["weight_transfer_config"] = {"backend": "runai_streamer"}
 
-    requested_logprobs = [
-        value
-        for value in (cfg.generator.sampling_params.logprobs, cfg.generator.eval_sampling_params.logprobs)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0
-    ]
-
+    requested_logprobs = [cfg.generator.sampling_params.logprobs, cfg.generator.eval_sampling_params.logprobs]
     for callback in cfg.trainer.get("callbacks") or []:
         if callback.get("type") == "evaluation":
-            for profile in (callback.get("additional_evaluations") or {}).values():
-                value = (profile.get("sampling_params") or {}).get("logprobs")
-                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-                    requested_logprobs.append(value)
+            requested_logprobs.extend(
+                (profile.get("sampling_params") or {}).get("logprobs")
+                for profile in (callback.get("additional_evaluations") or {}).values()
+            )
+    requested_logprobs = [
+        value for value in requested_logprobs if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    ]
 
     role = InferenceEngineRoleConfig(
         pretrain=rollout_model_path,

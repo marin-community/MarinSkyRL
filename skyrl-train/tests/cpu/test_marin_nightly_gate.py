@@ -353,7 +353,7 @@ def test_cat_count_shipped_specs_require_learning_from_step_zero(lane, mutation)
         "async/staleness_mean": 1.0,
         "tis/skipped_fraction": 0.0,
     }
-    steps = [StepMetrics("train", step, metrics) for step in range(1, spec.min_train_steps + 1)]
+    steps = [StepMetrics("train", step, metrics) for step in range(1, max(10, spec.min_train_steps) + 1)]
     evaluations = [
         StepMetrics("eval", step, {"eval/train/avg_score": score}) for step, score in ((0, 0.55), (5, 0.30), (10, 0.80))
     ]
@@ -369,6 +369,30 @@ def test_cat_count_shipped_specs_require_learning_from_step_zero(lane, mutation)
     else:
         assert failures
     assert check_log_patterns("Training done!\n[telemetry] enabled run_id=test\n", spec) == []
+
+
+@pytest.mark.parametrize(
+    "selector,bound,selected_step,bad_score",
+    [
+        (0, MetricBound(0.0, 0.1), 0, 0.3),
+        ("first", MetricBound(0.0, 0.1), 0, 0.3),
+        ("last", MetricBound(0.7, 1.0), 6, 0.6),
+    ],
+)
+def test_evaluation_step_selection_requires_the_selected_value(spec, selector, bound, selected_step, bad_score):
+    spec = replace(
+        spec,
+        min_train_steps=0,
+        finite_metrics=(),
+        bounds={},
+        metric_series=(MetricSeries("eval", "eval/score", True, 1, bounds=bound, at_step=selector),),
+    )
+    rows = [StepMetrics("eval", step, {"eval/score": score}) for step, score in ((0, 0.0), (3, 0.3), (6, 0.8))]
+    assert check_run(list(reversed(rows)), spec, 300) == []
+    broken = [replace(row, values={"eval/score": bad_score}) if row.step == selected_step else row for row in rows]
+    assert check_run(broken, spec, 300)
+    missing = [row for row in rows if row.step != selected_step]
+    assert check_run(missing, spec, 300)
 
 
 def test_shipped_spec_gates_a_healthy_run():
