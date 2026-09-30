@@ -96,6 +96,10 @@ def _encode_routes(routes: torch.Tensor | None, length: int) -> EncodedRoutes:
     return EncodedRoutes(value.tobytes(), list(value.shape), str(value.dtype))
 
 
+# Timed forward + backward repetitions per mode, after one warmup pass.
+TIMING_REPETITIONS = 3
+
+
 def _reread_routes(output, rows) -> list[np.ndarray | None]:
     """Return each cache-off re-read's full-sequence routes, or ``None`` when the engine captured none."""
     routes = output.get("routed_experts")
@@ -594,7 +598,8 @@ class ProbeCollector:
             )
         return result
 
-    def _trainer_scores(self, trainer, update: int):
+    def _mode_batches(self, update: int, modes: tuple[str, ...]) -> dict[str, TrainingInputBatch]:
+        """Prepare each mode's scoring batch: its routes, prompt routes and batch layout."""
         training_input = self.training_input
         rows = self.probes
         n = len(rows)
@@ -604,7 +609,6 @@ class ProbeCollector:
             *(["rollout_routed_experts"] if route_tensor is not None else []),
             *(["rollout_prompt_routed_experts"] if prompt_route_tensor is not None else []),
         ]
-        modes = (NATIVE_MODE, REPEAT_MODE, *self.spec.extra_trainer_modes)
         reread_tensors = None
         if any(TRAINER_MODES[mode].route_source == "reread" for mode in modes):
             if route_tensor is None:
@@ -623,35 +627,59 @@ class ProbeCollector:
                 raise ValueError(f"re-read replay at update {update} has no captured re-read routes")
             prompt_width = training_input["sequences"].shape[1] - route_tensor.shape[1]
             reread_tensors = _reread_route_tensors(rows, sources, route_tensor, prompt_width)
-        result = []
+        batches = {}
         for mode in modes:
-            repeat_layout = TRAINER_MODES[mode].repeat_layout
-            order = self.batch_layout.repeat_order if repeat_layout else self.batch_layout.native_order
-            data = training_input.select(["sequences", "attention_mask", *route_keys], ["response_length"])
+            spec = TRAINER_MODES[mode]
+            data = training_input.select(["sequences", "attention_mask", "loss_mask", *route_keys], ["response_length"])
             data["probe_row_indices"] = torch.arange(data.batch_size, dtype=torch.long)
-            if not TRAINER_MODES[mode].requires_routes and route_tensor is not None:
+            if not spec.requires_routes and route_tensor is not None:
                 data["rollout_routed_experts"] = torch.zeros_like(route_tensor)
-            if not TRAINER_MODES[mode].replays_prompt and prompt_route_tensor is not None:
+            if not spec.replays_prompt and prompt_route_tensor is not None:
                 data["rollout_prompt_routed_experts"] = torch.zeros_like(prompt_route_tensor)
-            if TRAINER_MODES[mode].route_source == "reread":
+            if spec.route_source == "reread":
                 data["rollout_routed_experts"], data["rollout_prompt_routed_experts"] = reread_tensors
-            if repeat_layout:
-                data = _reorder_batch(data, order + list(range(n, data.batch_size)))
-            micro_batch_size = self.batch_layout.repeat_micro_batch_size if repeat_layout else None
-            fraction = (
-                float(self.spec.filtered_replay.keep_fraction) if TRAINER_MODES[mode].requires_keep_fraction else None
+            if spec.repeat_layout:
+                data = _reorder_batch(data, self.batch_layout.repeat_order + list(range(n, data.batch_size)))
+            data.metadata.update(
+                probe_mode=mode,
+                probe_keep_fraction=(
+                    float(self.spec.filtered_replay.keep_fraction) if spec.requires_keep_fraction else None
+                ),
+                probe_micro_batch_size=self.batch_layout.repeat_micro_batch_size if spec.repeat_layout else None,
+                global_step=update,
+            )
+            batches[mode] = data
+        return batches
+
+    def _training_pass_timing(self, trainer, update: int) -> None:
+        """Time forward + backward on the probe batch for each mode in trainer.mismatch_probe.timing_modes."""
+        modes = tuple(self.spec.get("timing_modes") or ())
+        for mode, data in self._mode_batches(update, modes).items():
+            data.metadata["probe_timing_repetitions"] = TIMING_REPETITIONS
+            outputs = ray.get(trainer.policy_model.async_run_ray_method("mesh", "probe_time_training_pass", data=data))
+            per_rank = [output for output in outputs]
+            label = f"training_pass@{update}:{mode}"
+            # The slowest rank sets the pass time; keep each repetition.
+            self.timing[f"{label}/seconds"] = [
+                max(rank["seconds"][repetition] for rank in per_rank) for repetition in range(TIMING_REPETITIONS)
+            ]
+            self.timing[f"{label}/peak_memory_bytes"] = max(rank["peak_memory_bytes"] for rank in per_rank)
+
+    def _trainer_scores(self, trainer, update: int):
+        rows = self.probes
+        n = len(rows)
+        modes = (NATIVE_MODE, REPEAT_MODE, *self.spec.extra_trainer_modes)
+        batches = self._mode_batches(update, modes)
+        result = []
+        for mode, data in batches.items():
+            order = (
+                self.batch_layout.repeat_order if TRAINER_MODES[mode].repeat_layout else self.batch_layout.native_order
             )
             if TRAINER_MODES[mode].captures_layers:
                 data.metadata["probe_capture"] = {
                     "uri": f"{self.archive_uri.rstrip('/')}-trainer-capture/update-{update}/{mode}",
                     "layers": list(self.spec.get("capture_layers") or ()),
                 }
-            data.metadata.update(
-                probe_mode=mode,
-                probe_keep_fraction=fraction,
-                probe_micro_batch_size=micro_batch_size,
-                global_step=update,
-            )
             started = time.monotonic()
             outputs = ray.get(trainer.policy_model.async_run_ray_method("mesh", "probe_forward", data=data))
             values = concatenate_outputs_after_mesh_dispatch(trainer.policy_model.actor_infos, outputs)["output"][:n]
@@ -753,6 +781,7 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
                 for row in rescore_rows:
                     row.weights_hash = probe.weights[update]
                 trainer_rows = probe._trainer_scores(trainer, update)
+                probe._training_pass_timing(trainer, update)
                 if probe._policy_weights_hash(trainer) != probe.weights[update]:
                     raise ValueError(f"probe scoring changed policy weights or buffers at update {update}")
             finally:

@@ -370,6 +370,8 @@ trainer:
     reread_again: false
     # 0-based layers whose region activations native_capture records for the parity harness.
     capture_layers: []
+    # Modes whose forward + backward on the probe batch is timed after scoring (zero advantages).
+    timing_modes: []
 
 generator:
   model_name: ${trainer.policy.model.path}

@@ -3,6 +3,7 @@ import copy
 import hashlib
 import importlib.util
 import os
+import time
 from collections import defaultdict
 from enum import StrEnum
 from typing import Any
@@ -308,6 +309,75 @@ class MegatronWorker:
                 module.training = was_training
             MegatronStrategy.load_rng_state(rng_state)
             rng_tracker.set_states(tracker_states)
+
+    def probe_time_training_pass(self, data):
+        """Time forward + backward of the policy loss on a probe batch under one probe mode.
+
+        Advantages are zero, so every gradient is zero and no optimizer step runs; the optimizer's
+        cost does not depend on the forward numerics. Returns per-repetition seconds (after one
+        warmup) and the peak allocated memory, measured on this rank.
+        """
+        mode = data.metadata["probe_mode"]
+        repetitions = int(data.metadata["probe_timing_repetitions"])
+        micro_size = self.cfg.trainer.micro_train_batch_size_per_gpu
+        module_modes = [(module, module.training) for chunk in self.actor_module for module in chunk.modules()]
+        rng_state = MegatronStrategy.get_rng_state()
+        rng_tracker = get_cuda_rng_tracker()
+        tracker_states = copy.deepcopy(rng_tracker.get_states())
+        device = torch.cuda.current_device()
+        micro_buffer = []
+        for micro in data.chunk(micro_size):
+            micro.to(device)
+            attention_mask = micro["attention_mask"]
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 0)
+            loss_mask = micro["loss_mask"]
+            micro_buffer.append(
+                MegatronPolicyMicroBatch(
+                    sequences=micro["sequences"],
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    num_actions=micro.metadata["response_length"],
+                    old_action_log_probs=torch.zeros_like(loss_mask, dtype=torch.float32),
+                    base_action_log_probs=None,
+                    advantages=torch.zeros_like(loss_mask, dtype=torch.float32),
+                    loss_mask=loss_mask,
+                    rollout_action_logprobs=None,
+                    response_span_tags=None,
+                    global_loss_denom=None,
+                    rollout_routed_experts=micro.get("rollout_routed_experts"),
+                    rollout_prompt_routed_experts=micro.get("rollout_prompt_routed_experts"),
+                )
+            )
+        seconds = []
+        try:
+            with TRAINER_MODES[mode].context(self, data.metadata):
+                self.model.train()
+                torch.cuda.reset_peak_memory_stats()
+                for repetition in range(repetitions + 1):
+                    for chunk in self.actor_module:
+                        chunk.zero_grad_buffer()
+                    torch.cuda.synchronize()
+                    torch.distributed.barrier()
+                    started = time.perf_counter()
+                    self.model.forward_backward_mini_batch(
+                        micro_batches=micro_buffer,
+                        seq_len=micro_buffer[0].sequences.shape[1],
+                        micro_batch_size=micro_buffer[0].sequences.shape[0],
+                        temperature=self.cfg.generator.sampling_params.temperature,
+                    )
+                    torch.cuda.synchronize()
+                    torch.distributed.barrier()
+                    if repetition:
+                        seconds.append(time.perf_counter() - started)
+                for chunk in self.actor_module:
+                    chunk.zero_grad_buffer()
+        finally:
+            for module, was_training in module_modes:
+                module.training = was_training
+            MegatronStrategy.load_rng_state(rng_state)
+            rng_tracker.set_states(tracker_states)
+        return {"seconds": seconds, "peak_memory_bytes": torch.cuda.max_memory_allocated()}
 
     def probe_weights_digest(self) -> str:
         """Hash each local model shard exactly for same-weight and update checks."""

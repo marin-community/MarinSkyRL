@@ -71,6 +71,7 @@ class _PolicyEndpoint:
     def __init__(self):
         self.prompt_routes_by_mode = {}
         self.response_routes_by_mode = {}
+        self.timed_modes = []
         self.actor_infos = [
             SimpleNamespace(rank=MeshRank(dp=dp, sp=0, tp=0, pp=0, world_size=2, dp_size=2, pp_size=1))
             for dp in range(2)
@@ -79,6 +80,12 @@ class _PolicyEndpoint:
     def async_run_ray_method(self, dispatch, method, *, data=None):
         if method == "probe_weights_digest":
             return ["0" * 64]
+        if method == "probe_time_training_pass":
+            self.timed_modes.append(data.metadata["probe_mode"])
+            repetitions = data.metadata["probe_timing_repetitions"]
+            return [
+                {"seconds": [0.5 + dp] * repetitions, "peak_memory_bytes": 100 * (dp + 1)} for dp in range(2)
+            ]
         if method != "probe_forward":
             raise ValueError(method)
         width = data.metadata["response_length"]
@@ -136,6 +143,7 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     cfg.trainer.policy.megatron_config.moe_router_replay = True
     cfg.trainer.mismatch_probe.extra_trainer_modes = ["router_replay", "router_replay_response", "reread_replay"]
     cfg.trainer.mismatch_probe.reread_again = True
+    cfg.trainer.mismatch_probe.timing_modes = ["native", "reread_replay"]
     cfg.trainer.algorithm.advantage_estimator = "uniform"
     cfg.trainer.algorithm.use_tis = False
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
@@ -283,6 +291,10 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     assert [worker["parameter_sha256"] for worker in vllm_workers] == ["ab" * 32]
     # The fresh re-read now routes differently, but re-read replay still uses the frozen reference.
     assert trainer.policy_model.prompt_routes_by_mode["reread_replay"][0, :, 0].tolist() == [[0, 0], [3, 4], [4, 5]]
+    timing = json.loads(read_frozen_probe(cfg.trainer.mismatch_probe.archive_uri).manifest.timing_json)
+    # The slowest data-parallel rank sets each repetition's pass time.
+    assert timing["training_pass@0:reread_replay/seconds"] == [1.5, 1.5, 1.5]
+    assert timing["training_pass@0:native/peak_memory_bytes"] == 200
     frozen_rows = [row for row in chained_scores(cfg) if row.scorer == "vllm.rescore_frozen"]
     assert {row.sample_id: row.expert_choices for row in frozen_rows} == {
         sample: row.expert_choices for sample, row in rereads.items()

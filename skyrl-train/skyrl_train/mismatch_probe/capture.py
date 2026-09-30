@@ -71,7 +71,9 @@ def capture_layer_regions(
             store(index, "input", _first_tensor(args) if args else kwargs["hidden_states"])
 
         handles.append(layer.register_forward_pre_hook(pre_layer, with_kwargs=True))
-        handles.append(layer.register_forward_hook(lambda m, a, out, index=index: store(index, "output", _first_tensor(out))))
+        handles.append(
+            layer.register_forward_hook(lambda m, a, out, index=index: store(index, "output", _first_tensor(out)))
+        )
         handles.append(
             layer.input_layernorm.register_forward_hook(
                 lambda m, a, out, index=index: store(index, "attention_norm", _first_tensor(out))
@@ -92,7 +94,9 @@ def capture_layer_regions(
                 lambda m, a, out, index=index: store(index, "mlp_norm", _first_tensor(out))
             )
         )
-        handles.append(layer.mlp.register_forward_hook(lambda m, a, out, index=index: store(index, "mlp", _first_tensor(out))))
+        handles.append(
+            layer.mlp.register_forward_hook(lambda m, a, out, index=index: store(index, "mlp", _first_tensor(out)))
+        )
         router = getattr(layer.mlp, "router", None)
         if router is not None:
 
@@ -116,7 +120,9 @@ def capture_layer_regions(
             handle.remove()
 
 
-def write_capture(destination: str, captured: Mapping[int, Mapping[str, torch.Tensor]], batch: Mapping[str, Any]) -> None:
+def write_capture(
+    destination: str, captured: Mapping[int, Mapping[str, torch.Tensor]], batch: Mapping[str, Any]
+) -> None:
     """Write one pipeline stage's captured regions with the micro-batch token layout."""
     payload = io.BytesIO()
     torch.save({"layers": dict(captured), **batch}, payload)

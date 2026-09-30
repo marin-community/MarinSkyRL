@@ -125,6 +125,9 @@ def validate_mismatch_probe_config(
             raise ValueError("trainer.mismatch_probe replay modes require an MoE router with top-k >= 2")
     if any(TRAINER_MODES[mode].route_source == "reread" for mode in modes) and cache_mode == CACHE_ON:
         raise ValueError("trainer.mismatch_probe re-read replay modes require a cache-off re-read")
+    timing_modes = list(probe.get("timing_modes") or [])
+    if any(mode not in TRAINER_MODES or mode not in {NATIVE_MODE, REPEAT_MODE, *modes} for mode in timing_modes):
+        raise ValueError("trainer.mismatch_probe.timing_modes must name scored trainer modes")
     capture_layers = list(probe.get("capture_layers") or [])
     if any(TRAINER_MODES[mode].captures_layers for mode in modes) and not capture_layers:
         raise ValueError("trainer.mismatch_probe native_capture requires capture_layers")
