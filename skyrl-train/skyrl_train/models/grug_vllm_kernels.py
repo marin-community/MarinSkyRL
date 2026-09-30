@@ -1,11 +1,12 @@
-"""Compiled vLLM's attention kernel and expert-parallel combine, for the Grug trainer's numerics flags.
+"""Compiled vLLM's kernels and expert-parallel combine, for the Grug trainer's numerics flags.
 
 ``fa3_attention`` runs vLLM's own FA3 forward (``vllm.vllm_flash_attn``, the build the rollout engine
 serves with) on the trainer's query, key and value. Its bytes depend on how many key-block splits FA3
 uses for a request, which vLLM decides per engine step (``fa3_split_counts``). ``ep_sum`` adds each
 token's routed expert outputs the way vLLM's expert-parallel combine does: every EP rank sums the
 token's slots it owns in fp32 and rounds once, and a bf16 ring reduction adds the rank partials,
-starting after the rank that holds the token's request and ending at it.
+starting after the rank that holds the token's request and ending at it. ``vllm_experts`` computes each
+token-expert slot with vLLM's fused-MoE Triton kernels (``vllm_expert_outputs``).
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ FA3_MAX_SPLITS_FOR_CUDA_GRAPH = 32
 # The probe engines' largest CUDA-graph capture size (``max_cudagraph_capture_size``).
 VLLM_MAX_CUDA_GRAPH_TOKENS = 512
 H100_SMS = 132
+# ``vllm_experts`` addresses each expert's weights in units of this many elements from the lowest-addressed one.
+EXPERT_OFFSET_ELEMENTS = 16
 
 
 @dataclass(frozen=True)
@@ -218,3 +221,142 @@ def vllm_ep_combine(
         total = torch.where(new_rank, closed, total)
         partial = torch.where(new_rank, zero + value, partial + value)
     return (total.float() + partial.to(permuted.dtype).float()).to(permuted.dtype)
+
+
+def vllm_expert_outputs(
+    hidden: torch.Tensor,
+    tokens_per_expert: Sequence[int],
+    probs: torch.Tensor,
+    fc1_weights: Sequence[torch.Tensor],
+    fc2_weights: Sequence[torch.Tensor],
+) -> torch.Tensor:
+    """Each dispatched row's routed-expert output as vLLM's ``TritonExperts`` computes one token-expert slot.
+
+    ``hidden`` ``[rows, hidden]`` holds each local expert's rows in turn (``tokens_per_expert`` of them),
+    ``probs`` the rows' fp32 route weights, and ``fc1_weights`` / ``fc2_weights`` each expert's
+    ``[2 * ffn, hidden]`` gate-and-up and ``[hidden, ffn]`` down projection. As ``TritonExperts.apply`` does,
+    this aligns the rows by expert (``moe_align_block_size``), runs ``fused_moe_kernel`` for gate-and-up,
+    ``silu_and_mul``, and ``fused_moe_kernel`` for the down projection with the route weight multiplied into the
+    fp32 accumulator before one bf16 rounding, all with vLLM's launch config for the shapes. Every row is one
+    slot (``top_k`` 1). A slot's bytes depend only on its row, its expert and its weight: the kernel adds the K
+    blocks in order into one fp32 accumulator without split-K, whatever the config or the other rows.
+
+    The kernel reads the experts' weights where the trainer keeps them, one tensor per expert: it addresses a
+    block's expert at ``B + expert_ids[block] * B.stride(0)``, so each block gets its expert's offset from the
+    lowest-addressed expert weight, in units of ``EXPERT_OFFSET_ELEMENTS``, as its expert id, with that unit as
+    the expert stride. A stride divisible by 16 lets Triton keep the vectorized weight loads it uses for vLLM's
+    own stacked weights.
+    """
+    from vllm.model_executor.layers.fused_moe.config import FUSED_MOE_UNQUANTIZED_CONFIG
+    from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
+    from vllm.model_executor.layers.fused_moe.moe_align_block_size import moe_align_block_size
+
+    rows, width = hidden.shape
+    experts = len(fc1_weights)
+    gate_up_width = fc1_weights[0].shape[0]
+    if probs.dtype != torch.float32 or probs.shape != (rows,):
+        raise ValueError(f"vllm_experts needs one fp32 route weight per row, got {probs.dtype}{tuple(probs.shape)}")
+    if len(fc2_weights) != experts or len(tokens_per_expert) != experts:
+        raise ValueError("vllm_experts needs one fc1 weight, one fc2 weight and one row count per expert")
+    output = hidden.new_empty(rows, width)
+    if rows == 0:
+        return output
+    config = try_get_optimal_moe_config(
+        (experts, gate_up_width, width),
+        (experts, width, gate_up_width // 2),
+        1,
+        FUSED_MOE_UNQUANTIZED_CONFIG.config_name(hidden.dtype),
+        rows,
+    )
+    counts = torch.as_tensor(tokens_per_expert, dtype=torch.long, device="cpu")
+    expert_of_row = torch.repeat_interleave(torch.arange(experts, dtype=torch.int32), counts)
+    expert_of_row = expert_of_row.pin_memory().to(hidden.device, non_blocking=True).view(rows, 1)
+    sorted_rows, block_experts, padded_rows = moe_align_block_size(expert_of_row, config["BLOCK_SIZE_M"], experts)
+    gate_up = hidden.new_empty(rows, 1, gate_up_width)
+    _fused_moe_gemm(hidden.contiguous(), fc1_weights, gate_up, None, sorted_rows, block_experts, padded_rows, config)
+    activation = hidden.new_empty(rows, gate_up_width // 2)
+    torch.ops._C.silu_and_mul(activation, gate_up.view(rows, gate_up_width))
+    down = output.view(rows, 1, width)
+    _fused_moe_gemm(activation, fc2_weights, down, probs.view(rows, 1), sorted_rows, block_experts, padded_rows, config)
+    return output
+
+
+def expert_weight_offsets(weights: Sequence[torch.Tensor], base: torch.Tensor) -> list[int]:
+    """Each weight's address minus ``base``'s, in units of ``EXPERT_OFFSET_ELEMENTS`` elements.
+
+    ``base`` must be the lowest-addressed weight; every weight must be contiguous with ``base``'s shape and dtype
+    and sit a whole number of units above it, so that element ``offset * EXPERT_OFFSET_ELEMENTS`` counted from
+    ``base``'s first element is the weight's first element.
+    """
+    if any(
+        weight.shape != base.shape or weight.dtype != base.dtype or not weight.is_contiguous() for weight in weights
+    ):
+        raise ValueError("vllm_experts needs contiguous expert weights of one shape and dtype")
+    unit = EXPERT_OFFSET_ELEMENTS * base.element_size()
+    distances = [weight.data_ptr() - base.data_ptr() for weight in weights]
+    if any(distance < 0 or distance % unit for distance in distances):
+        raise ValueError(f"vllm_experts needs expert weights at whole {unit}-byte steps above the lowest one")
+    return [distance // unit for distance in distances]
+
+
+def vllm_qkv_projection(
+    x: torch.Tensor, fused_weight: torch.Tensor, groups: int, query_width: int, head_dim: int
+) -> torch.Tensor:
+    """Megatron's fused QKV projection computed as compiled vLLM computes q, k and v: three GEMMs.
+
+    Megatron's fused weight holds, for each of ``groups`` KV groups, the group's ``query_width`` query rows, then
+    its key and its value rows (``head_dim`` each). vLLM's q, k and v weights are those rows gathered across the
+    groups. The result has the fused projection's layout, so Megatron's split reads q, k and v from it.
+    """
+    grouped = fused_weight.view(groups, query_width + 2 * head_dim, -1)
+    weights = (
+        grouped[:, :query_width],
+        grouped[:, query_width : query_width + head_dim],
+        grouped[:, query_width + head_dim :],
+    )
+    parts = [torch.nn.functional.linear(x, weight.reshape(-1, weight.shape[-1])) for weight in weights]
+    return torch.cat([part.view(*x.shape[:-1], groups, -1) for part in parts], dim=-1).view(*x.shape[:-1], -1)
+
+
+def _fused_moe_gemm(
+    inputs: torch.Tensor,
+    weights: Sequence[torch.Tensor],
+    output: torch.Tensor,
+    route_weights: torch.Tensor | None,
+    sorted_rows: torch.Tensor,
+    block_experts: torch.Tensor,
+    padded_rows: torch.Tensor,
+    config: dict,
+) -> None:
+    """vLLM's ``invoke_fused_moe_triton_kernel`` on per-expert weight tensors (see ``vllm_expert_outputs``)."""
+    from vllm.model_executor.layers.fused_moe.fused_moe import invoke_fused_moe_triton_kernel
+    from vllm.triton_utils import tl
+
+    base = min(weights, key=lambda weight: weight.data_ptr())
+    rows, columns = base.shape
+    table = torch.tensor(expert_weight_offsets(weights, base), dtype=torch.int64)
+    table = table.pin_memory().to(inputs.device, non_blocking=True)
+    # Blocks past the padded row count keep whatever moe_align_block_size left there; the kernel returns before
+    # reading their expert, so any in-range value serves.
+    block_offsets = table[block_experts.long().clamp(0, len(weights) - 1)]
+    stacked = torch.as_strided(base.detach(), (1, rows, columns), (EXPERT_OFFSET_ELEMENTS, columns, 1))
+    invoke_fused_moe_triton_kernel(
+        inputs,
+        stacked,
+        output,
+        None,
+        None,
+        route_weights,
+        sorted_rows,
+        block_offsets,
+        padded_rows,
+        route_weights is not None,
+        1,
+        config,
+        compute_type=tl.bfloat16,
+        use_fp8_w8a8=False,
+        use_int8_w8a8=False,
+        use_int8_w8a16=False,
+        use_int4_w4a16=False,
+        per_channel_quant=False,
+    )

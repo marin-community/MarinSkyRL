@@ -1,9 +1,16 @@
-"""vLLM's expert-parallel combine order and FA3 split counts, as the Grug trainer's numerics reproduce them."""
+"""vLLM's kernel shapes, expert-parallel combine order and FA3 split counts, as the Grug trainer's numerics reproduce them."""
 
 import pytest
 import torch
 
-from skyrl_train.models.grug_vllm_kernels import Fa3Request, fa3_split_counts, vllm_ep_combine
+from skyrl_train.models.grug_vllm_kernels import (
+    EXPERT_OFFSET_ELEMENTS,
+    Fa3Request,
+    expert_weight_offsets,
+    fa3_split_counts,
+    vllm_ep_combine,
+    vllm_qkv_projection,
+)
 
 
 def _vllm_combine_reference(slots, experts, home, ep_size, num_experts):
@@ -70,3 +77,37 @@ def test_ep_combine_adds_rank_partials_in_the_ring_order_of_each_token_home_rank
 )
 def test_fa3_split_counts_follow_vllm_step_caps_and_the_fa3_heuristic(step, window, expected):
     assert fa3_split_counts(step, kv_heads=5, query_heads_per_kv_head=4, window=window) == expected
+
+
+def test_vllm_qkv_projection_has_the_layout_of_megatrons_fused_projection():
+    groups, heads_per_group, head_dim, hidden = 3, 2, 4, 8
+    generator = torch.Generator().manual_seed(0)
+    # Small integers keep every product and sum exact, so a difference can only be a misplaced row.
+    fused = torch.randint(-3, 4, (groups * (heads_per_group + 2) * head_dim, hidden), generator=generator).float()
+    x = torch.randint(-3, 4, (5, 2, hidden), generator=generator).float()
+
+    projected = vllm_qkv_projection(x, fused, groups, heads_per_group * head_dim, head_dim)
+
+    assert torch.equal(projected, torch.nn.functional.linear(x, fused))
+
+
+def test_expert_weight_offsets_address_each_expert_from_the_lowest_addressed_weight():
+    experts, rows, columns = 4, 3, EXPERT_OFFSET_ELEMENTS
+    size = rows * columns
+    buffer = torch.arange((experts + 1) * size, dtype=torch.float32)
+    # Megatron's parameter buffer holds a layer's experts in reverse order; one bucket boundary leaves a gap.
+    starts = [3 * size + size, 2 * size + size, size, 0]
+    weights = [buffer[start : start + size].view(rows, columns) for start in starts]
+    base = min(weights, key=lambda weight: weight.data_ptr())
+
+    offsets = expert_weight_offsets(weights, base)
+
+    # The kernel reads expert e at ``base + offsets[e] * EXPERT_OFFSET_ELEMENTS`` elements.
+    flat = buffer[base.storage_offset() :]
+    for weight, offset in zip(weights, offsets, strict=True):
+        start = offset * EXPERT_OFFSET_ELEMENTS
+        assert torch.equal(flat[start : start + size], weight.flatten())
+    misaligned = buffer[1 : 1 + size].view(rows, columns)
+    with pytest.raises(ValueError, match="whole"):
+        expert_weight_offsets([base, misaligned], base)
+
