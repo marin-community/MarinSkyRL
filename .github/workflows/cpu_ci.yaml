@@ -80,10 +80,6 @@ jobs:
         run: uv sync --frozen --group dev --group harbor-test --extra cpu --extra telemetry
       - name: Check the lockfile is current
         run: uv lock --check
-      - uses: actions/cache@v5
-        with:
-          path: .pytest_cache/d/cat_count_policy
-          key: cat-count-policy-${{ runner.os }}-${{ hashFiles('skyrl-train/examples/cat_count/cpu_canary.py', 'skyrl-gym/skyrl_gym/envs/cat_count/reward.py', 'skyrl-train/tests/cpu/test_cat_count_cpu_canary.py', 'pyproject.toml', 'skyrl-gym/pyproject.toml', 'uv.lock') }}
       - name: Run cpu tests
         env:
           PYTHONPATH: ${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym

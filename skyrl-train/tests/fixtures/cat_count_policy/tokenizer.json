@@ -1,0 +1,144 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    {
+      "id": 0,
+      "content": "<pad>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 1,
+      "content": "<eos>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 2,
+      "content": "<unk>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 3,
+      "content": "<|user|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 4,
+      "content": "<|assistant|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    }
+  ],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "Sequence",
+    "pretokenizers": [
+      {
+        "type": "WhitespaceSplit"
+      },
+      {
+        "type": "Punctuation",
+        "behavior": "Isolated"
+      },
+      {
+        "type": "Digits",
+        "individual_digits": true
+      }
+    ]
+  },
+  "post_processor": {
+    "type": "TemplateProcessing",
+    "single": [
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      }
+    ],
+    "pair": [
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "B",
+          "type_id": 1
+        }
+      }
+    ],
+    "special_tokens": {}
+  },
+  "decoder": {
+    "type": "WordPiece",
+    "prefix": "##",
+    "cleanup": true
+  },
+  "model": {
+    "type": "WordLevel",
+    "vocab": {
+      "<pad>": 0,
+      "<eos>": 1,
+      "<unk>": 2,
+      "<|user|>": 3,
+      "<|assistant|>": 4,
+      "Nothing": 5,
+      "Reply": 6,
+      "ant": 7,
+      "bee": 8,
+      "bird": 9,
+      "by": 10,
+      "cat": 11,
+      "cow": 12,
+      "dog": 13,
+      "else": 14,
+      "exactly": 15,
+      "fox": 16,
+      "owl": 17,
+      "pig": 18,
+      "separated": 19,
+      "single": 20,
+      "spaces": 21,
+      "the": 22,
+      "times": 23,
+      "with": 24,
+      "word": 25,
+      ",": 26,
+      ".": 27,
+      "0": 28,
+      "1": 29,
+      "2": 30,
+      "3": 31,
+      "4": 32,
+      "5": 33,
+      "6": 34,
+      "7": 35,
+      "8": 36,
+      "9": 37
+    },
+    "unk_token": "<unk>"
+  }
+}
