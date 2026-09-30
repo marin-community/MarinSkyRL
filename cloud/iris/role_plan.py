@@ -17,6 +17,7 @@ from marinskyrl.distillation import (
     compile_distillation_plan,
 )
 from cloud.iris.runtime_environment import RuntimeProfile
+from cloud.iris.rl_config_translation import RL_ENTRYPOINTS, RLEntrypoint
 
 
 class ModelRoleKind(StrEnum):
@@ -376,7 +377,9 @@ def _rollout_claim(config: dict[str, Any], values: _RolePlanValues) -> ModelRole
     return claim
 
 
-def derive_role_plan(config: dict[str, Any]) -> SkyRLRolePlan:
+def derive_role_plan(
+    config: dict[str, Any], *, entrypoint: str = RL_ENTRYPOINTS[RLEntrypoint.STANDARD]
+) -> SkyRLRolePlan:
     """Derive every role-plan field from the RL config.
 
     Required geometry raises before submission, while omitted reference dimensions
@@ -386,10 +389,15 @@ def derive_role_plan(config: dict[str, Any]) -> SkyRLRolePlan:
     physical whole-node footprint.
     """
     values = _role_plan_values(config)
-    claims = _core_model_claims(config, values)
+    generate_only = entrypoint in {
+        RL_ENTRYPOINTS[RLEntrypoint.GENERATE],
+        RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH_GENERATE],
+    }
+    claims = [] if generate_only else _core_model_claims(config, values)
     claims.append(_rollout_claim(config, values))
-    claims.extend(_teacher_claims(config))
-    claims.extend(_draft_trainer_claims(config, values))
+    if not generate_only:
+        claims.extend(_teacher_claims(config))
+        claims.extend(_draft_trainer_claims(config, values))
     bundles = _physical_bundles(tuple(claims))
     return SkyRLRolePlan(
         claims=tuple(claims),

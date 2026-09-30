@@ -272,25 +272,25 @@ def validate_iris_allocation(config: dict[str, Any]) -> IrisAllocationConfig:
     skyrl = config["skyrl"]
     if not isinstance(skyrl, dict):
         raise TypeError("skyrl must be a mapping")
-    plan = derive_role_plan(skyrl)
+    plan = derive_role_plan(skyrl, entrypoint=config["runtime"]["entrypoint"])
     allocation = config["iris"]["allocation"]
-    policy = plan.claim("policy")
+    execution_role = plan.claim("policy" if any(claim.role_id == "policy" for claim in plan.claims) else "rollout")
     checkpoint_export = config["run"]["mode"] == RunMode.CHECKPOINT_EXPORT
-    expected_nodes = policy.num_nodes if checkpoint_export else derive_num_nodes(plan)
+    expected_nodes = execution_role.num_nodes if checkpoint_export else derive_num_nodes(plan)
     if allocation["num_nodes"] != expected_nodes:
         raise ValueError(
             f"iris.allocation.num_nodes={allocation['num_nodes']} does not match SkyRL role plan's "
             f"{expected_nodes} physical nodes"
         )
     gpu_mismatch = (
-        allocation["gpus_per_node"] < policy.gpus_per_node
+        allocation["gpus_per_node"] < execution_role.gpus_per_node
         if checkpoint_export
-        else allocation["gpus_per_node"] != policy.gpus_per_node
+        else allocation["gpus_per_node"] != execution_role.gpus_per_node
     )
     if gpu_mismatch:
         raise ValueError(
-            f"iris.allocation.gpus_per_node={allocation['gpus_per_node']} does not match SkyRL policy "
-            f"placement ({policy.gpus_per_node})"
+            f"iris.allocation.gpus_per_node={allocation['gpus_per_node']} does not match SkyRL execution role "
+            f"placement ({execution_role.gpus_per_node})"
         )
     return IrisAllocationConfig(**allocation)
 

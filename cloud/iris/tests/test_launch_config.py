@@ -128,7 +128,7 @@ def test_composed_launch_records_whether_training_runs_ahead_of_its_updates(
     raw["skyrl"]["entrypoint"] = entrypoint
     raw["skyrl"]["trainer"]["placement"]["colocate_all"] = False
     raw["skyrl"]["trainer"]["rollout_buffer"] = {"max_staleness_steps": max_staleness_steps}
-    raw["iris"]["allocation"]["num_nodes"] = 2
+    raw["iris"]["allocation"]["num_nodes"] = 1 if entrypoint == "generate" else 2
     path = tmp_path / "launch.yaml"
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
@@ -196,3 +196,17 @@ def test_task_materializes_the_forwarded_launch_document(tmp_path: Path) -> None
 
     assert path == str(destination)
     assert destination.read_bytes() == contents
+
+
+@pytest.mark.parametrize("entrypoint", ["generate", "terminal_bench_generate"])
+def test_generate_only_reserves_inference_nodes_without_training_roles(tmp_path, entrypoint):
+    raw = _raw_config()
+    raw["skyrl"]["entrypoint"] = entrypoint
+    raw["skyrl"]["trainer"]["placement"].update(colocate_all=False, policy_num_nodes=10)
+    raw["skyrl"]["generator"].update(num_inference_engines=12, inference_engine_data_parallel_size=4)
+    raw["iris"]["allocation"]["num_nodes"] = 6
+    path = tmp_path / "generate-only.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    config = load_launch_config(path)
+    allocation = validate_launch_config(config)
+    assert allocation.num_nodes * allocation.gpus_per_node == 48
