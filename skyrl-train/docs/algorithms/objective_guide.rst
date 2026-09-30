@@ -51,8 +51,20 @@ when that extra bound is not intended.
 ``importance_sampling``
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-:math:`\ell=-rA`. Use for unclipped advantage-weighted updates, including
-chosen-token OPD. Avoid it when large ratios require a clipped policy surrogate.
+:math:`\ell=-rA`, with :math:`r=\pi_\theta/\pi_{\mathrm{old}}`, the same ratio
+as ``regular``. This is the regular policy surrogate without PPO clipping.
+With one optimizer step per batch, current and old policies coincide during
+gradient computation, so the two losses give the same update. Splitting the batch
+across several optimizer steps lets the current policy move away from the fixed
+old policy; the updates can then differ when PPO clipping becomes active.
+Accumulating microbatches into one optimizer step does not create that difference.
+Use for unclipped advantage-weighted updates, including chosen-token OPD.
+
+TIS is a separate correction: ``off_policy_correction: tis`` multiplies this loss
+by the detached weight :math:`\min(\pi_{\mathrm{old}}/\mu,2)`, where :math:`\mu`
+is the sampling policy. It can be combined with ``importance_sampling``.
+`Tinker's importance_sampling loss <https://tinker-docs.thinkingmachines.ai/tinker/losses/importance-sampling/>`_
+divides by the sampler's probabilities, whereas this loss divides by :math:`\pi_{\mathrm{old}}`.
 
 .. code-block:: yaml
 
