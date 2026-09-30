@@ -11,7 +11,10 @@ operations. Each flag makes one chain compute in fp32 and round once, as compile
 - ``router_input``: the router reads the unrounded gated-norm product in fp32, with an fp32
   router GEMM (requires ``gated_norm``);
 - ``route_weight``: each routed expert's down projection accumulates in fp32 and is multiplied by
-  its route weight before one rounding, instead of weighting the activation before the projection.
+  its route weight before one rounding, instead of weighting the activation before the projection;
+- ``mlp_residual``: the next residual is ``h + (routed + shared)`` in fp32, rounded once;
+- ``residual_norm``: the post-attention norm, the next layer's input norm and the final norm read
+  the unrounded fp32 residual sum, as when Inductor fuses a residual add into the following norm.
 
 Probe modes set flags for one scoring forward; the flags default to the current trainer numerics.
 """
@@ -31,6 +34,8 @@ class GrugNumerics:
     shared_swiglu: bool = False
     router_input: bool = False
     route_weight: bool = False
+    mlp_residual: bool = False
+    residual_norm: bool = False
 
 
 NUMERICS_FLAGS = tuple(field.name for field in fields(GrugNumerics))

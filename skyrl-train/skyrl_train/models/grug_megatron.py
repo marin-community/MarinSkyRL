@@ -44,6 +44,7 @@ from torch import nn
 from skyrl_train.mismatch_probe.numerics import active_numerics
 from skyrl_train.models.grug_rounding import (
     gated_norm_product_fp32,
+    rms_norm_single_rounding,
     weighted_down_projection_single_rounding,
     rotate_neox_fp32,
     swiglu_single_rounding,
@@ -68,6 +69,67 @@ def _first_present(preferred: torch.Tensor | None, fallback: torch.Tensor | None
 
 # Unrounded gated-norm products awaiting the router, keyed by the bf16 tensor handed to the MoE layer.
 _ROUTER_FP32_INPUTS: dict[int, torch.Tensor] = {}
+# Unrounded residual sums awaiting the next norm, keyed by the bf16 residual tensor.
+_RESIDUAL_FP32: dict[int, torch.Tensor] = {}
+
+
+def _install_residual_hooks(layer: TransformerLayer) -> None:
+    """Rebuild each residual in fp32 for the ``mlp_residual`` and ``residual_norm`` numerics."""
+    stored: dict[str, torch.Tensor] = {}
+
+    def active() -> bool:
+        numerics = active_numerics()
+        return numerics.mlp_residual or numerics.residual_norm
+
+    def keep_input(module, args, kwargs):
+        if active():
+            stored["input"] = args[0] if args else kwargs["hidden_states"]
+
+    def keep_attention(module, args, output):
+        if active():
+            stored["attention"] = output[0] if isinstance(output, tuple) else output
+
+    def attention_residual(module, args):
+        if not active():
+            return
+        stored["residual"] = args[0]
+        if active_numerics().residual_norm:
+            _RESIDUAL_FP32[id(args[0])] = stored["input"].float() + stored["attention"].float()
+
+    postprocess = layer.mlp.postprocess
+    combine_postprocess = layer.mlp.token_dispatcher.combine_postprocess
+
+    def keep_routed(output):
+        routed = combine_postprocess(output)
+        if active():
+            stored["routed"] = routed
+        return routed
+
+    def keep_shared(output, shared_expert_output):
+        if active():
+            if shared_expert_output is None:
+                raise RuntimeError("Grug residual numerics expect a shared expert")
+            stored["shared"] = shared_expert_output
+        return postprocess(output, shared_expert_output)
+
+    def mlp_residual(module, args, output):
+        numerics = active_numerics()
+        if not active():
+            return None
+        routed, shared = stored.pop("routed"), stored.pop("shared")
+        mlp_output = routed.float() + shared.float() if numerics.mlp_residual else (routed + shared).float()
+        next_residual = stored.pop("residual").float() + mlp_output
+        hidden = next_residual.to(output[0].dtype)
+        if numerics.residual_norm:
+            _RESIDUAL_FP32[id(hidden)] = next_residual
+        return (hidden, *output[1:])
+
+    layer.register_forward_pre_hook(keep_input, with_kwargs=True)
+    layer.self_attention.register_forward_hook(keep_attention)
+    layer.pre_mlp_layernorm.register_forward_pre_hook(attention_residual)
+    layer.mlp.token_dispatcher.combine_postprocess = keep_routed
+    layer.mlp.postprocess = keep_shared
+    layer.register_forward_hook(mlp_residual)
 
 
 def _install_route_weight_hooks(experts: TEGroupedMLP) -> None:
@@ -102,12 +164,13 @@ def _install_shared_swiglu_hooks(shared: SharedExpertMLP) -> None:
     stored: dict[str, torch.Tensor] = {}
 
     def keep_fc1_output(module, args, output):
-        stored["fc1"] = output[0] if isinstance(output, tuple) else output
+        if active_numerics().shared_swiglu:
+            stored["fc1"] = output[0] if isinstance(output, tuple) else output
 
     def replace_fc2_input(module, args):
-        fc1_output = stored.pop("fc1", None)
         if not active_numerics().shared_swiglu:
             return None
+        fc1_output = stored.pop("fc1", None)
         if fc1_output is None:
             raise RuntimeError("shared_swiglu requires the shared expert's fc1 output")
         return (swiglu_single_rounding(fc1_output), *args[1:])
@@ -124,7 +187,18 @@ def install_numerics_hooks(root: nn.Module) -> None:
         if isinstance(module, TEGroupedMLP):
             _install_route_weight_hooks(module)
         if isinstance(module, TransformerLayer) and isinstance(module.pre_mlp_layernorm, GrugGatedRMSNorm):
+            _install_residual_hooks(module)
             module.pre_mlp_layernorm.feeds_router = True
+
+
+def clear_numerics_handoffs() -> None:
+    """Drop the fp32 tensors the numerics hooks hand from one module to the next.
+
+    Each forward starts empty: a pipeline stage's last residual has no reader, and the entries are keyed
+    by ``id()`` of tensors that a later forward may reuse.
+    """
+    _ROUTER_FP32_INPUTS.clear()
+    _RESIDUAL_FP32.clear()
 
 
 class GrugGatedRMSNorm(nn.Module):
@@ -134,6 +208,7 @@ class GrugGatedRMSNorm(nn.Module):
         super().__init__()
         # True on the pre-MLP norm, whose output the router reads.
         self.feeds_router = False
+        self.eps = eps
         self.norm = TENorm(config=config, hidden_size=hidden_size, eps=eps)
         device = torch.cuda.current_device()
         self.down_proj = nn.Linear(
@@ -147,9 +222,13 @@ class GrugGatedRMSNorm(nn.Module):
             param.sequence_parallel = config.sequence_parallel
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        normalized = self.norm(hidden_states)
-        gate = self.up_proj(F.silu(self.down_proj(normalized)))
         numerics = active_numerics()
+        residual = _RESIDUAL_FP32.pop(id(hidden_states), None) if numerics.residual_norm else None
+        if residual is None:
+            normalized = self.norm(hidden_states)
+        else:
+            normalized = rms_norm_single_rounding(residual, self.norm.weight, self.eps)
+        gate = self.up_proj(F.silu(self.down_proj(normalized)))
         if not numerics.gated_norm:
             return normalized * torch.sigmoid(gate)
         product = gated_norm_product_fp32(normalized, gate)
@@ -384,6 +463,10 @@ class GrugGPTModel(GPTModel):
             self.embed_norm = GrugGatedRMSNorm(
                 config=config, hidden_size=config.hidden_size, eps=config.layernorm_epsilon
             )
+
+    def forward(self, *args, **kwargs):
+        clear_numerics_handoffs()
+        return super().forward(*args, **kwargs)
 
     def _preprocess(
         self,
