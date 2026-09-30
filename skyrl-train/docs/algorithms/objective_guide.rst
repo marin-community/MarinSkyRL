@@ -378,6 +378,11 @@ Optional ``entry_clip`` caps each summand above before summation.
 Use selected teacher tokens plus one aggregate tail bin to penalize student
 mass relative to teacher mass. The selected probabilities are not renormalized;
 the tail is one minus their sum. It equals full reverse KL only at full support.
+For partial support, the teacher tail is computed from the available top-K
+logprobs using float64 ``logsumexp`` and ``log1mexp``, with a probability floor
+of ``1e-12``. This bounds the tail's negative log probability at approximately
+27.63 even when float32 retained mass rounds to one. The floor regularizes the
+tail bin; full support uses an exact zero tail.
 
 .. code-block:: yaml
 
@@ -394,6 +399,7 @@ with :math:`m=\alpha q+(1-\alpha)p` on selected tokens plus the tail bin.
 Use a mixture divergence when neither teacher-to-student direction alone is
 intended. Partial support still aggregates all omitted tokens into one bin.
 ``jsd_beta`` must be strictly between 0 and 1.
+It uses the same float64, floored teacher tail as ``sparse_reverse_kl``.
 
 .. code-block:: yaml
 

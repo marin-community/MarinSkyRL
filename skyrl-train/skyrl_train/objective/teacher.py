@@ -1,4 +1,5 @@
 from dataclasses import replace
+import math
 
 import torch
 
@@ -7,6 +8,10 @@ from skyrl_train.config.objective_spec import TopKLossParams
 from skyrl_train.distillation import DISTILLATION_TOPK_METRIC, TeacherTopKInput, TopKEvidence
 from skyrl_train.objective.losses import TokenLoss
 from skyrl_train.tensor_math import safe_exp_delta
+
+
+# A partial-vocabulary teacher tail has probability at least 1e-12, bounding its negative log at 27.6311.
+TEACHER_TAIL_MASS_FLOOR = 1e-12
 
 
 @torch.no_grad()
@@ -77,7 +82,14 @@ def topk_teacher_loss(
                 teacher_tail = torch.zeros_like(mass.unsqueeze(-1))
             else:
                 student_tail = (1 - student_support.sum(-1, keepdim=True)).clamp(min=0)
-                teacher_tail = (1 - mass.unsqueeze(-1)).clamp(min=0)
+                log_mass = torch.where(selected, evidence.teacher_topk_logprobs, 0).double().logsumexp(-1, keepdim=True)
+                log_mass = log_mass.clamp(max=math.log1p(-TEACHER_TAIL_MASS_FLOOR))
+                log_tail = torch.where(
+                    log_mass < -math.log(2),
+                    torch.log1p(-log_mass.exp()),
+                    torch.log(-torch.expm1(log_mass)),
+                )
+                teacher_tail = log_tail.exp().to(student_support.dtype)
             student_bins = torch.cat((student_support, student_tail), dim=-1)
             teacher_bins = torch.cat((teacher.exp(), teacher_tail), dim=-1)
             if params.objective is DistillationObjectiveKind.SPARSE_REVERSE_KL:

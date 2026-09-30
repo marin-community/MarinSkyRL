@@ -6,7 +6,7 @@ import torch
 from marinskyrl.distillation import DistillationObjectiveKind
 from skyrl_train.config.objective_spec import TopKLossParams
 from skyrl_train.distillation import TeacherTopKInput, StudentTopKInput, student_topk_logprobs
-from skyrl_train.objective.teacher import topk_teacher_loss
+from skyrl_train.objective.teacher import TEACHER_TAIL_MASS_FLOOR, topk_teacher_loss
 
 
 def test_sparse_forward_teacher_equality_preserves_conditional_teacher_formula():
@@ -113,7 +113,7 @@ def test_teacher_tail_survives_float32_retained_mass_rounding(objective, teacher
         vocabulary_size=3,
     )
     target_support = teacher.double().exp()
-    target_tail = max(1 - math.fsum(target_support.tolist()), 1e-12)
+    target_tail = max(1 - math.fsum(target_support.tolist()), TEACHER_TAIL_MASS_FLOOR)
     target = torch.cat((target_support, torch.tensor([target_tail], dtype=torch.float64)))
     student = reference_logits.softmax(-1)
     if objective == "sparse_reverse_kl":
