@@ -141,60 +141,44 @@ def test_megatron_muonh_matches_independent_jax_steps_after_own_state_resume(off
                 adam_optimizer.load_state_dict(saved_adam)
 
 
-@pytest.mark.parametrize("groups", [1, 2])
-def test_megatron_muonh_splits_fused_qkv_and_gate_up_before_hyperball_update(groups):
-    torch.manual_seed(31)
-    q, k, v = (torch.randn(rows * groups, 5) for rows in (4, 2, 2))
-    q_grad, k_grad, v_grad = (torch.randn_like(weight) for weight in (q, k, v))
-    fused = torch.cat((q.view(groups, 4, 5), k.view(groups, 2, 5), v.view(groups, 2, 5)), dim=1).reshape(8 * groups, 5)
-    fused_grad = torch.cat(
-        (q_grad.view(groups, 4, 5), k_grad.view(groups, 2, 5), v_grad.view(groups, 2, 5)), dim=1
-    ).reshape(8 * groups, 5)
-    gate, up = torch.randn(6, 5), torch.randn(6, 5)
-    gate_grad, up_grad = torch.randn_like(gate), torch.randn_like(up)
-    fused_gate_up = torch.cat((gate, up), dim=0)
+@pytest.mark.parametrize("groups,query_name", [(1, "q_proj"), (2, "q_proj"), (2, "gqa_q_proj")])
+def test_megatron_muonh_splits_fused_qkv_and_gate_up_before_hyperball_update(groups, query_name):
+    with np.load(FIXTURE, allow_pickle=False) as fixture:
+        query_rows = fixture[f"initial__{query_name}"].shape[0] // groups
+        kv_rows = fixture["initial__shared"].shape[0] // groups
 
-    reference = [torch.nn.Parameter(value.clone()) for value in (q, k, v, gate, up)]
-    for parameter, gradient in zip(reference, (q_grad, k_grad, v_grad, gate_grad, up_grad)):
-        parameter.grad = gradient.clone()
-    reference_optimizer = MegatronGrugMuonH(
-        [{"params": reference, "optimizer": "grug_muonh"}],
-        lr=0.03,
-        betas=(0.9, 0.95),
-        momentum=0.95,
-        nesterov=True,
-        ns_steps=5,
-        eps=1e-8,
-        muon_eps=1e-8,
-        qkv_split_shapes=(4, 2, 2),
-    )
+        def fused_values(prefix):
+            query = _tensor(fixture[f"{prefix}__{query_name}"])
+            key = _tensor(fixture[f"{prefix}__shared"])
+            value = _tensor(fixture[f"{prefix}__expert"])[0]
+            qkv = torch.cat(
+                (query.view(groups, query_rows, 4), key.view(groups, kv_rows, 4), value.view(groups, kv_rows, 4)),
+                dim=1,
+            ).reshape(-1, 4)
+            gate_up = torch.cat((_tensor(fixture[f"{prefix}__q_proj"]), key))
+            return qkv, gate_up
 
-    actual_qkv = torch.nn.Parameter(fused.clone())
-    actual_gate_up = torch.nn.Parameter(fused_gate_up.clone())
-    actual_qkv.grad = fused_grad.clone()
-    actual_gate_up.grad = torch.cat((gate_grad, up_grad), dim=0)
-    optimizer = MegatronGrugMuonH(
-        [
-            {"params": [actual_qkv], "optimizer": "grug_muonh_qkv"},
-            {"params": [actual_gate_up], "optimizer": "grug_muonh_gate_up"},
-        ],
-        lr=0.03,
-        betas=(0.9, 0.95),
-        momentum=0.95,
-        nesterov=True,
-        ns_steps=5,
-        eps=1e-8,
-        muon_eps=1e-8,
-        qkv_split_shapes=(4, 2, 2),
-    )
-    reference_optimizer.step()
-    optimizer.step()
-
-    expected_qkv = torch.cat(
-        (reference[0].view(groups, 4, 5), reference[1].view(groups, 2, 5), reference[2].view(groups, 2, 5)), dim=1
-    ).reshape(8 * groups, 5)
-    torch.testing.assert_close(actual_qkv, expected_qkv, rtol=0, atol=0)
-    torch.testing.assert_close(actual_gate_up, torch.cat((reference[3], reference[4]), dim=0), rtol=0, atol=0)
+        parameters = [nn.Parameter(value) for value in fused_values("initial")]
+        optimizer = MegatronGrugMuonH(
+            [
+                {"params": [parameters[0]], "optimizer": "grug_muonh_qkv"},
+                {"params": [parameters[1]], "optimizer": "grug_muonh_gate_up"},
+            ],
+            lr=float(fixture["metadata_shared_lr"]),
+            betas=(0.9, 0.95),
+            momentum=0.95,
+            nesterov=True,
+            ns_steps=5,
+            eps=1e-8,
+            muon_eps=1e-8,
+            qkv_split_shapes=(query_rows, kv_rows, kv_rows),
+        )
+        for step in range(1, int(fixture["metadata_steps"]) + 1):
+            for parameter, gradient in zip(parameters, fused_values(f"gradient_{step}")):
+                parameter.grad = gradient
+            optimizer.step()
+            for parameter, expected in zip(parameters, fused_values(f"parameter_{step}")):
+                _assert_close(parameter, expected.numpy(), muon_bf16=True)
 
 
 def test_megatron_muonh_routes_hero_parameter_families():
@@ -215,25 +199,6 @@ def test_megatron_muonh_routes_hero_parameter_families():
     assert megatron_grug_route("decoder.layers.0.self_attention.sconv_k.weight", matrix) == "adam"
     assert megatron_grug_route("decoder.layers.0.mlp.router.weight", matrix) == "adam"
     assert megatron_grug_route("decoder.layers.0.input_layernorm.weight", vector) == "adam"
-
-
-def test_megatron_muonh_preserves_unclipped_zero_decay_recipe_in_mcore_config():
-    try:
-        from skyrl_train.distributed.megatron.optimizer import init_megatron_optim_config
-    except ImportError:
-        pytest.skip("Megatron Core optimizer is not in the CPU test profile")
-
-    recipe = {"optimizer": "MuonH", "lr": 0.03, "weight_decay": 0.0, "max_grad_norm": 0.0}
-    config = init_megatron_optim_config(recipe, {})
-    assert config.clip_grad == 0.0
-    assert config.weight_decay == 0.0
-    assert not config.decoupled_weight_decay
-    with pytest.raises(ValueError, match="max_grad_norm=0.0"):
-        init_megatron_optim_config({**recipe, "max_grad_norm": 1.0}, {})
-    with pytest.raises(ValueError, match="max_grad_norm=0.0"):
-        init_megatron_optim_config(recipe, {"clip_grad": 1.0})
-    with pytest.raises(ValueError, match="weight_decay=0"):
-        init_megatron_optim_config(recipe, {"weight_decay": 0.01})
 
 
 def test_megatron_adamh_reuses_gradient_across_scratch_chunks_without_changing_direction():

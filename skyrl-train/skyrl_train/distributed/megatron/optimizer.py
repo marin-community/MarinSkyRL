@@ -33,6 +33,21 @@ _GRUG_MUONH_NAME = "grug_muonh"
 _GRUG_EMERGING_ROUTES = ("grug_muonh_qkv", "grug_muonh_gate_up", "grug_adamh")
 
 
+class _MegatronParamScheduler(OptimizerParamScheduler):
+    def load_state_dict(self, state_dict: dict) -> None:
+        self.num_steps = 0
+        super().load_state_dict(state_dict)
+
+
+class _GrugMuonHParamScheduler(_MegatronParamScheduler):
+    def get_lr(self, param_group: dict) -> float:
+        if param_group.get("optimizer") != "adam" or self.lr_warmup_steps <= 0 or self.num_steps > self.lr_warmup_steps:
+            return super().get_lr(param_group)
+        max_lr = param_group.get("max_lr", self.max_lr)
+        init_lr = self.init_lr * max_lr / self.max_lr if self.max_lr else 0.0
+        return init_lr + (max_lr - init_lr) * self.num_steps / self.lr_warmup_steps
+
+
 def _grug_muonh_extra(optim_config: Mapping) -> dict:
     raw = optim_config.get("optimizer_kwargs", {})
     if not isinstance(raw, Mapping):
@@ -93,12 +108,6 @@ def _register_grug_muonh(optim_config: Mapping) -> None:
         _EMERGING_OPTIMIZERS[route] = entry
 
 
-class _MegatronParamScheduler(OptimizerParamScheduler):
-    def load_state_dict(self, state_dict: dict) -> None:
-        self.num_steps = 0
-        super().load_state_dict(state_dict)
-
-
 def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict) -> OptimizerConfig:
     # megatron-core only recognizes 'adam' / 'sgd' as standard optimizers (anything
     # else routes to `_get_megatron_emerging_optimizer`, which raises
@@ -134,8 +143,6 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
         extra = _grug_muonh_extra(optim_config)
         if float(optim_args["weight_decay"]) != 0.0:
             raise ValueError("MuonH requires weight_decay=0, including Megatron overrides")
-        if optim_args["clip_grad"] is None or float(optim_args["clip_grad"]) != 0.0:
-            raise ValueError("Hero MuonH requires max_grad_norm=0.0 (unclipped gradients)")
         if optimizer_config_kwargs.get("use_distributed_optimizer", False):
             raise ValueError("Hero MuonH uses Megatron's full-matrix optimizer path")
         if optim_args.get("optimizer_cpu_offload", False) or optim_args.get("optimizer_offload_fraction", 0.0):
@@ -218,7 +225,10 @@ def get_megatron_optimizer_param_scheduler(
     ):
         lr_warmup_steps = int(config.lr_warmup_steps_ratio * lr_decay_steps)
 
-    opt_param_scheduler = _MegatronParamScheduler(
+    scheduler_class = (
+        _GrugMuonHParamScheduler if str(config.get("optimizer", "adam")).lower() == "muonh" else _MegatronParamScheduler
+    )
+    opt_param_scheduler = scheduler_class(
         optimizer,
         init_lr=config.get("lr_warmup_init", 0.0),
         max_lr=config.lr,

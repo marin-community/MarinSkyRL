@@ -174,8 +174,10 @@ MuonH keeps complete FP32 master matrices and gradients on each owning rank.
 `offload_momentum` keeps MuonH momentum on CPU between bounded transfers;
 AdamH and ordinary Adam use their normal state placement. Do not enable
 Megatron's native AdamW CPU-offload or precision-aware optimizer options for
-this recipe. Weight decay and gradient clipping must be zero; PPO clipping
-remains a separate policy-loss setting.
+this recipe. Weight decay must be zero. Megatron applies `max_grad_norm` to the
+global gradient norm across every optimizer route; the Hero recipe uses zero
+and the Snowball curriculum uses one. PPO clipping is a separate policy-loss
+setting. A nonzero warmup starting rate scales with each route's learning rate.
 
 A fresh run loads model weights without importing pretraining optimizer state.
 Resuming an RL checkpoint requires the MuonH checkpoint integration and restores

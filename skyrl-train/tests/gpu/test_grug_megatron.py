@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 import ray
 import torch
+from omegaconf import open_dict
 from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
@@ -490,6 +491,10 @@ def test_grug_megatron_muonh_pp2_ep2_checkpoint_continues_exactly(tmp_path):
     cfg.trainer.policy.optimizer_config.weight_decay = 0.0
     cfg.trainer.policy.optimizer_config.adam_betas = [0.9, 0.95]
     cfg.trainer.policy.optimizer_config.optimizer_kwargs = {"adam_lr": 2.0e-2}
+    cfg.trainer.policy.optimizer_config.max_grad_norm = 1.0
+    cfg.trainer.policy.optimizer_config.num_warmup_steps = 10
+    with open_dict(cfg.trainer.policy.optimizer_config):
+        cfg.trainer.policy.optimizer_config.lr_warmup_init = 2.0e-3
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     batch = _padded_batch(tokenizer.pad_token_id, prompt_length=48, response_length=48, variable_lengths=True)
     names = [
@@ -544,6 +549,15 @@ def test_grug_megatron_muonh_pp2_ep2_checkpoint_continues_exactly(tmp_path):
         resumed = rank0_validation_snapshot(policy, names)
         for name in names:
             torch.testing.assert_close(resumed[name], continued[name], rtol=0, atol=0)
+        scores = _megatron_response_logprobs(policy, batch)
+        export_dir = tmp_path / "export"
+        ray.get(policy.async_run_ray_method("pass_through", "save_hf_model", str(export_dir), tokenizer))
+        exported = GrugMoeForCausalLM.from_pretrained(export_dir, dtype=torch.float32).state_dict()
+        for name in names:
+            torch.testing.assert_close(exported[name].float(), resumed[name], rtol=0, atol=0)
+        policy.kill_actors()
+        reloaded = _hf_response_logprobs_direct(str(export_dir), batch)
+        _assert_logprobs_close(scores, reloaded, batch["response_mask"])
     finally:
         ray.shutdown()
 

@@ -38,7 +38,8 @@ params = {
                 "gated_norm": {"down_proj": values((4, 4), -0.45, 0.55)},
                 "input_layernorm": values((4,), 0.8, 1.2),
                 "bias": values((6,), -0.2, 0.3),
-            }
+            },
+            "1": {"self_attn": {"q_proj": values((4, 12), -0.1, 0.1)}},
         },
         "output_proj": values((4, 5), -0.65, 0.85),
     }
@@ -47,6 +48,7 @@ params = {
 paths = {
     "embed": ("model", "token_embed"),
     "q_proj": ("model", "layers", "0", "self_attn", "q_proj"),
+    "gqa_q_proj": ("model", "layers", "1", "self_attn", "q_proj"),
     "attn_gate": ("model", "layers", "0", "self_attn", "attn_gate"),
     "router": ("model", "layers", "0", "mlp", "router"),
     "expert": ("model", "layers", "0", "mlp", "experts", "gate_proj"),
@@ -59,6 +61,7 @@ paths = {
 routes = {
     "embed": "adam",
     "q_proj": "muonh",
+    "gqa_q_proj": "muonh",
     "attn_gate": "adam",
     "router": "adam",
     "expert": "muonh",
@@ -68,7 +71,7 @@ routes = {
     "bias": "adam",
     "output": "adamh",
 }
-transpose = {"q_proj", "attn_gate", "router", "expert", "shared", "gated_norm", "output"}
+transpose = {"q_proj", "gqa_q_proj", "attn_gate", "router", "expert", "shared", "gated_norm", "output"}
 
 
 def get(tree, path):
