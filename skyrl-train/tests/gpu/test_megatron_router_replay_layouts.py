@@ -156,6 +156,13 @@ def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path, la
     cfg.trainer.mismatch_probe.archive_uri = str(tmp_path / "probe")
     cfg.trainer.mismatch_probe.extra_trainer_modes = ["router_replay", "router_replay_filtered"]
     cfg.trainer.mismatch_probe.filtered_replay.keep_fraction = 1.0
+    cfg.trainer.mismatch_probe.enabled = True
+    cfg.trainer.max_steps = 2
+    cfg.trainer.policy.optimizer_config.lr_warmup_steps_ratio = 0.1
+    schedule = RayPPOTrainer.__new__(RayPPOTrainer)
+    schedule.cfg = cfg
+    schedule.train_dataset = range(100 * cfg.trainer.train_batch_size)
+    schedule._configure_training_schedule()
     pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
     batch = _routed_batch(pad_token_id, captured=True, variable_lengths=True)
     if layout[0] == "probe-dp2-ragged":
@@ -196,7 +203,13 @@ def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path, la
     initialize_ray(cfg)
     try:
         policy = init_worker_with_type(
-            "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=layout[1], num_nodes=1, cfg=cfg
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=layout[1],
+            num_nodes=1,
+            cfg=cfg,
+            num_training_steps=schedule.total_training_steps,
         )
         trainer = SimpleNamespace(policy_model=policy, critic_model=None, ref_model=None)
         padded = RayPPOTrainer.pad_batch(trainer, batch)
