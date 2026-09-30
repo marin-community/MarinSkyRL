@@ -33,7 +33,14 @@ from skyrl_train.mismatch_harness.regions import (
     REGIONS,
 )
 from skyrl_train.mismatch_harness.replay import CallResult, run_call
-from skyrl_train.mismatch_harness.vllm_side import GrugShape, Requests, VllmMoe, flash_attention_prefill, pad_rows
+from skyrl_train.mismatch_harness.vllm_side import (
+    GrugShape,
+    Requests,
+    VllmMoe,
+    fa3_num_splits,
+    flash_attention_prefill,
+    pad_rows,
+)
 
 
 def hf_parameter(role: str, prev_layer: int | None, next_layer: int | None) -> str:
@@ -337,6 +344,7 @@ class LayerReplay:
             requests,
             window=window,
             scale=self.shape.head_dim**-0.5,
+            num_splits=fa3_num_splits(tokens),
         )
         return pad_rows(output, requests.rows)
 

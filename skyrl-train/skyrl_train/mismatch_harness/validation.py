@@ -7,6 +7,11 @@ compiled. The harness then replays that output code on the same tokens (with vLL
 fused-MoE kernels between the pieces) and requires byte-identical routes and logits. The pieces are
 also text-diffed against a full-model probe's archived output code.
 
+The engine's worker also records what reaches each FA3 call on the prompt's step, its rotary table and
+the launch config each Inductor kernel ran with (``engine_taps``). The replay's own attention inputs
+and outputs are compared with them layer by layer, and FA3 is rerun on the engine's own inputs, so a
+failed validation names the first op whose inputs or outputs differ.
+
 Example (one H100)::
 
     python -m skyrl_train.mismatch_harness.validation --model s3://.../hf-bf16-vllm --layers 4 \\
@@ -21,9 +26,12 @@ import gc
 import io as stdlib_io
 import json
 import os
+import re
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -36,8 +44,10 @@ from vllm.inputs import TokensPrompt
 
 from skyrl_train.io import io
 from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore
+from skyrl_train.mismatch_harness import engine_taps
 from skyrl_train.mismatch_harness.expert_parallel import ReduceOrder
 from skyrl_train.mismatch_harness.harness import LayerReplay, attention_inputs
+from skyrl_train.mismatch_harness.numerics import compare
 from skyrl_train.mismatch_harness.output_code import is_graph_module, parse_output_code
 from skyrl_train.mismatch_harness.pieces import classify
 from skyrl_train.mismatch_harness.replay import load_module
@@ -46,6 +56,9 @@ from skyrl_train.mismatch_harness.vllm_side import (
     Requests,
     cos_sin_cache,
     cuda_graph_padded_tokens,
+    fa3_num_splits,
+    flash_attention_prefill,
+    paged_kv_cache,
     vllm_config_context,
 )
 
@@ -112,12 +125,19 @@ def truncated_export(source_uri: str, num_layers: int, destination: Path) -> dic
     return tensors
 
 
-def serve(model_dir: Path, token_ids: list[int]) -> dict:
-    """Score one prompt with compiled vLLM; return its routes, prompt logits and output code."""
+def serve(model_dir: Path, token_ids: list[int], taps: Path) -> dict:
+    """Score one prompt with compiled vLLM; return its routes, prompt logits, output code and taps."""
     os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
-    llm = LLM(model=str(model_dir), max_model_len=len(token_ids) + 16, **ENGINE_SETTINGS)
+    llm = LLM(
+        model=str(model_dir),
+        max_model_len=len(token_ids) + 16,
+        worker_extension_cls=engine_taps.EXTENSION,
+        **ENGINE_SETTINGS,
+    )
+    llm.collective_rpc("tap_attention", args=(len(token_ids),))
     params = SamplingParams(max_tokens=1, temperature=1.0, prompt_logprobs=PROMPT_LOGPROBS, seed=0)
     output = llm.generate([TokensPrompt(prompt_token_ids=token_ids)], params)[0]
+    llm.collective_rpc("save_taps", args=(str(taps), len(token_ids)))
     completion = output.outputs[0]
     routes = np.asarray(completion.routed_experts)
     logits = {}
@@ -134,20 +154,34 @@ def serve(model_dir: Path, token_ids: list[int]) -> dict:
     del llm
     gc.collect()
     torch.cuda.empty_cache()
-    return {"routes": routes, "logits": logits, "code": code}
+    return {"routes": routes, "logits": logits, "code": code, "taps": torch.load(taps, weights_only=False)}
 
 
-def replay_model(code: dict[str, str], shape: GrugShape, weights: dict[str, torch.Tensor], token_ids: list[int]):
-    """Run the served model's own compiled pieces end to end; return routes ``[P, L, K]`` and bf16 logits."""
+@dataclass(frozen=True)
+class ReplayTrace:
+    """What the replay computed: routes ``[P, L, K]``, bf16 logits, each layer's FA3 call, kernel configs."""
+
+    routes: torch.Tensor
+    logits: torch.Tensor
+    attention: list[dict[str, torch.Tensor]]
+    kernel_configs: dict[str, list[str]]
+
+
+def replay_model(
+    code: dict[str, str], shape: GrugShape, weights: dict[str, torch.Tensor], token_ids: list[int]
+) -> ReplayTrace:
+    """Run the served model's own compiled pieces end to end."""
     pieces = {}
     for relative, text in code.items():
         if relative.endswith(".py") and is_graph_module(text):
             piece = classify(parse_output_code(text))
             pieces[(piece.kind, piece.rope)] = (piece, load_module(piece.code, f"validation_{relative}").__dict__)
     cos_sin = cos_sin_cache(shape)
-    requests = Requests((len(token_ids),), padded=cuda_graph_padded_tokens(len(token_ids)))
+    tokens = len(token_ids)
+    requests = Requests((tokens,), padded=cuda_graph_padded_tokens(tokens))
     ids = torch.tensor(token_ids, dtype=torch.int32, device="cuda")
     routes = []
+    attention_calls = []
     result = None
     for layer in range(shape.layers):
         replay = LayerReplay(
@@ -168,12 +202,126 @@ def replay_model(code: dict[str, str], shape: GrugShape, weights: dict[str, torc
         attn_in, residual = outputs[-2], outputs[-1]
         value = inputs["value"].reshape(requests.rows, -1)
         attention = replay.attention(inputs["query"], inputs["key"], inputs["value"], requests)
+        attention_calls.append(
+            {name: inputs[name][:tokens].clone() for name in ("query", "key", "value")}
+            | {"output": attention[:tokens].clone()}
+        )
         moe = replay.moe(None, None)
         result, _ = replay.run_post_attention(requests, attention, value, attn_in, residual, moe, None)
         routes.append(moe.records[-1].vllm_ids)
     final_hidden = result.outputs[0]
-    logits = F.linear(final_hidden[: len(token_ids) - 1], weights["lm_head.weight"])
-    return torch.stack(routes, dim=1)[: len(token_ids)], logits
+    logits = F.linear(final_hidden[: tokens - 1], weights["lm_head.weight"])
+    kernels = [value for _, namespace in pieces.values() for value in namespace.values()]
+    return ReplayTrace(
+        routes=torch.stack(routes, dim=1)[:tokens],
+        logits=logits,
+        attention=attention_calls,
+        kernel_configs=engine_taps.inductor_kernel_configs(kernels),
+    )
+
+
+def _layer_index(layer_name: str) -> int:
+    return int(re.search(r"layers\.(\d+)\.", layer_name).group(1))
+
+
+def _agreement(left: torch.Tensor, right: torch.Tensor) -> dict[str, Any]:
+    """Byte-equal fraction, max ulp and the first token row holding a differing element."""
+    left = left.reshape(left.shape[0], -1)
+    right = right.reshape(right.shape[0], -1).to(left.device)
+    stats = compare(left, right)
+    rows = (left != right).any(-1).nonzero().flatten()
+    return {
+        "byte_equal_fraction": stats.byte_equal_fraction,
+        "max_ulp": stats.max_ulp,
+        "first_differing_row": int(rows[0]) if rows.numel() else None,
+    }
+
+
+ENGINE_CALL_FIELDS = (
+    "query_rows",
+    "key_cache_stride",
+    "block_size",
+    "sliding_window",
+    "scale",
+    "softcap",
+    "fa_version",
+    "max_query_len",
+    "max_seq_len",
+    "seq_lens",
+    "scheduler_metadata",
+    "max_num_splits",
+    "causal",
+    "use_cascade",
+)
+
+
+def attention_diagnostics(engine: dict[str, Any], trace: ReplayTrace, shape: GrugShape) -> dict[str, Any]:
+    """Compare the replay's FA3 inputs and outputs with the engine's; rerun FA3 on the engine's inputs."""
+    by_layer = []
+    for call in sorted(engine["attention"], key=lambda call: _layer_index(call["layer_name"])):
+        layer = _layer_index(call["layer_name"])
+        query, key, value = (call[name].cuda() for name in ("query", "key", "value"))
+        requests = Requests(tuple(call["seq_lens"]))
+        window = None if shape.is_long(layer) else shape.sliding_window
+        splits = sorted({call["max_num_splits"], fa3_num_splits(requests.tokens), 0})
+        rerun = {
+            f"num_splits={count}": _agreement(
+                flash_attention_prefill(
+                    query, key, value, requests, window=window, scale=shape.head_dim**-0.5, num_splits=count
+                ),
+                call["output"],
+            )
+            for count in splits
+        }
+        key_cache, _, _ = paged_kv_cache(key, value, requests.lengths, call["block_size"])
+        by_layer.append(
+            {
+                "layer": layer,
+                "engine_call": {name: call[name] for name in ENGINE_CALL_FIELDS},
+                "harness_call": {
+                    "key_cache_stride": list(key_cache.stride()),
+                    "window_size": [window - 1, 0] if window is not None else [-1, -1],
+                    "num_splits": fa3_num_splits(requests.tokens),
+                    "scale": shape.head_dim**-0.5,
+                },
+                "replay_vs_engine": {
+                    name: _agreement(trace.attention[layer][name], call[name])
+                    for name in ("query", "key", "value", "output")
+                },
+                "fa3_on_engine_inputs_vs_engine_output": rerun,
+            }
+        )
+    return {"calls_recorded": len(engine["attention"]), "by_layer": by_layer}
+
+
+def rotary_diagnostics(engine: dict[str, Any], shape: GrugShape, positions: int) -> dict[str, Any]:
+    ours = cos_sin_cache(shape)[:positions].cpu()
+    return {"engine_tables_equal_to_harness": [bool(torch.equal(table, ours)) for table in engine["cos_sin_cache"]]}
+
+
+def kernel_config_diagnostics(engine: dict[str, list[str]], replay: dict[str, list[str]]) -> dict[str, Any]:
+    shared = sorted(set(engine) & set(replay))
+    return {
+        "replay_kernels": len(replay),
+        "replay_kernels_found_in_engine": len(shared),
+        "differing": {
+            name: {"engine": engine[name], "replay": replay[name]} for name in shared if engine[name] != replay[name]
+        },
+    }
+
+
+def logits_diagnostics(served: dict[int, dict[int, float]], logits: torch.Tensor) -> dict[str, Any]:
+    rows = logits.float().cpu()
+    equal = {
+        position: all(rows[position - 1, token].item() == value for token, value in values.items())
+        for position, values in served.items()
+    }
+    differing = sorted(position for position, same in equal.items() if not same)
+    return {
+        "positions": len(equal),
+        "positions_all_equal_fraction": sum(equal.values()) / max(len(equal), 1),
+        "first_differing_position": differing[0] if differing else None,
+    }
 
 
 def diff_pieces(served: dict[str, str], archived_uri: str) -> dict[str, str]:
@@ -220,12 +368,19 @@ def main() -> None:
     token_ids = capture["sequences"][0][mask].tolist()
     with tempfile.TemporaryDirectory() as directory:
         weights = truncated_export(args.model, args.layers, Path(directory))
-        served = serve(Path(directory) / "model", token_ids)
+        served = serve(Path(directory) / "model", token_ids, Path(directory) / "taps.pt")
         config = json.loads((Path(directory) / "model" / "config.json").read_text())
     shape = GrugShape.from_config(config)
     weights = {name: tensor.cuda() for name, tensor in weights.items()}
     with vllm_config_context():
-        routes, logits = replay_model(served["code"], shape, weights, token_ids)
+        trace = replay_model(served["code"], shape, weights, token_ids)
+        diagnostics = {
+            "attention": attention_diagnostics(served["taps"], trace, shape),
+            "rotary_table": rotary_diagnostics(served["taps"], shape, len(token_ids)),
+            "kernel_configs": kernel_config_diagnostics(served["taps"]["kernel_configs"], trace.kernel_configs),
+            "logits": logits_diagnostics(served["logits"], trace.logits),
+        }
+    routes, logits = trace.routes, trace.logits
     served_routes = torch.as_tensor(served["routes"]).to(routes.device)
     replayed = routes[: served_routes.shape[0]].to(served_routes.dtype)
     compared = total = equal = 0
@@ -255,6 +410,7 @@ def main() -> None:
         "piece_diff_against_full_model": diff_pieces(served["code"], args.full_output_code),
         "best_configs": sum(1 for relative in served["code"] if relative.endswith(".best_config")),
         "engine_settings": ENGINE_SETTINGS,
+        "diagnostics": diagnostics,
     }
     payload = json.dumps(result, indent=1, sort_keys=True, default=str)
     io.write_bytes_atomic(join_resource_path(args.output, "validation.json"), payload.encode())

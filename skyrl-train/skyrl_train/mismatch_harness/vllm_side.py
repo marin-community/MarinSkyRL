@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_ex
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.grugmoe import GrugMoeRouter
+from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 from skyrl_train.mismatch_harness.expert_parallel import ReduceOrder, reduce_partials, reduction_order
@@ -97,11 +98,26 @@ def cos_sin_cache(shape: GrugShape) -> torch.Tensor:
 # vLLM's CUDA-graph capture sizes for the probe engine (engine log ``cudagraph_capture_sizes``): a step of
 # at most 512 tokens runs the compiled pieces padded up to the next size.
 CUDA_GRAPH_CAPTURE_SIZES = (1, 2, 4, *range(8, 257, 8), *range(272, 513, 16))
+MAX_CUDA_GRAPH_CAPTURE_SIZE = CUDA_GRAPH_CAPTURE_SIZES[-1]
+# ``attention_config.flash_attn_max_num_splits_for_cuda_graph``: the split cap FA3 gets on steps a CUDA
+# graph could hold.
+FA3_MAX_NUM_SPLITS_FOR_CUDA_GRAPH = 32
 
 
 def cuda_graph_padded_tokens(tokens: int) -> int:
     """The token count vLLM runs its compiled pieces with for a step of ``tokens`` scheduled tokens."""
     return next((size for size in CUDA_GRAPH_CAPTURE_SIZES if size >= tokens), tokens)
+
+
+def fa3_num_splits(step_tokens: int) -> int:
+    """The ``num_splits`` vLLM passes FA3 for a step of ``step_tokens`` scheduled tokens.
+
+    The probe's engines run FULL_AND_PIECEWISE CUDA graphs, so ``FlashAttentionMetadataBuilder`` caps
+    the split count of every step of at most the largest capture size, prefill steps included, and
+    passes 0 (FA3's own heuristic) for larger steps. The count of splits FA3 then uses is chosen per
+    request on the device, and it decides how the key blocks are summed.
+    """
+    return FA3_MAX_NUM_SPLITS_FOR_CUDA_GRAPH if step_tokens <= MAX_CUDA_GRAPH_CAPTURE_SIZE else 0
 
 
 @dataclass(frozen=True)
@@ -139,6 +155,34 @@ def pad_rows(tensor: torch.Tensor, rows: int) -> torch.Tensor:
     return torch.cat((tensor, padding))
 
 
+def paged_kv_cache(
+    key: torch.Tensor, value: torch.Tensor, lengths: tuple[int, ...], block_size: int = KV_BLOCK_SIZE
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """A bf16 paged KV cache holding each request's keys and values in whole blocks of its own.
+
+    The storage is vLLM's LBNHC layout (block, token, KV head, key and value channels), and the key and
+    value caches are its two channel halves with singleton strides canonicalized, as
+    ``FlashAttentionImpl.forward`` derives them from the ``[blocks, kv_heads, block_size, 2 * head_dim]``
+    tensor it is given. Returns the key cache, the value cache and the block table.
+    """
+    kv_heads, head_dim = key.shape[1], key.shape[2]
+    blocks_per_request = [-(-length // block_size) for length in lengths]
+    storage = torch.zeros(
+        sum(blocks_per_request), block_size, kv_heads, 2 * head_dim, dtype=key.dtype, device=key.device
+    )
+    key_cache, value_cache = (canonicalize_singleton_dim_strides(half) for half in storage.split(head_dim, dim=-1))
+    block_table = torch.zeros(len(lengths), max(blocks_per_request), dtype=torch.int32, device=key.device)
+    start_block = start_token = 0
+    for index, (length, blocks) in enumerate(zip(lengths, blocks_per_request, strict=True)):
+        block_table[index, :blocks] = torch.arange(start_block, start_block + blocks, dtype=torch.int32)
+        slots = torch.arange(length, device=key.device)
+        key_cache[start_block + slots // block_size, slots % block_size] = key[start_token : start_token + length]
+        value_cache[start_block + slots // block_size, slots % block_size] = value[start_token : start_token + length]
+        start_block += blocks
+        start_token += length
+    return key_cache, value_cache, block_table
+
+
 def flash_attention_prefill(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -147,30 +191,18 @@ def flash_attention_prefill(
     *,
     window: int | None,
     scale: float,
+    num_splits: int,
     block_size: int = KV_BLOCK_SIZE,
 ) -> torch.Tensor:
     """FA3 varlen prefill over a paged bf16 KV cache, with the arguments ``FlashAttentionImpl`` passes.
 
     ``query`` is ``[tokens, heads, head_dim]``; ``key``/``value`` are ``[tokens, kv_heads, head_dim]``.
-    Each request's keys fill whole cache blocks of its own. Grug mixes windowed and full layers, so
-    vLLM runs without an ahead-of-time schedule and lets FA3 choose its split count (``num_splits=0``).
+    Grug mixes windowed and full layers, so vLLM runs without an ahead-of-time schedule;
+    ``num_splits`` is the step's split cap (``fa3_num_splits``).
     """
-    kv_heads, head_dim = key.shape[1], key.shape[2]
-    blocks_per_request = [-(-length // block_size) for length in requests.lengths]
-    num_blocks = sum(blocks_per_request)
-    cache = torch.zeros(num_blocks, 2, block_size, kv_heads, head_dim, dtype=key.dtype, device=key.device)
-    key_cache, value_cache = cache[:, 0], cache[:, 1]
-    block_table = torch.zeros(len(requests.lengths), max(blocks_per_request), dtype=torch.int32, device=key.device)
-    start_block = start_token = 0
-    for index, (length, blocks) in enumerate(zip(requests.lengths, blocks_per_request, strict=True)):
-        block_table[index, :blocks] = torch.arange(start_block, start_block + blocks, dtype=torch.int32)
-        slots = torch.arange(length, device=key.device)
-        key_cache[start_block + slots // block_size, slots % block_size] = key[start_token : start_token + length]
-        value_cache[start_block + slots // block_size, slots % block_size] = value[start_token : start_token + length]
-        start_block += blocks
-        start_token += length
+    key_cache, value_cache, block_table = paged_kv_cache(key, value, requests.lengths, block_size)
     output = torch.empty_like(query)
-    descale = torch.ones(len(requests.lengths), kv_heads, dtype=torch.float32, device=key.device)
+    descale = torch.ones(len(requests.lengths), key.shape[1], dtype=torch.float32, device=key.device)
     flash_attn_varlen_func(
         q=query,
         k=key_cache,
@@ -191,7 +223,7 @@ def flash_attention_prefill(
         q_descale=None,
         k_descale=descale,
         v_descale=descale,
-        num_splits=0,
+        num_splits=num_splits,
     )
     return output
 
