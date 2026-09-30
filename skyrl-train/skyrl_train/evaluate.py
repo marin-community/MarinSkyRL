@@ -133,7 +133,7 @@ async def _collect_evaluation_rollouts(
                 get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.eval_sampling_params),
                 cfg.environment.env_class,
                 "eval",
-                global_step,
+                global_step if global_step is not None else 0,
             )
             batch = await trajectory_runner.run(request)
             trajectory_batches.append(batch)
