@@ -7,11 +7,12 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 
-from skyrl_train.models.grug_megatron import GrugShortConv
 from tests.gpu.grug_gpu_gates import require_hoppers
 
 
 def _sequence_parallel_convolution(rank, rendezvous):
+    from skyrl_train.models.grug_megatron import GrugShortConv
+
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", init_method=rendezvous, rank=rank, world_size=2)
     cp_groups = [dist.new_group([index]) for index in range(2)]
@@ -36,7 +37,9 @@ def _sequence_parallel_convolution(rank, rendezvous):
         ).permute(2, 0, 1)
         (reference * probe).sum().backward()
         (actual * probe.chunk(2)[rank]).sum().backward()
-        # The gathered forward gives each rank the complete replicated weight gradient.
+        # Match Megatron's finalization of sequence-parallel parameter grads.
+        if convolution.weight.sequence_parallel:
+            dist.all_reduce(convolution.weight.grad, group=groups.tp)
         torch.testing.assert_close(actual, reference.chunk(2)[rank], rtol=0, atol=0)
         torch.testing.assert_close(local_input.grad, full_input.grad.chunk(2)[rank], rtol=1e-5, atol=1e-5)
         torch.testing.assert_close(convolution.weight.grad, weight.grad, rtol=1e-5, atol=1e-5)

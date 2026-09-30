@@ -69,6 +69,7 @@ from marinskyrl.environment_contract import (
 )
 from cloud.iris.runtime_environment import (
     CHECKPOINT_EXPORT_ENTRYPOINT,
+    IRIS_TASK_IMAGE,
     MARINSKYRL_ACTIVATION_FILE,
     MARINSKYRL_TASK_ROOT,
     RuntimeProfile,
@@ -742,11 +743,17 @@ def _cluster_dashboard_host(cluster_config_path: Optional[str]) -> Optional[str]
 
 
 def _rl_config_uses_daytona(config: DictConfig) -> bool:
-    """Return whether the resolved launch uses a Daytona-backed entrypoint."""
-    return str(config.runtime.entrypoint) in {
+    """Return whether the resolved launch runs Harbor trials in Daytona sandboxes.
+
+    The Harbor entrypoints always do. Other entrypoints do when ``data.terminal_bench_data``
+    routes rows to Harbor, as Nemotron Ultra routing does for its SWE rows.
+    """
+    if str(config.runtime.entrypoint) in {
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH],
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH_GENERATE],
-    }
+    }:
+        return True
+    return bool(config.skyrl.get("data", {}).get("terminal_bench_data"))
 
 
 def validate_controller_ingress_reachability(args: SimpleNamespace) -> None:
@@ -1390,6 +1397,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
         job = client.submit(
             entrypoint=entrypoint,
             name=args.job_name,
+            task_image=IRIS_TASK_IMAGE,
             resources=resources,
             environment=EnvironmentSpec(
                 env_vars=env_vars,

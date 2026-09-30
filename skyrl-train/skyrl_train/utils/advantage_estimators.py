@@ -15,8 +15,8 @@ import torch
 from jaxtyping import Float
 from omegaconf import DictConfig
 
+from marinskyrl.runtime_options import AdvantageEstimator
 from skyrl_train.utils.algorithm_registry import (
-    AdvantageEstimator,
     AdvantageEstimatorRegistry,
     ExactPhysicalGroup,
     MinimumBaselineEligibleGroup,
@@ -25,6 +25,8 @@ from skyrl_train.utils.algorithm_registry import (
 )
 from skyrl_train.utils.policy_math import masked_whiten, right_pad_to_match
 from skyrl_train.group_admission import GroupAdvantageInvariant, GroupAdvantageKind
+
+GRPO_FLAT_REWARD_STD_TOLERANCE = 1e-6
 
 
 @register_advantage_estimator(AdvantageEstimator.UNIFORM, group_contract=NoGroupAdvantage())

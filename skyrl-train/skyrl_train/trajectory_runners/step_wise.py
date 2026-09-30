@@ -6,7 +6,9 @@ import copy
 from dataclasses import replace
 from uuid import uuid4
 import skyrl_gym
-from typing import Callable, List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple
+
+import numpy as np
 
 from skyrl_train.trajectory_runners.base import TrajectoryID, TrajectoryRequestBatch
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
@@ -65,8 +67,6 @@ class StepWiseRolloutCollector:
         return getattr(self._runner, name)
 
     def validate(self) -> None:
-        if self._runner.batched:
-            raise ValueError("step-wise collection does not support batched generation")
         if self._runner.custom_chat_template is not None:
             raise ValueError("step-wise collection does not support a custom chat template")
         if not self._runner.use_conversation_multi_turn:
@@ -84,7 +84,6 @@ class StepWiseRolloutCollector:
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
-        global_step_fn: Optional[Callable[[], int]] = None,
     ) -> List[AgentLoopOutput]:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -134,8 +133,6 @@ class StepWiseRolloutCollector:
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, int]] = []
         per_step_outputs: List[AgentLoopOutput] = []
-        # Capture global_step at first inference for accurate staleness tracking
-        captured_global_step: Optional[int] = None
         max_model_len = self.trajectory_runner_cfg.get("engine_init_kwargs", {}).get("max_model_len")
         while not done:
             if retokenize_chat_history:
@@ -177,13 +174,13 @@ class StepWiseRolloutCollector:
                 prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=request_sampling_params
             )
             engine_output = await self.model_client.generate(engine_input)
-            # Capture global_step after first inference returns — at this point the vLLM
-            # engine has definitively served the request with its current weights.
-            if captured_global_step is None and global_step_fn is not None:
-                captured_global_step = global_step_fn()
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             sampled_ids = list(output_ids)
+            routes_batch = engine_output.get("routed_experts")
+            response_routes = routes_batch[0] if routes_batch is not None else None
+            if response_routes is not None and len(response_routes) != len(sampled_ids):
+                raise ValueError("routed_experts must align with generated token IDs")
             topk_ids_batch = engine_output.get("student_topk_indices")
             topk_scores_batch = engine_output.get("behavior_topk_logprobs")
             if (topk_ids_batch is None) != (topk_scores_batch is None):
@@ -210,6 +207,10 @@ class StepWiseRolloutCollector:
                     output_ids.append(self.tokenizer.eos_token_id)
                     if response_logprobs is not None:
                         response_logprobs.append(0.0)
+                    if response_routes is not None:
+                        response_routes = np.concatenate(
+                            (response_routes, np.zeros((1, *response_routes.shape[1:]), dtype=response_routes.dtype))
+                        )
 
             # 2. Environment step
             publish_rollout_evidence(
@@ -241,6 +242,10 @@ class StepWiseRolloutCollector:
 
             per_step_rewards.append((step_reward, response_end_idx))
             response_ids = copy.deepcopy(input_ids[current_prompt_length:])
+            routed_experts = None
+            if response_routes is not None and not retokenize_chat_history:
+                routed_experts = np.zeros((len(response_ids), *response_routes.shape[1:]), dtype=response_routes.dtype)
+                routed_experts[: len(response_routes)] = response_routes
             selected = (
                 align_student_topk(
                     response_ids,
@@ -259,9 +264,12 @@ class StepWiseRolloutCollector:
                     generated_token_count=sum(bool(value) for value in loss_mask),
                     prompt_token_ids=tuple(input_ids[:current_prompt_length]),
                     response_token_ids=tuple(response_ids),
-                    behavior_logprobs=None if response_logprobs is None else tuple(response_logprobs),
+                    behavior_logprobs=None
+                    if response_logprobs is None
+                    else np.asarray(response_logprobs, dtype=np.float32),
                     student_topk_indices=None if selected is None else selected.indices,
                     behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
+                    routed_experts=routed_experts,
                 ),
                 verification=verification,
                 reward=reward_from_env_step(env_step_output, verification),
@@ -296,10 +304,6 @@ class StepWiseRolloutCollector:
                 components=per_step_output.reward.components,
                 token_credit=per_step_output.reward.token_credit,
             )
-
-        # Attach captured global_step to the first per-step output
-        if per_step_outputs and captured_global_step is not None:
-            per_step_outputs[0].captured_global_step = captured_global_step
 
         await self._run_in_executor_if_available(env.close)
 

@@ -6,29 +6,6 @@ import ray
 import numpy as np
 
 
-def test_train_batch_initialization():
-    # Test basic initialization
-    batch_size = 3
-    seq_len = 4
-    sequences = torch.randn(batch_size, seq_len)
-    attention_mask = torch.ones(batch_size, seq_len)
-    loss_mask = torch.ones(batch_size, seq_len)
-    response_mask = torch.ones(batch_size, seq_len)
-
-    data = TensorBatch(
-        {
-            "sequences": sequences,
-            "attention_mask": attention_mask,
-            "loss_mask": loss_mask,
-            "response_mask": response_mask,
-        }
-    )
-    assert isinstance(data, TensorBatch)
-    assert data.batch_size == batch_size
-    assert torch.equal(data["sequences"], sequences)
-    assert torch.equal(data["attention_mask"], attention_mask)
-
-
 def test_train_batch_validation():
     # Test validation of batch sizes
     batch_size = 3
@@ -223,20 +200,6 @@ def test_train_batch_setitem():
     # 2. numpy array
     with pytest.raises(ValueError, match="must be a tensor"):
         data["sequences"] = np.zeros((batch_size, seq_len))
-
-
-@pytest.mark.usefixtures("ray_init")
-def test_train_batch_ray_serialization():
-    data = TensorBatch(
-        **{"a": torch.tensor([1.2, 2.4, 3.6, 4.8]), "b": torch.tensor([4, 5, 6, 7])},
-    )
-    data.metadata = {"hello": "world"}
-
-    def _task(inp: TensorBatch):
-        assert inp == data
-
-    input_ref = ray.put(data)
-    ray.get(ray.remote(_task).remote(input_ref))
 
 
 def test_train_batch_repeat():

@@ -3,8 +3,8 @@
 `trainer.strategy=megatron` trains Grug through Megatron-Core with pipeline
 parallelism as the primary geometry. Snowball's 26 layers split evenly across
 PP2 or PP13; TP must stay at one because the model has five KV heads, and
-expert parallelism may be layered on top of PP for the 256 experts. Sample
-packing is not yet validated and should stay disabled.
+expert parallelism may be layered on top of PP for the 256 experts. Hero
+packed training and context parallelism use the schema-specific path below.
 
 ## Hero architecture
 
@@ -34,9 +34,8 @@ Hero parameter families, packed training, repeated updates, and checkpoint
 continuation; passing it alone does not establish full-Hero capacity or parity
 with Levanter.
 
-Megatron's precision-aware AdamW can consume BF16 gradient buffers while keeping
-FP32 master weights and moments. Native CPU offload can move a fraction of those
-optimizer states out of GPU memory. Configure these together under
+Precision-aware AdamW accepts BF16 gradients and retains FP32 master weights
+and moments. To offload half its state to CPU, set these fields under
 `trainer.policy.megatron_config`:
 
 ```yaml
@@ -51,11 +50,11 @@ optimizer_config_kwargs:
   overlap_cpu_optimizer_d2h_h2d: false
 ```
 
-This uses fresh AdamW, not Hero's pretraining optimizer history. CPU offload
-requires host memory for master weights, moments, and temporary gradients.
-The checkpoint integration restores the inner CPU/GPU master weights and Adam
-step counters, including subsequent GPU updates after resume. The pinned TE
-norm and clipping kernels avoid Megatron's gradient-sized Torch temporary.
+CPU offload requires host memory for master weights, moments and staged
+gradients. The checkpoint loader restores those tensors and Adam step counters
+through the native hybrid optimizer. The tiny worker regression compares two
+updates after resume with uninterrupted training; it does not qualify
+reduced-precision optimizer state or full-Hero capacity.
 
 The port lives in two modules:
 
@@ -77,12 +76,15 @@ selects the flash backend instead.
 
 ## Weights
 
-The HF checkpoint keeps its stacked `[E, ...]` expert tensors. The bridge maps
+Snowball HF checkpoints keep stacked `[E, ...]` expert tensors. The bridge maps
 each Megatron per-expert grouped-GEMM weight to one slice of the stacked tensor
 on import and re-stacks on export, so exported checkpoints and weight sync use
 the same names as vLLM serving. The router bias becomes
 Megatron's persistent fp32 `expert_bias` buffer and is sent to vLLM in fp32 in
 its own weight-sync bucket; every other tensor is sent in the generator dtype.
+With BF16 serving, router weights therefore travel as BF16 before vLLM copies
+them into its FP32 router parameters. Hero schema-v2 experts retain individual
+per-expert names rather than using the stacked Snowball format.
 
 Re-stacking gathers every expert of a layer onto each rank before the tensor
 is sent, which needs a few GiB of headroom beyond the resident model, gradient

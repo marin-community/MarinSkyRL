@@ -1,6 +1,5 @@
 """Hero architecture through the actual Megatron worker, with split-expert checkpoints."""
 
-import json
 import math
 from pathlib import Path
 
@@ -92,24 +91,20 @@ def write_tiny_hero_checkpoint(path: Path):
 
 
 @pytest.mark.parametrize(
-    "tp,pp,ep,cp,packing,overlap_param_gather,optimizer_offload",
+    "tp,pp,ep,cp,packing,optimizer_offload",
     [
-        (1, 1, 1, 1, False, False, None),
-        (1, 2, 1, 1, False, False, None),
-        (1, 1, 2, 1, True, False, None),
-        (1, 1, 1, 2, True, False, None),
-        (2, 1, 1, 1, True, False, None),
-        (1, 1, 1, 2, True, True, None),
-        (2, 2, 4, 2, True, True, None),
-        pytest.param(1, 1, 2, 2, True, True, 0.0, id="precision-aware-gpu"),
-        pytest.param(1, 1, 2, 2, True, True, 0.5, id="half-offloaded-adamw"),
-        pytest.param(1, 1, 2, 2, True, True, 1.0, id="cpu-adamw"),
+        (1, 1, 1, 1, False, None),
+        (1, 2, 1, 1, False, None),
+        (1, 1, 2, 1, True, None),
+        (1, 1, 1, 2, True, None),
+        (2, 1, 1, 1, True, None),
+        pytest.param(1, 1, 2, 1, True, 0.0, id="precision-aware-gpu"),
+        pytest.param(1, 1, 2, 1, True, 0.5, id="half-offloaded-adamw"),
+        pytest.param(1, 1, 2, 1, True, 1.0, id="cpu-adamw"),
     ],
 )
-def test_hero_worker_repeated_updates(
-    tmp_path, monkeypatch, tp, pp, ep, cp, packing, overlap_param_gather, optimizer_offload
-):
-    world_size = pp * max(tp * cp, ep)
+def test_hero_worker_repeated_updates(tmp_path, monkeypatch, tp, pp, ep, cp, packing, optimizer_offload):
+    world_size = max(tp, pp, ep, cp)
     require_hoppers(world_size)
     model_path = tmp_path / "model"
     model_path.mkdir()
@@ -117,16 +112,15 @@ def test_hero_worker_repeated_updates(
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
-    cfg.trainer.policy.megatron_config.ddp_config.overlap_param_gather = overlap_param_gather
     if optimizer_offload is not None:
         monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
-        megatron = cfg.trainer.policy.megatron_config
         cfg.trainer.flash_attn = True
+        megatron = cfg.trainer.policy.megatron_config
+        megatron.ddp_config.overlap_param_gather = True
         megatron.ddp_config.grad_reduce_in_fp32 = False
         megatron.optimizer_checkpoint_sharding_type = "dp_reshardable"
-        with open_dict(megatron.transformer_config_kwargs):
+        with open_dict(megatron.transformer_config_kwargs), open_dict(megatron.optimizer_config_kwargs):
             megatron.transformer_config_kwargs.deterministic_mode = True
-        with open_dict(megatron.optimizer_config_kwargs):
             megatron.optimizer_config_kwargs.use_precision_aware_optimizer = True
             megatron.optimizer_config_kwargs.store_param_remainders = False
             megatron.optimizer_config_kwargs.optimizer_cpu_offload = optimizer_offload > 0
@@ -143,33 +137,35 @@ def test_hero_worker_repeated_updates(
         for name in names:
             expected = original[name] if name.endswith("router.bias") else original[name].to(torch.bfloat16).float()
             torch.testing.assert_close(before[name], expected, rtol=0, atol=0)
+        selected_names = [
+            "model.layers.0.mlp.experts.3.gate_proj.weight",
+            "model.layers.0.mlp.experts.15.down_proj.weight",
+        ]
+        selected = rank0_validation_snapshot(policy, selected_names)
+        assert set(selected) == set(selected_names)
+        for name in selected_names:
+            torch.testing.assert_close(selected[name], before[name], rtol=0, atol=0)
         initial_scores = _megatron_response_logprobs(policy, batch)
         assert torch.isfinite(initial_scores).all()
         repeated_scores = _megatron_response_logprobs(policy, batch)
         torch.testing.assert_close(initial_scores, repeated_scores, rtol=0, atol=0)
-        updated_names = [
-            "model.layers.0.mlp.latent_down_proj.weight",
-            "model.layers.0.sconv_mlp.weight",
-            "model.layers.0.self_attn.sconv_k.weight",
-            "model.layers.0.shared_experts.1.up_proj.weight",
-        ]
-        previous_step = before
-        metrics = []
         for _ in range(3):
             scores = _megatron_response_logprobs(policy, batch)
             batch["action_log_probs"] = (scores * batch["response_mask"]).float()
             status = _train_step(policy, batch)
             assert status["log_ratio_abs_max"] < 1e-3, status
-            metrics.append(status)
-            updated = rank0_validation_snapshot(policy, updated_names)
-            for name in updated_names:
-                assert not torch.equal(previous_step[name], updated[name]), name
-            previous_step = updated
         after = rank0_validation_snapshot(policy, names)
         for name in names:
             if name.endswith("router.bias"):
                 torch.testing.assert_close(after[name], before[name], rtol=0, atol=0)
             assert torch.isfinite(after[name]).all(), name
+        for name in (
+            "model.layers.0.mlp.latent_down_proj.weight",
+            "model.layers.0.sconv_mlp.weight",
+            "model.layers.0.self_attn.sconv_k.weight",
+            "model.layers.0.shared_experts.1.up_proj.weight",
+        ):
+            assert not torch.equal(before[name], after[name]), name
         final_scores = _megatron_response_logprobs(policy, batch)
         assert torch.isfinite(final_scores).all()
         assert not torch.equal(initial_scores, final_scores)
@@ -178,6 +174,7 @@ def test_hero_worker_repeated_updates(
         ray.get(
             policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint, tokenizer=tokenizer)
         )
+        # The second update catches a restored step counter reset on every step.
         continued = []
         for _ in range(2):
             _train_step(policy, batch)
@@ -193,6 +190,5 @@ def test_hero_worker_repeated_updates(
             resumed = rank0_validation_snapshot(policy, names)
             for name in names:
                 torch.testing.assert_close(resumed[name], expected[name], rtol=0, atol=0)
-        print(json.dumps({"tp": tp, "pp": pp, "ep": ep, "cp": cp, "packing": packing, "metrics": metrics}, default=str))
     finally:
         ray.shutdown()

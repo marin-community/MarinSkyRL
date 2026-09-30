@@ -20,6 +20,11 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
+from skyrl_train.config.weight_sync_pause import (
+    DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
+    WeightSyncPausePolicy,
+    validate_weight_sync_pause_backend,
+)
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
 from skyrl_train.inference_engines.utils import (
     ReservedRendezvousPorts,
@@ -491,7 +496,6 @@ def create_ray_wrapped_inference_engines(
     shared_pg=None,
     gpu_memory_utilization=None,
     inference_engine_enable_sleep=False,
-    async_engine=False,
     max_num_batched_tokens=8192,
     max_num_seqs=1024,
     tokenizer=None,
@@ -509,6 +513,7 @@ def create_ray_wrapped_inference_engines(
     require_v1_model_runner: bool = False,
     mp_backend: bool = False,
     placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
+    weight_sync_pause_policy: WeightSyncPausePolicy = DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
@@ -525,10 +530,12 @@ def create_ray_wrapped_inference_engines(
         still require the ray backend for shared-GPU resource management.
     """
     engine_init_kwargs = dict(engine_init_kwargs)
+    # Direct factory callers bypass generator config validation.
+    validate_weight_sync_pause_backend(weight_sync_pause_policy, backend=backend, run_engines_locally=True)
     model_metadata_path = engine_init_kwargs.pop(MODEL_METADATA_PATH_KEY, pretrain)
     if backend == "vllm":
         import vllm
-        from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
+        from skyrl_train.inference_engines.vllm.vllm_engine import AsyncVLLMRayActor
 
         # if a dev version is being used, skip the version check
         if "dev" not in vllm.__version__:
@@ -539,9 +546,6 @@ def create_ray_wrapped_inference_engines(
         pass
     else:
         raise ValueError(f"Unsupported backend: {backend}")
-
-    if backend == "vllm" and data_parallel_size > 1 and not async_engine:
-        raise ValueError("vLLM data-parallel rollout engines require async_engine=True")
 
     inference_engine_actors = []
     weight_sync_relative_rank_offsets = []
@@ -754,11 +758,6 @@ def create_ray_wrapped_inference_engines(
             rendezvous_reservation = rendezvous.reservation
 
         if backend == "vllm":
-            if async_engine:
-                actor_class = AsyncVLLMRayActor
-            else:
-                actor_class = VLLMRayActor
-
             lora_kwargs = {
                 "enable_lora": enable_lora,
                 "max_lora_rank": max_lora_rank,
@@ -861,7 +860,7 @@ def create_ray_wrapped_inference_engines(
                 )
                 if inference_engine_runtime_env is not None:
                     engine_options["runtime_env"] = inference_engine_runtime_env
-                engine = actor_class.options(**engine_options).remote(
+                engine = AsyncVLLMRayActor.options(**engine_options).remote(
                     model=pretrain,
                     enforce_eager=enforce_eager,
                     worker_extension_cls="skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
@@ -874,6 +873,7 @@ def create_ray_wrapped_inference_engines(
                     dtype=model_dtype,
                     trust_remote_code=True,
                     vllm_v1_disable_multiproc=vllm_v1_disable_multiproc,
+                    weight_sync_pause_policy=weight_sync_pause_policy,
                     gpu_memory_utilization=gpu_memory_utilization,
                     bundle_indices=dp_rank_bundles,
                     num_gpus=0.2 if use_hybrid_engine else 1,

@@ -27,7 +27,12 @@ from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_
 from megatron.core.utils import get_pg_rank
 
 from skyrl_train.models.grug_megatron import GrugGPTModel, grug_block_spec
-from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, grug_long_layer_flags
+from skyrl_train.models.grug_moe import (
+    GRUG_DEFAULT_GLOBAL_EVERY,
+    GRUG_MOE_MODEL_TYPE,
+    GRUG_SPLIT_EXPERT_SCHEMA_VERSION,
+    grug_long_layer_flags,
+)
 
 GRUG_ROTARY_PERCENT = 0.5
 
@@ -38,7 +43,7 @@ class GrugModelProvider(GPTModelProvider):
 
     grug_qk_mult: float = 1.0
     grug_qk_mult_long_scale: float = 1.0
-    grug_global_every: int = 4
+    grug_global_every: int = GRUG_DEFAULT_GLOBAL_EVERY
     grug_local_kv_heads: int = 1
     grug_global_kv_heads: int = 1
     grug_num_shared_experts: int = 1
@@ -124,6 +129,24 @@ class GrugStackedGatedExpertMapping(_StackedExpertExport, GatedMLPMapping):
         expert = extract_expert_number_from_param(self.megatron_param)
         sliced = {name: weight[expert].contiguous() for name, weight in hf_weights.items()}
         return super().hf_to_megatron(sliced, megatron_module)
+
+
+def _routed_expert_mappings(schema_version: int) -> list[AutoMapping | GatedMLPMapping]:
+    """Map individually saved or stacked HF experts to Megatron's per-expert weights."""
+    megatron = "decoder.layers.*.mlp.experts"
+    hf = "model.layers.*.mlp.experts"
+    if schema_version == GRUG_SPLIT_EXPERT_SCHEMA_VERSION:
+        hf += ".*"
+        gate_up_mapping = GatedMLPMapping
+        down_mapping = AutoMapping
+    else:
+        gate_up_mapping = GrugStackedGatedExpertMapping
+        down_mapping = GrugStackedExpertMapping
+    # Megatron's fc1 fuses HF gate/up weights; fc2 holds the down weight.
+    return [
+        gate_up_mapping(f"{megatron}.linear_fc1.weight*", gate=f"{hf}.gate_proj.weight", up=f"{hf}.up_proj.weight"),
+        down_mapping(f"{megatron}.linear_fc2.weight*", f"{hf}.down_proj.weight"),
+    ]
 
 
 def _gated_norm_mappings(megatron_prefix: str, hf_norm: str, hf_gate_prefix: str) -> list[ReplicatedMapping]:
@@ -243,60 +266,23 @@ class GrugMoeBridge(MegatronModelBridge):
             ReplicatedMapping("decoder.layers.*.mlp.router.expert_bias", "model.layers.*.mlp.router.bias"),
         ]
         config = self.hf_config
-        hero = config.uses_hero_architecture
-        if hero:
-            for index in range(config.num_shared_experts):
-                mg = f"decoder.layers.*.mlp.shared_experts.experts.{index}"
-                hf = f"model.layers.*.shared_experts.{index}"
-                mappings.extend(
-                    [
-                        GatedMLPMapping(
-                            f"{mg}.linear_fc1.weight", gate=f"{hf}.gate_proj.weight", up=f"{hf}.up_proj.weight"
-                        ),
-                        AutoMapping(f"{mg}.linear_fc2.weight", f"{hf}.down_proj.weight"),
-                    ]
-                )
+        if config.uses_hero_architecture:
+            shared_expert_prefixes = [
+                (f"decoder.layers.*.mlp.shared_experts.experts.{index}", f"model.layers.*.shared_experts.{index}")
+                for index in range(config.num_shared_experts)
+            ]
         else:
+            shared_expert_prefixes = [("decoder.layers.*.mlp.shared_experts", "model.layers.*.shared_expert")]
+        for megatron, hf in shared_expert_prefixes:
             mappings.extend(
                 [
                     GatedMLPMapping(
-                        "decoder.layers.*.mlp.shared_experts.linear_fc1.weight",
-                        gate="model.layers.*.shared_expert.gate_proj.weight",
-                        up="model.layers.*.shared_expert.up_proj.weight",
+                        f"{megatron}.linear_fc1.weight", gate=f"{hf}.gate_proj.weight", up=f"{hf}.up_proj.weight"
                     ),
-                    AutoMapping(
-                        "decoder.layers.*.mlp.shared_experts.linear_fc2.weight",
-                        "model.layers.*.shared_expert.down_proj.weight",
-                    ),
+                    AutoMapping(f"{megatron}.linear_fc2.weight", f"{hf}.down_proj.weight"),
                 ]
             )
-        if config.grugmoe_artifact_schema_version == 2:
-            mappings.extend(
-                [
-                    GatedMLPMapping(
-                        "decoder.layers.*.mlp.experts.linear_fc1.weight*",
-                        gate="model.layers.*.mlp.experts.*.gate_proj.weight",
-                        up="model.layers.*.mlp.experts.*.up_proj.weight",
-                    ),
-                    AutoMapping(
-                        "decoder.layers.*.mlp.experts.linear_fc2.weight*",
-                        "model.layers.*.mlp.experts.*.down_proj.weight",
-                    ),
-                ]
-            )
-        else:
-            mappings.extend(
-                [
-                    GrugStackedGatedExpertMapping(
-                        "decoder.layers.*.mlp.experts.linear_fc1.weight*",
-                        gate="model.layers.*.mlp.experts.gate_proj.weight",
-                        up="model.layers.*.mlp.experts.up_proj.weight",
-                    ),
-                    GrugStackedExpertMapping(
-                        "decoder.layers.*.mlp.experts.linear_fc2.weight*", "model.layers.*.mlp.experts.down_proj.weight"
-                    ),
-                ]
-            )
+        mappings.extend(_routed_expert_mappings(config.grugmoe_artifact_schema_version))
         if config.latent_dim is not None:
             mappings.extend(
                 [

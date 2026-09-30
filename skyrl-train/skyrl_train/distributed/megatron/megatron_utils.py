@@ -27,7 +27,7 @@ from loguru import logger
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.transformer.module import Float16Module
 from megatron.core.optimizer import ChainedOptimizer
-from megatron.core.optimizer.cpu_offloading.hybrid_optimizer import HybridDeviceOptimizer
+from megatron.core.optimizer.cpu_offloading import HybridDeviceOptimizer
 from megatron.core import parallel_state as mpu
 from megatron.core.utils import get_attr_wrapped_model
 from megatron.core.packed_seq_params import PackedSeqParams
@@ -330,23 +330,20 @@ def restore_offloaded_optimizer_state(optimizer) -> None:
     optimizers = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
     for distributed_optimizer in optimizers:
         inner = distributed_optimizer.optimizer
-        if isinstance(inner, HybridDeviceOptimizer):
-            # Bucket-space checkpoints keep per-parameter steps as local,
-            # nonpersistent objects. Those overwrite the restored AdamW step
-            # with the current process's value; the saved value is in the groups.
-            for group in inner.param_groups:
-                for parameter in group["params"]:
-                    state = inner.state[parameter]
-                    if "step" in state:
-                        state["step"].fill_(group["step"])
-            # MCore 0.18's dp_reshardable loader replaces the state tensors but
-            # omits the synchronization performed by its model-space loaders.
-            # In particular, the inner FP32 parameters still contain old weights.
-            inner._sync_hdo_state_to_sub_optimizers()
-            # The outer groups normally have no step. Keeping the checkpoint's
-            # step here would reset FusedAdam's counter before every later update.
-            for group in inner.param_groups:
-                group.pop("step", None)
+        if not isinstance(inner, HybridDeviceOptimizer):
+            continue
+        # MCore 0.18's bucket load overwrites CPU Adam's saved step with local
+        # state. Only the inner GPU groups should retain step, or HDO resets it
+        # before every update.
+        for group in inner.param_groups:
+            for parameter in group["params"]:
+                state = inner.state[parameter]
+                if "step" in state:
+                    state["step"].fill_(group["step"])
+            group.pop("step", None)
+        # Bucket tensors replace state after HDO's load hooks. Rebind moments,
+        # restore FP32 masters and place state on the native optimizers' devices.
+        inner._sync_hdo_state_to_sub_optimizers()
 
 
 def preprocess_packed_seqs(

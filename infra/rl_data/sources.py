@@ -18,6 +18,7 @@ import numpy as np
 import reasoning_gym
 import requests
 from skyrl_gym.envs.aime.utils import last_boxed_only_string, remove_boxed
+from skyrl_gym.envs.mcq.utils import extract_mcq_answer
 from skyrl_gym.envs.text_to_sql import scoring as text_to_sql_scoring
 
 from infra.rl_data.contracts import VerifierDataContract
@@ -39,6 +40,7 @@ VERIFIABLE_CODE_DATASET = "open-r1/verifiable-coding-problems-python"
 APPS_DATASET = "codeparrot/apps"
 GPQA_DATASET = "Idavidrein/gpqa"
 OPENSCIENCE_DATASET = "nvidia/OpenScience"
+OPENSCIENCE_SUBSETS = ("OS-Q2.5-32B-10", "OS-Q2.5-32B-4", "OS-Q2.5-72B-10", "OS-Q3-235B-4")
 KTO_MIX_DATASET = "trl-lib/kto-mix-14k"
 HH_RLHF_DATASET = "Anthropic/hh-rlhf"
 EURUS2_DATASET = "PRIME-RL/Eurus-2-RL-Data"
@@ -65,7 +67,7 @@ _HENDRYCKS_MATH_SUBJECTS = (
     "precalculus",
 )
 _ASDIV_XML_URL = "https://raw.githubusercontent.com/chaochun/nlu-asdiv-dataset/{revision}/dataset/ASDiv.xml"
-_PLAIN_NUMERIC_ANSWER = re.compile(r"^-?\d+(?:\.\d+)?(?:/\d+)?$")
+_PLAIN_NUMERIC_ANSWER = re.compile(r"^-?\d+(?:\.\d+)?(?:/\d+)?$|^-?\d+:-?\d+$")
 
 
 PreparedRow = dict[str, Any]
@@ -467,7 +469,7 @@ def _boxed_answer(solution: str) -> str:
 def _plain_numeric_answer(answer: Any) -> str:
     normalized = str(answer).split("(", 1)[0].strip().replace(",", "")
     if not _PLAIN_NUMERIC_ANSWER.fullmatch(normalized):
-        raise ValueError("answer is not a plain number or fraction.")
+        raise ValueError("answer is not a plain number, fraction, or ratio.")
     if normalized.endswith(".0"):
         return normalized[: -len(".0")]
     return normalized
@@ -771,6 +773,23 @@ def _prepare_gpqa(example: Mapping[str, Any], index: int, contract: VerifierData
     }
 
 
+def _mcq_options(prompt: str) -> dict[str, str]:
+    """Map each ``X: text`` option label to its text, or raise on conflicts.
+
+    OpenScience prompts list one option per line. A label repeated with
+    different text makes that option ambiguous, so the row is rejected.
+    """
+    options: dict[str, str] = {}
+    for match in re.finditer(r"^([A-Z]): ?(.+)$", prompt, re.MULTILINE):
+        label, text = match.group(1), match.group(2).strip()
+        previous = options.setdefault(label, text)
+        if previous != text:
+            raise ValueError(f"OpenScience input has conflicting options for label {label}.")
+    if not options:
+        raise ValueError("OpenScience input has no 'X: option' lines.")
+    return options
+
+
 def _prepare_openscience(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
     source = openscience_source()
     prompt_text = example.get("input")
@@ -779,21 +798,30 @@ def _prepare_openscience(example: Mapping[str, Any], index: int, contract: Verif
         raise TypeError("OpenScience row input must be a string.")
     if not isinstance(output, str):
         raise TypeError("OpenScience row output must be a string.")
-    match = re.search(r"\\boxed\{([A-Da-d])\}", output)
-    if not match:
+    match = extract_mcq_answer(output)
+    if match is None:
         raise ValueError("OpenScience output missing \\boxed{X} answer letter.")
-    ground_truth = match.group(1).upper()
+    ground_truth = match
+    if ground_truth not in _mcq_options(prompt_text):
+        raise ValueError(f"OpenScience answer letter {ground_truth} is not among the offered options.")
     instruction = contract.prompt_instruction
     if not instruction:
         raise ValueError(f"{source.name} requires a verifier prompt instruction.")
-    normalized = contract.normalize_ground_truth(ground_truth)
-    return {
+    wrong_letter = chr((ord(ground_truth) - ord("A") + 1) % 26 + ord("A"))
+    normalized = contract.validate_example(
+        ground_truth, f"\\boxed{{{ground_truth}}}", f"\\boxed{{{wrong_letter}}}"
+    )
+    row = {
         "data_source": source.dataset_id,
         "prompt": [{"role": "user", "content": prompt_text + instruction}],
         "env_class": source.env_id,
         "reward_model": {"ground_truth": normalized},
         "extra_info": {"split": "train", "index": index},
     }
+    subset = example.get("subset")
+    if isinstance(subset, str) and subset:
+        row["extra_info"]["subset"] = subset
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -1058,7 +1086,16 @@ def gpqa_source() -> Source:
 
 
 def openscience_source() -> Source:
-    return Source("openscience", OPENSCIENCE_DATASET, "mcq", "train", True, "two_sided", _prepare_openscience)
+    return Source(
+        "openscience",
+        OPENSCIENCE_DATASET,
+        "mcq",
+        "train",
+        True,
+        "two_sided",
+        _prepare_openscience,
+        _load_openscience_rows,
+    )
 
 
 def kto_mix_source() -> Source:
@@ -1219,6 +1256,19 @@ def _load_eurus2_rows(source: Source, revision: str, parameters: Mapping[str, An
 
 def _load_nemotron_rows(source: Source, revision: str, parameters: Mapping[str, Any]):
     return _skip_source_rows(source, _load_hugging_face_dataset(source, revision, "RL"), parameters)
+
+
+def _load_openscience_rows(source: Source, revision: str, parameters: Mapping[str, Any]):
+    _validate_source_parameters(source.name, parameters, {"subset", "skip"})
+    subset = parameters.get("subset")
+    if subset not in OPENSCIENCE_SUBSETS:
+        raise ValueError(
+            f"{source.name} parameters.subset must select one of {list(OPENSCIENCE_SUBSETS)}; got {subset!r}."
+        )
+    rows = _skip_source_rows(
+        source, _load_hugging_face_dataset(source, revision, subset), {"skip": parameters.get("skip", 0)}
+    )
+    return ({**example, "subset": subset} for example in rows)
 
 
 def _iter_jsonl_rows(path: Path) -> Iterable[Mapping[str, Any]]:

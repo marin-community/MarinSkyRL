@@ -44,7 +44,6 @@ def example_dummy_config():
     generator_overrides = {
         "sampling_params": {"max_generate_length": 20},
         "n_samples_per_prompt": 1,
-        "batched": False,
         "max_turns": 1,
         "enable_http_endpoint": False,
         "http_endpoint_host": "127.0.0.1",
@@ -106,8 +105,7 @@ def stub_megatron_modules() -> None:
             "ChainedOptimizer": type("ChainedOptimizer", (), {}),
             "DistributedOptimizer": type("DistributedOptimizer", (), {}),
         },
-        "megatron.core.optimizer.cpu_offloading": {},
-        "megatron.core.optimizer.cpu_offloading.hybrid_optimizer": {
+        "megatron.core.optimizer.cpu_offloading": {
             "HybridDeviceOptimizer": type("HybridDeviceOptimizer", (), {}),
         },
         "megatron.core.utils": {"get_attr_wrapped_model": lambda *args, **kwargs: None},

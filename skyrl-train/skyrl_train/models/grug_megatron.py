@@ -9,10 +9,12 @@ layer spec cannot express through configuration alone:
 * attention output is projected away from the value direction (XSA) and
   scaled by a per-head sigmoid gate computed from the attention input;
 * the router selects the top-(k+1) experts on biased logits, drops the last
-  one, and renormalizes sigmoid weights of the survivors.
+  one, and renormalizes sigmoid weights of the survivors;
+* Hero adds latent expert projections, separate shared experts, causal ShortConv,
+  and different key/value head counts on local and long-attention layers.
 
 Everything else (sliding window on local layers, RoPE skipped on long layers,
-half-RoPE, grouped-GEMM experts with a shared expert, GQA) maps onto stock
+half-RoPE, grouped-GEMM experts, GQA) maps onto stock
 Megatron-Core settings chosen by ``GrugModelProvider`` in
 ``grug_megatron_bridge``.
 """
@@ -475,14 +477,8 @@ class GrugTransformerLayer(TransformerLayer):
             output, bias = tensor_parallel.checkpoint(mlp_forward, False, normalized)
         else:
             output, bias = mlp_forward(normalized)
-        if self.recompute_pre_mlp_layernorm:
-            self.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(output)
         output = self.sconv_mlp(output, packed_seq_params)
-        with self.bias_dropout_add_exec_handler():
-            output = self.mlp_bda(self.training, self.config.bias_dropout_fusion)(
-                (output, bias), hidden_states, self.hidden_dropout
-            )
-        return output, context
+        return self._forward_post_mlp((output, bias), hidden_states), context
 
 
 def grug_layer_spec(config: TransformerConfig) -> ModuleSpec:

@@ -42,7 +42,9 @@ GRUG_EP_COMM_BACKEND = "torch"
 GRUG_ROUTER_BIAS_SUFFIX = ".mlp.router.bias"
 GRUG_MOE_ARCHITECTURE = "GrugMoeForCausalLM"
 GRUG_MOE_ATTENTION_MODE = "production"
-GRUG_MOE_ARTIFACT_SCHEMA_VERSION = 1
+GRUG_STACKED_EXPERT_SCHEMA_VERSION = 1
+GRUG_SPLIT_EXPERT_SCHEMA_VERSION = 2
+GRUG_DEFAULT_GLOBAL_EVERY = 4
 GRUG_EAGER_ATTENTION_BACKEND = "eager"
 GRUG_FLASH_ATTENTION_BACKEND = "flash_attention_2"
 GRUG_SUPPORTED_ATTENTION_BACKENDS = frozenset({GRUG_EAGER_ATTENTION_BACKEND, GRUG_FLASH_ATTENTION_BACKEND})
@@ -71,10 +73,10 @@ def validate_grug_training_strategy(model_type: str | None, training_strategy: s
         )
 
 
-def grug_long_layer_flags(num_layers: int, global_every: int = 4) -> tuple[bool, ...]:
+def grug_long_layer_flags(num_layers: int, global_every: int = GRUG_DEFAULT_GLOBAL_EVERY) -> tuple[bool, ...]:
     """Return which decoder layers use full causal attention without RoPE.
 
-    Grug makes every fourth layer and the final layer a "long" layer; the
+    Every ``global_every``-th layer and the final layer are "long" layers; the
     remaining layers use sliding-window attention with half-RoPE.
     """
 
@@ -173,12 +175,12 @@ class GrugMoeConfig(PretrainedConfig):
         disable_long_rope: bool = True,
         router_z_loss_coef: float = 0.0,
         grugmoe_attention_mode: str = GRUG_MOE_ATTENTION_MODE,
-        grugmoe_artifact_schema_version: int = GRUG_MOE_ARTIFACT_SCHEMA_VERSION,
+        grugmoe_artifact_schema_version: int = GRUG_STACKED_EXPERT_SCHEMA_VERSION,
         latent_dim: int | None = None,
         num_shared_experts: int = 1,
         local_kv_heads: int | None = None,
         global_kv_heads: int | None = None,
-        global_every: int = 4,
+        global_every: int = GRUG_DEFAULT_GLOBAL_EVERY,
         rope_fused: bool = False,
         sconv: bool = False,
         sconv_kernel: int = 4,
@@ -267,7 +269,10 @@ class GrugMoeConfig(PretrainedConfig):
             raise ValueError("Grug training supports only disable_long_rope=true")
         if grugmoe_attention_mode != GRUG_MOE_ATTENTION_MODE:
             raise ValueError(f"unsupported Grug attention mode {grugmoe_attention_mode!r}")
-        if int(grugmoe_artifact_schema_version) not in (1, 2):
+        if int(grugmoe_artifact_schema_version) not in (
+            GRUG_STACKED_EXPERT_SCHEMA_VERSION,
+            GRUG_SPLIT_EXPERT_SCHEMA_VERSION,
+        ):
             raise ValueError(
                 f"unsupported Grug artifact schema {grugmoe_artifact_schema_version}; "
                 "expected 1 (stacked experts) or 2 (split experts)"
@@ -342,8 +347,8 @@ class GrugMoeConfig(PretrainedConfig):
             or self.local_kv_heads is not None
             or self.num_shared_experts != 1
             or self.rope_fused
-            or self.global_every != 4
-            or self.grugmoe_artifact_schema_version == 2
+            or self.global_every != GRUG_DEFAULT_GLOBAL_EVERY
+            or self.grugmoe_artifact_schema_version == GRUG_SPLIT_EXPERT_SCHEMA_VERSION
         )
 
 

@@ -5,9 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 import numpy as np
 import pytest
 from jinja2 import TemplateError
+from omegaconf import OmegaConf
 
 from skyrl_train.inference_engines.chat_template import SINGLE_TOOL_CALL_TEMPLATE_ERROR
-from skyrl_train.trajectory_runners.model_clients import DirectModelClient
+from skyrl_train.inference_engines.utils import get_vllm_sampling_params
+from skyrl_train.trajectory_runners.model_clients import ContextLengthExceededError, DirectModelClient, ModelServerError
 
 
 def _encoded_routes(rows):
@@ -31,6 +33,56 @@ async def test_direct_model_client_preserves_engine_tokens():
     output = await DirectModelClient(engine).generate({"prompt_token_ids": [[1, 2]]})
 
     assert output == {**engine_output, "token_provenance": "engine"}
+
+
+@pytest.mark.asyncio
+async def test_direct_chat_client_preserves_server_error_identity_without_message():
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenize.return_value = {"tokens": [1, 2]}
+
+    async def server_error(payload):
+        return {
+            "error": {"message": "private prompt contents", "code": 500},
+            "error_category": "constrained_decoding",
+            "request_id": payload["headers"]["x-request-id"],
+        }
+
+    engine.chat_completion.side_effect = server_error
+    with pytest.raises(ModelServerError) as raised:
+        await DirectModelClient(engine).generate(
+            {
+                "prompts": [[{"role": "user", "content": "secret"}]],
+                "chat_completion_params": [{}],
+            }
+        )
+
+    error = raised.value
+    assert error.request_id == engine.chat_completion.await_args.args[0]["headers"]["x-request-id"]
+    assert error.category == "constrained_decoding"
+    assert error.status_code == 500
+    assert "private prompt contents" not in str(error)
+
+
+@pytest.mark.asyncio
+async def test_direct_chat_client_types_context_overflow_without_leaking_prompt():
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenize.return_value = {"tokens": [1, 2]}
+    engine.chat_completion.return_value = {
+        "error": {"message": "private prompt contents", "code": 400},
+        "error_category": "context_overflow",
+        "request_id": "request-123",
+    }
+
+    with pytest.raises(ContextLengthExceededError) as raised:
+        await DirectModelClient(engine).generate(
+            {"prompts": [[{"role": "user", "content": "secret"}]], "chat_completion_params": [{}]}
+        )
+
+    assert raised.value.status_code == 400
+    assert raised.value.request_id == "request-123"
+    assert "private prompt contents" not in str(raised.value)
 
 
 @pytest.mark.asyncio
@@ -282,21 +334,11 @@ async def test_direct_chat_continuation_preserves_sampled_tool_call_tokens():
     )
 
     assert output["prompt_ids"] == [[11, 12, 21, 22, 30, 40, 41]]
-    assert engine.chat_completion.await_args.args[0]["json"]["_skyrl_exact_prompt_token_ids"] == [
-        11,
-        12,
-        21,
-        22,
-        30,
-        40,
-        41,
-    ]
-
-
-def test_direct_model_client_omits_empty_tools_from_vllm_request():
-    options = DirectModelClient._chat_options({"tools": [], "temperature": 0.4}, {})
-
-    assert options == {"temperature": 0.4}
+    chat_body = engine.chat_completion.await_args.args[0]["json"]
+    assert chat_body["_skyrl_exact_prompt_token_ids"] == [11, 12, 21, 22, 30, 40, 41]
+    # A row with `tools: []` is served as a tool-free request.
+    assert "tools" not in chat_body
+    assert all("tools" not in call.args[0]["json"] for call in engine.tokenize.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -350,4 +392,135 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
     assert body["return_tokens_as_token_ids"] is True
     assert output["student_topk_indices"] == [[[2, 3], [10, 11]]]
     assert output["behavior_topk_logprobs"] == [[[-0.1, -0.2], [-0.1, -0.2]]]
-    assert output["routed_experts"] == [[[[4, 7]], [[0, 0]]]]
+    np.testing.assert_array_equal(output["routed_experts"][0], [[[4, 7]], [[0, 0]]])
+    assert output["routed_experts"][0].dtype == np.uint8
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content,expected", [("final answer", "final answer"), (None, "")])
+async def test_chat_grading_text_uses_parsed_final_content_and_preserves_raw_tokens(content, expected):
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "reasoning words and final answer"
+    engine.tokenize.return_value = {"tokens": [1, 2]}
+    engine.chat_completion.return_value = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": content, "reasoning_content": "reasoning words"},
+                "finish_reason": "stop",
+                "token_ids": [3, 4, 5],
+            }
+        ]
+    }
+    result = await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "question"}]],
+            "chat_completion_params": [{}],
+        }
+    )
+    assert result["responses"] == [expected]
+    assert result["response_ids"] == [[3, 4, 5]]
+    assert result["assistant_messages"][0]["reasoning_content"] == "reasoning words"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "decoded,expected",
+    [
+        ('<|start_think|>not JSON<|end_think|>{"answer": 7}<|eot_id|>', '{"answer": 7}'),
+        ("<|start_think|>a tentative answer is 7", ""),
+        ("reasoning<|end_think|>7<|eot_id|>", "7"),
+    ],
+)
+async def test_chat_grading_recovers_reasoning_boundaries_without_changing_replay_evidence(decoded, expected):
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = decoded
+    engine.tokenize.return_value = {"tokens": [1, 2]}
+    raw_message = {"role": "assistant", "content": "reasoning words mixed with answer", "tool_calls": []}
+    engine.chat_completion.return_value = {
+        "choices": [
+            {
+                "message": raw_message,
+                "finish_reason": "stop",
+                "token_ids": [3, 4, 5],
+                "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}, {"logprob": -0.3}]},
+                "routed_experts": _encoded_routes([[[0, 0]], [[0, 0]], [[1, 2]], [[3, 4]]]),
+            }
+        ]
+    }
+    result = await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "question"}]],
+            "chat_completion_params": [{}],
+        }
+    )
+    assert result["responses"] == [expected]
+    assert result["response_ids"] == [[3, 4, 5]]
+    assert result["response_logprobs"] == [[-0.1, -0.2, -0.3]]
+    np.testing.assert_array_equal(result["routed_experts"][0], [[[1, 2]], [[3, 4]], [[0, 0]]])
+    assert result["assistant_messages"] == [raw_message]
+
+
+@pytest.mark.asyncio
+async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "7"
+    engine.tokenize.return_value = {"tokens": [1, 2, 3, 4]}
+
+    async def serve(request):
+        tokens = request["json"]["max_completion_tokens"]
+        assert tokens == 1
+        return {
+            "choices": [{"message": {"role": "assistant", "content": "7"}, "finish_reason": "stop", "token_ids": [7]}]
+        }
+
+    engine.chat_completion.side_effect = serve
+    result = await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "a correction prompt"}]],
+            "chat_completion_params": [{"max_output_tokens": 3}],
+            "sampling_params": {"max_generate_length": 3},
+            "max_context_length": 5,
+        }
+    )
+    assert result["responses"] == ["7"]
+    assert result["prompt_ids"] == [[1, 2, 3, 4]]
+
+
+@pytest.mark.asyncio
+async def test_chat_output_keeps_the_per_turn_limit_of_vllm_sampling_params():
+    """Training passes vLLM-form sampling params; a large request window must not lift their per-turn limit."""
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "7"
+    engine.tokenize.return_value = {"tokens": [1, 2, 3, 4]}
+    served = []
+
+    async def serve(request):
+        served.append(request["json"])
+        return {
+            "choices": [{"message": {"role": "assistant", "content": "7"}, "finish_reason": "stop", "token_ids": [7]}]
+        }
+
+    engine.chat_completion.side_effect = serve
+    sampling_params = get_vllm_sampling_params(
+        OmegaConf.create(
+            {"max_generate_length": 6528, "temperature": 1.0, "top_p": 1.0, "top_k": -1, "min_p": 0.0, "logprobs": None}
+        )
+    )
+    await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "question"}]],
+            "chat_completion_params": [{}],
+            "sampling_params": sampling_params,
+            "max_context_length": 32768,
+        }
+    )
+    assert served[0]["max_completion_tokens"] == 6528
+    assert "max_tokens" not in served[0]
