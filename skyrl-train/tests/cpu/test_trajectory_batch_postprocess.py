@@ -61,6 +61,26 @@ def test_pass_at_k_uses_unshaped_outcomes():
     assert trainer.all_metrics["reward/avg_raw_reward"] == pytest.approx(0.35)
 
 
+def test_training_reports_normalized_composite_scores_by_agent():
+    trainer = make_trainer()
+    batch: TrajectoryBatch = {
+        "response_ids": [[1], [2], [3]],
+        "rewards": [5.0, 1.0, 0.0],
+        "verification_results": [
+            VerificationResult.verified(5.0, diagnostics={"agent": "genrm"}, score_min=1.0, score_max=5.0),
+            VerificationResult.verified(1.0, diagnostics={"agent": "mcqa"}),
+            VerificationResult.error("judge unavailable", diagnostics={"agent": "mcqa"}),
+        ],
+    }
+
+    trainer.postprocess_trajectory_batch(batch, ["a", "b", "c"])
+
+    assert trainer.all_metrics["reward/avg_raw_reward"] == 2.0
+    assert trainer.all_metrics["reward/avg_verifier_score"] == pytest.approx(2 / 3)
+    assert trainer.all_metrics["reward/agent/genrm/avg_verifier_score"] == 1.0
+    assert trainer.all_metrics["reward/agent/mcqa/avg_verifier_score"] == 0.5
+
+
 def test_informative_group_fraction_counts_groups_whose_rewards_differ():
     trainer = make_trainer()
     # Group a has reward spread; group b is a tie and carries no advantage signal.
