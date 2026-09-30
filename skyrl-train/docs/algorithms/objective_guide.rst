@@ -333,8 +333,8 @@ Configure the following keys under ``trainer.algorithm.distillation`` and
 supply teachers and routing as in the worked setups. ``coefficient`` and route
 weights multiply each teacher contribution once. The `teacher loss source`_
 and `teacher configuration source`_ define these objectives. See
-`On-Policy Distillation of Language Models: Learning from Self-Generated
-Mistakes <https://arxiv.org/abs/2306.13649>`_ for on-policy teacher training.
+`MOPD section 3.2.1 <https://arxiv.org/html/2606.30406v1#S3.SS2.SSS1>`_
+for the sampled single-token reverse-KL policy-gradient estimator.
 
 ``sampled_reverse_kl``
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -411,7 +411,12 @@ intended. Partial support still aggregates all omitted tokens into one bin.
 Use rollout-selected support and teacher scores on that same support for a
 clipped distillation surrogate. The softmax weights and advantages are detached;
 this is not an exact full KL estimator. It requires ``token_mean`` and rollout
-``logprobs`` equal to every teacher's ``top_k``.
+``logprobs`` equal to every teacher's ``top_k``. The surrogate alone preserves
+configured sampling and logprob handling, including ``top_p: 0.99`` in the
+native Open-MOPD schedule. Neutral, processed behavior-logprob sampling applies
+when an active policy row uses a scalar rollout ratio: a rollout-anchored loss
+or a nonempty off-policy correction. Admission checks the surrogate's behavior
+top-K fields independently of that scalar-ratio requirement.
 
 .. code-block:: yaml
 
@@ -458,17 +463,35 @@ settings must also be supplied.
      - Mean-centered unstandardized group advantage, :math:`C(r,A)`, fixed-length normalization, clip 0.2/0.2, no KL.
      - Avoid reward-standard-deviation and response-length normalization; configured maximum length controls magnitude. `Understanding R1-Zero-Like Training`_.
    * - ``gspo``
-     - GSPO-token sequence ratio, ``sequence_mean``, clip 0.0003/0.0004; inherits base KL enabled with coefficient 0.001.
+     - GSPO-token sequence ratio, ``sequence_mean``, clip 0.0003/0.0004, explicit KL-off recipe choice.
      - Sequence-level credit with a narrow ratio interval. Avoid token-varying credit. `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_.
    * - ``cispo``
      - Detached ratio-weighted :math:`-A\log p`, ``token_mean``, ratio bounds [0,6], no KL, nonzero reward-spread filtering.
      - Retain log-likelihood gradients with clipped weights; does not implement PPO's pessimistic selection. `MiniMax-M1 <https://arxiv.org/abs/2506.13585>`_.
    * - ``opd``
      - Uniform then teacher REPLACE advantage, :math:`-rA^T`, ``token_mean``, no KL.
-     - Pure chosen-token teacher training. Requires teacher definitions, routing and coefficient. `On-Policy Distillation <https://arxiv.org/abs/2306.13649>`_.
+     - Pure chosen-token teacher training. Requires teacher definitions, routing and coefficient. Sampled estimator: `MOPD section 3.2.1 <https://arxiv.org/html/2606.30406v1#S3.SS2.SSS1>`_.
    * - ``mopd``
-     - Uniform then routed teacher REPLACE advantage, :math:`-rA^T`, ``sequence_mean``, no KL.
+     - Uniform then routed teacher REPLACE advantage, :math:`-rA^T`, ``sequence_mean``, ``advantage_clip: 5.0``, no KL.
      - Give each response equal teacher-loss weight across domains. Domain frequency and route weights still affect the mixture. `MOPD <https://arxiv.org/abs/2606.30406>`_.
+
+The GSPO paper's displayed objective has no KL term. Section 2 says the term
+is omitted for brevity, and the paper reports no KL coefficient. This recipe
+therefore sets ``use_kl_loss: false`` and ``use_kl_in_reward: false`` rather
+than inheriting the base default. A user who wants reference KL sets it and
+its coefficient explicitly.
+
+The GRPO recipe uses DeepSeekMath's sequence averaging and KL coefficient 0.04.
+The existing ``examples/gsm8k/run_gsm8k.sh`` uses the base ``token_mean`` and
+KL coefficient 0.001. Those are distinct experiment choices. The DAPO recipe
+uses the paper's regular clipped objective; the existing DAPO examples use
+verl's ``dual_clip`` variant with ``clip_ratio_c: 10``. These example settings
+are preserved. The recipe configures algorithm fields only: overlong filtering
+(``generator.apply_overlong_filtering``) and soft length penalties
+(``generator.trajectory_reward_shaping.overlong``) need explicit generator
+settings. DAPO section 4.1 uses a 16,384-token expected maximum and an additional
+4,096-token soft penalty interval; set generation limits and the shaping interval
+together for the intended experiment.
 
 For each of GRPO, DAPO, Dr.GRPO, GSPO and CISPO, start from this complete launch
 source and change only ``algorithm_recipe`` to the table's name. Use the
@@ -621,12 +644,16 @@ with one of those names. Its routing configuration is:
        kind: domain-weighted
        domain_weights: {math: 1.0, swe: 1.0, terminal: 1.0}
 
-Use the ``mopd`` recipe and set ``loss_reduction: sequence_mean`` explicitly
-when adapting that smoke source, which supplies ``token_mean`` itself. For
-chosen-token MOPD, keep each teacher's ``evidence: chosen_token`` and use
-``sampled_reverse_kl``. Set ``advantage_clip: 2.0`` to bound each raw teacher gap
-before its route weight and coefficient; a lower route weight reduces that
-domain's contribution without changing the averaging denominator.
+The ``mopd`` recipe follows the paper's sequence averaging (section 3.2.1) and
+``advantage_clip: 5.0`` (appendix A). When adapting the smoke source, set both
+``loss_reduction: sequence_mean`` and ``distillation.advantage_clip: 5.0``
+explicitly when starting from that source. Its ``token_mean`` overrides the
+recipe, and its standalone sampled objective leaves teacher gaps unclipped.
+The existing smoke configuration keeps those choices.
+For chosen-token MOPD, keep each teacher's ``evidence: chosen_token`` and use
+``sampled_reverse_kl``. The clip bounds each raw teacher gap before its route
+weight and coefficient; a lower route weight reduces that domain's contribution
+without changing the averaging denominator.
 
 For teacher top-K divergences, change every teacher to
 ``evidence: topk_distribution`` and ``top_k: 32`` and select
@@ -691,7 +718,7 @@ teacher evidence and group admission.
      - Use a listed preset or ``custom`` with the rule schema above; keep at most one truncate rule.
    * - Rules supplied for a preset, or missing for ``custom``.
      - Supply rules only with ``off_policy_correction: custom``.
-   * - Student-top-K surrogate K mismatch or unavailable rollout log probabilities.
+   * - Student-top-K surrogate K mismatch or missing behavior top-K evidence.
      - Set generator ``sampling_params.logprobs`` to every teacher's ``top_k`` and preserve aligned evidence through admission.
    * - Distillation has no teachers, an unknown routing plan/teacher, or unused teacher roles.
      - Declare every referenced teacher, select the named routing plan and give each teacher a route consumer.

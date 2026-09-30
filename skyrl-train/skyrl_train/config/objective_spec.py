@@ -217,8 +217,7 @@ def resolve_objective_config(cfg: DictConfig) -> None:
     policy_trains = not (topk and plan.reward_mode is DistillationRewardMode.REPLACE)
     algorithm.resolved_off_policy_correction = correction.to_config()
     algorithm.resolved_rollout_logprobs_required = bool(
-        (policy_trains and (spec.anchor is RatioAnchor.ROLLOUT or correction.rules))
-        or (plan is not None and plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE)
+        policy_trains and (spec.anchor is RatioAnchor.ROLLOUT or correction.rules)
     )
 
 

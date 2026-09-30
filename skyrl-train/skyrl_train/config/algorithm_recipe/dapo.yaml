@@ -1,5 +1,5 @@
 # @package trainer.algorithm
-# https://arxiv.org/abs/2503.14476
+# DAPO equation (8) and section 4.1: https://arxiv.org/abs/2503.14476
 advantage_estimator: grpo
 policy_loss_type: regular
 loss_reduction: token_mean

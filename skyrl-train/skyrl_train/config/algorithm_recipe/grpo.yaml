@@ -1,5 +1,5 @@
 # @package trainer.algorithm
-# https://arxiv.org/abs/2402.03300
+# DeepSeekMath sections 4.1 and 4.2.1: https://arxiv.org/abs/2402.03300
 advantage_estimator: grpo
 policy_loss_type: regular
 loss_reduction: sequence_mean

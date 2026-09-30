@@ -619,10 +619,7 @@ def validate_cfg(cfg: DictConfig):
 
     behavior_logprobs_required = cfg.trainer.algorithm.resolved_rollout_logprobs_required
     if behavior_logprobs_required:
-        if cfg.generator.sampling_params.logprobs is None and (
-            distillation_plan is None
-            or distillation_plan.objective is not DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
-        ):
+        if cfg.generator.sampling_params.logprobs is None:
             logger.warning(
                 "The selected objective requires rollout logprobs; setting generator.sampling_params.logprobs=0."
             )

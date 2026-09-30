@@ -310,7 +310,7 @@ Algorithm Configuration
 
       # cispo parameters (only used when policy_loss_type: "cispo")
       cispo: 
-        cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+        cispo_eps_clip_low: 1.0 # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
         cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
 
       # value loss parameters
@@ -390,7 +390,7 @@ Algorithm Configuration
 
 - ``algorithm.cispo``: CISPO parameters (only used when ``policy_loss_type`` is ``cispo``):
 
-  - ``cispo_eps_clip_low``: Offset for lower bound of importance sampling ratio clipping. Tokens with importance sampling ratio less than ``1 - cispo_eps_clip_low`` will have their ratio clipped, but can still be updated in the policy gradient update.
+  - ``cispo_eps_clip_low``: Defaults to 1.0, giving a zero lower ratio bound. Offset for lower bound of importance sampling ratio clipping. Tokens with importance sampling ratio less than ``1 - cispo_eps_clip_low`` will have their ratio clipped, but can still be updated in the policy gradient update.
   - ``cispo_eps_clip_high``: Offset for upper bound of importance sampling ratio clipping. Tokens with importance sampling ratio greater than ``1 + cispo_eps_clip_high`` will have their ratio clipped, but can still be updated in the policy gradient update.
 
 - ``algorithm.sapo``: SAPO (as proposed in `this paper <https://arxiv.org/pdf/2511.20347>`) parameters (only used when ``policy_loss_type`` is ``sapo``):

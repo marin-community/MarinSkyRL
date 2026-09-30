@@ -91,7 +91,7 @@ def hydra_arguments(
         "generator.n_samples_per_prompt=1",
         f"generator.sampling_params.max_generate_length={training.response_limit}",
         f"generator.sampling_params.temperature={training.temperature}",
-        "generator.sampling_params.top_p=1.0",
+        f"generator.sampling_params.top_p={training.nucleus_p}",
         f"generator.sampling_params.logprobs={training.top_k}",
         "++generator.engine_init_kwargs.max_model_len=32768",
         f"generator.eval_sampling_params.max_generate_length={training.response_limit}",
