@@ -216,3 +216,10 @@ they never become zero rewards. Profiling token counts include all returned atte
 summary reports recovered and unresolved samples separately. A fatal runner or retention error
 still propagates: retries apply to retained per-request failures, including a batch in which every
 request failed, and do not conceal programming errors or loss of the inference engines.
+
+
+The runtime pins xgrammar 0.2.8, which fixes overridden EOS tokens being allowed
+inside unfinished tool JSON ([upstream fix](https://github.com/mlc-ai/xgrammar/pull/905)).
+With Grug, generation uses both EOS IDs 128001 and 128009 while the tokenizer declares
+only 128001. Earlier xgrammar releases could allow 128009 through the mask and then
+reject it in the matcher, producing a server error. The pin preserves strict tool schemas.
