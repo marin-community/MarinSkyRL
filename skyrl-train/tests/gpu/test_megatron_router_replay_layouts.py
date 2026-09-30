@@ -28,6 +28,7 @@ from types import SimpleNamespace
 import numpy as np
 from finestore import mismatch_probe as mismatch
 from finestore.reader import ReadView
+from omegaconf import open_dict
 
 import pytest
 import ray
@@ -141,7 +142,8 @@ def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path, la
     cfg.trainer.mismatch_probe.filtered_replay.keep_fraction = 1.0
     cfg.trainer.mismatch_probe.enabled = True
     cfg.trainer.max_steps = 2
-    cfg.trainer.policy.optimizer_config.lr_warmup_steps_ratio = 0.1
+    with open_dict(cfg.trainer.policy.optimizer_config):
+        cfg.trainer.policy.optimizer_config.lr_warmup_steps_ratio = 0.1
     schedule = RayPPOTrainer.__new__(RayPPOTrainer)
     schedule.cfg = cfg
     schedule.train_dataset = range(100 * cfg.trainer.train_batch_size)
