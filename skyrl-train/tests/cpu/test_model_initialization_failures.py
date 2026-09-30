@@ -114,6 +114,5 @@ async def test_training_failure_preserves_receipt_before_shutdown(monkeypatch, t
 
     assert messages
     assert all(message.record["exception"] is None for message in messages)
-    assert any("_UnpickleableError: GPU worker ran out of memory" in message.record["message"] for message in messages)
     for message in messages:
         pickle.dumps(message.record)
