@@ -10,6 +10,7 @@ import hydra
 import ray
 from loguru import logger
 from omegaconf import DictConfig
+from marinskyrl.pivot_history import validate_profile_retention
 
 from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation
 from skyrl_train.entrypoints.main_base import (
@@ -54,6 +55,8 @@ class EvalOnlyEntrypoint(BasePPOExp):
     async def _evaluate(self) -> dict[str, Any]:
         assert self.eval_dataset is not None, "The evaluation only entrypoint requires an eval dataset is provided"
 
+        if self.cfg.generator.get("pivot_profiling_resume", False):
+            validate_profile_retention(self.cfg.generator.trajectory_retention)
         inference_engine_client = self.create_inference_engine_client(operation=EntrypointOperation.GENERATE)
         await load_initial_policy_adapter(inference_engine_client, self.cfg)
         trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)

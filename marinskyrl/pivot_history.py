@@ -1,6 +1,7 @@
 """Recover frozen profiling samples from committed rollout archives."""
 
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from datetime import datetime
 import gzip
 import json
@@ -10,6 +11,20 @@ from zipfile import ZipFile
 
 from marinskyrl.pivot import is_context_exclusion
 from marinskyrl.remote_io import filesystem_and_path
+
+
+def validate_profile_retention(retention: Mapping[str, Any]) -> None:
+    """Reject incomplete resume history before allocating inference engines."""
+    if not (
+        retention.get("enabled", False)
+        and retention.get("required", False)
+        and retention.get("sample_fraction") == 1.0
+        and retention.get("max_bytes_per_run") is None
+        and retention.get("max_bytes_per_step") is None
+        and "eval" in retention.get("phases", ())
+        and retention.get("output_path")
+    ):
+        raise ValueError("Profiling resume requires complete, unbounded, durable evaluation retention")
 
 
 @dataclass

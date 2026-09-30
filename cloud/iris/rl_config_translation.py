@@ -27,6 +27,7 @@ from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 from marinskyrl.remote_io import filesystem_and_path, open_output_stream
 from marinskyrl.pivot import apply_pivot_mode
+from marinskyrl.pivot_history import validate_profile_retention
 from marinskyrl.rollout_grading import validate_nemotron_ultra_grading
 
 # Directory containing the bundled example RL config YAML files.
@@ -853,6 +854,9 @@ def _skyrl_config_sections(
 
 
 _OPEN_CONFIG_ROOTS = frozenset({"teachers", "teacher_routing", "terminal_bench_config"})
+_NULLABLE_OVERRIDE_PATHS = frozenset(
+    {"generator.trajectory_retention.max_bytes_per_step", "generator.trajectory_retention.max_bytes_per_run"}
+)
 
 
 def _path_allows_new_keys(path: str) -> bool:
@@ -864,9 +868,9 @@ def _path_allows_new_keys(path: str) -> bool:
 def _merge_config_mapping(config: DictConfig, values: Mapping[str, Any], prefix: str = "") -> None:
     """Merge launch values into declared SkyRL config paths."""
     for key, value in values.items():
-        if value is None or isinstance(value, Mapping) and not value:
-            continue
         path = f"{prefix}.{key}" if prefix else key
+        if (value is None and path not in _NULLABLE_OVERRIDE_PATHS) or isinstance(value, Mapping) and not value:
+            continue
         current = OmegaConf.select(config, path, default=...)
         key_exists = current is not ...
         if isinstance(value, Mapping):
@@ -901,6 +905,8 @@ def compose_skyrl_config(
     config = _compose_base_config(parsed.config_groups)
     _merge_config_mapping(config, _skyrl_config_sections(parsed, exp_args, hpc))
     validate_nemotron_ultra_grading(config, parsed.distillation_plan)
+    if config.generator.get("pivot_profiling_resume", False):
+        validate_profile_retention(config.generator.trajectory_retention)
     return CompiledSkyRLConfig(
         entrypoint=registered_rl_entrypoint_module(parsed.entrypoint),
         config=config,

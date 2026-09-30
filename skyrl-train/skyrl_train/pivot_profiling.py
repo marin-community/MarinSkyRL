@@ -7,7 +7,12 @@ import asyncio
 from loguru import logger
 
 from marinskyrl.pivot import is_context_exclusion
-from marinskyrl.pivot_history import ProfileHistory, load_profile_history, profile_sample_outcome
+from marinskyrl.pivot_history import (
+    ProfileHistory,
+    load_profile_history,
+    profile_sample_outcome,
+    validate_profile_retention,
+)
 
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.trajectory_runners.trajectory_processing import (
@@ -27,15 +32,7 @@ async def profile_candidates(dataloader, runner, cfg) -> dict[str, float]:
     history = ProfileHistory()
     if cfg.generator.get("pivot_profiling_resume", False):
         retention = cfg.generator.trajectory_retention
-        if not (
-            retention.enabled
-            and retention.required
-            and retention.sample_fraction == 1.0
-            and retention.max_bytes_per_run is None
-            and retention.max_bytes_per_step is None
-            and "eval" in retention.phases
-        ):
-            raise ValueError("Profiling resume requires complete, unbounded, durable evaluation retention")
+        validate_profile_retention(retention)
         model = cfg.trainer.policy.model
         history = await asyncio.to_thread(load_profile_history, retention.output_path, model.path, model.revision)
     previous = {}
