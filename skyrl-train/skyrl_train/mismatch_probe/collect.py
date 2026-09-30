@@ -32,7 +32,7 @@ from skyrl_train.config.mismatch_probe import (
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.group_admission import GroupAdvantageInvariant, GroupAdvantageKind
 from skyrl_train.io.io import write_bytes_atomic
-from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl_train.inference_engines.utils import get_sampling_params_for_backend, route_prompts_to_engines
 from skyrl_train.inference_engines.vllm_teacher_oracle import tokenizer_vocabulary_fingerprint
 from skyrl_train.mismatch_probe.archive import (
     BUILDING_STATUS,
@@ -139,6 +139,36 @@ def _reorder_batch(batch: TrainingInputBatch, order: list[int]) -> TrainingInput
     return reordered
 
 
+def _batched_dp_ranks(trainer, prompts: int) -> list[int] | None:
+    """The vLLM data-parallel rank the client's even split sends each prompt of one batched request to.
+
+    A single prompt goes to a random engine, so its rank is unknown (``None``).
+    """
+    if prompts < 2:
+        return None
+    dp_size = int(trainer.cfg.generator.inference_engine_data_parallel_size)
+    placement = route_prompts_to_engines(prompts, len(trainer.inference_engine_client.engines), None)
+    ranks = [0] * prompts
+    for engine, rows in placement.items():
+        for row in rows:
+            ranks[row] = engine % dp_size
+    return ranks
+
+
+def _served_dp_ranks(output, trainer, prompts: int) -> list[int] | None:
+    """The vLLM data-parallel rank that served each prompt (engine ``i`` is rank ``i % dp``), when reported."""
+    served = output.get("engine_indices")
+    if served is None:
+        return None
+    if len(served) != prompts:
+        raise ValueError("vLLM re-read reported serving engines for a different number of prompts")
+    dp_size = int(trainer.cfg.generator.inference_engine_data_parallel_size)
+    ranks = [int(engine) % dp_size for engine in served]
+    if ranks != _batched_dp_ranks(trainer, prompts):
+        logger.warning("mismatch probe: the re-read left the client's even split (an engine failed over)")
+    return ranks
+
+
 def _candidate_logprobs(output, overrides):
     ids = output.get("student_topk_indices")
     values = output.get("behavior_topk_logprobs")
@@ -191,6 +221,10 @@ class ProbeCollector:
         self.reread_routes: dict[int, list[np.ndarray]] = {}
         # The reused source's prefill reference rows, keyed by sample.
         self.frozen_rereads: dict[str, mismatch.ScoreRow] = {}
+        # The vLLM data-parallel rank that served each cache-off re-read row, per update; for the frozen
+        # source, the rank the client's even split gave each row (its re-read was one batched request).
+        self.reread_dp_ranks: dict[int, list[int]] = {}
+        self.frozen_reread_dp_ranks: list[int] | None = None
         # Per vLLM worker: placement, parameter digest and versions (output code is written beside the archive).
         self.vllm_provenance: list[dict] = []
 
@@ -470,6 +504,10 @@ class ProbeCollector:
             engine_input["sampling_params_per_prompt"] = overrides
             output = await trainer.inference_engine_client.generate(engine_input)
             duration = time.monotonic() - started
+            if cache_mode == CACHE_OFF and scorer == RESCORE_SCORER:
+                self.reread_dp_ranks[update] = _served_dp_ranks(output, trainer, len(prefixes))
+                if self.frozen_rereads:
+                    self.frozen_reread_dp_ranks = _batched_dp_ranks(trainer, len(prefixes))
             chosen = []
             candidates = _candidate_logprobs(output, overrides)
             if cache_mode == CACHE_OFF:
@@ -627,6 +665,11 @@ class ProbeCollector:
                 raise ValueError(f"re-read replay at update {update} has no captured re-read routes")
             prompt_width = training_input["sequences"].shape[1] - route_tensor.shape[1]
             reread_tensors = _reread_route_tensors(rows, sources, route_tensor, prompt_width)
+            ranks = (
+                self.frozen_reread_dp_ranks if update == 0 and self.frozen_rereads else self.reread_dp_ranks.get(update)
+            )
+            if ranks is not None and len(ranks) != n:
+                raise ValueError(f"re-read replay at update {update} has vLLM data-parallel ranks for other rows")
         batches = {}
         for mode in modes:
             spec = TRAINER_MODES[mode]
@@ -638,6 +681,9 @@ class ProbeCollector:
                 data["rollout_prompt_routed_experts"] = torch.zeros_like(prompt_route_tensor)
             if spec.route_source == "reread":
                 data["rollout_routed_experts"], data["rollout_prompt_routed_experts"] = reread_tensors
+                if ranks is not None:
+                    # Padding rows past the frozen samples take rank 0; their scores are dropped.
+                    data["vllm_dp_rank"] = torch.tensor(ranks + [0] * (data.batch_size - n), dtype=torch.long)
             if spec.repeat_layout:
                 data = _reorder_batch(data, self.batch_layout.repeat_order + list(range(n, data.batch_size)))
             data.metadata.update(
@@ -782,8 +828,9 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
                 # Re-read rows were delayed until this exact weight identity is known.
                 for row in rescore_rows:
                     row.weights_hash = probe.weights[update]
-                trainer_rows = probe._trainer_scores(trainer, update)
+                # Timing first: a failing candidate's training pass then costs no finished scores.
                 probe._training_pass_timing(trainer, update)
+                trainer_rows = probe._trainer_scores(trainer, update)
                 if probe._policy_weights_hash(trainer) != probe.weights[update]:
                     raise ValueError(f"probe scoring changed policy weights or buffers at update {update}")
             finally:

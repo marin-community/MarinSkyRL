@@ -63,6 +63,9 @@ class InferenceEngineOutput(TypedDict):
     routed_experts: NotRequired[List[np.ndarray | None]]
     # Experts selected for each prompt token, one row per prompt token.
     prompt_routed_experts: NotRequired[List[np.ndarray | None]]
+    # The client's engine that served each prompt of a batched request (with vLLM data parallelism,
+    # engine ``i`` of an engine group is data-parallel rank ``i % dp_size``).
+    engine_indices: NotRequired[List[int]]
 
 
 class NamedWeightsUpdateRequest(TypedDict):

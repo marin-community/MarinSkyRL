@@ -14,6 +14,7 @@ REPEAT_MODE = "repeat"
 REPLAY_MODE = "router_replay"
 FILTERED_REPLAY_MODE = "router_replay_filtered"
 RESPONSE_REPLAY_MODE = "router_replay_response"
+FILTERED_RESPONSE_REPLAY_MODE = "router_replay_filtered_response"
 NATIVE_AGAIN_MODE = "native_again"
 REPEAT_REPLAY_MODE = "repeat_replay"
 REREAD_REPLAY_MODE = "reread_replay"
@@ -64,17 +65,46 @@ TRAINER_MODES: dict[str, ModeSpec] = {
     REPEAT_REREAD_REPLAY_MODE: ModeSpec(_replay, requires_routes=True, repeat_layout=True, route_source="reread"),
     RESPONSE_REPLAY_MODE: ModeSpec(_replay, requires_routes=True, replays_prompt=False),
     FILTERED_REPLAY_MODE: ModeSpec(_replay, requires_routes=True, requires_keep_fraction=True),
+    FILTERED_RESPONSE_REPLAY_MODE: ModeSpec(
+        _replay, requires_routes=True, requires_keep_fraction=True, replays_prompt=False
+    ),
 }
 
-# Candidate rounding points (see ``mismatch_probe/numerics.py``), each scored under re-read replay (the
-# prefill metric) and under native routing (route agreement). ``compiled_stack`` enables every flag
-# except ``route_weight``, whose fp32 per-expert projection is slow; ``compiled_stack_all`` adds it.
+# Candidate numerics (see ``mismatch_probe/numerics.py``), each scored under re-read replay (the prefill
+# metric) and, except ``ep_sum``, under native routing (route agreement). ``compiled_stack`` holds the
+# fusion-map rounding chains without ``route_weight``, whose fp32 per-expert projection is slow;
+# ``compiled_stack_all`` adds it. The ``+fa3_attention`` and ``+ep_sum`` candidates add one of vLLM's
+# kernel orders to a stack, and ``vllm_kernel_stack`` enables every flag.
 COMPILED_STACK = "compiled_stack"
 COMPILED_STACK_ALL = "compiled_stack_all"
+VLLM_KERNEL_STACK = "vllm_kernel_stack"
+_COMPILED_STACK_FLAGS = (
+    "gated_norm",
+    "qk_rope",
+    "xsa_gate",
+    "shared_swiglu",
+    "router_gemm",
+    "mlp_residual",
+    "input_norm_variance",
+    "final_norm_fp32",
+)
+_KERNEL_FLAGS = ("fa3_attention", "ep_sum")
+# ``ep_sum`` needs each row's vLLM data-parallel rank, which the probe knows only for its re-reads.
+_NEEDS_REREAD_PLACEMENT = "ep_sum"
+
+
+def _enabled(*flags: str) -> dict[str, bool]:
+    return dict.fromkeys(flags, True)
+
+
 _NUMERICS_CANDIDATES = {
     **{flag: {flag: True} for flag in NUMERICS_FLAGS},
-    COMPILED_STACK: {flag: flag != "route_weight" for flag in NUMERICS_FLAGS},
-    COMPILED_STACK_ALL: dict.fromkeys(NUMERICS_FLAGS, True),
+    COMPILED_STACK: _enabled(*_COMPILED_STACK_FLAGS),
+    COMPILED_STACK_ALL: _enabled(*_COMPILED_STACK_FLAGS, "route_weight"),
+    f"{COMPILED_STACK}+fa3_attention": _enabled(*_COMPILED_STACK_FLAGS, "fa3_attention"),
+    f"{COMPILED_STACK}+ep_sum": _enabled(*_COMPILED_STACK_FLAGS, "ep_sum"),
+    f"{COMPILED_STACK_ALL}+ep_sum": _enabled(*_COMPILED_STACK_FLAGS, "route_weight", "ep_sum"),
+    VLLM_KERNEL_STACK: _enabled(*_COMPILED_STACK_FLAGS, "route_weight", *_KERNEL_FLAGS),
 }
 
 
@@ -87,8 +117,15 @@ def _with_numerics(base: Callable, flags: Mapping[str, bool]):
     return scope
 
 
+# The compiled stacks on generation-route replay, comparable with the replay rows against generation.
+for _candidate in (COMPILED_STACK, COMPILED_STACK_ALL, f"{COMPILED_STACK}+fa3_attention"):
+    TRAINER_MODES[f"{REPLAY_MODE}+{_candidate}"] = ModeSpec(
+        _with_numerics(_replay, _NUMERICS_CANDIDATES[_candidate]), requires_routes=True
+    )
+
 for _candidate, _flags in _NUMERICS_CANDIDATES.items():
     TRAINER_MODES[f"{REREAD_REPLAY_MODE}+{_candidate}"] = ModeSpec(
         _with_numerics(_replay, _flags), requires_routes=True, route_source="reread"
     )
-    TRAINER_MODES[f"{NATIVE_MODE}+{_candidate}"] = ModeSpec(_with_numerics(_native, _flags), replays_prompt=False)
+    if not _flags.get(_NEEDS_REREAD_PLACEMENT):
+        TRAINER_MODES[f"{NATIVE_MODE}+{_candidate}"] = ModeSpec(_with_numerics(_native, _flags), replays_prompt=False)

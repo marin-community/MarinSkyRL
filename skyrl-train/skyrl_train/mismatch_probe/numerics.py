@@ -2,7 +2,8 @@
 
 Compiled vLLM runs Grug through Inductor, which keeps each fused elementwise chain in fp32 and rounds
 to bf16 once when it stores the result. The Megatron trainer runs op by op and rounds after most
-operations. Each flag makes one chain compute in fp32 and round once, as compiled vLLM does:
+operations. Each flag up to ``final_norm_fp32`` makes one chain compute in fp32 and round once, as
+compiled vLLM does; the last two reproduce vLLM's attention kernel and its expert-parallel addition order:
 
 - ``gated_norm``: ``norm(x) * sigmoid(gate)``;
 - ``qk_rope``: q/k RMS norm, RoPE with the bf16 cos/sin table, and the query scale: k rounds once, q's
@@ -15,7 +16,12 @@ operations. Each flag makes one chain compute in fp32 and round once, as compile
 - ``mlp_residual``: the next residual is ``h + (routed + shared)`` in fp32, rounded once;
 - ``input_norm_variance``: each layer's input norm takes its variance from the unrounded residual sum
   (the unrounded embedding gated-norm product for layer 0) and normalizes the rounded residual;
-- ``final_norm_fp32``: the final norm normalizes the unrounded residual sum.
+- ``final_norm_fp32``: the final norm normalizes the unrounded residual sum;
+- ``fa3_attention``: attention runs vLLM's own FA3 forward kernel (unsplit, or with a scoring plan's
+  split counts); the backward stays the trainer's cuDNN attention;
+- ``ep_sum``: each token's routed expert outputs are added as vLLM's expert-parallel combine adds them,
+  per vLLM EP rank in fp32, then across ranks in bf16 in NCCL's ring order for the token's vLLM
+  data-parallel rank (router replay supplies that rank).
 
 Probe modes set flags for one scoring forward; the flags default to the current trainer numerics.
 """
@@ -38,6 +44,8 @@ class GrugNumerics:
     mlp_residual: bool = False
     input_norm_variance: bool = False
     final_norm_fp32: bool = False
+    fa3_attention: bool = False
+    ep_sum: bool = False
 
 
 NUMERICS_FLAGS = tuple(field.name for field in fields(GrugNumerics))

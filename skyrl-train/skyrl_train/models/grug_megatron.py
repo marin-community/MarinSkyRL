@@ -17,6 +17,8 @@ Megatron-Core settings chosen by ``GrugModelProvider`` in
 ``grug_megatron_bridge``.
 """
 
+import math
+import weakref
 from enum import StrEnum
 
 import torch
@@ -53,6 +55,7 @@ from skyrl_train.models.grug_rounding import (
     swiglu_single_rounding,
     xsa_and_gate_single_rounding,
 )
+from skyrl_train.models.grug_vllm_kernels import fa3_attention_sbhd, vllm_ep_combine
 from skyrl_train.models.grug_moe import (
     GRUG_ATTN_GATE_SCALE,
     GRUG_GATED_NORM_RANK,
@@ -71,8 +74,23 @@ def _first_present(preferred: torch.Tensor | None, fallback: torch.Tensor | None
 
 
 # Unrounded residual sums (and the embedding's unrounded gated-norm product) awaiting the next norm,
-# keyed by the bf16 tensor that norm receives.
-_RESIDUAL_FP32: dict[int, torch.Tensor] = {}
+# keyed by the bf16 tensor that norm receives. Each entry keeps a weak reference to that tensor: under
+# pipeline parallelism several micro-batches are in flight and a stage's last residual has no reader, so a
+# freed tensor's ``id()`` can come back for an unrelated tensor, which must not receive the entry.
+_RESIDUAL_FP32: dict[int, tuple[weakref.ref, torch.Tensor]] = {}
+
+
+def _hand_off(receiver: torch.Tensor, unrounded: torch.Tensor) -> None:
+    for key in [key for key, (ref, _) in _RESIDUAL_FP32.items() if ref() is None]:
+        del _RESIDUAL_FP32[key]
+    _RESIDUAL_FP32[id(receiver)] = weakref.ref(receiver), unrounded
+
+
+def _take_hand_off(receiver: torch.Tensor) -> torch.Tensor | None:
+    entry = _RESIDUAL_FP32.pop(id(receiver), None)
+    if entry is None or entry[0]() is not receiver:
+        return None
+    return entry[1]
 
 
 def _install_residual_hooks(layer: TransformerLayer) -> None:
@@ -116,7 +134,7 @@ def _install_residual_hooks(layer: TransformerLayer) -> None:
             hidden = (stored["residual"].float() + (routed + shared).float()).to(output[0].dtype)
         stored.pop("residual")
         if numerics.input_norm_variance or numerics.final_norm_fp32:
-            _RESIDUAL_FP32[id(hidden)] = unrounded
+            _hand_off(hidden, unrounded)
         return (hidden, *output[1:])
 
     layer.pre_mlp_layernorm.register_forward_pre_hook(keep_residual)
@@ -152,6 +170,69 @@ def _install_route_weight_hooks(experts: TEGroupedMLP) -> None:
     experts.linear_fc2.register_forward_hook(weighted_output)
 
 
+def _install_fa3_attention_hooks(attention: "GrugSelfAttention") -> None:
+    """Take the attention value from vLLM's FA3 forward when ``fa3_attention`` is active.
+
+    The gradient is the trainer's cuDNN attention backward at the same query, key and value: with
+    gradients enabled the cuDNN forward also runs, and ``x - x.detach()`` (exactly zero) carries its
+    graph under FA3's bytes. A scoring forward without gradients runs FA3 alone.
+    """
+    core = attention.core_attention
+    cudnn_forward = core.forward
+
+    def forward(
+        query, key, value, attention_mask, attn_mask_type=None, attention_bias=None, packed_seq_params=None, **kwargs
+    ):
+        def cudnn():
+            return cudnn_forward(
+                query,
+                key,
+                value,
+                attention_mask,
+                attn_mask_type=attn_mask_type,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                **kwargs,
+            )
+
+        if not active_numerics().fa3_attention:
+            return cudnn()
+        if packed_seq_params is not None or attention_bias is not None or kwargs:
+            raise NotImplementedError("fa3_attention numerics support unpacked causal sequences only")
+        output = fa3_attention_sbhd(query, key, value, window=attention.fa3_window, scale=attention.fa3_scale)
+        if not torch.is_grad_enabled():
+            return output
+        reference = cudnn()
+        return output.detach() + (reference - reference.detach())
+
+    core.forward = forward
+
+
+def _install_ep_combine_hooks(layer: TransformerLayer) -> None:
+    """Add the routed expert outputs in vLLM's expert-parallel order when ``ep_sum`` is active.
+
+    The value comes from ``vllm_ep_combine``; the gradient is the trainer's own unpermute (each slot's
+    gradient is the token's output gradient in both), through the same exact-zero difference.
+    """
+    dispatcher = layer.mlp.token_dispatcher
+    router = layer.mlp.router
+    unpermute = dispatcher.combine_postprocess
+
+    def combine_postprocess(permuted):
+        output = unpermute(permuted)
+        if not active_numerics().ep_sum:
+            return output
+        if dispatcher.shared_experts is not None:
+            raise NotImplementedError("ep_sum numerics expect the shared expert outside the dispatcher")
+        selected, expert_parallel = router.take_ep_route()
+        combined = vllm_ep_combine(
+            permuted, dispatcher.routing_map, selected, expert_parallel.dp_ranks, expert_parallel.ep_size
+        ).view_as(output)
+        return combined.detach() + (output - output.detach())
+
+    dispatcher.combine_postprocess = combine_postprocess
+
+
 def _install_shared_swiglu_hooks(shared: SharedExpertMLP) -> None:
     """Recompute the shared expert's activation with one rounding when ``shared_swiglu`` is active."""
     stored: dict[str, torch.Tensor] = {}
@@ -179,7 +260,11 @@ def install_numerics_hooks(root: nn.Module) -> None:
             _install_shared_swiglu_hooks(module)
         if isinstance(module, TEGroupedMLP):
             _install_route_weight_hooks(module)
+        if isinstance(module, GrugSelfAttention):
+            _install_fa3_attention_hooks(module)
         if isinstance(module, TransformerLayer) and isinstance(module.pre_mlp_layernorm, GrugGatedRMSNorm):
+            # The residual hooks wrap the EP combine, so the fp32 residual reads the combine's value.
+            _install_ep_combine_hooks(module)
             _install_residual_hooks(module)
             module.input_layernorm.role = NormRole.INPUT
 
@@ -223,7 +308,13 @@ class GrugGatedRMSNorm(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         numerics = active_numerics()
-        unrounded = _RESIDUAL_FP32.pop(id(hidden_states), None)
+        unrounded = _take_hand_off(hidden_states)
+        if unrounded is not None:
+            # The hand-off may come from a no-grad checkpointed forward; keep its values and take the
+            # gradient through the bf16 residual so the loss still reaches the layers before this norm.
+            # ``x - x.detach()`` is exactly zero, so the values are unchanged bit for bit.
+            residual = hidden_states.float()
+            unrounded = unrounded.detach() + (residual - residual.detach())
         if unrounded is not None and self.role is NormRole.INPUT and numerics.input_norm_variance:
             normalized = rms_norm_hybrid(hidden_states, unrounded, self.norm.weight, self.eps)
         elif unrounded is not None and self.role is NormRole.FINAL and numerics.final_norm_fp32:
@@ -235,7 +326,7 @@ class GrugGatedRMSNorm(nn.Module):
         output = product.to(normalized.dtype) if numerics.gated_norm else normalized * torch.sigmoid(gate)
         if self.role is NormRole.EMBEDDING and numerics.input_norm_variance:
             # Layer 0's input norm takes its variance from the unrounded embedding gated-norm product.
-            _RESIDUAL_FP32[id(output)] = product
+            _hand_off(output, product)
         return output
 
 
@@ -281,6 +372,11 @@ class GrugSelfAttention(SelfAttention):
         self.qk_mult = config.grug_qk_mult
         self.qk_mult_scale = config.grug_qk_mult_long_scale if is_long else 1.0
         self.skip_rope = bool(config.no_rope_freq[layer_number - 1])
+        # vLLM's FA3 call for this layer: a sliding window of window_size[0] + 1 keys on local layers.
+        self.fa3_window = None if is_long else config.window_size[0] + 1
+        self.fa3_scale = (
+            config.softmax_scale if config.softmax_scale is not None else 1.0 / math.sqrt(config.kv_channels)
+        )
 
     def forward(
         self,
@@ -442,11 +538,24 @@ class GrugTopKRouter(TopKRouter):
                 return scores.gather(1, indices), indices
 
             _, selected = self.router_replay.get_replay_topk(biased_logits, self.topk, None, None, native_topk)
+        if active_numerics().ep_sum:
+            # The combine adds the slots in vLLM's order: the selection order, per vLLM EP rank.
+            expert_parallel = None if self.router_replay is None else self.router_replay.take_vllm_expert_parallel()
+            if expert_parallel is None:
+                raise ValueError("ep_sum numerics need each token's vLLM data-parallel rank from router replay")
+            self._ep_route = (selected, expert_parallel)
         combine = torch.sigmoid(torch.gather(logits, dim=-1, index=selected))
         combine = combine * (GRUG_ROUTING_RENORM_SUM / (combine.sum(dim=-1, keepdim=True) + GRUG_ROUTER_RENORM_EPS))
         probs = torch.zeros_like(logits).scatter(1, selected, combine)
         routing_map = torch.zeros_like(logits, dtype=torch.bool).scatter(1, selected, True)
         return probs, routing_map
+
+    def take_ep_route(self):
+        """The slot order and vLLM placement of this router's last routing, for the ``ep_sum`` combine."""
+        route = self.__dict__.pop("_ep_route", None)
+        if route is None:
+            raise RuntimeError("ep_sum combine ran without a routing from this layer's router")
+        return route
 
     def forward(self, input: torch.Tensor, padding_mask: torch.Tensor | None = None):
         self._maintain_float32_expert_bias()

@@ -28,6 +28,9 @@ class _InferenceEndpoint:
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         self.route_offset = 0
+        # Two vLLM data-parallel ranks, one client engine each; ``failover_engine`` serves every prompt.
+        self.engines = [object(), object()]
+        self.failover_engine = None
 
     async def reset_prefix_cache(self):
         pass
@@ -43,7 +46,14 @@ class _InferenceEndpoint:
 
     async def generate(self, request):
         probabilities = torch.log_softmax(torch.arange(32, dtype=torch.float32), dim=0)
+        prompts = len(request["prompt_token_ids"])
+        per_engine = -(-prompts // len(self.engines))
         return {
+            # The client's even split: prompt i goes to engine i // ceil(prompts / engines).
+            "engine_indices": [
+                index // per_engine if self.failover_engine is None else self.failover_engine
+                for index in range(prompts)
+            ],
             "prompt_logprobs": [
                 [None] + [{token: float(probabilities[token])} for token in sequence[1:]]
                 for sequence in request["prompt_token_ids"]
@@ -71,6 +81,7 @@ class _PolicyEndpoint:
     def __init__(self):
         self.prompt_routes_by_mode = {}
         self.response_routes_by_mode = {}
+        self.dp_ranks_by_mode = {}
         self.timed_modes = []
         self.actor_infos = [
             SimpleNamespace(rank=MeshRank(dp=dp, sp=0, tp=0, pp=0, world_size=2, dp_size=2, pp_size=1))
@@ -87,6 +98,7 @@ class _PolicyEndpoint:
         if method != "probe_forward":
             raise ValueError(method)
         width = data.metadata["response_length"]
+        self.dp_ranks_by_mode[data.metadata["probe_mode"]] = data.get("vllm_dp_rank")
         self.prompt_routes_by_mode[data.metadata["probe_mode"]] = data["rollout_prompt_routed_experts"].clone()
         self.response_routes_by_mode[data.metadata["probe_mode"]] = data["rollout_routed_experts"].clone()
         probabilities = torch.log_softmax(torch.arange(32, dtype=torch.float32), dim=0)
@@ -144,6 +156,7 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     cfg.trainer.mismatch_probe.timing_modes = ["native", "reread_replay"]
     cfg.trainer.algorithm.advantage_estimator = "uniform"
     cfg.trainer.algorithm.use_tis = False
+    cfg.generator.inference_engine_data_parallel_size = 2
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = cfg
     trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
@@ -266,6 +279,11 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     reread_response = trainer.policy_model.response_routes_by_mode["reread_replay"]
     assert reread_prompt[0, :, 0].tolist() == [[0, 0], [3, 4], [4, 5]]
     assert reread_response[0, :, 0].tolist() == [[7, 0], [1, 2], [3, 4], [0, 0]]
+    # Re-read replay also carries the vLLM data-parallel rank that re-read each sample (the padding row
+    # takes 0); generation-route modes do not, since generation placed its requests differently.
+    assert trainer.policy_model.dp_ranks_by_mode["reread_replay"].tolist() == [0, 0, 1, 0]
+    for mode in ("native", "router_replay", "router_replay_response"):
+        assert trainer.policy_model.dp_ranks_by_mode[mode] is None
     rereads = {row.sample_id: row for row in chained_scores(cfg) if row.scorer == "vllm.rescore" and row.update == 0}
     agains = [row for row in chained_scores(cfg) if row.scorer == "vllm.rescore_again" and row.update == 0]
     assert len(rereads) == len(agains) == 3
@@ -276,6 +294,7 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     assert sorted(frozen) == sorted(row.sample_id for row in probes)
     assert frozen["sample-0"].logprobs == rereads["sample-0"].logprobs
     trainer.inference_engine_client.route_offset = 2
+    trainer.inference_engine_client.failover_engine = 1
     cfg.trainer.mismatch_probe.reuse_probe = cfg.trainer.mismatch_probe.archive_uri
     cfg.trainer.mismatch_probe.archive_uri = str(tmp_path / "frozen-reference")
     cfg.trainer.mismatch_probe.score_after_updates = [0]
@@ -287,8 +306,10 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     assert code.read_text() == "def call(args):\n    pass\n"
     vllm_workers = json.loads(read_frozen_probe(cfg.trainer.mismatch_probe.archive_uri).manifest.hardware_json)["vllm"]
     assert [worker["parameter_sha256"] for worker in vllm_workers] == ["ab" * 32]
-    # The fresh re-read now routes differently, but re-read replay still uses the frozen reference.
+    # The fresh re-read now routes differently and one engine served it all, but re-read replay still
+    # uses the frozen reference, placed as the client's even split placed that batched re-read.
     assert trainer.policy_model.prompt_routes_by_mode["reread_replay"][0, :, 0].tolist() == [[0, 0], [3, 4], [4, 5]]
+    assert trainer.policy_model.dp_ranks_by_mode["reread_replay"].tolist() == [0, 0, 1, 0]
     timing = json.loads(read_frozen_probe(cfg.trainer.mismatch_probe.archive_uri).manifest.timing_json)
     # The slowest data-parallel rank sets each repetition's pass time.
     assert timing["training_pass@0:reread_replay/seconds"] == [1.5, 1.5, 1.5]

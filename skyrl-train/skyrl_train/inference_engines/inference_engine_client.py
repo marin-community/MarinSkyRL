@@ -336,6 +336,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 fallback = self._pick_fallback_engine(task_engine_idxs[i])
                 if fallback is None:
                     raise RuntimeError("All inference engines have died") from result
+                task_engine_idxs[i] = fallback
                 cur_prompt_token_ids = [prompt_token_ids[j] for j in indices_list[i]]
                 engine_input = InferenceEngineInput(
                     prompt_token_ids=cur_prompt_token_ids,
@@ -361,6 +362,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         behavior_topk_logprobs: List[Optional[List[List[float]]]] = [None for _ in range(n)]
         prefix_cache_hit_tokens: List[Optional[int]] = [None for _ in range(n)]
         routed_experts: List[Optional[np.ndarray]] = [None for _ in range(n)]
+        engine_indices: List[int] = [-1] * n
         # a bit hacky for now
         add_resp_logprobs = False
         add_prompt_logprobs = False
@@ -368,7 +370,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         add_prefix_cache_hit_tokens = False
         add_routed_experts = False
 
-        for indices, result in zip(indices_list, results):
+        for indices, result, engine_idx in zip(indices_list, results, task_engine_idxs, strict=True):
+            for original_idx in indices:
+                engine_indices[original_idx] = engine_idx
             selected_ids = result.get("student_topk_indices")
             selected_scores = result.get("behavior_topk_logprobs")
             if (selected_ids is None) != (selected_scores is None):
@@ -415,6 +419,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_ids=response_ids,
             response_logprobs=response_logprobs if add_resp_logprobs else None,
             prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
+            engine_indices=engine_indices,
         )
         if add_student_topk:
             if any(row is None for row in student_topk_indices) or any(row is None for row in behavior_topk_logprobs):
