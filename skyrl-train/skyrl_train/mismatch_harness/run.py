@@ -334,6 +334,7 @@ def vllm_step(flags: dict[str, bool], layout: RowLayout, shape: GrugShape, layer
             kv_heads=shape.kv_heads,
             query_heads_per_kv_head=shape.heads // shape.kv_heads,
             window=None if shape.is_long(layer) else shape.sliding_window,
+            step_tokens=args.fa3_step_tokens,
         )
     return VllmStep(fa3_splits=splits, home_rank=args.home_rank, ep_size=args.ep_size)
 
@@ -367,6 +368,11 @@ def main() -> None:
         "--pad-tokens", type=int, help="rows the compiled pieces run on (default: vLLM's CUDA-graph size)"
     )
     parser.add_argument("--floor-extra-tokens", type=int, default=512)
+    parser.add_argument(
+        "--fa3-step-tokens",
+        type=int,
+        help="scheduled tokens of the vLLM step FA3's split count follows (default: the harness sequence's)",
+    )
     parser.add_argument(
         "--numerics",
         action="append",
@@ -453,6 +459,7 @@ def main() -> None:
                 ep_size=args.ep_size,
                 home_rank=args.home_rank,
                 order=order,
+                fa3_step_tokens=args.fa3_step_tokens,
             )
             layer_result: dict = {
                 "input_from_layer": source,

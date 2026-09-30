@@ -196,6 +196,7 @@ class LayerReplay:
         ep_size: int,
         home_rank: int,
         order: ReduceOrder,
+        fa3_step_tokens: int | None = None,
     ):
         self.pieces = pieces
         self.shape = shape
@@ -206,6 +207,8 @@ class LayerReplay:
         self.ep_size = ep_size
         self.home_rank = home_rank
         self.order = order
+        # The scheduled tokens of the vLLM step FA3's split decision sees (default: the harness's own tokens).
+        self.fa3_step_tokens = fa3_step_tokens
 
     def _piece(self, kind: PieceKind, rope: bool) -> tuple[Piece, dict[str, Any]]:
         key = (kind, rope if kind is not PieceKind.LAST else False)
@@ -344,7 +347,7 @@ class LayerReplay:
             requests,
             window=window,
             scale=self.shape.head_dim**-0.5,
-            num_splits=fa3_num_splits(tokens),
+            num_splits=fa3_num_splits(self.fa3_step_tokens or tokens),
         )
         return pad_rows(output, requests.rows)
 
