@@ -11,6 +11,9 @@ import pytest
 import torch
 from torch.distributed import checkpoint
 from torch.distributed.checkpoint.api import CheckpointException
+from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
+from torch.distributed.checkpoint.planner import LoadItemType, LoadPlan, ReadItem
+from torch.distributed.checkpoint.metadata import MetadataIndex
 
 from marinskyrl.remote_io import S3MultipartWriteStream
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
@@ -270,6 +273,42 @@ def test_budgeted_checkpoint_restores_adam_and_continues_the_same_update(tmp_pat
     update(resumed, resumed_optimizer)
     for expected, actual in zip(model.parameters(), resumed.parameters(), strict=True):
         assert torch.equal(expected, actual)
+
+
+def test_budgeted_checkpoint_slice_accounts_for_the_whole_saved_tensor(tmp_path):
+    source = torch.arange(8 * 2**20, dtype=torch.float32)
+    checkpoint.save({"tensor": source}, checkpoint_id=tmp_path / "checkpoint", no_dist=True)
+    offset = 3 * 2**20
+    restored = {"tensor": torch.full((2**20,), -1.0)}
+    planner = DefaultLoadPlanner()
+    plan = LoadPlan(
+        items=[
+            ReadItem(
+                type=LoadItemType.TENSOR,
+                dest_index=MetadataIndex("tensor"),
+                dest_offsets=torch.Size([0]),
+                storage_index=MetadataIndex("tensor", torch.Size([0])),
+                storage_offsets=torch.Size([offset]),
+                lengths=restored["tensor"].size(),
+            )
+        ]
+    )
+    # The requested slice is 4 MiB, but deserializing the saved 32 MiB tensor
+    # needs its full storage plus read and copy buffers. A 64 MiB budget must fail.
+    for budget_mib in (64, 128):
+        reader = BudgetedCheckpointReader(
+            str(tmp_path / "checkpoint"), PodCheckpointReadBudget(budget_mib * 2**20, tmp_path / "budget")
+        )
+        metadata = reader.read_metadata()
+        reader.set_up_storage_reader(metadata, is_coordinator=True)
+        planner.set_up_planner(restored, metadata, is_coordinator=True)
+        if budget_mib == 64:
+            with pytest.raises(ValueError):
+                reader.read_data(plan, planner).wait()
+            assert torch.equal(restored["tensor"], torch.full_like(restored["tensor"], -1.0))
+        else:
+            reader.read_data(plan, planner).wait()
+            assert torch.equal(restored["tensor"], source[offset : offset + 2**20])
 
 
 def _hold_checkpoint_reservation(directory, amount, connection):
