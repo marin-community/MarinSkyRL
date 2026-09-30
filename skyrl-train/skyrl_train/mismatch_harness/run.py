@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import gc
-from contextlib import contextmanager
 import io as stdlib_io
 import json
 import platform
@@ -149,30 +148,12 @@ def chosen_configs(pieces: dict, candidates: dict[tuple[str, str], list]) -> dic
     return chosen
 
 
-@contextmanager
-def forced_candidate(pieces: dict, candidates: dict[tuple[str, str], list], index: int):
-    """Launch candidate ``index`` of every kernel that has several, as a vLLM process may have chosen."""
-    saved = {}
-    for (kind, rope), (piece, namespace) in pieces.items():
-        key = f"{kind}{'+rope' if rope else ''}"
-        for name in piece.code.kernels:
-            options = candidates[(key, name)]
-            kernel = namespace.get(name)
-            if len(options) < 2:
-                continue
-            saved[(key, name)] = (kernel, kernel.launchers)
-            kernel.launchers = [options[index % len(options)]]
-            kernel._cached_launcher = None
-    try:
-        yield
-    finally:
-        for kernel, launchers in saved.values():
-            kernel.launchers = launchers
-            kernel._cached_launcher = None
+def load_pieces(output_code_uri: str, candidate: int | None = None) -> dict:
+    """Parse, classify and load every compiled subgraph module of one vLLM worker.
 
-
-def load_pieces(output_code_uri: str) -> dict:
-    """Parse, classify and load every compiled subgraph module of one vLLM worker."""
+    With ``candidate``, every kernel that has several launch configs keeps only that one (modulo the
+    count), so no autotuning happens and the replay launches a config a vLLM process may have chosen.
+    """
     pieces = {}
     for path in sorted(io.find_files(output_code_uri)):
         if not path.endswith(".py"):
@@ -186,7 +167,11 @@ def load_pieces(output_code_uri: str) -> dict:
         key = (piece.kind, piece.rope)
         if key in pieces:
             raise ValueError(f"two archived modules are {piece.kind} pieces with rope={piece.rope}")
-        module = load_module(piece.code, f"vllm_piece_{piece.kind}_{int(piece.rope)}")
+        module = load_module(piece.code, f"vllm_piece_{piece.kind}_{int(piece.rope)}_{candidate}")
+        if candidate is not None:
+            for name in piece.code.kernels:
+                kernel = module.__dict__[name]
+                kernel.launchers = [kernel.launchers[candidate % len(kernel.launchers)]]
         pieces[key] = (piece, module.__dict__)
     return pieces
 
@@ -359,6 +344,8 @@ def main() -> None:
         results["staged_best_configs"] = stage_autotune_choices(args.output_code)
         pieces = load_pieces(args.output_code)
         candidates = kernel_candidates(pieces)
+        most = max(len(options) for options in candidates.values())
+        pinned_pieces = [load_pieces(args.output_code, candidate=index) for index in range(most)] if most > 1 else []
         results["pieces"] = sorted(f"{kind}{'+rope' if rope else ''}" for kind, rope in pieces)
         bridge, provider = grug_provider(str(config_dir))
         names = needed_weights(shape, args.layers)
@@ -437,20 +424,30 @@ def main() -> None:
             )
             layer_result["floor"] = stats_json(compare_regions(chained, floor))
             sweeps = []
-            for index in range(max(len(options) for options in candidates.values())):
-                with forced_candidate(pieces, candidates, index):
-                    sweeps.append(
-                        run_vllm(
-                            replay,
-                            layout,
-                            shape,
-                            None,
-                            baseline.tensors,
-                            flat_input,
-                            config_tokens=args.moe_config_tokens,
-                            pad_tokens=args.pad_tokens,
-                        )
+            for pinned in pinned_pieces:
+                pinned_replay = LayerReplay(
+                    pieces=pinned,
+                    shape=shape,
+                    weights=weights,
+                    cos_sin=cos_sin,
+                    layer=layer,
+                    router_bias=bias,
+                    ep_size=args.ep_size,
+                    home_rank=args.home_rank,
+                    order=order,
+                )
+                sweeps.append(
+                    run_vllm(
+                        pinned_replay,
+                        layout,
+                        shape,
+                        None,
+                        baseline.tensors,
+                        flat_input,
+                        config_tokens=args.moe_config_tokens,
+                        pad_tokens=args.pad_tokens,
                     )
+                )
             if len(sweeps) > 1:
                 layer_result["config_floor"] = stats_json(compare_regions(sweeps[0], sweeps[-1]))
             variants = {"baseline": {}}
