@@ -31,10 +31,9 @@ from pathlib import Path
 import torch
 from flash_attn.flash_attn_interface import _flash_attn_varlen_backward
 from marinskyrl.resource_locator import join_resource_path
+from megatron.core import tensor_parallel
 from megatron.core.transformer.enums import AttnMaskType
 from vllm.vllm_flash_attn import flash_attn_varlen_func
-
-from megatron.core import tensor_parallel
 
 from skyrl_train.io import io
 from skyrl_train.mismatch_harness.run import export_weights, layer_weight_names, parse_variants, stage_config
@@ -52,6 +51,8 @@ from skyrl_train.models.megatron_router_replay import LayerReplayHandle, Megatro
 
 WARMUP = 3
 REPETITIONS = 10
+PROFILED_REPETITIONS = 5
+ROUNDS = 3
 
 
 def milliseconds(run: Callable[[], None]) -> float:
@@ -143,14 +144,30 @@ def expert_routes(tokens: int, top_k: int, experts: int, generator: torch.Genera
     return scores.argsort(dim=1)[:, :top_k]
 
 
+def device_milliseconds(run: Callable[[], None]) -> float:
+    """GPU kernel time of one ``run``: the summed duration of every CUDA kernel it launches, averaged over
+    ``PROFILED_REPETITIONS`` calls after ``WARMUP`` calls. Unlike the wall time it leaves out the gaps in which
+    the GPU waits for the host, which dominate one layer at these sizes on one GPU."""
+    for _ in range(WARMUP):
+        run()
+    torch.cuda.synchronize()
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as profile:
+        for _ in range(PROFILED_REPETITIONS):
+            run()
+        torch.cuda.synchronize()
+    kernels = [event for event in profile.events() if event.device_type == torch.autograd.DeviceType.CUDA]
+    return sum(event.time_range.elapsed_us() for event in kernels) / 1000 / PROFILED_REPETITIONS
+
+
 def layer_times(
     layer, rotary, shape: GrugShape, tokens: int, variants, generator: torch.Generator
-) -> dict[str, dict[str, float]]:
-    """Forward+backward milliseconds of the whole layer on one sequence, per numerics variant, expert load and
-    recompute setting.
+) -> dict[str, dict[str, dict[str, float]]]:
+    """Forward+backward time of the whole layer on one sequence, per numerics variant, expert load and recompute.
 
     ``native`` routes with the layer's router; ``ep8_rank`` replays routes among the first 32 experts. The
-    ``recompute`` times run the layer inside ``tensor_parallel.checkpoint`` as the production recipe does.
+    ``recompute`` settings run the layer inside ``tensor_parallel.checkpoint`` as the production recipe does.
+    Each setting reports the GPU kernel time, the wall time (median over ``ROUNDS`` rounds that visit the
+    variants in turn, so slow drift reaches every variant alike) and the peak allocated memory.
     """
     layer.train()
     hidden = torch.randn(tokens, 1, shape.hidden, generator=generator, device="cuda").to(torch.bfloat16)
@@ -161,37 +178,52 @@ def layer_times(
         "native": (torch.zeros(tokens, router.topk, dtype=torch.long, device="cuda"), False),
         "ep8_rank": (expert_routes(tokens, router.topk, EP8_RANK_EXPERTS, generator), True),
     }
-    times: dict[str, dict[str, float]] = {}
-    for label, flags in variants.items():
-        for load, (routes, replayed) in loads.items():
-            for recompute in (False, True):
-                controller = MegatronRouterReplay([0], recompute_enabled=recompute)
-                router.router_replay = LayerReplayHandle(controller, 0)
+    placement = VllmExpertParallel(torch.zeros(tokens, dtype=torch.long, device="cuda"), 8)
 
-                def forward(inputs):
-                    clear_numerics_handoffs()
-                    output, _ = layer(hidden_states=inputs, attention_mask=None, rotary_pos_emb=rotary_pos_emb)
-                    return output
+    def runner(routes, replayed: bool, recompute: bool, controller: MegatronRouterReplay) -> Callable[[], None]:
+        def forward(inputs):
+            clear_numerics_handoffs()
+            output, _ = layer(hidden_states=inputs, attention_mask=None, rotary_pos_emb=rotary_pos_emb)
+            return output
 
-                def run() -> None:
-                    controller.begin_forward(
-                        {0: routes},
-                        torch.full((tokens,), replayed, dtype=torch.bool, device="cuda"),
-                        record_recompute=recompute,
-                        vllm_expert_parallel=VllmExpertParallel(
-                            torch.zeros(tokens, dtype=torch.long, device="cuda"), 8
-                        ),
-                    )
-                    source = hidden.detach().requires_grad_()
-                    output = tensor_parallel.checkpoint(forward, False, source) if recompute else forward(source)
-                    controller.end_forward()
-                    output.backward(grad)
-                    clear_numerics_handoffs()
+        def run() -> None:
+            controller.begin_forward(
+                {0: routes},
+                torch.full((tokens,), replayed, dtype=torch.bool, device="cuda"),
+                record_recompute=recompute,
+                vllm_expert_parallel=placement,
+            )
+            source = hidden.detach().requires_grad_()
+            output = tensor_parallel.checkpoint(forward, False, source) if recompute else forward(source)
+            controller.end_forward()
+            output.backward(grad)
+            clear_numerics_handoffs()
 
-                with grug_numerics(**flags):
-                    times.setdefault(label, {})[f"{load}{'+recompute' if recompute else ''}"] = milliseconds(run)
-                controller.assert_drained()
-                router.router_replay = None
+        return run
+
+    times: dict[str, dict[str, dict[str, float]]] = {label: {} for label in variants}
+    for load, (routes, replayed) in loads.items():
+        for recompute in (False, True):
+            setting = f"{load}{'+recompute' if recompute else ''}"
+            walls: dict[str, list[float]] = {label: [] for label in variants}
+            for round_index in range(ROUNDS):
+                for label, flags in variants.items():
+                    controller = MegatronRouterReplay([0], recompute_enabled=recompute)
+                    router.router_replay = LayerReplayHandle(controller, 0)
+                    run = runner(routes, replayed, recompute, controller)
+                    with grug_numerics(**flags):
+                        if round_index == 0:
+                            torch.cuda.reset_peak_memory_stats()
+                            device = device_milliseconds(run)
+                            times[label][setting] = {
+                                "device_ms": device,
+                                "peak_gib": torch.cuda.max_memory_allocated() / 2**30,
+                            }
+                        walls[label].append(milliseconds(run))
+                    controller.assert_drained()
+                    router.router_replay = None
+            for label in variants:
+                times[label][setting]["wall_ms"] = statistics.median(walls[label])
     layer.eval()
     return times
 
@@ -216,7 +248,10 @@ def expert_forward_times(
                 experts(permuted, counts, probs)
 
             with torch.no_grad(), grug_numerics(**flags):
-                times.setdefault(load, {})[label] = milliseconds(run)
+                times.setdefault(load, {})[label] = {
+                    "wall_ms": milliseconds(run),
+                    "device_ms": device_milliseconds(run),
+                }
     return times
 
 
