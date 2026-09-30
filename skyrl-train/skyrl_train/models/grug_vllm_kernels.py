@@ -34,6 +34,8 @@ VLLM_MAX_CUDA_GRAPH_TOKENS = 512
 H100_SMS = 132
 # ``vllm_experts`` addresses each expert's weights in units of this many elements from the lowest-addressed one.
 EXPERT_OFFSET_ELEMENTS = 16
+# The probe engines' ``max_num_batched_tokens``: the rows of a full vLLM prefill step.
+VLLM_MAX_BATCHED_TOKENS = 8192
 
 
 @dataclass(frozen=True)
@@ -297,6 +299,21 @@ def expert_weight_offsets(weights: Sequence[torch.Tensor], base: torch.Tensor) -
     if any(distance < 0 or distance % unit for distance in distances):
         raise ValueError(f"vllm_experts needs expert weights at whole {unit}-byte steps above the lowest one")
     return [distance // unit for distance in distances]
+
+
+def fixed_rows_linear(x: torch.Tensor, weight: torch.Tensor, rows: int) -> torch.Tensor:
+    """``F.linear(x, weight)`` computed in calls of exactly ``rows`` rows, the last one zero-padded.
+
+    A GEMM library picks its kernel, and with it the order it sums each output in, from the call's row count, so
+    this gives every row the bytes of a ``rows``-row call whatever the batch holds.
+    """
+    flat = x.reshape(-1, x.shape[-1])
+    outputs = []
+    for chunk in flat.split(rows):
+        padded = chunk.new_zeros(rows, chunk.shape[1])
+        padded[: chunk.shape[0]] = chunk
+        outputs.append(torch.nn.functional.linear(padded, weight)[: chunk.shape[0]])
+    return torch.cat(outputs).view(*x.shape[:-1], weight.shape[0])
 
 
 def vllm_qkv_projection(

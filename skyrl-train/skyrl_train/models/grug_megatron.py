@@ -56,7 +56,9 @@ from skyrl_train.models.grug_rounding import (
     xsa_and_gate_single_rounding,
 )
 from skyrl_train.models.grug_vllm_kernels import (
+    VLLM_MAX_BATCHED_TOKENS,
     fa3_attention_sbhd,
+    fixed_rows_linear,
     vllm_ep_combine,
     vllm_expert_outputs,
     vllm_qkv_projection,
@@ -657,9 +659,21 @@ class GrugTopKRouter(TopKRouter):
 
     def forward(self, input: torch.Tensor, padding_mask: torch.Tensor | None = None):
         self._maintain_float32_expert_bias()
-        if active_numerics().router_gemm:
+        numerics = active_numerics()
+        if numerics.router_gemm or numerics.router_rows:
             # Compiled vLLM runs an fp32 GEMM on the stored bf16 input and fp32 weights holding the bf16 values.
-            logits = F.linear(input.float(), self.weight.float())
+            fp32_input, weight = input.float(), self.weight.float()
+            if not numerics.router_rows:
+                logits = F.linear(fp32_input, weight)
+            else:
+                # cuBLAS sums the fp32 GEMM in an order that follows its row count; vLLM's full prefill step has
+                # VLLM_MAX_BATCHED_TOKENS rows. The value comes from calls of that size, the gradient from the
+                # plain GEMM through the exact-zero ``x - x.detach()``.
+                with torch.no_grad():
+                    logits = fixed_rows_linear(fp32_input, weight, VLLM_MAX_BATCHED_TOKENS)
+                if torch.is_grad_enabled():
+                    reference = F.linear(fp32_input, weight)
+                    logits = logits + (reference - reference.detach())
         else:
             logits = self.gating(input)
         return self.routing(logits, padding_mask)

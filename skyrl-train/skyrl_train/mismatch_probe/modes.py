@@ -76,7 +76,8 @@ TRAINER_MODES: dict[str, ModeSpec] = {
 # ``compiled_stack_all`` adds it. The ``+fa3_attention`` and ``+ep_sum`` candidates add one of vLLM's
 # kernel orders to a stack, and ``vllm_kernel_stack`` is the compiled stack with ``route_weight``,
 # ``fa3_attention`` and ``ep_sum``. ``KEPT_STACK`` (``compiled_stack+fa3_attention``) is the kept numerics;
-# its ``+vllm_gemm`` and ``+vllm_experts`` candidates add vLLM's dense GEMM shapes and expert kernels.
+# its ``+vllm_gemm`` and ``+vllm_experts`` candidates add vLLM's dense GEMM shapes and expert kernels, and
+# ``+router_rows`` computes the router GEMM at a full vLLM prefill step's row count.
 COMPILED_STACK = "compiled_stack"
 COMPILED_STACK_ALL = "compiled_stack_all"
 VLLM_KERNEL_STACK = "vllm_kernel_stack"
@@ -84,6 +85,7 @@ KEPT_STACK = f"{COMPILED_STACK}+fa3_attention"
 KEPT_VLLM_GEMM = f"{KEPT_STACK}+vllm_gemm"
 KEPT_VLLM_EXPERTS = f"{KEPT_STACK}+vllm_experts"
 KEPT_VLLM_KERNELS = f"{KEPT_STACK}+vllm_gemm+vllm_experts"
+KEPT_VLLM_KERNELS_ROUTER_ROWS = f"{KEPT_VLLM_KERNELS}+router_rows"
 _COMPILED_STACK_FLAGS = (
     "gated_norm",
     "qk_rope",
@@ -114,6 +116,9 @@ NUMERICS_CANDIDATES = {
     KEPT_VLLM_GEMM: _enabled(*_COMPILED_STACK_FLAGS, "fa3_attention", "vllm_gemm"),
     KEPT_VLLM_EXPERTS: _enabled(*_COMPILED_STACK_FLAGS, "fa3_attention", "vllm_experts"),
     KEPT_VLLM_KERNELS: _enabled(*_COMPILED_STACK_FLAGS, "fa3_attention", "vllm_gemm", "vllm_experts"),
+    KEPT_VLLM_KERNELS_ROUTER_ROWS: _enabled(
+        *_COMPILED_STACK_FLAGS, "fa3_attention", "vllm_gemm", "vllm_experts", "router_rows"
+    ),
     # Every vLLM kernel and vLLM's expert-parallel addition order: the stack the harness finds byte-equal to
     # compiled vLLM apart from the XSA reductions, a few RoPE and norm elements and the router GEMM's row count.
     f"{KEPT_VLLM_KERNELS}+ep_sum": _enabled(
@@ -151,6 +156,7 @@ for _candidate in (
     KEPT_VLLM_GEMM,
     KEPT_VLLM_EXPERTS,
     KEPT_VLLM_KERNELS,
+    KEPT_VLLM_KERNELS_ROUTER_ROWS,
     f"{KEPT_VLLM_KERNELS}+ep_sum",
 ):
     TRAINER_MODES[f"{REPLAY_MODE}+{_candidate}"] = ModeSpec(
@@ -159,7 +165,7 @@ for _candidate in (
 
 # The batch-layout control of a stack: the trainer against itself in reversed order with larger micro-batches,
 # the re-read's routes replayed, so the prefill metric's layout floor is measured under that stack.
-for _candidate in (KEPT_STACK, KEPT_VLLM_GEMM, KEPT_VLLM_KERNELS):
+for _candidate in (KEPT_STACK, KEPT_VLLM_GEMM, KEPT_VLLM_KERNELS, KEPT_VLLM_KERNELS_ROUTER_ROWS):
     TRAINER_MODES[f"{REPEAT_REREAD_REPLAY_MODE}+{_candidate}"] = ModeSpec(
         _with_numerics(_replay, NUMERICS_CANDIDATES[_candidate]),
         requires_routes=True,
