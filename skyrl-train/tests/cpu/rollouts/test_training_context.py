@@ -37,6 +37,8 @@ from skyrl_train.rollouts.context import (
 )
 from skyrl_train.rollouts.loader import PromptLoader, PromptLoaderState, JudgedGroup, PromptOrder, SeededPasses
 from skyrl_train.rollouts.payloads import MemoryPayloads, ObjectStorePayloads, PayloadStore
+from skyrl_train.utils import validate_cfg
+from tests.cpu.test_teacher_config_rejection import selected_topk_config
 
 SAMPLES_PER_PROMPT = 2
 STALL_TIMEOUT = 10.0
@@ -455,19 +457,46 @@ async def test_writer_filters_success_ceiling_using_final_outcomes(ray_module, p
         ray.kill(buffer)
 
 
+class _EvidenceWorkers:
+    def __init__(self, batch: dict, missing_field: str):
+        self.batch = batch
+        self.missing_field = missing_field
+        self.rejections = ()
+
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
+        invalid = deepcopy(self.batch)
+        invalid[self.missing_field][0][0] = -1 if self.missing_field == "student_topk_indices" else np.nan
+        with pytest.raises(TrainingGroupInvariantError) as error:
+            await writer.write_rollout(
+                task.lease, RolloutGroup(invalid, task.prompt["uid"], task.lease.policy_step, task.prompt)
+            )
+        self.rejections = error.value.rejections
+        await writer.write_rollout(
+            task.lease, RolloutGroup(self.batch, task.prompt["uid"], task.lease.policy_step, task.prompt)
+        )
+        return SAMPLES_PER_PROMPT
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing_field", ["rollout_logprobs", "student_topk_indices", "behavior_topk_logprobs"])
-async def test_writer_requires_behavior_evidence_only_at_trainable_tokens(ray_module, payloads, missing_field):
-    policy = RolloutContentPolicy(
-        GroupAdmissionPolicy(
-            GroupAdvantageInvariant.no_group_advantage(physical_group_size=2),
-            rollout_logprobs_required=missing_field == "rollout_logprobs",
-            student_topk_width=2,
-        ),
-        GroupSelectionPolicy(None),
-    )
-    buffer = ray.remote(RolloutBuffer).remote(RolloutBufferConfig(1, 1, 0, BatchPolicy.FULL_BATCH, None, None))
-    writer = payloads.writer(buffer, policy)
+async def test_configured_context_requires_behavior_evidence_only_at_trainable_tokens(
+    ray_module, payloads, missing_field
+):
+    cfg = selected_topk_config()
+    cfg.teachers.primary.top_k = 2
+    cfg.generator.sampling_params.logprobs = 2
+    cfg.generator.n_samples_per_prompt = SAMPLES_PER_PROMPT
+    cfg.trainer.train_batch_size = 1
+    cfg.trainer.policy_mini_batch_size = SAMPLES_PER_PROMPT
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.trainer.micro_forward_batch_size_per_gpu = 1
+    cfg.trainer.policy_num_gpus_per_node = 1
+    cfg.trainer.rollout_buffer.max_in_flight = 1
+    cfg.trainer.rollout_buffer.object_store_root = payloads.object_store_root
+    if missing_field == "rollout_logprobs":
+        cfg.trainer.algorithm.distillation.reward_mode = "add"
+        cfg.trainer.algorithm.off_policy_correction = "tis"
+    validate_cfg(cfg)
     batch = _batch()
     batch.update(
         response_ids=[[2, 3], [4, 5]],
@@ -481,22 +510,18 @@ async def test_writer_requires_behavior_evidence_only_at_trainable_tokens(ray_mo
     )
     if missing_field != "rollout_logprobs":
         batch["rollout_logprobs"] = None
+    workers = _EvidenceWorkers(batch, missing_field)
+    context = TrainingContext.from_config(cfg, _Prompts(["a"]), workers)
+    context.start()
     try:
-        await buffer.publish.remote(1)
-        lease = await buffer.acquire_lease.remote()
-        invalid = deepcopy(batch)
-        invalid[missing_field][0][0] = -1 if missing_field == "student_topk_indices" else np.nan
-        with pytest.raises(TrainingGroupInvariantError) as error:
-            await writer.write_rollout(lease, RolloutGroup(invalid, "a", 1, _prompt("a")))
+        await context.publish(1)
+        groups, _ = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
         expected = (
             AdmissionRejection.MISSING_ROLLOUT_LOGPROBS
             if missing_field == "rollout_logprobs"
             else AdmissionRejection.MISSING_BEHAVIOR_TOPK
         )
-        assert error.value.rejections == (expected,)
-        await writer.write_rollout(lease, RolloutGroup(batch, "a", 1, _prompt("a")))
-        admission = await buffer.admit.remote(STALL_TIMEOUT)
-        groups = await payloads.fetch(admission.payloads)
+        assert workers.rejections == (expected,)
         np.testing.assert_equal([group.trajectory_batch for group in groups], [batch])
     finally:
-        ray.kill(buffer)
+        await context.close()

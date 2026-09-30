@@ -152,7 +152,10 @@ def test_one_step_is_independent_of_micro_batch_size(runs: ForkServerContext, tm
     model = CausalLMPolicy(AutoModelForCausalLM.from_pretrained(tiny_policy, dtype=torch.float32))
     log_probs = model(batch["sequences"], num_actions=4, attention_mask=batch["attention_mask"])
     ratios = (log_probs - batch["action_log_probs"]).exp()
-    loss = -(ratios * batch["advantages"] * batch["loss_mask"]).sum() / batch["loss_mask"].sum()
+    loss = (
+        -(ratios * batch["advantages"] * batch["correction_weights"] * batch["loss_mask"]).sum()
+        / batch["loss_mask"].sum()
+    )
     loss.backward()
     reference_norm = torch.linalg.vector_norm(
         torch.stack([parameter.grad.norm() for parameter in model.parameters() if parameter.grad is not None])
