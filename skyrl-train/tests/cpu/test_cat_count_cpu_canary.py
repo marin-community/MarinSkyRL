@@ -3,37 +3,27 @@ import asyncio
 import hashlib
 import json
 import math
+import multiprocessing
+import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from multiprocessing.context import ForkServerContext
 
 import pytest
-import ray
 import skyrl_gym
 import skyrl_train
 import torch
 import zstandard
 from examples.cat_count.cpu_canary import PROMPT, pretrain
-from skyrl_train.config.trajectory_runner_capabilities import (
-    TrajectoryRunnerMode,
-    validate_trajectory_runner_capabilities,
-)
-from skyrl_train.entrypoints.main_base import EntrypointOperation
-from skyrl_train.utils import validate_cfg
-from skyrl_train.utils.algorithm_registry import AdvantageEstimatorRegistry, sync_registries
 
-from tests.cpu.tiny_training.cat_count import FAST_STEPS, cat_count_config, flipped_grpo
+from tests.cpu.tiny_training.cat_count import FAST_STEPS, cat_count_config, run_cat_count
 from tests.cpu.tiny_training.cpu_backend import CPUInferenceEngine
-from tests.cpu.tiny_training.experiment import (
-    LOGICAL_CPUS,
-    LOGICAL_GPUS,
-    WORKER_ENV_VARS,
-    TinyTrainingExp,
-    read_metrics,
-)
+from tests.cpu.tiny_training.experiment import read_metrics
 
 pytestmark = pytest.mark.slow
+RUN_TIMEOUT_SECONDS = 300
 
 
 @pytest.fixture(scope="session")
@@ -85,27 +75,23 @@ def cat_count_session(monkeypatch):
     }
     for key, value in telemetry_env.items():
         monkeypatch.setenv(key, value)
-    ray.init(
-        num_cpus=LOGICAL_CPUS,
-        num_gpus=LOGICAL_GPUS,
-        include_dashboard=False,
-        runtime_env={"env_vars": {**WORKER_ENV_VARS, **telemetry_env}},
-    )
-    sync_registries()
-    AdvantageEstimatorRegistry.register(
-        "cat_count_flipped_grpo", flipped_grpo, group_contract=AdvantageEstimatorRegistry.group_contract("grpo")
-    )
     try:
         yield rows
     finally:
-        AdvantageEstimatorRegistry.unregister("cat_count_flipped_grpo")
-        ray.shutdown()
         server.shutdown()
         server.server_close()
         thread.join()
 
 
+@pytest.fixture(scope="module")
+def runs() -> ForkServerContext:
+    context = multiprocessing.get_context("forkserver")
+    context.set_forkserver_preload(["tests.cpu.tiny_training.cat_count"])
+    return context
+
+
 def train(
+    runs: ForkServerContext,
     root: Path,
     model: Path,
     *,
@@ -121,10 +107,16 @@ def train(
     )
     if flipped:
         cfg.trainer.algorithm.advantage_estimator = "cat_count_flipped_grpo"
-    validate_cfg(cfg)
-    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM, EntrypointOperation.TRAIN)
+    worker_env = {key: os.environ[key] for key in ("SKYRL_TELEMETRY_ENDPOINT", "SKYRL_RUN_ID", "SKYRL_EXECUTION_UID")}
     start = time.perf_counter()
-    TinyTrainingExp(cfg).run()
+    process = runs.Process(target=run_cat_count, args=(cfg, worker_env))
+    process.start()
+    process.join(RUN_TIMEOUT_SECONDS)
+    if process.exitcode is None:
+        process.kill()
+        process.join()
+        pytest.fail(f"the run did not finish within {RUN_TIMEOUT_SECONDS} seconds")
+    assert process.exitcode == 0
     print(f"CAT_COUNT_CPU run={root.name} seconds={time.perf_counter() - start:.3f}")
     return read_metrics(root)
 
@@ -146,6 +138,7 @@ async def test_cpu_sampling_preserves_trajectory_rng_and_minimum_tokens(cat_coun
             }
         ],
         tokenize=True,
+        return_dict=False,
         add_generation_prompt=True,
     )
     sampling = {"temperature": 1.0, "max_tokens": 64, "min_tokens": 0, "logprobs": 0}
@@ -177,6 +170,7 @@ async def test_cpu_sampling_preserves_trajectory_rng_and_minimum_tokens(cat_coun
                 }
             ],
             tokenize=True,
+            return_dict=False,
             add_generation_prompt=True,
         ) + tokenizer.encode("cat", add_special_tokens=False)
         mixed = await engine.generate(
@@ -203,9 +197,9 @@ async def test_cpu_sampling_preserves_trajectory_rng_and_minimum_tokens(cat_coun
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2])
-def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_policy, cat_count_session, seed):
-    positive = train(tmp_path / "positive", cat_count_policy, seed=seed)
-    negative = train(tmp_path / "negative", cat_count_policy, flipped=True, seed=seed)
+def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_policy, cat_count_session, runs, seed):
+    positive = train(runs, tmp_path / "positive", cat_count_policy, seed=seed)
+    negative = train(runs, tmp_path / "negative", cat_count_policy, flipped=True, seed=seed)
     before, after = scores(positive)
     negative_before, negative_after = scores(negative)
     assert before == negative_before
@@ -236,10 +230,10 @@ def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_po
 
 
 @pytest.mark.nightly
-def test_cat_count_async_resumes_and_converges(tmp_path, cat_count_policy, cat_count_session):
+def test_cat_count_async_resumes_and_converges(tmp_path, cat_count_policy, cat_count_session, runs):
     root = tmp_path / "async"
-    first = train(root, cat_count_policy, steps=4, staleness=1)
-    resumed = train(root, cat_count_policy, steps=100, staleness=1, resume=True, eval_interval=2)
+    first = train(runs, root, cat_count_policy, steps=4, staleness=1)
+    resumed = train(runs, root, cat_count_policy, steps=100, staleness=1, resume=True, eval_interval=2)
     assert scores(resumed)[len(scores(first))] == scores(first)[-1]
     assert len([row for row in first if "policy/raw_grad_norm" in row]) == 4
     training = [row for row in resumed if "policy/raw_grad_norm" in row]

@@ -1,12 +1,15 @@
 """CatCount configuration for the production trainer's CPU harness."""
 
 import json
+import os
 from pathlib import Path
 
 from examples.cat_count.cpu_canary import HELD_OUT_N, PROMPT, TRAIN_N
 from omegaconf import DictConfig, OmegaConf
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.utils.algorithm_registry import AdvantageEstimatorRegistry
+
+from tests.cpu.tiny_training.experiment import run_tiny_training
 
 FAST_STEPS = 10
 
@@ -105,3 +108,12 @@ def cat_count_config(
             },
         },
     )
+
+
+def run_cat_count(cfg: DictConfig, worker_env: dict[str, str]) -> None:
+    """Run one counting experiment in a process with its telemetry environment."""
+    os.environ.update(worker_env)
+    AdvantageEstimatorRegistry.register(
+        "cat_count_flipped_grpo", flipped_grpo, group_contract=AdvantageEstimatorRegistry.group_contract("grpo")
+    )
+    run_tiny_training(cfg)
