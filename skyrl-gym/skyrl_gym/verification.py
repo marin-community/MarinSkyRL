@@ -86,8 +86,16 @@ class VerificationResult:
     passed: bool | None = None
     reason: str | None = None
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
+    score_min: float = 0.0
+    score_max: float = 1.0
 
     def __post_init__(self) -> None:
+        minimum = _normalize_finite(self.score_min, field_name="score_min")
+        maximum = _normalize_finite(self.score_max, field_name="score_max")
+        if maximum <= minimum:
+            raise ValueError("Verifier score range must be increasing")
+        object.__setattr__(self, "score_min", minimum)
+        object.__setattr__(self, "score_max", maximum)
         if self.status is VerificationStatus.VERIFIED:
             if self.score is None:
                 raise ValueError("verified results require a score")
@@ -107,12 +115,16 @@ class VerificationResult:
         *,
         passed: bool | None = None,
         diagnostics: Mapping[str, Any] | None = None,
+        score_min: float = 0.0,
+        score_max: float = 1.0,
     ) -> "VerificationResult":
         return cls(
             status=VerificationStatus.VERIFIED,
             score=score,
             passed=passed,
             diagnostics={} if diagnostics is None else diagnostics,
+            score_min=score_min,
+            score_max=score_max,
         )
 
     @classmethod
@@ -138,6 +150,14 @@ class VerificationResult:
             reason=reason,
             diagnostics={} if diagnostics is None else diagnostics,
         )
+
+
+def normalized_verifier_score(result: VerificationResult) -> float:
+    """Scale a verified score to [0, 1] using its declared native bounds."""
+    if result.status is not VerificationStatus.VERIFIED or result.score is None:
+        raise ValueError("A verified score is required for normalization")
+    minimum, maximum = result.score_min, result.score_max
+    return min(1.0, max(0.0, (result.score - minimum) / (maximum - minimum)))
 
 
 @dataclass(frozen=True)
