@@ -13,6 +13,8 @@ from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.config.objective_spec import TopKLossParams
 from skyrl_train.distillation import StudentTopKInput
 from skyrl_train.objective.teacher import topk_teacher_loss
+from cloud.iris.launch_config import load_launch_config
+from cloud.iris.tests.test_launch_config import _raw_config
 
 
 def replace_mode_config() -> DictConfig:
@@ -94,6 +96,7 @@ def test_skipped_grading_is_accepted_for_pure_distillation(tmp_path):
     parsed = parse_rl_config(str(_skipped_grading_config(tmp_path, eval_interval=-1)))
     cfg = compose_skyrl_config(parsed, {"job_name": "grading-test", "num_nodes": 1}, _HPCStub()).config
     cfg.trainer.flash_attn = False
+    # Successful validation is the contract for training with teacher credit and no environment grading.
     validate_cfg(cfg)
     validate_megatron_cfg(cfg)
 
@@ -186,3 +189,28 @@ def test_selected_topk_rollouts_require_matching_teacher_width():
     cfg.generator.sampling_params.logprobs = 8
     with pytest.raises(ValueError, match="matching teacher top_k"):
         validate_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "error"),
+    [
+        ("policy.megatron_config.tensor_model_parallel_size", 2, "top-K teacher objectives require"),
+        ("algorithm.policy_loss_type", "kl_cov", "requires an advantage-linear policy loss"),
+        ("algorithm.loss_reduction", "seq_mean_token_sum_norm_global", "top-K teacher rows require"),
+    ],
+)
+def test_teacher_objective_is_validated_before_launch(tmp_path, key, value, error):
+    teacher = selected_topk_config()
+    raw = OmegaConf.create(_raw_config())
+    raw.skyrl.teachers = teacher.teachers
+    raw.skyrl.teacher_routing = teacher.teacher_routing
+    raw.skyrl.trainer.algorithm.distillation = teacher.trainer.algorithm.distillation
+    raw.skyrl.trainer.algorithm.advantage_estimator = teacher.trainer.algorithm.advantage_estimator
+    raw.skyrl.trainer.use_sample_packing = False
+    raw.skyrl.generator.sampling_params = {"logprobs": 16}
+    OmegaConf.update(raw.skyrl.trainer, key, value, force_add=True)
+    path = tmp_path / "launch.yaml"
+    OmegaConf.save(raw, path)
+
+    with pytest.raises(ValueError, match=error):
+        load_launch_config(path)

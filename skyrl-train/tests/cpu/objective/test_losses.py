@@ -2,6 +2,9 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
+from skyrl_train.config.objective_spec import BUILTIN_LOSS_SPECS
+from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
+from skyrl_train.objective.objective import build_objective_micro_batch
 from skyrl_train.objective.losses import (
     PolicyLossInputs,
     behavior_clipped_policy_loss,
@@ -80,8 +83,9 @@ def test_policy_loss_is_finite_at_extreme_ratios(loss, loss_config):
     assert torch.isfinite(log_probs.grad).all()
 
 
-@pytest.mark.parametrize("loss", [loss for loss in LOSSES if loss not in (sft_policy_loss, compute_policy_loss_kl_cov)])
-def test_advantage_linear_losses_vanish_at_zero_advantage(loss, loss_config):
+@pytest.mark.parametrize("name", [name for name, spec in BUILTIN_LOSS_SPECS.items() if spec.advantage_linear])
+def test_advantage_linear_losses_vanish_at_zero_advantage(name, loss_config):
+    loss = PolicyLossRegistry.get(name)
     log_probs = torch.tensor([[0.5, -3.0, 0.0]], requires_grad=True)
     inputs = PolicyLossInputs(
         log_probs,
@@ -94,3 +98,34 @@ def test_advantage_linear_losses_vanish_at_zero_advantage(loss, loss_config):
     result.values.sum().backward()
     torch.testing.assert_close(result.values, torch.zeros_like(log_probs))
     torch.testing.assert_close(log_probs.grad, torch.zeros_like(log_probs))
+
+
+@pytest.mark.parametrize("loss", LOSSES)
+def test_policy_loss_ignores_masked_values(loss, loss_config):
+    mask = torch.tensor([[1, 1, 0], [1, 0, 0]], dtype=torch.float64)
+    results, gradients = [], []
+    for padding in (0.0, float("nan")):
+        log_probs = torch.where(mask.bool(), torch.tensor([[-0.4, -1.2, 0], [-0.8, 0, 0]]), padding).requires_grad_()
+        old = torch.where(mask.bool(), -1.0, padding)
+        advantages = torch.where(mask.bool(), torch.tensor([[2, -1, 0], [0.5, 0, 0]]), padding)
+        batch = build_objective_micro_batch(
+            action_log_probs=log_probs,
+            old_action_log_probs=old,
+            base_action_log_probs=None,
+            advantages=advantages,
+            loss_mask=mask,
+            rollout_logprobs=old,
+            response_span_tags=None,
+            token_entropy=torch.zeros_like(mask),
+            think_token_weight=1.0,
+            teacher=None,
+        )
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(0)
+            result = loss(batch.policy, loss_config)
+        results.append(result)
+        gradients.append(torch.autograd.grad(result.values.sum(), log_probs)[0])
+    torch.testing.assert_close(results[0].values, results[1].values, rtol=0, atol=0)
+    assert results[0].metrics == results[1].metrics
+    torch.testing.assert_close(gradients[0], gradients[1], rtol=0, atol=0)
+    torch.testing.assert_close(gradients[1][~mask.bool()], torch.zeros_like(gradients[1][~mask.bool()]))

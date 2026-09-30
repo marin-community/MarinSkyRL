@@ -172,7 +172,6 @@ trainer:
     batch_invariant: false
     advantage_estimator: "grpo"
     group_advantage_min_size: null
-    resolved_loss_spec: null
     resolved_topk_loss_params: null
     resolved_rollout_logprobs_required: false
     resolved_group_advantage:
