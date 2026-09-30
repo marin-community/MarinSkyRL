@@ -12,7 +12,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import prepare_traject
 
 async def profile_candidates(dataloader, runner, cfg) -> dict[str, float]:
     """Retain each batch before discarding its token arrays; never update the policy."""
-    count, passed, excluded = 0, 0.0, 0
+    count, passed, excluded, errors = 0, 0.0, 0, 0
     prompt_tokens, response_tokens = 0, 0
     await runner.start_eval_session(run_name=cfg.trainer.run_name, eval_step=0)
     try:
@@ -31,21 +31,33 @@ async def profile_candidates(dataloader, runner, cfg) -> dict[str, float]:
             response_tokens += sum(map(len, batch["response_ids"]))
             for verdict in batch["verification_results"]:
                 if verdict is None:
-                    raise ValueError("Profiling requires a binary verifier verdict for every response")
+                    errors += 1
+                    continue
                 if is_context_exclusion(asdict(verdict)):
                     excluded += 1
                     continue
-                if verdict.status != "verified" or verdict.score not in (0, 1):
+                if verdict.status != "verified":
+                    errors += 1
+                    continue
+                if verdict.score not in (0, 1):
                     raise ValueError("Profiling requires a binary verifier verdict for every response")
                 passed += verdict.score
                 count += 1
-            logger.info("Profiled {} actions; mean success={:.4f}", count, passed / max(1, count))
+            logger.info(
+                "Profiled {} actions; mean success={:.4f}; errors={}; context exclusions={}",
+                count,
+                passed / max(1, count),
+                errors,
+                excluded,
+            )
     finally:
         await runner.stop_eval_session()
     if not count:
         raise ValueError("Profiling produced no responses")
     return {
         "profile/actions": count,
+        "profile/attempts": count + errors + excluded,
+        "profile/errors": errors,
         "profile/mean_success": passed / count,
         "profile/context_exclusions": excluded,
         "profile/prompt_tokens": prompt_tokens,

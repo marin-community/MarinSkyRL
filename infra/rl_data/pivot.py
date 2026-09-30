@@ -33,6 +33,12 @@ class Release:
     sha256: str
 
 
+@dataclass(frozen=True)
+class ProfileOutcome:
+    score: float | None
+    exclusion: str | None
+
+
 RELEASES = {
     "swe": Release(
         "nvidia/Nemotron-RL-Agentic-SWE-Pivot-v1",
@@ -185,11 +191,11 @@ def filter_candidates(
     """Select pivots from our frozen policy's retained trajectories, never release counts.
 
     Input is SkyRL trajectory-retention JSONL from a generate-only run over candidates.
-    Every candidate must have the requested number of distinct repetitions and valid
-    binary verifier outcomes from the same frozen model at step zero.
+    Every candidate must have the requested number of distinct attempts from the
+    same frozen model at step zero. Exclude groups with failed attempts from selection.
     """
     candidates = Dataset.from_parquet(str(artifacts / "candidates.parquet"))
-    groups: dict[str, dict[int, float | None]] = {}
+    groups: dict[str, dict[int, ProfileOutcome]] = {}
     digest = hashlib.sha256()
     for rollout in iter_records(rollouts):
         digest.update(json.dumps(rollout, sort_keys=True).encode())
@@ -205,20 +211,23 @@ def filter_candidates(
             raise ValueError("Use a generate-only profiling run, before any training updates")
         verification = rollout["verification_result"]
         excluded = verification is not None and is_context_exclusion(verification)
-        if not excluded and (
+        failed = not excluded and (
             rollout["disposition"]["exception_type"] is not None
             or verification is None or verification["status"] != "verified"
-        ):
-            raise ValueError("Profiling contains an unverified rollout; repair and rerun it")
+        )
         identity = rollout["trajectory"]["environment_extras"]["extra_info"]["source_id"]
         repetition = rollout["trajectory"]["repetition_id"]
         outcome = rollout["reward"]["outcome"]
-        if not excluded and (outcome not in (0.0, 1.0) or rollout["reward"]["shaped"] != outcome):
+        if not excluded and not failed and (
+            outcome not in (0.0, 1.0) or rollout["reward"]["shaped"] != outcome
+            or verification["score"] != outcome
+        ):
             raise ValueError("Profiling requires unshaped binary outcomes")
         group = groups.setdefault(identity, {})
         if repetition in group:
             raise ValueError("Duplicate profiling repetition")
-        group[repetition] = None if excluded else outcome
+        exclusion = "context_window" if excluded else "infrastructure_error" if failed else None
+        group[repetition] = ProfileOutcome(None if exclusion else outcome, exclusion)
     if set(groups) != {row["extra_info"]["source_id"] for row in candidates}:
         raise ValueError("Profiling must cover every candidate, with no validation rows")
     selected, statistics = [], []
@@ -227,23 +236,28 @@ def filter_candidates(
         group = groups[identity]
         if len(group) != samples_per_prefix:
             raise ValueError(f"Incomplete profiling group for {identity}")
-        if any(value is None for value in group.values()):
-            if not all(value is None for value in group.values()):
+        errors = sum(value.exclusion == "infrastructure_error" for value in group.values())
+        context_exclusions = sum(value.exclusion == "context_window" for value in group.values())
+        if errors or context_exclusions:
+            if not errors and context_exclusions != samples_per_prefix:
                 raise ValueError("Inconsistent context eligibility within a profiling group")
-            statistics.append({"source_id": identity, "passed": None, "total": 0,
+            statistics.append({"source_id": identity, "passed": None,
+                               "total": samples_per_prefix - errors - context_exclusions,
                                "mean": None, "variance": None, "selected": False,
-                               "exclusion": "context_window"})
+                               "errors": errors, "context_exclusions": context_exclusions,
+                               "exclusion": "infrastructure_error" if errors else "context_window"})
             continue
-        passed, total = int(sum(value for value in group.values() if value is not None)), len(group)
+        passed, total = int(sum(value.score for value in group.values() if value.score is not None)), len(group)
         mean = passed / total
         keep = pivot_selected(passed, total, difficulty_threshold)
         statistics.append({"source_id": identity, "passed": passed, "total": total,
-                           "mean": mean, "variance": mean * (1 - mean), "selected": keep, "exclusion": None})
+                           "mean": mean, "variance": mean * (1 - mean), "selected": keep, "exclusion": None,
+                           "errors": 0, "context_exclusions": 0})
         if keep:
             selected.append(index)
     if not selected:
         raise ValueError("Profiling selected no pivots")
-    # Outcome-independent control: all context-eligible candidates remain in the
+    # Outcome-independent control: all completely verified candidates remain in the
     # sampling pool, including all-pass/all-fail groups and selected pivots.
     eligible = [index for index, item in enumerate(statistics) if item["exclusion"] is None]
     random_selected = sorted(random.Random(random_seed).sample(eligible, len(selected)))
@@ -261,7 +275,10 @@ def filter_candidates(
         "samples_per_prefix": samples_per_prefix,
         "candidate_rows": len(candidates), "selected_rows": len(selected),
         "rejected_rows": len(candidates) - len(selected),
-        "context_excluded_rows": sum(item["exclusion"] is not None for item in statistics),
+        "context_excluded_rows": sum(item["exclusion"] == "context_window" for item in statistics),
+        "error_excluded_rows": sum(item["exclusion"] == "infrastructure_error" for item in statistics),
+        "error_actions": sum(item["errors"] for item in statistics),
+        "verified_rows": len(eligible),
         "random_control": {
             "seed": random_seed, "sampling": "uniform_without_replacement",
             "eligible_rows": len(eligible), "selected_rows": len(random_selected),

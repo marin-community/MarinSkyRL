@@ -1,4 +1,4 @@
-"""Frozen profiling preserves repetition identities and rejects missing verdicts."""
+"""Frozen profiling preserves repetitions and continues past retained request errors."""
 
 import pytest
 from omegaconf import OmegaConf
@@ -29,8 +29,8 @@ class ProfilingRunner(TrajectoryRunner):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalid", [False, True])
-async def test_profile_streams_all_batches_and_stops_session_on_error(invalid):
+@pytest.mark.parametrize("verdict", [VerificationResult.verified(0), None, VerificationResult.error("HTTP 500")])
+async def test_profile_streams_all_batches_and_counts_failed_verdicts(verdict):
     cfg = OmegaConf.create(
         {
             "trainer": {"run_name": "profile"},
@@ -60,16 +60,14 @@ async def test_profile_streams_all_batches_and_stops_session_on_error(invalid):
         ]
         for i in range(2)
     ]
-    runner = ProfilingRunner([None if invalid else VerificationResult.verified(0), VerificationResult.verified(1)])
-    if invalid:
-        with pytest.raises(ValueError, match="binary verifier"):
-            await profile_candidates(batches, runner, cfg)
-    else:
-        result = await profile_candidates(batches, runner, cfg)
-        assert result["profile/actions"] == 4
-        assert result["profile/mean_success"] == 0.5
-        assert len(runner.requests) == 2
-        for request in runner.requests:
-            assert [identity.repetition_id for identity in request["trajectory_ids"]] == [0, 1]
-            assert request["batch_metadata"].global_step == 0
+    runner = ProfilingRunner([verdict, VerificationResult.verified(1)])
+    invalid = verdict is None or verdict.status != "verified"
+    result = await profile_candidates(batches, runner, cfg)
+    assert result["profile/actions"] == (2 if invalid else 4)
+    assert result["profile/attempts"] == 4
+    assert result["profile/errors"] == (2 if invalid else 0)
+    assert result["profile/mean_success"] == (1.0 if invalid else 0.5)
+    for request in runner.requests:
+        assert [identity.repetition_id for identity in request["trajectory_ids"]] == [0, 1]
+        assert request["batch_metadata"].global_step == 0
     assert runner.stopped

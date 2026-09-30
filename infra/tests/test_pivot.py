@@ -97,6 +97,37 @@ def test_report_clusters_correlated_prefixes_and_checks_rollout_geometry():
         check_rollout_geometry(training, 64, 16)
 
 
+def test_filter_excludes_failed_groups_without_counting_errors_as_wrong_answers(tmp_path):
+    rows = [adapt_row(swe_row(i), "swe", i, "train") for i in range(3)]
+    Dataset.from_list(rows).to_parquet(str(tmp_path / "candidates.parquet"))
+    (tmp_path / "manifest.json").write_text('{"release_rows": 3}')
+    records = [retained(row, rep, int(rep == 0)) for row in rows for rep in range(8)]
+    # A masked server error carries a placeholder zero reward. It must not turn
+    # this incomplete group into an apparently valid 1/8 pivot.
+    records[4]["disposition"]["exception_type"] = "ModelServerError"
+    records[4]["verification_result"] = {"status": "error", "score": None}
+    for record in records[16:]:
+        record["verification_result"] = {"status": "unavailable",
+                                         "reason": "initial prompt exceeds the model input limit"}
+    path = tmp_path / "rollouts.jsonl"
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    manifest = filter_candidates(tmp_path, tmp_path / "filtered", difficulty_threshold=.5,
+                                 rollouts=path, profile_policy="student@immutable", profile_revision="revision", samples_per_prefix=8)
+    selected = Dataset.from_parquet(str(tmp_path / "filtered/train.parquet"))
+    random_rows = Dataset.from_parquet(str(tmp_path / "filtered/random_train.parquet"))
+    profiles = Dataset.from_parquet(str(tmp_path / "filtered/profiled_candidates.parquet"))
+    assert [row["extra_info"]["index"] for row in selected] == [1]
+    assert [row["extra_info"]["index"] for row in random_rows] == [1]
+    failed, valid, context = [row["student_profile"] for row in profiles]
+    assert failed["mean"] is None and failed["passed"] is None and failed["variance"] is None
+    assert failed["exclusion"] == "infrastructure_error" and failed["errors"] == 1
+    assert failed["total"] == 7
+    assert valid["mean"] == .125 and valid["selected"]
+    assert context["exclusion"] == "context_window" and context["total"] == 0
+    assert manifest["error_excluded_rows"] == 1 and manifest["error_actions"] == 1
+    assert manifest["context_excluded_rows"] == 1 and manifest["verified_rows"] == 1
+
+
 def test_paired_report_preserves_shared_errors_and_aligns_reordered_rows():
     rows = [adapt_row(swe_row(i), "swe", i, "validation") for i in range(4)]
     reference = [retained(row, 0, reward) for row, reward in zip(rows, [0, 0, 1, 1])]

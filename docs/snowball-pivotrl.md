@@ -104,8 +104,12 @@ uv run python -m infra.rl_data.pivot_publish --artifacts "$FILTERED_LOCAL" \
 ```
 
 Selection rejects wrong policy identities, updated/resumed policies, missing samples,
-duplicate repetitions, validation contamination, nonbinary outcomes, and verifier
-failures. Context-overflow exclusions are recorded separately from incorrect answers.
+duplicate repetitions, validation contamination, and nonbinary outcomes. Profiling
+continues after retained request/verifier errors. A candidate with any failed attempt
+is excluded from both pivot selection and the random control; its partial outcomes
+never receive a mean or variance. Every candidate must still have eight retained
+attempts, so missing batches cannot silently pass as complete profiling. Error counts
+and context-overflow exclusions are recorded separately from incorrect answers.
 Outputs include every candidate's student mean/variance in
 `profiled_candidates.parquet`, `statistics.jsonl`, the selected `train.parquet`, the
 count-matched `random_train.parquet`, and a
