@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import math
 import os
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Type
 
 from loguru import logger
@@ -160,6 +161,12 @@ class DistillationTokenBudgetCallback(TrainerCallback):
         return control
 
 
+@dataclass(frozen=True)
+class EvaluationSamplingConfig:
+    sampling_params: Dict[str, Any] | None = None
+    n_samples_per_prompt: int | None = None
+
+
 @register_callback("evaluation")
 class EvaluationCallback(TrainerCallback):
     """Schedule evaluations and stop after configured gains over the first evaluation.
@@ -185,7 +192,9 @@ class EvaluationCallback(TrainerCallback):
         self.eval_steps = eval_steps
         self.eval_on_train_end = eval_on_train_end
         self.eval_before_train = eval_before_train
-        self.additional_evaluations = additional_evaluations or {}
+        self.additional_evaluations = {
+            name: EvaluationSamplingConfig(**parameters) for name, parameters in (additional_evaluations or {}).items()
+        }
         self.metric_groups = metric_groups or {}
         self.stop_on_improvement = stop_on_improvement or {}
         self._initial_values: Dict[str, float] = {}
@@ -203,7 +212,11 @@ class EvaluationCallback(TrainerCallback):
         self, state: TrainerState, control: TrainerControl, *, metrics: Dict[str, float], trainer, **kwargs
     ) -> TrainerControl:
         for name, parameters in self.additional_evaluations.items():
-            additional = await trainer.eval(val_set_name=name, **parameters)
+            additional = await trainer.eval(
+                val_set_name=name,
+                sampling_params=parameters.sampling_params,
+                n_samples_per_prompt=parameters.n_samples_per_prompt,
+            )
             metrics.update({key.replace("eval/", f"eval/{name}/", 1): value for key, value in additional.items()})
         for name, members in self.metric_groups.items():
             metrics[name] = math.fsum(metrics[member] / len(members) for member in members)

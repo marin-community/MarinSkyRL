@@ -268,6 +268,12 @@ def validate_trajectory_runner_capabilities(
     # executes that package's eager registration imports, including Torch.
     from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
 
+    if mode is not TrajectoryRunnerMode.SKYRL_GYM and any(
+        callback.get("type") == "evaluation" and callback.get("additional_evaluations")
+        for callback in (cfg.trainer.get("callbacks") or [])
+    ):
+        raise ValueError(f"{mode.value} does not support additional evaluation sampling profiles")
+
     distillation_plan = compile_distillation_plan_from_config(cfg)
     capabilities = trajectory_runner_capabilities(cfg, mode)
     if cfg.generator.get("require_exact_chat_transport", False):

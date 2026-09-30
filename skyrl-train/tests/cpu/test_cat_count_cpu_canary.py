@@ -249,7 +249,7 @@ def test_cat_count_evaluation_stops_at_reward_gain_and_preserves_sampled_results
                 "eval_steps": 2,
                 "additional_evaluations": {
                     "sampled": {
-                        "sampling_params": {"temperature": 1.0},
+                        "sampling_params": {"temperature": 1.0, "seed": 42},
                         "n_samples_per_prompt": 8,
                     }
                 },

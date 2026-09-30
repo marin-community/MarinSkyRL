@@ -21,6 +21,7 @@ import sys
 import types
 
 import pytest
+from omegaconf import OmegaConf
 from ray.exceptions import ActorDiedError
 
 import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
@@ -198,16 +199,24 @@ def test_from_config_retries_s3_engine_gang_after_actor_startup_failure(monkeypa
     assert attempts[1]["engine_init_timeout_seconds"] < attempts[0]["engine_init_timeout_seconds"]
 
 
-def test_from_config_reserves_enough_rollout_logprobs(monkeypatch):
+@pytest.mark.parametrize(("training", "evaluation", "profile", "expected"), [(16, 24, None, 24), (0, None, 5, 5)])
+def test_from_config_reserves_enough_rollout_logprobs(monkeypatch, training, evaluation, profile, expected):
     captured = {}
     monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])
     cfg = get_default_config()
-    cfg.generator.sampling_params.logprobs = 16
-    cfg.generator.eval_sampling_params.logprobs = 24
+    cfg.generator.sampling_params.logprobs = training
+    cfg.generator.eval_sampling_params.logprobs = evaluation
+    if profile is not None:
+        OmegaConf.update(
+            cfg,
+            "trainer.callbacks",
+            [{"type": "evaluation", "additional_evaluations": {"sampled": {"sampling_params": {"logprobs": profile}}}}],
+            force_add=True,
+        )
 
     main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
 
-    assert captured["max_logprobs"] == 24
+    assert captured["max_logprobs"] == expected
 
 
 def test_policy_tokenizer_uses_configured_revision(monkeypatch):

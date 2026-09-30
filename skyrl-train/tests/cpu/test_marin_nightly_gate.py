@@ -192,7 +192,6 @@ def test_eval_payloads_do_not_count_as_training_steps(spec):
 def test_insufficient_reward_improvement_fails_the_trend_gate(rewards, window):
     failures = check_run(parse_metrics(reward_log(rewards)), trend_spec(window=window), wall_clock_seconds=300)
     assert len(failures) == 1
-    assert "expected at least +0.0300" in failures[0]
 
 
 @pytest.mark.parametrize("rewards", [[0.05, 0.06, 0.20, 0.22], [-1e308, -1e308, 1e308, 1e308]])

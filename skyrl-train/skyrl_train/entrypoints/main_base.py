@@ -176,6 +176,13 @@ def create_ray_wrapped_inference_engines_from_config(
         if isinstance(value, int) and not isinstance(value, bool) and value > 0
     ]
 
+    for callback in cfg.trainer.get("callbacks") or []:
+        if callback.get("type") == "evaluation":
+            for profile in callback.get("additional_evaluations", {}).values():
+                value = (profile.get("sampling_params") or {}).get("logprobs")
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    requested_logprobs.append(value)
+
     role = InferenceEngineRoleConfig(
         pretrain=rollout_model_path,
         backend=cfg.generator.backend,

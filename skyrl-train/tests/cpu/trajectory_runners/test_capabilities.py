@@ -103,6 +103,26 @@ def test_runner_capabilities_accept(mode, agent_name, overrides, distillation, l
 
 # (mode, harbor agent or None, overrides, distillation, operation, match naming the runner or config field)
 REJECTED = [
+    *(
+        pytest.param(
+            mode,
+            None,
+            {
+                **NO_TIS,
+                "trainer.callbacks": [
+                    {
+                        "type": "evaluation",
+                        "additional_evaluations": {"sampled": {"sampling_params": {"temperature": 1.0}}},
+                    }
+                ],
+            },
+            False,
+            "train",
+            "does not support additional evaluation sampling profiles",
+            id=f"{mode.value}-sampling-profiles",
+        )
+        for mode in (HARBOR, MINI_SWE)
+    ),
     pytest.param(HARBOR, "codex", {}, False, "train", "Harbor codex cannot supply exact", id="harbor-codex"),
     pytest.param(HARBOR, "future-agent", {}, False, "train", "Harbor future-agent", id="harbor-unknown-agent"),
     *(

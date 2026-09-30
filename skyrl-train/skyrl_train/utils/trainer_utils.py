@@ -232,16 +232,31 @@ def evaluation_response_metrics(trajectory_batch: TrajectoryBatch) -> Dict[str, 
     stops = trajectory_batch.get("stop_reasons")
     metrics = {key.removeprefix("consumed/"): value for key, value in consumed_stop_metrics(stops, count).items()}
     if trajectory_batch.get("env_metrics") is not None:
-        rollout_metrics = get_rollout_metrics(
-            trajectory_batch["response_ids"],
-            trajectory_batch["rewards"],
-            trajectory_batch["env_metrics"],
-            trajectory_batch["env_classes"],
-            verification_results=trajectory_batch.get("verification_results"),
-        )
-        metrics.update(
-            {key: value for key, value in rollout_metrics.items() if key.startswith(ENVIRONMENT_METRIC_PREFIX)}
-        )
+        environments = set(trajectory_batch["env_classes"])
+        for environment in environments:
+            indices = [i for i, name in enumerate(trajectory_batch["env_classes"]) if name == environment]
+            subset = {
+                key: [values[i] for i in indices]
+                for key, values in trajectory_batch.items()
+                if isinstance(values, list)
+            }
+            rollout_metrics = get_rollout_metrics(
+                subset["response_ids"],
+                subset["rewards"],
+                subset["env_metrics"],
+                subset["env_classes"],
+                verification_results=subset.get("verification_results"),
+            )
+            prefix = ENVIRONMENT_METRIC_PREFIX
+            if len(environments) > 1:
+                prefix = f"{prefix}{environment}/"
+            metrics.update(
+                {
+                    f"{prefix}{key.removeprefix(ENVIRONMENT_METRIC_PREFIX)}": value
+                    for key, value in rollout_metrics.items()
+                    if key.startswith(ENVIRONMENT_METRIC_PREFIX)
+                }
+            )
     metrics.update(
         response_tokens=float(sum(lengths)),
         response_tokens_mean=sum(lengths) / count,

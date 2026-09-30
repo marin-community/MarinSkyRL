@@ -442,13 +442,13 @@ class RayPPOTrainer:
     ) -> Dict[str, float]:
         """Evaluate the current policy with optional sampling overrides and a named output directory."""
         overrides = {"generator": {}, "trainer": {}}
-        if sampling_params is not None:
-            overrides["generator"]["eval_sampling_params"] = sampling_params
         if n_samples_per_prompt is not None:
             overrides["generator"]["eval_n_samples_per_prompt"] = n_samples_per_prompt
         if val_set_name is not None:
             overrides["trainer"]["export_path"] = join_resource_path(self.cfg.trainer.export_path, val_set_name)
         cfg = OmegaConf.merge(self.cfg, overrides)
+        for key, value in (sampling_params or {}).items():
+            OmegaConf.update(cfg, f"generator.eval_sampling_params.{key}", value, force_add=True)
         evaluator = evaluate_step_wise if cfg.trainer.step_wise_training else evaluate
         return await evaluator(
             eval_dataloader=self.eval_dataloader,
@@ -679,13 +679,7 @@ class RayPPOTrainer:
                 and self._last_evaluated_step != self.global_step
             ):
                 with Timer("eval", self.all_timings):
-                    eval_metrics = await self.eval()
-                    self._control = await self.callback_handler.call_event_async(
-                        "on_evaluate", final_state, self._control, metrics=eval_metrics, trainer=self
-                    )
-                    self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
-                    self.tracker.log(eval_metrics, step=self.global_step, commit=True)
-                    self._last_evaluated_step = self.global_step
+                    await self._evaluate_and_log(final_state, commit=True)
                 self._control.should_evaluate = False
         finally:
             if self.colocate_all:
@@ -825,13 +819,7 @@ class RayPPOTrainer:
             if step_wall is not None:
                 step_wall.start("evaluation")
             with Timer("eval", self.all_timings):
-                eval_metrics = await self.eval()
-                self._control = await self.callback_handler.call_event_async(
-                    "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
-                )
-                self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
-                self.tracker.log(eval_metrics, step=self.global_step, commit=False)
-                self._last_evaluated_step = self.global_step
+                await self._evaluate_and_log(state, commit=False)
             self._control.should_evaluate = False
         if step_wall is not None:
             step_wall.start("step_end_bookkeeping")
@@ -1515,16 +1503,19 @@ class RayPPOTrainer:
             with Timer("update_ref_with_policy", self.all_timings):
                 await asyncio.to_thread(self.update_ref_with_policy)
 
+    async def _evaluate_and_log(self, state: TrainerState, *, commit: bool) -> None:
+        eval_metrics = await self.eval()
+        self._control = await self.callback_handler.call_event_async(
+            "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
+        )
+        self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
+        self.tracker.log(eval_metrics, step=self.global_step, commit=commit)
+        self._last_evaluated_step = self.global_step
+
     async def _run_pretraining_evaluation(self, state: TrainerState) -> None:
         # Pre-step evaluation must not be mixed into the first optimizer step's inclusive timers.
         with Timer("eval_before_train") as pretrain_eval_timer:
-            eval_metrics = await self.eval()
-            self._control = await self.callback_handler.call_event_async(
-                "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
-            )
-            self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
-            self.tracker.log(eval_metrics, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
-            self._last_evaluated_step = self.global_step
+            await self._evaluate_and_log(state, commit=self.cfg.trainer.tracker_commit_each_step)
         startup_eval = {"startup/eval_before_train": pretrain_eval_timer.duration}
         self._log_metrics_stdout(startup_eval, step=self.global_step, kind="startup")
         self.tracker.log(startup_eval, step=self.global_step, commit=False)
