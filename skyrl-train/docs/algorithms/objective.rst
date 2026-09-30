@@ -225,8 +225,9 @@ Validation and failure stages
 
 ``validate_launch_config`` checks a composed objective before job submission.
 ``validate_cfg`` repeats the contract at runtime startup after resolving custom
-registrations. Resolved contracts contain only primitive configuration values
-for worker transport. Teacher startup checks tokenizer identity and capabilities;
+registrations. Consumers compute objective settings from the current config;
+custom loss declarations travel with their callables through the Ray registry.
+Teacher startup checks tokenizer identity and capabilities;
 writer admission checks actual rollout evidence. After admission, the driver
 checks teacher row identities before learner-batch assembly. An optimizer-step
 failure is a separate runtime event.

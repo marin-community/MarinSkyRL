@@ -115,7 +115,8 @@ def test_rollout_batch_conversion_records_domain_reward_metrics():
     trainer = object.__new__(RayPPOTrainer)
     trainer.context = SimpleNamespace(config=SimpleNamespace(batch_size=3, max_staleness_steps=0))
     trainer.cfg = get_default_config()
-    trainer.cfg.trainer.algorithm.policy_loss_type = "pg"
+    trainer.cfg.trainer.algorithm.policy_loss_type = "regular"
+    trainer.cfg.trainer.algorithm.off_policy_correction = "none"
     trainer.cfg.generator.n_samples_per_prompt = 2
     trainer.global_step = 0
     trainer.all_metrics = {}
