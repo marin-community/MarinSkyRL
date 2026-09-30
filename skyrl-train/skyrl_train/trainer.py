@@ -41,6 +41,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     graded_row_indices,
     normalized_verifier_scores,
     scalar_reward_token_credit,
+    verifier_score_summary,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
 from skyrl_train.dataset.preprocess import (
@@ -2253,10 +2254,10 @@ class RayPPOTrainer:
         ) / len(grouped_rewards)
         verifier_scores = normalized_verifier_scores(trajectory_batch)
         if verifier_scores is not None:
-            scored = [score for score in verifier_scores if score is not None]
-            reward_metrics["reward/verifier_score_coverage"] = len(scored) / len(verifier_scores)
-            if scored:
-                reward_metrics["reward/avg_verifier_score"] = float(np.mean(scored))
+            coverage, average = verifier_score_summary(verifier_scores)
+            reward_metrics["reward/verifier_score_coverage"] = coverage
+            if average is not None:
+                reward_metrics["reward/avg_verifier_score"] = average
             results = trajectory_batch["verification_results"]
             scores_by_agent: Dict[str, List[float]] = defaultdict(list)
             for result, score in zip(results, verifier_scores, strict=True):

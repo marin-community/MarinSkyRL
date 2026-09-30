@@ -1067,12 +1067,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 )
                 outputs[index].verification = VerificationResult.verified(
                     reward,
-                    diagnostics={
-                        "agent": (ultra_at(index) or {})["agent"],
-                        "genrm_metrics": metrics,
-                        "score_min": 1.0,
-                        "score_max": 5.0,
-                    },
+                    diagnostics={"agent": (ultra_at(index) or {})["agent"], "genrm_metrics": metrics},
+                    score_range=(1.0, 5.0),
                 )
                 outputs[index].env_metrics.update({f"genrm/{name}": value for name, value in metrics.items()})
 

@@ -70,7 +70,7 @@ def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
         "response_ids": [[1], [2]],
         "rewards": [5.0, 0.0],
         "verification_results": [
-            VerificationResult.verified(5.0, diagnostics={"score_min": 1.0, "score_max": 5.0}),
+            VerificationResult.verified(5.0, score_range=(1.0, 5.0)),
             VerificationResult.verified(0.0),
         ],
     }

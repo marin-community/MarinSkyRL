@@ -700,9 +700,10 @@ def get_outcome_rewards(trajectory_batch: TrajectoryBatch) -> List[float]:
 
 
 def normalized_verifier_scores(trajectory_batch: TrajectoryBatch) -> List[float | None] | None:
-    """Return bounded task scores, including zero for verifier failures.
+    """Return bounded task scores, or None if the batch has no verdict channel.
 
-    A verifier may declare its native score range in diagnostics. This keeps
+    Entries are None for skipped or missing verdicts and zero for verifier
+    failures. A verifier may declare its native score range. This keeps
     GenRM's 1–5 ratings comparable with 0–1 verifiers in cross-task averages,
     while leaving the optimization rewards and raw verifier scores intact.
     """
@@ -720,6 +721,13 @@ def normalized_verifier_scores(trajectory_batch: TrajectoryBatch) -> List[float 
         else:
             scores.append(normalized_verifier_score(result))
     return scores
+
+
+def verifier_score_summary(scores: List[float | None]) -> tuple[float, float | None]:
+    """Return included-row coverage and mean bounded score."""
+    included = [score for score in scores if score is not None]
+    coverage = len(included) / len(scores) if scores else 0.0
+    return coverage, float(np.mean(included)) if included else None
 
 
 def graded_row_indices(trajectory_batch: TrajectoryBatch) -> List[int]:

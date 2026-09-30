@@ -14,6 +14,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     get_metrics_from_trajectory_batch,
     normalized_verifier_scores,
     prepare_trajectory_request,
+    verifier_score_summary,
 )
 from skyrl_train.trajectory_runners.base import (
     ConversationType,
@@ -178,11 +179,11 @@ def _calculate_eval_metrics(
         }
     )
     verifier_scores = normalized_verifier_scores(batch)
-    if verifier_scores:
-        scored = [score for score in verifier_scores if score is not None]
-        metrics["eval/all/verifier_score_coverage"] = len(scored) / len(verifier_scores)
-        if scored:
-            metrics["eval/all/avg_verifier_score"] = sum(scored) / len(scored)
+    if verifier_scores is not None:
+        coverage, average = verifier_score_summary(verifier_scores)
+        metrics["eval/all/verifier_score_coverage"] = coverage
+        if average is not None:
+            metrics["eval/all/avg_verifier_score"] = average
     metrics.update({f"eval/all/{key}": value for key, value in evaluation_response_metrics(batch).items()})
     return metrics
 

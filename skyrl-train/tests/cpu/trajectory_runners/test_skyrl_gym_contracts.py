@@ -44,7 +44,7 @@ def test_missing_legacy_reward_is_not_a_zero_verdict():
 
 def test_multiturn_verification_averages_scored_turns_and_requires_all_to_pass():
     results = [
-        VerificationResult.verified(5.0, passed=True, diagnostics={"score_min": 1.0, "score_max": 5.0}),
+        VerificationResult.verified(5.0, passed=True, score_range=(1.0, 5.0)),
         VerificationResult.unavailable("tool turn has no verdict"),
         VerificationResult.verified(0.0, passed=False),
     ]

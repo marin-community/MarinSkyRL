@@ -67,7 +67,7 @@ def test_training_reports_normalized_composite_scores_by_agent():
         "response_ids": [[1], [2], [3]],
         "rewards": [5.0, 1.0, 0.0],
         "verification_results": [
-            VerificationResult.verified(5.0, diagnostics={"agent": "genrm", "score_min": 1.0, "score_max": 5.0}),
+            VerificationResult.verified(5.0, diagnostics={"agent": "genrm"}, score_range=(1.0, 5.0)),
             VerificationResult.verified(1.0, diagnostics={"agent": "mcqa"}),
             VerificationResult.error("judge unavailable", diagnostics={"agent": "mcqa"}),
         ],
