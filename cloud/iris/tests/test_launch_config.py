@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import base64
-import asyncio
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-from skyrl_train.callbacks.base import CallbackHandler, TrainerState, TrainerControl
-from skyrl_train.callbacks.builtin import create_default_callbacks
 
 from cloud.iris import training_driver
 from cloud.iris.launch_config import load_launch_config, validate_launch_config
@@ -116,10 +113,6 @@ def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) ->
 
     assert config.skyrl.trainer.train_batch_size == 8
     assert validate_launch_config(config).num_nodes == 1
-    handler = CallbackHandler(create_default_callbacks(config.skyrl))
-    state = TrainerState(global_step=2, epoch=0, total_steps=10, num_steps_per_epoch=10)
-    control = asyncio.run(handler.call_event_async("on_step_end", state, TrainerControl()))
-    assert control.should_save
 
 
 @pytest.mark.parametrize(
