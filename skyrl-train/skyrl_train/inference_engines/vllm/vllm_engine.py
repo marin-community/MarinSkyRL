@@ -1046,6 +1046,41 @@ class WorkerWrap:
         """This worker's host, GPU and ranks, as a plain dict."""
         return asdict(self._device_placement())
 
+    def probe_numerics_provenance(self) -> dict[str, Any]:
+        """Read-only numerics provenance for mismatch probes.
+
+        Returns this worker's placement, a SHA-256 over its live parameters in name
+        order, library and GPU versions, and the Inductor output-code modules that
+        compiled vLLM runs (``torch._inductor`` cache directory, ``*.py``).
+        """
+        import hashlib
+
+        import triton
+        from torch._inductor.runtime.cache_dir_utils import cache_dir
+
+        digest = hashlib.sha256()
+        for name, parameter in sorted(self.model_runner.model.named_parameters()):
+            digest.update(name.encode())
+            digest.update(parameter.detach().contiguous().view(torch.uint8).cpu().numpy().tobytes())
+        root = Path(cache_dir())
+        output_code = {
+            str(path.relative_to(root)): path.read_text(errors="replace") for path in sorted(root.rglob("*.py"))
+        }
+        return {
+            "placement": asdict(self._device_placement()),
+            "parameter_sha256": digest.hexdigest(),
+            "versions": {
+                "torch": torch.__version__,
+                "cuda": torch.version.cuda,
+                "cudnn": torch.backends.cudnn.version(),
+                "nccl": ".".join(str(part) for part in torch.cuda.nccl.version()),
+                "triton": triton.__version__,
+                "vllm": vllm.__version__,
+                "gpu": torch.cuda.get_device_name(),
+            },
+            "inductor_output_code": output_code,
+        }
+
     def _device_placement(self) -> InferenceWorkerPlacement:
         dp, pp = get_dp_group(), get_pp_group()
         ep = get_ep_group() if self.model_config.is_moe else None
@@ -1874,6 +1909,10 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
     async def report_engine_placement(self):
         """Host, GPU and ranks of every worker of this engine."""
         return await self.llm.collective_rpc("report_device_placement")
+
+    async def probe_numerics_provenance(self) -> list[dict[str, Any]]:
+        """Numerics provenance from every worker of this engine; see ``WorkerWrap``."""
+        return await self.llm.collective_rpc("probe_numerics_provenance")
 
     async def expert_block_rpc(self, method: str, *args) -> list:
         """Call one expert-block sync method on every worker of this engine.

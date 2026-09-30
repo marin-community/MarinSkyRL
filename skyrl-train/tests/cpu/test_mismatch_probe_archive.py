@@ -1,3 +1,4 @@
+import json
 import hashlib
 from types import SimpleNamespace
 
@@ -30,6 +31,15 @@ class _InferenceEndpoint:
 
     async def reset_prefix_cache(self):
         pass
+
+    async def probe_numerics_provenance(self):
+        worker = {
+            "placement": {"dp_rank": 0, "ep_rank": 1},
+            "parameter_sha256": "ab" * 32,
+            "versions": {"torch": "test"},
+            "inductor_output_code": {"q7/cq7kernel.py": "def call(args):\n    pass\n"},
+        }
+        return [[worker]]
 
     async def generate(self, request):
         probabilities = torch.log_softmax(torch.arange(32, dtype=torch.float32), dim=0)
@@ -267,6 +277,10 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     callback = MismatchProbeCallback(cfg)
     await callback.on_train_begin_async(TrainerState(0, 0, 9, 9), TrainerControl(), trainer=trainer)
     callback.on_train_end(TrainerState(0, 0, 9, 9), TrainerControl(), trainer=trainer)
+    code = tmp_path / "frozen-reference-inductor-output-code" / "engine-0" / "dp-0-ep-1" / "q7" / "cq7kernel.py"
+    assert code.read_text() == "def call(args):\n    pass\n"
+    vllm_workers = json.loads(read_frozen_probe(cfg.trainer.mismatch_probe.archive_uri).manifest.hardware_json)["vllm"]
+    assert [worker["parameter_sha256"] for worker in vllm_workers] == ["ab" * 32]
     # The fresh re-read now routes differently, but re-read replay still uses the frozen reference.
     assert trainer.policy_model.prompt_routes_by_mode["reread_replay"][0, :, 0].tolist() == [[0, 0], [3, 4], [4, 5]]
     frozen_rows = [row for row in chained_scores(cfg) if row.scorer == "vllm.rescore_frozen"]

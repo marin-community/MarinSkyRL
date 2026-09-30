@@ -190,6 +190,10 @@ class InferenceEngineInterface(ABC):
         """Begin a bounded online-EAGLE capture interval when supported."""
         raise NotImplementedError()
 
+    async def probe_numerics_provenance(self) -> List[Dict[str, Any]]:
+        """Per-worker parameter digest, versions and compiled output code, when supported."""
+        raise NotImplementedError()
+
     async def seal_online_eagle_capture(self, destination: str) -> OnlineEagleResult:
         """Publish the active capture to cloud storage."""
         raise NotImplementedError()

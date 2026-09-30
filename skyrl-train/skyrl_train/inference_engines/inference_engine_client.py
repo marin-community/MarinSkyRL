@@ -429,6 +429,10 @@ class InferenceEngineClient(InferenceEngineInterface):
             output["routed_experts"] = routed_experts
         return output
 
+    async def probe_numerics_provenance(self) -> List[List[Dict[str, Any]]]:
+        """Numerics provenance from every worker of every engine."""
+        return await self._run_on_all_engines("probe_numerics_provenance")
+
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> List[OnlineEagleResult]:
         """Begin the same capture interval on every live inference engine."""
         return await self._run_on_all_engines("begin_online_eagle_capture", config)

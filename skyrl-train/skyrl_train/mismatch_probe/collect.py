@@ -31,6 +31,7 @@ from skyrl_train.config.mismatch_probe import (
 )
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.group_admission import GroupAdvantageInvariant, GroupAdvantageKind
+from skyrl_train.io.io import write_bytes_atomic
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.inference_engines.vllm_teacher_oracle import tokenizer_vocabulary_fingerprint
 from skyrl_train.mismatch_probe.archive import (
@@ -186,6 +187,8 @@ class ProbeCollector:
         self.reread_routes: dict[int, list[np.ndarray]] = {}
         # The reused source's prefill reference rows, keyed by sample.
         self.frozen_rereads: dict[str, mismatch.ScoreRow] = {}
+        # Per vLLM worker: placement, parameter digest and versions (output code is written beside the archive).
+        self.vllm_provenance: list[dict] = []
 
     async def _generate(self, trainer):
         if trainer.eval_dataset is None:
@@ -513,6 +516,27 @@ class ProbeCollector:
                 )
         return result
 
+    async def _record_vllm_provenance(self, trainer) -> None:
+        """Record each vLLM worker's parameter digest and versions, and write its compiled output code."""
+        engines = await trainer.inference_engine_client.probe_numerics_provenance()
+        code_root = f"{self.archive_uri.rstrip('/')}-inductor-output-code"
+        for engine_index, workers in enumerate(engines):
+            for worker in workers:
+                placement = worker["placement"]
+                worker_dir = f"{code_root}/engine-{engine_index}/dp-{placement['dp_rank']}-ep-{placement['ep_rank']}"
+                for relative_path, text in worker["inductor_output_code"].items():
+                    write_bytes_atomic(f"{worker_dir}/{relative_path}", text.encode())
+                self.vllm_provenance.append(
+                    {
+                        "engine": engine_index,
+                        "placement": placement,
+                        "parameter_sha256": worker["parameter_sha256"],
+                        "versions": worker["versions"],
+                        "output_code_files": len(worker["inductor_output_code"]),
+                        "output_code_uri": worker_dir,
+                    }
+                )
+
     def _policy_weights_hash(self, trainer) -> str:
         shards = ray.get(trainer.policy_model.async_run_ray_method("pass_through", "probe_weights_digest"))
         if not shards or not all(isinstance(shard, str) and len(shard) == 64 for shard in shards):
@@ -702,6 +726,10 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
         probe.weights[update] = "pending"
         rescore_rows = await probe._rescore_vllm(trainer, update)
         probe.timing[f"update@{update}/vllm_total_seconds"] = time.monotonic() - rescore_started
+        if update == 0:
+            provenance_started = time.monotonic()
+            await probe._record_vllm_provenance(trainer)
+            probe.timing["probe/vllm_provenance_seconds"] = time.monotonic() - provenance_started
         if trainer.colocate_all:
             await trainer.inference_engine_client.sleep()
         try:

@@ -391,6 +391,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def begin_online_eagle_capture(self, config: Dict[str, Any]):
         return await self.inference_engine_actor.begin_online_eagle_capture.remote(config)
 
+    async def probe_numerics_provenance(self):
+        return await self.inference_engine_actor.probe_numerics_provenance.remote()
+
     async def seal_online_eagle_capture(self, destination: str):
         return await self.inference_engine_actor.seal_online_eagle_capture.remote(destination)
 
