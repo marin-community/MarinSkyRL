@@ -20,6 +20,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from transformers import PreTrainedTokenizerBase
 
 from marinskyrl.resource_locator import join_resource_path
+from marinskyrl.pivot_history import profile_record_summary
 from skyrl_train.trajectory_runners.types import (
     TrajectoryRequestBatch,
     TrajectoryBatch,
@@ -518,6 +519,9 @@ def _archive_payload(selected: Sequence[_SelectedRecord]) -> bytes:
                     "entry": entry_name,
                 }
             )
+            extra = item.record.trajectory.environment_extras.get("extra_info", {})
+            if "profiling_attempt" in extra:
+                manifest_records[-1]["profiling"] = profile_record_summary(item.record.to_json())
         manifest = {"schema_version": RETENTION_SCHEMA_VERSION, "records": manifest_records}
         info = zipfile.ZipInfo(_ARCHIVE_MANIFEST)
         info.date_time = (1980, 1, 1, 0, 0, 0)

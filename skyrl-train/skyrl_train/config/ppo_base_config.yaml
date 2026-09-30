@@ -367,6 +367,7 @@ generator:
   reference_actions: false
   pivot_profiling: false
   pivot_profiling_max_retries: 2
+  pivot_profiling_resume: false
   model_name: ${trainer.policy.model.path}
   model_dtype: "bfloat16"
   timeout_multiplier: 1.0
