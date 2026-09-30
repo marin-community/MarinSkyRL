@@ -12,6 +12,7 @@ from skyrl_train.models.megatron_router_replay import (
     LayerReplayHandle,
     MegatronRouterReplay,
     RouterScoreType,
+    VllmExpertParallel,
     capture_layer_indices,
     dense_replay_targets,
     expand_moe_layer_freq,
@@ -263,16 +264,20 @@ class TestControllerRecomputeFifo:
         for value in range(3):
             targets = torch.full((4, 2), value, dtype=torch.long)
             mask = torch.ones(4, dtype=torch.bool)
-            mb.append((targets, mask))
+            # Each micro-batch's rows came from their own vLLM data-parallel ranks.
+            placement = VllmExpertParallel(torch.arange(4) + value, ep_size=8)
+            mb.append((targets, mask, placement))
 
         def forward(i):
-            controller.begin_forward({layer: mb[i][0]}, mb[i][1])
+            controller.begin_forward({layer: mb[i][0]}, mb[i][1], vllm_expert_parallel=mb[i][2])
             probs, idx = handle.get_replay_topk(scores, 2, None, None, _fake_compute_topk)
             controller.end_forward()
+            assert handle.take_vllm_expert_parallel() is mb[i][2]
             return idx
 
         def recompute(i):
             _, idx = handle.get_replay_topk(scores, 2, None, None, _fake_compute_topk)
+            assert handle.take_vllm_expert_parallel() is mb[i][2], "recompute must serve its own vLLM placement"
             return idx
 
         f1 = forward(0)

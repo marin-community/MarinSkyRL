@@ -228,6 +228,7 @@ class MegatronWorker:
                     else None,
                     probe_row_indices=micro.get("probe_row_indices"),
                     rollout_prompt_routed_experts=micro.get("rollout_prompt_routed_experts"),
+                    vllm_dp_ranks=micro.get("vllm_dp_rank"),
                 )
             )
 
@@ -347,6 +348,7 @@ class MegatronWorker:
                     global_loss_denom=None,
                     rollout_routed_experts=micro.get("rollout_routed_experts"),
                     rollout_prompt_routed_experts=micro.get("rollout_prompt_routed_experts"),
+                    vllm_dp_ranks=micro.get("vllm_dp_rank"),
                 )
             )
         seconds = []

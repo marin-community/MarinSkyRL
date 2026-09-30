@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from collections import deque
 from contextlib import contextmanager
+from dataclasses import dataclass
 from skyrl_train.config.router_replay import validate_replay_keep_fraction
 from skyrl_train.mismatch_probe.modes import FILTERED_REPLAY_MODE, REPLAY_MODE
 from enum import Enum
@@ -39,6 +40,7 @@ import torch
 __all__ = [
     "MegatronRouterReplay",
     "LayerReplayHandle",
+    "VllmExpertParallel",
     "MIN_ROUTER_TOPK",
     "SENTINEL_EXPERT_ID",
     "dense_replay_targets",
@@ -180,6 +182,18 @@ def slice_sequence_parallel(
     return x[start : start + local * batch_size]
 
 
+@dataclass(frozen=True)
+class VllmExpertParallel:
+    """Each router row's vLLM data-parallel rank and vLLM's expert-parallel size.
+
+    vLLM adds a token's per-rank expert partials in a ring that starts after the rank holding the
+    token's request; the ``ep_sum`` numerics reproduce that order from these ranks.
+    """
+
+    dp_ranks: torch.Tensor
+    ep_size: int
+
+
 class _Phase(Enum):
     IDLE = "idle"
     FORWARD = "forward"
@@ -262,6 +276,9 @@ class MegatronRouterReplay:
         self._phase = _Phase.IDLE
         # layer capture idx -> (targets [N, K], replay mask [N]) for the current forward
         self._current: dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+        # vLLM placement of the current forward's rows, and what each layer's last router call was served
+        self._vllm_expert_parallel: Optional[VllmExpertParallel] = None
+        self._served_expert_parallel: dict[int, VllmExpertParallel] = {}
         self._expected: tuple[int, ...] = ()
         self._consumed: set[int] = set()
         self._response_mask: Optional[torch.Tensor] = None
@@ -302,6 +319,7 @@ class MegatronRouterReplay:
         *,
         record_recompute: bool = True,
         probe_positions: Optional[torch.Tensor] = None,
+        vllm_expert_parallel: Optional[VllmExpertParallel] = None,
     ) -> None:
         """Arm the controller for one forward over the model's local layers.
 
@@ -313,6 +331,8 @@ class MegatronRouterReplay:
         replay activation-checkpointed layers, even when forward runs under no_grad.
         ``probe_positions`` holds ``[N, 2]`` sample and response positions;
         non-response rows use -1 for the response position.
+        ``vllm_expert_parallel`` gives each row's vLLM data-parallel rank; every layer's router call
+        serves it (from the recompute FIFO during recompute) to ``take_vllm_expert_parallel``.
         """
         if self._phase is not _Phase.IDLE:
             raise RuntimeError("router replay: begin_forward while a forward is already armed (phase must be IDLE)")
@@ -322,7 +342,10 @@ class MegatronRouterReplay:
         self._response_mask = response_mask
         if probe_positions is not None and (probe_positions.ndim != 2 or probe_positions.shape != (mask.numel(), 2)):
             raise ValueError("probe positions must have one (sample, response-position) pair per router row")
+        if vllm_expert_parallel is not None and vllm_expert_parallel.dp_ranks.shape != (mask.numel(),):
+            raise ValueError("vLLM data-parallel ranks must have one entry per router row")
         self._probe_positions = probe_positions
+        self._vllm_expert_parallel = vllm_expert_parallel
         self._record_recompute = record_recompute
         self._phase = _Phase.FORWARD
 
@@ -340,6 +363,7 @@ class MegatronRouterReplay:
         self._expected = ()
         self._response_mask = None
         self._probe_positions = None
+        self._vllm_expert_parallel = None
         self._record_recompute = False
         self._phase = _Phase.IDLE
 
@@ -354,6 +378,8 @@ class MegatronRouterReplay:
         self._consumed = set()
         self._response_mask = None
         self._probe_positions = None
+        self._vllm_expert_parallel = None
+        self._served_expert_parallel = {}
         self._record_recompute = False
         self._phase = _Phase.IDLE
         for fifo in self._fifo.values():
@@ -417,7 +443,7 @@ class MegatronRouterReplay:
         """
         probs, native_idx = default_compute_topk(scores, topk, num_groups=num_groups, group_topk=group_topk)
         is_forward = self._phase is _Phase.FORWARD
-        targets, mask = self._targets_for_call(layer_idx, scores)
+        targets, mask, expert_parallel = self._targets_for_call(layer_idx, scores)
 
         if targets.shape[0] != scores.shape[0]:
             raise ValueError(
@@ -440,7 +466,11 @@ class MegatronRouterReplay:
         probs = scores.gather(1, idx)
 
         if is_forward and self._recompute_enabled and self._record_recompute:
-            self._fifo[layer_idx].append((idx.detach(), mask))
+            self._fifo[layer_idx].append((idx.detach(), mask, expert_parallel))
+        if expert_parallel is None:
+            self._served_expert_parallel.pop(layer_idx, None)
+        else:
+            self._served_expert_parallel[layer_idx] = expert_parallel
 
         if self._probe_positions is not None:
             if self._probe_positions.shape[0] != scores.shape[0]:
@@ -488,7 +518,13 @@ class MegatronRouterReplay:
             self._sentinel_rows += (response & ~mask).sum().item()
         return probs, idx
 
-    def _targets_for_call(self, layer_idx: int, scores: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def take_vllm_expert_parallel(self, layer_idx: int) -> Optional[VllmExpertParallel]:
+        """The vLLM placement served with ``layer_idx``'s last router call, or ``None`` if none was armed."""
+        return self._served_expert_parallel.pop(layer_idx, None)
+
+    def _targets_for_call(
+        self, layer_idx: int, scores: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[VllmExpertParallel]]:
         if self._phase is _Phase.FORWARD:
             if layer_idx not in self._current:
                 raise ValueError(
@@ -499,7 +535,7 @@ class MegatronRouterReplay:
                 raise ValueError(f"router replay: layer {layer_idx} consumed twice in one forward")
             self._consumed.add(layer_idx)
             targets, mask = self._current[layer_idx]
-            return targets, mask
+            return targets, mask, self._vllm_expert_parallel
         if not self._recompute_enabled or layer_idx not in self._fifo or not self._fifo[layer_idx]:
             raise RuntimeError(
                 f"router replay: recompute without a recorded forward (layer {layer_idx}, "
@@ -537,6 +573,10 @@ class LayerReplayHandle:
         return self._controller.get_replay_topk(
             self.layer_idx, scores, topk, num_groups, group_topk, default_compute_topk, self._score_type
         )
+
+    def take_vllm_expert_parallel(self) -> Optional[VllmExpertParallel]:
+        """The vLLM placement of the rows this router just routed (see ``MegatronRouterReplay.begin_forward``)."""
+        return self._controller.take_vllm_expert_parallel(self.layer_idx)
 
 
 def validate_replay_geometry(

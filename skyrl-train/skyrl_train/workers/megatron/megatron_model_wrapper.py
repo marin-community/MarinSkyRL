@@ -17,7 +17,7 @@ from skyrl_train.distributed.megatron.model_utils import (
 )
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl_train.distillation import DistillationInput, student_topk_logprobs
-from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
+from skyrl_train.models.megatron_router_replay import MegatronRouterReplay, VllmExpertParallel
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
 from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor, gather_ratio_tensor
@@ -56,6 +56,8 @@ class MegatronForwardMicroBatch:
     rollout_routed_experts: Optional[torch.Tensor] = None
     probe_row_indices: Optional[torch.Tensor] = None
     rollout_prompt_routed_experts: Optional[torch.Tensor] = None
+    # The vLLM data-parallel rank that served each sequence, for the ``ep_sum`` numerics.
+    vllm_dp_ranks: Optional[torch.Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,7 @@ class RouterReplayTargets:
     mask: torch.Tensor
     response_mask: torch.Tensor
     probe_positions: Optional[torch.Tensor]
+    vllm_dp_ranks: Optional[torch.Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,7 @@ class MegatronPolicyMicroBatch:
     distillation: Optional[DistillationInput] = None
     rollout_routed_experts: Optional[torch.Tensor] = None
     rollout_prompt_routed_experts: Optional[torch.Tensor] = None
+    vllm_dp_ranks: Optional[torch.Tensor] = None
 
 
 class MegatronModelWrapper:
@@ -193,6 +197,7 @@ class MegatronModelWrapper:
         layer_indices: tuple[int, ...],
         probe_row_indices: Optional[torch.Tensor] = None,
         rollout_prompt_routed_experts: Optional[torch.Tensor] = None,
+        vllm_dp_ranks: Optional[torch.Tensor] = None,
     ):
         """Build per-layer router targets in the exact token order the routers see.
 
@@ -202,7 +207,8 @@ class MegatronModelWrapper:
         sequence-major (``s*B + b``, mirroring the router view), and slices to
         this TP rank's contiguous sequence chunk under sequence parallelism.
         The result contains per-layer targets, replay and response masks, and
-        optional probe positions aligned to the model chunk's router rows.
+        optional probe positions and per-sequence vLLM data-parallel ranks aligned to
+        the model chunk's router rows.
         """
         controller = self.router_replay
         assert controller is not None
@@ -234,6 +240,13 @@ class MegatronModelWrapper:
             probe_positions = torch.zeros((batch_size, seq_len, 2), dtype=torch.long, device=device)
             probe_positions[:, seq_len - response_len :, 0] = probe_row_indices[:, None] + 1
             probe_positions[:, seq_len - response_len :, 1] = torch.arange(1, response_len + 1, device=device)
+        ranks_BS = None
+        if vllm_dp_ranks is not None:
+            if vllm_dp_ranks.shape != (batch_size,):
+                raise ValueError("vLLM data-parallel ranks must have one entry per sequence")
+            ranks_BS = (
+                vllm_dp_ranks.to(device=device, dtype=torch.long)[:, None].expand(batch_size, seq_len).contiguous()
+            )
 
         if self.use_sample_packing:
             # The routes tensor is ours, not the pipeline's input: always run the
@@ -244,6 +257,8 @@ class MegatronModelWrapper:
             response_BS, _ = preprocess_packed_seqs(response_BS, attention_mask, pre_process=True)
             if probe_positions is not None:
                 probe_positions, _ = preprocess_packed_seqs(probe_positions, attention_mask, pre_process=True)
+            if ranks_BS is not None:
+                ranks_BS, _ = preprocess_packed_seqs(ranks_BS, attention_mask, pre_process=True)
         else:
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids = position_ids.masked_fill(attention_mask == 0, 0)
@@ -254,12 +269,15 @@ class MegatronModelWrapper:
                 probe_positions, _, _ = remove_left_padding(
                     probe_positions, attention_mask, position_ids, pre_process=True
                 )
+            if ranks_BS is not None:
+                ranks_BS, _, _ = remove_left_padding(ranks_BS, attention_mask, position_ids, pre_process=True)
 
         flat = sequence_major_flatten(dense)
         mask = sequence_major_flatten(mask_BS)
         response_mask = sequence_major_flatten(response_BS)
         if probe_positions is not None:
             probe_positions = sequence_major_flatten(probe_positions) - 1
+        ranks = None if ranks_BS is None else sequence_major_flatten(ranks_BS)
         tp_size = mpu.get_tensor_model_parallel_world_size()
         if tp_size > 1:
             # Under TP sequence parallelism the router sees this rank's
@@ -276,8 +294,16 @@ class MegatronModelWrapper:
             response_mask = slice_sequence_parallel(response_mask, **slice_kwargs)
             if probe_positions is not None:
                 probe_positions = slice_sequence_parallel(probe_positions, **slice_kwargs)
+            if ranks is not None:
+                ranks = slice_sequence_parallel(ranks, **slice_kwargs)
         per_layer = {idx: flat[:, idx, :].to(device) for idx in layer_indices}
-        return RouterReplayTargets(per_layer, mask.to(device), response_mask.to(device), probe_positions)
+        return RouterReplayTargets(
+            per_layer,
+            mask.to(device),
+            response_mask.to(device),
+            probe_positions,
+            None if ranks is None else ranks.to(device),
+        )
 
     def _forward_micro_batch(
         self,
@@ -290,6 +316,7 @@ class MegatronModelWrapper:
         num_actions: Optional[int] = None,
         record_recompute: bool = False,
         rollout_prompt_routed_experts: Optional[torch.Tensor] = None,
+        vllm_dp_ranks: Optional[torch.Tensor] = None,
     ):
         """Run the shared packed or left-unpadded Megatron model boundary.
 
@@ -316,13 +343,20 @@ class MegatronModelWrapper:
                 layer_indices,
                 probe_row_indices,
                 rollout_prompt_routed_experts,
+                vllm_dp_ranks,
             )
+            expert_parallel = None
+            if targets.vllm_dp_ranks is not None:
+                expert_parallel = VllmExpertParallel(
+                    targets.vllm_dp_ranks, int(self.cfg.generator.inference_engine_expert_parallel_size)
+                )
             self.router_replay.begin_forward(
                 targets.per_layer,
                 targets.mask,
                 targets.response_mask,
                 record_recompute=record_recompute,
                 probe_positions=targets.probe_positions,
+                vllm_expert_parallel=expert_parallel,
             )
             armed = True
         try:
@@ -404,6 +438,7 @@ class MegatronModelWrapper:
                 probe_row_indices=batch.probe_row_indices,
                 num_actions=batch.num_actions,
                 rollout_prompt_routed_experts=batch.rollout_prompt_routed_experts,
+                vllm_dp_ranks=batch.vllm_dp_ranks,
             )
 
             return outputs, partial(collection_func, data=batch, packed_seq_params=packed_seq_params)
@@ -561,6 +596,7 @@ class MegatronModelWrapper:
                 num_actions=batch.num_actions,
                 record_recompute=True,
                 rollout_prompt_routed_experts=batch.rollout_prompt_routed_experts,
+                vllm_dp_ranks=batch.vllm_dp_ranks,
             )
 
             return outputs, partial(loss_func, data=batch, packed_seq_params=packed_seq_params)
