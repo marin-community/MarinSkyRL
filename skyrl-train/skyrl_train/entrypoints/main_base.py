@@ -144,7 +144,8 @@ def create_ray_wrapped_inference_engines_from_config(
         "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
     }
     if cfg.generator.backend == "vllm":
-        from skyrl_train.trajectory_runners.trajectory_processing import get_custom_chat_template
+        # The template resolver imports Torch from the optional trainer runtime.
+        from skyrl_train.trajectory_runners.trajectory_processing import get_custom_chat_template  # noqa: PLC0415
 
         engine_init_kwargs["chat_template"] = get_custom_chat_template(cfg.generator.chat_template)
         engine_init_kwargs["default_chat_template_kwargs"] = OmegaConf.to_container(
@@ -174,6 +175,13 @@ def create_ray_wrapped_inference_engines_from_config(
         for value in (cfg.generator.sampling_params.logprobs, cfg.generator.eval_sampling_params.logprobs)
         if isinstance(value, int) and not isinstance(value, bool) and value > 0
     ]
+
+    for callback in cfg.trainer.get("callbacks") or []:
+        if callback.get("type") == "evaluation":
+            for profile in (callback.get("additional_evaluations") or {}).values():
+                value = (profile.get("sampling_params") or {}).get("logprobs")
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    requested_logprobs.append(value)
 
     role = InferenceEngineRoleConfig(
         pretrain=rollout_model_path,
@@ -256,32 +264,6 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
         # external `vllm serve` launch — SkyRL does not spawn remote servers. Carried here
         # for geometry/GPU-accounting consistency (DCP reuses the TP GPUs; no extra GPUs).
         decode_context_parallel_size=cfg.generator.get("inference_engine_decode_context_parallel_size", 1),
-    )
-
-
-def build_gym_trajectory_runner(
-    cfg: DictConfig, tokenizer: PreTrainedTokenizerBase, inference_engine_client: InferenceEngineClient
-) -> TrajectoryRunner:
-    """Build the SkyRL-Gym runner, collecting step-wise trajectories when step-wise training is enabled."""
-    from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection  # noqa: PLC0415
-    from skyrl_train.trajectory_runners.skyrl_gym import (  # noqa: PLC0415
-        SkyRLGymTrajectoryRunner,
-        TrajectoryPipeline,
-    )
-    from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector  # noqa: PLC0415
-
-    pipeline = None
-    if cfg.trainer.step_wise_training:
-        pipeline = TrajectoryPipeline(
-            StepWiseRolloutCollector,
-            StepWiseTrajectoryProjection(cfg.generator, tokenizer),
-        )
-    return SkyRLGymTrajectoryRunner(
-        trajectory_runner_cfg=cfg.generator,
-        skyrl_gym_cfg=cfg.environment.skyrl_gym,
-        inference_engine_client=inference_engine_client,
-        tokenizer=tokenizer,
-        pipeline=pipeline,
     )
 
 
@@ -471,12 +453,17 @@ class BasePPOExp:
         return pg
 
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
-        """Initialize the configured trajectory runner.
+        """Run SkyRL-Gym, and Harbor for Nemotron Ultra's terminal-bench rows, in rollout worker processes.
 
         Returns:
             TrajectoryRunner: The runner.
         """
-        gym_runner = build_gym_trajectory_runner(cfg, tokenizer, inference_engine_client)
+        del tokenizer
+        from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources  # noqa: PLC0415
+        from skyrl_train.trajectory_runners.skyrl_gym_execution import GymRunnerSpec  # noqa: PLC0415
+
+        resources = RolloutWorkerResources.from_config(cfg)
+        gym_runner = RolloutWorkerPool(GymRunnerSpec.from_config(cfg, inference_engine_client.engines), resources)
         terminal_bench_data = list(cfg.data.get("terminal_bench_data", []))
         if not terminal_bench_data:
             return gym_runner
@@ -484,14 +471,13 @@ class BasePPOExp:
         if cfg.trainer.step_wise_training:
             raise ValueError("Nemotron Ultra terminal-bench routing is incompatible with step-wise training")
 
-        from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources  # noqa: PLC0415
         from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec  # noqa: PLC0415
         from skyrl_train.trajectory_runners.nemotron_ultra import NemotronUltraTrajectoryRouter  # noqa: PLC0415
         from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
 
         if not cfg.get("terminal_bench_config"):
             raise ValueError("data.terminal_bench_data requires terminal_bench_config")
-        harbor_runner = RolloutWorkerPool(HarborRunnerSpec.from_config(cfg), RolloutWorkerResources.from_config(cfg))
+        harbor_runner = RolloutWorkerPool(HarborRunnerSpec.from_config(cfg), resources)
         return NemotronUltraTrajectoryRouter(
             gym_runner=gym_runner,
             harbor_runner=harbor_runner,

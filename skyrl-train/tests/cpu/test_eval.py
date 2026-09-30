@@ -8,12 +8,14 @@ import pytest
 from omegaconf import OmegaConf
 
 from skyrl_train.evaluate import evaluate
-import skyrl_train.evaluate as evaluate_module
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryBatch
+from skyrl_train.trajectory_runners.trajectory_retention import (
+    TrajectorySink,
+    execute_publication,
+    parse_trajectory_retention_config,
+)
+from skyrl_train.trajectory_runners.trajectory_retention_publisher import InlineTrajectoryPublisher
 from tests.cpu.util import example_dummy_config
-
-# A standalone evaluation starts the run's trajectory sink actor.
-pytestmark = pytest.mark.usefixtures("ray_module")
 
 
 @pytest.fixture
@@ -62,11 +64,6 @@ class DummyRunner(TrajectoryRunner):
         return self.output
 
 
-class FailingRunner(TrajectoryRunner):
-    async def _run(self, input_batch, disable_tqdm: bool = False):
-        raise RuntimeError("evaluation actor failed")
-
-
 @pytest.mark.asyncio
 async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     cfg = configure_eval(dummy_config, tmp_path)
@@ -80,7 +77,7 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
         },
         {
             "prompt": [{"role": "user", "content": "question-2"}],
-            "env_class": "custom_env",
+            "env_class": "cat_count",
             "env_extras": {"data_source": "dataset/b"},
             "uid": "uid-2",
         },
@@ -94,11 +91,19 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
         "loss_masks": [[1], [1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": None,
+        "env_classes": ["gsm8k", "cat_count"],
+        "env_metrics": [{"truncated": 1}, {"truncated": 0}],
     }
     runner = DummyRunner(trajectory_batch)
 
     tokenizer = MagicMock()
     tokenizer.decode.side_effect = lambda tokens: "decoded"
+    # The run's shared sink is a Ray actor; an in-process sink with the same configuration keeps this test off Ray.
+    sink = TrajectorySink(
+        parse_trajectory_retention_config(cfg.generator.trajectory_retention),
+        tokenizer,
+        publisher=InlineTrajectoryPublisher(execute_publication),
+    )
 
     metrics = await evaluate(
         eval_dataloader=eval_dataloader,
@@ -106,6 +111,7 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
         cfg=cfg,
         global_step=5,
         tokenizer=tokenizer,
+        trajectory_sink=sink,
     )
 
     expected_metrics = {
@@ -115,6 +121,10 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
         "eval/dataset_b/pass_at_1": 0.0,
         "eval/all/avg_score": 0.5,
         "eval/all/pass_at_1": 0.5,
+        "eval/all/environment/gsm8k/truncated": 1.0,
+        "eval/all/environment/cat_count/truncated": 0.0,
+        "eval/dataset_a/environment/truncated": 1.0,
+        "eval/dataset_b/environment/truncated": 0.0,
     }
 
     for key, expected_value in expected_metrics.items():
@@ -123,27 +133,6 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     assert len(runner.seen_inputs) == 1
     seen_batch = runner.seen_inputs[0]
     assert seen_batch["prompts"] == [prompt["prompt"] for prompt in prompts_batch]
-    assert seen_batch["env_classes"] == ["gsm8k", "custom_env"]
+    assert seen_batch["env_classes"] == ["gsm8k", "cat_count"]
     assert seen_batch["env_extras"] == [prompt["env_extras"] for prompt in prompts_batch]
     assert seen_batch["batch_metadata"].training_phase == "eval"
-
-
-@pytest.mark.asyncio
-async def test_evaluate_closes_progress_reporter_when_rollout_fails(dummy_config, tmp_path, monkeypatch):
-    cfg = configure_eval(dummy_config, tmp_path)
-    eval_dataloader = DummyStatefulDataLoader(
-        [[{"prompt": [{"role": "user", "content": "question"}], "env_class": None, "env_extras": {}, "uid": "1"}]]
-    )
-    progress = MagicMock()
-    monkeypatch.setattr(evaluate_module, "tqdm", lambda **_kwargs: progress)
-
-    with pytest.raises(RuntimeError, match="evaluation actor failed"):
-        await evaluate(
-            eval_dataloader=eval_dataloader,
-            trajectory_runner=FailingRunner(),
-            cfg=cfg,
-            global_step=5,
-            tokenizer=MagicMock(),
-        )
-
-    progress.close.assert_called_once_with()

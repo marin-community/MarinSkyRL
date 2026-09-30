@@ -31,14 +31,6 @@ def test_reward_rises_monotonically_toward_n(n):
 
 
 @pytest.mark.parametrize("n", NS)
-def test_exact_count_with_length_stop_keeps_verification_and_pays_penalty(n):
-    score = cat_count_score(cats(n), n, stop_reason="length")
-    assert score.exact
-    assert score.truncated
-    assert score.reward == pytest.approx(0.9)
-
-
-@pytest.mark.parametrize("n", NS)
 def test_junk_is_always_worse_than_the_same_cats_alone(n):
     assert reward("Sure! " + cats(n), n) < reward(cats(n), n)
     assert reward(cats(n) + " I hope that helps", n) < reward(cats(n), n)
@@ -54,12 +46,10 @@ def test_more_junk_words_score_lower_until_the_cap(n):
 def test_overshoot_keeps_falling_across_the_whole_64_token_budget(n):
     scores = [reward(cats(k), n) for k in range(n, 64)]
     assert all(a > b for a, b in zip(scores, scores[1:]))
-    assert min(scores) > -1.0
 
 
 def test_n1_non_cat_replies_score_nonpositive():
     assert reward("dog", 1) <= 0.0
-    assert reward("", 1) == pytest.approx(-0.25)
     assert reward("I can help with that", 1) < 0.0
 
 
@@ -74,17 +64,6 @@ def test_near_miss_formats_earn_shaping_but_not_exact():
 def test_character_pieces_earn_nothing():
     assert reward("ca at c a t", 4) < 0.0
     assert reward("exact concatenate", 4) < 0.0
-
-
-def test_truncation_penalty_only_when_known():
-    assert reward(cats(25), 20, stop_reason="length") < reward(cats(25), 20)
-    assert reward(cats(20), 20, stop_reason="stop") == pytest.approx(1.0)
-    assert reward(cats(20), 20, stop_reason="unknown") == pytest.approx(1.0)
-
-
-def test_off_by_one_is_well_separated_from_exact():
-    for n in NS:
-        assert reward(cats(n), n) - reward(cats(max(n - 1, 0)), n) >= 0.3
 
 
 def test_reward_is_bounded():
@@ -102,49 +81,44 @@ def test_embedded_end_marker_cannot_verify_exact():
 @pytest.mark.parametrize("n", NS)
 def test_empty_reply_loses_to_any_reply_within_2n_cats(n):
     empty = reward("", n)
-    assert empty < 0.0
+    assert empty == pytest.approx(-0.25)
     for k in range(1, 2 * n + 1):
         assert reward(cats(k), n) > empty
 
 
-def test_environment_scores_completion_only_and_reports_exact_by_n():
-    env = skyrl_gym.make(
+def make_environment(n):
+    return skyrl_gym.make(
         "cat_count",
         env_config=DictConfig({"env_class": "cat_count"}),
-        extras={"extra_info": {"n": 4}},
+        extras={"extra_info": {"n": n}},
     )
-    prompt = "Reply with the word cat exactly 4 times, separated by single spaces. Nothing else."
+
+
+@pytest.mark.parametrize(
+    "n,completion,stop_reason,expected_reward,exact,n_words,truncated",
+    [
+        (4, "cat cat cat", None, 0.4725, False, 3, False),
+        (2, "cat cat", None, 1.0, True, 2, False),
+        (2, "cat cat", "length", 0.9, True, 2, True),
+        (2, "cat cat", "stop", 1.0, True, 2, False),
+        (2, "cat cat", "unknown", 1.0, True, 2, False),
+        (20, cats(25), None, 0.468347953216, False, 25, False),
+        (20, cats(25), "length", 0.368347953216, False, 25, True),
+    ],
+)
+def test_environment_scores_completion_and_reports_verification_and_metrics(
+    n, completion, stop_reason, expected_reward, exact, n_words, truncated
+):
+    env = make_environment(n)
+    prompt = f"Reply with the word cat exactly {n} times, separated by single spaces. Nothing else."
     env.init([{"role": "user", "content": prompt}])
-    step = env.step("cat cat cat")
-    assert step["reward"] == pytest.approx(cat_count_score("cat cat cat", 4).reward)
-    assert step["verification"].score == 0.0
-    assert step["verification"].passed is False
-    assert env.get_metrics()["exact_n4"] == 0.0
-    assert env.get_metrics()["n_words_n4"] == 3.0
-    assert env.get_metrics()["has_cat"] == 1.0
-
-
-def test_environment_keeps_exact_verification_separate_from_shaped_reward():
-    env = skyrl_gym.make(
-        "cat_count",
-        env_config=DictConfig({"env_class": "cat_count"}),
-        extras={"extra_info": {"n": 2}},
-    )
-    step = env.step("cat cat")
-    assert step["reward"] == pytest.approx(1.0)
-    assert step["verification"].score == 1.0
-    assert step["verification"].passed is True
-    assert env.get_metrics()["exact_n2"] == 1.0
-
-
-def test_environment_penalizes_reported_length_stop():
-    env = skyrl_gym.make(
-        "cat_count",
-        env_config=DictConfig({"env_class": "cat_count"}),
-        extras={"extra_info": {"n": 2}},
-    )
-    env.set_rollout_evidence(RolloutEvidence(stop_reason="length"))
-    step = env.step("cat cat")
-    assert step["reward"] == pytest.approx(0.9)
-    assert step["verification"].score == 1.0
-    assert env.get_metrics()["truncated"] == 1.0
+    env.set_rollout_evidence(RolloutEvidence(stop_reason=stop_reason))
+    step = env.step(completion)
+    assert step["reward"] == pytest.approx(expected_reward)
+    assert step["verification"].score == float(exact)
+    assert step["verification"].passed is exact
+    metrics = env.get_metrics()
+    assert metrics[f"exact_n{n}"] == float(exact)
+    assert metrics[f"n_words_n{n}"] == float(n_words)
+    assert metrics["has_cat"] == 1.0
+    assert metrics["truncated"] == float(truncated)

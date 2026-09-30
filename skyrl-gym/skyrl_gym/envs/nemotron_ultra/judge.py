@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 _MAX_REQUEST_ATTEMPTS = 5
 _INITIAL_RETRY_DELAY_SECONDS = 1.0
 _TRANSIENT_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+DEFAULT_JUDGE_MAX_TOKENS = 8192
+
+
+class IncompleteJudgeResponse(ValueError):
+    """Judge generation stopped before producing any content."""
 
 
 class GenRMResponseTransport(StrEnum):
@@ -132,13 +137,13 @@ class OpenAIJudge:
         body: dict[str, Any] = response.json()
         choice = body["choices"][0]
         if choice.get("finish_reason") in {"length", "content_filter"}:
-            raise ValueError(f"Incomplete judge response: {body}")
+            raise IncompleteJudgeResponse(f"Incomplete judge response: {body}")
         content = choice["message"].get("content")
         if not isinstance(content, str):
             raise RuntimeError(f"Judge returned no message content: {body}")
         return content
 
-    def generate(self, messages: list[dict[str, str]], *, max_tokens: int = 8192) -> str:
+    def generate(self, messages: list[dict[str, str]], *, max_tokens: int = DEFAULT_JUDGE_MAX_TOKENS) -> str:
         return self._post_chat_completion(messages, max_tokens=max_tokens)
 
     def generate_response(
@@ -184,7 +189,7 @@ class OpenAIJudge:
         )
         body: dict[str, Any] = response.json()
         if body.get("status") == "incomplete":
-            raise ValueError(f"Incomplete judge response: {body}")
+            raise IncompleteJudgeResponse(f"Incomplete judge response: {body}")
         texts = []
         for item in body.get("output", []):
             if item.get("type") != "message":

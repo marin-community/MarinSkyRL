@@ -209,8 +209,6 @@ trainer:
     tis_lcs_alert_threshold: 0.005
     enable_token_reward_channel: false
     think_token_weight: 1.0
-    think_token_cost: 0.0
-    think_max_cost_per_turn: 0.05
     sapo:
       tau_pos: 1.0
       tau_neg: 1.05
@@ -309,6 +307,7 @@ trainer:
   reset_global_step_on_resume: false
   ckpt_path: "${oc.env:HOME}/ckpts/"
   max_ckpts_to_keep: -1
+  callbacks: null
   ckpt_interval: 5
   hf_save_interval: ${trainer.ckpt_interval}
   export_hf_artifact: false
@@ -373,6 +372,10 @@ generator:
   backend: "vllm"
   vllm_attention_backend: null
   weight_sync_backend: "nccl"
+  # vLLM pause policy during weight sync. abort ends in-flight streams; keep preserves them.
+  weight_sync_pause:
+    mode: keep
+    clear_cache: true
   # How weights reach the engines. "broadcast": trainer rank 0 sends every tensor to every engine.
   # "expert_block": each MoE expert matrix is broadcast from a Megatron rank that holds it to the vLLM
   # workers that serve it. Needs engines that are not colocated with training, a Grug MoE on the megatron
@@ -535,10 +538,13 @@ environment:
   env_class: "gsm8k"
 
 trajectory_runner:
-  # Rollout worker processes for runners that generate outside the trainer process (Harbor, and SkyRL-Gym under
-  # the gym_worker_pool entrypoint). Every worker runs on the trainer's node.
+  # Rollout worker processes, which run SkyRL-Gym and Harbor outside the trainer process. Every worker runs on the
+  # trainer's node; each runner type (Gym, and Harbor under terminal-bench routing) gets its own pool of this size.
   rollout_workers:
     num_workers: 4
     cpus_per_worker: 8
     executor_threads: 256 # width of each worker's default thread pool, which Harbor's model client runs on
     progress_timeout_seconds: 21600 # fail a worker's requests when none of them completes for this long
+    # Workers start one at a time, this long after the previous one is up, so their imports and tokenizer loads
+    # from a shared filesystem do not overlap; zero starts them all at once.
+    start_interval_seconds: 2.0
