@@ -9,7 +9,7 @@ from dataclasses import replace
 import torch
 
 from marinskyrl.distillation import DomainGradientBalanceSpec
-from skyrl_train.distillation import DistillationInput, StudentTopKPolicySurrogateInput
+from skyrl_train.distillation import PreparedTeacherInput, StudentTopKInput
 
 MIN_GAP_DRIFT = 0.05
 MAX_GAP_DRIFT = 20.0
@@ -41,9 +41,9 @@ class DomainGradientBalancer:
         self._anchor = {str(domain): float(value) for domain, value in anchor.items()}
 
     def apply(
-        self, evidence: DistillationInput, route_ids: Sequence[str]
-    ) -> tuple[StudentTopKPolicySurrogateInput, dict[str, float]]:
-        if not isinstance(evidence, StudentTopKPolicySurrogateInput):
+        self, evidence: PreparedTeacherInput, route_ids: Sequence[str]
+    ) -> tuple[StudentTopKInput, dict[str, float]]:
+        if not isinstance(evidence, StudentTopKInput):
             raise ValueError("domain gradient balance requires student-selected top-K evidence")
         mask = evidence.valid_mask
         if mask.ndim != 2 or evidence.loss_weights.shape != mask.shape:

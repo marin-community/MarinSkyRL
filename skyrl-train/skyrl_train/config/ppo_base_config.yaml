@@ -97,6 +97,7 @@ trainer:
     enable_numa_affinity: false
   strategy: megatron
   policy:
+    max_consecutive_nonfinite_steps: 3
     host_memory_monitor:
       enabled: true
       interval_seconds: 60
@@ -235,25 +236,8 @@ trainer:
       ppo_kl_coef: 1.0
     
     cispo:
-      cispo_eps_clip_low: 0
+      cispo_eps_clip_low: 1.0
       cispo_eps_clip_high: 5
-
-    z_clip:
-      enabled: false
-      alpha: 0.97
-      z_thresh: 2.5
-      warmup_steps: 25
-      mode: "zscore"
-      clip_option: "adaptive_scaling"
-      clip_factor: 1.0
-      skip_update_on_spike: false
-
-    stale_clip:
-      enabled: false
-      alpha: 0.3
-      entropy_threshold: 0.15
-      entropy_window: 10
-      min_lr_scale: 0.1
 
   # Rollout workers generate prompt groups under leases from the rollout buffer; each step trains on
   # train_batch_size groups. At 0 staleness every group comes from the current policy (synchronous training).

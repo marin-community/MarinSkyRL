@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Literal, NotRequired, Optional, TypedDict, U
 import numpy as np
 
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
-from skyrl_train.distillation import DistillationInput, TeacherEvidenceBatch
+from skyrl_train.distillation import PreparedTeacherInput, TeacherEvidenceBatch
 from skyrl_train.inference_engines.base import ConversationType
 
 
@@ -119,7 +119,7 @@ class TrajectoryBatch(TypedDict):
     behavior_topk_logprobs: Optional[List[np.ndarray]]
     rollout_routed_experts: Optional[List[np.ndarray]]
     teacher_evidence: Optional[TeacherEvidenceBatch]
-    distillation: Optional[DistillationInput]
+    distillation: Optional[PreparedTeacherInput]
     token_level_shaping: Optional[List[List[float]]]
     response_span_tags: Optional[List[List[int]]]
     trajectory_ids: Optional[List[TrajectoryID]]

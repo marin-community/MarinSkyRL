@@ -62,6 +62,7 @@ SkyRL is a full-stack RL library designed for modularity and extensibility.
    :maxdepth: 2
    :caption: Algorithms
 
+   algorithms/objective
    algorithms/dapo
    algorithms/opd
    algorithms/custom_algorithms
