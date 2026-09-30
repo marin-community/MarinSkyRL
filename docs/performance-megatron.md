@@ -1,12 +1,14 @@
 # Tune Megatron and the asynchronous RL loop
 
-[Choose the task](performance.md), then choose a learner and inspect the whole loop. These are BF16 Snowball/Hero measurements on CoreWeave H100 and GB200/B200, checked on 30 September 2026. A learner-only rate excludes rollout supply, scoring, publication and checkpointing.
+[Choose the task](performance.md), then measure the learner and the full RL loop. BF16 Snowball/Hero evidence covers CoreWeave H100 and GB200/B200, checked on 30 September 2026. Learner-only rates exclude supply, scoring, publication and checkpointing.
 
-**Hero learning is qualified at 4K on non-agentic GSM8K with route replay, frozen query bias and MuonH/AdamH/Adam.** The longer synthetic AdamW trainer probes and the short staleness-two supply diagnostic have different qualification boundaries. Read [the learning audit](https://github.com/marin-community/MarinSkyRL/issues/737#issuecomment-5860256429) before changing that contract.
+**Hero learning is qualified at 4K on non-agentic GSM8K with route replay, frozen query bias and MuonH/AdamH/Adam.** Synthetic long-context AdamW and short staleness-two probes do not extend that qualification. [Learning audit](https://github.com/marin-community/MarinSkyRL/issues/737#issuecomment-5860256429).
 
 ## Choose a learner
 
-The fixed bank has 128 sequences and 116,351 unpadded prompt + response tokens. Warm medians use three later updates. Rates divide those tokens by training time and learner GPUs. Peak HBM is maximum allocated memory over ranks/updates; host memory is peak cgroup GiB per node. None of these is a measured device-utilization or MFU number.
+The fixed bank contains 128 sequences and 116,351 unpadded prompt + response tokens. Rates use the median training time of three warm updates and learner GPU count. HBM is peak allocated GiB across ranks/updates; host memory is peak cgroup GiB per node. Device utilization/MFU was not measured.
+
+TP, PP, EP, CP and DP mean tensor, pipeline, expert, context and data parallelism.
 
 | Model / hardware; measured 26–28 Sept | Learner GPUs; TP / PP / EP / CP | Warm s/update; sequence tok/s/GPU | Peak HBM / host GiB | Supported starting decision |
 | --- | --- | --- | --- | --- |
@@ -15,26 +17,26 @@ The fixed bank has 128 sequences and 116,351 unpadded prompt + response tokens. 
 | Hero H100 | 96; 1 / 24 / 4 / 1 | 19.97; 60.7 | 75.0 / 449.9 | Fixed-bank efficiency option; **online batch256 OOMed**. Use the measured 128-GPU online layout for the large-batch example. [Evidence](#learner-evidence) |
 | Hero GB200 | 48; 1 / 12 / 4 / 4 | 60.36; 40.2 | 128.6 / 445.1 | Efficient tested MuonH point. 64 GPUs at PP16 takes 52.13 s but 15.1% more GPU-seconds. [Evidence](#learner-evidence) |
 
-Choose PP for layer/state fit, EP for experts, CP for sequence memory, and DP for replicated throughput. Resolve actual rank groups from the launch plan: attention DP and expert DP differ, and Hero can fold EP across the CP/DP mesh. Do not multiply every printed dimension to infer physical GPUs. Snowball32 TP1/PP2/CP1 has attention DP16 and expert DP2; Snowball16 has DP8 and expert DP1. The provider owns valid head geometry and Hero's local/global attention choices. [Grug training](grug-megatron-training.md); [Megatron parallelism](https://docs.nvidia.com/nemo/megatron-bridge/latest/parallelisms.html).
+Use PP to fit layers/state, EP to shard experts, CP to reduce sequence memory and DP to replicate work. Read rank groups from the launch plan: attention/expert DP differ, and Hero can fold EP across CP/DP. The dimensions do not simply multiply to GPU count. Snowball32 at TP1/PP2/CP1 has attention DP16 and expert DP2; Snowball16 has DP8 and expert DP1. Use the provider's valid head and local/global attention geometry. [Grug training](grug-megatron-training.md); [Megatron parallelism](https://docs.nvidia.com/nemo/megatron-bridge/latest/parallelisms.html).
 
-Start with packed samples, micro-forward = micro-train = 1, the tested recomputation and optimizer offload settings, and explicit longest sequence and group batch. For Snowball, [snowball_megatron_full.yaml](../cloud/iris/configs/snowball_megatron_full.yaml) shows the current backend fields; its batch/serving allocation is a different workload from the example below. Match a historical resolved config deliberately, then validate the current launcher.
+Match the tested packing, recomputation and optimizer offload settings. Keep micro-forward = micro-train = 1 and set sequence/group limits. [snowball_megatron_full.yaml](../cloud/iris/configs/snowball_megatron_full.yaml) shows current fields but uses a different batch and serving allocation from the worked example. Validate the resolved launcher config.
 
 ## Find the full-loop limit
 
-Inspect at least two warm ordinary cycles after initialization. Use a longer window when response tails are variable. Report startup/evaluation/save separately and include them in total task cost. Old `timing/*` spans overlap; current exclusive `timing/step_wall/*` budgets partition the step. Do not sum overlapping timers to manufacture a wall time.
+Measure at least two warm ordinary cycles; use more for variable tails. Report startup/evaluation/save separately and include them in task cost. Old `timing/*` spans overlap, so do not sum them. Current `timing/step_wall/*` spans partition the step.
 
 | Observation | First hypothesis | One next change; what would confirm it |
 | --- | --- | --- |
-| Learner waits; servers have low running counts, low KV, no queue | Group tails, tool waits, admission, scoring or publication starving supply | Inspect group/lease and pause windows. Change the identified admission or worker bound within the allowed age; accepted tokens/GPU-hour must rise without worse quality/drift |
+| Learner waits; servers have low running counts, low KV, no queue | Group tails, tool waits, admission, scoring or publication starving supply | Inspect group, lease and pause windows. Adjust the limiting admission/worker bound within the allowed age; require higher accepted tokens/GPU-hour without worse quality/drift |
 | Learner waits; servers queue and preempt | Serving/cache pressure | Use the [vLLM guide](performance-vllm.md#read-the-signals-together). Try one cap or fleet change; lower wait with higher accepted work confirms it |
-| Training dominates; memory fit is tight | Learner layout/activation cost | Try a compatible PP/EP/CP or recomputation option on the same bank. Lower GPU-seconds and safe peak memory confirm it; CPU offload may move cost to host transfer |
+| Training dominates; memory fit is tight | Learner layout/activation cost | Compare compatible PP/EP/CP or recomputation on the same bank. Require fewer GPU-seconds and memory headroom; offload can move cost to host transfers |
 | Scoring dominates | Reference/replay or mesh forward cost | Compare same tokens/routes/weights and measure full-loop benefit; changing routes can fail the numerical gate |
-| Publication dominates | Pause, optimizer offload, rank alignment, transfer, reload or drain | Split the publication stages. A shorter broadcast timer alone does not identify network bandwidth; require exact installed-weight checks and accepted-rate gain |
+| Publication dominates | Pause, optimizer offload, rank alignment, transfer, reload or drain | Time publication stages separately. Broadcast time alone cannot identify bandwidth; require exact installed weights and an accepted-rate gain |
 | Few groups carry mixed rewards; raw reward high but truncation grows | Useful learning work or termination is failing | Inspect complete answers, verifier and informative-group fraction before buying GPUs. Historical Snowball raw reward hid nontermination. [Evidence](https://github.com/marin-community/marin/issues/8936#issuecomment-5581680479) |
 
 ### Telemetry you can use
 
-Open [RL Post-training (async)](https://grafana.oa.dev/d/marin-async-rl) with the exact cluster/run and time window. Use the [run-selection guide](grafana-rl-runs.md) and [metric definitions](design/async-rl-telemetry.md). FineLog commands run from a Marin checkout; authenticate through the normal Iris access path. Discover the current namespace/schema before adapting SQL:
+Select the cluster, run and window in [RL Post-training (async)](https://grafana.oa.dev/d/marin-async-rl). See [run selection](grafana-rl-runs.md) and [metric definitions](design/async-rl-telemetry.md). Run FineLog from Marin with normal Iris authentication; discover the schema before adapting SQL:
 
 ```bash
 uv run finelog namespaces cw-us-east-08a
@@ -42,7 +44,7 @@ uv run finelog schema cw-us-east-08a telemetry_v1.marinskyrl
 uv run finelog query cw-us-east-08a --format table < bounded-query.sql
 ```
 
-Use `marin` for the federated view and the job's region for recent local truth. Keep run, execution identity, cluster and physical engine/rank until after delta calculations. Missing rows or a forwarding delay are not idle hardware. [FineLog access and query rules](https://github.com/marin-community/marin/blob/main/lib/finelog/OPS.md).
+Use `marin` for federated queries or the job's region for recent local data. Compute deltas per run, execution, cluster and physical engine/rank before aggregating. Missing or delayed rows cannot establish idle hardware. [FineLog access and query rules](https://github.com/marin-community/marin/blob/main/lib/finelog/OPS.md).
 
 | Signal / source | Unit and window | Confirmation / contrary evidence |
 | --- | --- | --- |
@@ -58,7 +60,7 @@ Use `marin` for the federated view and the job's region for recent local truth. 
 <details>
 <summary>A bounded FineLog server query to join with learner waits</summary>
 
-This exact historical window is Hero GB200 step45: 408.02 seconds waiting. It showed running requests declining, near-zero queues and low KV, weakening a saturated-server explanation. Change the run/time bounds after discovering your schema; replace the deployment with the run's region.
+Hero GB200 step45 waited 408.02 seconds while running requests declined, queues stayed near zero and KV stayed low. That weakens a saturated-server explanation. Adapt the run, window and region after checking your schema.
 
 ```sql
 SELECT date_bin(INTERVAL '1 minute', to_timestamp_millis(timestamp_ms)) AS minute_utc,
@@ -72,26 +74,30 @@ GROUP BY minute_utc, name
 ORDER BY minute_utc, name
 ```
 
-For native vLLM cumulative token counters, take `LAG(value)` within the full series identity, discard negative reset deltas, then sum deltas divided by elapsed seconds. Scan one sample before the window. Native Rigging `work_completed` rows are already deltas; sum them directly. The gauge query above intentionally averages only for a fleet overview: inspect each engine's maximum before ruling out skew or KV pressure.
+For cumulative vLLM counters, scan one sample before the window, take `LAG(value)` per full series, discard negative reset deltas and divide summed deltas by elapsed seconds. Sum native Rigging `work_completed` deltas directly. These gauge averages describe the fleet; inspect each engine's maximum for skew or KV pressure.
 
 </details>
 
 ## Worked task: short Snowball math RL on H100
 
-Task: a short, single-turn GSM8K run, eight responses per group, throughput per all GPU-hours as the goal, with fixed-token alignment and completed-answer checks. [Historical 26 September source](https://github.com/marin-community/MarinSkyRL/issues/737#issuecomment-5848726769) supports evaluating **P32/I8**, not a universal default.
+For short single-turn GSM8K with eight responses per group, evaluate **32 learner + 8 serving H100s (P32/I8)**. Optimize accepted work per all GPU-hours while checking fixed-token alignment and completed answers. This is a [26 September measurement](https://github.com/marin-community/MarinSkyRL/issues/737#issuecomment-5848726769).
 
-**The current Marin entrypoint cannot represent or launch this recipe.** At Marin `14597ea844`, [async_rl.py](https://github.com/marin-community/marin/blob/14597ea8441ff629cf936db583f571b67391d5fe/experiments/post_training/async_rl.py#L84-L87) fixes 128 prompts × four answers, rejects role-plan changes through `--set`, and emits `entrypoint: fully_async` and `trainer.fully_async`. Its [pinned SkyRL runtime](https://github.com/marin-community/marin/blob/14597ea8441ff629cf936db583f571b67391d5fe/lib/marin/src/marin/external_dependencies.py#L83-L89) registers `standard` with `trainer.rollout_buffer`, so that old entrypoint fails preflight. Update the recipe and config translation before using the non-submitting plan to validate 256 × eight. That launcher work is outside these guides; no GPU probe can substitute for it.
+**Update Marin's launcher before trying this recipe.** At `14597ea844`, [async_rl.py](https://github.com/marin-community/marin/blob/14597ea8441ff629cf936db583f571b67391d5fe/experiments/post_training/async_rl.py#L84-L87) fixes 128 prompts × four answers and rejects role-plan changes through `--set`. It emits `entrypoint: fully_async` and `trainer.fully_async`; the [pinned runtime](https://github.com/marin-community/marin/blob/14597ea8441ff629cf936db583f571b67391d5fe/lib/marin/src/marin/external_dependencies.py#L83-L89) accepts `standard` with `trainer.rollout_buffer`. Preflight therefore fails. Recipe/config translation work must precede a non-submitting validation of 256 × eight; it is outside this guide.
 
-1. Use the identified Snowball Grug-67B-A2B BF16 export. The measured learner had four eight-H100 nodes, TP1/PP2/EP8/CP1, packed samples, equal microbatches of one, AdamW at 1e-6, frozen query bias and optimizer offload during rollouts. The server had one eight-H100 node, TP1/PP1/DP8/EP8, non-eager batch-invariant vLLM, cap1,024/4,096, memory utilization 0.90 and prefix cache off.
-2. Match the task shape: at most 256 prompt + 3,840 response tokens = 4,096 total, 256 prompt groups × eight responses per update. The historical admission settings were 512 generation workers, 256 buffered groups and staleness one. **These are old `trainer.fully_async` fields.** Current code uses `trainer.rollout_buffer` with `max_staleness_steps`, `batch_policy` and `max_in_flight`; it has no direct worker/buffer-field equivalent. Use the current launch plan, inspect the dry run and remeasure supply. A migration is not proven performance equivalence.
-3. Check warm cycles two and three, excluding cold first update and final evaluation. The report counts **1,802,197 accepted loss-masked response tokens / 313.7906 s / 40 GPUs = 143.58 tok/GPU-s**, about 516,898 tok/GPU-hour. Wait is 0.081 and 0.684 s, per-engine median running 7.5 and 7.0, median queues zero, KV preemptions zero. Keep I8 for this window and inspect learner/scoring/publication.
-4. If your new run has sustained learner wait **and** busy queued/preempting servers, reconsider a server cap or I16 and compare accepted work per all GPU-hours. If engines are idle during the wait, inspect group tails/admission/pauses first. Earlier historical I16 bought 5.8% wall time at 17% more task GPU-hours. More servers need a latency/deadline reason or a measured efficiency gain. [Earlier allocation study](https://github.com/marin-community/marin/issues/8936#issuecomment-5581680479).
+1. Match the Snowball Grug-67B-A2B BF16 layout:
 
-The exact job was `/romain/snowball-integrated-h100-01a0dca4-a3`, MarinSkyRL source `0d80999cda9258c7094c720ab66db59f454ee3cc`, vLLM `25f0fc1aae71cccb6da65046cff13145512a6946`. Its resolved config and per-step counters are in `s3://marin-us-east-02a/marin/users/romain/hero-learning-01a0dca4/snowball-integrated-h100-a3/report.json`. The finite warm sample and changed runtime limit generalization. Total short-run cost must also include the evaluations and startup.
+   - Learner: four eight-H100 nodes, TP1/PP2/EP8/CP1, packed samples, equal microbatches of one, AdamW at 1e-6, frozen query bias and optimizer offload during rollouts.
+   - Server: one eight-H100 node, TP1/PP1/DP8/EP8, non-eager batch-invariant vLLM, 1,024 sequences / 4,096 batched tokens, memory utilization 0.90 and prefix cache off.
+
+2. Match the task: at most 256 prompt + 3,840 response tokens = 4,096 total; 256 groups × eight responses/update. Historical admission used 512 workers, 256 buffered groups and staleness one. Current `trainer.rollout_buffer` uses `max_staleness_steps`, `batch_policy` and `max_in_flight`, with no direct worker/buffer equivalents. Remeasure supply after migration.
+3. Check warm cycles two and three, excluding the cold update and final evaluation. They delivered **1,802,197 accepted loss-masked response tokens / 313.7906 s / 40 GPUs = 143.58 tok/GPU-s**, about 516,898 tok/GPU-hour. Wait was 0.081 and 0.684 s; per-engine median running 7.5 and 7.0; median queues and KV preemptions zero. Keep I8 for this window and inspect training, scoring and publication.
+4. Sustained wait **with busy, queued/preempting servers** justifies a cap or I16 comparison using accepted work per all GPU-hours. With idle servers, inspect group tails, admission and pauses first. Earlier I16 saved 5.8% wall time but cost 17% more task GPU-hours; add servers only for a deadline or measured efficiency gain. [Earlier allocation study](https://github.com/marin-community/marin/issues/8936#issuecomment-5581680479).
+
+The run was `/romain/snowball-integrated-h100-01a0dca4-a3`, with MarinSkyRL `0d80999cda9258c7094c720ab66db59f454ee3cc` and vLLM `25f0fc1aae71cccb6da65046cff13145512a6946`. Its config and counters are in `s3://marin-us-east-02a/marin/users/romain/hero-learning-01a0dca4/snowball-integrated-h100-a3/report.json`. Two warm cycles on an older runtime cannot predict total short-run cost; include startup and evaluations.
 
 ## Performance and numerical alignment
 
-Hero's accepted fixed-weight rule is fewer than 0.1% same-token trainer/serving probability ratios outside [0.8, 1.2]. Replay must use captured routes for the same tokens, positions, masks and weights. A native-route/sentinel performance bank does not qualify numerical agreement or learning. [Numerical decision](https://github.com/marin-community/MarinSkyRL/issues/737#issuecomment-5835032707).
+Hero's fixed-weight gate permits fewer than 0.1% of same-token trainer/serving probability ratios outside [0.8, 1.2]. Replay the captured routes with identical tokens, positions, masks and weights. Native-route/sentinel timing banks cannot qualify numerical agreement or learning. [Numerical decision](https://github.com/marin-community/MarinSkyRL/issues/737#issuecomment-5835032707).
 
 | Choice | Measured result | Starting decision / remaining gap |
 | --- | --- | --- |
@@ -102,14 +108,14 @@ Hero's accepted fixed-weight rule is fewer than 0.1% same-token trainer/serving 
 | S=1→S=2 GB200 admission package | Workers 32→48 and buffer16→32 also change; accepted rate 75.46→89.56 tok/s over 56 GPUs | Short combined-setting result, not a staleness-only or long-run learning claim. [Online evidence](#online-evidence) |
 | GB200 broadcast→expert_block | 89.56→153.05 accepted tok/s; four-cycle publication 737.93→117.27 s. Fixed-weight, sampled readback and separate full byte replay passed | Trial revisions differ from draft #860's combined branch; GPU validation there is still required. Responses differ by 5.44%; +70.9% is observed, not a universal transfer speedup. [Online evidence](#online-evidence) |
 
-Recomputation reduces activation memory by repeating compute. Optimizer offload trades device headroom for host memory and transfer time. Microbatch changes can alter kernels and numerical results; keep forward/train microbatches equal. Check memory at publication as well as training, keep checkpoint geometry compatible, and recheck fixed-token gap plus online clipping before accepting a throughput win. [Current Grug mechanism](grug-megatron-training.md).
+Recomputation saves activation memory through extra compute; optimizer offload uses host memory and transfer time. Keep forward/train microbatches equal because changes can alter kernels/numerics. Check training and publication memory, checkpoint compatibility, fixed-token mismatch and online clipping before accepting a speed gain. [Current Grug mechanism](grug-megatron-training.md).
 
 ### Learner evidence
 
 <details>
 <summary>Fixed-bank reports and qualification limits</summary>
 
-The bank SHA256 is `6d97026e4235babacdfe1d04d4e53d9e7deef4c68e1c96a6be73a12ced09c896`. Prefix **H** = `s3://marin-us-east-02a/marin/users/romain/hero-learning-01a0dca4/`; **P** = `s3://hero-checkpoints/marin/users/romain/hero-perf-01a0e406/`. Append the report key shown. These locators require authorized CoreWeave access. Each report contains the resolved config, source and input digests.
+Bank SHA256: `6d97026e4235babacdfe1d04d4e53d9e7deef4c68e1c96a6be73a12ced09c896`. Prefix **H** = `s3://marin-us-east-02a/marin/users/romain/hero-learning-01a0dca4/`; **P** = `s3://hero-checkpoints/marin/users/romain/hero-perf-01a0e406/`. Append the report key; CoreWeave access is required. Reports contain configs, source and input digests.
 
 | Point | Iris job; source SHA | Report key; SHA256 |
 | --- | --- | --- |
@@ -121,9 +127,9 @@ The bank SHA256 is `6d97026e4235babacdfe1d04d4e53d9e7deef4c68e1c96a6be73a12ced09
 | GB200 NCCL ON/OFF | `/romain/hero-gb200-nccl-on-48g-01a0e406-a2` / `/romain/hero-gb200-nccl-off-48g-01a0e406-a1`; source `1bc2affa3d54da08285faed2b2750785082f3272` | P `gb200-nccl-on-48g-a2/report.json`, `gb200-nccl-off-48g-a1/report.json`; SHA256 `d87a98d01940c2b4091c5c089756e604c093efda7b3879d2fa3450c993aa735c` / `6cf46d33907e72c5977b7945156abce01e7341c8ea042e6693c7f00144352956` |
 | H100128 NCCL ON/OFF | same 16 nodes; OFF failed backward after step0 | H100 performance prefix `s3://marin-us-east-02a/marin/users/romain/hero-perf-01a0e406/`, keys `h100-nccl-on-128g-a1/report.json` / `h100-nccl-off-128g-a1/report.json` |
 
-Hero fixed-bank results use MuonH/AdamH/Adam; Snowball uses AdamW. Warm training excludes scoring, optimizer offload outside the timer, serving and publication. Reported rank dispatch phases overlap. Results from one placement and three warm updates do not establish fleet minima or variability.
+Hero uses MuonH/AdamH/Adam; Snowball uses AdamW. Warm training excludes scoring, offload outside the timer, serving and publication. Rank dispatch spans overlap. One placement and three warm updates cannot establish minimum fleet size or variability.
 
-The NCCL bundle was tested together: `NCCL_LAUNCH_MODE=GROUP`, `NCCL_COLLNET_ENABLE=0`, `NCCL_NVLS_ENABLE=0`, `NCCL_P2P_NET_DISABLE=1`, `NCCL_MIN_NCHANNELS=1`, `NCCL_MAX_NCHANNELS=1`, `NCCL_PROTO=Simple`, `NCCL_ALGO=allreduce:tree`, `NCCL_NTHREADS=1`, `NCCL_SOCKET_NTHREADS=1`. The experiment's ON/OFF switch is not a production launcher argument or a per-flag result.
+NCCL flags were tested as one bundle: `NCCL_LAUNCH_MODE=GROUP`, `NCCL_COLLNET_ENABLE=0`, `NCCL_NVLS_ENABLE=0`, `NCCL_P2P_NET_DISABLE=1`, `NCCL_MIN_NCHANNELS=1`, `NCCL_MAX_NCHANNELS=1`, `NCCL_PROTO=Simple`, `NCCL_ALGO=allreduce:tree`, `NCCL_NTHREADS=1`, `NCCL_SOCKET_NTHREADS=1`. The ON/OFF switch belongs to the experiment; individual flag effects are unknown.
 
 </details>
 
@@ -139,11 +145,11 @@ The NCCL bundle was tested together: `NCCL_LAUNCH_MODE=GROUP`, `NCCL_COLLNET_ENA
 | Hero GB20048+8 S=2 cap16, steps34–37 | 161,621 / 1,804.63 s = 89.56 tok/s, 1.599 per all GPUs | `/romain/hero-gb200-feed-48p8s-s2-01a0e406-a1`, source `8d71544751a41d978bb476a0c49e9e30af21921a`; P prefix `gb200-feed-48p8s-s2-a1/report.json`. Batch16×8, workers48, buffer32. Maximum clip0.02441%, age2; wait40.6%, publication40.9% |
 | Same fleet, expert_block | 170,418 / 1,113.45 s = 153.05 tok/s | `/romain/hero-gb200-expert-block-48p8s-s2-01a0e406-a4`, source `e26957594e84c67c88888b7c0653100905fb3d77`; P `gb200-expert-block-48p8s-s2-a4/report.json`; SHA256 `d3eab5bdde398985bb49f5c1775c8c096debd71d25fd10e9bb2c1e776884d346`. Max clip0.02955%; sampled weights exact |
 
-P and H are the prefixes in learner evidence. A4's written report passed five updates and final evaluation; its deleted head pod required manual Iris completion. Separate `/romain/hero-gb200-expert-block-verify-48p8s-s2-01a0e406-a6` succeeded 14/14 and checked full receiver-parameter bytes plus trainer DP replicas at step32, with no updates or evaluation. Source `97bae9fbf285d95caa569a01d17065d0435c34e9`; P `gb200-expert-block-verify-48p8s-s2-a6/report.json`; SHA256 `ca5c3022ecf6bf777a6b0bf66dc3db402e0428bd57350a84337b9f6921fdf65e`. Per-receiver byte counts were not persisted.
+Use the P/H prefixes above. A4 passed five updates and final evaluation; after its head pod was deleted, Iris completion was marked manually. Separate `/romain/hero-gb200-expert-block-verify-48p8s-s2-01a0e406-a6` succeeded 14/14 and checked full receiver-parameter bytes plus trainer DP replicas at step32, with no updates or evaluation. Source `97bae9fbf285d95caa569a01d17065d0435c34e9`; P `gb200-expert-block-verify-48p8s-s2-a6/report.json`; SHA256 `ca5c3022ecf6bf777a6b0bf66dc3db402e0428bd57350a84337b9f6921fdf65e`. Per-receiver byte counts were not persisted.
 
-The online cap comparisons are `s3://marin-us-east-02a/marin/users/romain/hero-perf-01a0e406/h100-online-128seq-a2/report.json` and P `gb200-feed-48p8s-s2-maxseq32-a3/report.json`. The H100 retry also raised the pause deadline from 120 to 300 s; four warm steps and independently generated outputs limit causal inference.
+The online cap comparisons are `s3://marin-us-east-02a/marin/users/romain/hero-perf-01a0e406/h100-online-128seq-a2/report.json` and P `gb200-feed-48p8s-s2-maxseq32-a3/report.json`. The H100 retry also raised the pause deadline from 120 to 300 s; four warm steps with different generated outputs limit causal inference.
 
-On 30 September, [Hero architecture #792](https://github.com/marin-community/MarinSkyRL/pull/792) and [vLLM #77](https://github.com/marin-community/vllm/pull/77)/[#78](https://github.com/marin-community/vllm/pull/78) were merged. [Runtime wheels #799](https://github.com/marin-community/MarinSkyRL/pull/799), [expert-block Hero integration #860](https://github.com/marin-community/MarinSkyRL/pull/860), and [sparse publication #701](https://github.com/marin-community/MarinSkyRL/pull/701) remained drafts. A successful trial source or CPU CI does not qualify their combined released runtime.
+On 30 September, [Hero architecture #792](https://github.com/marin-community/MarinSkyRL/pull/792) and [vLLM #77](https://github.com/marin-community/vllm/pull/77)/[#78](https://github.com/marin-community/vllm/pull/78) were merged. [Runtime wheels #799](https://github.com/marin-community/MarinSkyRL/pull/799), [expert-block Hero integration #860](https://github.com/marin-community/MarinSkyRL/pull/860), and [sparse publication #701](https://github.com/marin-community/MarinSkyRL/pull/701) remained drafts. Their combined runtime still needs GPU qualification.
 
 </details>
 
@@ -151,9 +157,9 @@ On 30 September, [Hero architecture #792](https://github.com/marin-community/Mar
 
 | Gap | Narrow proposed probe | Cost and decision value |
 | --- | --- | --- |
-| Current rollout-buffer migration for the Snowball worked task | Same 4K bank, P32/I8, two warm cycles plus fixed-token gate; inspect resolved admission semantics | 40 H100s × roughly 30 min = 20 GPU-hours including an estimated startup allowance. Would validate current supply/accepted-rate advice; measure actual cost |
-| Hero expert-block combined branch | Step32 restore, exact full-byte publication replay, then four ordinary matched cycles on P48/I8 | 56 GB200s × roughly 1 hour = 56 GPU-hours including restore/eval allowance. Would decide release readiness and whether publication savings survive integration |
-| Hero/Snowball isolated GB2008 serving | Fixed 4K bank at two client loads on a reliably constrained rack; verify placement before loading | 8 GPUs × roughly 30 min = 4 GPU-hours plus startup variance. Would decide whether the 16-GPU isolated server reference can shrink; old failed placements produced no sizing data |
-| Hero long-response or multi-turn >4K RL | First qualify fixed-token routes/positions at one intended length, then a bounded complete task with tools/tails | No defensible fixed cost yet: learner fit and runtime are unknown. Serving 256K short outputs and synthetic 65K AdamW updates cannot predict this rate |
+| Current rollout-buffer migration for the Snowball worked task | Same 4K bank, P32/I8, two warm cycles plus fixed-token gate; inspect resolved admission semantics | 40 H100s × roughly 30 min = 20 GPU-hours, including estimated startup. Checks current supply/accepted rate; record actual cost |
+| Hero expert-block combined branch | Step32 restore, exact full-byte publication replay, then four ordinary matched cycles on P48/I8 | 56 GB200s × roughly 1 hour = 56 GPU-hours, including restore/eval. Checks release readiness and integrated publication savings |
+| Hero/Snowball isolated GB2008 serving | Fixed 4K bank at two client loads on a reliably constrained rack; verify placement before loading | 8 GPUs × roughly 30 min = 4 GPU-hours plus startup variance. Checks whether 16 GPUs can shrink to eight; failed placements gave no sizing data |
+| Hero long-response or multi-turn >4K RL | First qualify fixed-token routes/positions at one intended length, then a bounded complete task with tools/tails | Cost unknown: learner fit/runtime untested. Serving 256K short outputs and synthetic 65K AdamW updates cannot predict this rate |
 
-These are **estimated probe budgets**, not scheduled work. [Synthetic full-Hero capacity](https://github.com/marin-community/MarinSkyRL/blob/e3f5fff039f9b965d3f014584f8abd34164c0381/docs/grug-megatron-training.md#full-hero-capacity) passed 65K save/restore on 256 H100 or 64 GB200 with AdamW. MuonH long-context learner fit, online quality, sustained decode and 128K/256K trainer rates remain unknown. No new GPU experiment is required to use or review these drafts.
+Probe budgets are **estimates**; no work is scheduled. [Synthetic full-Hero capacity](https://github.com/marin-community/MarinSkyRL/blob/e3f5fff039f9b965d3f014584f8abd34164c0381/docs/grug-megatron-training.md#full-hero-capacity) passed 65K save/restore on 256 H100 or 64 GB200 with AdamW. MuonH long-context learner fit, online quality, sustained decode and 128K/256K trainer rates remain unknown.
