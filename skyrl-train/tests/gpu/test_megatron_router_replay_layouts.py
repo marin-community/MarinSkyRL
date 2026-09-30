@@ -36,7 +36,7 @@ from transformers import AutoTokenizer
 
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from tests.gpu.tiny_grug import NUM_EXPERTS, NUM_LAYERS, write_tiny_checkpoint as _write_tiny_checkpoint
-from skyrl_train.mismatch_probe.collect import ProbeCollector
+from skyrl_train.mismatch_probe.collect import BatchLayout, ProbeCollector
 from skyrl_train.mismatch_probe.archive import MismatchArchive
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
@@ -201,12 +201,18 @@ def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path, la
         collector.probe_hash = "fixture"
         collector.training_input = padded
         collector.weights[0] = "fixture-weights"
-        collector.batch_layout = {
-            "native_order": list(range(len(probes))),
-            "repeat_order": list(reversed(range(len(probes)))),
-            "padded_rows": padded.metadata["pad_size"],
-            "repeat_micro_batch_size": 4,
-        }
+        collector.batch_layout = BatchLayout(
+            sample_ids=[row.sample_id for row in probes],
+            native_order=list(range(len(probes))),
+            repeat_order=list(reversed(range(len(probes)))),
+            padded_rows=padded.metadata["pad_size"],
+            native_micro_batch_size=cfg.trainer.micro_forward_batch_size_per_gpu,
+            repeat_micro_batch_size=4,
+            collated_bytes=sum(value.numel() * value.element_size() for value in padded.values()),
+            collated_route_bytes=padded["rollout_routed_experts"].numel()
+            * padded["rollout_routed_experts"].element_size(),
+            nonzero_advantage_samples=int((padded["advantages"].abs().sum(dim=1) > 0).sum()),
+        )
         before = ray.get(policy.async_run_ray_method("pass_through", "probe_weights_digest"))
         scores = collector._trainer_scores(trainer, 0)
         assert before == ray.get(policy.async_run_ray_method("pass_through", "probe_weights_digest"))
