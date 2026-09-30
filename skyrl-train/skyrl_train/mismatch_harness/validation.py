@@ -66,6 +66,7 @@ from skyrl_train.mismatch_harness.vllm_side import (
 
 WEIGHT_INDEX = "model.safetensors.index.json"
 PROMPT_LOGPROBS = 20
+KERNEL_PATH_COMMENT = "# kernel path: "
 # Engine settings of the probe's vLLM that decide what it compiles and how it computes.
 ENGINE_SETTINGS = {
     "dtype": "bfloat16",
@@ -229,11 +230,13 @@ def serve(prompts: list[list[int]], work: Path) -> None:
 def replay_rank(work: str, rank: int, dp_size: int, archive: str) -> None:
     """Replay one rank's prompt in the Inductor cache its engine compiled into, as that engine ran it.
 
-    Runs in its own process, so the replay's kernels load beside the rank's own ``.best_config`` files.
-    Saves the comparison to ``work/result-rank{rank}.json``.
+    Runs in its own process on the rank's GPU, so the replay's kernels load beside the rank's own
+    ``.best_config`` files. Saves the comparison to ``work/result-rank{rank}.json``.
     """
     work_dir = Path(work)
     os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(work_dir / f"inductor-rank{rank}")
+    # The rank's output code names the GPU it compiled on (its device guard and kernel metadata).
+    torch.cuda.set_device(rank)
     served = torch.load(work_dir / f"served-rank{rank}.pt", weights_only=False)
     shape = GrugShape.from_config(json.loads((work_dir / "model" / "config.json").read_text()))
     weights = export_tensors(work_dir / "model")
@@ -421,6 +424,11 @@ def logits_diagnostics(served: dict[int, dict[int, float]], logits: torch.Tensor
     }
 
 
+def _code_lines(text: str) -> list[str]:
+    """A module's lines without the ``# kernel path:`` comments, which name the Inductor cache directory."""
+    return [line for line in text.splitlines() if not line.startswith(KERNEL_PATH_COMMENT)]
+
+
 def diff_pieces(served: dict[str, str], archived_uri: str) -> dict[str, str]:
     """Text-diff each served piece against the archived full-model piece of the same kind."""
     archived = {}
@@ -444,7 +452,7 @@ def diff_pieces(served: dict[str, str], archived_uri: str) -> dict[str, str]:
             continue
         changed = [
             line
-            for line in difflib.unified_diff(reference.splitlines(), text.splitlines(), lineterm="", n=0)
+            for line in difflib.unified_diff(_code_lines(reference), _code_lines(text), lineterm="", n=0)
             if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
         ]
         result[key] = "identical" if not changed else f"{len(changed)} changed lines: {changed[:6]}"
