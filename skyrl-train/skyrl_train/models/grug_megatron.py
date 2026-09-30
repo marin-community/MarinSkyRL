@@ -87,7 +87,10 @@ def _install_residual_hooks(layer: TransformerLayer) -> None:
 
     def keep_attention(module, args, output):
         if active():
-            stored["attention"] = output[0] if isinstance(output, tuple) else output
+            # Without gradients, the attention bias-dropout-add adds the residual into this tensor in
+            # place (megatron/core/fusions/fused_bias_dropout.py), so keep a copy made before it runs.
+            attention = output[0] if isinstance(output, tuple) else output
+            stored["attention"] = attention.to(torch.float32, copy=True)
 
     def attention_residual(module, args):
         if not active():
