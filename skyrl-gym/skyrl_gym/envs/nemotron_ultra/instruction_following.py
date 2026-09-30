@@ -32,10 +32,14 @@ def _ensure_nltk_data() -> None:
 
 def grade_instruction_following(text: str, record: dict[str, Any]) -> tuple[float, dict[str, Any]]:
     """Evaluate every per-row constraint with NVIDIA's pinned instruction registry."""
+    instruction_ids = record["instruction_id_list"]
+    kwargs_list = record["kwargs"]
+    if not instruction_ids or len(instruction_ids) != len(kwargs_list):
+        raise ValueError("Instruction IDs and kwargs must have the same nonzero length")
     _ensure_nltk_data()
     results: list[bool] = []
     errors: list[str | None] = []
-    for instruction_id, kwargs in zip(record["instruction_id_list"], record["kwargs"]):
+    for instruction_id, kwargs in zip(instruction_ids, kwargs_list, strict=True):
         try:
             instruction_cls = instructions_registry.INSTRUCTION_DICT[instruction_id]
             instruction = instruction_cls(instruction_id)
@@ -58,4 +62,6 @@ def grade_instruction_following(text: str, record: dict[str, Any]) -> tuple[floa
         "follow_instruction_list": results,
         "instruction_errors": errors,
         "grading_mode": grading_mode,
+        "num_passed": sum(results),
+        "num_total": len(instruction_ids),
     }
