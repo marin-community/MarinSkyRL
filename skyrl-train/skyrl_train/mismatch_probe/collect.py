@@ -763,11 +763,13 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
             provenance_started = time.monotonic()
             await probe._record_vllm_provenance(trainer)
             probe.timing["probe/vllm_provenance_seconds"] = time.monotonic() - provenance_started
+        # Training-pass timing runs backward, which needs the gradient buffers offloaded with the optimizer.
+        timing = bool(probe.spec.get("timing_modes"))
         if trainer.colocate_all:
             await trainer.inference_engine_client.sleep()
         try:
             if trainer.colocate_all:
-                trainer.policy_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
+                trainer.policy_model.backload_to_gpu(backload_optimizer=timing, backload_model=True)
             try:
                 probe.weights[update] = probe._policy_weights_hash(trainer)
                 if update == 0:
@@ -786,7 +788,7 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
                     raise ValueError(f"probe scoring changed policy weights or buffers at update {update}")
             finally:
                 if trainer.colocate_all:
-                    trainer.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
+                    trainer.policy_model.offload_to_cpu(offload_optimizer=timing, offload_model=True)
         finally:
             if trainer.colocate_all:
                 await trainer.inference_engine_client.wake_up()
