@@ -1,11 +1,6 @@
-import fcntl
-import os
-import tempfile
-import time
-from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
-from loguru import logger
 from megatron.core.dist_checkpointing.dict_utils import nested_values
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict, ShardedTensor
 from megatron.core.dist_checkpointing.strategies.torch import (
@@ -20,11 +15,11 @@ from megatron.core.dist_checkpointing.strategies.torch import (
     mcore_to_pyt_state_dict,
 )
 from torch.distributed import checkpoint
-from torch.distributed.checkpoint import FileSystemReader
 from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as FsspecFileSystem
 
 from marinskyrl.remote_io import create_s3_filesystem
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
+from skyrl_train.io.checkpoint_reader import BudgetedCheckpointReader, PodCheckpointReadBudget
 
 
 # MCore 0.18 does not expose a storage-writer hook. Keep the adapter narrow: it
@@ -54,45 +49,28 @@ class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
         )
 
 
-@contextmanager
-def _local_checkpoint_load_slot():
-    """Optionally bound simultaneous DCP tensor reads in one pod."""
-    slots = int(os.environ.get("SKYRL_MEGATRON_LOCAL_DCP_LOAD_SLOTS", "0"))
-    if slots == 0:
-        yield
-        return
-    if slots < 0:
-        raise ValueError(f"Invalid local DCP load slot count: {slots}")
-    waiting_since = time.monotonic()
-    while True:
-        for slot in range(slots):
-            with open(Path(tempfile.gettempdir()) / f"skyrl-megatron-dcp-load-{slot}.lock", "a+") as lock:
-                try:
-                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    continue
-                acquired_at = time.monotonic()
-                try:
-                    yield
-                finally:
-                    logger.info(
-                        "Local DCP load pid={} slot={} wait={:.2f}s read={:.2f}s",
-                        os.getpid(),
-                        slot,
-                        acquired_at - waiting_since,
-                        time.monotonic() - acquired_at,
-                    )
-                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                return
-        time.sleep(0.1)
-
-
 class DirectS3TorchDistLoadShardedStrategy(TorchDistLoadShardedStrategy):
     """Read only the DCP tensor byte ranges assigned to this rank from S3."""
 
-    def __init__(self, checkpoint_dir: str) -> None:
+    def __init__(self, checkpoint_dir: str, memory_budget_bytes: int) -> None:
         super().__init__()
+        source = urlparse(checkpoint_dir)
+        if source.scheme != "s3" or not source.netloc or not source.path.strip("/") or source.query or source.fragment:
+            raise ValueError("Megatron restore requires a CoreWeave S3 training checkpoint")
+        self.filesystem = create_s3_filesystem(default_cache_type="none")
+        endpoint = self.filesystem.endpoint_url or self.filesystem.client_kwargs.get("endpoint_url", "")
+        resolved = urlparse(endpoint)
+        if (
+            resolved.scheme not in ("http", "https")
+            or resolved.hostname not in ("cwobject.com", "cwlota.com")
+            or resolved.path not in ("", "/")
+            or resolved.username
+            or resolved.query
+            or resolved.fragment
+        ):
+            raise ValueError("Megatron restore requires a resolved cwobject.com or cwlota.com storage endpoint")
         self.checkpoint_dir = checkpoint_dir
+        self.budget = PodCheckpointReadBudget(memory_budget_bytes)
 
     def load(self, sharded_state_dict: ShardedStateDict, _checkpoint_dir: Path, async_strategy: str = "mcore"):
         del async_strategy  # Required by the Megatron sharded-load strategy interface.
@@ -101,25 +79,23 @@ class DirectS3TorchDistLoadShardedStrategy(TorchDistLoadShardedStrategy):
         converted, flat_mapping, rename_mapping = _replace_state_dict_keys_with_sharded_keys(original)
         pytorch_state_dict = mcore_to_pyt_state_dict(converted, True)
 
-        filesystem = create_s3_filesystem()
-        reader = FileSystemReader(self.checkpoint_dir)
+        reader = BudgetedCheckpointReader(self.checkpoint_dir, self.budget)
         reader.fs = FsspecFileSystem()
-        reader.fs.fs = filesystem
+        reader.fs.fs = self.filesystem
         reader.path = self.checkpoint_dir
-        with _local_checkpoint_load_slot():
-            checkpoint.load(
-                pytorch_state_dict,
-                storage_reader=reader,
-                planner=MCoreLoadPlanner(
-                    shapes_validation_sharded_tensors=[value for value in tensors if not value.allow_shape_mismatch],
-                    allow_shape_mismatch_sharded_tensors={
-                        value.key: value for value in tensors if value.allow_shape_mismatch
-                    },
-                    flatten_state_dict=False,
-                    flatten_sharded_tensors=False,
-                ),
-                no_dist=True,
-            )
+        checkpoint.load(
+            pytorch_state_dict,
+            storage_reader=reader,
+            planner=MCoreLoadPlanner(
+                shapes_validation_sharded_tensors=[value for value in tensors if not value.allow_shape_mismatch],
+                allow_shape_mismatch_sharded_tensors={
+                    value.key: value for value in tensors if value.allow_shape_mismatch
+                },
+                flatten_state_dict=False,
+                flatten_sharded_tensors=False,
+            ),
+            no_dist=True,
+        )
         restored = {name: _unwrap_pyt_sharded_tensor(value) for name, value in pytorch_state_dict.items()}
         restored = _replace_sharded_keys_with_state_dict_keys(restored, flat_mapping, rename_mapping)
         _restore_dict_types(restored, original)

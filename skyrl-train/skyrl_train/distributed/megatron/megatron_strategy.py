@@ -38,7 +38,6 @@ from megatron.core.dist_checkpointing.strategies import base as ckpt_base
 from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
 from megatron.core import dist_checkpointing
 from megatron.core.dist_checkpointing.serialization import (
-    get_default_load_sharded_strategy,
     get_default_save_sharded_strategy,
 )
 from megatron.core.dist_checkpointing.strategies.fully_parallel import (
@@ -81,9 +80,6 @@ def _saved_optimizer_sharding_type(common_state: dict) -> str:
     return sharding_type
 
 
-_NODE_LOCAL_CHECKPOINT_CACHE = os.path.join(tempfile.gettempdir(), "marinskyrl-megatron-checkpoints")
-
-
 class MegatronStrategy(DistributedStrategy):
     """
     The strategy for training with Megatron.
@@ -92,11 +88,13 @@ class MegatronStrategy(DistributedStrategy):
     def __init__(
         self,
         megatron_config,
+        checkpoint_load_memory_bytes: int,
         optimizer_config=None,
         seed: int = 42,
     ) -> None:
         super().__init__()
         self.megatron_config = megatron_config
+        self.checkpoint_load_memory_bytes = checkpoint_load_memory_bytes
         self.optimizer_config = optimizer_config
         self.seed = seed
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
@@ -280,7 +278,8 @@ class MegatronStrategy(DistributedStrategy):
         load_module_strict: bool = True,
         load_training_state: bool = True,
     ):
-        if not ckpt_dir or not io.exists(ckpt_dir):
+        load_strategy = DirectS3TorchDistLoadShardedStrategy(ckpt_dir, self.checkpoint_load_memory_bytes)
+        if not io.exists(ckpt_dir):
             raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
 
         # Extract base model.
@@ -298,12 +297,7 @@ class MegatronStrategy(DistributedStrategy):
         if scheduler and load_training_state:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
-        read_context = (
-            remote_checkpoint_metadata(ckpt_dir)
-            if ckpt_dir.startswith("s3://")
-            else io.node_cached_read_dir(ckpt_dir, _NODE_LOCAL_CHECKPOINT_CACHE)
-        )
-        with read_context as read_dir:
+        with remote_checkpoint_metadata(ckpt_dir) as read_dir:
             if optimizer and load_training_state:
                 common_state = dist_checkpointing.load_common_state_dict(read_dir)
                 saved_type = _saved_optimizer_sharding_type(common_state)
@@ -319,11 +313,6 @@ class MegatronStrategy(DistributedStrategy):
                     metadata=_optimizer_checkpoint_metadata(saved_type),
                 )
             # Load the checkpoint in parallel.
-            load_strategy = (
-                DirectS3TorchDistLoadShardedStrategy(ckpt_dir)
-                if ckpt_dir.startswith("s3://")
-                else get_default_load_sharded_strategy(read_dir)
-            )
             load_strategy = FullyParallelLoadStrategyWrapper(
                 load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
             )

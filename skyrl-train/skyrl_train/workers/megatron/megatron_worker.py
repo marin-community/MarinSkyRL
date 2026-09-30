@@ -385,6 +385,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             torch.distributed._skyrl_broadcast_no_grad_patched = True
 
         self.strategy = MegatronStrategy(
+            checkpoint_load_memory_bytes=int(self.cfg.trainer.distributed.megatron_checkpoint_load_memory_gib * 2**30),
             megatron_config=self.cfg.trainer.policy.megatron_config,
             optimizer_config=self.cfg.trainer.policy.optimizer_config,
             seed=self.cfg.trainer.seed,
@@ -816,6 +817,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         )
 
         self.strategy = MegatronStrategy(
+            checkpoint_load_memory_bytes=int(self.cfg.trainer.distributed.megatron_checkpoint_load_memory_gib * 2**30),
             megatron_config=self.cfg.trainer.ref.megatron_config,
             optimizer_config=None,
             seed=self.cfg.trainer.seed,

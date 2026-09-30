@@ -8,16 +8,17 @@ import pytest
 import hydra
 import torch
 import os
-import shutil
+from uuid import uuid4
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
 from skyrl_train.utils.utils import print_mem
 from tests.gpu.utils import init_worker_with_type, get_model_logits_from_actor, validate_cfg
 from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.io import io
+from skyrl_train.distributed.megatron.checkpoint_metadata import remote_checkpoint_metadata
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-CKPT_PATH = "$HOME/ckpts/test/"
 NUM_GPUS = 4
 
 
@@ -34,8 +35,11 @@ def get_test_actor_config(strategy: str, optimizer_checkpoint_sharding_type: str
     cfg.trainer.strategy = strategy
     cfg.trainer.policy.megatron_config.optimizer_checkpoint_sharding_type = optimizer_checkpoint_sharding_type
 
-    cfg.trainer.ckpt_path = CKPT_PATH
-    cfg.trainer.export_path = CKPT_PATH
+    checkpoint_prefix = os.environ.get("MARIN_TEMP_PREFIX", os.environ.get("MARIN_PREFIX", ""))
+    if not checkpoint_prefix.startswith("s3://"):
+        raise ValueError("Run the Megatron checkpoint test on Iris with CoreWeave object storage configured")
+    cfg.trainer.ckpt_path = f"{checkpoint_prefix.rstrip('/')}/tests/megatron-checkpoint/{uuid4().hex}"
+    cfg.trainer.export_path = cfg.trainer.ckpt_path
     cfg.trainer.logger = "console"
 
     validate_cfg(cfg)
@@ -96,7 +100,8 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, optimizer_checkpoint_s
         from megatron.core import dist_checkpointing
         from skyrl_train.distributed.megatron.megatron_strategy import _saved_optimizer_sharding_type
 
-        common_state = dist_checkpointing.load_common_state_dict(checkpoint_path)
+        with remote_checkpoint_metadata(checkpoint_path) as metadata_dir:
+            common_state = dist_checkpointing.load_common_state_dict(metadata_dir)
         assert _saved_optimizer_sharding_type(common_state) == optimizer_checkpoint_sharding_type
 
         # Step 2.1: Make sure that offloading still works after saving checkpoint
@@ -117,9 +122,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, optimizer_checkpoint_s
         huggingface_dir = os.path.join(checkpoint_path, "huggingface")
         expected_files = ["config.json", "generation_config.json", "tokenizer.json"]
         for file in expected_files:
-            assert os.path.exists(os.path.join(huggingface_dir, file)), (
-                f"File {file} not found in huggingface directory"
-            )
+            assert io.exists(os.path.join(huggingface_dir, file)), f"File {file} not found in huggingface directory"
 
         # Step 3: Do second training step and record results
         run_one_training_step(actor_group, train_batch_2)
@@ -133,7 +136,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, optimizer_checkpoint_s
         logits_after_second_training = get_model_logits_from_actor(actor_group, test_input, attention_mask)
 
         # Step 5: Load checkpoint via strategy's load_checkpoint method
-        assert os.path.exists(checkpoint_path), f"Checkpoint directory {checkpoint_path} does not exist"
+        assert io.exists(checkpoint_path), f"Checkpoint directory {checkpoint_path} does not exist"
         ray.get(actor_group.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint_path))
 
         # Step 6: Now repeat the exact same second training step
@@ -147,6 +150,6 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, optimizer_checkpoint_s
 
     finally:
         # Clean up checkpoint directory
-        if checkpoint_dir and os.path.exists(checkpoint_dir):
+        if checkpoint_dir and io.exists(checkpoint_dir):
             print(f"Removing checkpoint directory: {checkpoint_dir}")
-            shutil.rmtree(checkpoint_dir)
+            io.remove(checkpoint_dir)
