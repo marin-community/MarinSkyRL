@@ -80,7 +80,9 @@ Counts are recomputed for each accumulation window and training epoch.
 
 KL always uses ``sequence_mean`` with raw-mask counts. Entropy always uses
 ``token_mean`` with raw-mask counts. Empty rows contribute zero; denominator
-counts are clamped to at least one. Invalid positions are zeroed before
+counts are clamped to at least one. For ``sequence_mean``, each nonempty row
+is divided by its true weighted mass :math:`n_i`, including masses below one
+when ``think_token_weight < 1``. Invalid positions are zeroed before
 nonlinear operations, so a masked NaN does not contaminate a valid loss.
 
 For two responses with 10 and 1,000 trainable tokens and unit data weights,
@@ -198,7 +200,9 @@ Non-finite optimizer steps
 
 Megatron with ``trainer.policy.max_consecutive_nonfinite_steps: 3`` permits
 three non-finite skips between applied updates and raises on the next. Null
-raises immediately. A successfully applied update resets the streak; finite
+raises immediately. Explicit null values in a launch document override declared
+defaults, so this null limit reaches the trainer. A successfully applied update
+resets the streak; finite
 gradient-threshold skips leave it unchanged. The base worker does not implement
 this skip allowance. The Megatron skip decision is synchronized
 across the affected ranks. A skipped non-finite step preserves parameters,
