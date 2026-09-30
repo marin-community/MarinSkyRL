@@ -246,8 +246,8 @@ def vllm_expert_outputs(
     The kernel reads the experts' weights where the trainer keeps them, one tensor per expert: it addresses a
     block's expert at ``B + expert_ids[block] * B.stride(0)``, so each block gets its expert's offset from the
     lowest-addressed expert weight, in units of ``EXPERT_OFFSET_ELEMENTS``, as its expert id, with that unit as
-    the expert stride. A stride divisible by 16 lets Triton keep the vectorized weight loads it uses for vLLM's
-    own stacked weights.
+    the expert stride. Triton specializes a stride divisible by 16, so it can assume the same weight-address
+    alignment as for vLLM's own stacked weights.
     """
     from vllm.model_executor.layers.fused_moe.config import FUSED_MOE_UNQUANTIZED_CONFIG
     from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
