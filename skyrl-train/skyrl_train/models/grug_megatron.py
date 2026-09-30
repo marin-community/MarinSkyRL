@@ -227,7 +227,9 @@ class GrugGatedRMSNorm(nn.Module):
         if unrounded is not None:
             # The hand-off may come from a no-grad checkpointed forward; keep its values and take the
             # gradient through the bf16 residual so the loss still reaches the layers before this norm.
-            unrounded = hidden_states.float() + (unrounded - hidden_states.float()).detach()
+            # ``x - x.detach()`` is exactly zero, so the values are unchanged bit for bit.
+            residual = hidden_states.float()
+            unrounded = unrounded.detach() + (residual - residual.detach())
         if unrounded is not None and self.role is NormRole.INPUT and numerics.input_norm_variance:
             normalized = rms_norm_hybrid(hidden_states, unrounded, self.norm.weight, self.eps)
         elif unrounded is not None and self.role is NormRole.FINAL and numerics.final_norm_fp32:
