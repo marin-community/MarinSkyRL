@@ -225,9 +225,8 @@ def run_layer(
         return routed
 
     dispatcher.combine_postprocess = recorded_combine
-    hook_output(moe.experts.linear_fc1, "experts_fc1")
-    hook_input(moe.experts.linear_fc2, "experts_act")
-    hook_output(moe.experts.linear_fc2, "experts_fc2")
+    # The experts' output rows (one per token-expert slot, route weight applied), whichever kernel computed them.
+    hook_output(moe.experts, "expert_outputs")
     shared = moe.shared_experts
     hook_output(shared.linear_fc1, "shared_fc1")
     hook_input(shared.linear_fc2, "shared_act")

@@ -1,12 +1,17 @@
-"""H100 time of the trainer's attention and MoE combine under the vLLM-kernel numerics, at Snowball shapes.
+"""H100 time of the trainer's attention, experts and whole layer under the vLLM-kernel numerics, at Snowball shapes.
 
-Runs on one GPU, gradients on, as a training forward and backward runs them (no activation recompute; the
-production recipe's full recompute runs each forward a second time before the backward):
+Runs on one GPU, gradients on, as a training forward and backward runs them:
 
 - core attention alone, Megatron's TE ``DotProductAttention`` with the probe's settings (cuDNN), against
   the ``fa3_attention`` path (vLLM's FA3 forward, and the cuDNN forward and backward for the gradient), and
   against FA3's forward with FA2's backward, the other backward available in the runtime;
-- one whole Grug decoder layer (256 experts on this GPU) under numerics sets, ``ep_sum`` included.
+- one whole Grug decoder layer under numerics sets, forward and backward, both plain and inside Megatron's
+  ``tensor_parallel.checkpoint`` (the production recipe's full recompute: a forward without gradients, then the
+  forward again with gradients and the backward). The experts either route natively over all 256 experts on
+  this GPU (``native``), or every token is routed among the first 32 experts, which gives this GPU the expert
+  rows one of 8 expert-parallel ranks computes (``ep8_rank``);
+- the routed experts' forward alone without gradients (the scoring and first recompute pass), Transformer
+  Engine's grouped GEMMs against vLLM's fused-MoE kernels, at both expert loads.
 
 Example::
 
@@ -28,6 +33,8 @@ from flash_attn.flash_attn_interface import _flash_attn_varlen_backward
 from marinskyrl.resource_locator import join_resource_path
 from megatron.core.transformer.enums import AttnMaskType
 from vllm.vllm_flash_attn import flash_attn_varlen_func
+
+from megatron.core import tensor_parallel
 
 from skyrl_train.io import io
 from skyrl_train.mismatch_harness.run import export_weights, layer_weight_names, parse_variants, stage_config
@@ -126,39 +133,90 @@ def _fa3_fa2_time(query, key, value, grad, attention, shape: GrugShape) -> float
     return milliseconds(run)
 
 
-def layer_times(layer, rotary, shape: GrugShape, tokens: int, variants, generator: torch.Generator) -> dict[str, float]:
-    """Forward+backward milliseconds of the whole layer on one sequence, per numerics variant."""
+# Experts one of vLLM's and the trainer's 8 expert-parallel ranks holds (256 experts over 8 ranks).
+EP8_RANK_EXPERTS = 32
+
+
+def expert_routes(tokens: int, top_k: int, experts: int, generator: torch.Generator) -> torch.Tensor:
+    """``[tokens, top_k]`` distinct experts per token drawn uniformly from the first ``experts``."""
+    scores = torch.rand(tokens, experts, generator=generator, device="cuda")
+    return scores.argsort(dim=1)[:, :top_k]
+
+
+def layer_times(
+    layer, rotary, shape: GrugShape, tokens: int, variants, generator: torch.Generator
+) -> dict[str, dict[str, float]]:
+    """Forward+backward milliseconds of the whole layer on one sequence, per numerics variant, expert load and
+    recompute setting.
+
+    ``native`` routes with the layer's router; ``ep8_rank`` replays routes among the first 32 experts. The
+    ``recompute`` times run the layer inside ``tensor_parallel.checkpoint`` as the production recipe does.
+    """
     layer.train()
     hidden = torch.randn(tokens, 1, shape.hidden, generator=generator, device="cuda").to(torch.bfloat16)
-    hidden.requires_grad_()
     grad = torch.randn_like(hidden)
     rotary_pos_emb = rotary(tokens)
     router = layer.mlp.router
-    times = {}
+    loads = {
+        "native": (torch.zeros(tokens, router.topk, dtype=torch.long, device="cuda"), False),
+        "ep8_rank": (expert_routes(tokens, router.topk, EP8_RANK_EXPERTS, generator), True),
+    }
+    times: dict[str, dict[str, float]] = {}
     for label, flags in variants.items():
-        controller = None
-        if flags.get("ep_sum"):
-            controller = MegatronRouterReplay([0], recompute_enabled=False)
-            router.router_replay = LayerReplayHandle(controller, 0)
+        for load, (routes, replayed) in loads.items():
+            for recompute in (False, True):
+                controller = MegatronRouterReplay([0], recompute_enabled=recompute)
+                router.router_replay = LayerReplayHandle(controller, 0)
 
-        def run() -> None:
-            if controller is not None:
-                controller.begin_forward(
-                    {0: torch.zeros(tokens, router.topk, dtype=torch.long, device="cuda")},
-                    torch.zeros(tokens, dtype=torch.bool, device="cuda"),
-                    vllm_expert_parallel=VllmExpertParallel(torch.zeros(tokens, dtype=torch.long, device="cuda"), 8),
-                )
-            clear_numerics_handoffs()
-            output, _ = layer(hidden_states=hidden, attention_mask=None, rotary_pos_emb=rotary_pos_emb)
-            if controller is not None:
-                controller.end_forward()
-            output.backward(grad)
-            clear_numerics_handoffs()
+                def forward(inputs):
+                    clear_numerics_handoffs()
+                    output, _ = layer(hidden_states=inputs, attention_mask=None, rotary_pos_emb=rotary_pos_emb)
+                    return output
 
-        with grug_numerics(**flags):
-            times[label] = milliseconds(run)
-        router.router_replay = None
+                def run() -> None:
+                    controller.begin_forward(
+                        {0: routes},
+                        torch.full((tokens,), replayed, dtype=torch.bool, device="cuda"),
+                        record_recompute=recompute,
+                        vllm_expert_parallel=VllmExpertParallel(
+                            torch.zeros(tokens, dtype=torch.long, device="cuda"), 8
+                        ),
+                    )
+                    source = hidden.detach().requires_grad_()
+                    output = tensor_parallel.checkpoint(forward, False, source) if recompute else forward(source)
+                    controller.end_forward()
+                    output.backward(grad)
+                    clear_numerics_handoffs()
+
+                with grug_numerics(**flags):
+                    times.setdefault(label, {})[f"{load}{'+recompute' if recompute else ''}"] = milliseconds(run)
+                controller.assert_drained()
+                router.router_replay = None
     layer.eval()
+    return times
+
+
+def expert_forward_times(
+    layer, shape: GrugShape, tokens: int, generator: torch.Generator
+) -> dict[str, dict[str, float]]:
+    """Milliseconds of the routed experts' forward without gradients: TE's grouped GEMMs and vLLM's kernels."""
+    experts = layer.mlp.experts
+    hidden = torch.randn(tokens, shape.hidden, generator=generator, device="cuda").to(torch.bfloat16)
+    times: dict[str, dict[str, float]] = {}
+    for load, count in (("native", shape.experts), ("ep8_rank", EP8_RANK_EXPERTS)):
+        routes = expert_routes(tokens, shape.top_k, count, generator)
+        routing_map = torch.zeros(tokens, shape.experts, dtype=torch.bool, device="cuda").scatter(1, routes, True)
+        pairs = routing_map.t().nonzero()
+        permuted = hidden[pairs[:, 1]]
+        probs = torch.rand(pairs.shape[0], generator=generator, device="cuda")
+        counts = routing_map.sum(0).cpu()
+        for label, flags in (("te_grouped_gemm", {}), ("vllm_experts", {"vllm_experts": True})):
+
+            def run() -> None:
+                experts(permuted, counts, probs)
+
+            with torch.no_grad(), grug_numerics(**flags):
+                times.setdefault(load, {})[label] = milliseconds(run)
     return times
 
 
@@ -168,6 +226,7 @@ def main() -> None:
     parser.add_argument("--layers", type=int, nargs="+", required=True)
     parser.add_argument("--lengths", type=int, nargs="+", required=True)
     parser.add_argument("--numerics", action="append", default=[], help="[label=]comma-separated flags")
+    parser.add_argument("--skip-attention", action="store_true", help="time only the layer and the experts")
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=1234)
     args = parser.parse_args()
@@ -184,14 +243,16 @@ def main() -> None:
         for layer_index in args.layers:
             layer = build_layer(provider, layer_index)
             load_hf_weights(layer, f"decoder.layers.{layer_index}.", weights)
-            entry = {"window": layer.self_attention.fa3_window, "attention": {}, "layer": {}}
+            entry = {"window": layer.self_attention.fa3_window, "attention": {}, "layer": {}, "experts": {}}
             for tokens in args.lengths:
-                entry["attention"][str(tokens)] = attention_times(layer, shape, tokens, generator)
+                if not args.skip_attention:
+                    entry["attention"][str(tokens)] = attention_times(layer, shape, tokens, generator)
+                entry["experts"][str(tokens)] = expert_forward_times(layer, shape, tokens, generator)
                 entry["layer"][str(tokens)] = layer_times(layer, rotary, shape, tokens, variants, generator)
-                print(
-                    json.dumps({"layer": layer_index, "tokens": tokens, **entry["attention"][str(tokens)]}), flush=True
-                )
-                print(json.dumps({"layer": layer_index, "tokens": tokens, **entry["layer"][str(tokens)]}), flush=True)
+                for part in ("attention", "experts", "layer"):
+                    if str(tokens) in entry[part]:
+                        record = {"layer": layer_index, "tokens": tokens, part: entry[part][str(tokens)]}
+                        print(json.dumps(record), flush=True)
             results["layers"][str(layer_index)] = entry
             del layer
             torch.cuda.empty_cache()

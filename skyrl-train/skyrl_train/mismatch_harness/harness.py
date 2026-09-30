@@ -148,7 +148,7 @@ def trainer_routing(
 def trainer_expert_slots(
     tensors: Mapping[str, torch.Tensor], layout: RowLayout, topk_ids: torch.Tensor
 ) -> torch.Tensor:
-    """The trainer's per-slot expert outputs ``[tokens, top_k, hidden]`` from its permuted fc2 output.
+    """The trainer's per-slot expert outputs ``[tokens, top_k, hidden]`` from its permuted expert output rows.
 
     TE's permutation orders rows by expert, then by token in sequence-major order.
     """
@@ -157,7 +157,7 @@ def trainer_expert_slots(
     batch = len(layout.lengths)
     token_order = torch.arange(sequence_length * batch, device=routing_map.device).reshape(sequence_length, batch)
     flat_index = layout.flatten(token_order)
-    rows = tensors["experts_fc2"]
+    rows = tensors["expert_outputs"]
     permuted = routing_map.t().nonzero()
     row_of = {(int(token), int(expert)): row for row, (expert, token) in enumerate(permuted.tolist())}
     slots = torch.empty(topk_ids.shape[0], topk_ids.shape[1], rows.shape[-1], dtype=rows.dtype, device=rows.device)
