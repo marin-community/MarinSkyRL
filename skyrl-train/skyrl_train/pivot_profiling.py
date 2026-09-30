@@ -18,7 +18,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
 
 
 async def profile_candidates(dataloader, runner, cfg) -> dict[str, float]:
-    """Retain each batch before discarding its token arrays; never update the policy."""
+    """Retain completed groups and refill a bounded queue without updating the policy."""
     count, passed, excluded, errors = 0, 0.0, 0, 0
     prompt_tokens, response_tokens, attempts, recovered, unresolved = 0, 0, 0, 0, 0
     max_retries = cfg.generator.pivot_profiling_max_retries
@@ -62,8 +62,61 @@ async def profile_candidates(dataloader, runner, cfg) -> dict[str, float]:
                 recovered += int(len(saved) > 1)
     prompt_tokens, response_tokens, attempts = history.prompt_tokens, history.response_tokens, history.attempts
     visited = set()
-    await runner.start_eval_session(run_name=cfg.trainer.run_name, eval_step=0)
-    try:
+    buffer = cfg.trainer.get("rollout_buffer", {})
+    rolling = buffer.get("batch_policy", "full_batch") == "rolling"
+    capacity = buffer.get("max_in_flight") if rolling else 1
+    if not isinstance(capacity, int) or capacity < 1:
+        raise ValueError("Rolling profiling requires a positive max_in_flight group count")
+
+    async def profile_group(request):
+        nonlocal count, passed, excluded, errors, prompt_tokens, response_tokens, attempts, recovered, unresolved
+        while request["prompts"]:
+            # Retention includes the attempt number so failures and their replacements
+            # remain auditable even when archives are read out of order.
+            request = deepcopy(request)
+            slots = []
+            for identity, extras in zip(request["trajectory_ids"], request["env_extras"]):
+                extra = extras.setdefault("extra_info", {})
+                slot = (extra.get("source_id", identity.instance_id), identity.repetition_id)
+                extra["profiling_attempt"] = next_attempts.get(slot, 0)
+                slots.append(slot)
+            batch = await runner.run(request)
+            validate_trajectory_batch(len(request["prompts"]), batch)
+            attempts += len(request["prompts"])
+            prompt_tokens += sum(map(len, batch["prompt_token_ids"]))
+            response_tokens += sum(map(len, batch["response_ids"]))
+            failed_indices = []
+            for index, verdict in enumerate(batch["verification_results"]):
+                attempt = request["env_extras"][index]["extra_info"]["profiling_attempt"]
+                next_attempts[slots[index]] = attempt + 1
+                if verdict is not None and is_context_exclusion(asdict(verdict)):
+                    excluded += 1
+                    continue
+                if verdict is None or verdict.status != "verified":
+                    errors += 1
+                    if attempt < max_retries:
+                        failed_indices.append(index)
+                    else:
+                        unresolved += 1
+                    continue
+                if verdict.score not in (0, 1):
+                    raise ValueError("Profiling requires a binary verifier verdict for every response")
+                passed += verdict.score
+                count += 1
+                recovered += int(attempt > 0)
+            if not failed_indices:
+                break
+            logger.warning("Retrying {} failed profiling requests", len(failed_indices))
+            request = select_request_rows(request, failed_indices)
+        logger.info(
+            "Profiled {} actions; mean success={:.4f}; errors={}; context exclusions={}",
+            count,
+            passed / max(1, count),
+            errors,
+            excluded,
+        )
+
+    def requests():
         for prompts in dataloader:
             request, _ = prepare_trajectory_request(
                 prompts,
@@ -81,54 +134,45 @@ async def profile_candidates(dataloader, runner, cfg) -> dict[str, float]:
                 visited.add(slot)
                 if slot not in completed:
                     pending.append(index)
-            request = select_request_rows(request, pending)
-            while pending:
-                # Retention includes the attempt number so failures and their replacements
-                # remain auditable even when archives are read out of order.
-                request = deepcopy(request)
-                slots = []
-                for identity, extras in zip(request["trajectory_ids"], request["env_extras"]):
-                    extra = extras.setdefault("extra_info", {})
-                    slot = (extra.get("source_id", identity.instance_id), identity.repetition_id)
-                    extra["profiling_attempt"] = next_attempts.get(slot, 0)
-                    slots.append(slot)
-                batch = await runner.run(request)
-                validate_trajectory_batch(len(request["prompts"]), batch)
-                attempts += len(request["prompts"])
-                prompt_tokens += sum(map(len, batch["prompt_token_ids"]))
-                response_tokens += sum(map(len, batch["response_ids"]))
-                failed_indices = []
-                for index, verdict in enumerate(batch["verification_results"]):
-                    attempt = request["env_extras"][index]["extra_info"]["profiling_attempt"]
-                    next_attempts[slots[index]] = attempt + 1
-                    if verdict is not None and is_context_exclusion(asdict(verdict)):
-                        excluded += 1
-                        continue
-                    if verdict is None or verdict.status != "verified":
-                        errors += 1
-                        if attempt < max_retries:
-                            failed_indices.append(index)
-                        else:
-                            unresolved += 1
-                        continue
-                    if verdict.score not in (0, 1):
-                        raise ValueError("Profiling requires a binary verifier verdict for every response")
-                    passed += verdict.score
-                    count += 1
-                    recovered += int(attempt > 0)
-                if not failed_indices:
-                    break
-                logger.warning("Retrying {} failed profiling requests", len(failed_indices))
-                request = select_request_rows(request, failed_indices)
-                pending = failed_indices
-            logger.info(
-                "Profiled {} actions; mean success={:.4f}; errors={}; context exclusions={}",
-                count,
-                passed / max(1, count),
-                errors,
-                excluded,
-            )
+            if rolling:
+                groups = {}
+                for index in pending:
+                    identity = request["trajectory_ids"][index]
+                    groups.setdefault(identity.instance_id, []).append(index)
+                for indices in groups.values():
+                    yield select_request_rows(request, indices)
+            elif pending:
+                yield select_request_rows(request, pending)
+
+    logger.info(
+        "Frozen profiling: samples per row={}, queue policy={}, maximum in-flight groups={}",
+        cfg.generator.eval_n_samples_per_prompt,
+        buffer.get("batch_policy", "full_batch"),
+        capacity,
+    )
+    await runner.start_profiling_session(run_name=cfg.trainer.run_name, eval_step=0)
+    in_flight = set()
+    source = iter(requests())
+    exhausted = False
+    try:
+        while in_flight or not exhausted:
+            while not exhausted and len(in_flight) < capacity:
+                request = next(source, None)
+                if request is None:
+                    exhausted = True
+                else:
+                    in_flight.add(asyncio.create_task(profile_group(request)))
+            if in_flight:
+                done, in_flight = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
+                # Retrieve all results before propagating a fatal worker/retention error.
+                results = await asyncio.gather(*done, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, BaseException):
+                        raise result
     finally:
+        for task in in_flight:
+            task.cancel()
+        await asyncio.gather(*in_flight, return_exceptions=True)
         await runner.stop_eval_session()
     if set(previous) - visited:
         raise ValueError("Retained profiling contains samples outside this candidate split")

@@ -1,5 +1,6 @@
 """Frozen profiling preserves repetitions and continues past retained request errors."""
 
+import asyncio
 import pytest
 import os
 import gzip
@@ -291,3 +292,58 @@ def test_profile_history_reads_existing_archives_without_compact_index(tmp_path)
     assert history.prompt_tokens == 2
     assert history.response_tokens == 1
     assert history.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_rolling_profile_refills_while_an_earlier_group_is_slow():
+    """A slow group must not prevent other rows from entering the bounded queue."""
+    cfg = OmegaConf.create(
+        {
+            "trainer": {"run_name": "profile", "rollout_buffer": {"batch_policy": "rolling", "max_in_flight": 2}},
+            "generator": {
+                "backend": "vllm",
+                "pivot_profiling_max_retries": 0,
+                "eval_n_samples_per_prompt": 2,
+                "eval_sampling_params": {
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "top_k": -1,
+                    "max_generate_length": 100,
+                    "min_p": 0.0,
+                    "logprobs": None,
+                },
+            },
+            "environment": {"env_class": "nemotron_ultra"},
+        }
+    )
+    release = asyncio.Event()
+    started = []
+
+    class SlowRunner(ProfilingRunner):
+        async def _run(self, request, disable_tqdm=False):
+            uid = request["trajectory_ids"][0].instance_id
+            started.append(uid)
+            if uid == "0":
+                await release.wait()
+            if uid == "2":
+                assert not release.is_set()
+                release.set()
+            assert [item.repetition_id for item in request["trajectory_ids"]] == [0, 1]
+            return await super()._run(request, disable_tqdm)
+
+    rows = [
+        {
+            "prompt": [{"role": "user", "content": "prefix"}],
+            "env_class": "nemotron_ultra",
+            "env_extras": {},
+            "uid": str(i),
+        }
+        for i in range(3)
+    ]
+    runner = SlowRunner([VerificationResult.verified(0), VerificationResult.verified(1)])
+    async with asyncio.timeout(5):
+        result = await profile_candidates([rows], runner, cfg)
+    assert started == ["0", "1", "2"]
+    assert result["profile/actions"] == result["profile/attempts"] == 6
+    assert result["profile/mean_success"] == 0.5
+    assert runner.stopped
