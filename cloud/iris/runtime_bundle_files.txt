@@ -44,6 +44,7 @@ marinskyrl/process_diagnostics.py
 marinskyrl/remote_io.py
 marinskyrl/resource_locator.py
 marinskyrl/environment_contract.py
+marinskyrl/rollout_grading.py
 marinskyrl/runtime_options.py
 marinskyrl/speculative_decoding.py
 marinskyrl/task_sources.py

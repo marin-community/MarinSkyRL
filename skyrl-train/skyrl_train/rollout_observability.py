@@ -1,4 +1,4 @@
-"""Wall time and waits of each trajectory-runner call and of the async producer loop."""
+"""Wall time and waits of each rollout call and of the loop that dispatches rollout tasks."""
 
 import asyncio
 import contextlib
@@ -61,6 +61,7 @@ def async_phase_window(phase: str, *, step: int, enabled: bool) -> Iterator[None
 async def monitor_event_loop_lag(
     *,
     step_fn: Callable[[], int],
+    mode: str,
     interval: float = 1.0,
     clock: Callable[[], float] = time.perf_counter,
     wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -71,7 +72,7 @@ async def monitor_event_loop_lag(
         await wait(interval)
         event_loop_lag.record(
             max(0.0, clock() - expected),
-            attributes={"role": TRAINER_ROLE, "step": str(step_fn()), "mode": "async"},
+            attributes={"role": TRAINER_ROLE, "step": str(step_fn()), "mode": mode},
         )
 
 
@@ -82,10 +83,16 @@ def publish_wait(name: str, durations: Sequence[float], *, step: int, mode: str)
     waits.add(len(durations), attributes=attributes)
 
 
+@dataclass(frozen=True)
+class RolloutTimings:
+    """The waits and phase durations one process measured for a rollout call."""
+
+    waits: dict[str, list[float]]
+    phases: dict[str, float]
+
+
 @dataclass
 class RolloutObservation:
-    step: int
-    mode: str
     phases: PhaseBreakdown
     call_id: str = field(default_factory=lambda: uuid4().hex)
     waits: dict[str, list[float]] = field(default_factory=dict)
@@ -93,6 +100,38 @@ class RolloutObservation:
 
     def add_wait(self, name: str, seconds: float) -> None:
         self.waits.setdefault(name, []).append(seconds)
+
+    def timings(self) -> RolloutTimings:
+        return RolloutTimings(
+            {name: list(durations) for name, durations in self.waits.items()}, self.phases.durations()
+        )
+
+    def absorb(self, timings: RolloutTimings) -> None:
+        """Add what a rollout worker measured while serving this call."""
+        for name, durations in timings.waits.items():
+            self.waits.setdefault(name, []).extend(durations)
+        for phase, seconds in timings.phases.items():
+            self.phases.add(phase, seconds)
+
+
+def current_rollout_observation() -> RolloutObservation | None:
+    return _CURRENT.get()
+
+
+@contextlib.contextmanager
+def measure_rollout(
+    *, enabled: bool, clock: Callable[[], float] = time.perf_counter
+) -> Iterator[RolloutObservation | None]:
+    """Collect the enclosed rollout call's waits and phases in a new observation, without publishing them."""
+    if not enabled:
+        yield None
+        return
+    observation = RolloutObservation(PhaseBreakdown("rollout_call", _PARENTS, enabled=True, clock=clock))
+    token = _CURRENT.set(observation)
+    try:
+        yield observation
+    finally:
+        _CURRENT.reset(token)
 
 
 @contextlib.contextmanager
@@ -102,28 +141,26 @@ def observe_rollout_call(
     if not enabled:
         yield None
         return
-    observation = RolloutObservation(step, mode, PhaseBreakdown("rollout_call", _PARENTS, enabled=True, clock=clock))
-    token = _CURRENT.set(observation)
     outcome = "success"
-    try:
-        yield observation
-    except asyncio.CancelledError:
-        outcome = "cancelled"
-        raise
-    except BaseException:
-        outcome = "failure"
-        raise
-    finally:
-        _CURRENT.reset(token)
-        attributes = {"role": TRAINER_ROLE, "step": str(step), "mode": mode, "outcome": outcome}
-        duration = observation.phases.publish(clock_domain="driver_monotonic", attributes=attributes)
-        for name, durations in observation.waits.items():
-            publish_wait(name, durations, step=step, mode=mode)
-        record_event(
-            "rollout_call",
-            {"call_id": observation.call_id, **_window(duration), "response_tokens": observation.response_tokens},
-            attributes=attributes,
-        )
+    with measure_rollout(enabled=True, clock=clock) as observation:
+        try:
+            yield observation
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except BaseException:
+            outcome = "failure"
+            raise
+        finally:
+            attributes = {"role": TRAINER_ROLE, "step": str(step), "mode": mode, "outcome": outcome}
+            duration = observation.phases.publish(clock_domain="driver_monotonic", attributes=attributes)
+            for name, durations in observation.waits.items():
+                publish_wait(name, durations, step=step, mode=mode)
+            record_event(
+                "rollout_call",
+                {"call_id": observation.call_id, **_window(duration), "response_tokens": observation.response_tokens},
+                attributes=attributes,
+            )
 
 
 @contextlib.contextmanager
@@ -152,8 +189,8 @@ def time_tokenization(func: Callable, *args, **kwargs):
 
 
 @contextlib.contextmanager
-def async_wait(name: str, *, step: int, enabled: bool) -> Iterator[None]:
-    """Measure a producer await outside the trajectory-runner call."""
+def dispatch_wait(name: str, *, step: int, mode: str, enabled: bool) -> Iterator[None]:
+    """Measure an await of the rollout dispatch loop outside the rollout call."""
     if not enabled:
         yield
         return
@@ -161,7 +198,7 @@ def async_wait(name: str, *, step: int, enabled: bool) -> Iterator[None]:
     try:
         yield
     finally:
-        publish_wait(name, [time.perf_counter() - started], step=step, mode="async")
+        publish_wait(name, [time.perf_counter() - started], step=step, mode=mode)
 
 
 async def run_environment(executor: Executor | None, func: Callable, *args, **kwargs):
@@ -192,12 +229,10 @@ async def run_environment(executor: Executor | None, func: Callable, *args, **kw
             observation.add_wait("env_resume", clock() - stamps[1])
 
 
-def record_group_disposition(
-    *, disposition: str, tokens: int, step: int, completed_at: float | None, admitted_at: float | None
-) -> None:
+def record_group_disposition(*, disposition: str, tokens: int, step: int, dwell_seconds: float | None) -> None:
+    """Count a group's fate and, when known, how long it waited in the buffer."""
     attributes = {"role": TRAINER_ROLE, "step": str(step), "disposition": disposition}
     groups.add(1, attributes=attributes)
     group_tokens.add(tokens, attributes=attributes)
-    if completed_at is not None:
-        finished = time.perf_counter() if admitted_at is None else admitted_at
-        buffer_dwell.record(finished - completed_at, attributes=attributes)
+    if dwell_seconds is not None:
+        buffer_dwell.record(dwell_seconds, attributes=attributes)

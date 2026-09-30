@@ -477,14 +477,8 @@ class GrugTransformerLayer(TransformerLayer):
             output, bias = tensor_parallel.checkpoint(mlp_forward, False, normalized)
         else:
             output, bias = mlp_forward(normalized)
-        if self.recompute_pre_mlp_layernorm:
-            self.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(output)
         output = self.sconv_mlp(output, packed_seq_params)
-        with self.bias_dropout_add_exec_handler():
-            output = self.mlp_bda(self.training, self.config.bias_dropout_fusion)(
-                (output, bias), hidden_states, self.hidden_dropout
-            )
-        return output, context
+        return self._forward_post_mlp((output, bias), hidden_states), context
 
 
 def grug_layer_spec(config: TransformerConfig) -> ModuleSpec:

@@ -248,31 +248,20 @@ class GrugMoeBridge(MegatronModelBridge):
             ReplicatedMapping("decoder.layers.*.mlp.router.expert_bias", "model.layers.*.mlp.router.bias"),
         ]
         config = self.hf_config
-        hero = config.uses_hero_architecture
-        if hero:
-            for index in range(config.num_shared_experts):
-                mg = f"decoder.layers.*.mlp.shared_experts.experts.{index}"
-                hf = f"model.layers.*.shared_experts.{index}"
-                mappings.extend(
-                    [
-                        GatedMLPMapping(
-                            f"{mg}.linear_fc1.weight", gate=f"{hf}.gate_proj.weight", up=f"{hf}.up_proj.weight"
-                        ),
-                        AutoMapping(f"{mg}.linear_fc2.weight", f"{hf}.down_proj.weight"),
-                    ]
-                )
+        if config.uses_hero_architecture:
+            shared_expert_prefixes = [
+                (f"decoder.layers.*.mlp.shared_experts.experts.{index}", f"model.layers.*.shared_experts.{index}")
+                for index in range(config.num_shared_experts)
+            ]
         else:
+            shared_expert_prefixes = [("decoder.layers.*.mlp.shared_experts", "model.layers.*.shared_expert")]
+        for mg, hf in shared_expert_prefixes:
             mappings.extend(
                 [
                     GatedMLPMapping(
-                        "decoder.layers.*.mlp.shared_experts.linear_fc1.weight",
-                        gate="model.layers.*.shared_expert.gate_proj.weight",
-                        up="model.layers.*.shared_expert.up_proj.weight",
+                        f"{mg}.linear_fc1.weight", gate=f"{hf}.gate_proj.weight", up=f"{hf}.up_proj.weight"
                     ),
-                    AutoMapping(
-                        "decoder.layers.*.mlp.shared_experts.linear_fc2.weight",
-                        "model.layers.*.shared_expert.down_proj.weight",
-                    ),
+                    AutoMapping(f"{mg}.linear_fc2.weight", f"{hf}.down_proj.weight"),
                 ]
             )
         if config.grugmoe_artifact_schema_version == GRUG_SPLIT_EXPERT_SCHEMA_VERSION:

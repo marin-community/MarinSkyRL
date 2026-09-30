@@ -3,6 +3,7 @@
 import copy
 from typing import Generic, Protocol, Sequence, TypeVar
 
+import numpy as np
 from omegaconf import DictConfig
 
 from skyrl_train.distillation import INVALID_TOPK_INDEX
@@ -15,10 +16,8 @@ from skyrl_train.trajectory_runners.types import (
     TrajectoryRequestBatch,
 )
 from skyrl_train.trajectory_runners.trajectory_processing import (
-    _sentinel_routed_experts_row,
     apply_overlong_filtering,
     get_rollout_metrics,
-    minimum_captured_global_step,
     scalar_reward_token_credit,
 )
 
@@ -42,13 +41,6 @@ class TrajectoryProjection(Protocol, Generic[InteractionT]):
     def project(self, outputs: InteractionT, request: TrajectoryRequestBatch) -> TrajectoryBatch: ...
 
 
-class IdentityTrajectoryProjection:
-    """Return a batch that a collector has already normalized."""
-
-    def project(self, outputs: TrajectoryBatch, request: TrajectoryRequestBatch) -> TrajectoryBatch:
-        return outputs
-
-
 class WholeTrajectoryProjection:
     """Emit one trainer sample for each completed environment trajectory."""
 
@@ -64,10 +56,7 @@ class WholeTrajectoryProjection:
         responses = [list(output.evidence.response_token_ids) for output in outputs]
         rewards = projected_rewards(outputs, responses)
         loss_masks = _loss_masks(outputs, responses, self._cfg, self._tokenizer)
-        candidate_logprobs = [
-            None if output.evidence.behavior_logprobs is None else list(output.evidence.behavior_logprobs)
-            for output in outputs
-        ]
+        candidate_logprobs = [output.evidence.behavior_logprobs for output in outputs]
         get_logprobs = _logprobs_requested(request, self._cfg)
         rollout_logprobs = (
             candidate_logprobs if get_logprobs and all(x is not None for x in candidate_logprobs) else None
@@ -85,16 +74,18 @@ class WholeTrajectoryProjection:
             prompt_token_ids=[list(output.evidence.prompt_token_ids) for output in outputs],
             response_ids=responses,
             rewards=rewards,
+            verification_results=[output.verification for output in outputs],
+            evidence_messages=[[dict(message) for message in output.evidence.messages] for output in outputs],
             loss_masks=loss_masks,
             stop_reasons=[output.evidence.stop_reason for output in outputs],
             rollout_metrics=rollout_metrics,
             rollout_logprobs=rollout_logprobs,
             exclude_from_baseline=[not output.disposition.baseline_eligible for output in outputs],
-            actual_global_step=minimum_captured_global_step(outputs),
         )
         attach_student_topk(batch, outputs, responses, loss_masks)
         attach_routed_experts(batch, outputs, responses)
         attach_terminal_classifications(batch, outputs)
+        attach_server_errors(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
         return batch
 
@@ -130,14 +121,7 @@ class StepWiseTrajectoryProjection:
                 is_last_step.append(step_index == len(trajectory) - 1)
 
         get_logprobs = _logprobs_requested(request, self._cfg)
-        rollout_logprobs = (
-            [
-                None if step.evidence.behavior_logprobs is None else list(step.evidence.behavior_logprobs)
-                for step in steps
-            ]
-            if get_logprobs
-            else None
-        )
+        rollout_logprobs = [step.evidence.behavior_logprobs for step in steps] if get_logprobs else None
 
         rollout_metrics = get_rollout_metrics(responses, rewards, successes=_verification_successes(steps))
         rollout_metrics.update(_token_provenance_metrics(steps))
@@ -145,6 +129,8 @@ class StepWiseTrajectoryProjection:
             prompt_token_ids=[list(step.evidence.prompt_token_ids) for step in steps],
             response_ids=responses,
             rewards=rewards,
+            verification_results=[step.verification for step in steps],
+            evidence_messages=[[dict(message) for message in step.evidence.messages] for step in steps],
             loss_masks=loss_masks,
             stop_reasons=[step.evidence.stop_reason for step in steps],
             rollout_metrics=rollout_metrics,
@@ -152,11 +138,11 @@ class StepWiseTrajectoryProjection:
             trajectory_ids=projected_ids,
             is_last_step=is_last_step,
             exclude_from_baseline=[not step.disposition.baseline_eligible for step in steps],
-            actual_global_step=minimum_captured_global_step(steps),
         )
         attach_student_topk(batch, steps, responses, loss_masks)
         attach_routed_experts(batch, steps, responses)
         attach_terminal_classifications(batch, steps)
+        attach_server_errors(batch, steps)
         _attach_reward_channels(batch, steps, responses)
         return batch
 
@@ -171,22 +157,40 @@ def attach_terminal_classifications(batch: TrajectoryBatch, outputs: Sequence[Tr
         batch["error_treatments"] = error_treatments
 
 
+def attach_server_errors(batch: TrajectoryBatch, outputs: Sequence[AgentLoopOutput]) -> None:
+    """Keep safe model-serving diagnostics with the corresponding trajectory row."""
+    errors = []
+    for output in outputs:
+        diagnostics = output.verification.diagnostics
+        if "error_category" in diagnostics:
+            errors.append(
+                {
+                    "category": diagnostics["error_category"],
+                    "request_id": diagnostics["request_id"],
+                    "status_code": diagnostics["status_code"],
+                }
+            )
+        else:
+            errors.append(None)
+    if any(error is not None for error in errors):
+        batch["server_errors"] = errors
+
+
 def attach_routed_experts(
     batch: TrajectoryBatch, outputs: Sequence[AgentLoopOutput], responses: Sequence[Sequence[int]]
 ) -> None:
     """Project exact per-token routes and preserve the batch's route shape."""
     captured = [output.evidence.routed_experts for output in outputs]
-    template = next((routes[0] for routes in captured if routes), None)
+    template = next((routes for routes in captured if routes is not None and len(routes)), None)
     if template is None:
         return
-    sentinel = _sentinel_routed_experts_row(template)
+    shape = template.shape[1:]
+    dtype = template.dtype
     projected = []
     for routes, response in zip(captured, responses, strict=True):
         if routes is not None and len(routes) != len(response):
             raise ValueError("routed_experts must align with response token IDs")
-        projected.append(
-            [sentinel for _ in response] if routes is None else [[list(layer) for layer in token] for token in routes]
-        )
+        projected.append(np.zeros((len(response), *shape), dtype=dtype) if routes is None else routes)
     batch["rollout_routed_experts"] = projected
 
 
@@ -200,7 +204,8 @@ def attach_student_topk(
     captured = [output.evidence.student_topk_indices for output in outputs]
     if not any(rows is not None for rows in captured):
         return
-    width = next((len(row) for rows in captured if rows is not None for row in rows if row), 0)
+    template = next((rows for rows in captured if rows is not None and len(rows)), None)
+    width = 0 if template is None else template.shape[1]
     if width <= 0:
         raise ValueError("student top-K evidence has no candidate width")
     indices = []
@@ -210,13 +215,13 @@ def attach_student_topk(
         if evidence.student_topk_indices is None:
             if any(mask):
                 raise ValueError("student top-K evidence is missing for a trainable trajectory")
-            indices.append([[INVALID_TOPK_INDEX] * width for _ in response])
-            scores.append([[0.0] * width for _ in response])
+            indices.append(np.full((len(response), width), INVALID_TOPK_INDEX, dtype=template.dtype))
+            scores.append(np.zeros((len(response), width), dtype=np.float32))
             continue
-        if any(len(row) != width for row in evidence.student_topk_indices):
+        if evidence.student_topk_indices.shape[1] != width:
             raise ValueError("student top-K evidence widths must agree across trajectories")
-        indices.append([list(row) for row in evidence.student_topk_indices])
-        scores.append([list(row) for row in evidence.behavior_topk_logprobs])
+        indices.append(evidence.student_topk_indices)
+        scores.append(evidence.behavior_topk_logprobs)
     batch["student_topk_indices"] = indices
     batch["behavior_topk_logprobs"] = scores
 

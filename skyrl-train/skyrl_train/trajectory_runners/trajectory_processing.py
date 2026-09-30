@@ -1,12 +1,12 @@
 import torch
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol, Sequence
+from typing import List, Tuple, Union, Optional, Dict, Any, Sequence
 from collections import defaultdict
 from enum import StrEnum
 import numpy as np
 from skyrl_train.group_admission import group_is_fully_excluded_from_training
-from skyrl_train.trajectory_runners.base import (
+from skyrl_train.trajectory_runners.types import (
     TrajectoryBatch,
     TrajectoryRequestBatch,
     TrajectoryID,
@@ -42,6 +42,7 @@ from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
+from skyrl_gym.verification import VerificationStatus
 
 
 BATCH_ERROR_METRIC_PREFIX = "generate/errors/"
@@ -72,7 +73,7 @@ class TitoFullAssemblyResult:
     response_ids: Optional[List[int]] = None
     loss_mask: Optional[List[int]] = None
     rollout_logprobs: Optional[List[float]] = None
-    rollout_routed_experts: Optional[List[Any]] = None
+    rollout_routed_experts: np.ndarray | None = None
     decline_reason: Optional[TitoFullDeclineReason] = None
 
 
@@ -659,12 +660,13 @@ def get_metrics_from_trajectory_batch(trajectory_batch: TrajectoryBatch, uids: L
     Rewards can be either per-trajectory or per-token. The returned mean describes
     the optimization reward. ``pass_at_n`` uses ``unshaped_rewards`` when supplied,
     so optimization-specific shaping cannot change the task-success metric.
+    Explicit verifier pass verdicts take precedence over positive partial rewards.
     """
     rewards: Union[List[float], List[List[float]]] = trajectory_batch["rewards"]
     if not len(rewards):
         raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
-    outcome_rewards = get_outcome_rewards(trajectory_batch)
+    trajectory_passes = get_trajectory_passes(trajectory_batch)
 
     if isinstance(rewards[0], list):
         # Token-level rewards: rewards is List[List[float]]
@@ -673,17 +675,11 @@ def get_metrics_from_trajectory_batch(trajectory_batch: TrajectoryBatch, uids: L
     else:
         mean_reward = float(np.mean(rewards))
 
-    # TODO: We should make metrics customizable by the environment.
-    # Map from the example's uid to each trajectory's unshaped outcome on that example.
-    uid_to_trajectory_rewards = defaultdict(list)
-    for i, reward in enumerate(outcome_rewards):
-        uid_to_trajectory_rewards[uids[i]].append(reward)
+    uid_to_trajectory_passes = defaultdict(list)
+    for uid, passed in zip(uids, trajectory_passes, strict=True):
+        uid_to_trajectory_passes[uid].append(passed)
 
-    # For each example, pass@n = 1 if any trajectory achieves a positive reward.
-    # The explicit unshaped channel, when present, makes this invariant to reward shaping.
-    pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if any(r > 0.0 for r in v)) / len(
-        uid_to_trajectory_rewards
-    )
+    pass_at_n = sum(any(passes) for passes in uid_to_trajectory_passes.values()) / len(uid_to_trajectory_passes)
 
     return mean_reward, pass_at_n
 
@@ -700,6 +696,35 @@ def get_outcome_rewards(trajectory_batch: TrajectoryBatch) -> List[float]:
             )
         return [float(reward) for reward in unshaped_rewards]
     return [NormalizedReward.from_output(reward).outcome for reward in rewards]
+
+
+def graded_row_indices(trajectory_batch: TrajectoryBatch) -> List[int]:
+    """Return rows whose environment ran grading; skipped rows carry no reward to report."""
+    results = trajectory_batch.get("verification_results")
+    if results is None:
+        return list(range(len(trajectory_batch["rewards"])))
+    return [
+        index
+        for index, result in enumerate(results)
+        if result is None or result.status is not VerificationStatus.SKIPPED
+    ]
+
+
+def get_trajectory_passes(trajectory_batch: TrajectoryBatch) -> List[bool]:
+    """Return task success, honoring explicit verifier verdicts when available."""
+    outcomes = get_outcome_rewards(trajectory_batch)
+    results = trajectory_batch.get("verification_results")
+    if results is None:
+        return [outcome > 0.0 for outcome in outcomes]
+    passes = []
+    for outcome, result in zip(outcomes, results, strict=True):
+        if result is None:
+            passes.append(outcome > 0.0)
+        elif result.status is not VerificationStatus.VERIFIED:
+            passes.append(False)
+        else:
+            passes.append(result.passed if result.passed is not None else outcome > 0.0)
+    return passes
 
 
 def _rollout_logprob_presence(trajectory_batches: List[TrajectoryBatch], *, required: bool) -> List[bool]:
@@ -771,7 +796,7 @@ def concatenate_trajectory_batches(
                 # Fill in placeholder logprobs for batches that don't have them
                 # Each trajectory needs logprobs matching its response_ids length
                 for response_ids in output["response_ids"]:
-                    rollout_logprobs_concat.append([0.0] * len(response_ids))
+                    rollout_logprobs_concat.append(np.zeros(len(response_ids), dtype=np.float32))
 
     selected_topk_concat = None
     behavior_topk_concat = None
@@ -785,6 +810,14 @@ def concatenate_trajectory_batches(
         behavior_topk_concat = [row for output in trajectory_batches for row in output["behavior_topk_logprobs"]]
     elif any(output.get("behavior_topk_logprobs") is not None for output in trajectory_batches):
         raise ValueError("student-selected behavior scores require selected token IDs")
+
+    data_sources_concat = None
+    if any(output.get("data_sources") is not None for output in trajectory_batches):
+        data_sources_concat = [
+            source
+            for output in trajectory_batches
+            for source in (output.get("data_sources") or [None] * len(output["response_ids"]))
+        ]
 
     unshaped_rewards_concat = None
     unshaped_reward_available_concat = None
@@ -803,8 +836,8 @@ def concatenate_trajectory_batches(
                 )
             ]
 
-    disposition_channels: dict[str, list[str | None]] = {}
-    for key in ("exception_types", "error_treatments"):
+    disposition_channels: dict[str, list[Any]] = {}
+    for key in ("exception_types", "error_treatments", "server_errors"):
         if any(output.get(key) is not None for output in trajectory_batches):
             disposition_channels[key] = [
                 value
@@ -820,32 +853,20 @@ def concatenate_trajectory_batches(
             for excluded in (output.get("exclude_from_baseline") or [False] * len(output["response_ids"]))
         ]
 
-    # Handle mixed routed_experts (Stage 1 MoE router-replay capture rail) the same
-    # way as rollout_logprobs: if any batch carries routed_experts but others don't,
-    # sentinel-fill the missing batches with a per-token [1, 1] sentinel row so the
-    # concatenated list stays 1:1 with response_ids. When the flag is off, NO batch
-    # carries the key (the runner omits it), so this stays None and the result
-    # dict is byte-identical to today.
+    # Missing batches keep the geometry learned from the first captured sample.
     has_routed_experts = [
         "rollout_routed_experts" in output and output.get("rollout_routed_experts") is not None
         for output in trajectory_batches
     ]
     rollout_routed_experts_concat = None
     if any(has_routed_experts):
-        # Learn the real [L, K] per-token row shape from the FIRST sample that
-        # actually carries routing. Samples lacking routing (preempted requests,
-        # quant paths) must be sentinel-filled with the SAME [L, K] width — a
-        # degenerate [1, 1] sentinel here makes the L axis ragged across the batch
-        # ([48, K] real rows vs [1, 1] sentinels) and crashes the dense
-        # torch.tensor() collation in convert_prompts_responses_to_batch_tensors
-        # ("expected sequence of length 1 at dim 2"). See _sentinel_routed_experts_row.
         _concat_sentinel_row = None
         for output in trajectory_batches:
             re_out = output.get("rollout_routed_experts")
             if re_out is not None and len(re_out) > 0:
                 for sample_re in re_out:
-                    if sample_re is not None and len(sample_re) > 0:
-                        _concat_sentinel_row = _sentinel_routed_experts_row(sample_re[0])
+                    if sample_re is not None:
+                        _concat_sentinel_row = np.zeros(sample_re.shape[1:], dtype=sample_re.dtype)
                         break
             if _concat_sentinel_row is not None:
                 break
@@ -906,6 +927,8 @@ def concatenate_trajectory_batches(
     if selected_topk_concat is not None:
         result["student_topk_indices"] = selected_topk_concat
         result["behavior_topk_logprobs"] = behavior_topk_concat
+    if data_sources_concat is not None:
+        result["data_sources"] = data_sources_concat
     if token_level_shaping_concat is not None:
         result["token_level_shaping"] = token_level_shaping_concat
     if response_span_tags_concat is not None:
@@ -918,6 +941,14 @@ def concatenate_trajectory_batches(
         result[key] = values
     if baseline_exclusions_concat is not None:
         result["exclude_from_baseline"] = baseline_exclusions_concat
+
+    for key in ("verification_results", "evidence_messages"):
+        if any(batch.get(key) is not None for batch in trajectory_batches):
+            result[key] = [
+                value
+                for batch in trajectory_batches
+                for value in (batch.get(key) or [None] * len(batch["response_ids"]))
+            ]
 
     # propagate additional keys with list values as-is
     additional_keys = [
@@ -1017,13 +1048,26 @@ def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatc
         raise RuntimeError("No outputs generated")
 
     num_responses = len(trajectory_batch["response_ids"])
+    data_sources = trajectory_batch.get("data_sources")
+    if data_sources is not None and len(data_sources) != num_responses:
+        raise ValueError(
+            f"data_sources must match response_ids: got {len(data_sources)} sources for {num_responses} rows"
+        )
     num_prompt_tokens = len(trajectory_batch["prompt_token_ids"])
     assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
     assert num_responses == num_prompt_tokens, (
         f"Mismatch between responses ({num_responses}) and prompt_token_ids ({num_prompt_tokens})"
     )
 
-    for key in ("response_ids", "loss_masks", "rewards", "rollout_logprobs", "verifier_tests"):
+    for key in (
+        "response_ids",
+        "loss_masks",
+        "rewards",
+        "rollout_logprobs",
+        "verifier_tests",
+        "verification_results",
+        "evidence_messages",
+    ):
         value = trajectory_batch.get(key)
         if isinstance(value, list):
             assert len(value) == num_responses, (
@@ -1263,18 +1307,6 @@ def prepare_trajectory_request(
     return trajectory_request, uids
 
 
-class HasCapturedGlobalStep(Protocol):
-    captured_global_step: Optional[int]
-
-
-def minimum_captured_global_step(outputs: Iterable[HasCapturedGlobalStep]) -> Optional[int]:
-    """Return the minimum model-step value recorded across a rollout group."""
-    return min(
-        (output.captured_global_step for output in outputs if output.captured_global_step is not None),
-        default=None,
-    )
-
-
 def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None, chat_template_kwargs=None):
     """Encodes a subset of messages from a multi-turn conversation using the fixed base approach.
 
@@ -1491,7 +1523,7 @@ def extract_prompt_token_ids_from_rollout_details(
 
 def extract_routed_experts_from_rollout_details(
     rollout_details: Optional[List[Dict[str, Any]]],
-) -> Optional[List[Any]]:
+) -> list[np.ndarray | None] | None:
     """Extract per-turn MoE ``routed_experts`` from Harbor's rollout_details.
 
     Harbor groups vLLM's base64 NumPy payloads in
@@ -1542,200 +1574,47 @@ def extract_routed_experts_from_rollout_details(
             if completion_ids is None or index >= len(completion_ids):
                 raise ValueError("routed_experts requires exact completion token IDs for each turn")
             turn_prompt_ids = prompt_ids[index] if prompt_ids is not None and index < len(prompt_ids) else None
-            out.append(
-                _as_routed_experts_array(normalize_routed_experts(turn_re, turn_prompt_ids, completion_ids[index]))
-            )
+            if turn_prompt_ids is None:
+                raise ValueError("routed_experts requires exact prompt token IDs for each turn")
+            out.append(normalize_routed_experts(turn_re, turn_prompt_ids, completion_ids[index]))
         else:
-            out.append(turn_re)
+            out.append(None)
     return out
-
-
-SENTINEL_EXPERT_ID = 0  # sentinel for unmatched / non-generated token rows in routed_experts
-
-# Fix B: int16 array dtype for the routed-experts carrier (512 experts -> max id 511
-# needs 9 bits, so uint8 overflows; int16 is near-minimal and matches the collator's
-# deterministic narrow).
-_ROUTED_EXPERTS_ARRAY_DTYPE = np.int16
-
-
-def _as_routed_experts_array(turn_re: Any) -> "np.ndarray":
-    """Coerce ONE turn's nested ``[gen_len, L, K]`` routed-experts list to a
-    contiguous ``np.int16`` array (Fix B capture repackage). Idempotent on arrays."""
-    arr = np.asarray(turn_re, dtype=_ROUTED_EXPERTS_ARRAY_DTYPE)
-    return np.ascontiguousarray(arr)
 
 
 def align_routed_experts_with_lcs(
     retokenized_ids: List[int],
-    vllm_routed_experts: List[Any],
+    vllm_routed_experts: np.ndarray,
     tokenizer,
     vllm_token_strings: Optional[List[str]] = None,
-) -> List[List[List[int]]]:
-    """Align vLLM per-token ``routed_experts`` rows to re-tokenized IDs via LCS.
-
-    Mirror of :func:`align_logprobs_with_lcs`, but each per-token element is a
-    ``[L, K]`` VECTOR (MoE-layer x top-k expert indices) rather than a scalar
-    logprob. ``routed_experts`` is 1:1 with the vLLM response tokens — exactly the
-    same index space as the per-token logprobs — so when the vLLM token strings are
-    available (``vllm_token_strings``, from the parallel logprob dicts) we run the
-    IDENTICAL ``SequenceMatcher.get_matching_blocks()`` LCS used by
-    ``align_logprobs_with_lcs`` and copy the whole ``[L, K]`` row for each matched
-    position. Unmatched positions get a sentinel ``[L, K]`` row (all
-    ``SENTINEL_EXPERT_ID``).
-
-    When token strings are unavailable, the exact 1:1 count case (same tokenizer —
-    the production / smoke path) is a direct copy; differing counts fall back to a
-    positional-index LCS proxy.
-
-    Args:
-        retokenized_ids: Token IDs from re-tokenizing the response text.
-        vllm_routed_experts: Per-token routed-experts rows from vLLM, each a
-            ``[L, K]`` nested list (length == number of vLLM tokens).
-        tokenizer: HuggingFace tokenizer used for re-tokenization.
-        vllm_token_strings: Optional per-token vLLM token strings (same order as
-            ``vllm_routed_experts``) used to share the logprob LCS map.
-
-    Returns:
-        List of ``[L, K]`` rows aligned to ``retokenized_ids`` (one per token).
-        Unmatched tokens get a sentinel ``[L, K]`` row.
-    """
-    if isinstance(vllm_routed_experts, np.ndarray):
-        # Fix B array path: identical LCS/positional alignment + sentinel placement,
-        # expressed as np.int16 array-row slice-assign instead of list-row copy. The
-        # returned [n_retok, L, K] array's .tolist() is bit-identical to the list
-        # branch's output (see test_align_flag_parity).
-        return _align_routed_experts_with_lcs_array(retokenized_ids, vllm_routed_experts, tokenizer, vllm_token_strings)
-
-    if not vllm_routed_experts:
-        # No routed_experts to align — caller sentinel-pads; return [] so the
-        # per-turn extend uses a sentinel block sized to the generated tokens.
-        return []
-
-    if not retokenized_ids:
-        return []
-
-    # Infer the [L, K] shape from the first vLLM row so the sentinel matches.
-    sentinel_row = _sentinel_routed_experts_row(vllm_routed_experts[0])
-    aligned = [list(sentinel_row) for _ in range(len(retokenized_ids))]
-
+) -> np.ndarray:
+    """Align route rows with the same LCS positions used for logprobs."""
     n_vllm = len(vllm_routed_experts)
     n_retok = len(retokenized_ids)
+    if vllm_routed_experts.ndim != 3:
+        raise ValueError("routed_experts must have [token, layer, top_k] shape")
+    if n_vllm == n_retok and vllm_token_strings is None:
+        return vllm_routed_experts
 
+    aligned = np.zeros((n_retok, *vllm_routed_experts.shape[1:]), dtype=vllm_routed_experts.dtype)
     if vllm_token_strings is not None and len(vllm_token_strings) == n_vllm:
-        # Faithful mirror of align_logprobs_with_lcs: LCS over token strings,
-        # copy the [L, K] row instead of a scalar.
-        retok_strings = tokenizer.convert_ids_to_tokens(retokenized_ids)
-        matcher = SequenceMatcher(None, retok_strings, vllm_token_strings)
-        for a_start, b_start, size in matcher.get_matching_blocks():
-            for i in range(size):
-                aligned[a_start + i] = vllm_routed_experts[b_start + i]
-        return aligned
-
-    if n_vllm == n_retok:
-        # Exact 1:1 — common case (same tokenizer). Direct copy.
-        for i in range(n_retok):
-            aligned[i] = vllm_routed_experts[i]
-        return aligned
-
-    # No token strings and counts differ: positional-index LCS proxy (routed_experts
-    # shares the vLLM response-token index space).
-    matcher = SequenceMatcher(None, list(range(n_retok)), list(range(n_vllm)))
-    matched_any = False
-    for a_start, b_start, size in matcher.get_matching_blocks():
-        for i in range(size):
-            aligned[a_start + i] = vllm_routed_experts[b_start + i]
-            matched_any = True
-    if not matched_any:
-        logger.debug(f"routed_experts LCS: no positional match (retok={n_retok}, vLLM={n_vllm}); all rows sentinel.")
-    return aligned
-
-
-def _align_routed_experts_with_lcs_array(
-    retokenized_ids: List[int],
-    vllm_routed_experts: "np.ndarray",
-    tokenizer,
-    vllm_token_strings: Optional[List[str]] = None,
-) -> Any:
-    """Fix B array twin of :func:`align_routed_experts_with_lcs` — SAME alignment
-    semantics (LCS-over-token-strings / exact 1:1 direct copy / positional-index LCS
-    proxy) and SAME sentinel placement, on an ``np.int16`` ``[n_vllm, L, K]`` input,
-    returning an ``np.int16`` ``[n_retok, L, K]`` array (row-for-row identical to the
-    list branch). Empty inputs return ``[]`` exactly like the list branch so the
-    caller's sentinel-fallback fires identically."""
-    n_vllm = int(vllm_routed_experts.shape[0]) if vllm_routed_experts.ndim >= 1 else 0
-    if n_vllm == 0:
-        return []
-    if not retokenized_ids:
-        return []
-
-    # Infer [L, K] from the first vLLM row; the sentinel canvas is zeros of that shape.
-    sentinel_row = _sentinel_routed_experts_row(vllm_routed_experts[0])  # np.int16 [L, K]
-    L, K = int(sentinel_row.shape[0]), int(sentinel_row.shape[1])
-    n_retok = len(retokenized_ids)
-    aligned = np.zeros((n_retok, L, K), dtype=_ROUTED_EXPERTS_ARRAY_DTYPE)
-
-    if vllm_token_strings is not None and len(vllm_token_strings) == n_vllm:
-        retok_strings = tokenizer.convert_ids_to_tokens(retokenized_ids)
-        matcher = SequenceMatcher(None, retok_strings, vllm_token_strings)
-        for a_start, b_start, size in matcher.get_matching_blocks():
-            if size:
-                aligned[a_start : a_start + size] = vllm_routed_experts[b_start : b_start + size]
-        return aligned
-
-    if n_vllm == n_retok:
-        # Exact 1:1 — direct copy (same values/rows as the list branch's per-index copy).
-        return np.ascontiguousarray(vllm_routed_experts.astype(_ROUTED_EXPERTS_ARRAY_DTYPE, copy=True))
-
-    matcher = SequenceMatcher(None, list(range(n_retok)), list(range(n_vllm)))
-    matched_any = False
-    for a_start, b_start, size in matcher.get_matching_blocks():
+        matcher = SequenceMatcher(None, tokenizer.convert_ids_to_tokens(retokenized_ids), vllm_token_strings)
+    else:
+        matcher = SequenceMatcher(None, list(range(n_retok)), list(range(n_vllm)))
+    for retok_start, vllm_start, size in matcher.get_matching_blocks():
         if size:
-            aligned[a_start : a_start + size] = vllm_routed_experts[b_start : b_start + size]
-            matched_any = True
-    if not matched_any:
-        logger.debug(f"routed_experts LCS: no positional match (retok={n_retok}, vLLM={n_vllm}); all rows sentinel.")
+            aligned[retok_start : retok_start + size] = vllm_routed_experts[vllm_start : vllm_start + size]
     return aligned
 
 
-def _sentinel_routed_experts_row(template_row: Any) -> Any:
-    """Build a sentinel ``[L, K]`` row matching the shape of ``template_row``.
-
-    Fix B: when ``template_row`` is an ``np.ndarray`` (the array-carrier path), the
-    sentinel is a zeros ``np.int16`` array of the SAME ``[L, K]`` shape, so every
-    downstream row stays an array (out-of-band shippable). Values (all
-    ``SENTINEL_EXPERT_ID``) and shape are identical to the nested-list sentinel."""
-    if isinstance(template_row, np.ndarray):
-        return np.zeros(template_row.shape, dtype=_ROUTED_EXPERTS_ARRAY_DTYPE)
-    # template_row is a [L, K] nested list. Mirror its L x K shape with sentinels.
-    if not isinstance(template_row, (list, tuple)) or len(template_row) == 0:
-        # Degenerate / unknown shape — fall back to a single [1, 1] sentinel.
-        return [[SENTINEL_EXPERT_ID]]
-    sentinel = []
-    for layer in template_row:
-        if isinstance(layer, (list, tuple)):
-            sentinel.append([SENTINEL_EXPERT_ID] * len(layer))
-        else:
-            sentinel.append([SENTINEL_EXPERT_ID])
-    return sentinel
+def _sentinel_routed_experts_row(template_row: np.ndarray) -> np.ndarray:
+    """Match a route row's geometry and dtype for an unforwarded token."""
+    return np.zeros(template_row.shape, dtype=template_row.dtype)
 
 
-def _re_sentinel_rows(n: int, sentinel_row: Optional[List[List[int]]]) -> List[List[List[int]]]:
-    """Return ``n`` copies of a sentinel ``[L, K]`` routed_experts row.
-
-    If the ``[L, K]`` shape has not been learned yet (no real row seen), fall back
-    to a degenerate ``[[SENTINEL_EXPERT_ID]]`` row; the collator infers the true
-    ``[L, K]`` from whichever sample first carries real routing and pads the rest.
-    """
-    if n <= 0:
-        return []
-    if isinstance(sentinel_row, np.ndarray):
-        # Fix B: contiguous [n, L, K] int16 sentinel block. Consumers .extend() /
-        # slice-assign this, which iterates axis-0 into per-token [L, K] array rows
-        # — identical rows/values to the nested-list list-of-copies below.
-        return np.broadcast_to(sentinel_row, (n,) + sentinel_row.shape).astype(_ROUTED_EXPERTS_ARRAY_DTYPE, copy=True)
-    if sentinel_row is None:
-        sentinel_row = [[SENTINEL_EXPERT_ID]]
-    return [list(sentinel_row) for _ in range(n)]
+def _re_sentinel_rows(n: int, sentinel_row: np.ndarray) -> np.ndarray:
+    """Return a compact sentinel block with the learned route geometry."""
+    return np.zeros((n, *sentinel_row.shape), dtype=sentinel_row.dtype)
 
 
 def _tito_full_enabled(rollout_logprobs_required: bool = False, tito_full: Optional[bool] = None) -> bool:
@@ -1860,15 +1739,15 @@ def _assemble_response_ids_tito_full(
     loss_mask = [0] * total_len
     rollout_logprobs = None if assistant_logprobs is None else [0.0] * total_len
 
-    # routed_experts sentinel [L, K] shape learned up-front.
     rollout_routed_experts = None
     _re_sentinel_row = None
     if assistant_routed_experts is not None:
-        rollout_routed_experts = [None] * total_len  # placeholder; sentinel-filled below
         for _turn_re in assistant_routed_experts:
             if _turn_re is not None and len(_turn_re) > 0:
                 _re_sentinel_row = _sentinel_routed_experts_row(_turn_re[0])
                 break
+        if _re_sentinel_row is not None:
+            rollout_routed_experts = _re_sentinel_rows(total_len, _re_sentinel_row)
 
     for t in range(n_turns):
         start = len(assistant_prompt_token_ids[t]) - initial_prompt_len
@@ -1893,13 +1772,11 @@ def _assemble_response_ids_tito_full(
                 msg_logprobs = [0.0] * len(comp)
             rollout_logprobs[start:end] = msg_logprobs
 
-        if assistant_routed_experts is not None:
+        if rollout_routed_experts is not None:
             msg_re = None
             if t < len(assistant_routed_experts):
                 candidate_re = assistant_routed_experts[t]
                 if candidate_re is not None and len(candidate_re) > 0:
-                    if _re_sentinel_row is None and len(candidate_re) > 0:
-                        _re_sentinel_row = _sentinel_routed_experts_row(candidate_re[0])
                     vllm_token_strings = None
                     if assistant_logprobs and t < len(assistant_logprobs):
                         strs, _ = _normalize_candidate_logprobs(assistant_logprobs[t])
@@ -1912,12 +1789,6 @@ def _assemble_response_ids_tito_full(
             if msg_re is None or len(msg_re) != len(comp):
                 msg_re = _re_sentinel_rows(len(comp), _re_sentinel_row)
             rollout_routed_experts[start:end] = msg_re
-
-    # Fill any remaining (masked / non-generated) routed_experts positions with sentinels.
-    if rollout_routed_experts is not None:
-        for i in range(total_len):
-            if rollout_routed_experts[i] is None:
-                rollout_routed_experts[i] = _re_sentinel_row if _re_sentinel_row is not None else [[SENTINEL_EXPERT_ID]]
 
     # Byte-parity tail: the re-tok path appends the FINAL assistant turn's trailing
     # template tokens after its EOS (e.g. the ``\n`` after ``<|im_end|>``). The served
@@ -1937,7 +1808,9 @@ def _assemble_response_ids_tito_full(
         if rollout_logprobs is not None:
             rollout_logprobs.extend([0.0] * len(trailing))
         if rollout_routed_experts is not None:
-            rollout_routed_experts.extend(_re_sentinel_rows(len(trailing), _re_sentinel_row))
+            rollout_routed_experts = np.concatenate(
+                (rollout_routed_experts, _re_sentinel_rows(len(trailing), _re_sentinel_row))
+            )
 
     assert len(loss_mask) == len(response_ids)
     assert rollout_logprobs is None or len(rollout_logprobs) == len(response_ids)
@@ -2094,21 +1967,14 @@ def get_response_ids_and_loss_mask_from_messages(
     response_ids = []
     loss_mask = []
     rollout_logprobs = None if assistant_logprobs is None else []
-    # routed_experts rides the SAME per-token / per-turn index space as logprobs.
-    # Each accumulated element is a [L, K] row; user/prefix/post-EOS rows are
-    # sentinel-filled (see align_routed_experts_with_lcs / SENTINEL_EXPERT_ID).
-    rollout_routed_experts = None if assistant_routed_experts is None else []
-    # Sentinel [L, K] shape — learned UP-FRONT by scanning assistant_routed_experts
-    # for the first real per-token row, so that sentinel rows emitted BEFORE the
-    # first generated token (e.g. a leading user message) already have the correct
-    # [L, K] width. Otherwise a single sample could mix [1, 1] and [L, K] rows and
-    # break the dense torch.tensor() collation.
+    # Learn the route geometry before adding masked prefix tokens.
     _re_sentinel_row = None
     if assistant_routed_experts is not None:
         for _turn_re in assistant_routed_experts:
             if _turn_re is not None and len(_turn_re) > 0:
                 _re_sentinel_row = _sentinel_routed_experts_row(_turn_re[0])
                 break
+    rollout_routed_experts = None if _re_sentinel_row is None else _re_sentinel_rows(0, _re_sentinel_row)
     assistant_msg_idx = 0
 
     for i in range(len(messages)):
@@ -2134,8 +2000,10 @@ def get_response_ids_and_loss_mask_from_messages(
             loss_mask.extend([0] * len(cur_token_ids))
             if assistant_logprobs:
                 rollout_logprobs.extend([0.0] * len(cur_token_ids))
-            if assistant_routed_experts is not None:
-                rollout_routed_experts.extend(_re_sentinel_rows(len(cur_token_ids), _re_sentinel_row))
+            if rollout_routed_experts is not None:
+                rollout_routed_experts = np.concatenate(
+                    (rollout_routed_experts, _re_sentinel_rows(len(cur_token_ids), _re_sentinel_row))
+                )
         elif cur_message["role"] == "assistant":
             # 3.2. For assistant messages, we need to separate out:
             # 1) generation prompt IDs -- mask is 0
@@ -2258,8 +2126,10 @@ def get_response_ids_and_loss_mask_from_messages(
             loss_mask.extend([0] * prefix_len)
             if assistant_logprobs:
                 rollout_logprobs.extend([0.0] * prefix_len)
-            if assistant_routed_experts is not None:
-                rollout_routed_experts.extend(_re_sentinel_rows(prefix_len, _re_sentinel_row))
+            if rollout_routed_experts is not None:
+                rollout_routed_experts = np.concatenate(
+                    (rollout_routed_experts, _re_sentinel_rows(prefix_len, _re_sentinel_row))
+                )
 
             # 3.2.2. Add what the assistant actually generated
             generated_mask_start = len(loss_mask)
@@ -2293,14 +2163,11 @@ def get_response_ids_and_loss_mask_from_messages(
             # 3.2.2b. Add the per-token routed_experts [L, K] rows for what the
             # assistant actually generated, aligned to the re-tokenized generated
             # tokens via LCS (mirrors the logprobs alignment above).
-            if assistant_routed_experts is not None:
+            if rollout_routed_experts is not None:
                 msg_routed_experts = None
                 if assistant_msg_idx < len(assistant_routed_experts):
                     candidate_re = assistant_routed_experts[assistant_msg_idx]
                     if candidate_re is not None and len(candidate_re) > 0:
-                        # Lazily learn the [L, K] sentinel shape from the first real row.
-                        if _re_sentinel_row is None and len(candidate_re) > 0:
-                            _re_sentinel_row = _sentinel_routed_experts_row(candidate_re[0])
                         # Share the logprob LCS map: routed_experts rides the SAME
                         # vLLM response-token index space as the per-token logprobs,
                         # so reuse those token strings when present for an identical
@@ -2325,14 +2192,16 @@ def get_response_ids_and_loss_mask_from_messages(
                     )
                 if msg_routed_experts is None or len(msg_routed_experts) != len(generated_token_ids):
                     msg_routed_experts = _re_sentinel_rows(len(generated_token_ids), _re_sentinel_row)
-                rollout_routed_experts.extend(msg_routed_experts)
+                rollout_routed_experts = np.concatenate((rollout_routed_experts, msg_routed_experts))
 
             # 3.2.3. Add the tokens after the EOS token.
             loss_mask.extend([0] * len(tokens_after_eos))
             if assistant_logprobs:
                 rollout_logprobs.extend([0.0] * len(tokens_after_eos))
-            if assistant_routed_experts is not None:
-                rollout_routed_experts.extend(_re_sentinel_rows(len(tokens_after_eos), _re_sentinel_row))
+            if rollout_routed_experts is not None:
+                rollout_routed_experts = np.concatenate(
+                    (rollout_routed_experts, _re_sentinel_rows(len(tokens_after_eos), _re_sentinel_row))
+                )
 
             assistant_msg_idx += 1
         else:

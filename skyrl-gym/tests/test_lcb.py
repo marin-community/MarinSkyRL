@@ -1,3 +1,4 @@
+import os
 import multiprocessing
 import platform
 import time
@@ -7,7 +8,7 @@ import skyrl_gym
 import json
 from omegaconf import DictConfig
 
-from skyrl_gym.envs.lcb.livecodebench import VerifierLimits, lcb_test_results
+from skyrl_gym.envs.lcb.livecodebench import VerifierLimits, lcb_execution_result, lcb_test_results
 
 SECOND_LARGEST_SOLUTION = """```python
 def main():
@@ -32,6 +33,20 @@ if __name__ == "__main__":
                 [
                     {"input": "4\n8 2 5 1\n", "output": "3\n", "testtype": "stdin"},
                     {"input": "3\n3 2 1\n", "output": "2\n", "testtype": "stdin"},
+                ]
+            ),
+            1.0,
+        ),
+        # Correct code reading stdin through the bytes view
+        (
+            """```python
+import sys
+print(sum(map(int, sys.stdin.buffer.read().split())))
+```""",
+            json.dumps(
+                [
+                    {"input": "4 7\n", "output": "11\n", "testtype": "stdin"},
+                    {"input": "2 3\n", "output": "5\n", "testtype": "stdin"},
                 ]
             ),
             1.0,
@@ -196,4 +211,39 @@ def test_verifier_child_allocating_past_the_memory_cap_scores_zero():
     )
 
     assert all(result is not True for result in results)
+    assert multiprocessing.active_children() == []
+
+
+def _large_diagnostic_child(sample, generation, debug, sender, timeout, execution_mode, memory):
+    sender.send(([False], {"error_message": "diagnostic:" + "x" * (128 * 1024)}))
+    sender.close()
+
+
+def _crashing_verifier_child(*args):
+    os._exit(7)
+
+
+def test_large_verifier_diagnostics_do_not_deadlock_the_child_pipe(monkeypatch):
+    monkeypatch.setattr("skyrl_gym.envs.lcb.livecodebench._run_test_in_subprocess", _large_diagnostic_child)
+    results, metadata = lcb_execution_result(
+        [{"input": "1\n", "output": "1\n", "testtype": "stdin"}],
+        "print(input())",
+        timeout=1,
+        limits=VerifierLimits(total_timeout_seconds=10),
+    )
+    assert results == [False]
+    assert metadata["error_message"] == "diagnostic:" + "x" * (128 * 1024)
+    assert multiprocessing.active_children() == []
+
+
+def test_verifier_child_crash_retains_exit_status_instead_of_a_candidate_verdict(monkeypatch):
+    monkeypatch.setattr("skyrl_gym.envs.lcb.livecodebench._run_test_in_subprocess", _crashing_verifier_child)
+    results, metadata = lcb_execution_result(
+        [{"input": "1\n", "output": "1\n", "testtype": "stdin"}],
+        "print(input())",
+        timeout=1,
+        limits=VerifierLimits(total_timeout_seconds=10),
+    )
+    assert results == [-1]
+    assert metadata == {"execution_error": "child_crash", "exit_code": 7}
     assert multiprocessing.active_children() == []

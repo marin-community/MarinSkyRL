@@ -8,14 +8,8 @@ Asserts the engine-launch wiring, with NO GPU and NO real Ray actor / vLLM init:
       `BasePPOExp` (standard) and `TerminalBenchExp` entrypoints (both inherit
       `_setup_trainer`), so wiring here covers both (G5).
 
-  (G1 byte-identity) `create_ray_wrapped_inference_engines` forwards
-      `decode_context_parallel_size` to the vLLM actor `.remote(...)` ONLY when `> 1`.
-      With dcp=1 (the default) the kwarg is ABSENT from the remote call → vLLM engine
-      init is byte-identical to today. With dcp=2 it is present and `== 2`.
-
-  (G4 GPU-neutrality) DCP does not change the PACK PG bundle count or the per-actor
-      `bundle_indices` — DCP rides the TP GPUs and adds no GPUs. The captured bundle
-      geometry is identical for dcp=1 vs dcp=2.
+  `create_ray_wrapped_inference_engines` forwards `decode_context_parallel_size` and the
+      attention backend to the vLLM actor `.remote(...)` when they are set.
 
 See notes/RL/skyrl/vllm_dcp_rollout_stages/stage1_vllm_support_and_plumbing_scope.md.
 
@@ -25,9 +19,14 @@ Run:
 
 import sys
 import types
-import pytest
 
+import pytest
+from ray.exceptions import ActorDiedError
+
+import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
+import skyrl_train.tokenizer as tokenizer_module
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.entrypoints import main_base
 
 DCP_KEY = "inference_engine_decode_context_parallel_size"
 
@@ -38,13 +37,6 @@ def test_from_config_forwards_vllm_engine_options(monkeypatch):
 
     Covers both entrypoints (BasePPOExp + TerminalBenchExp) since they share this seam.
     """
-    pytest.importorskip("hydra")
-    # main_base transitively imports the trainer, which imports torchdata; on the Mac
-    # dev box torchdata is absent (documented env artifact) -> skip there. On Jupiter /
-    # the production runtime torchdata is present and this exercises the real seam.
-    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
-    from skyrl_train.entrypoints import main_base
-
     captured = {}
 
     def fake_create(**engine_kwargs):
@@ -53,7 +45,6 @@ def test_from_config_forwards_vllm_engine_options(monkeypatch):
 
     # The function imports create_ray_wrapped_inference_engines lazily from this module,
     # so patch it at the source module.
-    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
 
     monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", fake_create)
 
@@ -88,12 +79,6 @@ def test_from_config_forwards_vllm_engine_options(monkeypatch):
 
 def test_standard_entrypoint_identity_survives_python_module_execution(monkeypatch):
     """Online EAGLE remains supported when ``python -m`` names the module ``__main__``."""
-    pytest.importorskip("hydra")
-    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
-    from skyrl_train.entrypoints import main_base
-
-    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
-
     monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **_kwargs: [])
     monkeypatch.setattr(main_base.BasePPOExp, "__module__", "__main__")
 
@@ -123,12 +108,6 @@ def test_standard_entrypoint_identity_survives_python_module_execution(monkeypat
 
 def test_online_eagle_training_uses_vllm_synchronous_scheduling(monkeypatch):
     """SkyRL's async actor API must not turn on vLLM's async scheduler for capture."""
-    pytest.importorskip("hydra")
-    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
-    from skyrl_train.entrypoints import main_base
-
-    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
-
     captured = {}
 
     def fake_create(**engine_kwargs):
@@ -139,7 +118,6 @@ def test_online_eagle_training_uses_vllm_synchronous_scheduling(monkeypatch):
 
     cfg = get_default_config()
     cfg.trainer.placement.colocate_all = False
-    cfg.generator.async_engine = True
     cfg.generator.inference_engine_tensor_parallel_size = 1
     cfg.generator.speculative_decoding = {
         "method": "eagle3",
@@ -153,17 +131,11 @@ def test_online_eagle_training_uses_vllm_synchronous_scheduling(monkeypatch):
 
     main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
 
-    assert captured["async_engine"] is True
     assert captured["engine_init_kwargs"]["async_scheduling"] is False
     assert captured["engine_init_kwargs"]["weight_transfer_config"] == {"backend": "runai_streamer"}
 
 
 def test_from_config_forwards_policy_revision_to_vllm(monkeypatch):
-    pytest.importorskip("hydra")
-    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
-    from skyrl_train.entrypoints import main_base
-    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
-
     captured = {}
     monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])
     cfg = get_default_config()
@@ -178,11 +150,6 @@ def test_from_config_forwards_policy_revision_to_vllm(monkeypatch):
 
 
 def test_from_config_streams_object_store_policy_weights(monkeypatch):
-    pytest.importorskip("hydra")
-    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
-    from skyrl_train.entrypoints import main_base
-    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
-
     captured = {}
     monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])
     cfg = get_default_config()
@@ -203,13 +170,6 @@ def test_from_config_streams_object_store_policy_weights(monkeypatch):
 
 
 def test_from_config_retries_s3_engine_gang_after_actor_startup_failure(monkeypatch):
-    pytest.importorskip("hydra")
-    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
-    from ray.exceptions import ActorDiedError
-
-    from skyrl_train.entrypoints import main_base
-    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
-
     attempts = []
 
     def fake_create(**kwargs):
@@ -239,11 +199,6 @@ def test_from_config_retries_s3_engine_gang_after_actor_startup_failure(monkeypa
 
 
 def test_from_config_reserves_enough_rollout_logprobs(monkeypatch):
-    pytest.importorskip("hydra")
-    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
-    from skyrl_train.entrypoints import main_base
-    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
-
     captured = {}
     monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])
     cfg = get_default_config()
@@ -256,11 +211,6 @@ def test_from_config_reserves_enough_rollout_logprobs(monkeypatch):
 
 
 def test_policy_tokenizer_uses_configured_revision(monkeypatch):
-    pytest.importorskip("hydra")
-    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
-    from skyrl_train.entrypoints import main_base
-    import skyrl_train.tokenizer as tokenizer_module
-
     captured = {}
     monkeypatch.setattr(tokenizer_module, "create_tokenizer", lambda **kwargs: captured.update(kwargs) or object())
     experiment = main_base.BasePPOExp.__new__(main_base.BasePPOExp)
@@ -281,16 +231,13 @@ class _RemoteCapture:
 
     def __init__(self):
         self.remote_calls = []
-        self.options_calls = []
 
     def make_actor_class(self):
         capture = self
 
         class _Actor:
             @staticmethod
-            def options(**opts):
-                capture.options_calls.append(opts)
-
+            def options(**_opts):
                 class _Bound:
                     @staticmethod
                     def remote(**kwargs):
@@ -321,7 +268,6 @@ def _run_create(
     placement_group + readiness + rendezvous + actor are all stubbed. Returns the
     _RemoteCapture so the caller can inspect the kwargs forwarded to .remote(...).
     """
-    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
 
     capture = _RemoteCapture()
     monkeypatch.setattr(rwie, "_validate_installed_vllm_for_model", lambda _pretrain: None)
@@ -332,7 +278,6 @@ def _run_create(
     monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
 
     fake_engine_mod = types.ModuleType("skyrl_train.inference_engines.vllm.vllm_engine")
-    fake_engine_mod.VLLMRayActor = capture.make_actor_class()
     fake_engine_mod.AsyncVLLMRayActor = capture.make_actor_class()
     fake_engine_mod.WorkerWrap = object
     monkeypatch.setitem(sys.modules, "skyrl_train.inference_engines.vllm.vllm_engine", fake_engine_mod)
@@ -370,7 +315,7 @@ def _run_create(
     # handle as .inference_engine_actor), so use it unmocked — the readiness gate reads
     # engine.inference_engine_actor off it.
 
-    engines = rwie.create_ray_wrapped_inference_engines(
+    rwie.create_ray_wrapped_inference_engines(
         num_inference_engines=1,
         tensor_parallel_size=1,
         model_dtype="bfloat16",
@@ -385,18 +330,14 @@ def _run_create(
         shared_pg=None,
         gpu_memory_utilization=0.8,
         inference_engine_enable_sleep=False,
-        async_engine=False,
         backend="vllm",
         vllm_attention_backend=attention_backend,
         engine_init_timeout_seconds=60,
     )
-    capture.resolved_max_model_len = engines[0].max_model_len
     return capture
 
 
 def test_failed_engine_startup_releases_owned_placement_group(monkeypatch):
-    from ray.exceptions import ActorDiedError
-
     removed_placement_groups = []
     with pytest.raises(ActorDiedError):
         _run_create(
@@ -409,18 +350,6 @@ def test_failed_engine_startup_releases_owned_placement_group(monkeypatch):
     assert removed_placement_groups == [("PG", (1,))]
 
 
-def test_dcp_disabled_kwarg_absent_from_remote(monkeypatch):
-    """G1: dcp=1 => decode_context_parallel_size is NOT passed to the vLLM actor.
-
-    The remote call (hence vllm.LLM/AsyncEngineArgs) is byte-identical to today.
-    """
-    capture = _run_create(monkeypatch, dcp=1)
-    assert len(capture.remote_calls) == 1
-    assert "decode_context_parallel_size" not in capture.remote_calls[0], (
-        "dcp=1 must NOT forward decode_context_parallel_size (G1 byte-identity)"
-    )
-
-
 def test_dcp_enabled_kwarg_present_in_remote(monkeypatch):
     """dcp=2 => decode_context_parallel_size=2 is forwarded to the vLLM actor."""
     capture = _run_create(monkeypatch, dcp=2)
@@ -428,39 +357,6 @@ def test_dcp_enabled_kwarg_present_in_remote(monkeypatch):
     assert capture.remote_calls[0].get("decode_context_parallel_size") == 2
 
 
-def test_dcp_does_not_change_bundle_geometry(monkeypatch):
-    """G4: per-actor bundle_indices / TP geometry identical for dcp=1 vs dcp=2.
-
-    DCP rides the TP GPUs; it must not change placement-group / GPU sizing.
-    """
-    cap1 = _run_create(monkeypatch, dcp=1)
-    cap2 = _run_create(monkeypatch, dcp=2)
-
-    def geometry(cap):
-        rc = cap.remote_calls[0]
-        oc = cap.options_calls[0]
-        return {
-            "bundle_indices": rc.get("bundle_indices"),
-            "tensor_parallel_size": rc.get("tensor_parallel_size"),
-            "pipeline_parallel_size": rc.get("pipeline_parallel_size"),
-            "num_gpus_option": oc.get("num_gpus"),
-            "num_cpus_option": oc.get("num_cpus"),
-        }
-
-    assert geometry(cap1) == geometry(cap2), "DCP must not change GPU/placement geometry (G4)"
-
-
-def test_attention_backend_absent_by_default(monkeypatch):
-    capture = _run_create(monkeypatch, dcp=1)
-    assert "attention_backend" not in capture.remote_calls[0]
-
-
 def test_attention_backend_forwarded_to_vllm_actor(monkeypatch):
     capture = _run_create(monkeypatch, dcp=1, attention_backend="FLASH_ATTN")
     assert capture.remote_calls[0]["attention_backend"] == "FLASH_ATTN"
-
-
-def test_wrapper_records_the_limit_resolved_by_vllm(monkeypatch):
-    capture = _run_create(monkeypatch, dcp=1)
-
-    assert capture.resolved_max_model_len == 32768

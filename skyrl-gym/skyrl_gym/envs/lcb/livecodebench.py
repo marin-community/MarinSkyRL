@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import signal
 
-from io import StringIO
+from io import BytesIO, StringIO
 from unittest.mock import patch, mock_open
 from types import ModuleType
 from enum import Enum
@@ -280,6 +280,14 @@ def make_function(code: str) -> str:
         return code
 
 
+class _TextStdin(StringIO):
+    """Text stdin patch that also exposes the underlying byte stream as ``buffer``."""
+
+    def __init__(self, text: str):
+        super().__init__(text)
+        self.buffer = BytesIO(text.encode())
+
+
 def call_method(method, inputs):
     if isinstance(inputs, list):
         inputs = "\n".join(inputs)
@@ -290,7 +298,7 @@ def call_method(method, inputs):
 
     # @patch('builtins.input', side_effect=inputs.split("\n"))
     @patch("builtins.open", mock_open(read_data=inputs))
-    @patch("sys.stdin", StringIO(inputs))
+    @patch("sys.stdin", _TextStdin(inputs))
     @patch("sys.stdin.readline", lambda *args: next(inputs_line_iterator))
     @patch("sys.stdin.readlines", lambda *args: inputs.split("\n"))
     @patch("sys.stdin.read", lambda *args: inputs)
@@ -810,7 +818,7 @@ def verifier_slots() -> threading.BoundedSemaphore:
 
 
 def _run_test_in_subprocess(sample, generation, debug, connection, timeout, execution_mode, max_memory_bytes):
-    res, _metadata = run_test(
+    res, metadata = run_test(
         sample,
         test=generation,
         debug=debug,
@@ -818,11 +826,11 @@ def _run_test_in_subprocess(sample, generation, debug, connection, timeout, exec
         execution_mode=execution_mode,
         max_memory_bytes=max_memory_bytes,
     )
-    connection.send(res)
+    connection.send((res, metadata))
     connection.close()
 
 
-def lcb_test_results(
+def lcb_execution_result(
     sample,
     generation,
     timeout=6,
@@ -830,7 +838,7 @@ def lcb_test_results(
     execution_mode=TestExecutionMode.collect_all,
     limits=None,
 ):
-    """Return one pass/failure result per executed test case.
+    """Return per-test pass/failure results and execution diagnostics.
 
     A process-level timeout catches extreme cases not handled by the per-test alarms.
     Stop-on-failure mode preserves the binary scorer's original short circuit. Each
@@ -865,12 +873,18 @@ def lcb_test_results(
             timeout,
             deadline,
         )
-        p.join(deadline)
+        started = time.monotonic()
+        results = None
+        if receiver.poll(deadline):
+            try:
+                results = receiver.recv()
+            except EOFError:
+                results = None
+        p.join(max(0.0, deadline - (time.monotonic() - started)))
         timed_out = p.is_alive()
         if timed_out:
             p.kill()
             p.join()
-        results = receiver.recv() if p.exitcode == 0 and receiver.poll() else None
     if timed_out:
         _logger.warning(
             "LiveCodeBench verifier child pid=%s exceeded its %.0fs deadline (%d tests); scoring all failed",
@@ -878,12 +892,26 @@ def lcb_test_results(
             deadline,
             num_tests,
         )
+    receiver.close()
+    if results is not None:
+        test_results, metadata = results
+        return list(test_results), metadata
     if results is None:
-        # consider that all tests failed
+        # No verdict was returned; retain the cause as well as failure sentinels.
         results = [-1 for _ in range(num_tests)]
         if debug:
             print("global timeout")
-    return list(results)
+    return list(results), {
+        "execution_error": "process_timeout" if timed_out else "child_crash",
+        "exit_code": p.exitcode,
+    }
+
+
+def lcb_test_results(
+    sample, generation, timeout=6, debug=False, execution_mode=TestExecutionMode.collect_all, limits=None
+):
+    results, _ = lcb_execution_result(sample, generation, timeout, debug, execution_mode, limits)
+    return results
 
 
 def lcb_check_correctness(sample, generation, timeout=6, debug=False, limits=None):

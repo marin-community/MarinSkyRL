@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 _MAX_REQUEST_ATTEMPTS = 5
 _INITIAL_RETRY_DELAY_SECONDS = 1.0
 _TRANSIENT_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+DEFAULT_JUDGE_MAX_TOKENS = 8192
+
+
+class IncompleteJudgeResponse(ValueError):
+    """Judge generation stopped before producing any content."""
 
 
 class GenRMResponseTransport(StrEnum):
@@ -130,12 +135,15 @@ class OpenAIJudge:
             timeout=self.timeout_seconds,
         )
         body: dict[str, Any] = response.json()
-        content = body["choices"][0]["message"].get("content")
+        choice = body["choices"][0]
+        if choice.get("finish_reason") in {"length", "content_filter"}:
+            raise IncompleteJudgeResponse(f"Incomplete judge response: {body}")
+        content = choice["message"].get("content")
         if not isinstance(content, str):
             raise RuntimeError(f"Judge returned no message content: {body}")
         return content
 
-    def generate(self, messages: list[dict[str, str]], *, max_tokens: int = 8192) -> str:
+    def generate(self, messages: list[dict[str, str]], *, max_tokens: int = DEFAULT_JUDGE_MAX_TOKENS) -> str:
         return self._post_chat_completion(messages, max_tokens=max_tokens)
 
     def generate_response(
@@ -175,14 +183,20 @@ class OpenAIJudge:
                 "max_output_tokens": max_output_tokens,
                 "temperature": temperature,
                 "top_p": top_p,
+                **({"reasoning": {"effort": self.reasoning_effort}} if self.reasoning_effort is not None else {}),
             },
             timeout=self.timeout_seconds,
         )
         body: dict[str, Any] = response.json()
-        for item in reversed(body.get("output", [])):
+        if body.get("status") == "incomplete":
+            raise IncompleteJudgeResponse(f"Incomplete judge response: {body}")
+        texts = []
+        for item in body.get("output", []):
             if item.get("type") != "message":
                 continue
             for content in item.get("content", []):
                 if content.get("type") == "output_text" and isinstance(content.get("text"), str):
-                    return content["text"]
+                    texts.append(content["text"])
+        if texts:
+            return "".join(texts)
         raise RuntimeError(f"GenRM judge returned no output text: {body}")

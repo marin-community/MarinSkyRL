@@ -1,6 +1,5 @@
 """Hero architecture through the actual Megatron worker, with split-expert checkpoints."""
 
-import json
 import math
 from pathlib import Path
 
@@ -124,13 +123,11 @@ def test_hero_worker_repeated_updates(tmp_path, tp, pp, ep, cp, packing):
         assert torch.isfinite(initial_scores).all()
         repeated_scores = _megatron_response_logprobs(policy, batch)
         torch.testing.assert_close(initial_scores, repeated_scores, rtol=0, atol=0)
-        metrics = []
         for _ in range(3):
             scores = _megatron_response_logprobs(policy, batch)
             batch["action_log_probs"] = (scores * batch["response_mask"]).float()
             status = _train_step(policy, batch)
             assert status["log_ratio_abs_max"] < 1e-3, status
-            metrics.append(status)
         after = rank0_validation_snapshot(policy, names)
         for name in names:
             if name.endswith("router.bias"):
@@ -163,6 +160,5 @@ def test_hero_worker_repeated_updates(tmp_path, tp, pp, ep, cp, packing):
         resumed = rank0_validation_snapshot(policy, names)
         for name in names:
             torch.testing.assert_close(resumed[name], continued[name], rtol=0, atol=0)
-        print(json.dumps({"tp": tp, "pp": pp, "ep": ep, "cp": cp, "packing": packing, "metrics": metrics}, default=str))
     finally:
         ray.shutdown()

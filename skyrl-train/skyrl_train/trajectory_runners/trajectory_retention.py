@@ -14,6 +14,9 @@ import zipfile
 
 from omegaconf import DictConfig
 from loguru import logger
+import ray
+from ray.actor import ActorHandle
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from transformers import PreTrainedTokenizerBase
 
 from marinskyrl.resource_locator import join_resource_path
@@ -40,13 +43,14 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
     NormalizedReward,
     aggregate_reward_shaping_components,
 )
+from skyrl_gym.verification import VerificationResult
 from skyrl_train.json_serialization import canonical_json_bytes, to_jsonable
 from skyrl_train.io import io
 
 
 RETENTION_METRIC_PREFIX = "generate/trajectory_retention"
 RETENTION_SCHEMA_VERSION = 1
-TRAJECTORY_RECORD_SCHEMA_VERSION = 3
+TRAJECTORY_RECORD_SCHEMA_VERSION = 5
 _LEDGER_NAME = "_retention_ledger.json"
 _SELECTION_COUNT = "count"
 _SELECTION_FRACTION = "fraction"
@@ -136,14 +140,6 @@ class _SelectedRecord:
 
 
 @dataclass(frozen=True)
-class _SelectedArchive:
-    path: str
-    payload: bytes
-    ledger: _RetentionLedger
-    record_count: int
-
-
-@dataclass(frozen=True)
 class _TrajectoryIdentity:
     instance_id: str
     repetition_id: int
@@ -159,12 +155,6 @@ class _PromptTrace:
 
 
 @dataclass(frozen=True)
-class _TraceMessage:
-    role: str
-    content: str
-
-
-@dataclass(frozen=True)
 class _StepBoundary:
     row_index: int
     token_start: int
@@ -175,7 +165,7 @@ class _StepBoundary:
 
 @dataclass(frozen=True)
 class _ResponseTrace:
-    messages: tuple[_TraceMessage, ...] | None
+    messages: tuple[dict[str, Any], ...] | None
     text: str | None
     token_ids: tuple[int, ...]
     loss_mask: tuple[int, ...]
@@ -197,6 +187,7 @@ class _RewardTrace:
 class _DispositionTrace:
     exception_type: str | None
     error_treatment: str | None
+    server_error: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -224,6 +215,7 @@ class TrajectoryRecord:
     reward: _RewardTrace
     disposition: _DispositionTrace
     verifier: VerifierTestCollection | None
+    verification_result: VerificationResult | None
     metrics: dict[str, Any]
     provenance: _ProvenanceTrace
 
@@ -387,10 +379,13 @@ def build_trajectory_records(
     stop_reasons = output.get("stop_reasons") or [None] * len(output["response_ids"])
     exception_types = output.get("exception_types") or [None] * len(output["response_ids"])
     error_treatments = output.get("error_treatments") or [None] * len(output["response_ids"])
+    server_errors = output.get("server_errors") or [None] * len(output["response_ids"])
     if len(exception_types) != len(output["response_ids"]):
         raise ValueError("exception types must have one entry per trajectory row")
     if len(error_treatments) != len(output["response_ids"]):
         raise ValueError("error treatments must have one entry per trajectory row")
+    if len(server_errors) != len(output["response_ids"]):
+        raise ValueError("server errors must have one entry per trajectory row")
     unshaped = output.get("unshaped_rewards")
     components = output.get("reward_shaping_components")
     loop_spans = output.get("reward_shaping_loop_spans")
@@ -398,9 +393,8 @@ def build_trajectory_records(
     verifier_tests = output.get("verifier_tests")
     if verifier_tests is not None and len(verifier_tests) != len(output["response_ids"]):
         raise ValueError("verifier tests must have one entry per trajectory row")
-    model_version_step = output.get("actual_global_step")
-    if model_version_step is None:
-        model_version_step = max(0, metadata.global_step - 1)
+    # A request's step names the policy version being trained, which has completed one fewer update.
+    model_version_step = max(0, metadata.global_step - 1)
 
     records = []
     for group in _group_rows(input_batch, output):
@@ -436,7 +430,14 @@ def build_trajectory_records(
                 token_ids=tuple(prompt_ids),
             ),
             response=_ResponseTrace(
-                messages=None if response_text is None else (_TraceMessage(role="assistant", content=response_text),),
+                messages=(
+                    tuple(output["evidence_messages"][final_index])
+                    if output.get("evidence_messages") is not None
+                    and output["evidence_messages"][final_index] is not None
+                    else None
+                    if response_text is None
+                    else ({"role": "assistant", "content": response_text},)
+                ),
                 text=response_text,
                 token_ids=tuple(response_ids),
                 loss_mask=tuple(loss_mask),
@@ -456,8 +457,12 @@ def build_trajectory_records(
             disposition=_DispositionTrace(
                 exception_type=exception_types[final_index],
                 error_treatment=error_treatments[final_index],
+                server_error=server_errors[final_index],
             ),
             verifier=None if verifier_tests is None else verifier_tests[final_index],
+            verification_result=(
+                output["verification_results"][final_index] if output.get("verification_results") is not None else None
+            ),
             metrics=to_jsonable(output.get("rollout_metrics") or {}),
             provenance=_ProvenanceTrace(
                 runner=runner_name,
@@ -696,42 +701,38 @@ def _initialize_publication(request: PublicationRequest) -> _RetentionLedger:
     return _reconciled_ledger(writer, config)
 
 
-def _publish_archive(request: PublicationRequest) -> _RetentionLedger:
-    if request.archive_path is None or request.archive_payload is None or request.ledger is None:
+def _publish_archives(request: PublicationRequest) -> _RetentionLedger:
+    if request.archives is None or request.ledger is None:
         raise ValueError("trajectory publication request is incomplete")
     writer = _FilesystemTrajectoryWriter(request.output_path)
-    if not writer.exists(request.archive_path):
-        writer.write_bytes(request.archive_path, request.archive_payload)
+    for path, payload in request.archives.items():
+        if not writer.exists(path):
+            writer.write_bytes(path, payload)
     ledger = _RetentionLedger.from_json(request.ledger)
     writer.write_json(_LEDGER_NAME, to_jsonable(ledger))
     return ledger
 
 
-def _publication_worker(request: PublicationRequest, sender) -> None:
+def execute_publication(request: PublicationRequest) -> PublicationResult:
+    """Perform one storage operation, reporting any failure in the result rather than raising."""
     try:
         if request.operation is PublicationOperation.INITIALIZE:
             ledger = _initialize_publication(request)
         elif request.operation is PublicationOperation.PUBLISH:
-            ledger = _publish_archive(request)
+            ledger = _publish_archives(request)
         else:
             raise ValueError(f"unknown trajectory publication operation: {request.operation}")
-        sender.send(
-            PublicationResult(
-                request_id=request.request_id,
-                record_count=request.record_count,
-                ledger=to_jsonable(ledger),
-            )
+    except Exception as error:
+        return PublicationResult(
+            request_id=request.request_id,
+            record_count=request.record_count,
+            error=f"{type(error).__name__}: {error}",
         )
-    except BaseException as error:
-        sender.send(
-            PublicationResult(
-                request_id=request.request_id,
-                record_count=request.record_count,
-                error=f"{type(error).__name__}: {error}",
-            )
-        )
-    finally:
-        sender.close()
+    return PublicationResult(
+        request_id=request.request_id,
+        record_count=request.record_count,
+        ledger=to_jsonable(ledger),
+    )
 
 
 def _empty_metrics() -> dict[str, float]:
@@ -744,13 +745,29 @@ def _empty_metrics() -> dict[str, float]:
         f"{RETENTION_METRIC_PREFIX}/write_errors": 0.0,
         f"{RETENTION_METRIC_PREFIX}/bytes_written": 0.0,
         f"{RETENTION_METRIC_PREFIX}/enqueued": 0.0,
-        f"{RETENTION_METRIC_PREFIX}/dropped_by_backpressure": 0.0,
         f"{RETENTION_METRIC_PREFIX}/publish_timeouts": 0.0,
     }
 
 
+class RetentionSink(Protocol):
+    """Where trajectory runners send finished batches for retention."""
+
+    config: TrajectoryRetentionConfig
+
+    def bind_runner(self, runner_name: str) -> None: ...
+
+    def retain(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> dict[str, float]: ...
+
+    def close(self) -> None: ...
+
+
 class TrajectorySink:
-    """Select, bound, and persist normalized trajectory records."""
+    """Select, bound, and persist normalized trajectory records.
+
+    A best-effort sink runs one storage operation at a time. Records selected while one is in flight wait in a
+    queue, and the next operation publishes all of them, one archive per step, so a run that retains one group at
+    a time keeps every record it selects.
+    """
 
     def __init__(
         self,
@@ -761,15 +778,17 @@ class TrajectorySink:
         self.config = config
         self.tokenizer = tokenizer
         self.publisher = publisher or ProcessTrajectoryPublisher(
-            _publication_worker,
+            execute_publication,
             publish_timeout_seconds=config.publish_timeout_seconds,
             shutdown_timeout_seconds=config.shutdown_timeout_seconds,
         )
         self._lock = threading.Lock()
+        # Includes the queued records, so selection sees every record the sink has accepted.
         self._ledger: _RetentionLedger | None = None
+        self._queued: list[_SelectedRecord] = []
         self._runner_name: str | None = None
         self._pending_operation: PublicationOperation | None = None
-        self._pending_archive_path: str | None = None
+        self._pending_archive_paths: tuple[str, ...] = ()
         self._pending_archive_bytes = 0
         if config.enabled:
             result = self.publisher.execute(self._initialization_request())
@@ -804,10 +823,16 @@ class TrajectorySink:
             return self._retain_locked(input_batch, output)
 
     def close(self) -> None:
-        """Flush or cancel pending best-effort publication within the shutdown deadline."""
-        result = self.publisher.close()
-        if result is not None and result.error is not None:
-            logger.error("Trajectory retention publication did not finish during shutdown: {}", result.error)
+        """Finish or cancel the pending publication within the shutdown deadline, then publish queued records."""
+        with self._lock:
+            result = self.publisher.close()
+            if result is not None:
+                self._finish_publication(result, _empty_metrics())
+            if not self._queued:
+                return
+            result = self.publisher.execute(self._queued_publication())
+            if result.error is not None:
+                logger.error("Trajectory retention publication did not finish during shutdown: {}", result.error)
 
     def _retain_locked(
         self,
@@ -826,16 +851,9 @@ class TrajectorySink:
         metrics[f"{RETENTION_METRIC_PREFIX}/candidates"] = float(len(records))
         if not self._ensure_ledger(metrics, len(records)):
             return metrics
-
-        if self._pending_operation is not None:
-            metrics[f"{RETENTION_METRIC_PREFIX}/dropped_by_backpressure"] += float(len(records))
-            return metrics
-
-        assert self._ledger is not None
-        archive = self._select_archive(records, self._ledger, metrics)
-        if archive is None:
-            return metrics
-        self._dispatch_archive(archive, metrics)
+        self._queue_selected(records, metrics)
+        if self._queued and self._pending_operation is None:
+            self._publish_queued(metrics)
         return metrics
 
     def _ensure_ledger(self, metrics: dict[str, float], record_count: int) -> bool:
@@ -851,45 +869,58 @@ class TrajectorySink:
         self._ledger = _RetentionLedger.from_json(result.ledger)
         return True
 
-    def _dispatch_archive(self, archive: _SelectedArchive, metrics: dict[str, float]) -> None:
-        request = self._publication_request(archive)
+    def _publish_queued(self, metrics: dict[str, float]) -> None:
+        request = self._queued_publication()
+        assert request.archives is not None
+        archive_bytes = sum(len(payload) for payload in request.archives.values())
         if self.config.required:
             result = self.publisher.execute(request)
             if result.error is not None:
-                self._raise_publication_error(result, archive.path)
-            self._ledger = _RetentionLedger.from_json(result.ledger)
-            metrics[f"{RETENTION_METRIC_PREFIX}/written"] += float(archive.record_count)
-            metrics[f"{RETENTION_METRIC_PREFIX}/bytes_written"] += float(len(archive.payload))
+                self._raise_publication_error(result, ", ".join(request.archives))
+            metrics[f"{RETENTION_METRIC_PREFIX}/written"] += float(request.record_count)
+            metrics[f"{RETENTION_METRIC_PREFIX}/bytes_written"] += float(archive_bytes)
             return
 
-        if not self.publisher.submit(request):
-            metrics[f"{RETENTION_METRIC_PREFIX}/dropped_by_backpressure"] += float(archive.record_count)
-            return
+        submitted = self.publisher.submit(request)
+        assert submitted, "the sink submits only when no publication is pending"
         self._pending_operation = PublicationOperation.PUBLISH
-        self._pending_archive_path = archive.path
-        self._pending_archive_bytes = len(archive.payload)
-        metrics[f"{RETENTION_METRIC_PREFIX}/enqueued"] += float(archive.record_count)
+        self._pending_archive_paths = tuple(request.archives)
+        self._pending_archive_bytes = archive_bytes
+        metrics[f"{RETENTION_METRIC_PREFIX}/enqueued"] += float(request.record_count)
 
-    def _publication_request(self, archive: _SelectedArchive) -> PublicationRequest:
+    def _queued_publication(self) -> PublicationRequest:
+        """Move the queued records into one archive per step, and return the request that publishes them."""
+        assert self._ledger is not None
+        by_step: dict[str, list[_SelectedRecord]] = {}
+        for selected_record in self._queued:
+            by_step.setdefault(self._step_key(selected_record.record), []).append(selected_record)
+        record_count = len(self._queued)
+        self._queued = []
+        archives = {}
+        for step_key, selected in by_step.items():
+            payload = _archive_payload(selected)
+            path = self._archive_path(selected[0].record, payload)
+            record_ids = tuple(item.record.record_id for item in selected)
+            for record_id in record_ids:
+                self._ledger.records[record_id] = replace(self._ledger.records[record_id], path=path)
+            self._ledger.archives[path] = _ArchiveEntry(bytes=len(payload), step=step_key, record_ids=record_ids)
+            self._ledger.step_bytes[step_key] = self._ledger.step_bytes.get(step_key, 0) + len(payload)
+            self._ledger.total_bytes += len(payload)
+            archives[path] = payload
         return PublicationRequest(
-            request_id=hashlib.sha256(archive.path.encode("utf-8")).hexdigest(),
+            request_id=hashlib.sha256("".join(archives).encode("utf-8")).hexdigest(),
             operation=PublicationOperation.PUBLISH,
             output_path=self.config.output_path,
-            archive_path=archive.path,
-            archive_payload=archive.payload,
-            ledger=to_jsonable(archive.ledger),
+            archives=archives,
+            ledger=to_jsonable(self._ledger),
             retention_config=to_jsonable(self.config),
-            record_count=archive.record_count,
+            record_count=record_count,
         )
 
-    def _select_archive(
-        self,
-        records: Sequence[TrajectoryRecord],
-        ledger: _RetentionLedger,
-        metrics: dict[str, float],
-    ) -> _SelectedArchive | None:
-        """Return a payload-bounded priority prefix, or none when no record qualifies or fits."""
-        selection_ledger = _copy_ledger(ledger)
+    def _queue_selected(self, records: Sequence[TrajectoryRecord], metrics: dict[str, float]) -> None:
+        """Queue the payload-bounded priority prefix of the records that qualify for retention."""
+        assert self._ledger is not None
+        selection_ledger = _copy_ledger(self._ledger)
         selected = []
         for record in sorted(records, key=self._sample_score):
             if record.record_id in selection_ledger.records:
@@ -905,15 +936,19 @@ class TrajectorySink:
             selected.append(selected_record)
 
         if not selected:
-            return None
+            return
 
-        first = selected[0].record
-        step_key = self._step_key(first)
+        step_key = self._step_key(selected[0].record)
+        # Queued records count against the bounds before their archives exist.
+        queued_bytes = sum(len(item.payload) for item in self._queued)
+        queued_step_bytes = sum(len(item.payload) for item in self._queued if self._step_key(item.record) == step_key)
         remaining_limits = []
         if self.config.max_bytes_per_step is not None:
-            remaining_limits.append(self.config.max_bytes_per_step - ledger.step_bytes.get(step_key, 0))
+            remaining_limits.append(
+                self.config.max_bytes_per_step - self._ledger.step_bytes.get(step_key, 0) - queued_step_bytes
+            )
         if self.config.max_bytes_per_run is not None:
-            remaining_limits.append(self.config.max_bytes_per_run - ledger.total_bytes)
+            remaining_limits.append(self.config.max_bytes_per_run - self._ledger.total_bytes - queued_bytes)
         max_payload_bytes = min(remaining_limits) if remaining_limits else None
         retained = []
         retained_payload_bytes = 0
@@ -924,30 +959,11 @@ class TrajectorySink:
             retained.append(selected_record)
             retained_payload_bytes = candidate_bytes
         metrics[f"{RETENTION_METRIC_PREFIX}/dropped_by_bounds"] += float(len(selected) - len(retained))
-        if not retained:
-            return None
 
-        next_ledger = _copy_ledger(ledger)
         for selected_record in retained:
-            self._add_selected_record(next_ledger, selected_record)
-        archive_payload = _archive_payload(retained)
-        archive_path = self._archive_path(first, archive_payload)
-        record_ids = tuple(item.record.record_id for item in retained)
-        for record_id in record_ids:
-            next_ledger.records[record_id] = replace(next_ledger.records[record_id], path=archive_path)
-        next_ledger.archives[archive_path] = _ArchiveEntry(
-            bytes=len(archive_payload),
-            step=step_key,
-            record_ids=record_ids,
-        )
-        next_ledger.step_bytes[step_key] = next_ledger.step_bytes.get(step_key, 0) + len(archive_payload)
-        next_ledger.total_bytes += len(archive_payload)
-        return _SelectedArchive(
-            path=archive_path,
-            payload=archive_payload,
-            ledger=next_ledger,
-            record_count=len(retained),
-        )
+            self._add_selected_record(self._ledger, selected_record)
+        # A queued record displaced as a count sample, with no other reason to keep it, is no longer retained.
+        self._queued = [item for item in (*self._queued, *retained) if item.record.record_id in self._ledger.records]
 
     def _add_selected_record(self, ledger: _RetentionLedger, selected: _SelectedRecord) -> None:
         record = selected.record
@@ -983,25 +999,32 @@ class TrajectorySink:
 
     def _drain_publication(self, metrics: dict[str, float]) -> None:
         result = self.publisher.poll()
-        if result is None:
-            return
+        if result is not None:
+            self._finish_publication(result, metrics)
+
+    def _finish_publication(self, result: PublicationResult, metrics: dict[str, float]) -> None:
         operation = self._pending_operation
-        archive_path = self._pending_archive_path
+        archive_paths = self._pending_archive_paths
         archive_bytes = self._pending_archive_bytes
         self._pending_operation = None
-        self._pending_archive_path = None
+        self._pending_archive_paths = ()
         self._pending_archive_bytes = 0
         if result.error is not None:
             logger.error("Trajectory retention {} failed: {}", operation, result.error)
-            metrics[f"{RETENTION_METRIC_PREFIX}/write_errors"] += float(max(1, result.record_count))
+            # The ledger now describes records storage may not hold, so reload it from storage and drop the
+            # records queued against it.
+            metrics[f"{RETENTION_METRIC_PREFIX}/write_errors"] += float(max(1, result.record_count) + len(self._queued))
             metrics[f"{RETENTION_METRIC_PREFIX}/publish_timeouts"] += float(result.timed_out)
             self._ledger = None
+            self._queued = []
             return
-        self._ledger = _RetentionLedger.from_json(result.ledger)
-        if operation is PublicationOperation.PUBLISH:
-            metrics[f"{RETENTION_METRIC_PREFIX}/written"] += float(result.record_count)
-            metrics[f"{RETENTION_METRIC_PREFIX}/bytes_written"] += float(archive_bytes)
-            logger.info("Published trajectory retention archive {}", archive_path)
+        if operation is PublicationOperation.INITIALIZE:
+            self._ledger = _RetentionLedger.from_json(result.ledger)
+            return
+        # The sink's ledger already includes this publication and every record queued since.
+        metrics[f"{RETENTION_METRIC_PREFIX}/written"] += float(result.record_count)
+        metrics[f"{RETENTION_METRIC_PREFIX}/bytes_written"] += float(archive_bytes)
+        logger.info("Published trajectory retention archives {}", ", ".join(archive_paths))
 
     @staticmethod
     def _raise_publication_error(result: PublicationResult, path: str) -> None:
@@ -1086,7 +1109,7 @@ _RETENTION_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1, threa
 
 
 async def retain_trajectories(
-    sink: TrajectorySink,
+    sink: RetentionSink,
     input_batch: TrajectoryRequestBatch,
     output: TrajectoryBatch,
 ) -> None:
@@ -1115,6 +1138,49 @@ async def retain_trajectories(
     output["rollout_metrics"] = rollout_metrics
 
 
-def make_trajectory_sink(config: DictConfig, tokenizer: PreTrainedTokenizerBase) -> TrajectorySink:
-    """Build the shared sink from the runner configuration."""
-    return TrajectorySink(parse_trajectory_retention_config(config.get("trajectory_retention")), tokenizer)
+class SharedTrajectorySink:
+    """A picklable handle to the run's one ``TrajectorySink`` actor.
+
+    Rollout workers retain from many processes, and the retention ledger admits a single writer. Only the
+    trainer, which owns the sink, closes it.
+    """
+
+    def __init__(self, config: TrajectoryRetentionConfig, actor: ActorHandle):
+        self.config = config
+        self._actor = actor
+
+    def bind_runner(self, runner_name: str) -> None:
+        ray.get(self._actor.bind_runner.remote(runner_name))
+
+    def retain(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> dict[str, float]:
+        return ray.get(self._actor.retain.remote(input_batch, output))
+
+    def close(self) -> None:
+        ray.get(self._actor.close.remote())
+        ray.kill(self._actor)
+
+
+class DisabledTrajectorySink:
+    """The sink of a run that retains nothing, which needs no actor."""
+
+    def __init__(self, config: TrajectoryRetentionConfig):
+        self.config = config
+
+    def bind_runner(self, runner_name: str) -> None:
+        """Nothing is retained, so no runner identity is recorded."""
+
+    def retain(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> dict[str, float]:
+        return {}
+
+    def close(self) -> None:
+        """The sink holds no resources."""
+
+
+def make_trajectory_sink(config: DictConfig, tokenizer: PreTrainedTokenizerBase) -> RetentionSink:
+    """Start the run's sink on this node, where a local ``output_path`` resolves as it does here."""
+    retention = parse_trajectory_retention_config(config.get("trajectory_retention"))
+    if not retention.enabled:
+        return DisabledTrajectorySink(retention)
+    node = NodeAffinitySchedulingStrategy(node_id=ray.get_runtime_context().get_node_id(), soft=False)
+    actor = ray.remote(TrajectorySink).options(num_cpus=0, scheduling_strategy=node).remote(retention, tokenizer)
+    return SharedTrajectorySink(retention, actor)

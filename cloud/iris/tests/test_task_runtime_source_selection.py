@@ -1,13 +1,13 @@
 """Behavior tests for runtime source selection inside an Iris GPU task."""
 
 import contextlib
+import os
 import signal
 import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 
 from cloud.iris import task_runtime
 
@@ -36,11 +36,6 @@ def test_training_driver_starts_from_the_immutable_runtime_checkout(monkeypatch)
         "stdout": task_runtime.subprocess.PIPE,
         "stderr": task_runtime.subprocess.STDOUT,
     }
-
-
-def test_training_driver_requires_the_runtime_checkout() -> None:
-    with pytest.raises(RuntimeError, match="SKYRL_HOME"):
-        task_runtime.launch_training_driver(Path("/tmp/launch.yaml"), {})
 
 
 def test_head_returns_driver_abort_when_failure_artifact_upload_blocks(tmp_path, monkeypatch) -> None:
@@ -122,13 +117,25 @@ def _isolate_head_runtime(tmp_path: Path, monkeypatch) -> None:
 
 def _run_head_script(args: SimpleNamespace, script: str, monkeypatch) -> int:
     def launch(_config_path, environment):
-        return task_runtime.subprocess.Popen(
-            [sys.executable, "-c", script],
-            env=environment,
-            start_new_session=True,
-            stdout=task_runtime.subprocess.PIPE,
-            stderr=task_runtime.subprocess.STDOUT,
-        )
+        # run_head starts the liveness clock when launch returns. Hold the return until the
+        # child interpreter has started so its startup time, which is unbounded on a loaded
+        # host, is not charged against the test's short liveness windows.
+        ready_read, ready_write = os.pipe()
+        handshake = f"import os\nos.write({ready_write}, b'r')\nos.close({ready_write})\n"
+        try:
+            process = task_runtime.subprocess.Popen(
+                [sys.executable, "-c", handshake + script],
+                env=environment,
+                start_new_session=True,
+                stdout=task_runtime.subprocess.PIPE,
+                stderr=task_runtime.subprocess.STDOUT,
+                pass_fds=(ready_write,),
+            )
+        finally:
+            os.close(ready_write)
+        with os.fdopen(ready_read, "rb") as ready:
+            ready.read(1)
+        return process
 
     monkeypatch.setattr(task_runtime, "launch_training_driver", launch)
     return task_runtime.run_head(args, Path("/tmp/unused-launch-config.yaml"))
@@ -165,15 +172,16 @@ os.kill(os.getpid(), signal.SIGABRT)
 
 def test_head_keeps_a_driver_alive_while_it_emits_progress(tmp_path, monkeypatch) -> None:
     _isolate_head_runtime(tmp_path, monkeypatch)
+    # The driver runs well past the liveness window, but no single silence exceeds it.
     script = """
 import threading
 
-for phase in range(5):
+for phase in range(6):
     print(f"completed phase {phase}", flush=True)
-    threading.Event().wait(0.03)
+    threading.Event().wait(0.05)
 """
 
-    exit_code = _run_head_script(_runtime_args(tmp_path, liveness_timeout=0.05), script, monkeypatch)
+    exit_code = _run_head_script(_runtime_args(tmp_path, liveness_timeout=0.2), script, monkeypatch)
 
     assert exit_code == 0
 

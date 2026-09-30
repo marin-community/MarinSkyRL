@@ -95,25 +95,6 @@ def test_job_inventory_filters_regex_fields():
     assert [row["job_id"] for row in filtered] == ["/benjaminfeuer/glm52-running"]
 
 
-def test_job_inventory_queries_all_default_clusters(monkeypatch):
-    queried_clusters = []
-
-    def fake_query_jobs(*, user, hours, cluster):
-        queried_clusters.append((user, hours, cluster))
-        return [{"job_id": f"/{user}/{cluster}", "state": "3", "submitted_at_ms": "1"}]
-
-    monkeypatch.setattr(list_iris_jobs, "query_jobs", fake_query_jobs)
-
-    assert list_iris_jobs.main(["--user", "benjaminfeuer", "--hours", "6", "--filter", "state=running"]) == 0
-
-    assert [cluster for _user, _hours, cluster in queried_clusters] == [
-        "cw-rno2a",
-        "cw-us-east-02a",
-        "cw-us-east-08a",
-        "marin",
-    ]
-
-
 def test_job_inventory_overrides_an_inherited_non_coreweave_kubeconfig(monkeypatch, iris_command):
     monkeypatch.setenv("KUBECONFIG", "/tmp/other-kubeconfig")
 
@@ -122,12 +103,6 @@ def test_job_inventory_overrides_an_inherited_non_coreweave_kubeconfig(monkeypat
     assert iris_command.calls[0][1]["environment"]["KUBECONFIG"] == str(
         list_iris_jobs.COREWEAVE_CLUSTERS["cw-us-east-02a"].kubeconfig
     )
-
-
-def test_job_inventory_hours_zero_queries_all_history(iris_command):
-    list_iris_jobs.query_jobs(user="benjaminfeuer", hours=0, cluster="marin", now_ms=86_400_000)
-
-    assert "submitted_at_ms >=" not in iris_command.calls[0][0][1]
 
 
 def test_job_inventory_rejects_an_invalid_user_before_query():

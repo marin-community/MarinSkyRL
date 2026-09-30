@@ -102,7 +102,7 @@ def _satisfies(event: dict[str, Any], expected: dict[str, Any]) -> bool:
         return start >= _time_to_minutes(low) and end <= _time_to_minutes(high)
     if constraint.startswith("at "):
         return start == _time_to_minutes(constraint.removeprefix("at "))
-    return True
+    raise RuntimeError(f"Unknown calendar constraint: {constraint!r}")
 
 
 def grade_calendar(response: str, expected: dict[str, Any]) -> tuple[float, str]:
@@ -121,6 +121,6 @@ def grade_calendar(response: str, expected: dict[str, Any]) -> tuple[float, str]
             return 0.0, "conflicting_events"
         if any(not _satisfies(by_id[event_id], expected[event_id]) for event_id in expected):
             return 0.0, "constraint_violated"
-    except Exception:
-        return 0.0, "error_in_grading"
+    except (KeyError, TypeError, ValueError):
+        return 0.0, "invalid_response"
     return 1.0, "pass"

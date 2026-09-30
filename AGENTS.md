@@ -36,9 +36,10 @@ Run launcher and trainer commands from the repository root. The base install is 
 profile only when resolving a training environment.
 
 ```bash
-# Root launcher + skyrl-train CPU tests (what PR CI runs)
+# Root launcher + skyrl-train CPU tests (what PR CI runs), one pytest-xdist worker per core. loadgroup starts the
+# tests marked slow first and bounds how many run at once by host memory (see skyrl-train/tests/cpu/conftest.py).
 uv sync --frozen --group dev --group harbor-test --extra cpu --extra telemetry
-uv run --frozen pytest cloud/iris/tests/ skyrl-train/tests/cpu/
+uv run --frozen pytest cloud/iris/tests/ skyrl-train/tests/cpu/ -n auto --dist loadgroup
 
 # Megatron/vLLM runtime closure (GPU tests need an 8-GPU node; not run in PR CI)
 uv sync --frozen --extra vllm --extra megatron --group dev

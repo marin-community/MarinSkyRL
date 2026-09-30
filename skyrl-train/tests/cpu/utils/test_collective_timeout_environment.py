@@ -1,4 +1,4 @@
-from tests.cpu.util import example_dummy_config
+import pytest
 from omegaconf import OmegaConf
 
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import (
@@ -12,6 +12,7 @@ from skyrl_train.env_vars import (
     RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV,
 )
 from skyrl_train.utils.utils import prepare_runtime_environment
+from tests.cpu.util import example_dummy_config
 
 
 def test_runtime_environment_does_not_enable_nonblocking_communicators(monkeypatch):
@@ -75,25 +76,24 @@ def test_selected_id_teacher_forces_v1_runner_without_changing_default(monkeypat
     assert selected_env["env_vars"]["VLLM_USE_V2_MODEL_RUNNER"] == "0"
 
 
-def test_runai_streamer_gets_s3_stall_tolerance_and_diagnostics(monkeypatch):
-    monkeypatch.delenv(RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV, raising=False)
-    monkeypatch.delenv(RUNAI_STREAMER_LOG_TO_STDERR_ENV, raising=False)
+@pytest.mark.parametrize(
+    ("timeout_ms", "log_to_stderr", "expected"),
+    [
+        (None, None, (DEFAULT_RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS, DEFAULT_RUNAI_STREAMER_LOG_TO_STDERR)),
+        ("30000", "0", ("30000", "0")),
+    ],
+    ids=["defaults", "explicit"],
+)
+def test_runai_streamer_forwards_s3_tuning(monkeypatch, timeout_ms, log_to_stderr, expected):
+    for variable, value in [
+        (RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV, timeout_ms),
+        (RUNAI_STREAMER_LOG_TO_STDERR_ENV, log_to_stderr),
+    ]:
+        if value is None:
+            monkeypatch.delenv(variable, raising=False)
+        else:
+            monkeypatch.setenv(variable, value)
 
-    runtime_env = _build_inference_engine_runtime_env(runai_streamer_enabled=True)
+    env_vars = _build_inference_engine_runtime_env(runai_streamer_enabled=True)["env_vars"]
 
-    assert runtime_env is not None
-    assert runtime_env["env_vars"][RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV] == (
-        DEFAULT_RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS
-    )
-    assert runtime_env["env_vars"][RUNAI_STREAMER_LOG_TO_STDERR_ENV] == DEFAULT_RUNAI_STREAMER_LOG_TO_STDERR
-
-
-def test_runai_streamer_preserves_explicit_s3_tuning(monkeypatch):
-    monkeypatch.setenv(RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV, "30000")
-    monkeypatch.setenv(RUNAI_STREAMER_LOG_TO_STDERR_ENV, "0")
-
-    runtime_env = _build_inference_engine_runtime_env(runai_streamer_enabled=True)
-
-    assert runtime_env is not None
-    assert runtime_env["env_vars"][RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV] == "30000"
-    assert runtime_env["env_vars"][RUNAI_STREAMER_LOG_TO_STDERR_ENV] == "0"
+    assert (env_vars[RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV], env_vars[RUNAI_STREAMER_LOG_TO_STDERR_ENV]) == expected
