@@ -70,11 +70,8 @@ def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
 def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatch):
     trainer = object.__new__(RayPPOTrainer)
     trainer.context = SimpleNamespace(config=SimpleNamespace(batch_size=2, max_staleness_steps=2))
-    trainer.cfg = SimpleNamespace(
-        trainer=SimpleNamespace(
-            algorithm=SimpleNamespace(resolved_rollout_logprobs_required=False, tis_lcs_alert_threshold=0.0)
-        )
-    )
+    trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(algorithm=get_default_config().trainer.algorithm))
+    trainer.cfg.trainer.algorithm.off_policy_correction = "none"
     trainer.global_step = 10
     trainer.all_metrics = {}
     trainer.all_timings = {}

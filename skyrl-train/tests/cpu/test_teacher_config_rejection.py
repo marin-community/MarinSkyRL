@@ -10,7 +10,7 @@ from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_conf
 from cloud.iris.tests.test_nemotron_ultra_grading_config import _HPCStub, _skipped_grading_config
 from skyrl_train.objective.losses import PolicyLossInputs
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
-from skyrl_train.config.objective_spec import TopKLossParams
+from skyrl_train.config.objective_spec import topk_loss_params
 from skyrl_train.distillation import StudentTopKInput
 from skyrl_train.objective.teacher import topk_teacher_loss
 from cloud.iris.launch_config import load_launch_config
@@ -181,7 +181,7 @@ def test_selected_topk_rollouts_require_matching_teacher_width():
     result = topk_teacher_loss(
         evidence,
         current,
-        TopKLossParams.from_config(transported.trainer.algorithm.resolved_topk_loss_params),
+        topk_loss_params(transported.trainer.algorithm),
         vocabulary_size=32,
     )
     result.values.sum().backward()

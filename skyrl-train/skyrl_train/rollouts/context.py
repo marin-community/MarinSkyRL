@@ -46,6 +46,8 @@ from skyrl_train.rollouts.workers import RolloutWorkers
 from skyrl_train.telemetry import record_generated_work, record_rollout_buffer
 from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request
 from skyrl_train.trajectory_runners.types import TrajectoryRequestBatch
+from skyrl_train.config.objective_spec import rollout_logprobs_required
+from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 
 _T = TypeVar("_T")
 
@@ -177,7 +179,9 @@ class TrainingContext:
         plan = compile_distillation_plan_from_config(config)
         admission = GroupAdmissionPolicy(
             GroupAdvantageInvariant.from_config(algorithm.resolved_group_advantage),
-            rollout_logprobs_required=algorithm.resolved_rollout_logprobs_required,
+            rollout_logprobs_required=rollout_logprobs_required(
+                algorithm, loss_spec=PolicyLossRegistry.spec(algorithm.policy_loss_type)
+            ),
             student_topk_width=(
                 plan.teachers[0].top_k
                 if plan is not None and plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE

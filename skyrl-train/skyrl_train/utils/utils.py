@@ -23,7 +23,7 @@ from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_exp
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
 from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
-from skyrl_train.config.objective_spec import resolve_objective_config, validate_objective
+from skyrl_train.config.objective_spec import rollout_logprobs_required, validate_objective
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
@@ -613,9 +613,8 @@ def validate_cfg(cfg: DictConfig):
         logger.warning("`use_kl_estimator_k3` will be deprecated, overriding to use `kl_estimator_type='k3'` instead")
         algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
-    resolve_objective_config(cfg, loss_spec=spec)
 
-    behavior_logprobs_required = cfg.trainer.algorithm.resolved_rollout_logprobs_required
+    behavior_logprobs_required = rollout_logprobs_required(cfg.trainer.algorithm, loss_spec=spec)
     if behavior_logprobs_required:
         if cfg.generator.sampling_params.logprobs is None:
             logger.warning(

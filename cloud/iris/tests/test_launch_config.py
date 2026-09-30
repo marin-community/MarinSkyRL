@@ -13,7 +13,7 @@ import yaml
 from cloud.iris import training_driver
 from cloud.iris.launch_config import load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
-from skyrl_train.distributed.megatron.nonfinite_steps import NonfiniteStepAction, nonfinite_step_action
+from skyrl_train.distributed.step_policy import NonfiniteStepPolicy, nonfinite_step_policy
 
 
 def _raw_config() -> dict[str, Any]:
@@ -224,8 +224,8 @@ def test_null_nonfinite_limit_in_launch_fails_on_first_invalid_step(tmp_path: Pa
 
     config = load_launch_config(path)
 
-    action = nonfinite_step_action(float("nan"), True, 0, config.skyrl.trainer.policy.max_consecutive_nonfinite_steps)
-    assert action is NonfiniteStepAction.FAIL
+    action = nonfinite_step_policy(0, config.skyrl.trainer.policy.max_consecutive_nonfinite_steps)
+    assert action is NonfiniteStepPolicy.FAIL
 
 
 @pytest.mark.parametrize(("key", "value"), [("use_tis", True), ("tis_imp_ratio_cap", 2.0)])

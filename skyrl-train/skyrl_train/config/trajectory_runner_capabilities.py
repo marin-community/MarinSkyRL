@@ -6,6 +6,7 @@ from enum import StrEnum
 from omegaconf import DictConfig
 
 from marinskyrl.distillation import DistillationObjectiveKind, compile_distillation_plan_from_config
+from skyrl_train.config.objective_spec import LossSpec, rollout_logprobs_required
 
 from marinskyrl.harbor_agent_names import (
     DEFAULT_HARBOR_AGENT_NAME,
@@ -262,6 +263,8 @@ def validate_trajectory_runner_capabilities(
     cfg: DictConfig,
     mode: TrajectoryRunnerMode,
     operation: EntrypointOperation = EntrypointOperation.TRAIN,
+    *,
+    loss_spec: LossSpec | None = None,
 ) -> None:
     """Reject operation and runner combinations that cannot supply required training evidence."""
     distillation_plan = compile_distillation_plan_from_config(cfg)
@@ -274,7 +277,7 @@ def validate_trajectory_runner_capabilities(
         _validate_teacher_scoreable_tokens(capabilities)
 
     algorithm = cfg.trainer.algorithm
-    behavior_logprobs_required = algorithm.resolved_rollout_logprobs_required
+    behavior_logprobs_required = rollout_logprobs_required(algorithm, loss_spec=loss_spec)
     full_tito_required = bool(algorithm.get("tito_full", False))
     student_topk_required = (
         distillation_plan is not None

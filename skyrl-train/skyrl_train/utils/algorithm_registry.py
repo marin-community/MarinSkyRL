@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from functools import wraps
 from dataclasses import dataclass
-from typing import Callable, Union
+from typing import Callable, Union, cast
 
 import ray
 from loguru import logger
@@ -74,6 +74,17 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
         cls._group_contracts.pop(name, None)
 
 
+@dataclass(frozen=True)
+class PolicyLossRegistration:
+    """A policy loss callable and its declaration, serialized together across Ray processes."""
+
+    function: Callable
+    spec: LossSpec
+
+    def __call__(self, *args, **kwargs):
+        return self.function(*args, **kwargs)
+
+
 class PolicyLossRegistry(BaseFunctionRegistry):
     """
     Registry for policy loss functions.
@@ -89,26 +100,19 @@ class PolicyLossRegistry(BaseFunctionRegistry):
 
     _actor_name = "policy_loss_registry"
     _function_type = "policy loss"
-    _specs: dict[str, LossSpec] = {}
 
     @classmethod
-    def register(cls, name: str, func: Callable, *, spec: LossSpec):
-        if name in BUILTIN_LOSS_SPECS:
-            assert spec == BUILTIN_LOSS_SPECS[name], f"policy loss {name!r} disagrees with its launcher LossSpec"
-        super().register(name, func)
-        cls._specs[name] = spec
+    def register(cls, name: str, func: Callable, *, spec: LossSpec | None = None):
+        spec = BUILTIN_LOSS_SPECS.get(name, spec)
+        if spec is None:
+            raise ValueError(f"custom policy loss {name!r} requires a LossSpec")
+        super().register(name, PolicyLossRegistration(func, spec))
 
     @classmethod
     def spec(cls, name: str) -> LossSpec:
-        try:
-            return cls._specs[name]
-        except KeyError as error:
-            raise ValueError(f"policy loss {name!r} has no local LossSpec") from error
-
-    @classmethod
-    def unregister(cls, name: str):
-        super().unregister(name)
-        cls._specs.pop(name, None)
+        if name in BUILTIN_LOSS_SPECS:
+            return BUILTIN_LOSS_SPECS[name]
+        return cast(PolicyLossRegistration, cls.get(name)).spec
 
 
 def register_advantage_estimator(name: Union[str, AdvantageEstimator], *, group_contract: GroupAdvantageContract):
@@ -126,7 +130,7 @@ def register_advantage_estimator(name: Union[str, AdvantageEstimator], *, group_
     return decorator
 
 
-def register_policy_loss(name: Union[str, PolicyLossType], spec: LossSpec):
+def register_policy_loss(name: Union[str, PolicyLossType], *, spec: LossSpec | None = None):
     """Decorator to register a policy loss function."""
     registry_name = name.value if isinstance(name, PolicyLossType) else name
 

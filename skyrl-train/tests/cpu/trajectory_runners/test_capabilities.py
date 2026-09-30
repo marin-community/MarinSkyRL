@@ -12,8 +12,8 @@ GYM = TrajectoryRunnerMode.SKYRL_GYM
 HARBOR = TrajectoryRunnerMode.HARBOR
 MINI_SWE = TrajectoryRunnerMode.MINI_SWE
 HARBOR_KEY = "terminal_bench_config.harbor"
-NO_ROLLOUT_LOGPROBS = {"trainer.algorithm.resolved_rollout_logprobs_required": False}
-FULL_TITO = {"trainer.algorithm.resolved_rollout_logprobs_required": False, "trainer.algorithm.tito_full": True}
+NO_ROLLOUT_LOGPROBS = {"trainer.algorithm.off_policy_correction": "none"}
+FULL_TITO = {"trainer.algorithm.off_policy_correction": "none", "trainer.algorithm.tito_full": True}
 OPENCODE = {f"{HARBOR_KEY}.version": SUPPORTED_OPENCODE_LITERAL_VERSION}
 EXACT_CHAT = {
     "generator.chat_template.name_or_path": "qwen2_5_with_generation_tag_simplified",
@@ -31,7 +31,8 @@ def _harbor_config(agent_name):
         {
             "trainer": {
                 "algorithm": {
-                    "resolved_rollout_logprobs_required": True,
+                    "off_policy_correction": "tis",
+                    "off_policy_correction_rules": None,
                     "policy_loss_type": "regular",
                     "tito_full": None,
                 },
@@ -48,7 +49,8 @@ def _skyrl_config():
         {
             "trainer": {
                 "algorithm": {
-                    "resolved_rollout_logprobs_required": True,
+                    "off_policy_correction": "tis",
+                    "off_policy_correction_rules": None,
                     "policy_loss_type": "regular",
                     "tito_full": None,
                 },

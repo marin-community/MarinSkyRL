@@ -9,7 +9,7 @@ import shutil
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
@@ -55,7 +55,8 @@ from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_m
 from skyrl_train.tensor_math import masked_mean
 from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
-from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
+from skyrl_train.utils.algorithm_registry import AdvantageEstimator
+from skyrl_train.utils.advantage_estimators import GRPO_FLAT_REWARD_STD_TOLERANCE, compute_advantages_and_returns
 from marinskyrl.distillation import (
     DistillationObjectiveKind,
     DistillationRewardMode,
@@ -63,7 +64,7 @@ from marinskyrl.distillation import (
 )
 from skyrl_train.objective.teacher import teacher_advantages
 from skyrl_train.objective.correction import compute_correction
-from skyrl_train.config.objective_spec import OffPolicyCorrection
+from skyrl_train.config.objective_spec import off_policy_correction
 from skyrl_train.distributed.dispatch import (
     ActorInfo,
     MeshRank,
@@ -111,6 +112,8 @@ from skyrl_train.utils.utils import (
     policy_force_cvd_mask_enabled,
 )
 
+from skyrl_train.config.objective_spec import rollout_logprobs_required
+from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
@@ -247,6 +250,19 @@ def consumed_work(training_input: TrainingInputBatch) -> ConsumedWork:
     )
 
 
+def _zero_std_group_fraction(uids: Sequence[str], rewards: torch.Tensor) -> float:
+    group_rewards: dict[str, list[torch.Tensor]] = {}
+    for uid, reward in zip(uids, rewards, strict=True):
+        group_rewards.setdefault(uid, []).append(reward)
+    if not group_rewards:
+        return 0.0
+    flat_groups = sum(
+        len(group) > 1 and torch.std(torch.stack(group)).item() <= GRPO_FLAT_REWARD_STD_TOLERANCE
+        for group in group_rewards.values()
+    )
+    return flat_groups / len(group_rewards)
+
+
 class RayPPOTrainer:
     """The rollout-buffer training loop.
 
@@ -310,6 +326,7 @@ class RayPPOTrainer:
         self._restored_rollout_state: TrainingContextState | None = None
         self.global_step = 0
         self._last_saved_step: int | None = None
+        self._last_evaluated_step: int | None = None
         self._pending_checkpoint_upload: tuple[asyncio.Task[tuple[float, float]], TrainerState] | None = None
         raw_speculative_decoding = cfg.generator.get("speculative_decoding")
         if raw_speculative_decoding is not None:
@@ -661,11 +678,16 @@ class RayPPOTrainer:
         )
 
         try:
-            if self._control.should_evaluate and self.eval_dataset is not None:
+            if (
+                self._control.should_evaluate
+                and self.eval_dataset is not None
+                and self._last_evaluated_step != self.global_step
+            ):
                 with Timer("eval", self.all_timings):
                     eval_metrics = await self.eval()
                     self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
                     self.tracker.log(eval_metrics, step=self.global_step, commit=True)
+                    self._last_evaluated_step = self.global_step
                 await self.callback_handler.call_event_async(
                     "on_evaluate", final_state, self._control, metrics=eval_metrics, trainer=self
                 )
@@ -809,7 +831,9 @@ class RayPPOTrainer:
                 step_wall.start("evaluation")
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
-                self.all_metrics.update(eval_metrics)
+                self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
+                self.tracker.log(eval_metrics, step=self.global_step, commit=False)
+                self._last_evaluated_step = self.global_step
             await self.callback_handler.call_event_async(
                 "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
             )
@@ -1485,6 +1509,7 @@ class RayPPOTrainer:
             eval_metrics = await self.eval()
             self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
             self.tracker.log(eval_metrics, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
+            self._last_evaluated_step = self.global_step
         startup_eval = {"startup/eval_before_train": pretrain_eval_timer.duration}
         self._log_metrics_stdout(startup_eval, step=self.global_step, kind="startup")
         self.tracker.log(startup_eval, step=self.global_step, commit=False)
@@ -1501,7 +1526,7 @@ class RayPPOTrainer:
                 raise ValueError("distillation reward_mode=replace requires teacher evidence on every training batch")
             training_input["loss_mask"] = training_input["loss_mask"] * training_input["teacher_valid_mask"]
 
-        correction = OffPolicyCorrection.from_config(self.cfg.trainer.algorithm.resolved_off_policy_correction)
+        correction = off_policy_correction(self.cfg.trainer.algorithm)
         if correction.rules:
             rollout_logprobs = training_input.get("rollout_logprobs")
             if rollout_logprobs is None:
@@ -1592,7 +1617,10 @@ class RayPPOTrainer:
 
             trajectory_batch = concatenate_trajectory_batches(
                 [group.trajectory_batch for group in groups],
-                require_rollout_logprobs=self.cfg.trainer.algorithm.resolved_rollout_logprobs_required,
+                require_rollout_logprobs=rollout_logprobs_required(
+                    self.cfg.trainer.algorithm,
+                    loss_spec=PolicyLossRegistry.spec(self.cfg.trainer.algorithm.policy_loss_type),
+                ),
                 tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
             )
             assert trajectory_batch["rollout_metrics"] is not None, "Rollout metrics should be non-null."
@@ -2030,7 +2058,13 @@ class RayPPOTrainer:
             response_span_tags,
             num_experts,
         )
-        if self.cfg.trainer.algorithm.resolved_rollout_logprobs_required and rollout_logprobs_tensor is None:
+        if (
+            rollout_logprobs_required(
+                self.cfg.trainer.algorithm,
+                loss_spec=PolicyLossRegistry.spec(self.cfg.trainer.algorithm.policy_loss_type),
+            )
+            and rollout_logprobs_tensor is None
+        ):
             raise ValueError("rollout_logprobs are required by the configured objective")
         if rollout_logprobs_tensor is not None:
             assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
@@ -2297,6 +2331,13 @@ class RayPPOTrainer:
         num_samples = len(token_level_rewards)
 
         return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
+        if (
+            self.cfg.trainer.algorithm.advantage_estimator == AdvantageEstimator.GRPO
+            and not self.cfg.trainer.step_wise_training
+        ):
+            self.all_metrics["reward/zero_std_group_fraction"] = _zero_std_group_fraction(
+                data.metadata["uids"][: num_samples - pad_size], return_sums
+            )
         if self.cfg.trainer.step_wise_training:
             avg_rewards: float = return_sums[data["is_last_step"][: num_samples - pad_size]].mean().item()
         else:

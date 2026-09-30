@@ -12,7 +12,7 @@ from skyrl_train.config.behavior_logprobs import (
 )
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
 from skyrl_train.inference_engines.vllm.utils import apply_openai_sampling, pop_vllm_wrapper_kwargs
-from skyrl_train.config.objective_spec import resolve_objective_config
+from skyrl_train.config.objective_spec import rollout_logprobs_required
 from skyrl_train.config.utils import get_default_config
 
 
@@ -116,8 +116,7 @@ def test_checked_in_behavior_logprob_configs_use_validated_sampling():
         cfg = get_default_config()
         OmegaConf.set_struct(cfg, False)
         cfg = OmegaConf.merge(cfg, config)
-        resolve_objective_config(cfg)
-        if not cfg.trainer.algorithm.resolved_rollout_logprobs_required:
+        if not rollout_logprobs_required(cfg.trainer.algorithm):
             continue
         validate_behavior_logprob_sampling((config.get("generator") or {}).get("sampling_params") or {})
         checked.append(path.name)

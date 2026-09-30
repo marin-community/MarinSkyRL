@@ -2,6 +2,7 @@
 
 import math
 from dataclasses import dataclass
+from functools import cache
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -129,16 +130,8 @@ class OffPolicyCorrection:
             raise ValueError("off_policy_correction permits at most one truncate rule")
         return cls(str(config.name), tuple(rules))
 
-    def to_config(self) -> dict:
-        rules = []
-        for rule in self.rules:
-            value = {"kind": "token", "action": rule.action.value, "low": rule.low, "high": rule.high}
-            if isinstance(rule, SequenceRule):
-                value.update(kind="sequence", aggregate=rule.aggregate.value)
-            rules.append(value)
-        return {"name": self.name, "rules": rules}
 
-
+@cache
 def load_correction(name: str) -> OffPolicyCorrection:
     """Read a named correction's rules without importing the training runtime."""
     if name == "none":
@@ -149,7 +142,8 @@ def load_correction(name: str) -> OffPolicyCorrection:
     return OffPolicyCorrection.from_config(OmegaConf.create({"name": name, "rules": config.rules}))
 
 
-def _configured_correction(algorithm: DictConfig) -> OffPolicyCorrection:
+def off_policy_correction(algorithm: DictConfig) -> OffPolicyCorrection:
+    """Compute correction rules from the current algorithm config and immutable presets."""
     name = algorithm.off_policy_correction
     rules = algorithm.off_policy_correction_rules
     if name == "custom":
@@ -170,44 +164,32 @@ class TopKLossParams:
     jsd_beta: float | None = None
     entry_clip: float | None = None
 
-    @classmethod
-    def from_config(cls, config: DictConfig) -> "TopKLossParams":
-        return cls(
-            DistillationObjectiveKind(config.objective),
-            float(config.eps_clip_low),
-            float(config.eps_clip_high),
-            float(config.clip_ratio_c),
-            config.jsd_beta,
-            config.entry_clip,
-        )
+
+def topk_loss_params(algorithm: DictConfig) -> TopKLossParams:
+    """Compute the teacher-loss parameters from an active top-K objective config."""
+    return TopKLossParams(
+        DistillationObjectiveKind(algorithm.distillation.objective),
+        float(algorithm.eps_clip_low),
+        float(algorithm.eps_clip_high),
+        float(algorithm.clip_ratio_c),
+        algorithm.distillation.get("jsd_beta"),
+        algorithm.distillation.get("entry_clip"),
+    )
 
 
-def resolve_objective_config(cfg: DictConfig, *, loss_spec: LossSpec | None = None) -> None:
-    """Materialize objective contracts as primitive config for driver and worker transport."""
-    algorithm = cfg.trainer.algorithm
+def rollout_logprobs_required(algorithm: DictConfig, *, loss_spec: LossSpec | None = None) -> bool:
+    """Compute whether active policy rows require behavior-policy log probabilities."""
     spec = loss_spec or BUILTIN_LOSS_SPECS.get(algorithm.policy_loss_type)
     if spec is None:
         raise ValueError(f"policy loss {algorithm.policy_loss_type!r} requires a runtime LossSpec")
-    correction = _configured_correction(algorithm)
-    plan = compile_distillation_plan_from_config(cfg)
-    topk = plan is not None and plan.objective is not DistillationObjectiveKind.SAMPLED_REVERSE_KL
-    algorithm.resolved_topk_loss_params = (
-        {
-            "objective": plan.objective.value,
-            "jsd_beta": plan.jsd_beta,
-            "entry_clip": plan.entry_clip,
-            "eps_clip_low": float(algorithm.eps_clip_low),
-            "eps_clip_high": float(algorithm.eps_clip_high),
-            "clip_ratio_c": float(algorithm.clip_ratio_c),
-        }
-        if topk
-        else None
-    )
-    policy_trains = not (topk and plan.reward_mode is DistillationRewardMode.REPLACE)
-    algorithm.resolved_off_policy_correction = correction.to_config()
-    algorithm.resolved_rollout_logprobs_required = bool(
-        policy_trains and (spec.anchor is RatioAnchor.ROLLOUT or correction.rules)
-    )
+    distillation = algorithm.get("distillation")
+    if (
+        distillation is not None
+        and distillation.objective != DistillationObjectiveKind.SAMPLED_REVERSE_KL
+        and distillation.reward_mode == DistillationRewardMode.REPLACE
+    ):
+        return False
+    return spec.anchor is RatioAnchor.ROLLOUT or bool(off_policy_correction(algorithm).rules)
 
 
 def validate_objective(cfg: DictConfig, *, loss_spec: LossSpec | None = None) -> None:
@@ -233,7 +215,7 @@ def validate_objective(cfg: DictConfig, *, loss_spec: LossSpec | None = None) ->
             f"invalid loss_reduction: {algorithm.loss_reduction}; choose one of {list(LossReduction)}"
         ) from error
     spec = loss_spec or BUILTIN_LOSS_SPECS.get(algorithm.policy_loss_type)
-    correction = _configured_correction(algorithm)
+    correction = off_policy_correction(algorithm)
     plan = compile_distillation_plan_from_config(cfg)
     topk = plan is not None and plan.objective is not DistillationObjectiveKind.SAMPLED_REVERSE_KL
     policy_trains = not (topk and plan.reward_mode is DistillationRewardMode.REPLACE)

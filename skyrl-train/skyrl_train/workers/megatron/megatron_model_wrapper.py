@@ -18,7 +18,7 @@ from skyrl_train.distributed.megatron.model_utils import (
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl_train.distillation import TopKEvidence, student_topk_logprobs
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
-from skyrl_train.config.objective_spec import TopKLossParams
+from skyrl_train.config.objective_spec import topk_loss_params
 from skyrl_train.objective.objective import (
     TopKTeacherBatch,
     build_objective_micro_batch,
@@ -497,7 +497,7 @@ class MegatronModelWrapper:
                 teacher = TopKTeacherBatch(
                     data.distillation,
                     sparse_student_logprobs,
-                    TopKLossParams.from_config(self.cfg.trainer.algorithm.resolved_topk_loss_params),
+                    topk_loss_params(self.cfg.trainer.algorithm),
                     logits.shape[-1],
                 )
             batch = build_objective_micro_batch(
