@@ -49,6 +49,7 @@ from skyrl_train.mismatch_probe.modes import NATIVE_MODE, REPEAT_MODE, TRAINER_M
 from skyrl_train.mismatch_probe.provenance import manifest
 from skyrl_train.models.megatron_router_replay import SENTINEL_EXPERT_ID
 from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
     prepare_trajectory_request,
@@ -169,6 +170,26 @@ def _served_dp_ranks(output, trainer, prompts: int) -> list[int] | None:
     return ranks
 
 
+def _generation_dp_ranks(trainer, rows) -> list[int]:
+    """The vLLM data-parallel rank that generated each frozen sample.
+
+    ``_generate`` runs one trajectory per request, whose session id is its ``TrajectoryID`` string; the
+    client sends a single prompt to engine ``sha256(session id) % engines`` (``route_prompts_to_engines``).
+    """
+    dp_size = int(trainer.cfg.generator.inference_engine_data_parallel_size)
+    engines = len(trainer.inference_engine_client.engines)
+    ranks = []
+    for row in rows:
+        # ``_generate`` names each sample ``<prompt uid>:<repetition>``.
+        uid, separator, repetition = row.sample_id.rpartition(":")
+        if not separator or uid != row.prompt_id:
+            raise ValueError(f"probe sample {row.sample_id} is not named <prompt uid>:<repetition>")
+        session = TrajectoryID(instance_id=uid, repetition_id=int(repetition)).to_string()
+        ((engine, _),) = route_prompts_to_engines(1, engines, [session]).items()
+        ranks.append(engine % dp_size)
+    return ranks
+
+
 def _candidate_logprobs(output, overrides):
     ids = output.get("student_topk_indices")
     values = output.get("behavior_topk_logprobs")
@@ -225,6 +246,8 @@ class ProbeCollector:
         # source, the rank the client's even split gave each row (its re-read was one batched request).
         self.reread_dp_ranks: dict[int, list[int]] = {}
         self.frozen_reread_dp_ranks: list[int] | None = None
+        # The vLLM data-parallel rank that generated each frozen sample.
+        self.generation_dp_ranks: list[int] | None = None
         # Per vLLM worker: placement, parameter digest and versions (output code is written beside the archive).
         self.vllm_provenance: list[dict] = []
 
@@ -505,6 +528,7 @@ class ProbeCollector:
             output = await trainer.inference_engine_client.generate(engine_input)
             duration = time.monotonic() - started
             if cache_mode == CACHE_OFF and scorer == RESCORE_SCORER:
+                self.generation_dp_ranks = _generation_dp_ranks(trainer, rows)
                 self.reread_dp_ranks[update] = _served_dp_ranks(output, trainer, len(prefixes))
                 if self.frozen_rereads:
                     self.frozen_reread_dp_ranks = _batched_dp_ranks(trainer, len(prefixes))
@@ -679,11 +703,15 @@ class ProbeCollector:
                 data["rollout_routed_experts"] = torch.zeros_like(route_tensor)
             if not spec.replays_prompt and prompt_route_tensor is not None:
                 data["rollout_prompt_routed_experts"] = torch.zeros_like(prompt_route_tensor)
+            # Replay modes carry the vLLM data-parallel rank that served their routes' source; padding rows past
+            # the frozen samples take rank 0, and their scores are dropped.
             if spec.route_source == "reread":
                 data["rollout_routed_experts"], data["rollout_prompt_routed_experts"] = reread_tensors
                 if ranks is not None:
-                    # Padding rows past the frozen samples take rank 0; their scores are dropped.
                     data["vllm_dp_rank"] = torch.tensor(ranks + [0] * (data.batch_size - n), dtype=torch.long)
+            elif spec.requires_routes and self.generation_dp_ranks is not None:
+                padding = [0] * (data.batch_size - n)
+                data["vllm_dp_rank"] = torch.tensor(self.generation_dp_ranks + padding, dtype=torch.long)
             if spec.repeat_layout:
                 data = _reorder_batch(data, self.batch_layout.repeat_order + list(range(n, data.batch_size)))
             data.metadata.update(

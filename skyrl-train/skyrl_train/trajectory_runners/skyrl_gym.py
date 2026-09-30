@@ -357,9 +357,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             prompt_token_ids: List[int]
             rollout_logprobs: Optional[List[float]]
         """
-        session_id = (
-            f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
-        )
+        # The client routes a single prompt by this session id (``route_prompts_to_engines``).
+        session_id = trajectory_id.to_string() if trajectory_id is not None else uuid4().hex
         done = False
 
         # Instantiate chat_history and chat_end_index, which are only used if `retokenize_chat_history==True`.

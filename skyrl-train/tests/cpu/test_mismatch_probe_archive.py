@@ -181,8 +181,8 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
             np.asarray([[[2, 3]], [[4, 5]], [[6, 7]]], dtype=np.uint8),
         ],
     }
-    prompt_ids = [f"prompt-{i}" for i in range(3)]
-    sample_ids = [f"sample-{i}" for i in range(3)]
+    prompt_ids = [f"p{i}" for i in range(3)]
+    sample_ids = [f"p{i}:0" for i in range(3)]
     collector = ProbeCollector(cfg)
     collector._collate_and_freeze(trainer, trajectory, prompt_ids, sample_ids, [91, 92, 93])
     probes = collector.probes
@@ -279,20 +279,23 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     reread_response = trainer.policy_model.response_routes_by_mode["reread_replay"]
     assert reread_prompt[0, :, 0].tolist() == [[0, 0], [3, 4], [4, 5]]
     assert reread_response[0, :, 0].tolist() == [[7, 0], [1, 2], [3, 4], [0, 0]]
-    # Re-read replay also carries the vLLM data-parallel rank that re-read each sample (the padding row
-    # takes 0); generation-route modes do not, since generation placed its requests differently.
+    # Replay modes also carry the vLLM data-parallel rank that served their routes' source (the padding row
+    # takes 0): the re-read's even split, or the engine each generation's session id hashes to.
     assert trainer.policy_model.dp_ranks_by_mode["reread_replay"].tolist() == [0, 0, 1, 0]
-    for mode in ("native", "router_replay", "router_replay_response"):
-        assert trainer.policy_model.dp_ranks_by_mode[mode] is None
+    sessions = [int.from_bytes(hashlib.sha256(f"p{i}_0".encode()).digest(), "big") % 2 for i in range(3)]
+    assert sessions == [1, 1, 0]
+    for mode in ("router_replay", "router_replay_response"):
+        assert trainer.policy_model.dp_ranks_by_mode[mode].tolist() == [*sessions, 0]
+    assert trainer.policy_model.dp_ranks_by_mode["native"] is None
     rereads = {row.sample_id: row for row in chained_scores(cfg) if row.scorer == "vllm.rescore" and row.update == 0}
     agains = [row for row in chained_scores(cfg) if row.scorer == "vllm.rescore_again" and row.update == 0]
     assert len(rereads) == len(agains) == 3
-    assert rereads["sample-0"].expert_choices_shape == [5, 1, 2]
+    assert rereads["p0:0"].expert_choices_shape == [5, 1, 2]
 
     # Reusing the chained archive freezes its re-read as the prefill reference and replay source.
     frozen = read_frozen_probe(cfg.trainer.mismatch_probe.archive_uri).rereads
     assert sorted(frozen) == sorted(row.sample_id for row in probes)
-    assert frozen["sample-0"].logprobs == rereads["sample-0"].logprobs
+    assert frozen["p0:0"].logprobs == rereads["p0:0"].logprobs
     trainer.inference_engine_client.route_offset = 2
     trainer.inference_engine_client.failover_engine = 1
     cfg.trainer.mismatch_probe.reuse_probe = cfg.trainer.mismatch_probe.archive_uri
