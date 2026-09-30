@@ -839,9 +839,13 @@ def _skyrl_config_sections(
         "environment": environment,
         "trajectory_runner": trajectory_runner,
     }
-    for section in ("teachers", "teacher_routing"):
+    for section, config_section in (
+        ("teachers", "teachers"),
+        ("teacher_routing", "teacher_routing"),
+        ("taskcompendium", "taskcompendium_config"),
+    ):
         if parsed.raw.get(section):
-            sections[section] = copy.deepcopy(parsed.raw[section])
+            sections[config_section] = copy.deepcopy(parsed.raw[section])
     if terminal_bench is not None:
         sections["terminal_bench_config"] = terminal_bench
     return sections

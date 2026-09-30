@@ -61,6 +61,39 @@ def test_snowball_ultra_judges_read_credentials_from_the_environment(config_path
         assert "api_key" not in judge
 
 
+def test_taskcompendium_launch_limits_reach_the_composed_runtime(tmp_path):
+    config = tmp_path / "taskcompendium.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "entrypoint": "taskcompendium",
+                "config_groups": {"taskcompendium_config": "taskcompendium"},
+                "context_budget": {
+                    "request_window_tokens": 8192,
+                    "max_new_tokens_per_turn": 256,
+                    "max_turns": 3,
+                },
+                "taskcompendium": {
+                    "concurrency": 2,
+                    "max_turns": 3,
+                    "timeout": 300,
+                    "parallel_tool_calls": False,
+                },
+            }
+        )
+    )
+    parsed = parse_rl_config(str(config))
+    cfg = compose_skyrl_config(parsed, {"num_nodes": 2}, _HPCStub()).config
+
+    assert dict(cfg.taskcompendium_config) == {
+        "concurrency": 2,
+        "max_turns": 3,
+        "timeout": 300,
+        "parallel_tool_calls": False,
+    }
+    assert cfg.taskcompendium_config.max_turns == cfg.generator.max_turns
+
+
 def test_context_budget_derives_all_hydra_length_arguments():
     parsed = parse_rl_config(str(_REPO_ROOT / "cloud/iris/configs/tasktrove_dq_sweep_30b.yaml"))
     cfg = compose_skyrl_config(parsed, {"job_name": "context-test", "num_nodes": 4}, _HPCStub()).config
