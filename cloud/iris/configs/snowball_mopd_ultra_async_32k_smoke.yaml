@@ -3,12 +3,11 @@
 # This uses the same data and memory settings as snowball_mopd_ultra_32k.yaml.
 # Staleness is bounded at one update. Token-level truncated importance sampling
 # corrects against rollout logprobs with a ratio cap of 2; prefix drift is not corrected.
-# SWE rows require the TaskTrove task parquet and Harbor/Daytona credentials;
-# ns_tools and Lean rows use the in-cluster NeMo Skills sandbox.
+# Build a fresh sample with --swe-rows 0, as in snowball_mopd_ultra_32k.yaml.
+# Harbor SWE trials are excluded until external model ingress is validated. The SWE
+# teacher still scores non-Harbor generators; ns_tools and Lean use the in-cluster sandbox.
+# Reserve more than 512 GB host RAM per node: the 32K checkpoint exceeded that limit.
 entrypoint: standard
-
-config_groups:
-  terminal_bench_config: terminal_bench
 
 context_budget:
   # Chosen-token scoring needs one position beyond the student window.
@@ -17,31 +16,6 @@ context_budget:
   max_new_tokens_per_turn: 8192
   max_turns: 50
   generated_budget_fraction: 1.0
-
-terminal_bench:
-  harbor:
-    name: opencode
-    version: "1.18.2"
-    collect_rollout_details: true
-    override_setup_timeout_sec: 600
-    override_timeout_sec: 1800
-    verifier_override_timeout_sec: 300
-    override_cpus: 1
-    override_memory_mb: 4096
-    override_storage_mb: 4096
-    auto_snapshot: true
-    env_network_policy:
-      mode: unrestricted
-    max_retries: 3
-    n_concurrent_trials: 16
-    enable_reward_shaping: false
-    enable_error_classification: true
-    default_error_treatment: zero
-  model_info:
-  archiving:
-    enabled: false
-  trace_upload:
-    enabled: false
 
 environment:
   env_class: nemotron_ultra
@@ -216,7 +190,6 @@ data:
   kind: parquet
   train_data: []
   val_data: []
-  terminal_bench_data: []
   shuffle: true
 
 extra_env:
