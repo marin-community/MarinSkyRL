@@ -45,7 +45,9 @@ def render_markdown(results: Mapping) -> str:
         "Cells are byte-equal fraction / fraction within one ulp / maximum ulp over valid token rows (the "
         "maximum is dominated by values of opposite sign near zero). `isolated`: vLLM's launch reads the "
         "trainer's tensors for every input. `chained`: vLLM runs the layer from the trainer's layer input. "
-        "`floor`: vLLM's chained run against itself with other requests in the batch.",
+        "`floor`: vLLM's chained run against itself with other requests in the batch. `config floor`: vLLM's "
+        "chained run against itself with the first and the last launch config of every kernel whose config "
+        "Inductor's autotuner picks at run time.",
         "",
     ]
     for layer, result in results["layers"].items():
@@ -54,22 +56,25 @@ def render_markdown(results: Mapping) -> str:
         baseline = result["baseline"]
         lowest = lowest_disagreeing_region(baseline["chained"], result["floor"])
         lines += [
-            f"- valid tokens per sequence: {result['lengths']}",
+            f"- valid tokens per sequence: {result['lengths']}; compiled pieces ran on {result['piece_rows']} rows "
+            f"(floor run: {result['floor_piece_rows']})",
             f"- router bias after the trainer's load equals the export's: {result['router_bias_equals_export']}",
             f"- lowest disagreeing region (chained, beyond vLLM's floor): {lowest or 'none'}",
             f"- routing, isolated (vLLM routing of the trainer's logits vs the trainer's): {baseline['routing_isolated']}",
             f"- routing, chained: {baseline['routing_chained']}",
             "",
         ]
-        header = ["region", *(f"isolated {name}" for name in variants), "chained", "floor"]
+        config_floor = result.get("config_floor", {})
+        header = ["region", *(f"isolated {name}" for name in variants), "chained", "floor", "config floor"]
         lines += ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
         for region in REGIONS:
             cells = [_cell(result[name]["isolated"].get(region)) for name in variants]
             chained = _cell(baseline["chained"].get(region))
             floor = _cell(result["floor"].get(region))
-            if all(cell == "–" for cell in (*cells, chained, floor)):
+            config = _cell(config_floor.get(region))
+            if all(cell == "–" for cell in (*cells, chained, floor, config)):
                 continue
-            lines.append(f"| {region} | " + " | ".join((*cells, chained, floor)) + " |")
+            lines.append(f"| {region} | " + " | ".join((*cells, chained, floor, config)) + " |")
         lines += ["", "Trainer layer in the harness against the probe's capture (same code, same GPU type):", ""]
         lines += ["| region | byte-equal / within 1 ulp / max ulp |", "|---|---|"]
         for region, stats in result["reproduction"].items():

@@ -41,7 +41,13 @@ from skyrl_train.mismatch_harness.harness import LayerReplay, attention_inputs
 from skyrl_train.mismatch_harness.output_code import is_graph_module, parse_output_code
 from skyrl_train.mismatch_harness.pieces import classify
 from skyrl_train.mismatch_harness.replay import load_module
-from skyrl_train.mismatch_harness.vllm_side import GrugShape, Requests, cos_sin_cache, vllm_config_context
+from skyrl_train.mismatch_harness.vllm_side import (
+    GrugShape,
+    Requests,
+    cos_sin_cache,
+    cuda_graph_padded_tokens,
+    vllm_config_context,
+)
 
 WEIGHT_INDEX = "model.safetensors.index.json"
 PROMPT_LOGPROBS = 20
@@ -139,7 +145,7 @@ def replay_model(code: dict[str, str], shape: GrugShape, weights: dict[str, torc
             piece = classify(parse_output_code(text))
             pieces[(piece.kind, piece.rope)] = (piece, load_module(piece.code, f"validation_{relative}").__dict__)
     cos_sin = cos_sin_cache(shape)
-    requests = Requests((len(token_ids),))
+    requests = Requests((len(token_ids),), padded=cuda_graph_padded_tokens(len(token_ids)))
     ids = torch.tensor(token_ids, dtype=torch.int32, device="cuda")
     routes = []
     result = None
@@ -160,14 +166,14 @@ def replay_model(code: dict[str, str], shape: GrugShape, weights: dict[str, torc
         inputs = attention_inputs(result, shape)
         outputs = [output for output in result.outputs if isinstance(output, torch.Tensor)]
         attn_in, residual = outputs[-2], outputs[-1]
-        value = inputs["value"].reshape(requests.tokens, -1)
+        value = inputs["value"].reshape(requests.rows, -1)
         attention = replay.attention(inputs["query"], inputs["key"], inputs["value"], requests)
         moe = replay.moe(None, None)
         result, _ = replay.run_post_attention(requests, attention, value, attn_in, residual, moe, None)
         routes.append(moe.records[-1].vllm_ids)
     final_hidden = result.outputs[0]
     logits = F.linear(final_hidden[: len(token_ids) - 1], weights["lm_head.weight"])
-    return torch.stack(routes, dim=1), logits
+    return torch.stack(routes, dim=1)[: len(token_ids)], logits
 
 
 def diff_pieces(served: dict[str, str], archived_uri: str) -> dict[str, str]:
@@ -229,11 +235,21 @@ def main() -> None:
             replay_value = logits[position - 1, token].float().item()
             equal += replay_value == value
             compared += 1
+    same_order = replayed == served_routes
+    same_set = torch.sort(replayed, dim=-1).values == torch.sort(served_routes, dim=-1).values
+    first_differing = [
+        int(position[0]) if (position := (~same_order[:, layer].all(-1)).nonzero().flatten()).numel() else None
+        for layer in range(served_routes.shape[1])
+    ]
     result = {
         "prompt_tokens": len(token_ids),
+        "piece_rows": cuda_graph_padded_tokens(len(token_ids)),
         "routes_shape": list(served_routes.shape),
-        "routes_equal_fraction": (replayed == served_routes).float().mean().item(),
+        "routes_equal_fraction": same_order.float().mean().item(),
         "routes_rows_all_equal": bool(torch.equal(replayed, served_routes)),
+        "routes_equal_fraction_by_layer": same_order.float().mean(dim=(0, 2)).tolist(),
+        "expert_sets_equal_fraction_by_layer": same_set.all(-1).float().mean(dim=0).tolist(),
+        "first_differing_position_by_layer": first_differing,
         "logits_compared": compared,
         "logits_equal_fraction": equal / max(total, 1),
         "piece_diff_against_full_model": diff_pieces(served["code"], args.full_output_code),

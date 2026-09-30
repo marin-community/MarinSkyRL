@@ -33,7 +33,7 @@ from skyrl_train.mismatch_harness.regions import (
     REGIONS,
 )
 from skyrl_train.mismatch_harness.replay import CallResult, run_call
-from skyrl_train.mismatch_harness.vllm_side import GrugShape, Requests, VllmMoe, flash_attention_prefill
+from skyrl_train.mismatch_harness.vllm_side import GrugShape, Requests, VllmMoe, flash_attention_prefill, pad_rows
 
 
 def hf_parameter(role: str, prev_layer: int | None, next_layer: int | None) -> str:
@@ -232,7 +232,7 @@ class LayerReplay:
                     tensor = torch.zeros(example.shape, dtype=getattr(torch, example.dtype), device="cuda")
                 elif role.endswith("mlp.router.weight"):
                     tensor = tensor.float()
-                values.append(_pad_rows(tensor, example.shape).contiguous())
+                values.append(_pad_vocabulary(tensor, example.shape).contiguous())
             elif name in by_activation:
                 role = by_activation[name]
                 if role in activations:
@@ -258,10 +258,10 @@ class LayerReplay:
     ) -> tuple[CallResult, Piece]:
         """Layer ``L`` up to attention. ``embedding_path`` runs layer 0's piece from token ids unmodified."""
         piece, namespace = self.pre_piece()
-        tokens = requests.tokens
+        tokens = requests.rows
         activations: dict[str, Any] = {"prev.layer_name": None}
         if token_ids is not None:
-            activations["token_ids"] = token_ids.to(torch.int32)
+            activations["token_ids"] = pad_rows(token_ids.to(torch.int32), tokens)
         if piece.rope:
             activations["next.positions"] = requests.positions()
             activations["next.cos_sin_cache"] = self.cos_sin
@@ -305,12 +305,12 @@ class LayerReplay:
         substitutions: Mapping[str, torch.Tensor] | None,
     ) -> tuple[CallResult, Piece]:
         piece, namespace = self.post_piece()
-        tokens = requests.tokens
+        tokens = requests.rows
         activations: dict[str, Any] = {
-            "prev.attn_out": attention.contiguous(),
-            "prev.value": value.contiguous(),
-            "prev.attn_in": attn_in.contiguous(),
-            "prev.residual": residual.contiguous(),
+            "prev.attn_out": pad_rows(attention, tokens).contiguous(),
+            "prev.value": pad_rows(value, tokens).contiguous(),
+            "prev.attn_in": pad_rows(attn_in, tokens).contiguous(),
+            "prev.residual": pad_rows(residual, tokens).contiguous(),
             "prev.layer_name": None,
         }
         if piece.rope:
@@ -329,14 +329,16 @@ class LayerReplay:
         self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, requests: Requests
     ) -> torch.Tensor:
         window = None if self.shape.is_long(self.layer) else self.shape.sliding_window
-        return flash_attention_prefill(
-            query.contiguous(),
-            key.contiguous(),
-            value.contiguous(),
+        tokens = requests.tokens
+        output = flash_attention_prefill(
+            query[:tokens].contiguous(),
+            key[:tokens].contiguous(),
+            value[:tokens].contiguous(),
             requests,
             window=window,
             scale=self.shape.head_dim**-0.5,
         )
+        return pad_rows(output, requests.rows)
 
     def moe(self, config_tokens: int | None, routing: tuple[torch.Tensor, torch.Tensor] | None) -> VllmMoe:
         prefix = f"model.layers.{self.layer}.mlp.experts."
@@ -354,7 +356,7 @@ class LayerReplay:
         )
 
 
-def _pad_rows(tensor: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
+def _pad_vocabulary(tensor: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
     """vLLM pads the vocabulary of its embedding table to a multiple of 64 rows with zeros."""
     if tuple(tensor.shape) == tuple(shape):
         return tensor
@@ -394,6 +396,9 @@ def _apply_before(before: Mapping[int, list[tuple[str, torch.Tensor]]]) -> Calla
     def apply(index: int, environment: dict[str, Any]) -> None:
         for variable, tensor in before.get(index, ()):
             target = environment[variable]
+            if target.shape[0] > tensor.shape[0]:
+                # Buffers hold the step's padded rows; the given tensor fills the real ones.
+                target = target[: tensor.shape[0]]
             if target.numel() != tensor.numel() and target.dim() == 2 and tensor.dim() == 2:
                 # A GEMM whose weight Inductor padded (attn_gate: 24 rows for 20 heads) stores extra
                 # columns; the trainer's tensor fills the leading ones.

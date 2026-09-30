@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+from contextlib import contextmanager
 import io as stdlib_io
 import json
 import platform
@@ -61,7 +62,13 @@ from skyrl_train.mismatch_harness.trainer_side import (
     run_layer,
     single_rank_megatron,
 )
-from skyrl_train.mismatch_harness.vllm_side import GrugShape, Requests, cos_sin_cache, vllm_config_context
+from skyrl_train.mismatch_harness.vllm_side import (
+    GrugShape,
+    Requests,
+    cos_sin_cache,
+    cuda_graph_padded_tokens,
+    vllm_config_context,
+)
 
 CONFIG_FILES = ("config.json", "model.safetensors.index.json")
 CAPTURE_REGIONS = (
@@ -116,19 +123,52 @@ def stage_autotune_choices(output_code_uri: str) -> int:
     return staged
 
 
-def chosen_configs(pieces: dict) -> dict[str, dict[str, dict[str, list[str]]]]:
+def kernel_candidates(pieces: dict) -> dict[tuple[str, str], list]:
+    """Each loaded Triton kernel's compiled launch configs, taken before any launch autotunes it."""
+    return {
+        (f"{kind}{'+rope' if rope else ''}", name): list(getattr(namespace.get(name), "launchers", None) or [])
+        for (kind, rope), (piece, namespace) in pieces.items()
+        for name in piece.code.kernels
+    }
+
+
+def chosen_configs(pieces: dict, candidates: dict[tuple[str, str], list]) -> dict[str, dict[str, dict]]:
     """For each replayed Triton kernel, its candidate launch configs and the one it ran with."""
-    chosen = {}
+    chosen: dict[str, dict[str, dict]] = {}
     for (kind, rope), (piece, namespace) in pieces.items():
-        configs = {}
-        for name in piece.code.kernels:
-            kernel = namespace.get(name)
-            configs[name] = {
-                "candidates": [str(config) for config in getattr(kernel, "configs", None) or []],
-                "launched": [str(launcher.config) for launcher in getattr(kernel, "launchers", None) or []],
+        key = f"{kind}{'+rope' if rope else ''}"
+        chosen[key] = {
+            name: {
+                "candidates": [str(launcher.config) for launcher in candidates[(key, name)]],
+                "launched": [
+                    str(launcher.config) for launcher in getattr(namespace.get(name), "launchers", None) or []
+                ],
             }
-        chosen[f"{kind}{'+rope' if rope else ''}"] = configs
+            for name in piece.code.kernels
+        }
     return chosen
+
+
+@contextmanager
+def forced_candidate(pieces: dict, candidates: dict[tuple[str, str], list], index: int):
+    """Launch candidate ``index`` of every kernel that has several, as a vLLM process may have chosen."""
+    saved = {}
+    for (kind, rope), (piece, namespace) in pieces.items():
+        key = f"{kind}{'+rope' if rope else ''}"
+        for name in piece.code.kernels:
+            options = candidates[(key, name)]
+            kernel = namespace.get(name)
+            if len(options) < 2:
+                continue
+            saved[(key, name)] = (kernel, kernel.launchers)
+            kernel.launchers = [options[index % len(options)]]
+            kernel._cached_launcher = None
+    try:
+        yield
+    finally:
+        for kernel, launchers in saved.values():
+            kernel.launchers = launchers
+            kernel._cached_launcher = None
 
 
 def load_pieces(output_code_uri: str) -> dict:
@@ -225,12 +265,17 @@ def run_vllm(
     layer_input: torch.Tensor,
     *,
     config_tokens: int | None,
+    pad_tokens: int | None,
     extra_input: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
-    """One vLLM pass over layer ``L``: ``trainer`` given means isolated (every input from the trainer)."""
-    requests = layout.requests
+    """One vLLM pass over layer ``L``: ``trainer`` given means isolated (every input from the trainer).
+
+    The compiled pieces run on ``pad_tokens`` rows (default: the CUDA-graph size vLLM pads the step to).
+    """
+    lengths = layout.lengths if extra_input is None else (*layout.lengths, extra_input.shape[0])
+    total = sum(lengths)
+    requests = Requests(lengths, padded=pad_tokens or cuda_graph_padded_tokens(total))
     if extra_input is not None:
-        requests = Requests((*layout.lengths, extra_input.shape[0]))
         layer_input = torch.cat((layer_input, extra_input))
     tokens = layout.requests.tokens
     pre, pre_piece = replay.run_pre_attention(requests, layer_input, None, trainer)
@@ -249,7 +294,7 @@ def run_vllm(
         routing = trainer_routing(raw_trainer, layout, replay.router_bias, shape.top_k)
     moe = replay.moe(config_tokens, routing)
     if trainer is None:
-        post_inputs = (attention, value.reshape(requests.tokens, -1), regions["attention_norm"])
+        post_inputs = (attention, value.reshape(value.shape[0], -1), regions["attention_norm"])
     else:
         post_inputs = (trainer["core_attention"], trainer["v_proj"], trainer["attention_norm"])
     post, post_piece = replay.run_post_attention(requests, *post_inputs, layer_input, moe, trainer)
@@ -257,7 +302,7 @@ def run_vllm(
     # Inductor pads the attn_gate GEMM to 24 output columns; the heads are the leading ones.
     regions["attn_gate"] = regions["attn_gate"][:, : shape.heads]
     record = moe.records[-1]
-    regions["routing"] = (record.vllm_ids, record.vllm_weights)
+    regions["routing"] = (record.vllm_ids[:tokens], record.vllm_weights[:tokens])
     if trainer is not None:
         ids, _ = routing
         regions["expert_slots"] = record.slots
@@ -285,6 +330,9 @@ def main() -> None:
         "--reduce-order", choices=[order.value for order in ReduceOrder], default=ReduceOrder.RING.value
     )
     parser.add_argument("--moe-config-tokens", type=int)
+    parser.add_argument(
+        "--pad-tokens", type=int, help="rows the compiled pieces run on (default: vLLM's CUDA-graph size)"
+    )
     parser.add_argument("--floor-extra-tokens", type=int, default=512)
     parser.add_argument("--numerics", action="append", default=[], help="comma-separated grug_numerics flags")
     parser.add_argument("--output", required=True)
@@ -310,6 +358,7 @@ def main() -> None:
         layout = RowLayout(tuple(int(length) for length in attention_mask.sum(dim=1).tolist()))
         results["staged_best_configs"] = stage_autotune_choices(args.output_code)
         pieces = load_pieces(args.output_code)
+        candidates = kernel_candidates(pieces)
         results["pieces"] = sorted(f"{kind}{'+rope' if rope else ''}" for kind, rope in pieces)
         bridge, provider = grug_provider(str(config_dir))
         names = needed_weights(shape, args.layers)
@@ -357,19 +406,53 @@ def main() -> None:
                 "reproduction": reproduction,
                 "router_bias_equals_export": bool(torch.equal(bias, export_bias)),
                 "lengths": list(layout.lengths),
+                "piece_rows": args.pad_tokens or cuda_graph_padded_tokens(sum(layout.lengths)),
+                "floor_piece_rows": cuda_graph_padded_tokens(sum(layout.lengths) + args.floor_extra_tokens),
             }
             flat_input = layout.flatten(layer_input)
             chained = run_vllm(
-                replay, layout, shape, None, baseline.tensors, flat_input, config_tokens=args.moe_config_tokens
+                replay,
+                layout,
+                shape,
+                None,
+                baseline.tensors,
+                flat_input,
+                config_tokens=args.moe_config_tokens,
+                pad_tokens=args.pad_tokens,
             )
             extra = torch.randn(args.floor_extra_tokens, shape.hidden, generator=generator, device="cuda").to(
                 flat_input.dtype
             )
             floor_tokens = None if args.moe_config_tokens is None else args.moe_config_tokens + args.floor_extra_tokens
             floor = run_vllm(
-                replay, layout, shape, None, baseline.tensors, flat_input, config_tokens=floor_tokens, extra_input=extra
+                replay,
+                layout,
+                shape,
+                None,
+                baseline.tensors,
+                flat_input,
+                config_tokens=floor_tokens,
+                pad_tokens=None,
+                extra_input=extra,
             )
             layer_result["floor"] = stats_json(compare_regions(chained, floor))
+            sweeps = []
+            for index in range(max(len(options) for options in candidates.values())):
+                with forced_candidate(pieces, candidates, index):
+                    sweeps.append(
+                        run_vllm(
+                            replay,
+                            layout,
+                            shape,
+                            None,
+                            baseline.tensors,
+                            flat_input,
+                            config_tokens=args.moe_config_tokens,
+                            pad_tokens=args.pad_tokens,
+                        )
+                    )
+            if len(sweeps) > 1:
+                layer_result["config_floor"] = stats_json(compare_regions(sweeps[0], sweeps[-1]))
             variants = {"baseline": {}}
             for text in args.numerics:
                 variants[text] = {flag: True for flag in text.split(",") if flag}
@@ -385,6 +468,7 @@ def main() -> None:
                     trainer_run.tensors,
                     flat_input,
                     config_tokens=args.moe_config_tokens,
+                    pad_tokens=args.pad_tokens,
                 )
                 trainer_with_slots = {
                     **trainer,
@@ -409,7 +493,7 @@ def main() -> None:
             del layer_module, replay
             gc.collect()
             torch.cuda.empty_cache()
-        results["kernel_configs"] = chosen_configs(pieces)
+        results["kernel_configs"] = chosen_configs(pieces, candidates)
     payload = json.dumps(results, indent=1, sort_keys=True, default=str)
     io.write_bytes_atomic(join_resource_path(args.output, "harness.json"), payload.encode())
     io.write_bytes_atomic(join_resource_path(args.output, "harness.md"), render_markdown(results).encode())

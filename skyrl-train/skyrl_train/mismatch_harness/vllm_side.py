@@ -94,21 +94,49 @@ def cos_sin_cache(shape: GrugShape) -> torch.Tensor:
     return rotary.cos_sin_cache
 
 
+# vLLM's CUDA-graph capture sizes for the probe engine (engine log ``cudagraph_capture_sizes``): a step of
+# at most 512 tokens runs the compiled pieces padded up to the next size.
+CUDA_GRAPH_CAPTURE_SIZES = (1, 2, 4, *range(8, 257, 8), *range(272, 513, 16))
+
+
+def cuda_graph_padded_tokens(tokens: int) -> int:
+    """The token count vLLM runs its compiled pieces with for a step of ``tokens`` scheduled tokens."""
+    return next((size for size in CUDA_GRAPH_CAPTURE_SIZES if size >= tokens), tokens)
+
+
 @dataclass(frozen=True)
 class Requests:
-    """Token rows of the prefill batch: one request per trainer sequence, flattened request-major."""
+    """Token rows of the prefill batch: one request per trainer sequence, flattened request-major.
+
+    The compiled pieces and the MoE run on ``rows`` rows (the step's padded token count); attention
+    reads only the ``tokens`` real rows, as vLLM's attention op does.
+    """
 
     lengths: tuple[int, ...]
+    padded: int = 0
 
     @property
     def tokens(self) -> int:
         return sum(self.lengths)
 
+    @property
+    def rows(self) -> int:
+        return max(self.padded, self.tokens)
+
     def positions(self) -> torch.Tensor:
-        return torch.cat([torch.arange(length, dtype=torch.int64) for length in self.lengths]).cuda()
+        real = torch.cat([torch.arange(length, dtype=torch.int64) for length in self.lengths])
+        return pad_rows(real, self.rows).cuda()
 
     def cu_seqlens(self) -> torch.Tensor:
         return torch.tensor([0, *torch.tensor(self.lengths).cumsum(0).tolist()], dtype=torch.int32).cuda()
+
+
+def pad_rows(tensor: torch.Tensor, rows: int) -> torch.Tensor:
+    """Zero rows appended so the first dimension is ``rows``."""
+    if tensor.shape[0] >= rows:
+        return tensor
+    padding = torch.zeros(rows - tensor.shape[0], *tensor.shape[1:], dtype=tensor.dtype, device=tensor.device)
+    return torch.cat((tensor, padding))
 
 
 def flash_attention_prefill(
@@ -274,7 +302,12 @@ class VllmMoe:
     def __call__(self, hidden_states, router_logits, shared_experts_input, input_ids, layer_name, hidden_dim_unpadded):
         del shared_experts_input, input_ids, layer_name, hidden_dim_unpadded
         vllm_weights, vllm_ids = self.route(hidden_states, router_logits)
-        topk_ids, topk_weights = (vllm_ids, vllm_weights) if self.routing is None else self.routing
+        topk_ids, topk_weights = vllm_ids, vllm_weights
+        if self.routing is not None:
+            # The given routing covers the real tokens; padding rows keep vLLM's own routing.
+            ids, weights = self.routing
+            topk_ids = torch.cat((ids.to(vllm_ids.dtype), vllm_ids[ids.shape[0] :]))
+            topk_weights = torch.cat((weights.to(vllm_weights.dtype), vllm_weights[weights.shape[0] :]))
         partials, slots = self.experts(hidden_states, topk_weights, topk_ids)
         output = reduce_partials(partials, reduction_order(self.order, self.ep_size, self.home_rank))
         self.records.append(MoeRecord(vllm_ids, vllm_weights, topk_ids, topk_weights, slots, partials, output))
