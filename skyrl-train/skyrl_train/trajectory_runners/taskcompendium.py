@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import uuid4
 
 from omegaconf import DictConfig
@@ -46,6 +46,7 @@ from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, 
 
 HARBOR_ENV_CLASS = "taskcompendium_harbor"
 NATIVE_CHAT_ENV_CLASS = "taskcompendium_native_chat"
+_NATIVE_CHAT_TRAJECTORIES_METRIC = "taskcompendium/native_chat_trajectories"
 
 
 class UngradedTaskCompendiumBatchError(RuntimeError):
@@ -74,7 +75,7 @@ def _native_chat_eligible(
 class TaskCompendiumTaskDataset:
     """Load lowerings and choose the least capable execution path that satisfies each one."""
 
-    def __init__(self, data_files: Sequence[str | Mapping[str, Any]], *, api_base: str, model_name: str):
+    def __init__(self, data_files: Sequence[str], *, api_base: str, model_name: str):
         self._rows = self._load_rows(data_files, api_base=api_base, model_name=model_name)
 
     @staticmethod
@@ -91,15 +92,13 @@ class TaskCompendiumTaskDataset:
     @classmethod
     def _load_rows(
         cls,
-        data_files: Sequence[str | Mapping[str, Any]],
+        data_files: Sequence[str],
         *,
         api_base: str,
         model_name: str,
     ) -> list[dict[str, Any]]:
         rows = []
         for value in data_files:
-            if not isinstance(value, str):
-                value = str(value["local_path"])
             for task_dir in cls._task_directories(Path(value)):
                 specification = read_specification(task_dir / SPECIFICATION_FILE)
                 convention = read_submission_convention(task_dir / SUBMISSION_CONVENTION_FILE)
@@ -265,7 +264,7 @@ class NativeTaskCompendiumRunner(TrajectoryRunner):
             "error_treatments": error_treatments,
             "trajectory_ids": list(identities),
             "rollout_metrics": {
-                "taskcompendium/native_chat_trajectories": float(size),
+                _NATIVE_CHAT_TRAJECTORIES_METRIC: float(size),
                 "taskcompendium/submission_failures": float(submission_failures),
             },
             "rollout_logprobs": rollout_logprobs,
@@ -280,6 +279,13 @@ class NativeTaskCompendiumRunner(TrajectoryRunner):
             output["student_topk_indices"] = selected_indices
             output["behavior_topk_logprobs"] = selected_logprobs
         return output
+
+
+class _HarborTrialTokens(NamedTuple):
+    prompt_ids: list[int]
+    response_ids: list[int]
+    loss_mask: list[int]
+    reward: float
 
 
 class TaskCompendiumHarborRunner(TrajectoryRunner):
@@ -321,7 +327,7 @@ class TaskCompendiumHarborRunner(TrajectoryRunner):
             raise ValueError(f"This runner requires env_class={HARBOR_ENV_CLASS}")
         semaphore = asyncio.Semaphore(self.concurrency)
 
-        async def trial(extra, prompt, identity):
+        async def trial(extra, prompt, identity) -> _HarborTrialTokens:
             task_dir = Path(extra["task_dir"])
             if prompt != [{"role": "user", "content": str(task_dir)}]:
                 raise ValueError("Harbor request prompts must identify the corresponding task package")
@@ -368,7 +374,7 @@ class TaskCompendiumHarborRunner(TrajectoryRunner):
                 tito_full=False,
                 chat_template_kwargs=template_kwargs,
             )
-            return prompt_ids, response_ids, loss_mask, float(reward)
+            return _HarborTrialTokens(prompt_ids, response_ids, loss_mask, float(reward))
 
         rows = await asyncio.gather(
             *(
@@ -377,11 +383,11 @@ class TaskCompendiumHarborRunner(TrajectoryRunner):
             )
         )
         return {
-            "prompt_token_ids": [row[0] for row in rows],
-            "response_ids": [row[1] for row in rows],
-            "loss_masks": [row[2] for row in rows],
-            "rewards": [row[3] for row in rows],
-            "unshaped_rewards": [row[3] for row in rows],
+            "prompt_token_ids": [row.prompt_ids for row in rows],
+            "response_ids": [row.response_ids for row in rows],
+            "loss_masks": [row.loss_mask for row in rows],
+            "rewards": [row.reward for row in rows],
+            "unshaped_rewards": [row.reward for row in rows],
             "stop_reasons": ["stop"] * size,
             "exception_types": [None] * size,
             "error_treatments": [None] * size,
@@ -486,7 +492,7 @@ class TaskCompendiumTrajectoryRouter:
         rollout_metrics = result.setdefault("rollout_metrics", {})
         if rollout_metrics is None:
             rollout_metrics = result["rollout_metrics"] = {}
-        rollout_metrics["taskcompendium/native_chat_trajectories"] = float(len(native_indices))
+        rollout_metrics[_NATIVE_CHAT_TRAJECTORIES_METRIC] = float(len(native_indices))
         rollout_metrics["taskcompendium/harbor_trajectories"] = float(len(harbor_indices))
         propagate_teacher_routes(input_batch, result)
         if self.trajectory_sink is not None:

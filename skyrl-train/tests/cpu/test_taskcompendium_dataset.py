@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from omegaconf import OmegaConf
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast
 from taskcompendium.grading import exact_answer
 from taskcompendium.lowering import SPECIFICATION_FILE, HarborEnvironmentConfig, lower_to_harbor, read_specification
 from taskcompendium.models import (
@@ -382,8 +384,6 @@ async def test_mixed_batch_uses_live_scripted_policy_endpoint_and_produces_train
     tmp_path, trusted_workplace_checkout, workplace_import, workplace_source_row
 ):
     pytest.importorskip("harbor")
-    from tokenizers import Tokenizer, models, pre_tokenizers
-    from transformers import PreTrainedTokenizerFast
 
     _lowering(tmp_path, "chat")
     specification, convention, binding = workplace_import
