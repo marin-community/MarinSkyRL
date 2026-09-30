@@ -106,7 +106,7 @@ def test_expert_weight_offsets_address_each_expert_from_the_lowest_addressed_wei
     flat = buffer[base.storage_offset() :]
     for weight, offset in zip(weights, offsets, strict=True):
         start = offset * EXPERT_OFFSET_ELEMENTS
-        assert torch.equal(flat[start : start + size].view(rows, columns), weight)
+        assert torch.equal(flat[start : start + size], weight.flatten())
     misaligned = buffer[1 : 1 + size].view(rows, columns)
     with pytest.raises(ValueError, match="whole"):
         expert_weight_offsets([base, misaligned], base)
