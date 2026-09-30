@@ -17,6 +17,7 @@ from typing import Any
 
 import torch
 from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 
@@ -29,7 +30,10 @@ def attention_call(arguments: Mapping[str, Any], tokens: int) -> dict[str, Any]:
     """One FA3 call's real-token inputs and output (CPU copies) and the arguments that pick its kernel."""
     impl, metadata, kv_cache = arguments["self"], arguments["attn_metadata"], arguments["kv_cache"]
     key_cache = canonicalize_singleton_dim_strides(kv_cache.transpose(1, 2).split(impl.head_size, dim=-1)[0])
+    dp_metadata = get_forward_context().dp_metadata
     return {
+        # Each data-parallel rank's step size after padding; the MoE runs on their sum.
+        "num_tokens_across_dp": None if dp_metadata is None else dp_metadata.num_tokens_across_dp_cpu.tolist(),
         "layer_name": arguments["layer"].layer_name,
         "query": arguments["query"][:tokens].cpu(),
         "key": arguments["key"][:tokens].cpu(),
