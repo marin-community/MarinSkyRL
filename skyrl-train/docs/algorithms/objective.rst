@@ -45,7 +45,7 @@ Paths are relative to ``skyrl-train/skyrl_train/``.
    * - KL and entropy
      - Regularizers against the reference model, and for exploration
      - ``utils/policy_math.py``
-     - ``differentiable_approx_kl``
+     - ``differentiable_approx_kl``; ``KLEstimator`` (declared in ``config/objective_spec.py``)
    * - Composition
      - Builds one micro-batch's inputs, computes the loss above, and reports each row as its step value
      - ``objective/objective.py``
