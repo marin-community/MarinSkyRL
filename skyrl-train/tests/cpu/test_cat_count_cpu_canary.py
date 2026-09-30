@@ -36,7 +36,6 @@ def cat_count_policy(pytestconfig) -> Path:
         "skyrl-gym/skyrl_gym/envs/cat_count/reward.py",
         "skyrl-train/tests/cpu/test_cat_count_cpu_canary.py",
         "pyproject.toml",
-        "skyrl-train/pyproject.toml",
         "skyrl-gym/pyproject.toml",
         "uv.lock",
     )

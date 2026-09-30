@@ -26,7 +26,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: .pytest_cache/d/cat_count_policy
-          key: cat-count-policy-${{ runner.os }}-${{ hashFiles('skyrl-train/examples/cat_count/cpu_canary.py', 'skyrl-gym/skyrl_gym/envs/cat_count/reward.py', 'skyrl-train/tests/cpu/test_cat_count_cpu_canary.py', 'pyproject.toml', 'skyrl-train/pyproject.toml', 'skyrl-gym/pyproject.toml', 'uv.lock') }}
+          key: cat-count-policy-${{ runner.os }}-${{ hashFiles('skyrl-train/examples/cat_count/cpu_canary.py', 'skyrl-gym/skyrl_gym/envs/cat_count/reward.py', 'skyrl-train/tests/cpu/test_cat_count_cpu_canary.py', 'pyproject.toml', 'skyrl-gym/pyproject.toml', 'uv.lock') }}
       - name: Check three learning seeds, async learning and checkpoint resume
         env:
           PYTHONPATH: ${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
