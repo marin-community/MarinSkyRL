@@ -693,10 +693,9 @@ def create_ray_wrapped_inference_engines(
             owned_placement_groups.append(shared_pg)
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
         elif use_per_engine_strict_pack:
-            # ray/uni backend, multi-GPU engines (TP*PP*DP > 1): one STRICT_PACK PG per
-            # engine so each engine's per_engine_gpu_count {GPU:1} bundles are
-            # guaranteed co-located on a single node (no cross-node TP all-reduce in
-            # decode). #232 fix.
+            # Keep each engine's bundles in one placement group. STRICT_PACK
+            # keeps ordinary multi-GPU engines on one node; explicit cross-node
+            # EP uses PACK to spread its DP ranks across nodes.
             for _ in range(num_inference_engines):
                 pg = placement_group(
                     [{"GPU": 1, "CPU": 1} for _ in range(per_engine_gpu_count)],
