@@ -416,7 +416,8 @@ configured sampling and logprob handling, including ``top_p: 0.99`` in the
 native Open-MOPD schedule. Neutral, processed behavior-logprob sampling applies
 when an active policy row uses a scalar rollout ratio: a rollout-anchored loss
 or a nonempty off-policy correction. Admission checks the surrogate's behavior
-top-K fields independently of that scalar-ratio requirement.
+top-K fields independently of that scalar-ratio requirement. The runner must
+preserve exact sampled completion tokens to capture that evidence.
 
 .. code-block:: yaml
 
@@ -741,7 +742,7 @@ teacher evidence and group admission.
 .. _group filter source: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/skyrl-train/skyrl_train/dynamic_sampling.py
 .. _teacher loss source: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/skyrl-train/skyrl_train/objective/teacher.py
 .. _teacher configuration source: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/marinskyrl/distillation.py
-.. _recipe source: https://github.com/marin-community/MarinSkyRL/tree/5abd5fddb4381a963e23c76aa2c08768c6d95184/skyrl-train/skyrl_train/config/algorithm_recipe
+.. _recipe source: https://github.com/marin-community/MarinSkyRL/tree/17cc1863a40c467b05dd78cce245d00e1242048c/skyrl-train/skyrl_train/config/algorithm_recipe
 .. _single-teacher smoke source: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/cloud/iris/configs/snowball_opd_math_smoke.yaml
 .. _multi-teacher smoke source: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/cloud/iris/configs/snowball_mopd_ultra_smoke.yaml
 .. _DeepSeekMath: https://arxiv.org/abs/2402.03300
