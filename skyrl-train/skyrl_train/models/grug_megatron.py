@@ -116,6 +116,17 @@ def _install_shared_swiglu_hooks(shared: SharedExpertMLP) -> None:
     shared.linear_fc2.register_forward_pre_hook(replace_fc2_input)
 
 
+def install_numerics_hooks(root: nn.Module) -> None:
+    """Install the switchable-numerics hooks on every Grug decoder layer under ``root``."""
+    for module in root.modules():
+        if isinstance(module, SharedExpertMLP):
+            _install_shared_swiglu_hooks(module)
+        if isinstance(module, TEGroupedMLP):
+            _install_route_weight_hooks(module)
+        if isinstance(module, TransformerLayer) and isinstance(module.pre_mlp_layernorm, GrugGatedRMSNorm):
+            module.pre_mlp_layernorm.feeds_router = True
+
+
 class GrugGatedRMSNorm(nn.Module):
     """RMSNorm followed by Grug's low-rank sigmoid gate: ``norm(x) * sigmoid(up(silu(down(norm(x)))))``."""
 
@@ -368,13 +379,7 @@ class GrugGPTModel(GPTModel):
 
     def __init__(self, config: TransformerConfig, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
-        for module in self.modules():
-            if isinstance(module, SharedExpertMLP):
-                _install_shared_swiglu_hooks(module)
-            if isinstance(module, TEGroupedMLP):
-                _install_route_weight_hooks(module)
-            if isinstance(module, TransformerLayer) and isinstance(module.pre_mlp_layernorm, GrugGatedRMSNorm):
-                module.pre_mlp_layernorm.feeds_router = True
+        install_numerics_hooks(self)
         if self.pre_process:
             self.embed_norm = GrugGatedRMSNorm(
                 config=config, hidden_size=config.hidden_size, eps=config.layernorm_epsilon

@@ -175,6 +175,10 @@ def _build_error_response(message: str, type_phrase: str, code: int) -> Dict[str
     ).model_dump()
 
 
+# Inductor cache files a mismatch probe archives: compiled subgraph modules and kernel sources, and the
+# launch config the autotuner chose for each kernel.
+OUTPUT_CODE_PATTERNS = ("*.py", "*.best_config")
+
 # Guard so the fake/meta registration runs at most once per worker process.
 _NORM_META_FAKES_REGISTERED = False
 
@@ -1051,7 +1055,8 @@ class WorkerWrap:
 
         Returns this worker's placement, a SHA-256 over its live parameters in name
         order, library and GPU versions, and the Inductor output-code modules that
-        compiled vLLM runs (``torch._inductor`` cache directory, ``*.py``).
+        compiled vLLM runs with the kernel configs its autotuner chose
+        (``torch._inductor`` cache directory, ``*.py`` and ``*.best_config``).
         """
         import hashlib
 
@@ -1064,7 +1069,9 @@ class WorkerWrap:
             digest.update(parameter.detach().contiguous().view(torch.uint8).cpu().numpy().tobytes())
         root = Path(cache_dir())
         output_code = {
-            str(path.relative_to(root)): path.read_text(errors="replace") for path in sorted(root.rglob("*.py"))
+            str(path.relative_to(root)): path.read_text(errors="replace")
+            for pattern in OUTPUT_CODE_PATTERNS
+            for path in sorted(root.rglob(pattern))
         }
         return {
             "placement": asdict(self._device_placement()),
