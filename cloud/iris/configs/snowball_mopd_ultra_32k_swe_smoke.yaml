@@ -1,0 +1,182 @@
+# Two-step Snowball MOPD smoke on Harbor SWE rows only, at the 32K recipe's window and learner
+# settings. Seven H100 nodes: four PP2 x EP8 learner nodes, two EP8 rollout nodes, and the
+# pinned swe teacher. Each step trains 16 prompts with two samples, 32 Harbor trials; 16 is
+# the smallest batch the learner's 16 data-parallel ranks accept.
+#
+# Build a sample with infra/rl_data/nemotron_ultra_mopd_subset.py --swe-rows N, keep only its
+# Harbor SWE rows, and pass its swe-tasks/tasks.parquet through data.terminal_bench_data.
+# opencode runs in a Daytona sandbox, which reaches the rollout engines only through controller
+# ingress: launch with ingress.mode controller, federated through marin.
+entrypoint: standard
+
+config_groups:
+  terminal_bench_config: terminal_bench
+
+context_budget:
+  # The swe and terminal teachers have 32,768 positions, and scoring a trajectory takes one
+  # position beyond it, so the student window stops one token short of 32K.
+  request_window_tokens: 32767
+  max_new_tokens_per_turn: 8192
+  max_turns: 50
+  generated_budget_fraction: 1.0
+
+terminal_bench:
+  harbor:
+    name: opencode
+    version: "1.18.2"
+    collect_rollout_details: true
+    override_setup_timeout_sec: 600
+    override_timeout_sec: 1800
+    verifier_override_timeout_sec: 300
+    override_cpus: 1
+    override_memory_mb: 4096
+    override_storage_mb: 4096
+    auto_snapshot: true
+    env_network_policy:
+      mode: unrestricted
+    max_retries: 3
+    n_concurrent_trials: 16
+    enable_reward_shaping: false
+    enable_error_classification: true
+    default_error_treatment: zero
+  model_info:
+  archiving:
+    enabled: false
+  trace_upload:
+    enabled: false
+
+environment:
+  env_class: nemotron_ultra
+  skyrl_gym:
+    nemotron_ultra:
+      grading: skip
+      sandbox:
+        host: snowball-nemo-skills-sandbox.iris.svc.cluster.local
+        port: 6000
+
+trainer:
+  strategy: megatron
+  flash_attn: true
+  use_sample_packing: true
+  # Megatron keeps the optimizer on the CPU (optimizer_config_kwargs below), so there is no
+  # rollout-time optimizer offload to do.
+  offload_optimizer_during_rollouts: false
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+  algorithm:
+    advantage_estimator: uniform
+    use_kl_loss: false
+    use_entropy_loss: false
+    loss_reduction: token_mean
+    distillation:
+      objective: sampled_reverse_kl
+      routing_plan: opd
+      coefficient: 1.0
+      reward_mode: replace
+    group_admission:
+      # A Harbor trial may take 600 s setup, 1800 s agent, and 300 s verifier time.
+      stall_timeout: 3600
+  epochs: 1
+  max_steps: 2
+  update_epochs_per_batch: 1
+  train_batch_size: 16
+  policy_mini_batch_size: 16
+  eval_batch_size: 64
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+  eval_before_train: false
+  eval_interval: -1
+  ckpt_interval: 2
+  max_ckpts_to_keep: 1
+  resume_mode: none
+  logger: console
+  policy:
+    optimizer_config:
+      lr: 1.0e-6
+      max_grad_norm: 1.0
+    megatron_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 2
+      # Snowball's sliding-window layers need Transformer Engine's a2a or all_gather CP; packing
+      # (required for CP > 1) rules out all_gather, and a2a needs KV heads divisible by the CP
+      # size, which Snowball's five KV heads are not. The learner therefore runs without CP.
+      context_parallel_size: 1
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      optimizer_checkpoint_sharding_type: dp_reshardable
+      # Without CP, a 32K sequence's last-stage vocabulary log-softmax ran out of memory next to
+      # ~60 GB of optimizer and master-weight state; the optimizer runs on the CPU instead.
+      optimizer_config_kwargs:
+        optimizer_cpu_offload: true
+        optimizer_offload_fraction: 1.0
+      logprob_chunk_size: 512
+  placement:
+    colocate_all: false
+    policy_num_nodes: 4
+    policy_num_gpus_per_node: 8
+
+generator:
+  backend: vllm
+  model_dtype: bfloat16
+  vllm_attention_backend: FLASH_ATTN
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_data_parallel_size: 8
+  inference_engine_expert_parallel_size: 8
+  num_inference_engines: 2
+  n_samples_per_prompt: 2
+  gpu_memory_utilization: 0.8
+  max_num_seqs: 16
+  max_num_batched_tokens: 16384
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+  enforce_eager: false
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  enable_http_endpoint: true
+  sampling_params:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+  engine_init_kwargs:
+    enable_auto_tool_choice: true
+    tool_call_parser: hermes
+
+# The vLLM fork serves GrugMoE only as tensor-parallel 1 with expert parallelism across the
+# data-parallel ranks. Each teacher prefills whole 32K sequences with prompt log-probs, so it
+# gets the rollout engines' batched-token cap.
+teachers:
+  swe:
+    source: local_inference
+    placement: pinned
+    backend: vllm
+    evidence: chosen_token
+    model:
+      path: laion/snowball-67b-a2b-rl-r2egym-newstack-step24
+      revision: cb75292c0e98fd66a8c50b482717bd35b664bed9
+    resources:
+      num_nodes: 1
+      gpus_per_node: 8
+      tensor_parallel_size: 1
+      data_parallel_size: 8
+      expert_parallel_size: 8
+      colocation_group: teacher_swe
+      gpu_memory_utilization: 0.8
+      max_num_batched_tokens: 16384
+
+teacher_routing:
+  opd:
+    revision: snowball-mopd-ultra-32k-swe-smoke-v1
+    routes:
+      swe:
+        teacher: swe
+        weight: 1.0
+
+data:
+  kind: parquet
+  train_data: []
+  val_data: []
+  terminal_bench_data: []
+  shuffle: true
+
+extra_env:
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
