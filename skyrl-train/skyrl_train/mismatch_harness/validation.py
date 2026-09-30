@@ -227,11 +227,12 @@ def serve(prompts: list[list[int]], work: Path) -> None:
     run_processes(serve_rank, arguments, together=True)
 
 
-def replay_rank(work: str, rank: int, dp_size: int, archive: str) -> None:
+def replay_rank(work: str, rank: int, dp_size: int, archive: str, orders: list[str]) -> None:
     """Replay one rank's prompt in the Inductor cache its engine compiled into, as that engine ran it.
 
     Runs in its own process on the rank's GPU, so the replay's kernels load beside the rank's own
-    ``.best_config`` files. Saves the comparison to ``work/result-rank{rank}.json``.
+    ``.best_config`` files. The MoE's partial sums are added under each reduce-scatter model in
+    ``orders``. Saves the comparisons to ``work/result-rank{rank}.json``.
     """
     work_dir = Path(work)
     os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(work_dir / f"inductor-rank{rank}")
@@ -241,7 +242,7 @@ def replay_rank(work: str, rank: int, dp_size: int, archive: str) -> None:
     shape = GrugShape.from_config(json.loads((work_dir / "model" / "config.json").read_text()))
     weights = export_tensors(work_dir / "model")
     with vllm_config_context():
-        result = rank_result(served, shape, weights, dp_size, archive)
+        result = {order: rank_result(served, shape, weights, dp_size, archive, ReduceOrder(order)) for order in orders}
     (work_dir / f"result-rank{rank}.json").write_text(json.dumps(result, default=str))
 
 
@@ -264,6 +265,7 @@ def replay_model(
     rows: int,
     ep_size: int,
     home_rank: int,
+    order: ReduceOrder,
     moe_tokens: int,
 ) -> ReplayTrace:
     """Run the served model's own compiled pieces end to end on one rank's prompt.
@@ -293,7 +295,7 @@ def replay_model(
             router_bias=weights[f"model.layers.{layer}.mlp.router.bias"].float(),
             ep_size=ep_size,
             home_rank=home_rank,
-            order=ReduceOrder.RING,
+            order=order,
         )
         if result is None:
             result, _ = replay.run_pre_attention(requests, torch.empty(0), ids, None, embedding_path=True)
@@ -459,7 +461,9 @@ def diff_pieces(served: dict[str, str], archived_uri: str) -> dict[str, str]:
     return result
 
 
-def rank_result(served: dict, shape: GrugShape, weights: dict[str, torch.Tensor], dp_size: int, archive: str) -> dict:
+def rank_result(
+    served: dict, shape: GrugShape, weights: dict[str, torch.Tensor], dp_size: int, archive: str, order: ReduceOrder
+) -> dict:
     """Replay one rank's prompt with the step sizes its engine recorded and compare routes and logits."""
     token_ids = served["token_ids"]
     first = min(served["taps"]["attention"], key=lambda call: _layer_index(call["layer_name"]))
@@ -474,6 +478,7 @@ def rank_result(served: dict, shape: GrugShape, weights: dict[str, torch.Tensor]
         rows=rows,
         ep_size=dp_size,
         home_rank=served["rank"],
+        order=order,
         moe_tokens=moe_tokens,
     )
     diagnostics = {
@@ -520,6 +525,13 @@ def main() -> None:
     parser.add_argument("--model", required=True)
     parser.add_argument("--layers", type=int, default=4)
     parser.add_argument("--dp-size", type=int, default=1, help="data-parallel ranks, one GPU each; EP when above 1")
+    parser.add_argument(
+        "--reduce-orders",
+        nargs="+",
+        choices=[order.value for order in ReduceOrder],
+        default=[ReduceOrder.RING.value],
+        help="reduce-scatter models to replay the MoE's partial sums with",
+    )
     parser.add_argument("--capture", required=True, help="a trainer capture whose first sequence is the prompt")
     parser.add_argument("--full-output-code", required=True)
     parser.add_argument("--output", required=True)
@@ -532,16 +544,18 @@ def main() -> None:
         work = Path(directory)
         truncated_export(args.model, args.layers, work)
         serve(prompts, work)
-        arguments = [(str(work), rank, args.dp_size, args.full_output_code) for rank in range(args.dp_size)]
+        arguments = [
+            (str(work), rank, args.dp_size, args.full_output_code, args.reduce_orders) for rank in range(args.dp_size)
+        ]
         run_processes(replay_rank, arguments, together=False)
-        ranks = [json.loads((work / f"result-rank{rank}.json").read_text()) for rank in range(args.dp_size)]
+        by_rank = [json.loads((work / f"result-rank{rank}.json").read_text()) for rank in range(args.dp_size)]
         codes = {
             rank: torch.load(work / f"served-rank{rank}.pt", weights_only=False)["code"] for rank in range(args.dp_size)
         }
     result = {
         "dp_size": args.dp_size,
         "engine_settings": ENGINE_SETTINGS | {"enable_expert_parallel": args.dp_size > 1},
-        "ranks": ranks,
+        "reduce_orders": {order: [rank[order] for rank in by_rank] for order in args.reduce_orders},
     }
     payload = json.dumps(result, indent=1, sort_keys=True, default=str)
     io.write_bytes_atomic(join_resource_path(args.output, "validation.json"), payload.encode())
@@ -551,8 +565,17 @@ def main() -> None:
                 join_resource_path(args.output, "output-code", f"rank{rank}", relative), text.encode()
             )
     print(payload, flush=True)
-    passed = all(rank["routes_rows_all_equal"] and rank["logits_equal_fraction"] == 1.0 for rank in ranks)
-    print(("PASS" if passed else "FAIL") + " replay validation", args.output, flush=True)
+    matching = [
+        order
+        for order in args.reduce_orders
+        if all(rank[order]["routes_rows_all_equal"] and rank[order]["logits_equal_fraction"] == 1.0 for rank in by_rank)
+    ]
+    passed = bool(matching)
+    print(
+        ("PASS" if passed else "FAIL") + f" replay validation (reduce models matching: {matching})",
+        args.output,
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

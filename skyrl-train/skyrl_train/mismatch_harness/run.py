@@ -32,7 +32,7 @@ from skyrl_train.distributed.megatron.checkpoint_metadata import remote_checkpoi
 from skyrl_train.distributed.megatron.direct_checkpoint import DirectS3TorchDistLoadShardedStrategy
 from skyrl_train.io import io
 from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore
-from skyrl_train.mismatch_harness.expert_parallel import ReduceOrder, reduction_order
+from skyrl_train.mismatch_harness.expert_parallel import ReduceOrder
 from skyrl_train.mismatch_harness.harness import (
     LayerReplay,
     RowLayout,
@@ -294,8 +294,9 @@ def run_vllm(
         ids, _ = routing
         regions["expert_slots"] = record.slots
         trainer_slots = trainer_expert_slots(raw_trainer, layout, ids)
-        order = reduction_order(replay.order, replay.ep_size, replay.home_rank)
-        regions["ep_sum"] = emulated_ep_sum(trainer_slots, ids, shape.experts, replay.ep_size, order)
+        regions["ep_sum"] = emulated_ep_sum(
+            trainer_slots, ids, shape.experts, replay.ep_size, replay.order, replay.home_rank
+        )
         regions["trainer_expert_slots"] = trainer_slots
     return {name: value[:tokens] if isinstance(value, torch.Tensor) else value for name, value in regions.items()}
 

@@ -3,8 +3,8 @@
 The Inductor pieces run from the archived output code (``replay.run_call``). The two ops that sit
 outside them are called directly with vLLM's own kernels: attention through ``flash_attn_varlen_func``
 with a paged bf16 KV cache as ``FlashAttentionImpl`` passes it, and the routed experts through
-``TritonExperts`` on each expert-parallel rank's experts, whose bf16 partial sums are then added in a
-reduce-scatter order (``expert_parallel.reduce_partials``). Nothing here changes vLLM's code or
+``TritonExperts`` on each expert-parallel rank's experts, whose bf16 partial sums are then added as a
+reduce-scatter model says (``expert_parallel.reduce_partials``). Nothing here changes vLLM's code or
 settings; eager vLLM is never run.
 """
 
@@ -30,7 +30,7 @@ from vllm.model_executor.models.grugmoe import GrugMoeRouter
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 from vllm.vllm_flash_attn import flash_attn_varlen_func
 
-from skyrl_train.mismatch_harness.expert_parallel import ReduceOrder, reduce_partials, reduction_order
+from skyrl_train.mismatch_harness.expert_parallel import ReduceOrder, reduce_partials
 from skyrl_train.models.grug_moe import grug_long_layer_flags
 
 FLASH_ATTENTION_VERSION = 3
@@ -341,7 +341,7 @@ class VllmMoe:
             topk_ids = torch.cat((ids.to(vllm_ids.dtype), vllm_ids[ids.shape[0] :]))
             topk_weights = torch.cat((weights.to(vllm_weights.dtype), vllm_weights[weights.shape[0] :]))
         partials, slots = self.experts(hidden_states, topk_weights, topk_ids)
-        output = reduce_partials(partials, reduction_order(self.order, self.ep_size, self.home_rank))
+        output = reduce_partials(partials, self.order, self.home_rank)
         self.records.append(MoeRecord(vllm_ids, vllm_weights, topk_ids, topk_weights, slots, partials, output))
         return output
 

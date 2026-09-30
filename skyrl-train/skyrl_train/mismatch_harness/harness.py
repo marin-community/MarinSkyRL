@@ -168,7 +168,7 @@ def trainer_expert_slots(
 
 
 def emulated_ep_sum(
-    slots: torch.Tensor, topk_ids: torch.Tensor, experts: int, ep_size: int, order: list[int]
+    slots: torch.Tensor, topk_ids: torch.Tensor, experts: int, ep_size: int, order: ReduceOrder, home_rank: int
 ) -> torch.Tensor:
     """vLLM's combine applied to given per-slot outputs: per-rank ``moe_sum`` in fp32, then a bf16 reduction."""
     per_rank = experts // ep_size
@@ -178,7 +178,7 @@ def emulated_ep_sum(
         output = torch.empty(slots.shape[0], slots.shape[2], dtype=slots.dtype, device=slots.device)
         vllm_ops.moe_sum(torch.where(local, slots, torch.zeros_like(slots)).contiguous(), output)
         partials.append(output)
-    return reduce_partials(torch.stack(partials), order)
+    return reduce_partials(torch.stack(partials), order, home_rank)
 
 
 class LayerReplay:
