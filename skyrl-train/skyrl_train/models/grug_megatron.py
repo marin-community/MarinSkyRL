@@ -224,6 +224,10 @@ class GrugGatedRMSNorm(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         numerics = active_numerics()
         unrounded = _RESIDUAL_FP32.pop(id(hidden_states), None)
+        if unrounded is not None:
+            # The hand-off may come from a no-grad checkpointed forward; keep its values and take the
+            # gradient through the bf16 residual so the loss still reaches the layers before this norm.
+            unrounded = hidden_states.float() + (unrounded - hidden_states.float()).detach()
         if unrounded is not None and self.role is NormRole.INPUT and numerics.input_norm_variance:
             normalized = rms_norm_hybrid(hidden_states, unrounded, self.norm.weight, self.eps)
         elif unrounded is not None and self.role is NormRole.FINAL and numerics.final_norm_fp32:
