@@ -55,7 +55,7 @@ class EvalOnlyEntrypoint(BasePPOExp):
     async def _evaluate(self) -> dict[str, Any]:
         assert self.eval_dataset is not None, "The evaluation only entrypoint requires an eval dataset is provided"
 
-        if self.cfg.generator.get("pivot_profiling_resume", False):
+        if self.cfg.generator.pivot_profiling or self.cfg.generator.get("pivot_profiling_resume", False):
             validate_profile_retention(self.cfg.generator.trajectory_retention)
         inference_engine_client = self.create_inference_engine_client(operation=EntrypointOperation.GENERATE)
         await load_initial_policy_adapter(inference_engine_client, self.cfg)

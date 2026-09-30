@@ -14,7 +14,7 @@ from marinskyrl.remote_io import filesystem_and_path
 
 
 def validate_profile_retention(retention: Mapping[str, Any]) -> None:
-    """Reject incomplete resume history before allocating inference engines."""
+    """Require complete profiling archives before allocating inference engines."""
     if not (
         retention.get("enabled", False)
         and retention.get("required", False)
@@ -24,7 +24,7 @@ def validate_profile_retention(retention: Mapping[str, Any]) -> None:
         and "eval" in retention.get("phases", ())
         and retention.get("output_path")
     ):
-        raise ValueError("Profiling resume requires complete, unbounded, durable evaluation retention")
+        raise ValueError("Profiling requires complete, unbounded, durable evaluation retention")
 
 
 @dataclass

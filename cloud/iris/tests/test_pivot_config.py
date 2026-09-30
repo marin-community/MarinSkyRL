@@ -47,9 +47,10 @@ def test_pivot_mode_compiles_same_data_and_geometry(tmp_path, mode, loss, sample
 
 
 @pytest.mark.parametrize("student", STUDENTS)
-def test_profile_uses_pinned_student_over_every_candidate(tmp_path, student):
+@pytest.mark.parametrize("resume", [False, True])
+def test_profile_uses_pinned_student_over_every_candidate(tmp_path, student, resume):
     raw = recipe(student, "profile", "candidates.parquet", ["validation.parquet"], 0.001)
-    raw["generator"]["pivot_profiling_resume"] = True
+    raw["generator"]["pivot_profiling_resume"] = resume
     path = tmp_path / "profile.yaml"
     path.write_text(yaml.safe_dump(raw))
     parsed = parse_rl_config(str(path))
@@ -83,9 +84,10 @@ def test_remaining_context_rejects_multiple_turns(tmp_path):
         parse_rl_config(str(path))
 
 
-def test_profile_resume_rejects_bounded_retention_during_composition(tmp_path):
+@pytest.mark.parametrize("resume", [False, True])
+def test_profile_rejects_bounded_retention_during_composition(tmp_path, resume):
     raw = recipe("snowball", "profile", "candidates.parquet", ["validation.parquet"], 0.001)
-    raw["generator"]["pivot_profiling_resume"] = True
+    raw["generator"]["pivot_profiling_resume"] = resume
     raw["generator"]["trajectory_retention"]["max_bytes_per_step"] = 838860800
     path = tmp_path / "bounded-resume.yaml"
     path.write_text(yaml.safe_dump(raw))

@@ -905,7 +905,7 @@ def compose_skyrl_config(
     config = _compose_base_config(parsed.config_groups)
     _merge_config_mapping(config, _skyrl_config_sections(parsed, exp_args, hpc))
     validate_nemotron_ultra_grading(config, parsed.distillation_plan)
-    if config.generator.get("pivot_profiling_resume", False):
+    if config.generator.get("pivot_profiling", False) or config.generator.get("pivot_profiling_resume", False):
         validate_profile_retention(config.generator.trajectory_retention)
     return CompiledSkyRLConfig(
         entrypoint=registered_rl_entrypoint_module(parsed.entrypoint),
