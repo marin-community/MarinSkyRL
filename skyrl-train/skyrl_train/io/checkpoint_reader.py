@@ -58,7 +58,6 @@ class PodCheckpointReadBudget:
                 f"DCP record needs {memory_bytes} temporary bytes, exceeding the pod budget "
                 f"of {self.memory_bytes}; increase trainer.distributed.megatron_checkpoint_load_memory_gib"
             )
-        waiting_since = time.monotonic()
         with self.admission_path.open("a+") as admission:
             fcntl.flock(admission, fcntl.LOCK_EX)
             # Publish only locked files: a peer must not reclaim a new reservation
@@ -77,16 +76,7 @@ class PodCheckpointReadBudget:
                             reservation.flush()
                             break
                     time.sleep(0.05)
-                acquired_at = time.monotonic()
-                try:
-                    yield
-                finally:
-                    logger.debug(
-                        "DCP record temporary_bytes={} wait={:.3f}s read_copy={:.3f}s",
-                        memory_bytes,
-                        acquired_at - waiting_since,
-                        time.monotonic() - acquired_at,
-                    )
+                yield
             finally:
                 with self.admission_path.open("a+") as admission:
                     fcntl.flock(admission, fcntl.LOCK_EX)
