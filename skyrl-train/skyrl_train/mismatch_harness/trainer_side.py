@@ -29,6 +29,7 @@ from skyrl_train.mismatch_probe.capture import capture_layer_regions
 from skyrl_train.mismatch_probe.numerics import grug_numerics
 from skyrl_train.models.grug_megatron import (
     GrugGatedRMSNorm,
+    NormRole,
     clear_numerics_handoffs,
     grug_layer_spec,
     install_numerics_hooks,
@@ -85,8 +86,11 @@ def build_layer(provider, layer: int) -> torch.nn.Module:
     return module.cuda().bfloat16().eval()
 
 
-def build_gated_norm(provider) -> torch.nn.Module:
-    return GrugGatedRMSNorm(provider, provider.hidden_size, provider.layernorm_epsilon).cuda().bfloat16().eval()
+def build_gated_norm(provider, role: NormRole) -> GrugGatedRMSNorm:
+    """A standalone Grug gated norm in the given place of the model (the numerics read its role)."""
+    norm = GrugGatedRMSNorm(provider, provider.hidden_size, provider.layernorm_epsilon).cuda().bfloat16().eval()
+    norm.role = role
+    return norm
 
 
 def load_hf_weights(module: torch.nn.Module, prefix: str, tensors: Mapping[str, torch.Tensor]) -> None:

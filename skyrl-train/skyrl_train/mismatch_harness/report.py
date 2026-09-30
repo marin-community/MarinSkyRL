@@ -13,6 +13,40 @@ def _cell(stats: Mapping | None) -> str:
     return f"{stats['byte_equal_fraction']:.4f} / {stats['within_one_ulp_fraction']:.4f} / {stats['max_ulp']}"
 
 
+def _short(stats: Mapping) -> str:
+    return f"{stats['byte_equal_fraction']:.4f} ({stats['max_ulp']})"
+
+
+def _variants(result: Mapping) -> list[str]:
+    return [name for name, value in result.items() if isinstance(value, Mapping) and "isolated" in value]
+
+
+def candidate_deltas(result: Mapping) -> list[str]:
+    """Table rows ``variant | region | baseline | variant`` for every isolated cell a variant changes."""
+    baseline = result["baseline"]["isolated"]
+    rows = []
+    for name in _variants(result):
+        if name == "baseline":
+            continue
+        for region in REGIONS:
+            before, after = baseline.get(region), result[name]["isolated"].get(region)
+            if before is None or after is None:
+                continue
+            if (before["byte_equal_fraction"], before["max_ulp"]) == (after["byte_equal_fraction"], after["max_ulp"]):
+                continue
+            rows.append(f"| {name} | {region} | {_short(before)} | {_short(after)} |")
+    return rows
+
+
+def still_differing(result: Mapping, variant: str) -> list[str]:
+    """Isolated regions that are not byte-equal under ``variant``."""
+    return [
+        region
+        for region in REGIONS
+        if (stats := result[variant]["isolated"].get(region)) is not None and stats["max_ulp"] > 0
+    ]
+
+
 def lowest_disagreeing_region(chained: Mapping[str, Mapping], floor: Mapping[str, Mapping]) -> str | None:
     """The first region in forward order whose chained bytes differ more than vLLM's two runs differ."""
     for region in REGIONS:
@@ -52,9 +86,12 @@ def render_markdown(results: Mapping) -> str:
     ]
     for layer, result in results["layers"].items():
         lines += [f"## Layer {layer}", ""]
-        variants = [name for name, value in result.items() if isinstance(value, Mapping) and "isolated" in value]
+        variants = _variants(result)
         baseline = result["baseline"]
         lowest = lowest_disagreeing_region(baseline["chained"], result["floor"])
+        source = result["input_from_layer"]
+        if str(source) != str(layer):
+            lines += [f"- input: layer {source}'s captured input (no capture of layer {layer} to reproduce)"]
         lines += [
             f"- valid tokens per sequence: {result['lengths']}; compiled pieces ran on {result['piece_rows']} rows "
             f"(floor run: {result['floor_piece_rows']})",
@@ -75,15 +112,29 @@ def render_markdown(results: Mapping) -> str:
             if all(cell == "–" for cell in (*cells, chained, floor, config)):
                 continue
             lines.append(f"| {region} | " + " | ".join((*cells, chained, floor, config)) + " |")
-        lines += ["", "Trainer layer in the harness against the probe's capture (same code, same GPU type):", ""]
-        lines += ["| region | byte-equal / within 1 ulp / max ulp |", "|---|---|"]
-        for region, stats in result["reproduction"].items():
-            cell = f"{stats['equal_fraction']:.4f}" if "equal_fraction" in stats else _cell(stats)
-            lines.append(f"| {region} | {cell} |")
+        deltas = candidate_deltas(result)
+        if deltas:
+            lines += ["", "Isolated cells each variant changes (byte-equal fraction (max ulp)):", ""]
+            lines += ["| variant | region | baseline | variant |", "|---|---|---|---|", *deltas]
+        lines += [""]
+        for name in variants:
+            lines.append(f"- not byte-equal under {name}: {', '.join(still_differing(result, name)) or 'none'}")
+        if result["reproduction"]:
+            lines += ["", "Trainer layer in the harness against the probe's capture (same code, same GPU type):", ""]
+            lines += ["| region | byte-equal / within 1 ulp / max ulp |", "|---|---|"]
+            for region, stats in result["reproduction"].items():
+                cell = f"{stats['equal_fraction']:.4f}" if "equal_fraction" in stats else _cell(stats)
+                lines.append(f"| {region} | {cell} |")
         if "embedding" in result:
-            lines += ["", "Layer 0 input (embedding, embedding norm and gate):", ""]
+            embedding = result["embedding"]
+            lines += ["", "Layer 0 input (embedding, embedding norm and gate), default numerics:", ""]
             lines += ["| comparison | byte-equal / within 1 ulp / max ulp |", "|---|---|"]
-            for name, stats in result["embedding"].items():
+            for name, stats in embedding["check"].items():
                 lines.append(f"| {name} | {_cell(stats)} |")
+            lines += ["", "Layer 0 input and input norm from token ids, vLLM against the trainer per variant:", ""]
+            lines += ["| variant | input | attn_rms | attention_norm |", "|---|---|---|---|"]
+            for name, stats in embedding["input_norm"].items():
+                cells = (_cell(stats["input"]), _cell(stats["attn_rms"]), _cell(stats["attention_norm"]))
+                lines.append(f"| {name} | " + " | ".join(cells) + " |")
         lines.append("")
     return "\n".join(lines)

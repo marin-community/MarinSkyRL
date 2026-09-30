@@ -61,6 +61,8 @@ from skyrl_train.mismatch_harness.trainer_side import (
     run_layer,
     single_rank_megatron,
 )
+from skyrl_train.mismatch_probe.numerics import grug_numerics
+from skyrl_train.models.grug_megatron import NormRole, clear_numerics_handoffs
 from skyrl_train.mismatch_harness.vllm_side import (
     GrugShape,
     Requests,
@@ -298,6 +300,23 @@ def run_vllm(
     return {name: value[:tokens] if isinstance(value, torch.Tensor) else value for name, value in regions.items()}
 
 
+def parse_variants(texts: list[str]) -> dict[str, dict[str, bool]]:
+    """Trainer variants from ``[label=]flag,flag`` texts; the label defaults to the flag list."""
+    variants: dict[str, dict[str, bool]] = {"baseline": {}}
+    for text in texts:
+        label, _, flags = text.rpartition("=")
+        variants[label or flags] = {flag: True for flag in flags.split(",") if flag}
+    return variants
+
+
+def parse_input_sources(texts: list[str]) -> dict[int, int]:
+    sources = {}
+    for text in texts:
+        layer, source = text.split("=")
+        sources[int(layer)] = int(source)
+    return sources
+
+
 def stats_json(stats: dict) -> dict:
     return {region: value.to_json() for region, value in stats.items()}
 
@@ -319,7 +338,18 @@ def main() -> None:
         "--pad-tokens", type=int, help="rows the compiled pieces run on (default: vLLM's CUDA-graph size)"
     )
     parser.add_argument("--floor-extra-tokens", type=int, default=512)
-    parser.add_argument("--numerics", action="append", default=[], help="comma-separated grug_numerics flags")
+    parser.add_argument(
+        "--numerics",
+        action="append",
+        default=[],
+        help="a trainer variant: [label=]comma-separated grug_numerics flags (repeatable)",
+    )
+    parser.add_argument(
+        "--input-from",
+        action="append",
+        default=[],
+        help="LAYER=SOURCE: run LAYER on SOURCE's captured input (no capture of LAYER to reproduce)",
+    )
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=1234)
     args = parser.parse_args()
@@ -356,19 +386,24 @@ def main() -> None:
         rotary = rotary_embedding(provider).cuda()
         cos_sin = cos_sin_cache(shape)
         generator = torch.Generator(device="cuda").manual_seed(args.seed)
+        variants = parse_variants(args.numerics)
+        input_sources = parse_input_sources(args.input_from)
         for layer in args.layers:
-            regions = captured[layer]
+            source = input_sources.get(layer, layer)
+            regions = captured[source]
             layer_module = build_layer(provider, layer)
             load_hf_weights(layer_module, f"decoder.layers.{layer}.", weights)
             layer_input = regions["input"].cuda()
-            next_norm = build_gated_norm(provider)
             if layer + 1 < shape.layers:
+                next_norm = build_gated_norm(provider, NormRole.INPUT)
                 load_hf_weights(next_norm, f"decoder.layers.{layer + 1}.input_layernorm.", weights)
             else:
+                next_norm = build_gated_norm(provider, NormRole.FINAL)
                 load_hf_weights(next_norm, "decoder.final_layernorm.", weights)
             baseline = run_layer(layer_module, layer_input, rotary, next_norm=next_norm, numerics={})
             reproduction = {}
-            for region in CAPTURE_REGIONS:
+            # A layer run on another layer's captured input has no capture of its own to reproduce.
+            for region in CAPTURE_REGIONS if source == layer else ():
                 ours, theirs = baseline.tensors[region], regions[region].cuda()
                 if ours.dtype == torch.bool:
                     reproduction[region] = {"equal_fraction": (ours == theirs).float().mean().item()}
@@ -390,6 +425,7 @@ def main() -> None:
                 order=order,
             )
             layer_result: dict = {
+                "input_from_layer": source,
                 "reproduction": reproduction,
                 "router_bias_equals_export": bool(torch.equal(bias, export_bias)),
                 "lengths": list(layout.lengths),
@@ -450,9 +486,6 @@ def main() -> None:
                 )
             if len(sweeps) > 1:
                 layer_result["config_floor"] = stats_json(compare_regions(sweeps[0], sweeps[-1]))
-            variants = {"baseline": {}}
-            for text in args.numerics:
-                variants[text] = {flag: True for flag in text.split(",") if flag}
             for label, flags in variants.items():
                 trainer_run = (
                     baseline
@@ -487,7 +520,15 @@ def main() -> None:
                 }
             if layer == 0:
                 layer_result["embedding"] = embedding_check(
-                    replay, provider, weights, layout, sequences, attention_mask, flat_input
+                    replay,
+                    provider,
+                    weights,
+                    layout,
+                    sequences,
+                    attention_mask,
+                    flat_input,
+                    layer_module.input_layernorm,
+                    variants,
                 )
             results["layers"][str(layer)] = layer_result
             del layer_module, replay
@@ -501,17 +542,26 @@ def main() -> None:
     print("PASS mismatch harness", args.output, flush=True)
 
 
-def embedding_check(replay, provider, weights, layout, sequences, attention_mask, flat_input) -> dict:
-    """Layer 0's input: vLLM's compiled embedding path from token ids against the trainer's captured input."""
+def embedding_check(
+    replay, provider, weights, layout, sequences, attention_mask, flat_input, input_norm, variants
+) -> dict:
+    """Layer 0's input from token ids: vLLM's compiled embedding path against the trainer's.
+
+    ``check`` compares the embedding norm and its gate at default numerics. ``input_norm`` compares
+    layer 0's input and its input norm under each trainer variant: the trainer runs its embedding norm
+    and hands the result to layer 0's input norm directly, so a numerics flag that carries the
+    unrounded embedding product to that norm (``input_norm_variance``) applies as in the model.
+    """
     token_ids = torch.cat(
         [sequences[index][attention_mask[index].bool()][:length] for index, length in enumerate(layout.lengths)]
     ).cuda()
     result, piece = replay.run_pre_attention(layout.requests, flat_input, token_ids, None, embedding_path=True)
     stored = {(value.launch.statement, value.variable): value.tensor for value in result.values}
     vllm = {role: stored[(ref.statement, ref.variable)] for role, ref in piece.values.items()}
-    embed_norm = build_gated_norm(provider)
+    embed_norm = build_gated_norm(provider, NormRole.EMBEDDING)
     load_hf_weights(embed_norm, "embed_norm.", weights)
-    trainer = gated_norm_regions(embed_norm, weights["model.embed_tokens.weight"][token_ids])
+    embeddings = weights["model.embed_tokens.weight"][token_ids]
+    trainer = gated_norm_regions(embed_norm, embeddings)
     pairs = {
         "embed_rms": (vllm["embed_rms"], trainer["rms"]),
         "embed_gate_down": (vllm["embed_gate_down"], trainer["gate_down"]),
@@ -521,7 +571,22 @@ def embedding_check(replay, provider, weights, layout, sequences, attention_mask
         "input_vllm_vs_capture": (vllm["next.residual"], flat_input),
         "input_trainer_module_vs_capture": (trainer["out"], flat_input),
     }
-    return {name: compare(a, b).to_json() for name, (a, b) in pairs.items()}
+    by_variant = {}
+    for label, flags in variants.items():
+        clear_numerics_handoffs()
+        with grug_numerics(**flags):
+            embedded = gated_norm_regions(embed_norm, embeddings)["out"]
+            layer0 = gated_norm_regions(input_norm, embedded)
+        clear_numerics_handoffs()
+        by_variant[label] = {
+            "input": compare(vllm["next.residual"], embedded).to_json(),
+            "attn_rms": compare(vllm["next.attn_rms"], layer0["rms"]).to_json(),
+            "attention_norm": compare(vllm["next.attn_in"], layer0["out"]).to_json(),
+        }
+    return {
+        "check": {name: compare(a, b).to_json() for name, (a, b) in pairs.items()},
+        "input_norm": by_variant,
+    }
 
 
 if __name__ == "__main__":
