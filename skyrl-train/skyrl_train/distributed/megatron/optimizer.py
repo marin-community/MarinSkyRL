@@ -18,19 +18,9 @@
 # limitations under the License.
 
 import torch
-from megatron.core.optimizer import OptimizerConfig, clip_grads, get_standard_config_overrides
+from megatron.core.optimizer import OptimizerConfig, get_standard_config_overrides
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
-from transformer_engine.pytorch.optimizers import multi_tensor_applier, multi_tensor_l2norm, multi_tensor_scale
-
-
-def use_transformer_engine_gradient_kernels() -> None:
-    """Select native TE norm and clipping kernels for this process."""
-    # Remove when MCore's grouped import handles TE 2.11's missing
-    # multi_tensor_scale_tensor without discarding the available kernels.
-    clip_grads.multi_tensor_applier = multi_tensor_applier
-    clip_grads.l2_norm_impl = multi_tensor_l2norm
-    clip_grads.multi_tensor_scale_impl = multi_tensor_scale
 
 
 class _MegatronParamScheduler(OptimizerParamScheduler):
@@ -93,7 +83,6 @@ def get_megatron_optimizer(
             "megatron-core 0.18.x's config_overrides mapping; only the defaults "
             "are supported."
         )
-    use_transformer_engine_gradient_kernels()
     config_overrides = get_standard_config_overrides(config)
     if config.optimizer == "adam":
         # SkyRL's AdamW recipe applies weight decay to every trainable parameter.

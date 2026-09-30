@@ -326,7 +326,10 @@ def load_megatron_optimizer(optimizers):
 
 
 def restore_offloaded_optimizer_state(optimizer) -> None:
-    """Bind restored moments and master weights to the native CPU/GPU optimizers."""
+    """Repair MCore 0.18's CPU-offloaded optimizer state after bucket restore."""
+    # Revisit on MCore upgrades; remove once native restore passes two-update
+    # continuation parity for mixed CPU/GPU state. Upstream step fix (partial):
+    # https://github.com/NVIDIA/Megatron-LM/pull/7629
     optimizers = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
     for distributed_optimizer in optimizers:
         inner = distributed_optimizer.optimizer
