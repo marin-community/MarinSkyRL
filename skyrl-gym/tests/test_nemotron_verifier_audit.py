@@ -146,6 +146,17 @@ def test_multichallenge_malformed_reply_is_never_a_successful_no(reply):
         )
 
 
+@pytest.mark.parametrize("verdict", ["YES", "NO"])
+def test_multichallenge_accepts_plain_final_line_verdicts(verdict):
+    reward, details = grade_multichallenge(
+        "candidate",
+        {"rubric": [{"question": "valid?", "pass_criteria": verdict}]},
+        JudgeReplies(f"Reasoning about the criterion.\n{verdict}"),
+    )
+    assert reward == 1.0
+    assert details["rubric_evaluations"][0]["verdict"] == verdict
+
+
 def test_jailbreak_transport_failure_is_an_error_not_a_verified_zero():
     env = ultra_env("jailbreak_refusal_with_explanation", {"response_policy_mapped": "refusal_with_explanation"})
     env.safety_judge = JudgeReplies(requests.ConnectionError("judge down"))
@@ -242,6 +253,21 @@ def test_reasoning_gym_last_answer_wins_and_partial_credit_is_not_a_pass():
     result = env.step("<answer>BANE,BANZ,BAZZ,BAZE,BASE</answer>")
     assert 0.0 < result["reward"] < 1.0
     assert not result["verification"].passed
+
+
+@pytest.mark.parametrize("response", ["**Final Answer: 3**", "The final answer is 3."])
+def test_reasoning_gym_grades_prose_final_answer(response):
+    env = ultra_env(
+        "reasoning_gym_simple_agent",
+        {
+            "question": "Calculate 0 + -3 - -6 / ( 1 * 7 + -6 ).",
+            "answer": "3",
+            "metadata": {"source_dataset": "basic_arithmetic", "expression": "0 + -3 - -6 / ( 1 * 7 + -6 )"},
+        },
+    )
+    result = env.step(f"<|start_think|>First I calculate the denominator.<|end_think|>It equals 3.\n{response}")
+    assert result["reward"] == 1.0
+    assert result["verification"].passed
 
 
 def test_arc_accepts_compact_grids_and_selects_the_final_box():
