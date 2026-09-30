@@ -9,6 +9,7 @@ from skyrl_train.models.grug_rounding import (
     gated_norm_product_fp32,
     rotate_neox_fp32,
     swiglu_single_rounding,
+    weighted_down_projection_single_rounding,
     xsa_and_gate_single_rounding,
 )
 
@@ -64,3 +65,22 @@ def test_xsa_and_head_gate_round_once_over_grouped_heads(groups):
 
     result = xsa_and_gate_single_rounding(attention, value, gate, head_dim)
     assert torch.equal(result, expected.reshape(tokens, heads * head_dim))
+
+
+def test_route_weight_multiplies_the_fp32_down_projection_before_one_rounding():
+    splits = [3, 0, 5]
+    activation = _bf16(sum(splits), 16, seed=7)
+    weights = [_bf16(8, 16, seed=10 + index) for index in range(len(splits))]
+    probs = torch.rand(sum(splits), 1, generator=torch.Generator().manual_seed(8)) * 2.5
+    rows = activation.float().split(splits)
+    fp32 = torch.cat([part @ weight.float().t() for part, weight in zip(rows, weights, strict=True)])
+    expected = (fp32 * probs).to(torch.bfloat16)
+
+    result = weighted_down_projection_single_rounding(activation, weights, splits, probs)
+    assert torch.equal(result, expected)
+    # The trainer's current order weights and rounds the activation before a bf16 projection.
+    weighted_first = (activation.float() * probs).to(torch.bfloat16).float().split(splits)
+    current = torch.cat(
+        [(part @ weight.float().t()).to(torch.bfloat16) for part, weight in zip(weighted_first, weights, strict=True)]
+    )
+    assert not torch.equal(result, current)

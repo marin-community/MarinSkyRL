@@ -34,6 +34,20 @@ def swiglu_single_rounding(fc1_output: torch.Tensor) -> torch.Tensor:
     return (F.silu(gate.float()) * up.float()).to(fc1_output.dtype)
 
 
+def weighted_down_projection_single_rounding(
+    activation: torch.Tensor, weights: list[torch.Tensor], tokens_per_expert: list[int], probs: torch.Tensor
+) -> torch.Tensor:
+    """Per-expert ``activation @ W.T`` accumulated in fp32, times the route weight, rounded once.
+
+    ``activation`` rows are grouped by expert in ``tokens_per_expert`` order; ``probs`` is ``[rows, 1]``.
+    """
+    outputs = [
+        rows.float() @ weight.float().t()
+        for rows, weight in zip(activation.split(tokens_per_expert), weights, strict=True)
+    ]
+    return (torch.cat(outputs) * probs.float()).to(activation.dtype)
+
+
 def xsa_and_gate_single_rounding(
     core_attn_out: torch.Tensor, value: torch.Tensor, gate: torch.Tensor, head_dim: int
 ) -> torch.Tensor:
@@ -49,4 +63,3 @@ def xsa_and_gate_single_rounding(
     projected = attention - (dot / (v.square().sum(dim=-1, keepdim=True) + GRUG_XSA_EPS)) * v
     scale = (GRUG_ATTN_GATE_SCALE * torch.sigmoid(gate.float())).view(*gate.shape, 1)
     return (projected * scale).to(core_attn_out.dtype).reshape(core_attn_out.shape)
-

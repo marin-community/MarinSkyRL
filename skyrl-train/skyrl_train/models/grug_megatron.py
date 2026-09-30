@@ -27,6 +27,7 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec_for_backend
 from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
 from megatron.core.transformer.enums import AttnMaskType
+from megatron.core.transformer.moe.experts import TEGroupedMLP
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.spec_utils import ModuleSpec
@@ -43,6 +44,7 @@ from torch import nn
 from skyrl_train.mismatch_probe.numerics import active_numerics
 from skyrl_train.models.grug_rounding import (
     gated_norm_product_fp32,
+    weighted_down_projection_single_rounding,
     rotate_neox_fp32,
     swiglu_single_rounding,
     xsa_and_gate_single_rounding,
@@ -66,6 +68,33 @@ def _first_present(preferred: torch.Tensor | None, fallback: torch.Tensor | None
 
 # Unrounded gated-norm products awaiting the router, keyed by the bf16 tensor handed to the MoE layer.
 _ROUTER_FP32_INPUTS: dict[int, torch.Tensor] = {}
+
+
+def _install_route_weight_hooks(experts: TEGroupedMLP) -> None:
+    """Apply route weights after the fp32 down projection when ``route_weight`` is active."""
+    stored: dict[str, object] = {}
+
+    def unit_probs(module, args, kwargs):
+        if not active_numerics().route_weight:
+            return None
+        if module._with_fused_impl:
+            raise NotImplementedError("route_weight numerics require the unfused grouped-MLP path")
+        hidden, tokens_per_expert, probs = args
+        stored["probs"], stored["splits"] = probs, tokens_per_expert.tolist()
+        return (hidden, tokens_per_expert, torch.ones_like(probs)), kwargs
+
+    def weighted_output(module, args, output):
+        if not active_numerics().route_weight:
+            return None
+        activation = args[0]
+        weights = [getattr(module, f"weight{index}") for index in range(module.num_gemms)]
+        result = weighted_down_projection_single_rounding(
+            activation, weights, stored.pop("splits"), stored.pop("probs").unsqueeze(-1)
+        )
+        return (result, output[1]) if isinstance(output, tuple) else result
+
+    experts.register_forward_pre_hook(unit_probs, with_kwargs=True)
+    experts.linear_fc2.register_forward_hook(weighted_output)
 
 
 def _install_shared_swiglu_hooks(shared: SharedExpertMLP) -> None:
@@ -342,6 +371,8 @@ class GrugGPTModel(GPTModel):
         for module in self.modules():
             if isinstance(module, SharedExpertMLP):
                 _install_shared_swiglu_hooks(module)
+            if isinstance(module, TEGroupedMLP):
+                _install_route_weight_hooks(module)
             if isinstance(module, TransformerLayer) and isinstance(module.pre_mlp_layernorm, GrugGatedRMSNorm):
                 module.pre_mlp_layernorm.feeds_router = True
         if self.pre_process:

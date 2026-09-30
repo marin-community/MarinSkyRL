@@ -9,7 +9,9 @@ operations. Each flag makes one chain compute in fp32 and round once, as compile
 - ``xsa_gate``: XSA followed by the ``2 * sigmoid`` head gate;
 - ``shared_swiglu``: ``silu(gate) * up`` in the shared expert;
 - ``router_input``: the router reads the unrounded gated-norm product in fp32, with an fp32
-  router GEMM (requires ``gated_norm``).
+  router GEMM (requires ``gated_norm``);
+- ``route_weight``: each routed expert's down projection accumulates in fp32 and is multiplied by
+  its route weight before one rounding, instead of weighting the activation before the projection.
 
 Probe modes set flags for one scoring forward; the flags default to the current trainer numerics.
 """
@@ -28,6 +30,7 @@ class GrugNumerics:
     xsa_gate: bool = False
     shared_swiglu: bool = False
     router_input: bool = False
+    route_weight: bool = False
 
 
 NUMERICS_FLAGS = tuple(field.name for field in fields(GrugNumerics))
