@@ -131,6 +131,24 @@ class GrugStackedGatedExpertMapping(_StackedExpertExport, GatedMLPMapping):
         return super().hf_to_megatron(sliced, megatron_module)
 
 
+def _routed_expert_mappings(schema_version: int) -> list[AutoMapping | GatedMLPMapping]:
+    """Map individually saved or stacked HF experts to Megatron's per-expert weights."""
+    megatron = "decoder.layers.*.mlp.experts"
+    hf = "model.layers.*.mlp.experts"
+    if schema_version == GRUG_SPLIT_EXPERT_SCHEMA_VERSION:
+        hf += ".*"
+        gate_up_mapping = GatedMLPMapping
+        down_mapping = AutoMapping
+    else:
+        gate_up_mapping = GrugStackedGatedExpertMapping
+        down_mapping = GrugStackedExpertMapping
+    # Megatron's fc1 fuses HF gate/up weights; fc2 holds the down weight.
+    return [
+        gate_up_mapping(f"{megatron}.linear_fc1.weight*", gate=f"{hf}.gate_proj.weight", up=f"{hf}.up_proj.weight"),
+        down_mapping(f"{megatron}.linear_fc2.weight*", f"{hf}.down_proj.weight"),
+    ]
+
+
 def _gated_norm_mappings(megatron_prefix: str, hf_norm: str, hf_gate_prefix: str) -> list[ReplicatedMapping]:
     return [
         ReplicatedMapping(f"{megatron_prefix}.norm.weight", hf_norm),
@@ -255,42 +273,16 @@ class GrugMoeBridge(MegatronModelBridge):
             ]
         else:
             shared_expert_prefixes = [("decoder.layers.*.mlp.shared_experts", "model.layers.*.shared_expert")]
-        for mg, hf in shared_expert_prefixes:
+        for megatron, hf in shared_expert_prefixes:
             mappings.extend(
                 [
                     GatedMLPMapping(
-                        f"{mg}.linear_fc1.weight", gate=f"{hf}.gate_proj.weight", up=f"{hf}.up_proj.weight"
+                        f"{megatron}.linear_fc1.weight", gate=f"{hf}.gate_proj.weight", up=f"{hf}.up_proj.weight"
                     ),
-                    AutoMapping(f"{mg}.linear_fc2.weight", f"{hf}.down_proj.weight"),
+                    AutoMapping(f"{megatron}.linear_fc2.weight", f"{hf}.down_proj.weight"),
                 ]
             )
-        if config.grugmoe_artifact_schema_version == GRUG_SPLIT_EXPERT_SCHEMA_VERSION:
-            mappings.extend(
-                [
-                    GatedMLPMapping(
-                        "decoder.layers.*.mlp.experts.linear_fc1.weight*",
-                        gate="model.layers.*.mlp.experts.*.gate_proj.weight",
-                        up="model.layers.*.mlp.experts.*.up_proj.weight",
-                    ),
-                    AutoMapping(
-                        "decoder.layers.*.mlp.experts.linear_fc2.weight*",
-                        "model.layers.*.mlp.experts.*.down_proj.weight",
-                    ),
-                ]
-            )
-        else:
-            mappings.extend(
-                [
-                    GrugStackedGatedExpertMapping(
-                        "decoder.layers.*.mlp.experts.linear_fc1.weight*",
-                        gate="model.layers.*.mlp.experts.gate_proj.weight",
-                        up="model.layers.*.mlp.experts.up_proj.weight",
-                    ),
-                    GrugStackedExpertMapping(
-                        "decoder.layers.*.mlp.experts.linear_fc2.weight*", "model.layers.*.mlp.experts.down_proj.weight"
-                    ),
-                ]
-            )
+        mappings.extend(_routed_expert_mappings(config.grugmoe_artifact_schema_version))
         if config.latent_dim is not None:
             mappings.extend(
                 [
