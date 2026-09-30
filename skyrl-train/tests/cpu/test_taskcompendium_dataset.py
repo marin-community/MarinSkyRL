@@ -17,7 +17,6 @@ from taskcompendium.models import (
     ConversationInput,
     ConversationToolCall,
     EnvironmentRequirements,
-    FinalTools,
     FunctionDefinition,
     Source,
     TaskSpec,
@@ -126,11 +125,7 @@ def test_taskcompendium_dataset_keeps_advertised_tools_on_harbor_path(tmp_path, 
         environment_requirements=EnvironmentRequirements(),
         source=Source(dataset="test", revision="revision", row="text-with-tools", importer_revision="importer"),
         answer_type=AnswerType.TEXT,
-        final_tools=FinalTools(
-            functions=(FunctionDefinition(name="lookup_color", parameters={"type": "object", "properties": {}}),),
-            tool_choice="auto",
-            parallel_tool_calls=False,
-        ),
+        final_tools=(FunctionDefinition(name="lookup_color", parameters={"type": "object", "properties": {}}),),
     )
     task = lower_to_harbor(specification, convention, HarborEnvironmentConfig(), tmp_path / "text-with-tools")
 
@@ -140,8 +135,6 @@ def test_taskcompendium_dataset_keeps_advertised_tools_on_harbor_path(tmp_path, 
 
     assert dataset[0]["env_class"] == HARBOR_ENV_CLASS
     assert request["tools"][0]["function"]["name"] == "lookup_color"
-    assert request["tool_choice"] == "auto"
-    assert request["parallel_tool_calls"] is False
 
 
 def test_taskcompendium_dataset_routes_answer_call_to_harbor(tmp_path):
@@ -459,7 +452,7 @@ async def test_mixed_batch_uses_live_scripted_policy_endpoint_and_produces_train
         router = TaskCompendiumTrajectoryRouter(
             native_runner=NativeTaskCompendiumRunner(cfg, tokenizer, client),
             harbor_runner=TaskCompendiumHarborRunner(
-                tokenizer, tmp_path / "trials", concurrency=1, max_turns=3, timeout=30
+                tokenizer, tmp_path / "trials", concurrency=1, max_turns=3, timeout=30, parallel_tool_calls=False
             ),
             require_rollout_logprobs=False,
             tis_lcs_alert_threshold=0.005,
@@ -504,6 +497,7 @@ async def test_mixed_batch_uses_live_scripted_policy_endpoint_and_produces_train
     assert tensor_batch[5] is None
     assert len(requests) == 2
     assert len(requests[0]["tools"]) == 27
+    assert all(request["parallel_tool_calls"] is False for request in requests)
     assert "ground_truth" not in json.dumps(requests)
     traces = list((tmp_path / "trials").rglob("result.json"))
     assert len(traces) == 1

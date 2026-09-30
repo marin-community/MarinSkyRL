@@ -1,3 +1,4 @@
 concurrency: 8
 max_turns: 8
 timeout: 120
+parallel_tool_calls: null

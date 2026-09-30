@@ -44,6 +44,7 @@ class TaskCompendiumExp(BasePPOExp):
             concurrency=int(cfg.taskcompendium_config.concurrency),
             max_turns=int(cfg.taskcompendium_config.max_turns),
             timeout=float(cfg.taskcompendium_config.timeout),
+            parallel_tool_calls=cfg.taskcompendium_config.parallel_tool_calls,
         )
         native_runner = NativeTaskCompendiumRunner(cfg.generator, tokenizer, DirectModelClient(inference_engine_client))
         return TaskCompendiumTrajectoryRouter(

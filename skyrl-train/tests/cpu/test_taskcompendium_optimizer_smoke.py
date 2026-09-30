@@ -116,7 +116,7 @@ async def test_mixed_taskcompendium_rollout_updates_cpu_policy(
         router = TaskCompendiumTrajectoryRouter(
             native_runner=NativeTaskCompendiumRunner(cfg, tokenizer, client),
             harbor_runner=TaskCompendiumHarborRunner(
-                tokenizer, tmp_path / "trials", concurrency=1, max_turns=3, timeout=30
+                tokenizer, tmp_path / "trials", concurrency=1, max_turns=3, timeout=30, parallel_tool_calls=False
             ),
             require_rollout_logprobs=False,
             tis_lcs_alert_threshold=0.005,

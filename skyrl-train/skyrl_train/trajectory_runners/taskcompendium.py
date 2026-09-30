@@ -65,9 +65,7 @@ def _native_chat_eligible(
         and convention.supports(specification.answer_type)
         and not specification.environment_requirements.capabilities
         and not specification.tool_providers
-        and not specification.final_tools.functions
-        and specification.final_tools.tool_choice is None
-        and specification.final_tools.parallel_tool_calls is None
+        and not specification.final_tools
         and binding == HarborEnvironmentConfig()
     )
 
@@ -292,13 +290,21 @@ class TaskCompendiumHarborRunner(TrajectoryRunner):
     """Run tool-bearing task packages and reconstruct learner actions from Harbor traces."""
 
     def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, output_dir: Path, *, concurrency: int, max_turns: int, timeout: float
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        output_dir: Path,
+        *,
+        concurrency: int,
+        max_turns: int,
+        timeout: float,
+        parallel_tool_calls: bool | None,
     ):
         self.tokenizer = tokenizer
         self.output_dir = output_dir
         self.concurrency = concurrency
         self.max_turns = max_turns
         self.timeout = timeout
+        self.parallel_tool_calls = parallel_tool_calls
         self.trajectory_sink = None
         self.global_step_fn = None
 
@@ -338,6 +344,7 @@ class TaskCompendiumHarborRunner(TrajectoryRunner):
                 max_turns=self.max_turns,
                 request_timeout=self.timeout,
                 trial_timeout=self.timeout,
+                parallel_tool_calls=self.parallel_tool_calls,
             )
             async with semaphore:
                 result = await run_trial(task_dir, binding, launch, self.output_dir, uuid4().hex)
