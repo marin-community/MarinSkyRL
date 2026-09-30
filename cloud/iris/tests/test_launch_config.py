@@ -112,6 +112,29 @@ def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) ->
     assert validate_launch_config(config).num_nodes == 1
 
 
+def test_launch_preserves_unbounded_retention_at_existing_history_path(tmp_path: Path) -> None:
+    raw = _raw_config()
+    history_path = "s3://runs/original-profile/trajectories"
+    raw["skyrl"]["generator"]["pivot_profiling_resume"] = True
+    raw["skyrl"]["generator"]["trajectory_retention"] = {
+        "enabled": True,
+        "output_path": history_path,
+        "required": True,
+        "sample_fraction": 1.0,
+        "phases": ["eval"],
+        "max_bytes_per_step": None,
+        "max_bytes_per_run": None,
+    }
+    path = tmp_path / "resume.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    config = load_launch_config(path)
+
+    assert config.skyrl.generator.trajectory_retention.output_path == history_path
+    assert config.skyrl.generator.trajectory_retention.max_bytes_per_step is None
+    assert config.skyrl.generator.trajectory_retention.max_bytes_per_run is None
+
+
 @pytest.mark.parametrize(
     ("entrypoint", "max_staleness_steps", "expected"),
     [

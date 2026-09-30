@@ -212,7 +212,8 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
                 "export_root": str(config.artifacts.export_root),
                 "resume_checkpoint_count": int(config.artifacts.resume_checkpoint_count),
                 "trace_root": join_resource_path(str(config.artifacts.attempts_root), "trace_jobs"),
-                "trajectory_root": join_resource_path(str(config.artifacts.attempts_root), "trajectories"),
+                "trajectory_root": raw_skyrl.get("generator", {}).get("trajectory_retention", {}).get("output_path")
+                or join_resource_path(str(config.artifacts.attempts_root), "trajectories"),
                 "export_hf_artifact": bool(config.run.export_hf),
                 "seed": int(config.run.seed),
             },
