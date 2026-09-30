@@ -14,6 +14,7 @@ REPEAT_MODE = "repeat"
 REPLAY_MODE = "router_replay"
 FILTERED_REPLAY_MODE = "router_replay_filtered"
 RESPONSE_REPLAY_MODE = "router_replay_response"
+FILTERED_RESPONSE_REPLAY_MODE = "router_replay_filtered_response"
 NATIVE_AGAIN_MODE = "native_again"
 REPEAT_REPLAY_MODE = "repeat_replay"
 REREAD_REPLAY_MODE = "reread_replay"
@@ -64,6 +65,9 @@ TRAINER_MODES: dict[str, ModeSpec] = {
     REPEAT_REREAD_REPLAY_MODE: ModeSpec(_replay, requires_routes=True, repeat_layout=True, route_source="reread"),
     RESPONSE_REPLAY_MODE: ModeSpec(_replay, requires_routes=True, replays_prompt=False),
     FILTERED_REPLAY_MODE: ModeSpec(_replay, requires_routes=True, requires_keep_fraction=True),
+    FILTERED_RESPONSE_REPLAY_MODE: ModeSpec(
+        _replay, requires_routes=True, requires_keep_fraction=True, replays_prompt=False
+    ),
 }
 
 # Candidate rounding points (see ``mismatch_probe/numerics.py``), each scored under re-read replay (the
@@ -86,6 +90,12 @@ def _with_numerics(base: Callable, flags: Mapping[str, bool]):
 
     return scope
 
+
+# The compiled stacks on generation-route replay, comparable with the replay rows against generation.
+for _candidate in (COMPILED_STACK, COMPILED_STACK_ALL):
+    TRAINER_MODES[f"{REPLAY_MODE}+{_candidate}"] = ModeSpec(
+        _with_numerics(_replay, _NUMERICS_CANDIDATES[_candidate]), requires_routes=True
+    )
 
 for _candidate, _flags in _NUMERICS_CANDIDATES.items():
     TRAINER_MODES[f"{REREAD_REPLAY_MODE}+{_candidate}"] = ModeSpec(
