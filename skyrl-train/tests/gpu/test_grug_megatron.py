@@ -37,6 +37,7 @@ from skyrl_train.utils.torch_utils import logprobs_from_logits
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.grug_serving import (
     LM_HEAD_NAME,
+    MAX_MODEL_LEN,
     ROUTER_NAME,
     STACKED_EXPERT_NAME,
     assert_engine_weights,
@@ -574,13 +575,19 @@ def test_grug_probe_reread_keeps_chosen_tokens_with_prefix_cache(tmp_path):
     try:
         # A full KV block must be shared before the cache-on reread can test
         # reused prefixes instead of merely testing a cache-enabled engine.
-        shared_prefix = [1, 17, 29, 5, 11] * 4
+        shared_prefix = ([1, 17, 29, 5, 11] * MAX_MODEL_LEN)[: MAX_MODEL_LEN - 6]
         prompts = [shared_prefix + [13, 3], shared_prefix + [19, 3]]
         rollout = asyncio.run(
             client.generate(
                 InferenceEngineInput(
                     prompt_token_ids=prompts,
-                    sampling_params={"temperature": 1.0, "max_tokens": 4, "logprobs": 1, "seed": 17},
+                    sampling_params={
+                        "temperature": 1.0,
+                        "max_tokens": 4,
+                        "logprobs": 1,
+                        "seed": 17,
+                        "ignore_eos": True,
+                    },
                 )
             )
         )

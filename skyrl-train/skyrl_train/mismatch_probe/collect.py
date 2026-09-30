@@ -86,6 +86,20 @@ def _reorder_batch(batch: TrainingInputBatch, order: list[int]) -> TrainingInput
     return reordered
 
 
+def _candidate_logprobs(output, overrides):
+    ids = output.get("student_topk_indices")
+    values = output.get("behavior_topk_logprobs")
+    if ids is None or values is None or len(ids) != len(overrides) or len(values) != len(overrides):
+        raise ValueError("vLLM re-read returned incomplete requested candidates")
+    result = []
+    for override, candidates, scores in zip(overrides, ids, values, strict=True):
+        token = override["logprob_token_ids"][0]
+        if len(candidates) != 1 or candidates[0] != [token] or len(scores) != 1 or len(scores[0]) != 1:
+            raise ValueError("vLLM re-read omitted the frozen response token")
+        result.append(float(scores[0][0]))
+    return result
+
+
 def _prompt_group_contract(trainer, samples_per_prompt: int) -> GroupAdvantageInvariant:
     current = trainer.group_advantage_invariant
     minimum = current.minimum_group_size
@@ -343,9 +357,9 @@ class ProbeCollector:
         for cache_mode in cache_modes:
             if cache_mode == CACHE_OFF:
                 await trainer.inference_engine_client.reset_prefix_cache()
-                prefixes = [row.prompt_token_ids + row.vllm_output_ids for row in rows]
-                overrides = None
-                sampling = {"prompt_logprobs": 1}
+                prefixes = [row.prompt_token_ids + row.vllm_output_ids[:-1] for row in rows]
+                overrides = [{"logprob_token_ids": [row.vllm_output_ids[-1]]} for row in rows]
+                sampling = {"prompt_logprobs": 1, "logprobs": 1}
             else:
                 # Cached decode scores require one prefix per frozen response token.
                 prefixes = [
@@ -368,36 +382,27 @@ class ProbeCollector:
                 },
                 "session_ids": None,
             }
-            if overrides is not None:
-                engine_input["sampling_params_per_prompt"] = overrides
+            engine_input["sampling_params_per_prompt"] = overrides
             output = await trainer.inference_engine_client.generate(engine_input)
             duration = time.monotonic() - started
             chosen = []
+            candidates = _candidate_logprobs(output, overrides)
             if cache_mode == CACHE_OFF:
                 prompt_scores = output.get("prompt_logprobs")
                 if prompt_scores is None or len(prompt_scores) != len(rows):
                     raise ValueError("vLLM re-read returned incomplete prompt logprobs")
-                for row, values in zip(rows, prompt_scores, strict=True):
+                for row, values, final_score in zip(rows, prompt_scores, candidates, strict=True):
                     chosen.append(
                         [
                             float(values[len(row.prompt_token_ids) + index][token])
-                            for index, token in enumerate(row.vllm_output_ids)
+                            for index, token in enumerate(row.vllm_output_ids[:-1])
                         ]
+                        + [final_score]
                     )
             else:
-                ids = output.get("student_topk_indices")
-                values = output.get("behavior_topk_logprobs")
-                if ids is None or values is None or len(ids) != len(prefixes) or len(values) != len(prefixes):
-                    raise ValueError("vLLM cached re-read returned incomplete requested candidates")
-                flat = []
-                for override, candidates, scores in zip(overrides, ids, values, strict=True):
-                    token = override["logprob_token_ids"][0]
-                    if len(candidates) != 1 or candidates[0] != [token] or len(scores) != 1 or len(scores[0]) != 1:
-                        raise ValueError("vLLM cached re-read omitted the frozen response token")
-                    flat.append(float(scores[0][0]))
                 offset = 0
                 for row in rows:
-                    chosen.append(flat[offset : offset + len(row.vllm_output_ids)])
+                    chosen.append(candidates[offset : offset + len(row.vllm_output_ids)])
                     offset += len(row.vllm_output_ids)
             label = rescore_scoring(update, cache_mode)
             self.timing[f"{label}/seconds"] = duration
@@ -614,7 +619,7 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
                 await trainer.inference_engine_client.wake_up()
 
         scores = rescore_rows + trainer_rows
-        if update == 0 and probe.source_manifest is None:
+        if update == 0:
             for row, values in zip(probe.probes, probe.generation_scores, strict=True):
                 scores.append(
                     mismatch.ScoreRow(

@@ -575,6 +575,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 and self.use_conversation_multi_turn
             ):
                 if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
+                    self._reject_inexact_chat("an appended EOS token was not sampled by the engine")
                     output_ids.append(self.tokenizer.eos_token_id)
                     if response_logprobs is not None:
                         response_logprobs.append(0.0)

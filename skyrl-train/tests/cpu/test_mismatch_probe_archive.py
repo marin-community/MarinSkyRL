@@ -1,20 +1,98 @@
+import hashlib
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import ray
+import torch
 from finestore import mismatch_probe as mismatch
 from tokenizers import Tokenizer, models
 from transformers import PreTrainedTokenizerFast
 
+from skyrl_train.callbacks.base import TrainerControl, TrainerState
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.inference_engines.vllm_teacher_oracle import tokenizer_vocabulary_fingerprint
 from skyrl_train.mismatch_probe.archive import MismatchArchive, read_frozen_probe
 from skyrl_train.mismatch_probe.collect import ProbeCollector
+from skyrl_train.mismatch_probe.callback import MismatchProbeCallback
+from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
+from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.trainer import RayPPOTrainer
 
 
-def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_path):
+class _InferenceEndpoint:
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+
+    async def reset_prefix_cache(self):
+        pass
+
+    async def generate(self, request):
+        probabilities = torch.log_softmax(torch.arange(32, dtype=torch.float32), dim=0)
+        return {
+            "prompt_logprobs": [
+                [None] + [{token: float(probabilities[token])} for token in sequence[1:]]
+                for sequence in request["prompt_token_ids"]
+            ],
+            "prefix_cache_hit_tokens": [0 for _ in request["prompt_token_ids"]],
+            "student_topk_indices": [
+                [[params["logprob_token_ids"][0]]] for params in request["sampling_params_per_prompt"]
+            ],
+            "behavior_topk_logprobs": [
+                [[float(probabilities[params["logprob_token_ids"][0]])]]
+                for params in request["sampling_params_per_prompt"]
+            ],
+        }
+
+
+class _PolicyEndpoint:
+    def __init__(self):
+        self.actor_infos = [
+            SimpleNamespace(rank=MeshRank(dp=dp, sp=0, tp=0, pp=0, world_size=2, dp_size=2, pp_size=1))
+            for dp in range(2)
+        ]
+
+    def async_run_ray_method(self, dispatch, method, *, data=None):
+        if method == "probe_weights_digest":
+            return ["0" * 64]
+        if method != "probe_forward":
+            raise ValueError(method)
+        width = data.metadata["response_length"]
+        probabilities = torch.log_softmax(torch.arange(32, dtype=torch.float32), dim=0)
+        outputs = []
+        for dp in range(2):
+            start, end = dp * data.batch_size // 2, (dp + 1) * data.batch_size // 2
+            targets = data["rollout_routed_experts"][start:end].reshape(-1, 2)
+            positions = torch.stack(
+                (
+                    data["probe_row_indices"][start:end].repeat_interleave(width),
+                    torch.arange(width).repeat(end - start),
+                ),
+                dim=-1,
+            )
+            controller = MegatronRouterReplay(local_layer_indices=[0], recompute_enabled=False)
+            controller.begin_forward(
+                {0: targets},
+                targets.ne(0).any(-1),
+                data["attention_mask"][start:end, -width:].bool().reshape(-1),
+                record_recompute=False,
+                probe_positions=positions,
+            )
+            router_scores = torch.arange(8, dtype=torch.float32).expand(len(targets), -1)
+            controller.get_replay_topk(
+                0, router_scores, 2, default_compute_topk=lambda scores, k, **kwargs: torch.topk(scores, k)
+            )
+            controller.end_forward()
+            output = TrainingOutputBatch({"output": probabilities[data["sequences"][start:end, -width:]]})
+            output.metadata = {"probe_routes": controller.take_probe_observations()}
+            outputs.append(output)
+        return outputs
+
+
+@pytest.mark.asyncio
+async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_path, monkeypatch):
     uri = str(tmp_path / "probe")
     tokenizer = PreTrainedTokenizerFast(
         tokenizer_object=Tokenizer(models.WordLevel({str(i): i for i in range(32)}, unk_token="0")),
@@ -23,6 +101,7 @@ def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_path):
     )
     cfg = get_default_config()
     cfg.trainer.mismatch_probe.archive_uri = uri
+    cfg.trainer.mismatch_probe.seed = 17
     cfg.trainer.mismatch_probe.prompts.count = 3
     cfg.trainer.mismatch_probe.prompts.samples_per_prompt = 1
     cfg.trainer.policy.megatron_config.moe_router_replay = True
@@ -32,8 +111,9 @@ def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_path):
     trainer.cfg = cfg
     trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
     trainer.tokenizer = tokenizer
-    trainer.inference_engine_client = SimpleNamespace(tokenizer=tokenizer)
-    trainer.policy_model = SimpleNamespace(actor_infos=[SimpleNamespace(rank=SimpleNamespace(dp_size=2))])
+    trainer.inference_engine_client = _InferenceEndpoint(tokenizer)
+    trainer.policy_model = _PolicyEndpoint()
+    monkeypatch.setattr(ray, "get", lambda results: results)
     trainer.critic_model = trainer.ref_model = None
     trainer.all_metrics = {}
     trainer._num_experts_cache = 8
@@ -55,13 +135,14 @@ def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_path):
     assert not collector.training_input["loss_mask"][-1].any()
     for row in probes:
         assert row.route_valid_mask == [[True], [False], [True], [False]]
+    weights_hash = "sha256:" + hashlib.sha256(("0" * 64).encode()).hexdigest()
     generation = [
         mismatch.ScoreRow(
             probe_hash=collector.probe_hash,
             sample_id=row.sample_id,
             scorer="vllm.generate",
             update=0,
-            weights_hash="weights-hash",
+            weights_hash=weights_hash,
             logprobs=values.tolist(),
         )
         for row, values in zip(probes, trajectory["rollout_logprobs"], strict=True)
@@ -70,7 +151,7 @@ def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_path):
         archive=uri,
         status=mismatch.ArchiveStatus.BUILDING,
         probe_hash=collector.probe_hash,
-        starting_weights_hash="weights-hash",
+        starting_weights_hash=weights_hash,
         tokenizer_fingerprint=tokenizer_vocabulary_fingerprint(tokenizer),
         starting_global_step=1,
         scored_updates=[0],
@@ -97,7 +178,7 @@ def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_path):
     finally:
         archive.close()
     source = read_frozen_probe(uri)
-    assert source.manifest.starting_weights_hash == "weights-hash"
+    assert source.manifest.starting_weights_hash == weights_hash
     assert source.probes == probes
     assert list(source.generations.values()) == generation
     cfg.trainer.mismatch_probe.reuse_probe = uri
@@ -107,3 +188,23 @@ def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_path):
     assert reused.probes == probes
     for original, restored in zip(trajectory["rollout_logprobs"], reused.generation_scores, strict=True):
         np.testing.assert_array_equal(restored, original)
+
+    cfg.trainer.mismatch_probe.archive_uri = str(tmp_path / "reused")
+    cfg.trainer.mismatch_probe.score_after_updates = [0, 1, 2]
+    trainer.total_training_steps = 9
+    trainer.global_step = 7
+    trainer.colocate_all = False
+    trainer.all_timings = {}
+    callback = MismatchProbeCallback(cfg)
+    control = TrainerControl()
+    await callback.on_train_begin_async(TrainerState(7, 0, 9, 9), control, trainer=trainer)
+    for step in (8, 9):
+        trainer.global_step = step
+        await callback.on_step_end_async(TrainerState(step, 0, 9, 9), control, trainer=trainer)
+    callback.on_train_end(TrainerState(9, 0, 9, 9), control, trainer=trainer)
+    chained = read_frozen_probe(cfg.trainer.mismatch_probe.archive_uri)
+    assert chained.manifest.scored_updates == [0, 1, 2]
+    assert chained.manifest.scored_global_steps == [7, 8, 9]
+    assert chained.manifest.starting_global_step == 7
+    assert chained.probes == probes
+    assert chained.generations == source.generations

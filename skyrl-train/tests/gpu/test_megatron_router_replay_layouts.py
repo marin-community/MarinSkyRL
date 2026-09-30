@@ -27,6 +27,7 @@ from types import SimpleNamespace
 
 import numpy as np
 from finestore import mismatch_probe as mismatch
+from finestore.reader import ReadView
 
 import pytest
 import ray
@@ -218,8 +219,6 @@ def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path, la
             archive.write(probes=probes, scores=scores)
         finally:
             archive.close()
-        from finestore.reader import ReadView
-
         view = ReadView(collector.archive_uri)
         stored = [mismatch.ScoreRow.model_validate(row) for row in view.scan(mismatch.SCORES_TABLE).to_pylist()]
         for score in stored:

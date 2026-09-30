@@ -381,8 +381,9 @@ class RayPPOTrainer:
                 f"the training dataset has {len(self.train_dataset)} prompts, fewer than one batch of {batch_size}"
             )
         self.total_training_steps = self.num_steps_per_epoch * self.cfg.trainer.epochs
+        self.available_training_steps = self.total_training_steps
         max_steps = self.cfg.trainer.get("max_steps")
-        if max_steps is not None and max_steps > 0 and not self.cfg.trainer.get("mismatch_probe", {}).get("enabled"):
+        if max_steps is not None and max_steps > 0:
             self.total_training_steps = min(self.total_training_steps, max_steps)
         logger.info(f"Steps per epoch: {self.num_steps_per_epoch}, total training steps: {self.total_training_steps}")
 
@@ -1218,6 +1219,7 @@ class RayPPOTrainer:
         if self.colocate_all:
             self.policy_model.backload_to_gpu()
 
+        restored_data = False
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints", self.all_startup_timings):
                 self.global_step, _ = self.load_checkpoints()
@@ -1225,11 +1227,13 @@ class RayPPOTrainer:
             if self._restored_rollout_state is not None:
                 await self.context.load_state_dict(self._restored_rollout_state)
                 self._restored_rollout_state = None
+                restored_data = True
 
         probe = self.cfg.trainer.mismatch_probe
         if probe.enabled:
             final_step = self.global_step + probe.score_after_updates[-1]
-            if final_step > self.total_training_steps:
+            available_steps = self.available_training_steps + (0 if restored_data else self.global_step)
+            if final_step > available_steps:
                 raise ValueError("mismatch probe update schedule exceeds the available training batches")
             self.total_training_steps = final_step
 
