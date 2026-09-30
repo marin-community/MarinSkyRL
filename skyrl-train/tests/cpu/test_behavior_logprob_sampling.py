@@ -122,3 +122,37 @@ def test_checked_in_behavior_logprob_configs_use_validated_sampling():
         checked.append(path.name)
 
     assert checked
+
+
+def test_mismatch_probe_samples_the_distribution_the_trainer_scores():
+    """A probe run leaves no sampling transform, including the first-token stop mask, the trainer omits."""
+    from unittest import mock
+
+    from skyrl_train.config.utils import get_default_config
+    from skyrl_train.utils.utils import validate_cfg
+
+    cfg = get_default_config()
+    OmegaConf.set_struct(cfg, False)
+    probe = cfg.trainer.mismatch_probe
+    probe.enabled = True
+    probe.seed = 17
+    probe.archive_uri = "memory://probe"
+    probe.prompts.count = 2
+    probe.prompts.samples_per_prompt = 1
+    probe.score_after_updates = [0]
+    cfg.trainer.max_steps = 0
+    cfg.trainer.algorithm.use_tis = False
+    cfg.generator.require_exact_chat_transport = True
+    cfg.generator.sampling_params.temperature = 1.0
+    cfg.generator.sampling_params.logprobs = 0
+    cfg.generator.engine_init_kwargs.logprobs_mode = "processed_logprobs"
+    cfg.generator.engine_init_kwargs.generation_config = "vllm"
+    assert cfg.generator.sampling_params.get("min_tokens") is None
+
+    with mock.patch("transformers.AutoConfig.from_pretrained", side_effect=OSError("offline")):
+        validate_cfg(cfg)
+
+    assert get_vllm_sampling_params(cfg.generator.sampling_params)["min_tokens"] == 0
+    assert pop_vllm_wrapper_kwargs(OmegaConf.to_container(cfg.generator.engine_init_kwargs)) == {
+        "validate_rollout_logprob_sampling": True
+    }
