@@ -42,7 +42,7 @@ from skyrl_train.mismatch_probe.protocol import (
     request_seed,
     require_token_identity,
 )
-from skyrl_train.mismatch_probe.modes import FILTERED_REPLAY_MODE, NATIVE_MODE, REPEAT_MODE
+from skyrl_train.mismatch_probe.modes import NATIVE_MODE, REPEAT_MODE, TRAINER_MODES
 from skyrl_train.mismatch_probe.provenance import manifest
 from skyrl_train.models.megatron_router_replay import SENTINEL_EXPERT_ID
 from skyrl_train.training_batch import TrainingInputBatch
@@ -516,12 +516,14 @@ class ProbeCollector:
                 ["response_length"],
             )
             data["probe_row_indices"] = torch.arange(data.batch_size, dtype=torch.long)
-            if mode in {NATIVE_MODE, REPEAT_MODE} and route_tensor is not None:
+            if not TRAINER_MODES[mode].requires_routes and route_tensor is not None:
                 data["rollout_routed_experts"] = torch.zeros_like(route_tensor)
             if mode == REPEAT_MODE:
                 data = _reorder_batch(data, order + list(range(n, data.batch_size)))
             micro_batch_size = self.batch_layout.repeat_micro_batch_size if mode == REPEAT_MODE else None
-            fraction = float(self.spec.filtered_replay.keep_fraction) if mode == FILTERED_REPLAY_MODE else None
+            fraction = (
+                float(self.spec.filtered_replay.keep_fraction) if TRAINER_MODES[mode].requires_keep_fraction else None
+            )
             data.metadata.update(
                 probe_mode=mode,
                 probe_keep_fraction=fraction,
