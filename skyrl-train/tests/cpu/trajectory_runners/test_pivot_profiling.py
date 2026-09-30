@@ -2,6 +2,7 @@
 
 import pytest
 from omegaconf import OmegaConf
+from skyrl_gym.verification import VerificationResult
 
 from skyrl_train.pivot_profiling import profile_candidates
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
@@ -59,9 +60,7 @@ async def test_profile_streams_all_batches_and_stops_session_on_error(invalid):
         ]
         for i in range(2)
     ]
-    runner = ProfilingRunner(
-        [None if invalid else {"status": "verified", "score": 0}, {"status": "verified", "score": 1}]
-    )
+    runner = ProfilingRunner([None if invalid else VerificationResult.verified(0), VerificationResult.verified(1)])
     if invalid:
         with pytest.raises(ValueError, match="binary verifier"):
             await profile_candidates(batches, runner, cfg)

@@ -1,5 +1,7 @@
 """Stream frozen-policy profiling through the normal rollout and verifier path."""
 
+from dataclasses import asdict
+
 from loguru import logger
 
 from marinskyrl.pivot import is_context_exclusion
@@ -30,12 +32,12 @@ async def profile_candidates(dataloader, runner, cfg) -> dict[str, float]:
             for verdict in batch["verification_results"]:
                 if verdict is None:
                     raise ValueError("Profiling requires a binary verifier verdict for every response")
-                if is_context_exclusion(verdict):
+                if is_context_exclusion(asdict(verdict)):
                     excluded += 1
                     continue
-                if verdict["status"] != "verified" or verdict["score"] not in (0, 1):
+                if verdict.status != "verified" or verdict.score not in (0, 1):
                     raise ValueError("Profiling requires a binary verifier verdict for every response")
-                passed += verdict["score"]
+                passed += verdict.score
                 count += 1
             logger.info("Profiled {} actions; mean success={:.4f}", count, passed / max(1, count))
     finally:
