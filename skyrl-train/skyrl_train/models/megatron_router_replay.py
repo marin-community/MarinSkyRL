@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from collections import deque
 from contextlib import contextmanager
+from skyrl_train.config.router_replay import validate_replay_keep_fraction
 from skyrl_train.mismatch_probe.modes import FILTERED_REPLAY_MODE, REPLAY_MODE
 from enum import Enum
 import math
@@ -196,8 +197,7 @@ def filtered_replay_topk(
     """Filtered router replay (Composer 2 Technical Report, arXiv:2603.24477): replay vLLM's experts except those whose trainer selection score is below keep_fraction of the trainer's k-th best, refilling those slots with the trainer's next-best unused experts."""
     if score_type is RouterScoreType.BIASED_PROBABILITIES:
         raise NotImplementedError("filtered replay does not support expert bias added to probability scores")
-    if not 0.0 <= keep_fraction <= 1.0 or not math.isfinite(keep_fraction):
-        raise ValueError("filtered replay keep_fraction must be finite and in [0, 1]")
+    validate_replay_keep_fraction(keep_fraction, "filtered replay keep_fraction")
     if scores.ndim != 2 or native_idx.shape != targets.shape or native_idx.shape[0] != scores.shape[0]:
         raise ValueError("filtered replay scores, native choices and captured choices have incompatible shapes")
     if mask.shape != (scores.shape[0],):
@@ -239,7 +239,11 @@ class MegatronRouterReplay:
     rank's model chunks own.
     """
 
-    def __init__(self, local_layer_indices: Sequence[int], *, recompute_enabled: bool) -> None:
+    def __init__(
+        self, local_layer_indices: Sequence[int], *, recompute_enabled: bool, keep_fraction: float | None = None
+    ) -> None:
+        if keep_fraction is not None:
+            validate_replay_keep_fraction(keep_fraction, "filtered replay keep_fraction")
         self.local_layer_indices: tuple[int, ...] = tuple(sorted(local_layer_indices))
         # Filled by the installer from the resolved model config; the target
         # builder validates every batch against them before arming.
@@ -264,8 +268,8 @@ class MegatronRouterReplay:
         self._hit_rows = 0
         self._response_rows = 0
         self._sentinel_rows = 0
-        self._scoring_mode = REPLAY_MODE
-        self._keep_fraction: float | None = None
+        self._scoring_mode = REPLAY_MODE if keep_fraction is None else FILTERED_REPLAY_MODE
+        self._keep_fraction = keep_fraction
 
     @contextmanager
     def scoring_mode(self, mode: str, keep_fraction: float | None = None):
@@ -274,8 +278,8 @@ class MegatronRouterReplay:
             raise RuntimeError("router replay: scoring mode requires an idle controller")
         if mode not in (REPLAY_MODE, FILTERED_REPLAY_MODE):
             raise ValueError(f"unsupported replay scoring mode: {mode}")
-        if mode == FILTERED_REPLAY_MODE and keep_fraction is None:
-            raise ValueError("filtered replay requires keep_fraction")
+        if mode == FILTERED_REPLAY_MODE:
+            validate_replay_keep_fraction(keep_fraction, "filtered replay keep_fraction")
         previous = (self._scoring_mode, self._keep_fraction)
         self._scoring_mode, self._keep_fraction = mode, keep_fraction
         try:
@@ -407,6 +411,7 @@ class MegatronRouterReplay:
         forward.
         """
         probs, native_idx = default_compute_topk(scores, topk, num_groups=num_groups, group_topk=group_topk)
+        is_forward = self._phase is _Phase.FORWARD
         targets, mask = self._targets_for_call(layer_idx, scores)
 
         if targets.shape[0] != scores.shape[0]:
@@ -423,11 +428,14 @@ class MegatronRouterReplay:
         mask = mask.to(device=scores.device, dtype=torch.bool)
         targets = targets.to(device=scores.device)
         replaced = torch.zeros_like(targets, dtype=torch.bool)
-        if self._scoring_mode == FILTERED_REPLAY_MODE:
+        if self._scoring_mode == FILTERED_REPLAY_MODE and is_forward:
             idx, replaced = filtered_replay_topk(scores, native_idx, targets, mask, self._keep_fraction, score_type)
         else:
             idx = torch.where(mask.unsqueeze(-1), targets, native_idx)
         probs = scores.gather(1, idx)
+
+        if is_forward and self._recompute_enabled and self._record_recompute:
+            self._fifo[layer_idx].append((idx.detach(), mask))
 
         if self._probe_positions is not None:
             if self._probe_positions.shape[0] != scores.shape[0]:
@@ -486,12 +494,6 @@ class MegatronRouterReplay:
                 raise ValueError(f"router replay: layer {layer_idx} consumed twice in one forward")
             self._consumed.add(layer_idx)
             targets, mask = self._current[layer_idx]
-            # Activation-checkpointed training forwards run under no_grad;
-            # the caller, not grad mode, identifies whether backward follows.
-            if self._recompute_enabled and self._record_recompute:
-                if layer_idx not in self._fifo:
-                    raise ValueError(f"router replay: layer {layer_idx} has no FIFO; not a local layer")
-                self._fifo[layer_idx].append((targets, mask))
             return targets, mask
         if not self._recompute_enabled or layer_idx not in self._fifo or not self._fifo[layer_idx]:
             raise RuntimeError(

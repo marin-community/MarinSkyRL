@@ -1015,11 +1015,19 @@ async def test_agent_loop_initial_prompt_over_budget_returns_empty_rollout(
 
 @pytest.mark.asyncio
 async def test_generate_aggregates_aime_step_metadata(tokenizer, mock_llm, generator_cfg):
-    mock_llm.generate = AsyncMock(
+    # AIME requests exact chat transport, so the engine renders and completes the chat.
+    mock_llm.model_name = "aime-test"
+    mock_llm.tokenizer = tokenizer
+    mock_llm.tokenize = AsyncMock(return_value={"tokens": [1, 2, 3]})
+    mock_llm.chat_completion = AsyncMock(
         return_value={
-            "responses": ["Answer: \\boxed{42}"],
-            "stop_reasons": ["stop"],
-            "response_ids": [SAMPLED_IDS.copy()],
+            "choices": [
+                {
+                    "token_ids": SAMPLED_IDS.copy(),
+                    "message": {"role": "assistant", "content": "Answer: \\boxed{42}"},
+                    "finish_reason": "stop",
+                }
+            ]
         }
     )
     runner = SkyRLGymTrajectoryRunner(

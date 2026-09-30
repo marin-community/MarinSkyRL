@@ -5,6 +5,7 @@ from typing import List, Tuple, Union, Optional, Dict, Any, Sequence
 from collections import defaultdict
 from enum import StrEnum
 import numpy as np
+from skyrl_train.io import io
 from skyrl_train.group_admission import group_is_fully_excluded_from_training
 from skyrl_train.trajectory_runners.types import (
     TrajectoryBatch,
@@ -499,8 +500,7 @@ def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConf
             )
     elif source == "file":
         try:
-            with open(name_or_path, "r", encoding="utf-8") as f:
-                return f.read()
+            return io.read_bytes(name_or_path).decode("utf-8")
         except FileNotFoundError as e:
             raise ValueError(f"Template file '{name_or_path}' not found") from e
         except OSError as e:

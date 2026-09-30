@@ -44,3 +44,4 @@ check_train_eval_parity: false
 
 # Replay expert choices captured during rollout.
 moe_router_replay: false
+moe_router_replay_keep_fraction: null

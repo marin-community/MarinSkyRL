@@ -226,19 +226,31 @@ class TestControllerSingleForward:
 
 
 class TestControllerRecomputeFifo:
-    def test_checkpointed_no_grad_forward_still_records_for_recompute(self):
-        scores = torch.randn(4, 8)
-        targets, mask = _masked_target_rows(4, 2, 8, 4)
-        controller = MegatronRouterReplay(local_layer_indices=[0], recompute_enabled=True)
+    @pytest.mark.parametrize("training_fraction", [None, 0.5], ids=["unfiltered-training", "filtered-training"])
+    def test_checkpointed_no_grad_forward_still_records_for_recompute(self, training_fraction):
+        scores = torch.tensor([[-4.0, -3.0, -2.0, -1.0]])
+        targets, mask = torch.tensor([[0, 1]]), torch.tensor([True])
+        controller = MegatronRouterReplay(
+            local_layer_indices=[0], recompute_enabled=True, keep_fraction=training_fraction
+        )
         handle = LayerReplayHandle(controller, layer_idx=0)
+
+        def compute_topk(values, topk, **kwargs):
+            return torch.topk(values, topk, dim=-1)
 
         controller.begin_forward({0: targets}, mask, record_recompute=True)
         with torch.no_grad():
-            handle.get_replay_topk(scores, 2, None, None, _fake_compute_topk)
+            _, forward_indices = handle.get_replay_topk(scores, 2, None, None, compute_topk)
         controller.end_forward()
 
-        _, recomputed_indices = handle.get_replay_topk(scores, 2, None, None, _fake_compute_topk)
-        assert torch.equal(recomputed_indices, targets)
+        expected = [[0, 1]] if training_fraction is None else [[3, 2]]
+        assert forward_indices.tolist() == expected
+        recompute_scores = scores.flip(-1).clone().requires_grad_()
+        values, recomputed_indices = handle.get_replay_topk(recompute_scores, 2, None, None, compute_topk)
+        assert recomputed_indices.tolist() == expected
+        values.sum().backward()
+        expected_gradient = [[1.0, 1.0, 0.0, 0.0]] if training_fraction is None else [[0.0, 0.0, 1.0, 1.0]]
+        assert recompute_scores.grad.tolist() == expected_gradient
         controller.assert_drained()
 
     def test_pp_interleave_serves_each_recompute_with_its_own_micro_batch(self):

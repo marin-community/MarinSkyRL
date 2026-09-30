@@ -2,6 +2,7 @@
 uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/test_skyrl_gym_runner_chat_templating.py
 """
 
+import fsspec
 import pytest
 from typing import Dict, Any
 from unittest.mock import AsyncMock, MagicMock
@@ -111,6 +112,7 @@ def _make_input_batch(prompt, extras):
         # Qwen3: test all three tokenization paths
         ("Qwen/Qwen3-0.6B", "tito", QWEN3_TITO_EXPECTED_STR),
         ("Qwen/Qwen3-0.6B", "custom_chat_template_from_path", QWEN3_WITHOUT_THINKING_EXPECTED_STR),
+        ("Qwen/Qwen3-0.6B", "custom_chat_template_from_uri", QWEN3_WITHOUT_THINKING_EXPECTED_STR),
         ("Qwen/Qwen3-0.6B", "custom_chat_template_builtin", QWEN3_WITHOUT_THINKING_EXPECTED_STR),
     ],
     ids=[
@@ -118,6 +120,7 @@ def _make_input_batch(prompt, extras):
         "llama3_2-tito",
         "qwen3-tito",
         "qwen3-custom_chat_template_from_path",
+        "qwen3-custom_chat_template_from_uri",
         "qwen3-custom_chat_template_builtin",
     ],
 )
@@ -158,7 +161,13 @@ async def test_skyrl_gym_runner_chat_templating_exact(model_name, tokenization_c
 
     mock_llm.generate = AsyncMock(side_effect=mock_generate)
     chat_template_config = None
-    if "Qwen3" in model_name and tokenization_codepath == "custom_chat_template_from_path":
+    if "Qwen3" in model_name and tokenization_codepath == "custom_chat_template_from_uri":
+        template_path = Path(__file__).parent / "qwen3_acc_without_thinking.jinja2"
+        uri = "memory://chat-template-test/qwen3.jinja"
+        filesystem = fsspec.filesystem("memory")
+        filesystem.pipe(uri, template_path.read_bytes())
+        chat_template_config = {"source": "file", "name_or_path": uri}
+    elif "Qwen3" in model_name and tokenization_codepath == "custom_chat_template_from_path":
         template_path = Path(__file__).parent / "qwen3_acc_without_thinking.jinja2"
         chat_template_config = {"source": "file", "name_or_path": str(template_path)}
     elif "Qwen3" in model_name and tokenization_codepath == "custom_chat_template_builtin":
