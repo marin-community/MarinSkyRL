@@ -882,3 +882,36 @@ def test_validate_batch_sizes_requires_even_division_across_ranks(default_config
         return
     with pytest.raises(AssertionError, match=error):
         validate_batch_sizes(cfg)
+
+
+def test_grpo_reports_one_flat_and_one_varied_reward_group():
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "step_wise_training": False,
+                "algorithm": {
+                    "advantage_estimator": "grpo",
+                    "gamma": 1.0,
+                    "lambd": 1.0,
+                    "grpo_norm_by_std": True,
+                },
+            }
+        }
+    )
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.exact_physical(physical_group_size=2)
+    trainer.all_metrics = {}
+    data = TrainingInputBatch(
+        {
+            "rewards": torch.tensor([[1.0], [1.0], [0.0], [2.0]]),
+            "response_mask": torch.ones(4, 1),
+            "values": None,
+        }
+    )
+    data.metadata = {"uids": ["easy", "easy", "hard", "hard"], "avg_response_length": 1.0}
+
+    result = trainer.compute_advantages_and_returns(data)
+
+    assert trainer.all_metrics["reward/zero_std_group_fraction"] == pytest.approx(0.5)
+    assert torch.equal(result["advantages"][:2], torch.zeros(2, 1))
+    assert torch.isfinite(result["advantages"]).all()

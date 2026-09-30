@@ -53,11 +53,11 @@ Paths are relative to ``skyrl-train/skyrl_train/``.
    * - Declarations and checks
      - Torch-free, so the launcher runs them before submission; the same checks run again at start-up
      - ``config/objective_spec.py``
-     - ``RatioAnchor``, ``LossSpec``, ``BUILTIN_LOSS_SPECS``, ``LossReduction``, ``TopKLossParams``, ``resolve_objective_config``, ``validate_objective``
+     - ``RatioAnchor``, ``LossSpec``, ``BUILTIN_LOSS_SPECS``, ``LossReduction``, ``TopKLossParams``, ``topk_loss_params``, ``rollout_logprobs_required``, ``validate_objective``
    * - Non-finite steps
      - On Megatron, skips an optimizer step whose gradients are NaN or infinite on any rank; fails after too many in a row
-     - ``distributed/megatron/nonfinite_steps.py``
-     - ``NonfiniteStepAction``, ``OptimizerStepResult``, ``nonfinite_step_action``
+     - ``distributed/step_policy.py``
+     - ``NonfiniteStepPolicy``, ``OptimizerStepResult``, ``nonfinite_step_policy``
    * - Names
      - Maps each ``policy_loss_type`` to its function
      - ``utils/algorithm_registry.py``
@@ -68,6 +68,9 @@ Where each part runs
 
 1. **At launch.** ``validate_objective`` rejects contradictory or ignored
    settings, both before the job is submitted and when the driver starts.
+   Workers and rollout consumers compute teacher-loss parameters and logprob
+   requirements from the current config through Torch-free helpers. Custom loss
+   declarations travel with their functions through the Ray registry.
 
 2. **On the driver, once per training batch** (``trainer.py``):
 
@@ -293,7 +296,7 @@ They are internal worker information, not user configuration fields.
 Adding a policy loss
 --------------------
 
-Register a function with ``register_policy_loss(name, spec)`` and return
+Register a function with ``register_policy_loss(name, spec=...)`` and return
 ``TokenLoss(values, metrics)`` where ``values`` has the same response-token
 shape as its input log probabilities. Do not average within that function.
 ``LossSpec`` declares the ratio anchor, sequence-level credit requirement,

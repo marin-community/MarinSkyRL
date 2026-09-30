@@ -48,10 +48,10 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
 from transformers import PreTrainedTokenizer
 from megatron.core.optimizer import ChainedOptimizer, DistributedOptimizer
 from megatron.core.optimizer.clip_grads import clip_grad_by_total_norm_fp32
-from skyrl_train.distributed.megatron.nonfinite_steps import (
-    NonfiniteStepAction,
+from skyrl_train.distributed.step_policy import (
+    NonfiniteStepPolicy,
     OptimizerStepResult,
-    nonfinite_step_action,
+    nonfinite_step_policy,
 )
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
@@ -181,11 +181,9 @@ class MegatronStrategy(DistributedStrategy):
         flag.fill_(int(found_inf or not math.isfinite(grad_norm)))
         dist.all_reduce(flag, op=dist.ReduceOp.MAX)
         if flag.item():
-            action = nonfinite_step_action(
-                float("nan"), True, consecutive_nonfinite_steps, max_consecutive_nonfinite_steps
-            )
+            action = nonfinite_step_policy(consecutive_nonfinite_steps, max_consecutive_nonfinite_steps)
             optimizer.zero_grad()
-            if action is NonfiniteStepAction.FAIL:
+            if action is NonfiniteStepPolicy.FAIL:
                 raise RuntimeError(
                     f"nonfinite policy gradients after {consecutive_nonfinite_steps} consecutive skipped steps; "
                     f"max_consecutive_nonfinite_steps={max_consecutive_nonfinite_steps}"

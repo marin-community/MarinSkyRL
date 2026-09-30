@@ -410,7 +410,7 @@ def validate_engine_init_kwargs(
             f"FORBIDDEN KEYS FOUND:\n{forbidden_list}\n\n"
             f"Remove these from your config. SkyRL handles them automatically.\n\n"
             f"FULL LIST OF SKYRL-INTERNAL KWARGS (never set these):\n{all_forbidden}\n\n"
-            f"SAFE TO SET: custom_chat_template_*, kv_cache_dtype, quantization, cpu_offload_gb, etc."
+            f"SAFE TO SET: kv_cache_dtype, quantization, cpu_offload_gb, etc."
         )
 
 
@@ -649,6 +649,7 @@ _OPTIONAL_HYDRA_PATTERNS = {
     ".distillation",
     ".domain_weights",
     ".engine_init_kwargs",
+    ".chat_template_kwargs",
     ".speculative_decoding",
     ".hf_hub_",
     ".enable_db_registration",
