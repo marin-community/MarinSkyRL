@@ -667,7 +667,7 @@ def create_ray_wrapped_inference_engines(
     # engines share one flat PACK group to avoid fragmenting policy nodes.
     per_engine_pgs: list = []
     owned_placement_groups: list = []
-    use_per_engine_strict_pack = use_per_engine_strict_pack_pg(
+    use_per_engine_placement_group = use_per_engine_strict_pack_pg(
         use_hybrid_engine=use_hybrid_engine,
         use_mp_backend=use_mp_backend,
         tensor_parallel_size=tensor_parallel_size,
@@ -692,7 +692,7 @@ def create_ray_wrapped_inference_engines(
             shared_pg = placement_group(bundles, strategy="PACK")
             owned_placement_groups.append(shared_pg)
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
-        elif use_per_engine_strict_pack:
+        elif use_per_engine_placement_group:
             # Keep each engine's bundles in one placement group. STRICT_PACK
             # keeps ordinary multi-GPU engines on one node; explicit cross-node
             # EP uses PACK to spread its DP ranks across nodes.
