@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+import posixpath
 import tempfile
 from typing import Any, Mapping
 
@@ -243,7 +244,7 @@ def load_launch_config(path: Path) -> DictConfig:
         config = _compose_source_recipe(config)
     probe = config.skyrl.get("trainer", {}).get("mismatch_probe", {})
     if probe.get("enabled") and not probe.get("archive_uri"):
-        artifact_root = str(config.artifacts.resolved_config_uri).rsplit("/", 1)[0]
+        artifact_root = posixpath.dirname(str(config.artifacts.resolved_config_uri))
         probe.archive_uri = join_resource_path(artifact_root, "mismatch_probe")
     validate_launch_config(config)
     return config

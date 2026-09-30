@@ -19,15 +19,17 @@ CACHE_OFF = "off"
 CACHE_ON = "on"
 CACHE_BOTH = "both"
 PROBE_CACHE_MODES = frozenset({CACHE_OFF, CACHE_ON, CACHE_BOTH})
-GENERATION_SCORING = "vllm.generate@0"
+GENERATION_SCORER = "vllm.generate"
+RESCORE_SCORER = "vllm.rescore"
+TRAINER_SCORER = "trainer"
 
 
-def rescore_scoring(update: int, cache_mode: str) -> str:
+def rescore_label(update: int, cache_mode: str) -> str:
     """Name a vLLM score group by update and prefix-cache mode."""
     return f"vllm.rescore@{update}" if cache_mode == CACHE_OFF else f"vllm.rescore@{update}:{cache_mode}"
 
 
-def trainer_scoring(update: int, mode: str) -> str:
+def trainer_label(update: int, mode: str) -> str:
     """Name a Megatron score group by update and routing mode."""
     return f"trainer@{update}:{mode}"
 

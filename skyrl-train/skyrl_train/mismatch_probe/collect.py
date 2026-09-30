@@ -21,8 +21,11 @@ from skyrl_train.config.mismatch_probe import (
     CACHE_BOTH,
     CACHE_OFF,
     CACHE_ON,
-    rescore_scoring,
-    trainer_scoring,
+    GENERATION_SCORER,
+    RESCORE_SCORER,
+    TRAINER_SCORER,
+    rescore_label,
+    trainer_label,
 )
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.group_admission import GroupAdvantageInvariant, GroupAdvantageKind
@@ -68,6 +71,19 @@ class ProbeSamples:
     prompt_ids: list[str]
     sample_ids: list[str]
     seeds: list[int]
+
+
+@dataclass(frozen=True)
+class BatchLayout:
+    sample_ids: list[str]
+    native_order: list[int]
+    repeat_order: list[int]
+    padded_rows: int
+    native_micro_batch_size: int
+    repeat_micro_batch_size: int
+    collated_bytes: int
+    collated_route_bytes: int
+    nonzero_advantage_samples: int
 
 
 def _encode_routes(routes: torch.Tensor | None, length: int) -> EncodedRoutes:
@@ -127,7 +143,7 @@ class ProbeCollector:
         self.generation_scores: list[np.ndarray] | None = None
         self.timing: dict[str, float] = {}
         self.weights: dict[int, str] = {}
-        self.batch_layout: dict[str, object] = {}
+        self.batch_layout: BatchLayout | None = None
         self.metrics: dict[str, object] = {}
         self.created_at = datetime.now(UTC).isoformat()
         self.starting_global_step: int | None = None
@@ -326,28 +342,28 @@ class ProbeCollector:
             for row, scores in zip(self.probes, self.generation_scores, strict=True)
         ):
             raise ValueError("mismatch probe generation-time logprob vectors are incomplete or nonfinite")
-        self.batch_layout = {
-            "sample_ids": sample_ids,
-            "native_order": list(range(len(sample_ids))),
-            "repeat_order": list(reversed(range(len(sample_ids)))),
-            "padded_rows": padded_count,
-            "native_micro_batch_size": int(trainer.cfg.trainer.micro_forward_batch_size_per_gpu),
-            "repeat_micro_batch_size": max(2, 2 * int(trainer.cfg.trainer.micro_forward_batch_size_per_gpu)),
-            "collated_bytes": sum(
+        self.batch_layout = BatchLayout(
+            sample_ids=sample_ids,
+            native_order=list(range(len(sample_ids))),
+            repeat_order=list(reversed(range(len(sample_ids)))),
+            padded_rows=padded_count,
+            native_micro_batch_size=int(trainer.cfg.trainer.micro_forward_batch_size_per_gpu),
+            repeat_micro_batch_size=max(2, 2 * int(trainer.cfg.trainer.micro_forward_batch_size_per_gpu)),
+            collated_bytes=sum(
                 value.numel() * value.element_size() for value in training_input.values() if value is not None
             ),
-            "collated_route_bytes": (
+            collated_route_bytes=(
                 0
                 if training_input.get("rollout_routed_experts") is None
                 else training_input["rollout_routed_experts"].numel()
                 * training_input["rollout_routed_experts"].element_size()
             ),
-            "nonzero_advantage_samples": (
+            nonzero_advantage_samples=(
                 0
                 if training_input.get("advantages") is None
                 else int((training_input["advantages"].abs().sum(dim=1) > 0).sum().item())
             ),
-        }
+        )
 
     async def _rescore_vllm(self, trainer, update: int):
         rows = self.probes
@@ -404,7 +420,7 @@ class ProbeCollector:
                 for row in rows:
                     chosen.append(candidates[offset : offset + len(row.vllm_output_ids)])
                     offset += len(row.vllm_output_ids)
-            label = rescore_scoring(update, cache_mode)
+            label = rescore_label(update, cache_mode)
             self.timing[f"{label}/seconds"] = duration
             cache_hits = output.get("prefix_cache_hit_tokens")
             if cache_hits is None or len(cache_hits) != len(prefixes):
@@ -419,7 +435,7 @@ class ProbeCollector:
                     mismatch.ScoreRow(
                         probe_hash=self.probe_hash,
                         sample_id=row.sample_id,
-                        scorer="vllm.rescore",
+                        scorer=RESCORE_SCORER,
                         update=update,
                         weights_hash=self.weights[update],
                         cache_mode=cache_mode,
@@ -435,7 +451,7 @@ class ProbeCollector:
             raise ValueError("policy workers did not return complete weight digests")
         return "sha256:" + hashlib.sha256("".join(shards).encode()).hexdigest()
 
-    def _route_observations(self, trainer, outputs, mode: str):
+    def _route_observations(self, outputs, mode: str):
         """Gather PP-owned router choices by frozen sample and captured layer."""
         if not self.cfg.trainer.policy.megatron_config.moe_router_replay or all(
             row.routed_experts is None for row in self.probes
@@ -456,7 +472,7 @@ class ProbeCollector:
                 sample = int(observation["sample"])
                 position = int(observation["position"])
                 layer = int(observation["layer"])
-                if sample < 0 or sample >= len(self.probes) + self.batch_layout["padded_rows"]:
+                if sample < 0 or sample >= len(self.probes) + self.batch_layout.padded_rows:
                     raise ValueError(f"probe router returned sample index {sample} outside the frozen batch")
                 if sample >= len(self.probes):
                     continue
@@ -494,7 +510,7 @@ class ProbeCollector:
         modes = (NATIVE_MODE, REPEAT_MODE, *self.spec.extra_trainer_modes)
         result = []
         for mode in modes:
-            order = self.batch_layout["repeat_order"] if mode == REPEAT_MODE else self.batch_layout["native_order"]
+            order = self.batch_layout.repeat_order if mode == REPEAT_MODE else self.batch_layout.native_order
             data = training_input.select(
                 ["sequences", "attention_mask", *(["rollout_routed_experts"] if route_tensor is not None else [])],
                 ["response_length"],
@@ -504,7 +520,7 @@ class ProbeCollector:
                 data["rollout_routed_experts"] = torch.zeros_like(route_tensor)
             if mode == REPEAT_MODE:
                 data = _reorder_batch(data, order + list(range(n, data.batch_size)))
-            micro_batch_size = self.batch_layout["repeat_micro_batch_size"] if mode == REPEAT_MODE else None
+            micro_batch_size = self.batch_layout.repeat_micro_batch_size if mode == REPEAT_MODE else None
             fraction = float(self.spec.filtered_replay.keep_fraction) if mode == FILTERED_REPLAY_MODE else None
             data.metadata.update(
                 probe_mode=mode,
@@ -515,9 +531,9 @@ class ProbeCollector:
             started = time.monotonic()
             outputs = ray.get(trainer.policy_model.async_run_ray_method("mesh", "probe_forward", data=data))
             values = concatenate_outputs_after_mesh_dispatch(trainer.policy_model.actor_infos, outputs)["output"][:n]
-            route_observations = self._route_observations(trainer, outputs, mode)
+            route_observations = self._route_observations(outputs, mode)
             duration = time.monotonic() - started
-            label = trainer_scoring(update, mode)
+            label = trainer_label(update, mode)
             self.timing[f"{label}/seconds"] = duration
             for ordered_position, original_position in enumerate(order):
                 row = rows[original_position]
@@ -529,7 +545,7 @@ class ProbeCollector:
                     mismatch.ScoreRow(
                         probe_hash=self.probe_hash,
                         sample_id=row.sample_id,
-                        scorer="trainer",
+                        scorer=TRAINER_SCORER,
                         mode=mode,
                         update=update,
                         weights_hash=self.weights[update],
@@ -625,7 +641,7 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
                     mismatch.ScoreRow(
                         probe_hash=probe.probe_hash,
                         sample_id=row.sample_id,
-                        scorer="vllm.generate",
+                        scorer=GENERATION_SCORER,
                         update=0,
                         weights_hash=probe.weights[0],
                         logprobs=values,
@@ -641,15 +657,15 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
             },
         }
         reference = {
-            row.sample_id: row for row in scores if row.scorer == "vllm.rescore" and row.cache_mode == CACHE_OFF
+            row.sample_id: row for row in scores if row.scorer == RESCORE_SCORER and row.cache_mode == CACHE_OFF
         }
         if not reference:
             reference = {
-                row.sample_id: row for row in scores if row.scorer == "vllm.rescore" and row.cache_mode == CACHE_ON
+                row.sample_id: row for row in scores if row.scorer == RESCORE_SCORER and row.cache_mode == CACHE_ON
             }
         if len(reference) == len(probe.probes):
             for mode in (NATIVE_MODE, REPEAT_MODE, *probe.spec.extra_trainer_modes):
-                scored = {row.sample_id: row for row in scores if row.scorer == "trainer" and row.mode == mode}
+                scored = {row.sample_id: row for row in scores if row.scorer == TRAINER_SCORER and row.mode == mode}
                 if len(scored) != len(probe.probes):
                     continue
                 delta = np.concatenate(
@@ -673,10 +689,10 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
         trainer.all_metrics[f"mismatch_probe/update_{update}/route_bytes"] = probe.metrics[f"update@{update}"][
             "route_bytes"
         ]
-        trainer.all_metrics[f"mismatch_probe/update_{update}/collated_bytes"] = probe.batch_layout["collated_bytes"]
-        trainer.all_metrics[f"mismatch_probe/update_{update}/collated_route_bytes"] = probe.batch_layout[
-            "collated_route_bytes"
-        ]
+        trainer.all_metrics[f"mismatch_probe/update_{update}/collated_bytes"] = probe.batch_layout.collated_bytes
+        trainer.all_metrics[f"mismatch_probe/update_{update}/collated_route_bytes"] = (
+            probe.batch_layout.collated_route_bytes
+        )
         status = COMPLETE_STATUS if update == probe.updates[-1] else BUILDING_STATUS
         if probe.archive is None:
             probe.archive = await asyncio.to_thread(

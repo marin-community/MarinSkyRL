@@ -101,23 +101,6 @@ def _response_logprobs(policy, batch: TrainingInputBatch) -> torch.Tensor:
     return concatenate_outputs_after_mesh_dispatch(policy.actor_infos, outputs)["output"].float()
 
 
-def _probe_forward(policy, batch: TrainingInputBatch, mode: str, *, keep_fraction: float | None = None):
-    data = batch.select(["sequences", "attention_mask", "rollout_routed_experts"], ["response_length"])
-    data["probe_row_indices"] = torch.arange(len(data["sequences"]), dtype=torch.long)
-    if mode in {"native", "repeat"}:
-        data["rollout_routed_experts"] = torch.zeros_like(data["rollout_routed_experts"])
-    data.metadata.update(
-        probe_mode=mode,
-        probe_keep_fraction=keep_fraction,
-        probe_micro_batch_size=2 if mode == "repeat" else None,
-        global_step=0,
-    )
-    outputs = ray.get(policy.async_run_ray_method("mesh", "probe_forward", data=data))
-    scores = concatenate_outputs_after_mesh_dispatch(policy.actor_infos, outputs)["output"].float()
-    observations = [item for output in outputs for item in output.metadata["probe_routes"]]
-    return scores, observations
-
-
 @pytest.mark.parametrize("packing", [False, True], ids=["unpacked", "packed"])
 def test_all_placeholder_replay_matches_flag_off_at_same_weights(tmp_path, packing):
     """The native probe control must be identical to the route-disabled model."""

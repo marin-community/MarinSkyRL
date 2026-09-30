@@ -15,8 +15,6 @@ class MismatchProbeCallback(TrainerCallback):
     async def on_train_begin_async(self, state: TrainerState, control: TrainerControl, **kwargs):
         trainer = kwargs["trainer"]
         self.collector.starting_global_step = state.global_step
-        if state.global_step + self.collector.updates[-1] > trainer.total_training_steps:
-            raise ValueError("mismatch probe update schedule exceeds the available training batches")
         await collect(self.collector, trainer, update=0)
         if self.collector.updates[-1] == 0:
             control.should_training_stop = True
