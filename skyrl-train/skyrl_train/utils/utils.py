@@ -6,7 +6,6 @@ import sys
 import logging
 import math
 import socket
-from dataclasses import asdict
 
 import ray
 import torch
@@ -552,8 +551,7 @@ def validate_cfg(cfg: DictConfig):
         f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
     )
     spec = PolicyLossRegistry.spec(cfg.trainer.algorithm.policy_loss_type)
-    cfg.trainer.algorithm.resolved_loss_spec = {**asdict(spec), "anchor": spec.anchor.value}
-    validate_objective(cfg)
+    validate_objective(cfg, loss_spec=spec)
     resolve_weight_sync_pause_policy(cfg.generator)
     validate_generator_cfg(cfg)
     validate_batch_invariant_config(cfg)
@@ -615,7 +613,7 @@ def validate_cfg(cfg: DictConfig):
         logger.warning("`use_kl_estimator_k3` will be deprecated, overriding to use `kl_estimator_type='k3'` instead")
         algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
-    resolve_objective_config(cfg)
+    resolve_objective_config(cfg, loss_spec=spec)
 
     behavior_clip = cfg.trainer.algorithm.policy_loss_type == "behavior_clip"
     if behavior_clip and cfg.trainer.algorithm.use_tis:

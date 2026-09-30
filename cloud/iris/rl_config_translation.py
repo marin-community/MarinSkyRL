@@ -18,6 +18,8 @@ from typing import Any, Dict, Mapping, Optional, Protocol
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
+from skyrl_train.config.objective_spec import validate_objective
+
 from cloud.iris.paths import resolve_paths_in_dict
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT as CHECKPOINT_EXPORT_MODULE
 from marinskyrl.environment_contract import TrainingType
@@ -893,8 +895,6 @@ def compose_skyrl_config(
     """Compose the final SkyRL subtree from its config groups and launch values."""
     config = _compose_base_config(parsed.config_groups)
     _merge_config_mapping(config, _skyrl_config_sections(parsed, exp_args, hpc))
-    from skyrl_train.config.objective_spec import validate_objective
-
     validate_nemotron_ultra_grading(config, parsed.distillation_plan)
     validate_objective(config)
     return CompiledSkyRLConfig(

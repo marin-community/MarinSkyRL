@@ -1,8 +1,8 @@
 # Snowball 67B-A2B single-teacher on-policy distillation smoke: the Megatron smoke geometry
 # (four PP2 x EP8 learner nodes, one EP8 rollout node) plus one pinned EP8 teacher node
 # scoring chosen tokens with sampled reverse KL. Six H100 nodes. Two optimizer steps on
-# GSM8K at 512-token generations; the gate is finite distillation loss, teacher-scored
-# tokens, a positive raw gradient norm, and one checkpoint, not a benchmark score.
+# GSM8K at 512-token generations; the gate requires finite teacher advantages,
+# teacher-scored tokens, a positive raw gradient norm, and one checkpoint.
 #
 # Pass the student with --model-path (open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92
 # pinned to a commit) and SkyRL-shaped GSM8K parquet with --train-data. The teacher is pinned
