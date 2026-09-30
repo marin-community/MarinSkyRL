@@ -34,18 +34,6 @@ Hero parameter families, packed training, repeated updates, and checkpoint
 continuation; passing it alone does not establish full-Hero capacity or parity
 with Levanter.
 
-CPU optimizer offload moves Adam updates and optimizer state to CPU, adding
-host memory use and transfers each update. Choose the offload fraction using
-GPU memory, host memory and update time measurements on the target machines. See the
-[MSRL defaults](../skyrl-train/skyrl_train/config/megatron_config/policy.yaml) and
-[Megatron's parameter definitions](https://github.com/NVIDIA/Megatron-LM/blob/core_v0.18.0/megatron/core/optimizer/optimizer_config.py#L344).
-
-Checkpoint restoration rebinds the native hybrid optimizer's moments, FP32
-master weights and Adam step counters. The tiny worker regression compares two
-updates after resume with uninterrupted training, using BF16 gradients, FP32
-masters and moments, and `dp_reshardable` checkpoints. That format requires the
-same tensor, pipeline, context and expert geometry when resuming.
-
 The port lives in two modules:
 
 - `skyrl_train.models.grug_megatron` holds the Megatron-Core modules that a

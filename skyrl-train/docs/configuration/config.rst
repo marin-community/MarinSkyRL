@@ -218,14 +218,6 @@ Some rules for configuring these parameters:
 - ``world_size % (pp_size * ep_size * etp_size) == 0``
     - This means that ``ep_size * etp_size`` can scale independently of ``tp_size * cp_size``, and can go across data parallel ranks.
 
-Precision-aware AdamW and CPU optimizer offload are opt-in. Checkpoint
-restoration repairs the native hybrid optimizer's state bindings and Adam step
-counters. The focused regression uses BF16 gradients, FP32 masters and moments,
-and ``dp_reshardable`` checkpoints. See the
-`Grug training guide <https://github.com/marin-community/MarinSkyRL/blob/main/docs/grug-megatron-training.md>`_
-for offload considerations and configuration references.
-
-
 Optimizer Configuration
 -----------------------
 For both the critic and policy model, we provide a common optimizer configuration
