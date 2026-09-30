@@ -8,7 +8,6 @@ from huggingface_hub import snapshot_download
 import asyncio
 import importlib.util
 import os
-import re
 from enum import StrEnum
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
@@ -759,22 +758,28 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         wanted = set(names)
         is_rank0 = torch.distributed.get_rank() == 0
         weights = {}
-        tasks = []
-        # Bridge gathers the same local expert index from every EP rank. Include
-        # its peer experts in the conversion stream even when only one is read.
-        conversion_names = set(wanted)
-        ep_size = mpu.get_expert_model_parallel_world_size()
-        experts_per_rank = self.provider.num_moe_experts // ep_size
-        for name in wanted:
-            match = re.search(r"\.experts\.(\d+)\.", name)
-            if match is not None:
-                local_expert = int(match.group(1)) % experts_per_rank
-                for ep_rank in range(ep_size):
-                    expert = str(local_expert + ep_rank * experts_per_rank)
-                    conversion_names.add(name[: match.start(1)] + expert + name[match.end(1) :])
-        for task in self.bridge.get_conversion_tasks(self.actor_module):
-            if conversion_names.intersection(mapping_hf_names(task.mapping)):
-                tasks.append(task)
+        tasks = self.bridge.get_conversion_tasks(self.actor_module)
+        task_names = [mapping_hf_names(task.mapping) for task in tasks]
+        known_names = set().union(*task_names)
+        requested_names = sorted(wanted)
+        # Bridge orders peer tasks by local expert index. If any EP rank needs
+        # a task, every peer must run it to enter the same gathers.
+        # Append name matches so unknown requests fail on every peer before export.
+        selection = torch.tensor(
+            [bool(wanted.intersection(names)) for names in task_names]
+            + [name in known_names for name in requested_names],
+            dtype=torch.uint8,
+            device=torch.cuda.current_device(),
+        )
+        if mpu.get_expert_model_parallel_world_size() > 1:
+            torch.distributed.all_reduce(
+                selection, op=torch.distributed.ReduceOp.MAX, group=mpu.get_expert_model_parallel_group()
+            )
+        selected, found = selection.split([len(tasks), len(requested_names)])
+        missing = [name for name, matches in zip(requested_names, found.tolist(), strict=True) if not matches]
+        if missing:
+            raise KeyError(f"missing Grug state entries: {missing}")
+        tasks = [task for task, keep in zip(tasks, selected.tolist(), strict=True) if keep]
         for name, tensor in self.bridge.export_hf_weights(
             self.actor_module, show_progress=False, conversion_tasks=tasks
         ):
