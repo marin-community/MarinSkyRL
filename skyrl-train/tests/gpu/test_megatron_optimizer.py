@@ -19,7 +19,7 @@ def test_megatron_gradient_clipping_preserves_values_without_gradient_sized_scra
         expected_norm = gradient.double().norm().item()
         actual_norm = get_grad_norm_fp32([gradient])
         assert float(actual_norm) == pytest.approx(expected_norm, rel=1e-6)
-        expected = gradient * (1.0 / (actual_norm + 1e-6))
+        expected = (gradient * (1.0 / (actual_norm + 1e-6))).to(dtype)
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
         resident = torch.cuda.memory_allocated()
