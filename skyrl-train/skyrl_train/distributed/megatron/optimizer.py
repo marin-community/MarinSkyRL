@@ -33,17 +33,19 @@ _GRUG_MUONH_NAME = "grug_muonh"
 _GRUG_EMERGING_ROUTES = ("grug_muonh_qkv", "grug_muonh_gate_up", "grug_adamh")
 
 
-class _GrugMuonHParamScheduler(OptimizerParamScheduler):
+class _MegatronParamScheduler(OptimizerParamScheduler):
+    def load_state_dict(self, state_dict: dict) -> None:
+        self.num_steps = 0
+        super().load_state_dict(state_dict)
+
+
+class _GrugMuonHParamScheduler(_MegatronParamScheduler):
     def get_lr(self, param_group: dict) -> float:
         if param_group.get("optimizer") != "adam" or self.lr_warmup_steps <= 0 or self.num_steps > self.lr_warmup_steps:
             return super().get_lr(param_group)
         max_lr = param_group.get("max_lr", self.max_lr)
         init_lr = self.init_lr * max_lr / self.max_lr if self.max_lr else 0.0
         return init_lr + (max_lr - init_lr) * self.num_steps / self.lr_warmup_steps
-
-    def load_state_dict(self, state_dict: dict) -> None:
-        self.num_steps = 0
-        super().load_state_dict(state_dict)
 
 
 def _grug_muonh_extra(optim_config: Mapping) -> dict:
@@ -104,6 +106,12 @@ def _register_grug_muonh(optim_config: Mapping) -> None:
     )
     for route in (_GRUG_MUONH_NAME, *_GRUG_EMERGING_ROUTES):
         _EMERGING_OPTIMIZERS[route] = entry
+
+
+class _MegatronParamScheduler(OptimizerParamScheduler):
+    def load_state_dict(self, state_dict: dict) -> None:
+        self.num_steps = 0
+        super().load_state_dict(state_dict)
 
 
 def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict) -> OptimizerConfig:
@@ -224,7 +232,7 @@ def get_megatron_optimizer_param_scheduler(
         lr_warmup_steps = int(config.lr_warmup_steps_ratio * lr_decay_steps)
 
     scheduler_class = (
-        _GrugMuonHParamScheduler if str(config.get("optimizer", "adam")).lower() == "muonh" else OptimizerParamScheduler
+        _GrugMuonHParamScheduler if str(config.get("optimizer", "adam")).lower() == "muonh" else _MegatronParamScheduler
     )
     opt_param_scheduler = scheduler_class(
         optimizer,
