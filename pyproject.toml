@@ -47,7 +47,7 @@ dependencies = [
     "s3fs",
     "smart_open",
     "tensorboard",
-    "taskcompendium[harbor,workplace] @ git+https://github.com/marin-community/marin.git@6a67b2666cd219b55c9d08db8659a7e91b23f08a#subdirectory=lib/taskcompendium",
+    "taskcompendium[harbor] @ git+https://github.com/marin-community/marin.git@67320d80d6d768158d5183e4c0464a33fef3d39c#subdirectory=lib/taskcompendium",
     "tqdm>=4.66",
     "tokenizers==0.23.1",
     "transformers==5.16.1",

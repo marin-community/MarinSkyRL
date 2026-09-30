@@ -12,6 +12,7 @@ from urllib.request import urlopen
 import pytest
 from omegaconf import OmegaConf
 from taskcompendium.importers.nemo_workplace import (
+    PROVIDER,
     PROVIDER_GIT_REVISION,
     PROVIDER_REPOSITORY,
     SOURCE_EXAMPLE_MAX_BYTES,
@@ -20,6 +21,7 @@ from taskcompendium.importers.nemo_workplace import (
     import_row,
     select_row_zero,
 )
+from taskcompendium.provider_sources import stage_git_provider
 
 # CPU tests already run in the locked uv environment. Ray's uv hook would package
 # this checkout and create another environment for every local Ray session.
@@ -85,9 +87,9 @@ def workplace_source_row() -> bytes:
 
 
 @pytest.fixture(scope="session")
-def workplace_import(workplace_source_row: bytes) -> WorkplaceImport:
+def workplace_import(workplace_source_row: bytes, trusted_workplace_source: Path) -> WorkplaceImport:
     """Validate the source row before exporting private task packages."""
-    return import_row(workplace_source_row)
+    return import_row(workplace_source_row, trusted_workplace_source)
 
 
 @pytest.fixture(scope="session")
@@ -97,6 +99,14 @@ def trusted_workplace_checkout(tmp_path_factory: pytest.TempPathFactory) -> Path
     subprocess.run(["git", "clone", "--quiet", PROVIDER_REPOSITORY, str(checkout)], check=True)
     subprocess.run(["git", "-C", str(checkout), "checkout", "--quiet", "--detach", PROVIDER_GIT_REVISION], check=True)
     return checkout
+
+
+@pytest.fixture(scope="session")
+def trusted_workplace_source(tmp_path_factory: pytest.TempPathFactory, trusted_workplace_checkout: Path) -> Path:
+    """Stage verified provider blobs for the source importer."""
+    snapshot = tmp_path_factory.mktemp("workplace-snapshot") / "source"
+    stage_git_provider(PROVIDER, trusted_workplace_checkout, snapshot)
+    return snapshot
 
 
 @pytest.fixture
