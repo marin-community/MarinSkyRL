@@ -67,6 +67,14 @@ from skyrl_train.mismatch_harness.vllm_side import (
 WEIGHT_INDEX = "model.safetensors.index.json"
 PROMPT_LOGPROBS = 20
 KERNEL_PATH_COMMENT = "# kernel path: "
+DEVICE_INDEX_PATTERNS = (
+    (r"cuda:\d+", "cuda:N"),
+    (r"_DeviceGuard\(\d+\)", "_DeviceGuard(N)"),
+    (r"set_device\(\d+\)", "set_device(N)"),
+    (r"\bindex=\d+", "index=N"),
+    (r"get_raw_stream\(\d+\)", "get_raw_stream(N)"),
+    (r"raw_stream\d+", "raw_streamN"),
+)
 # Engine settings of the probe's vLLM that decide what it compiles and how it computes.
 ENGINE_SETTINGS = {
     "dtype": "bfloat16",
@@ -427,8 +435,19 @@ def logits_diagnostics(served: dict[int, dict[int, float]], logits: torch.Tensor
 
 
 def _code_lines(text: str) -> list[str]:
-    """A module's lines without the ``# kernel path:`` comments, which name the Inductor cache directory."""
-    return [line for line in text.splitlines() if not line.startswith(KERNEL_PATH_COMMENT)]
+    """A module's lines without what names its cache directory or GPU.
+
+    Drops the ``# kernel path:`` comments and writes every device and stream index as ``N``, so the
+    output code of any data-parallel rank compares with the archived rank's.
+    """
+    lines = []
+    for line in text.splitlines():
+        if line.startswith(KERNEL_PATH_COMMENT):
+            continue
+        for pattern, replacement in DEVICE_INDEX_PATTERNS:
+            line = re.sub(pattern, replacement, line)
+        lines.append(line)
+    return lines
 
 
 def diff_pieces(served: dict[str, str], archived_uri: str) -> dict[str, str]:
