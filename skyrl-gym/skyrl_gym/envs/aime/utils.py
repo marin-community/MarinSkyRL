@@ -173,27 +173,21 @@ def normalize_final_answer(final_answer: str) -> str:
 
 
 _TEX_FRACTION = re.compile(r"(-?)\\frac\{(-?\d+(?:\.\d+)?)\}\{(-?\d+(?:\.\d+)?)\}")
-_SLASH_FRACTION = re.compile(r"(-?\d+(?:\.\d+)?)/(-?\d+(?:\.\d+)?)")
-_RATIO = re.compile(r"(-?\d+):(-?\d+)")
+_SLASH_FRACTION = re.compile(r"(-?)(\d+(?:\.\d+)?)/(-?\d+(?:\.\d+)?)")
+_RATIO = re.compile(r"(-?)(\d+):(-?\d+)")
 _PLAIN_DECIMAL = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 def rational_value(answer: str) -> Optional[Fraction]:
     """Parse a normalized answer as an exact rational, accepting TeX fraction and ratio forms."""
     candidate = answer.replace(r"\left", "").replace(r"\right", "").strip()
-    tex_fraction = _TEX_FRACTION.fullmatch(candidate)
-    if tex_fraction is not None:
-        try:
-            sign = -1 if tex_fraction.group(1) else 1
-            return sign * Fraction(tex_fraction.group(2)) / Fraction(tex_fraction.group(3))
-        except ZeroDivisionError:
-            return None
-    for pattern in (_SLASH_FRACTION, _RATIO):
+    for pattern in (_TEX_FRACTION, _SLASH_FRACTION, _RATIO):
         match = pattern.fullmatch(candidate)
         if match is None:
             continue
         try:
-            return Fraction(match.group(1)) / Fraction(match.group(2))
+            sign = -1 if match.group(1) else 1
+            return sign * Fraction(match.group(2)) / Fraction(match.group(3))
         except ZeroDivisionError:
             return None
     if _PLAIN_DECIMAL.fullmatch(candidate):
