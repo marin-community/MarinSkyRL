@@ -206,13 +206,13 @@ def test_from_config_reserves_enough_rollout_logprobs(monkeypatch, training, eva
     cfg = get_default_config()
     cfg.generator.sampling_params.logprobs = training
     cfg.generator.eval_sampling_params.logprobs = evaluation
-    if profile is not None:
-        OmegaConf.update(
-            cfg,
-            "trainer.callbacks",
-            [{"type": "evaluation", "additional_evaluations": {"sampled": {"sampling_params": {"logprobs": profile}}}}],
-            force_add=True,
-        )
+    profiles = {"sampled": {"sampling_params": {"logprobs": profile}}} if profile is not None else None
+    OmegaConf.update(
+        cfg,
+        "trainer.callbacks",
+        [{"type": "evaluation", "additional_evaluations": profiles}],
+        force_add=True,
+    )
 
     main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
 
