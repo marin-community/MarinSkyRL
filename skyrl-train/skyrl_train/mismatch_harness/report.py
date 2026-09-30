@@ -10,7 +10,7 @@ from skyrl_train.mismatch_harness.regions import REGIONS
 def _cell(stats: Mapping | None) -> str:
     if stats is None:
         return "–"
-    return f"{stats['byte_equal_fraction']:.4f} / {stats['max_ulp']}"
+    return f"{stats['byte_equal_fraction']:.4f} / {stats['within_one_ulp_fraction']:.4f} / {stats['max_ulp']}"
 
 
 def lowest_disagreeing_region(chained: Mapping[str, Mapping], floor: Mapping[str, Mapping]) -> str | None:
@@ -42,7 +42,8 @@ def render_markdown(results: Mapping) -> str:
         f"- archived autotune choices staged: {results['staged_best_configs']} (with none, a kernel with several "
         "launch configs was benchmarked again here and may launch a different one than vLLM did)",
         "",
-        "Cells are byte-equal fraction / maximum ulp over valid token rows. `isolated`: vLLM's launch reads the "
+        "Cells are byte-equal fraction / fraction within one ulp / maximum ulp over valid token rows (the "
+        "maximum is dominated by values of opposite sign near zero). `isolated`: vLLM's launch reads the "
         "trainer's tensors for every input. `chained`: vLLM runs the layer from the trainer's layer input. "
         "`floor`: vLLM's chained run against itself with other requests in the batch.",
         "",
@@ -70,13 +71,13 @@ def render_markdown(results: Mapping) -> str:
                 continue
             lines.append(f"| {region} | " + " | ".join((*cells, chained, floor)) + " |")
         lines += ["", "Trainer layer in the harness against the probe's capture (same code, same GPU type):", ""]
-        lines += ["| region | byte-equal / max ulp |", "|---|---|"]
+        lines += ["| region | byte-equal / within 1 ulp / max ulp |", "|---|---|"]
         for region, stats in result["reproduction"].items():
             cell = f"{stats['equal_fraction']:.4f}" if "equal_fraction" in stats else _cell(stats)
             lines.append(f"| {region} | {cell} |")
         if "embedding" in result:
             lines += ["", "Layer 0 input (embedding, embedding norm and gate):", ""]
-            lines += ["| comparison | byte-equal / max ulp |", "|---|---|"]
+            lines += ["| comparison | byte-equal / within 1 ulp / max ulp |", "|---|---|"]
             for name, stats in result["embedding"].items():
                 lines.append(f"| {name} | {_cell(stats)} |")
         lines.append("")

@@ -254,6 +254,8 @@ def run_vllm(
         post_inputs = (trainer["core_attention"], trainer["v_proj"], trainer["attention_norm"])
     post, post_piece = replay.run_post_attention(requests, *post_inputs, layer_input, moe, trainer)
     regions.update(piece_regions(post, post_piece, POST_ATTENTION_ROLES))
+    # Inductor pads the attn_gate GEMM to 24 output columns; the heads are the leading ones.
+    regions["attn_gate"] = regions["attn_gate"][:, : shape.heads]
     record = moe.records[-1]
     regions["routing"] = (record.vllm_ids, record.vllm_weights)
     if trainer is not None:

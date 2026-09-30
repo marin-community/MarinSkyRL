@@ -394,6 +394,10 @@ def _apply_before(before: Mapping[int, list[tuple[str, torch.Tensor]]]) -> Calla
     def apply(index: int, environment: dict[str, Any]) -> None:
         for variable, tensor in before.get(index, ()):
             target = environment[variable]
+            if target.numel() != tensor.numel() and target.dim() == 2 and tensor.dim() == 2:
+                # A GEMM whose weight Inductor padded (attn_gate: 24 rows for 20 heads) stores extra
+                # columns; the trainer's tensor fills the leading ones.
+                target = target[:, : tensor.shape[1]]
             if target.numel() != tensor.numel():
                 raise ValueError(f"cannot write {tuple(tensor.shape)} into {variable} {tuple(target.shape)}")
             target.copy_(tensor.reshape(target.shape).to(target.dtype))

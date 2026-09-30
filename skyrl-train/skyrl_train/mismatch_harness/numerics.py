@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -35,6 +36,8 @@ class RegionStats:
     elements: int
     byte_equal_fraction: float
     max_ulp: int
+    p99_ulp: float
+    within_one_ulp_fraction: float
     mean_ulp: float
     rows_all_equal_fraction: float
     max_abs: float
@@ -45,6 +48,8 @@ class RegionStats:
             "elements": self.elements,
             "byte_equal_fraction": self.byte_equal_fraction,
             "max_ulp": self.max_ulp,
+            "p99_ulp": self.p99_ulp,
+            "within_one_ulp_fraction": self.within_one_ulp_fraction,
             "mean_ulp": self.mean_ulp,
             "rows_all_equal_fraction": self.rows_all_equal_fraction,
             "max_abs": self.max_abs,
@@ -55,16 +60,21 @@ class RegionStats:
 def compare(left: torch.Tensor, right: torch.Tensor) -> RegionStats:
     """Compare two tensors whose first dimension indexes tokens.
 
-    NaNs compare equal only when their bit patterns are equal; a NaN on one side makes ``max_abs`` NaN.
+    The ulp distance counts representable values between the two numbers, so values of opposite sign
+    near zero (after cancellation) are far apart; ``p99_ulp`` and ``within_one_ulp_fraction`` describe the
+    bulk. NaNs compare equal only when their bit patterns are equal.
     """
     distance = ulp_distance(left, right)
     rows = distance.reshape(distance.shape[0], -1) if distance.dim() > 0 else distance.reshape(1, 1)
     equal = distance == 0
     difference = (left.float() - right.float()).abs()
+    flat = distance.flatten().double()
     return RegionStats(
         elements=distance.numel(),
         byte_equal_fraction=equal.float().mean().item() if distance.numel() else 1.0,
         max_ulp=int(distance.max().item()) if distance.numel() else 0,
+        p99_ulp=flat.kthvalue(max(1, math.ceil(0.99 * flat.numel()))).values.item() if distance.numel() else 0.0,
+        within_one_ulp_fraction=(distance <= 1).float().mean().item() if distance.numel() else 1.0,
         mean_ulp=distance.double().mean().item() if distance.numel() else 0.0,
         rows_all_equal_fraction=(rows == 0).all(dim=1).float().mean().item() if rows.numel() else 1.0,
         max_abs=difference.max().item() if difference.numel() else 0.0,

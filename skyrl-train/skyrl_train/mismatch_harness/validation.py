@@ -66,7 +66,7 @@ ENGINE_SETTINGS = {
 
 
 def truncated_export(source_uri: str, num_layers: int, destination: Path) -> dict[str, torch.Tensor]:
-    """Write a Grug export that keeps the first ``num_layers`` decoder layers; return its tensors."""
+    """Write a Grug export that keeps the first ``num_layers`` decoder layers; return its tensors (CPU)."""
     metadata = destination / "metadata"
     metadata.mkdir(parents=True)
     for path, _ in io.find_files(source_uri).items():
@@ -92,7 +92,7 @@ def truncated_export(source_uri: str, num_layers: int, destination: Path) -> dic
         loaded = store.load_tensors(names)
         save_file({name: tensor.contiguous() for name, tensor in loaded.items()}, model_dir / shard)
         weight_map.update({name: shard for name in names})
-        tensors.update({name: tensor.cuda() for name, tensor in loaded.items()})
+        tensors.update(loaded)
         del loaded
     for path in metadata.iterdir():
         if path.name not in (WEIGHT_INDEX, "config.json"):
@@ -217,6 +217,7 @@ def main() -> None:
         served = serve(Path(directory) / "model", token_ids)
         config = json.loads((Path(directory) / "model" / "config.json").read_text())
     shape = GrugShape.from_config(config)
+    weights = {name: tensor.cuda() for name, tensor in weights.items()}
     with vllm_config_context():
         routes, logits = replay_model(served["code"], shape, weights, token_ids)
     served_routes = torch.as_tensor(served["routes"]).to(routes.device)
