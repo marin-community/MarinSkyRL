@@ -14,6 +14,8 @@ import asyncio
 import math
 
 import pytest
+from types import SimpleNamespace
+from finestore.mismatch_probe import ProbeRow
 import ray
 import torch
 from ray.util.placement_group import placement_group
@@ -22,9 +24,9 @@ from transformers import AutoTokenizer
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
+from skyrl_train.mismatch_probe.collect import ProbeCollector
 from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX, GrugMoeForCausalLM
-from skyrl_train.fixtures.tiny_grug import (
+from tests.gpu.tiny_grug import (
     NUM_LAYERS,
     TOY_SHAPE,
     write_tiny_checkpoint as _write_tiny_checkpoint,
@@ -585,45 +587,36 @@ def test_grug_probe_reread_keeps_chosen_tokens_with_prefix_cache(tmp_path):
         responses = rollout["response_ids"]
         assert all(response for response in responses)
         assert rollout["response_logprobs"] is not None
-        for prompt, response, route in zip(prompts, responses, rollout["routed_experts"], strict=True):
-            captured = normalize_routed_experts(route, prompt, response)
-            assert len(captured) == len(response)
-            assert len(captured[0]) == NUM_LAYERS
-            assert all(expert == 0 for layer in captured[-1] for expert in layer)
-
-        prefixes = []
-        targets = []
-        for prompt, response in zip(prompts, responses, strict=True):
-            for offset, token in enumerate(response):
-                prefixes.append(prompt + response[:offset])
-                targets.append(token)
-        scores = []
-        for cache_mode in ("off", "on"):
-            if cache_mode == "off":
-                asyncio.run(client.reset_prefix_cache())
-            result = asyncio.run(
-                client.generate(
-                    InferenceEngineInput(
-                        prompt_token_ids=prefixes,
-                        sampling_params={
-                            "temperature": 1.0,
-                            "max_tokens": 1,
-                            "logprobs": 1,
-                            "skip_reading_prefix_cache": cache_mode == "off",
-                        },
-                        sampling_params_per_prompt=[{"logprob_token_ids": [token]} for token in targets],
-                    )
-                )
+        cfg.trainer.mismatch_probe.rescore_prefix_cache = "both"
+        cfg.trainer.mismatch_probe.seed = 17
+        cfg.trainer.mismatch_probe.archive_uri = str(tmp_path / "probe")
+        probe = ProbeCollector(cfg)
+        probe.probe_hash = "gpu-reread"
+        probe.weights[0] = "same-weights"
+        probe.probes = [
+            ProbeRow(
+                probe_hash=probe.probe_hash,
+                sample_id=str(index),
+                prompt_id=str(index),
+                prompt_token_ids=prompt,
+                trainer_prompt_ids=prompt,
+                vllm_output_ids=response,
+                trainer_input_ids=response,
+                response_mask=[True] * len(response),
+                loss_mask=[True] * len(response),
+                request_seed=17,
+                batch_position=index,
             )
-            chosen = [row[0][token] for row, token in zip(result["requested_token_logprobs"], targets, strict=True)]
-            assert len(chosen) == len(targets) and all(math.isfinite(value) for value in chosen)
-            hits = result["prefix_cache_hit_tokens"]
-            assert len(hits) == len(targets)
-            if cache_mode == "off":
-                assert sum(hits) == 0
-            else:
-                assert sum(hits) > 0
-            scores.append(chosen)
+            for index, (prompt, response) in enumerate(zip(prompts, responses, strict=True))
+        ]
+        reread = asyncio.run(probe._rescore_vllm(SimpleNamespace(inference_engine_client=client), 0))
+        scores = [
+            [value for row in reread if row.cache_mode == mode for value in row.logprobs] for mode in ("off", "on")
+        ]
+        assert all(len(values) == sum(map(len, responses)) for values in scores)
+        assert all(math.isfinite(value) for values in scores for value in values)
+        assert probe.cache_hit_tokens["vllm.rescore@0"] == 0
+        assert probe.cache_hit_tokens["vllm.rescore@0:on"] > 0
         torch.testing.assert_close(torch.tensor(scores[0]), torch.tensor(scores[1]), rtol=0, atol=1e-4)
     finally:
         ray.shutdown()

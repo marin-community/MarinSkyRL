@@ -359,15 +359,11 @@ class InferenceEngineClient(InferenceEngineInterface):
         prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
         student_topk_indices: List[Optional[List[List[int]]]] = [None for _ in range(n)]
         behavior_topk_logprobs: List[Optional[List[List[float]]]] = [None for _ in range(n)]
-        routed_experts: List[Optional[np.ndarray]] = [None for _ in range(n)]
-        requested_token_logprobs: List[Optional[List[Dict[int, float]]]] = [None for _ in range(n)]
         prefix_cache_hit_tokens: List[Optional[int]] = [None for _ in range(n)]
         # a bit hacky for now
         add_resp_logprobs = False
         add_prompt_logprobs = False
         add_student_topk = False
-        add_routed_experts = False
-        add_requested_token_logprobs = False
         add_prefix_cache_hit_tokens = False
 
         for indices, result in zip(indices_list, results):
@@ -379,16 +375,6 @@ class InferenceEngineClient(InferenceEngineInterface):
                 if len(selected_ids) != len(indices) or len(selected_scores) != len(indices):
                     raise ValueError("Inference engine student top-K rows must align with responses")
                 add_student_topk = True
-            routes = result.get("routed_experts")
-            if routes is not None:
-                if len(routes) != len(indices):
-                    raise ValueError("Inference engine routed expert rows must align with responses")
-                add_routed_experts = True
-            requested = result.get("requested_token_logprobs")
-            if requested is not None:
-                if len(requested) != len(indices):
-                    raise ValueError("Inference engine requested-token rows must align with responses")
-                add_requested_token_logprobs = True
             cached = result.get("prefix_cache_hit_tokens")
             if cached is not None:
                 if len(cached) != len(indices):
@@ -398,14 +384,6 @@ class InferenceEngineClient(InferenceEngineInterface):
                 responses[original_idx] = result["responses"][local_idx]
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
                 response_ids[original_idx] = result["response_ids"][local_idx]
-                if routes is not None:
-                    if len(routes[local_idx]) != len(response_ids[original_idx]):
-                        raise ValueError("Inference engine routed expert tokens must align with response tokens")
-                    routed_experts[original_idx] = routes[local_idx]
-                if requested is not None:
-                    if len(requested[local_idx]) != len(response_ids[original_idx]):
-                        raise ValueError("Inference engine requested-token scores must align with response tokens")
-                    requested_token_logprobs[original_idx] = requested[local_idx]
                 if cached is not None:
                     prefix_cache_hit_tokens[original_idx] = cached[local_idx]
                 if result.get("response_logprobs", None):
@@ -434,14 +412,6 @@ class InferenceEngineClient(InferenceEngineInterface):
                 raise ValueError("Inference engine omitted student top-K evidence for part of the batch")
             output["student_topk_indices"] = student_topk_indices
             output["behavior_topk_logprobs"] = behavior_topk_logprobs
-        if add_routed_experts:
-            if any(row is None for row in routed_experts):
-                raise ValueError("Inference engine omitted routed experts for part of the batch")
-            output["routed_experts"] = routed_experts
-        if add_requested_token_logprobs:
-            if any(row is None for row in requested_token_logprobs):
-                raise ValueError("Inference engine omitted requested-token scores for part of the batch")
-            output["requested_token_logprobs"] = requested_token_logprobs
         if add_prefix_cache_hit_tokens:
             if any(value is None for value in prefix_cache_hit_tokens):
                 raise ValueError("Inference engine omitted cache-hit counts for part of the batch")
@@ -519,11 +489,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         accum_response_logprobs: List[float] = []
         accum_student_topk_indices: List[List[int]] = []
         accum_behavior_topk_logprobs: List[List[float]] = []
-        accum_routed_experts: List[np.ndarray] = []
-        accum_requested_token_logprobs: List[Dict[int, float]] = []
         saw_student_topk: Optional[bool] = None
-        saw_routed_experts: Optional[bool] = None
-        saw_requested_token_logprobs: Optional[bool] = None
         saw_prefix_cache_hit_tokens: Optional[bool] = None
         accum_prefix_cache_hit_tokens = 0
         stop_reason: str = ABORT_FINISH_REASON
@@ -566,11 +532,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_response_logprobs = []
                 accum_student_topk_indices = []
                 accum_behavior_topk_logprobs = []
-                accum_routed_experts = []
-                accum_requested_token_logprobs = []
                 saw_student_topk = None
-                saw_routed_experts = None
-                saw_requested_token_logprobs = None
                 saw_prefix_cache_hit_tokens = None
                 accum_prefix_cache_hit_tokens = 0
                 num_turns = 0
@@ -612,26 +574,6 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_student_topk_indices.extend(selected_ids[0])
                 accum_behavior_topk_logprobs.extend(selected_scores[0])
 
-            routed_experts = partial_response.get("routed_experts")
-            has_routed_experts = routed_experts is not None
-            if saw_routed_experts is not None and saw_routed_experts != has_routed_experts:
-                raise ValueError("Inference engine omitted routed experts for part of a response")
-            saw_routed_experts = has_routed_experts
-            if has_routed_experts:
-                if len(routed_experts) != 1 or len(routed_experts[0]) != len(new_response_ids):
-                    raise ValueError("Inference engine routed expert tokens must align with response tokens")
-                accum_routed_experts.append(routed_experts[0])
-
-            requested = partial_response.get("requested_token_logprobs")
-            has_requested = requested is not None
-            if saw_requested_token_logprobs is not None and saw_requested_token_logprobs != has_requested:
-                raise ValueError("Inference engine omitted requested-token scores for part of a response")
-            saw_requested_token_logprobs = has_requested
-            if has_requested:
-                if len(requested) != 1 or len(requested[0]) != len(new_response_ids):
-                    raise ValueError("Inference engine requested-token scores must align with response tokens")
-                accum_requested_token_logprobs.extend(requested[0])
-
             cached = partial_response.get("prefix_cache_hit_tokens")
             has_cached = cached is not None
             if saw_prefix_cache_hit_tokens is not None and saw_prefix_cache_hit_tokens != has_cached:
@@ -668,10 +610,6 @@ class InferenceEngineClient(InferenceEngineInterface):
         if saw_student_topk:
             output["student_topk_indices"] = [accum_student_topk_indices]
             output["behavior_topk_logprobs"] = [accum_behavior_topk_logprobs]
-        if saw_routed_experts:
-            output["routed_experts"] = [np.concatenate(accum_routed_experts, axis=0)]
-        if saw_requested_token_logprobs:
-            output["requested_token_logprobs"] = [accum_requested_token_logprobs]
         if saw_prefix_cache_hit_tokens:
             output["prefix_cache_hit_tokens"] = [accum_prefix_cache_hit_tokens]
         return output

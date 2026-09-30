@@ -23,6 +23,10 @@ from __future__ import annotations
 
 import math
 import copy
+from types import SimpleNamespace
+
+import numpy as np
+from finestore import mismatch_probe as mismatch
 
 import pytest
 import ray
@@ -30,7 +34,10 @@ import torch
 from transformers import AutoTokenizer
 
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
-from skyrl_train.fixtures.tiny_grug import NUM_EXPERTS, NUM_LAYERS, write_tiny_checkpoint as _write_tiny_checkpoint
+from tests.gpu.tiny_grug import NUM_EXPERTS, NUM_LAYERS, write_tiny_checkpoint as _write_tiny_checkpoint
+from skyrl_train.mismatch_probe.collect import ProbeCollector
+from skyrl_train.mismatch_probe.archive import MismatchArchive
+from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
@@ -133,35 +140,110 @@ def test_all_placeholder_replay_matches_flag_off_at_same_weights(tmp_path, packi
     assert torch.equal(scores[0], scores[1]), f"placeholder control differs with packing={packing}"
 
 
-def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path):
-    require_hoppers(2)
-    cfg, model_path = _layout_config(tmp_path, ("probe-pp2", 2, 1, 2, 1, 1, False))
+@pytest.mark.parametrize(
+    "layout",
+    [
+        ("probe-pp2", 2, 1, 2, 1, 1, False),
+        ("probe-tp2", 2, 2, 1, 1, 1, False),
+        ("probe-dp2-ragged", 2, 1, 1, 1, 1, False),
+    ],
+    ids=["pp2", "tp2-sp", "dp2-ragged"],
+)
+def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path, layout):
+    require_hoppers(layout[1])
+    cfg, model_path = _layout_config(tmp_path, layout)
+    cfg.trainer.mismatch_probe.archive_uri = str(tmp_path / "probe")
+    cfg.trainer.mismatch_probe.extra_trainer_modes = ["router_replay", "router_replay_filtered"]
+    cfg.trainer.mismatch_probe.filtered_replay.keep_fraction = 1.0
     pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
     batch = _routed_batch(pad_token_id, captured=True, variable_lengths=True)
+    if layout[0] == "probe-dp2-ragged":
+        original_metadata = batch.metadata
+        batch = TrainingInputBatch({key: value[:3] for key, value in batch.items()})
+        batch.metadata = original_metadata
+    width = batch.metadata["response_length"]
+    prompt_width = batch["sequences"].shape[1] - width
+    probes = []
+    for position in range(batch.batch_size):
+        length = int(batch["response_mask"][position].sum())
+        batch["rollout_routed_experts"][position, length:] = 0
+        routes = batch["rollout_routed_experts"][position, :length].numpy()
+        response = batch["sequences"][position, prompt_width : prompt_width + length].tolist()
+        prompt = batch["sequences"][position, :prompt_width][
+            batch["attention_mask"][position, :prompt_width].bool()
+        ].tolist()
+        probes.append(
+            mismatch.ProbeRow(
+                probe_hash="fixture",
+                sample_id=f"sample-{position}",
+                prompt_id=f"prompt-{position}",
+                prompt_token_ids=prompt,
+                trainer_prompt_ids=prompt,
+                vllm_output_ids=response,
+                trainer_input_ids=response,
+                response_mask=[True] * length,
+                loss_mask=[True] * length,
+                request_seed=31 + position,
+                batch_position=position,
+                routed_experts=routes.tobytes(),
+                routed_experts_shape=list(routes.shape),
+                routed_experts_dtype=str(routes.dtype),
+                route_valid_mask=(routes != 0).any(-1).tolist(),
+            )
+        )
+    batch.metadata["uids"] = [row.prompt_id for row in probes]
     initialize_ray(cfg)
     try:
         policy = init_worker_with_type(
-            "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=2, num_nodes=1, cfg=cfg
+            "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=layout[1], num_nodes=1, cfg=cfg
         )
+        trainer = SimpleNamespace(policy_model=policy, critic_model=None, ref_model=None)
+        padded = RayPPOTrainer.pad_batch(trainer, batch)
+        collector = ProbeCollector(cfg)
+        collector.probes = probes
+        collector.probe_hash = "fixture"
+        collector.training_input = padded
+        collector.weights[0] = "fixture-weights"
+        collector.batch_layout = {
+            "native_order": list(range(len(probes))),
+            "repeat_order": list(reversed(range(len(probes)))),
+            "padded_rows": padded.metadata["pad_size"],
+            "repeat_micro_batch_size": 4,
+        }
         before = ray.get(policy.async_run_ray_method("pass_through", "probe_weights_digest"))
-        state_before = ray.get(policy.async_run_ray_method("pass_through", "probe_training_state_digests"))
-        results = {
-            mode: _probe_forward(policy, batch, mode, keep_fraction=1.0 if mode == "router_replay_filtered" else None)
+        scores = collector._trainer_scores(trainer, 0)
+        assert before == ray.get(policy.async_run_ray_method("pass_through", "probe_weights_digest"))
+        archive = MismatchArchive(collector.archive_uri, writer_id="gpu-owner")
+        try:
+            archive.write(probes=probes, scores=scores)
+        finally:
+            archive.close()
+        from finestore.reader import ReadView
+
+        view = ReadView(collector.archive_uri)
+        stored = [mismatch.ScoreRow.model_validate(row) for row in view.scan(mismatch.SCORES_TABLE).to_pylist()]
+        for score in stored:
+            probe = probes[int(score.sample_id.split("-")[1])]
+            assert len(score.logprobs) == len(probe.vllm_output_ids)
+            assert all(math.isfinite(value) for value in score.logprobs)
+            choices = np.frombuffer(score.expert_choices, dtype=score.expert_choices_dtype).reshape(
+                score.expert_choices_shape
+            )
+            valid = np.asarray(probe.route_valid_mask, dtype=bool)
+            assert np.all(choices[valid] >= 0)
+            if score.mode == "router_replay":
+                captured = np.frombuffer(probe.routed_experts, dtype=probe.routed_experts_dtype).reshape(
+                    probe.routed_experts_shape
+                )
+                np.testing.assert_array_equal(choices[valid], captured[valid])
+        by_mode = {
+            mode: [row for row in stored if row.mode == mode]
             for mode in ("native", "repeat", "router_replay", "router_replay_filtered")
         }
-        after = ray.get(policy.async_run_ray_method("pass_through", "probe_weights_digest"))
-        state_after = ray.get(policy.async_run_ray_method("pass_through", "probe_training_state_digests"))
-        assert before == after
-        assert state_before == state_after
-        for scores, observations in results.values():
-            assert torch.isfinite(scores).all()
-            positions = [(row["sample"], row["position"], row["layer"]) for row in observations]
-            assert len(positions) == len(set(positions))
-            assert {row["layer"] for row in observations} == set(range(NUM_LAYERS))
-            assert {row["sample"] for row in observations} == set(range(len(batch["sequences"])))
-        assert not torch.equal(results["native"][0], results["router_replay"][0])
-        assert any(any(row["replaced"]) for row in results["router_replay_filtered"][1])
-        assert not any(any(row["replaced"]) for row in results["router_replay"][1])
+        assert any(a.logprobs != b.logprobs for a, b in zip(by_mode["native"], by_mode["router_replay"], strict=True))
+        assert any(np.frombuffer(row.replacement_mask, dtype=bool).any() for row in by_mode["router_replay_filtered"])
+        _train_step(policy, padded)
+        assert before != ray.get(policy.async_run_ray_method("pass_through", "probe_weights_digest"))
     finally:
         ray.shutdown()
 

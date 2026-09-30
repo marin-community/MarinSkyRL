@@ -37,7 +37,7 @@ from tests.gpu.grug_serving import (
     assert_engine_weights,
     rank0_validation_snapshot,
 )
-from skyrl_train.fixtures.tiny_grug import write_tiny_checkpoint as _write_tiny_checkpoint
+from tests.gpu.tiny_grug import write_tiny_checkpoint as _write_tiny_checkpoint
 from tests.gpu.test_grug_megatron import (
     ATTN_GATE_NAME,
     BIAS_NAMES,

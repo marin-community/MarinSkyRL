@@ -40,19 +40,6 @@ checkpoint_export:
   hf_upload_mode: latest
 
 trainer:
-  mismatch_probe:
-    enabled: false
-    prompts: {count: 128, samples_per_prompt: 4}
-    seed: null
-    archive_uri: null
-    reuse_probe: null
-    score_after_updates: [0, 1, 2]
-    extra_trainer_modes: []
-    filtered_replay: {keep_fraction: null}
-    rescore_prefix_cache: "off"
-    layer_tokens: 0
-    marin_commit: null
-    skyrl_commit: null
   trajectory_selector:
     type: null # null | best_of_n; selection runs after reward postprocessing and before teacher scoring
   # light is the shared default: fatal Python stacks, bounded NCCL flight recording,
@@ -369,6 +356,17 @@ trainer:
   rope_theta: null
 
   step_wise_training: false
+
+  mismatch_probe:
+    enabled: false
+    prompts: {count: 128, samples_per_prompt: 4}
+    seed: null
+    archive_uri: null
+    reuse_probe: null
+    score_after_updates: [0, 1, 2]
+    extra_trainer_modes: []
+    filtered_replay: {keep_fraction: null}
+    rescore_prefix_cache: "off"
 
 generator:
   model_name: ${trainer.policy.model.path}

@@ -382,7 +382,7 @@ class RayPPOTrainer:
             )
         self.total_training_steps = self.num_steps_per_epoch * self.cfg.trainer.epochs
         max_steps = self.cfg.trainer.get("max_steps")
-        if max_steps is not None and max_steps > 0:
+        if max_steps is not None and max_steps > 0 and not self.cfg.trainer.get("mismatch_probe", {}).get("enabled"):
             self.total_training_steps = min(self.total_training_steps, max_steps)
         logger.info(f"Steps per epoch: {self.num_steps_per_epoch}, total training steps: {self.total_training_steps}")
 
@@ -1226,12 +1226,19 @@ class RayPPOTrainer:
                 await self.context.load_state_dict(self._restored_rollout_state)
                 self._restored_rollout_state = None
 
+        probe = self.cfg.trainer.mismatch_probe
+        if probe.enabled:
+            final_step = self.global_step + probe.score_after_updates[-1]
+            if final_step > self.total_training_steps:
+                raise ValueError("mismatch probe update schedule exceeds the available training batches")
+            self.total_training_steps = final_step
+
         await self._start_draft_trainer()
         await self._sync_policy_for_rollouts(reason="initial")
 
         # Synchronize before checking completion so a requested final evaluation uses the checkpoint weights.
         # The loaded global_step counts completed steps, so >= treats a resume exactly at max_steps as complete.
-        if self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps:
+        if self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps and not probe.enabled:
             await self._handle_resume_at_max_steps()
             return
 

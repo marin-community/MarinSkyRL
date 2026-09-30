@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from collections import deque
 from contextlib import contextmanager
-from skyrl_train.config.mismatch_probe import FILTERED_REPLAY_MODE, PROBE_MODES, REPLAY_MODE
+from skyrl_train.mismatch_probe.modes import FILTERED_REPLAY_MODE, REPLAY_MODE
 from enum import Enum
 import math
 from typing import Callable, Mapping, Optional, Sequence, Tuple
@@ -193,7 +193,7 @@ def filtered_replay_topk(
     keep_fraction: float,
     score_type: RouterScoreType = RouterScoreType.LOGITS,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Keep captured experts above the fractional native selection-probability cutoff."""
+    """Filtered router replay (Composer 2 Technical Report, arXiv:2603.24477): replay vLLM's experts except those whose trainer selection score is below keep_fraction of the trainer's k-th best, refilling those slots with the trainer's next-best unused experts."""
     if score_type is RouterScoreType.BIASED_PROBABILITIES:
         raise NotImplementedError("filtered replay does not support expert bias added to probability scores")
     if not 0.0 <= keep_fraction <= 1.0 or not math.isfinite(keep_fraction):
@@ -272,7 +272,7 @@ class MegatronRouterReplay:
         """Scope a probe forward without changing subsequent training forwards."""
         if self._phase is not _Phase.IDLE:
             raise RuntimeError("router replay: scoring mode requires an idle controller")
-        if mode not in PROBE_MODES:
+        if mode not in (REPLAY_MODE, FILTERED_REPLAY_MODE):
             raise ValueError(f"unsupported replay scoring mode: {mode}")
         if mode == FILTERED_REPLAY_MODE and keep_fraction is None:
             raise ValueError("filtered replay requires keep_fraction")

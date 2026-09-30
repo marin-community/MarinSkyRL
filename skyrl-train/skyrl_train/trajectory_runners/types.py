@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Dict, List, Literal, NotRequired, Optional, TypedDict, Union
+from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
 
 import numpy as np
 
@@ -32,7 +32,6 @@ class AgentLoopOutput:
     env_metrics: Dict[str, Any]
     token_provenance: TokenProvenance = TokenProvenance.ENGINE
     error_treatment: Optional[str] = None
-    engine_response_ids: Optional[List[int]] = None
 
 
 @dataclass
@@ -57,7 +56,6 @@ class TrajectoryRequestBatch(TypedDict):
     sampling_params: Optional[Dict[str, Any]]
     trajectory_ids: Optional[List[TrajectoryID]]
     batch_metadata: Optional[BatchMetadata]
-    probe_capture_token_identity: NotRequired[bool]
 
 
 class RewardShapingComponents(TypedDict):
@@ -95,7 +93,6 @@ class TrajectoryBatch(TypedDict):
 
     prompt_token_ids: List[List[int]]
     response_ids: List[List[int]]
-    engine_response_ids: NotRequired[List[List[int]]]
     data_sources: Optional[List[str | None]]
     rewards: Union[List[float], List[List[float]]]
     unshaped_rewards: Optional[List[float]]

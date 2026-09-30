@@ -5,14 +5,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from finestore import mismatch
+from finestore import mismatch_probe as mismatch
 from finestore.reader import ReadView
 from finestore.store import DataStore
 
-from skyrl_train.config.mismatch_probe import GENERATION_SCORING
-
-COMPLETE_STATUS = "complete"
-BUILDING_STATUS = "building"
+COMPLETE_STATUS = mismatch.ArchiveStatus.COMPLETE
+BUILDING_STATUS = mismatch.ArchiveStatus.BUILDING
 
 
 @dataclass(frozen=True)
@@ -37,14 +35,12 @@ class MismatchArchive:
         *,
         probes: Sequence[mismatch.ProbeRow] | None = None,
         scores: Sequence[mismatch.ScoreRow] | None = None,
-        layers: Sequence[mismatch.LayerRow] | None = None,
         manifest: mismatch.ManifestRow | None = None,
     ) -> None:
         with self.store.transaction() as transaction:
             for table, rows in (
                 (mismatch.PROBE_TABLE, probes),
                 (mismatch.SCORES_TABLE, scores),
-                (mismatch.LAYERS_TABLE, layers),
             ):
                 for row in rows or ():
                     transaction.table(table).add(row.model_dump())
@@ -63,7 +59,7 @@ def read_frozen_probe(uri: str) -> FrozenProbeSource:
         raise ValueError(f"reuse_probe source {uri} is not a single complete mismatch archive")
     probes = [mismatch.ProbeRow.model_validate(row) for row in view.scan(mismatch.PROBE_TABLE).to_pylist()]
     scores = [mismatch.ScoreRow.model_validate(row) for row in view.scan(mismatch.SCORES_TABLE).to_pylist()]
-    generations = {row.sample_id: row for row in scores if row.scoring == GENERATION_SCORING}
+    generations = {row.sample_id: row for row in scores if row.scorer == "vllm.generate" and row.update == 0}
     if not probes or len(generations) != len(probes):
         raise ValueError("reuse_probe source has incomplete generation-time scores")
     probes.sort(key=lambda row: row.batch_position)

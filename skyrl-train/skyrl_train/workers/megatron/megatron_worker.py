@@ -1,81 +1,77 @@
-import torch
-import torch.nn as nn
-import torch.distributed
-import ray
-from transformers import AutoTokenizer, AutoConfig
-from huggingface_hub import snapshot_download
-
 import asyncio
 import copy
 import hashlib
 import importlib.util
 import os
-import random
-from contextlib import nullcontext
-import numpy as np
-from enum import StrEnum
-from typing import List, Dict, Any, Optional
 from collections import defaultdict
-from loguru import logger
-from skyrl_train.utils.progress import tqdm
-from omegaconf import OmegaConf
+from enum import StrEnum
+from typing import Any
 
-from megatron.bridge import AutoBridge
 import megatron.core.parallel_state as mpu
+import ray
+import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
+import torch
+import torch.distributed
+from huggingface_hub import snapshot_download
+from loguru import logger
+from megatron.bridge import AutoBridge
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
-
-from skyrl_train.distributed.megatron.optimizer import (
-    init_megatron_optim_config,
-    get_megatron_optimizer,
-    get_megatron_optimizer_param_scheduler,
-)
+from omegaconf import OmegaConf
 from skyrl_train.distributed.dispatch import MeshRank
-from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
-from skyrl_train.config.mismatch_probe import ALL_TRAINER_PROBE_MODES, PROBE_MODES
-from skyrl_train.distributed.megatron.remote_model import install_remote_hf_state
 from skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     materialize_megatron_params,
     print_model_size,
 )
-from skyrl_train.utils.utils import (
-    moe_router_replay_requested,
-    update_model_config,
-    str_to_torch_dtype,
-    get_physical_gpu_id,
+from skyrl_train.distributed.megatron.optimizer import (
+    get_megatron_optimizer,
+    get_megatron_optimizer_param_scheduler,
+    init_megatron_optim_config,
 )
-from marinskyrl.hugging_face_retry import load_hugging_face_with_retry
-from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
-import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
+from skyrl_train.distributed.megatron.remote_model import install_remote_hf_state
+from skyrl_train.distributed.utils import init_worker_process_group_with_device
+from skyrl_train.mismatch_probe.modes import TRAINER_MODES
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
+from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.training_batch import (
     GLOBAL_LOSS_DENOM_METADATA_KEY,
     TrainingBatchIterator,
     TrainingOutputBatch,
     gradient_accumulation_steps,
 )
-from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
-from skyrl_train.workers.worker import (
-    PolicyWorkerBase,
-    RefWorkerBase,
-    CriticWorkerBase,
-    log_r3_resident_set,
+from skyrl_train.utils.profiler import Profiler
+from skyrl_train.utils.progress import tqdm
+from skyrl_train.utils.utils import (
+    get_physical_gpu_id,
+    moe_router_replay_requested,
+    str_to_torch_dtype,
+    update_model_config,
 )
+from skyrl_train.weight_sync.expert_block.sender import ExpertBlockSender
+from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode
+from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 from skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronForwardMicroBatch,
     MegatronModelWrapper,
     MegatronPolicyMicroBatch,
 )
-from skyrl_train.utils.profiler import Profiler
-from marinskyrl.runtime_options import WeightSyncTransport
-from skyrl_train.weight_sync.expert_block.sender import ExpertBlockSender
-from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode
+from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
 from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor, MegatronWeightExtractor
-from skyrl_train.workers.grug_validation import GrugValidationSnapshot
+from skyrl_train.workers.worker import (
+    CriticWorkerBase,
+    PolicyWorkerBase,
+    RefWorkerBase,
+    log_r3_resident_set,
+)
+from torch import nn
+from transformers import AutoConfig, AutoTokenizer
+
+from marinskyrl.hugging_face_retry import load_hugging_face_with_retry
+from marinskyrl.runtime_options import WeightSyncTransport
 
 
 class _MegatronInitMode(StrEnum):
@@ -181,9 +177,9 @@ class MegatronWorker:
     def make_megatron_module(
         self,
         wrap_with_ddp: bool = True,
-        ddp_config: Optional[Dict[str, Any]] = None,
+        ddp_config: dict[str, Any] | None = None,
         bf16: bool = True,
-    ) -> List[nn.Module]:
+    ) -> list[nn.Module]:
         """
         Creates a megatron GPTModel (optionally DDP wrapped) using the bridge.
         """
@@ -266,18 +262,15 @@ class MegatronWorker:
     def probe_forward(self, data):
         """Use the normal Megatron policy forward with a scoped probe routing mode."""
         mode = data.metadata["probe_mode"]
-        keep_fraction = data.metadata["probe_keep_fraction"]
         micro_batch_size = data.metadata["probe_micro_batch_size"]
         controller = self.model.router_replay
-        if mode not in ALL_TRAINER_PROBE_MODES:
+        if mode not in TRAINER_MODES:
             raise ValueError(f"unsupported probe mode: {mode}")
-        if mode in PROBE_MODES and controller is None:
-            raise ValueError(f"probe mode {mode} requires an installed Megatron router replay controller")
         module_modes = [(module, module.training) for chunk in self.actor_module for module in chunk.modules()]
         rng_state = MegatronStrategy.get_rng_state()
         rng_tracker = get_cuda_rng_tracker()
         tracker_states = copy.deepcopy(rng_tracker.get_states())
-        scope = controller.scoring_mode(mode, keep_fraction) if mode in PROBE_MODES else nullcontext()
+        scope = TRAINER_MODES[mode].context(self, data.metadata)
         try:
             with scope:
                 if controller is not None:
@@ -301,53 +294,7 @@ class MegatronWorker:
                 _update_probe_tensor_digest(digest, tensor)
         return digest.hexdigest()
 
-    def probe_training_state_digests(self) -> dict[str, str]:
-        """Hash optimizer and RNG state for small-fixture scoring checks."""
-        if self.optimizer is None:
-            raise ValueError("probe state check requires an initialized optimizer")
-
-        def digest_value(value) -> str:
-            digest = hashlib.sha256()
-
-            def add(item):
-                if isinstance(item, torch.Tensor):
-                    digest.update(f"tensor:{item.dtype}:{tuple(item.shape)}\0".encode())
-                    _update_probe_tensor_digest(digest, item)
-                elif isinstance(item, np.ndarray):
-                    digest.update(f"array:{item.dtype}:{item.shape}\0".encode())
-                    digest.update(item.tobytes())
-                elif isinstance(item, dict):
-                    digest.update(b"mapping\0")
-                    for key in sorted(item, key=repr):
-                        add(key)
-                        add(item[key])
-                elif isinstance(item, (tuple, list)):
-                    digest.update(f"sequence:{len(item)}\0".encode())
-                    for member in item:
-                        add(member)
-                else:
-                    digest.update(f"scalar:{type(item).__name__}:{item!r}\0".encode())
-
-            add(value)
-            return digest.hexdigest()
-
-        return {
-            "optimizer": digest_value(self.optimizer.state_dict()),
-            "rng": digest_value(
-                (
-                    random.getstate(),
-                    np.random.get_state(),
-                    torch.get_rng_state(),
-                    torch.cuda.get_rng_state(),
-                    get_cuda_rng_tracker().get_states(),
-                )
-            ),
-            "module_modes": digest_value(
-                [module.training for chunk in self.actor_module for module in chunk.modules()]
-            ),
-        }
-
-    def _log_forward_fingerprint(self, call: str, micro_payloads: List[MegatronForwardMicroBatch]) -> None:
+    def _log_forward_fingerprint(self, call: str, micro_payloads: list[MegatronForwardMicroBatch]) -> None:
         """Log checksums of this rank's inputs and parameters so two calls can be compared."""
         token_sum = sum(int(micro.sequences.long().sum().item()) for micro in micro_payloads)
         mask_sum = sum(int(micro.attention_mask.long().sum().item()) for micro in micro_payloads)
@@ -368,7 +315,7 @@ class MegatronWorker:
             f"params={param_count} param_sum={param_sum:.6f}"
         )
 
-    def _log_train_eval_parity_probe(self, micro_buffer: List[MegatronPolicyMicroBatch]) -> None:
+    def _log_train_eval_parity_probe(self, micro_buffer: list[MegatronPolicyMicroBatch]) -> None:
         """Re-run forward-only passes on the training micro-batches and compare them with the old log-probs.
 
         The eval-mode pass measures whether the log-prob forward is repeatable at all; the
@@ -438,7 +385,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: MegatronModelWrapper = None
-        self.actor_module: List[nn.Module] = None
+        self.actor_module: list[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler = None
@@ -895,7 +842,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: MegatronModelWrapper = None
-        self.actor_module: List[nn.Module] = None
+        self.actor_module: list[nn.Module] = None
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
         self.strategy.offload_to_cpu(self.actor_module, None, pin_memory, non_blocking)

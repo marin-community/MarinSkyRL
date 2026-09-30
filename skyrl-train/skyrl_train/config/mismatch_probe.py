@@ -9,13 +9,12 @@ from skyrl_train.config.behavior_logprobs import (
     ROLLOUT_LOGPROB_ENGINE_OPTIONS,
     validate_behavior_logprob_sampling,
 )
+from skyrl_train.mismatch_probe.modes import (
+    NATIVE_MODE,
+    REPEAT_MODE,
+    TRAINER_MODES,
+)
 
-NATIVE_MODE = "native"
-REPEAT_MODE = "repeat"
-REPLAY_MODE = "router_replay"
-FILTERED_REPLAY_MODE = "router_replay_filtered"
-PROBE_MODES = frozenset({REPLAY_MODE, FILTERED_REPLAY_MODE})
-ALL_TRAINER_PROBE_MODES = frozenset({NATIVE_MODE, REPEAT_MODE, *PROBE_MODES})
 CACHE_OFF = "off"
 CACHE_ON = "on"
 CACHE_BOTH = "both"
@@ -78,7 +77,7 @@ def validate_mismatch_probe_config(
         not isinstance(modes, Sequence)
         or isinstance(modes, str)
         or len(modes) != len(set(modes))
-        or not set(modes) <= PROBE_MODES
+        or any(mode not in TRAINER_MODES or mode in {NATIVE_MODE, REPEAT_MODE} for mode in modes)
     ):
         raise ValueError("trainer.mismatch_probe.extra_trainer_modes contains an unsupported or repeated mode")
     cache_mode = probe.get("rescore_prefix_cache", CACHE_OFF)
@@ -88,12 +87,14 @@ def validate_mismatch_probe_config(
     if reuse is not None and (not isinstance(reuse, str) or not reuse):
         raise ValueError("trainer.mismatch_probe.reuse_probe must be a non-empty archive URI or null")
     archive_uri = probe.get("archive_uri")
-    if archive_uri is not None and (not isinstance(archive_uri, str) or not archive_uri):
-        raise ValueError("trainer.mismatch_probe.archive_uri must be a non-empty URI or null")
+    if not isinstance(archive_uri, str) or not archive_uri:
+        raise ValueError("trainer.mismatch_probe.archive_uri must be a non-empty durable URI")
 
     generator = skyrl.get("generator", {})
     if generator.get("backend") != "vllm":
         raise ValueError("trainer.mismatch_probe requires a vLLM generator")
+    if not generator.get("require_exact_chat_transport"):
+        raise ValueError("trainer.mismatch_probe requires exact chat transport without re-tokenization")
     sampling = generator.get("sampling_params") or {}
     validate_behavior_logprob_sampling(sampling)
     if sampling.get("temperature") != 1.0:
@@ -107,7 +108,7 @@ def validate_mismatch_probe_config(
     if engine_options.get("override_generation_config") or engine_options.get("logits_processors"):
         raise ValueError("trainer.mismatch_probe rejects engine generation overrides and logits processors")
 
-    if modes:
+    if any(TRAINER_MODES[mode].requires_routes for mode in modes):
         policy = trainer.get("policy") or {}
         megatron = policy.get("megatron_config") or {}
         capture = generator.get("enable_return_routed_experts") or engine_options.get("enable_return_routed_experts")
@@ -116,7 +117,7 @@ def validate_mismatch_probe_config(
         topk = megatron.get("moe_router_topk")
         if topk is not None and topk < 2:
             raise ValueError("trainer.mismatch_probe replay modes require an MoE router with top-k >= 2")
-    if FILTERED_REPLAY_MODE in modes:
+    if any(TRAINER_MODES[mode].requires_keep_fraction for mode in modes):
         fraction = (probe.get("filtered_replay") or {}).get("keep_fraction")
         if (
             isinstance(fraction, bool)
@@ -125,11 +126,3 @@ def validate_mismatch_probe_config(
             or not 0 <= fraction <= 1
         ):
             raise ValueError("trainer.mismatch_probe.filtered_replay.keep_fraction must be explicit and in [0, 1]")
-
-    layer_tokens = probe.get("layer_tokens", 0)
-    if isinstance(layer_tokens, bool) or not isinstance(layer_tokens, int) or layer_tokens < 0:
-        raise ValueError("trainer.mismatch_probe.layer_tokens must be a non-negative integer")
-    if layer_tokens:
-        if not generator.get("enforce_eager"):
-            raise ValueError("trainer.mismatch_probe layer capture requires eager vLLM")
-        raise ValueError("trainer.mismatch_probe has no registered layer adapter for this architecture")
