@@ -108,12 +108,6 @@ def _register_grug_muonh(optim_config: Mapping) -> None:
         _EMERGING_OPTIMIZERS[route] = entry
 
 
-class _MegatronParamScheduler(OptimizerParamScheduler):
-    def load_state_dict(self, state_dict: dict) -> None:
-        self.num_steps = 0
-        super().load_state_dict(state_dict)
-
-
 def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict) -> OptimizerConfig:
     # megatron-core only recognizes 'adam' / 'sgd' as standard optimizers (anything
     # else routes to `_get_megatron_emerging_optimizer`, which raises
