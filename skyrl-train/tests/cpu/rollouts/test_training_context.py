@@ -487,10 +487,11 @@ async def test_configured_context_requires_behavior_evidence_only_at_trainable_t
     cfg.generator.sampling_params.logprobs = 2
     cfg.generator.n_samples_per_prompt = SAMPLES_PER_PROMPT
     cfg.trainer.train_batch_size = 1
-    cfg.trainer.policy_mini_batch_size = SAMPLES_PER_PROMPT
+    cfg.trainer.policy_mini_batch_size = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.micro_forward_batch_size_per_gpu = 1
-    cfg.trainer.policy_num_gpus_per_node = 1
+    cfg.trainer.placement.policy_num_gpus_per_node = 1
+    cfg.trainer.placement.ref_num_gpus_per_node = 1
     cfg.trainer.rollout_buffer.max_in_flight = 1
     cfg.trainer.rollout_buffer.object_store_root = payloads.object_store_root
     if missing_field == "rollout_logprobs":
