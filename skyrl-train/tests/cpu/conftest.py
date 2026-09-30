@@ -23,6 +23,47 @@ from skyrl_train.distillation import ChosenTokenTeacherEvidence  # noqa: E402
 from skyrl_train.trajectory_runners.types import TrajectoryID, VerifierTestCollection  # noqa: E402
 
 
+# A slow test starts its own Ray cluster of about 4 GiB, and four workers running the rest of the suite fill most
+# of a 16 GiB CI runner, so at most one slow test runs per 12 GiB of host memory. A second one on that runner
+# pushes it past Ray's memory monitor, which then kills actors.
+# pytest-xdist sets this in each worker process.
+XDIST_WORKER_COUNT_ENV = "PYTEST_XDIST_WORKER_COUNT"
+HOST_MEMORY_PER_SLOW_TEST_BYTES = 12 * 2**30
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Split the host's cores between pytest-xdist workers.
+
+    Torch defaults every process to one intra-op thread per physical core, so N workers would each spin that many
+    threads. OMP_NUM_THREADS carries the same limit into subprocesses that tests spawn.
+    """
+    worker_count = os.environ.get(XDIST_WORKER_COUNT_ENV)
+    if worker_count is None:
+        return
+    threads = max(1, os.cpu_count() // int(worker_count))
+    torch.set_num_threads(threads)
+    os.environ["OMP_NUM_THREADS"] = str(threads)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Start tests marked ``slow`` first, spread over as many pytest-xdist workers as host memory allows.
+
+    Under ``--dist loadgroup``, xdist runs each ``xdist_group`` on one worker, hands out the largest groups first,
+    and keeps the collection order among the rest. Moving slow tests to the front starts them before the short
+    ones; grouping them bounds how many run at once. This hook runs before xdist reads the group markers.
+    """
+    slow = [item for item in items if item.get_closest_marker("slow") is not None]
+    items[:] = slow + [item for item in items if item.get_closest_marker("slow") is None]
+    worker_count = os.environ.get(XDIST_WORKER_COUNT_ENV)
+    if worker_count is None:
+        return
+    host_memory = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    group_count = min(int(worker_count), max(1, round(host_memory / HOST_MEMORY_PER_SLOW_TEST_BYTES)))
+    for index, item in enumerate(slow):
+        item.add_marker(pytest.mark.xdist_group(f"slow-{index % group_count}"))
+
+
 @pytest.fixture
 def chosen_teacher_evidence() -> ChosenTokenTeacherEvidence:
     return ChosenTokenTeacherEvidence(
@@ -106,7 +147,8 @@ def _kill_registry_actors() -> None:
 @contextmanager
 def _local_ray_session() -> Iterator[None]:
     if not ray.is_initialized():
-        ray.init()
+        # No CPU test reads the dashboard; skipping it saves each concurrent session its start-up time and memory.
+        ray.init(include_dashboard=False)
     try:
         yield
     finally:
@@ -130,14 +172,14 @@ def ray_module() -> Iterator[None]:
 
 
 @pytest.fixture(scope="module")
-def single_rank_group():
+def single_rank_group(tmp_path_factory):
     """A world-size-1 gloo process group so distributed collectives (TP
     all-reduces, broadcast_object_list) run as no-ops on one CPU process."""
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", "29591")
     created = False
     if not dist.is_initialized():
-        dist.init_process_group("gloo", rank=0, world_size=1)
+        # A file rendezvous keeps concurrent pytest-xdist workers from contending for one TCP port.
+        rendezvous = tmp_path_factory.mktemp("single_rank_group") / "store"
+        dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=0, world_size=1)
         created = True
     try:
         yield dist.group.WORLD

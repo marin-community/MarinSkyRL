@@ -24,7 +24,7 @@ set -x
 : "${MINI_BATCH_SIZE:=256}"
 : "${MAX_STALENESS_STEPS:=4}"
 
-uv run --isolated --extra megatron --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.gym_worker_pool \
+uv run --isolated --extra megatron --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.rollout_buffer.max_staleness_steps=${MAX_STALENESS_STEPS} \

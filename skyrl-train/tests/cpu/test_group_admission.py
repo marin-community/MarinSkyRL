@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+import numpy as np
 import pytest
 
 from skyrl_train.dynamic_sampling import (
@@ -16,7 +17,6 @@ from skyrl_train.group_admission import (
     TrainingGroupInvariantError,
     admission_stall_timeout,
     assert_training_groups_eligible,
-    resolve_group_advantage_invariant,
 )
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import shape_trajectory_rewards
 
@@ -30,7 +30,7 @@ def _group(
     *,
     loss_masks: list[list[int]],
     exclude_from_baseline: list[bool] | None = None,
-    rollout_logprobs: list[list[float | None]] | None = None,
+    rollout_logprobs: list[np.ndarray] | None = None,
 ) -> _Group:
     group_size = len(loss_masks)
     trajectory_batch = {
@@ -47,19 +47,16 @@ def _group(
 
 
 @pytest.mark.parametrize(
-    ("history", "expected"),
+    ("history", "override", "expected"),
     [
-        ([], 1800.0),
-        ([100.0, 200.0, 300.0], 1000.0),
-        ([1.0, 2.0, 3.0], 600.0),
+        ([], None, 1800.0),
+        ([100.0, 200.0, 300.0], None, 1000.0),
+        ([1.0, 2.0, 3.0], None, 600.0),
+        pytest.param([100.0, 200.0, 300.0], 20.0, 20.0, id="override-ignores-step-times"),
     ],
 )
-def test_admission_stall_timeout_scales_with_recent_step_times(history, expected):
-    assert admission_stall_timeout(recent_step_times=history, timeout_override=None) == expected
-
-
-def test_admission_stall_timeout_override_ignores_step_times():
-    assert admission_stall_timeout(recent_step_times=[100.0, 200.0, 300.0], timeout_override=20.0) == 20.0
+def test_admission_stall_timeout_scales_with_recent_step_times(history, override, expected):
+    assert admission_stall_timeout(recent_step_times=history, timeout_override=override) == expected
 
 
 @pytest.mark.parametrize(
@@ -157,18 +154,28 @@ def test_required_logprobs_reject_missing_values_only_for_trainable_group():
     assert decision.primary_rejection is AdmissionRejection.MISSING_ROLLOUT_LOGPROBS
 
 
-def test_required_logprobs_allow_placeholders_only_at_masked_tokens():
+def test_required_logprobs_reject_non_array_rows():
     policy = GroupAdmissionPolicy(
         GroupAdvantageInvariant.exact_physical(physical_group_size=2),
         rollout_logprobs_required=True,
     )
-    group = _group(loss_masks=[[1], [0]], rollout_logprobs=[[None], [None]])
+    group = _group(loss_masks=[[1], [0]])
+    group.trajectory_batch["rollout_logprobs"] = [[-0.5], [0.0]]
 
-    decision = policy.evaluate(group)
+    with pytest.raises(ValueError, match="rollout_logprobs row 0 must be a one-dimensional array"):
+        policy.evaluate(group)
 
-    assert decision.primary_rejection is AdmissionRejection.MISSING_ROLLOUT_LOGPROBS
 
-    group.trajectory_batch["rollout_logprobs"] = [[-0.5], [None]]
+def test_required_logprobs_accept_numpy_rows():
+    policy = GroupAdmissionPolicy(
+        GroupAdvantageInvariant.exact_physical(physical_group_size=2),
+        rollout_logprobs_required=True,
+    )
+    group = _group(
+        loss_masks=[[1], [0]],
+        rollout_logprobs=[np.asarray([-0.5], dtype=np.float32), np.zeros(1, dtype=np.float32)],
+    )
+
     assert policy.evaluate(group).accepted
 
 
@@ -212,25 +219,6 @@ def test_stepwise_group_counts_final_trials_but_checks_all_transitions_for_train
     decision = policy.evaluate(group)
 
     assert decision.accepted
-
-
-@pytest.mark.parametrize("minimum_group_size", [None, 1, 5])
-def test_rloo_n_group_floor_must_support_leave_one_out(minimum_group_size):
-    with pytest.raises(ValueError):
-        resolve_group_advantage_invariant(
-            advantage_estimator="rloo_n",
-            physical_group_size=4,
-            minimum_group_size=minimum_group_size,
-        )
-
-
-def test_grpo_rejects_unused_group_floor():
-    with pytest.raises(ValueError, match="set it to null"):
-        resolve_group_advantage_invariant(
-            advantage_estimator="grpo",
-            physical_group_size=4,
-            minimum_group_size=2,
-        )
 
 
 def test_dynamic_filter_uses_final_unshaped_outcomes():

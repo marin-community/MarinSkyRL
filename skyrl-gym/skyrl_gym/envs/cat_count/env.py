@@ -19,7 +19,7 @@ class CatCountEnv(BaseTextEnv):
         self.score: CatCountScore | None = None
 
     def init(self, prompt: ConversationType) -> tuple[ConversationType, dict[str, Any]]:
-        return prompt, {"chat_completion_params": {}}
+        return prompt, {}
 
     def set_rollout_evidence(self, evidence: RolloutEvidence) -> None:
         self.stop_reason = evidence.stop_reason

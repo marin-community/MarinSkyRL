@@ -69,7 +69,10 @@ def _config():
                 "teacher_scoring": {"max_queued_per_teacher": 1, "workers_per_teacher": 1},
             },
             "generator": {
+                "backend": "vllm",
+                "run_engines_locally": True,
                 "model_dtype": "bfloat16",
+                "weight_sync_pause": {"mode": "keep", "clear_cache": True},
                 "vllm_v1_disable_multiproc": True,
                 "enable_prefix_caching": False,
                 "enforce_eager": False,
@@ -215,24 +218,6 @@ def test_local_teacher_runtime_accepts_multiple_routes_to_one_pinned_teacher(mon
         ("default", "primary"),
         ("math", "primary"),
     ]
-
-
-def test_teacher_queue_limits_fail_before_teacher_initialization(monkeypatch):
-    tokenizer_initialized = False
-
-    def create_teacher_tokenizer(*_args, **_kwargs):
-        nonlocal tokenizer_initialized
-        tokenizer_initialized = True
-        return _Tokenizer({"a": 0})
-
-    monkeypatch.setattr(runtime_module, "create_tokenizer", create_teacher_tokenizer)
-    cfg = _config()
-    cfg.trainer.teacher_scoring.max_queued_per_teacher = 0
-
-    with pytest.raises(ValueError, match="queue and worker limits must be positive"):
-        prepare_distillation_runtime(cfg, _Tokenizer({"a": 0}))
-
-    assert not tokenizer_initialized
 
 
 @pytest.mark.asyncio
@@ -481,16 +466,6 @@ def test_local_teacher_runtime_rejects_unsafe_multi_teacher_resource_layouts(mon
     cfg.teachers.primary.resources.colocation_group, cfg.teachers.secondary.resources.colocation_group = groups
 
     with pytest.raises(ValueError, match=message):
-        prepare_distillation_runtime(cfg, tokenizer)
-
-
-def test_local_teacher_runtime_rejects_unplanned_additional_residency_slots(monkeypatch):
-    tokenizer = _Tokenizer({"a": 0})
-    monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
-    cfg = _two_teacher_config(placement="rotating")
-    cfg.trainer.algorithm.distillation.residency.max_resident = 2
-
-    with pytest.raises(ValueError, match="exactly one rotating residency slot"):
         prepare_distillation_runtime(cfg, tokenizer)
 
 

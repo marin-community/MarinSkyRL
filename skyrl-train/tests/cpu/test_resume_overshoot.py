@@ -16,35 +16,26 @@ The fix adds a guard right after checkpoint load:
 final checkpoint / HF export still runs) and returns without training, so the
 process exits 0 (clean COMPLETED).
 
-These tests exercise the decision logic and the finalize handler directly,
-without booting Ray / models, so they run on CPU.
-
-    uv run --isolated --group dev --extra cpu pytest tests/cpu/test_resume_overshoot.py
+These tests exercise the finalize handler directly, without booting Ray or models.
 """
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from loguru import logger
+
+from ci.marin_nightly.gate import parse_metrics
 
 from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.callbacks.base import TrainerControl
+from skyrl_train.callbacks.base import CallbackHandler, TrainerControl
+from skyrl_train.callbacks.builtin import EvaluationCallback
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _resumed_at_max_is_complete(global_step: int, total_training_steps: int) -> bool:
-    """Mirror of the guard predicate used in the trainer's _train_loop.
-
-    A run is COMPLETE (must exit without another step) iff the checkpoint it
-    resumed from was already at or past max_steps. The loaded global_step is the
-    *completed* step count (save_checkpoints writes it after a step finishes), so
-    the boundary is ``>=`` — "resumed exactly at max_steps" counts as done.
-    """
-    return global_step >= total_training_steps
 
 
 def _make_bare_trainer(global_step: int, total_training_steps: int, colocate_all: bool = False):
@@ -55,6 +46,7 @@ def _make_bare_trainer(global_step: int, total_training_steps: int, colocate_all
     """
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer._last_saved_step = None
+    trainer._last_evaluated_step = None
     trainer._pending_checkpoint_upload = None
     trainer.global_step = global_step
     trainer.total_training_steps = total_training_steps
@@ -101,32 +93,6 @@ class _RecordingCallbackHandler:
         return control
 
 
-# ---------------------------------------------------------------------------
-# Guard-predicate tests (the core termination/resume-at-max condition)
-# ---------------------------------------------------------------------------
-
-
-def test_guard_predicate_resumed_at_max_is_complete():
-    # Resumed exactly AT max_steps -> done (no-op exit).
-    assert _resumed_at_max_is_complete(global_step=80, total_training_steps=80) is True
-
-
-def test_guard_predicate_resumed_past_max_is_complete():
-    # Resumed PAST max_steps (e.g. max_steps lowered) -> done.
-    assert _resumed_at_max_is_complete(global_step=81, total_training_steps=80) is True
-
-
-def test_guard_predicate_resumed_below_max_continues():
-    # Mid-training resume -> NOT complete, continue normally.
-    assert _resumed_at_max_is_complete(global_step=79, total_training_steps=80) is False
-    assert _resumed_at_max_is_complete(global_step=1, total_training_steps=80) is False
-
-
-def test_guard_predicate_fresh_run_not_complete():
-    # Fresh run (global_step == 0) is never treated as complete on load.
-    assert _resumed_at_max_is_complete(global_step=0, total_training_steps=80) is False
-
-
 def test_train_end_saves_the_last_completed_step():
     """Final callbacks and artifacts must use completed steps, not the next step index."""
     trainer = _make_bare_trainer(global_step=17, total_training_steps=16)
@@ -146,18 +112,57 @@ def test_train_end_saves_the_last_completed_step():
     assert trainer.callback_handler.events == ["on_train_end", "on_save"]
 
 
-def test_train_end_runs_and_logs_the_requested_evaluation():
-    trainer = _make_bare_trainer(global_step=17, total_training_steps=16)
-    requested = TrainerControl()
-    requested.should_evaluate = True
-    trainer.callback_handler = _RecordingCallbackHandler(requested)
+@pytest.mark.parametrize(
+    ("eval_interval", "expected_evaluations", "expected_commits"),
+    [
+        (20, [(16, 0.75)], [True]),
+        (10, [(10, 0.75), (16, 0.5)], [False, True]),
+        (8, [(8, 0.75), (16, 0.5)], [False, False]),
+    ],
+)
+def test_train_end_runs_and_logs_the_requested_evaluation(
+    eval_interval, expected_evaluations, expected_commits, delivered_telemetry
+):
+    trainer = _make_bare_trainer(global_step=1, total_training_steps=16)
+    trainer.callback_handler = CallbackHandler([EvaluationCallback(eval_steps=eval_interval)])
+    trainer.all_metrics = {"reward/raw_reward": 0.625}
+    trainer._training_metrics_enabled = True
+    trainer._log_metrics_stdout = RayPPOTrainer._log_metrics_stdout.__get__(trainer)
+    tracked = []
+    trainer.tracker = SimpleNamespace(log=lambda metrics, **kwargs: tracked.append((dict(metrics), kwargs)))
+    scores = iter([0.75, 0.5, 0.25])
 
-    asyncio.run(trainer._finalize_training(completed_step=16, epoch=0))
+    async def evaluate():
+        return {"eval/accuracy": next(scores)}
 
-    trainer.eval.assert_awaited_once()
-    trainer._log_metrics_stdout.assert_called_once_with({"eval/accuracy": 0.75}, step=16, kind="eval")
-    trainer.tracker.log.assert_called_once_with({"eval/accuracy": 0.75}, step=16, commit=True)
-    assert trainer.callback_handler.events == ["on_train_end", "on_evaluate"]
+    trainer.eval = evaluate
+    mirrored = []
+    sink = logger.add(lambda message: mirrored.append(str(message)), format="{message}")
+
+    async def finish_training():
+        for step in range(1, 17):
+            trainer.global_step = step
+            await trainer._run_step_end_callbacks(trainer._create_trainer_state(epoch=0))
+        trainer._log_metrics_stdout(trainer.all_metrics, step=16, kind="train")
+        trainer.global_step = 17
+        await trainer._finalize_training(completed_step=16, epoch=0)
+
+    try:
+        asyncio.run(finish_training())
+    finally:
+        logger.remove(sink)
+
+    payloads = parse_metrics("".join(mirrored))
+    assert [(row.step, row.values["eval/accuracy"]) for row in payloads if row.kind == "eval"] == expected_evaluations
+    assert [row.values for row in payloads if row.kind == "train"] == [{"reward/raw_reward": 0.625}]
+    assert tracked == [
+        ({"eval/accuracy": score}, {"step": step, "commit": commit})
+        for (step, score), commit in zip(expected_evaluations, expected_commits, strict=True)
+    ]
+    evaluation_values = delivered_telemetry.select("training_metric_value", payload_kind="eval", metric="eval/accuracy")
+    assert [(row["attributes"]["step"], row["value"]) for row in evaluation_values] == [
+        (str(step), score) for step, score in expected_evaluations
+    ]
 
 
 def test_train_end_still_saves_when_the_final_evaluation_fails():
@@ -175,46 +180,31 @@ def test_train_end_still_saves_when_the_final_evaluation_fails():
     assert trainer.callback_handler.events == ["on_train_end", "on_save"]
 
 
-# ---------------------------------------------------------------------------
-# _handle_resume_at_max_steps finalize-handler tests (both trainers)
-# ---------------------------------------------------------------------------
-
-
-def test_handle_resume_at_max_steps_triggers_export_when_requested():
-    """on_train_end requests a save+HF export -> finalize handler performs both,
-    and never runs a training step."""
-    trainer = _make_bare_trainer(global_step=80, total_training_steps=80)
-
+@pytest.mark.parametrize(
+    ("should_save", "should_save_hf_model", "colocate_all", "expected_effects"),
+    [
+        (True, True, False, ["checkpoint@80", "hf_export@80"]),
+        (False, False, False, []),
+        (False, False, True, ["engines_asleep", "policy_backloaded"]),
+    ],
+)
+def test_resume_at_max_steps_finalizes_without_training(
+    should_save, should_save_hf_model, colocate_all, expected_effects
+):
+    """A run resumed at max_steps fires on_train_end and performs only the requested final artifacts."""
+    trainer = _make_bare_trainer(global_step=80, total_training_steps=80, colocate_all=colocate_all)
     requested = TrainerControl()
-    requested.should_save = True
-    requested.should_save_hf_model = True
+    requested.should_save = should_save
+    requested.should_save_hf_model = should_save_hf_model
     trainer.callback_handler = _RecordingCallbackHandler(requested)
+    effects = []
+    trainer._snapshot_checkpoint.side_effect = lambda _state: effects.append(f"checkpoint@{trainer.global_step}")
+    trainer.handle_hf_export.side_effect = lambda: effects.append(f"hf_export@{trainer.global_step}")
+    trainer.inference_engine_client.sleep.side_effect = lambda: effects.append("engines_asleep")
+    trainer.policy_model.backload_to_gpu.side_effect = lambda: effects.append("policy_backloaded")
 
     asyncio.run(trainer._handle_resume_at_max_steps())
 
-    assert "on_train_end" in trainer.callback_handler.events
-    trainer._snapshot_checkpoint.assert_called_once()
-    trainer.handle_hf_export.assert_called_once()
-
-
-def test_handle_resume_at_max_steps_no_save_when_not_requested():
-    """If callbacks request no final save, the handler is still a clean no-op exit
-    (it does not raise and does not invent a save)."""
-    trainer = _make_bare_trainer(global_step=80, total_training_steps=80)
-    trainer.callback_handler = _RecordingCallbackHandler(TrainerControl())  # nothing requested
-
-    asyncio.run(trainer._handle_resume_at_max_steps())
-
-    trainer._snapshot_checkpoint.assert_not_called()
-    trainer.handle_hf_export.assert_not_called()
-
-
-def test_handle_resume_at_max_steps_backloads_when_colocate(monkeypatch):
-    """Base trainer with colocate_all=True backloads the policy model to GPU before
-    finalize (mirrors the normal end-of-training path)."""
-    trainer = _make_bare_trainer(global_step=80, total_training_steps=80, colocate_all=True)
-    trainer.callback_handler = _RecordingCallbackHandler(TrainerControl())
-
-    asyncio.run(trainer._handle_resume_at_max_steps())
-
-    trainer.policy_model.backload_to_gpu.assert_called_once()
+    assert trainer.callback_handler.events[0] == "on_train_end"
+    assert trainer.callback_handler.states[0].global_step == 80
+    assert effects == expected_effects
