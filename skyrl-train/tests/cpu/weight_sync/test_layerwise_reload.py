@@ -1,42 +1,38 @@
-from unittest.mock import AsyncMock, Mock
-
 import pytest
 import torch
 
 from skyrl_train.workers.worker import PolicyWorkerBase
 
 
+class RecordingEngineClient:
+    def __init__(self, events: list[str]):
+        self.events = events
+
+    async def begin_weight_reload(self):
+        self.events.append("begin")
+
+    async def finish_weight_reload(self):
+        self.events.append("finish")
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("rank", [0, 1])
-async def test_layerwise_weight_reload_is_rank_synchronized(monkeypatch, rank: int):
-    worker = object.__new__(PolicyWorkerBase)
-    client = Mock(begin_weight_reload=AsyncMock(), finish_weight_reload=AsyncMock())
-    barrier = Mock()
+@pytest.mark.parametrize(
+    ("rank", "enabled", "expected"),
+    [
+        # Rank 0 opens the reload before any rank streams weights, and finalizes only after every rank finished.
+        (0, True, ["begin", "barrier", "barrier", "finish"]),
+        (1, True, ["barrier", "barrier"]),
+        (0, False, []),
+    ],
+)
+async def test_layerwise_weight_reload_is_rank_synchronized(monkeypatch, rank, enabled, expected):
+    events: list[str] = []
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: rank)
-    monkeypatch.setattr(torch.distributed, "barrier", barrier)
-
-    await worker._begin_vllm_layerwise_weight_reload(client, enabled=True)
-    await worker._finish_vllm_layerwise_weight_reload(client, enabled=True)
-
-    assert barrier.call_count == 2
-    if rank == 0:
-        client.begin_weight_reload.assert_awaited_once_with()
-        client.finish_weight_reload.assert_awaited_once_with()
-    else:
-        client.begin_weight_reload.assert_not_awaited()
-        client.finish_weight_reload.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_layerwise_weight_reload_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(torch.distributed, "barrier", lambda: events.append("barrier"))
     worker = object.__new__(PolicyWorkerBase)
-    client = Mock(begin_weight_reload=AsyncMock(), finish_weight_reload=AsyncMock())
-    barrier = Mock()
-    monkeypatch.setattr(torch.distributed, "barrier", barrier)
+    client = RecordingEngineClient(events)
 
-    await worker._begin_vllm_layerwise_weight_reload(client, enabled=False)
-    await worker._finish_vllm_layerwise_weight_reload(client, enabled=False)
+    await worker._begin_vllm_layerwise_weight_reload(client, enabled=enabled)
+    await worker._finish_vllm_layerwise_weight_reload(client, enabled=enabled)
 
-    barrier.assert_not_called()
-    client.begin_weight_reload.assert_not_awaited()
-    client.finish_weight_reload.assert_not_awaited()
+    assert events == expected

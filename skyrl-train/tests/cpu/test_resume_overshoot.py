@@ -16,10 +16,7 @@ The fix adds a guard right after checkpoint load:
 final checkpoint / HF export still runs) and returns without training, so the
 process exits 0 (clean COMPLETED).
 
-These tests exercise the decision logic and the finalize handler directly,
-without booting Ray / models, so they run on CPU.
-
-    uv run --isolated --group dev --extra cpu pytest tests/cpu/test_resume_overshoot.py
+These tests exercise the finalize handler directly, without booting Ray or models.
 """
 
 import asyncio
@@ -28,8 +25,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
-from skyrl_train.callbacks.base import TrainerControl, TrainerState
+from skyrl_train.callbacks.base import TrainerControl
 
 
 # ---------------------------------------------------------------------------
@@ -37,24 +33,13 @@ from skyrl_train.callbacks.base import TrainerControl, TrainerState
 # ---------------------------------------------------------------------------
 
 
-def _resumed_at_max_is_complete(global_step: int, total_training_steps: int) -> bool:
-    """Mirror of the guard predicate used in both trainers' _train_loop.
-
-    A run is COMPLETE (must exit without another step) iff the checkpoint it
-    resumed from was already at or past max_steps. The loaded global_step is the
-    *completed* step count (save_checkpoints writes it after a step finishes), so
-    the boundary is ``>=`` — "resumed exactly at max_steps" counts as done.
-    """
-    return global_step >= total_training_steps
-
-
-def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocate_all: bool = False):
+def _make_bare_trainer(global_step: int, total_training_steps: int, colocate_all: bool = False):
     """Construct a trainer instance without running the heavy __init__.
 
     We bypass __init__ (which builds dataloaders, Ray actor groups, etc.) and set
     only the attributes the resume guard / finalize handler touch.
     """
-    trainer = cls.__new__(cls)
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer._last_saved_step = None
     trainer._pending_checkpoint_upload = None
     trainer.global_step = global_step
@@ -71,11 +56,8 @@ def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocat
     cfg.trainer.epochs = 1
     trainer.cfg = cfg
 
-    # _create_trainer_state for the base trainer reads len(self.train_dataloader);
-    # the fully-async override reads self.num_steps_per_epoch instead.
-    dl = MagicMock()
-    dl.__len__ = lambda _self: max(total_training_steps, 1)
-    trainer.train_dataloader = dl
+    trainer.context = MagicMock(name="context")
+    trainer.context.state_dict = AsyncMock(name="state_dict")
 
     trainer._snapshot_checkpoint = MagicMock(name="snapshot_checkpoint")
     trainer._finish_checkpoint_upload = AsyncMock(name="finish_checkpoint_upload", return_value=(0.0, 0.0))
@@ -105,63 +87,15 @@ class _RecordingCallbackHandler:
         return control
 
 
-# ---------------------------------------------------------------------------
-# Guard-predicate tests (the core termination/resume-at-max condition)
-# ---------------------------------------------------------------------------
-
-
-def test_guard_predicate_resumed_at_max_is_complete():
-    # Resumed exactly AT max_steps -> done (no-op exit).
-    assert _resumed_at_max_is_complete(global_step=80, total_training_steps=80) is True
-
-
-def test_guard_predicate_resumed_past_max_is_complete():
-    # Resumed PAST max_steps (e.g. max_steps lowered) -> done.
-    assert _resumed_at_max_is_complete(global_step=81, total_training_steps=80) is True
-
-
-def test_guard_predicate_resumed_below_max_continues():
-    # Mid-training resume -> NOT complete, continue normally.
-    assert _resumed_at_max_is_complete(global_step=79, total_training_steps=80) is False
-    assert _resumed_at_max_is_complete(global_step=1, total_training_steps=80) is False
-
-
-def test_guard_predicate_fresh_run_not_complete():
-    # Fresh run (global_step == 0) is never treated as complete on load.
-    assert _resumed_at_max_is_complete(global_step=0, total_training_steps=80) is False
-
-
-def test_fresh_run_stops_at_exactly_max_steps():
-    """Simulate the fresh-run loop arithmetic: it must stop at exactly max_steps.
-
-    A fresh run starts global_step=0, increments to 1, trains steps 1..N, and after
-    the post-step increment the check ``global_step > total_training_steps`` fires.
-    The last step actually *trained* (and checkpointed) must be exactly N — no gsN+1.
-    """
-    total = 80
-    global_step = 0
-    global_step += 1  # start training at global_step 1
-    trained_steps = []
-    while True:
-        trained_steps.append(global_step)  # this step is executed/checkpointed
-        global_step += 1  # post-step increment
-        if global_step > total:  # max_steps check (post-increment)
-            break
-    assert trained_steps[-1] == total, "fresh run must stop exactly at max_steps"
-    assert max(trained_steps) == total, "fresh run must NOT train gsN+1 (no overshoot)"
-    assert len(trained_steps) == total
-
-
-@pytest.mark.parametrize("cls", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
-def test_train_end_saves_the_last_completed_step(cls):
+def test_train_end_saves_the_last_completed_step():
     """Final callbacks and artifacts must use completed steps, not the next step index."""
-    trainer = _make_bare_trainer(cls, global_step=17, total_training_steps=16)
+    trainer = _make_bare_trainer(global_step=17, total_training_steps=16)
     requested = TrainerControl()
     requested.should_save = True
     requested.should_save_hf_model = True
     trainer.callback_handler = _RecordingCallbackHandler(requested)
     saved_steps = []
-    trainer._snapshot_checkpoint.side_effect = lambda: saved_steps.append(trainer.global_step)
+    trainer._snapshot_checkpoint.side_effect = lambda _rollout_state: saved_steps.append(trainer.global_step)
     trainer.handle_hf_export.side_effect = lambda: saved_steps.append(trainer.global_step)
 
     asyncio.run(trainer._finalize_training(completed_step=16, epoch=0))
@@ -172,9 +106,8 @@ def test_train_end_saves_the_last_completed_step(cls):
     assert trainer.callback_handler.events == ["on_train_end", "on_save"]
 
 
-@pytest.mark.parametrize("cls", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
-def test_train_end_runs_and_logs_the_requested_evaluation(cls):
-    trainer = _make_bare_trainer(cls, global_step=17, total_training_steps=16)
+def test_train_end_runs_and_logs_the_requested_evaluation():
+    trainer = _make_bare_trainer(global_step=17, total_training_steps=16)
     requested = TrainerControl()
     requested.should_evaluate = True
     trainer.callback_handler = _RecordingCallbackHandler(requested)
@@ -187,9 +120,8 @@ def test_train_end_runs_and_logs_the_requested_evaluation(cls):
     assert trainer.callback_handler.events == ["on_train_end", "on_evaluate"]
 
 
-@pytest.mark.parametrize("cls", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
-def test_train_end_still_saves_when_the_final_evaluation_fails(cls):
-    trainer = _make_bare_trainer(cls, global_step=17, total_training_steps=16)
+def test_train_end_still_saves_when_the_final_evaluation_fails():
+    trainer = _make_bare_trainer(global_step=17, total_training_steps=16)
     requested = TrainerControl()
     requested.should_evaluate = True
     requested.should_save = True
@@ -203,63 +135,31 @@ def test_train_end_still_saves_when_the_final_evaluation_fails(cls):
     assert trainer.callback_handler.events == ["on_train_end", "on_save"]
 
 
-# ---------------------------------------------------------------------------
-# _handle_resume_at_max_steps finalize-handler tests (both trainers)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("cls", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
-def test_handle_resume_at_max_steps_triggers_export_when_requested(cls):
-    """on_train_end requests a save+HF export -> finalize handler performs both,
-    and never runs a training step."""
-    trainer = _make_bare_trainer(cls, global_step=80, total_training_steps=80)
-
+@pytest.mark.parametrize(
+    ("should_save", "should_save_hf_model", "colocate_all", "expected_effects"),
+    [
+        (True, True, False, ["checkpoint@80", "hf_export@80"]),
+        (False, False, False, []),
+        (False, False, True, ["engines_asleep", "policy_backloaded"]),
+    ],
+)
+def test_resume_at_max_steps_finalizes_without_training(
+    should_save, should_save_hf_model, colocate_all, expected_effects
+):
+    """A run resumed at max_steps fires on_train_end and performs only the requested final artifacts."""
+    trainer = _make_bare_trainer(global_step=80, total_training_steps=80, colocate_all=colocate_all)
     requested = TrainerControl()
-    requested.should_save = True
-    requested.should_save_hf_model = True
+    requested.should_save = should_save
+    requested.should_save_hf_model = should_save_hf_model
     trainer.callback_handler = _RecordingCallbackHandler(requested)
+    effects = []
+    trainer._snapshot_checkpoint.side_effect = lambda _state: effects.append(f"checkpoint@{trainer.global_step}")
+    trainer.handle_hf_export.side_effect = lambda: effects.append(f"hf_export@{trainer.global_step}")
+    trainer.inference_engine_client.sleep.side_effect = lambda: effects.append("engines_asleep")
+    trainer.policy_model.backload_to_gpu.side_effect = lambda: effects.append("policy_backloaded")
 
     asyncio.run(trainer._handle_resume_at_max_steps())
 
-    assert "on_train_end" in trainer.callback_handler.events
-    trainer._snapshot_checkpoint.assert_called_once()
-    trainer.handle_hf_export.assert_called_once()
-
-
-@pytest.mark.parametrize("cls", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
-def test_handle_resume_at_max_steps_no_save_when_not_requested(cls):
-    """If callbacks request no final save, the handler is still a clean no-op exit
-    (it does not raise and does not invent a save)."""
-    trainer = _make_bare_trainer(cls, global_step=80, total_training_steps=80)
-    trainer.callback_handler = _RecordingCallbackHandler(TrainerControl())  # nothing requested
-
-    asyncio.run(trainer._handle_resume_at_max_steps())
-
-    trainer._snapshot_checkpoint.assert_not_called()
-    trainer.handle_hf_export.assert_not_called()
-
-
-def test_handle_resume_at_max_steps_backloads_when_colocate(monkeypatch):
-    """Base trainer with colocate_all=True backloads the policy model to GPU before
-    finalize (mirrors the normal end-of-training path)."""
-    trainer = _make_bare_trainer(RayPPOTrainer, global_step=80, total_training_steps=80, colocate_all=True)
-    trainer.callback_handler = _RecordingCallbackHandler(TrainerControl())
-
-    asyncio.run(trainer._handle_resume_at_max_steps())
-
-    trainer.policy_model.backload_to_gpu.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# Sanity: the fully-async trainer's _create_trainer_state used inside the handler
-# does not require the heavy base attributes.
-# ---------------------------------------------------------------------------
-
-
-def test_fully_async_create_trainer_state_smoke():
-    trainer = _make_bare_trainer(FullyAsyncRayPPOTrainer, global_step=80, total_training_steps=80)
-    state = trainer._create_trainer_state(epoch=0)
-    assert isinstance(state, TrainerState)
-    assert state.global_step == 80
-    assert state.total_steps == 80
-    assert state.is_last_step is True
+    assert trainer.callback_handler.events[0] == "on_train_end"
+    assert trainer.callback_handler.states[0].global_step == 80
+    assert effects == expected_effects

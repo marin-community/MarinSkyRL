@@ -19,6 +19,7 @@ from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.training_batch import TensorBatch, TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, ConversationType
@@ -343,7 +344,6 @@ def init_inference_engines(
     cfg,
     model,
     use_local,
-    async_engine,
     tp_size,
     colocate_all,
     backend,
@@ -379,7 +379,6 @@ def init_inference_engines(
         engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
         gpu_memory_utilization=gpu_memory_utilization,
         inference_engine_enable_sleep=sleep,
-        async_engine=async_engine,
         max_num_batched_tokens=8192,
         max_num_seqs=max_num_seqs,
         tokenizer=tokenizer,
@@ -387,6 +386,7 @@ def init_inference_engines(
         sleep_level=sleep_level,
         enable_lora=enable_lora,
         engine_init_kwargs=engine_init_kwargs or {},
+        weight_sync_pause_policy=resolve_weight_sync_pause_policy(cfg.generator),
     )
     client = InferenceEngineClient(eps, tokenizer, cfg)
     if sleep:

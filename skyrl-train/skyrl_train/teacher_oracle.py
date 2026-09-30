@@ -472,6 +472,8 @@ async def _close_oracles(oracles: Iterable[ValidatedTeacherOracle]) -> list[Base
     for oracle in reversed(tuple(oracles)):
         try:
             await oracle.close()
+        except asyncio.CancelledError:
+            raise
         except BaseException as error:
             errors.append(error)
     return errors

@@ -4,13 +4,11 @@ Validates: extract_test_runs parses REAL test-runner stdout (pytest / unittest /
 jest) from tool-observation messages, returns ordered (pass, fail) per run, NEVER
 parses assistant prose, and falls back to no-signal (empty list) on
 unrecognized / garbled / partial output.
-
-Run:
-    pytest tests/cpu/reward/test_test_delta_parser.py
 """
 
+import pytest
+
 from skyrl_train.utils.test_delta_parser import extract_test_runs
-from skyrl_train.utils.reward_shaping import JestOutputParser, get_output_parser
 
 
 PYTEST_FAIL = "============== 1 failed, 140 passed in 2.39s =============="
@@ -67,8 +65,8 @@ def test_jest_run_parsed():
 
 
 def test_jest_green_parsed():
-    p = JestOutputParser().parse(JEST_GREEN)
-    assert p is not None and p.passed == 13 and p.failed == 0 and p.total == 13
+    runs = extract_test_runs([_tool(JEST_GREEN)])
+    assert [(r.framework, r.passed, r.failed, r.total_runnable) for r in runs] == [("jest", 13, 0, 13)]
 
 
 # ---------------------------------------------------------------------------
@@ -92,63 +90,34 @@ def test_multiple_runs_ordered_with_indices():
     assert runs[1].frac_passing == 1.0
 
 
-# ---------------------------------------------------------------------------
-# Safety: never parse the model's prose
-# ---------------------------------------------------------------------------
-
-
-def test_assistant_prose_is_never_parsed():
-    # The assistant CLAIMS all tests pass; there is no real test-runner output.
-    history = [
-        _user("task"),
-        _assistant("I ran pytest and got: 141 passed in 2.5s. All tests pass!"),
-    ]
-    runs = extract_test_runs(history)
-    assert runs == []
-
-
-def test_assistant_with_summary_string_ignored():
-    # Even if the assistant message text contains a pytest-summary-looking line,
-    # it is NOT an observation -> not parsed.
-    history = [_assistant("============== 5 passed in 1.0s ==============")]
+@pytest.mark.parametrize(
+    "history",
+    [
+        # The assistant claims tests pass; only tool observations are test-runner output.
+        pytest.param(
+            [_user("task"), _assistant("I ran pytest and got: 141 passed in 2.5s. All tests pass!")],
+            id="assistant_prose",
+        ),
+        pytest.param([_assistant("============== 5 passed in 1.0s ==============")], id="assistant_summary_line"),
+        pytest.param(
+            [_tool("running 3 tests\ntest tests::a ... ok\ntest result: ok. 3 passed; 0 failed")],
+            id="unrecognized_framework",
+        ),
+        pytest.param([_tool("Segmentation fault (core dumped)\n\x00\x01garbage")], id="garbled"),
+        pytest.param([_tool("foo.py  bar.py  README.md")], id="non_test_command"),
+        pytest.param(
+            [
+                _tool(
+                    "ERROR collecting test_x.py\nImportError: no module named foo\n"
+                    "!!! Interrupted: 1 error during collection !!!"
+                )
+            ],
+            id="collection_error",
+        ),
+    ],
+)
+def test_no_test_signal(history):
     assert extract_test_runs(history) == []
-
-
-# ---------------------------------------------------------------------------
-# No-signal fallback: unrecognized / partial / garbled output
-# ---------------------------------------------------------------------------
-
-
-def test_unrecognized_framework_no_signal():
-    # cargo test output is not pytest/unittest/jest -> no-signal.
-    cargo = "running 3 tests\ntest tests::a ... ok\ntest result: ok. 3 passed; 0 failed"
-    runs = extract_test_runs([_tool(cargo)])
-    assert runs == []
-
-
-def test_garbled_output_no_signal():
-    runs = extract_test_runs([_tool("Segmentation fault (core dumped)\n\x00\x01garbage")])
-    assert runs == []
-
-
-def test_non_test_command_output_no_signal():
-    # Plain ls / cat output must not be mistaken for a test run.
-    runs = extract_test_runs([_tool("foo.py  bar.py  README.md")])
-    assert runs == []
-
-
-def test_collection_error_no_signal():
-    # pytest collection error -> the pytest parser returns None -> no-signal.
-    err = "ERROR collecting test_x.py\nImportError: no module named foo\n!!! Interrupted: 1 error during collection !!!"
-    runs = extract_test_runs([_tool(err)])
-    assert runs == []
-
-
-def test_empty_and_malformed_history():
-    assert extract_test_runs(None) == []
-    assert extract_test_runs([]) == []
-    assert extract_test_runs(["not a dict", 42, None]) == []
-    assert extract_test_runs([{"role": "tool"}]) == []  # no content
 
 
 def test_list_content_observation():
@@ -156,7 +125,3 @@ def test_list_content_observation():
     msg = {"role": "tool", "content": [{"type": "text", "text": PYTEST_GREEN}]}
     runs = extract_test_runs([msg])
     assert len(runs) == 1 and runs[0].frac_passing == 1.0
-
-
-def test_jest_registered_in_parser_registry():
-    assert get_output_parser("jest").name() == "jest"

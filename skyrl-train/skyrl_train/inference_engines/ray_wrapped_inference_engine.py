@@ -20,6 +20,11 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
+from skyrl_train.config.weight_sync_pause import (
+    DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
+    WeightSyncPausePolicy,
+    validate_weight_sync_pause_backend,
+)
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
 from skyrl_train.inference_engines.utils import (
     ReservedRendezvousPorts,
@@ -292,7 +297,7 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     ):
         self.inference_engine_actor = inference_engine_actor
         self.weight_sync_relative_rank_offset = weight_sync_relative_rank_offset
-        # The verified placement of each worker of a node-local replica, in worker order.
+        # The verified placement of each worker of a replica, in worker order.
         self.worker_placements: list[InferenceReplicaPlacement] | None = None
 
     def tp_size(self):
@@ -491,7 +496,6 @@ def create_ray_wrapped_inference_engines(
     shared_pg=None,
     gpu_memory_utilization=None,
     inference_engine_enable_sleep=False,
-    async_engine=False,
     max_num_batched_tokens=8192,
     max_num_seqs=1024,
     tokenizer=None,
@@ -510,6 +514,7 @@ def create_ray_wrapped_inference_engines(
     mp_backend: bool = False,
     allow_cross_node_ep: bool = False,
     placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
+    weight_sync_pause_policy: WeightSyncPausePolicy = DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
@@ -526,10 +531,12 @@ def create_ray_wrapped_inference_engines(
         still require the ray backend for shared-GPU resource management.
     """
     engine_init_kwargs = dict(engine_init_kwargs)
+    # Direct factory callers bypass generator config validation.
+    validate_weight_sync_pause_backend(weight_sync_pause_policy, backend=backend, run_engines_locally=True)
     model_metadata_path = engine_init_kwargs.pop(MODEL_METADATA_PATH_KEY, pretrain)
     if backend == "vllm":
         import vllm
-        from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
+        from skyrl_train.inference_engines.vllm.vllm_engine import AsyncVLLMRayActor
 
         # if a dev version is being used, skip the version check
         if "dev" not in vllm.__version__:
@@ -541,12 +548,8 @@ def create_ray_wrapped_inference_engines(
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
-    if backend == "vllm" and data_parallel_size > 1 and not async_engine:
-        raise ValueError("vLLM data-parallel rollout engines require async_engine=True")
-
     if allow_cross_node_ep and (
         backend != "vllm"
-        or not async_engine
         or tensor_parallel_size != 1
         or pipeline_parallel_size != 1
         or data_parallel_size < 2
@@ -554,7 +557,7 @@ def create_ray_wrapped_inference_engines(
         or shared_pg is not None
         or inference_engine_enable_sleep
     ):
-        raise ValueError("Cross-node EP requires non-colocated async vLLM at TP=PP=1 and EP=DP>1")
+        raise ValueError("Cross-node EP requires non-colocated vLLM at TP=PP=1 and EP=DP>1")
 
     inference_engine_actors = []
     weight_sync_relative_rank_offsets = []
@@ -640,27 +643,9 @@ def create_ray_wrapped_inference_engines(
         num_gpus_per_actor = 0.2
 
     per_engine_gpu_count = tensor_parallel_size * pipeline_parallel_size * data_parallel_size
-    # #232 ROOT-CAUSE FIX (cross-node TP all-reduce decode deadlock): when an engine
-    # spans MORE THAN ONE GPU (TP*PP > 1), create one PG PER ENGINE with STRICT_PACK,
-    # NOT a single flat PACK PG over all engines.
-    #
-    # The flat `placement_group(<all bundles>, strategy="PACK")` is SOFT — Ray packs
-    # bundles greedily to minimize node count but gives NO per-engine node-affinity:
-    # a single engine's `tp_pp_size` contiguous {GPU:1} bundles can land split across
-    # TWO nodes (observed: job 923995, a TP=4 engine straddling jpbo-091-30 + -38).
-    # When that happens, vLLM detects the TP process group spans nodes, DISABLES
-    # custom_all_reduce ("Custom allreduce is disabled because this process group
-    # spans across nodes"), and every per-decode-step TP all-reduce goes over the IB
-    # RDMA fabric instead of on-node NVLink. Under sustained 131k-context decode that
-    # cross-node NCCL all-reduce deadlocks (rank spins count-32768 AllReduce while its
-    # cross-node peers block on the RDMA transport) — exactly the Option-B wedge.
-    #
-    # Per-engine STRICT_PACK forces every engine's bundles onto ONE node (a STRICT_PACK
-    # PG is atomic-per-node), restoring the intended "TP=4 = one 4-GPU node, on-node
-    # NVLink all-reduce" guarantee. Bundle indices become engine-local (0..n-1).
-    # Multi-GPU engine ranks exchange collectives and must remain node-local. A
-    # single-GPU engine instead shares one flat PACK group so rollout allocation
-    # does not fragment nodes needed by the policy workers.
+    # Keep each multi-GPU engine node-local to avoid cross-node TP decode hangs (#232).
+    # Explicit TP=PP=1 expert parallelism can span nodes with every worker's placement checked.
+    # Single-GPU engines share a PACK group to leave whole nodes available for training.
     per_engine_pgs: list = []
     owned_placement_groups: list = []
     use_per_engine_strict_pack = use_per_engine_strict_pack_pg(
@@ -766,11 +751,6 @@ def create_ray_wrapped_inference_engines(
             rendezvous_reservation = rendezvous.reservation
 
         if backend == "vllm":
-            if async_engine:
-                actor_class = AsyncVLLMRayActor
-            else:
-                actor_class = VLLMRayActor
-
             lora_kwargs = {
                 "enable_lora": enable_lora,
                 "max_lora_rank": max_lora_rank,
@@ -873,7 +853,7 @@ def create_ray_wrapped_inference_engines(
                 )
                 if inference_engine_runtime_env is not None:
                     engine_options["runtime_env"] = inference_engine_runtime_env
-                engine = actor_class.options(**engine_options).remote(
+                engine = AsyncVLLMRayActor.options(**engine_options).remote(
                     model=pretrain,
                     enforce_eager=enforce_eager,
                     worker_extension_cls="skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
@@ -886,6 +866,7 @@ def create_ray_wrapped_inference_engines(
                     dtype=model_dtype,
                     trust_remote_code=True,
                     vllm_v1_disable_multiproc=vllm_v1_disable_multiproc,
+                    weight_sync_pause_policy=weight_sync_pause_policy,
                     gpu_memory_utilization=gpu_memory_utilization,
                     bundle_indices=dp_rank_bundles,
                     num_gpus=0.2 if use_hybrid_engine else 1,
