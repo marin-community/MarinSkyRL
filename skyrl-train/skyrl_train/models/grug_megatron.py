@@ -17,6 +17,7 @@ Megatron-Core settings chosen by ``GrugModelProvider`` in
 ``grug_megatron_bridge``.
 """
 
+import weakref
 from enum import StrEnum
 
 import torch
@@ -71,8 +72,23 @@ def _first_present(preferred: torch.Tensor | None, fallback: torch.Tensor | None
 
 
 # Unrounded residual sums (and the embedding's unrounded gated-norm product) awaiting the next norm,
-# keyed by the bf16 tensor that norm receives.
-_RESIDUAL_FP32: dict[int, torch.Tensor] = {}
+# keyed by the bf16 tensor that norm receives. Each entry keeps a weak reference to that tensor: under
+# pipeline parallelism several micro-batches are in flight and a stage's last residual has no reader, so a
+# freed tensor's ``id()`` can come back for an unrelated tensor, which must not receive the entry.
+_RESIDUAL_FP32: dict[int, tuple[weakref.ref, torch.Tensor]] = {}
+
+
+def _hand_off(receiver: torch.Tensor, unrounded: torch.Tensor) -> None:
+    for key in [key for key, (ref, _) in _RESIDUAL_FP32.items() if ref() is None]:
+        del _RESIDUAL_FP32[key]
+    _RESIDUAL_FP32[id(receiver)] = weakref.ref(receiver), unrounded
+
+
+def _take_hand_off(receiver: torch.Tensor) -> torch.Tensor | None:
+    entry = _RESIDUAL_FP32.pop(id(receiver), None)
+    if entry is None or entry[0]() is not receiver:
+        return None
+    return entry[1]
 
 
 def _install_residual_hooks(layer: TransformerLayer) -> None:
@@ -116,7 +132,7 @@ def _install_residual_hooks(layer: TransformerLayer) -> None:
             hidden = (stored["residual"].float() + (routed + shared).float()).to(output[0].dtype)
         stored.pop("residual")
         if numerics.input_norm_variance or numerics.final_norm_fp32:
-            _RESIDUAL_FP32[id(hidden)] = unrounded
+            _hand_off(hidden, unrounded)
         return (hidden, *output[1:])
 
     layer.pre_mlp_layernorm.register_forward_pre_hook(keep_residual)
@@ -223,7 +239,7 @@ class GrugGatedRMSNorm(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         numerics = active_numerics()
-        unrounded = _RESIDUAL_FP32.pop(id(hidden_states), None)
+        unrounded = _take_hand_off(hidden_states)
         if unrounded is not None:
             # The hand-off may come from a no-grad checkpointed forward; keep its values and take the
             # gradient through the bf16 residual so the loss still reaches the layers before this norm.
@@ -241,7 +257,7 @@ class GrugGatedRMSNorm(nn.Module):
         output = product.to(normalized.dtype) if numerics.gated_norm else normalized * torch.sigmoid(gate)
         if self.role is NormRole.EMBEDDING and numerics.input_norm_variance:
             # Layer 0's input norm takes its variance from the unrounded embedding gated-norm product.
-            _RESIDUAL_FP32[id(output)] = product
+            _hand_off(output, product)
         return output
 
 

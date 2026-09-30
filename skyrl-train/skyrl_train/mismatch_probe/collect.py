@@ -782,8 +782,9 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
                 # Re-read rows were delayed until this exact weight identity is known.
                 for row in rescore_rows:
                     row.weights_hash = probe.weights[update]
-                trainer_rows = probe._trainer_scores(trainer, update)
+                # Timing first: a failing candidate's training pass then costs no finished scores.
                 probe._training_pass_timing(trainer, update)
+                trainer_rows = probe._trainer_scores(trainer, update)
                 if probe._policy_weights_hash(trainer) != probe.weights[update]:
                     raise ValueError(f"probe scoring changed policy weights or buffers at update {update}")
             finally:
