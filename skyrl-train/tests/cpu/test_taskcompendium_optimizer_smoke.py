@@ -34,7 +34,7 @@ from skyrl_train.config.utils import get_default_config
 @pytest.mark.integrations
 @pytest.mark.asyncio
 async def test_mixed_taskcompendium_rollout_updates_cpu_policy(
-    tmp_path: Path, trusted_workplace_checkout: Path, workplace_import
+    tmp_path: Path, trusted_workplace_checkout: Path, workplace_import, workplace_source_row: bytes
 ):
     pytest.importorskip("harbor")
     chat = TaskSpec(
@@ -55,9 +55,7 @@ async def test_mixed_taskcompendium_rollout_updates_cpu_policy(
         tmp_path / "workplace",
         trusted_provider_sources={"workplace": trusted_workplace_checkout},
     )
-    source_row = json.loads(
-        next(resource.content for resource in workplace.resources if resource.path == "source-row.json")
-    )
+    source_row = json.loads(workplace_source_row)
     gold = source_row["ground_truth"][0]
     requests = []
 

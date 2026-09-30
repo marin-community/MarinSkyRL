@@ -21,8 +21,7 @@ from taskcompendium.lowering import (
     read_submission_convention,
 )
 from taskcompendium.models import AnswerType, ConversationTrace, TaskSpec, TextMessage, VerifierKind
-from taskcompendium.resources import ResourceVisibility
-from taskcompendium.submission import AnswerFormat, SubmissionConvention, chat_request
+from taskcompendium.submission import AnswerFormat, GradingAttempt, SubmissionConvention, chat_request
 from taskcompendium.verifier_registry import grade_answer
 from transformers import PreTrainedTokenizerBase
 
@@ -68,7 +67,6 @@ def _native_chat_eligible(
         and not specification.final_tools.functions
         and specification.final_tools.tool_choice is None
         and specification.final_tools.parallel_tool_calls is None
-        and not any(resource.visibility is ResourceVisibility.AGENT for resource in specification.resources)
         and binding == HarborEnvironmentConfig()
     )
 
@@ -239,7 +237,7 @@ class NativeTaskCompendiumRunner(TrajectoryRunner):
                     events=tuple(TextMessage.model_validate(message) for message in prompt)
                     + (TextMessage(role="assistant", content=response),)
                 )
-                result = await grade_answer(specification, convention, conversation, workspace)
+                result = await grade_answer(specification, convention, GradingAttempt(conversation, {}, workspace))
                 if result.status is Outcome.GRADED and result.reward is not None:
                     rewards.append(result.reward)
                     exception_types.append(None)

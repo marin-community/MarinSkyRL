@@ -77,11 +77,17 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
 
 @pytest.fixture(scope="session")
-def workplace_import() -> WorkplaceImport:
-    """Resolve and validate the source row before exporting private task resources."""
+def workplace_source_row() -> bytes:
+    """Fetch the pinned source row for trusted test setup."""
     with urlopen(SOURCE_EXAMPLE_URL, timeout=30) as response:
         source = response.read(SOURCE_EXAMPLE_MAX_BYTES + 1)
-    return import_row(select_row_zero(source))
+    return select_row_zero(source)
+
+
+@pytest.fixture(scope="session")
+def workplace_import(workplace_source_row: bytes) -> WorkplaceImport:
+    """Validate the source row before exporting private task packages."""
+    return import_row(workplace_source_row)
 
 
 @pytest.fixture(scope="session")

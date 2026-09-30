@@ -3284,7 +3284,7 @@ requires-dist = [
     { name = "s3fs" },
     { name = "smart-open" },
     { name = "speculators", marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/lukedhlee/speculators.git?rev=6496b4db007de00dd4741349643d23b23e29dce8" },
-    { name = "taskcompendium", extras = ["harbor", "workplace"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=9ed978f7cad76b00b31a6787b487a3b6c1cf0336" },
+    { name = "taskcompendium", extras = ["harbor", "workplace"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=a979ffaab6f4a6a20329cfacbe6649c650127747" },
     { name = "tensorboard" },
     { name = "tensordict", marker = "sys_platform == 'linux' and extra == 'cuda'" },
     { name = "tensordict", marker = "sys_platform == 'linux' and extra == 'megatron'" },
@@ -3929,7 +3929,7 @@ wheels = [
 [[package]]
 name = "nemo-workplace"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/nemo_workplace?rev=f92a1efb9bcf416b953136463b2022c5525f4b23#f92a1efb9bcf416b953136463b2022c5525f4b23" }
+source = { git = "https://github.com/marin-community/nemo_workplace?rev=27b39001312617403021635f0492e120abc2cd34#27b39001312617403021635f0492e120abc2cd34" }
 dependencies = [
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "pandas", version = "3.0.5", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
@@ -6918,7 +6918,7 @@ wheels = [
 [[package]]
 name = "taskcompendium"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=9ed978f7cad76b00b31a6787b487a3b6c1cf0336#9ed978f7cad76b00b31a6787b487a3b6c1cf0336" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=a979ffaab6f4a6a20329cfacbe6649c650127747#a979ffaab6f4a6a20329cfacbe6649c650127747" }
 dependencies = [
     { name = "pydantic", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "tasktrove-verify", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
@@ -6929,13 +6929,13 @@ harbor = [
     { name = "harbor", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
 workplace = [
-    { name = "nemo-workplace" },
+    { name = "nemo-workplace", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
 
 [[package]]
 name = "tasktrove-verify"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftasktrove-verify&rev=9ed978f7cad76b00b31a6787b487a3b6c1cf0336#9ed978f7cad76b00b31a6787b487a3b6c1cf0336" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftasktrove-verify&rev=a979ffaab6f4a6a20329cfacbe6649c650127747#a979ffaab6f4a6a20329cfacbe6649c650127747" }
 dependencies = [
     { name = "tomlkit", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]

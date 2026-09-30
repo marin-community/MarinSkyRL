@@ -22,7 +22,6 @@ from taskcompendium.models import (
     TextMessage,
     ToolResult,
 )
-from taskcompendium.resources import ResourceVisibility, TaskResource
 from taskcompendium.submission import AnswerCall, JsonAnswer, PlainText, SubmissionConvention, chat_request
 
 from skyrl_train.entrypoints.taskcompendium import TaskCompendiumExp
@@ -55,7 +54,6 @@ def _lowering(root: Path, name: str, *, convention: SubmissionConvention = Plain
         environment_requirements=EnvironmentRequirements(),
         source=Source(dataset="test", revision="revision", row=name, importer_revision="importer"),
         answer_type=AnswerType.TEXT,
-        resources=(TaskResource(path="private/reference.txt", visibility=ResourceVisibility.VERIFIER, content="blue"),),
     )
     return lower_to_harbor(
         specification,
@@ -381,7 +379,7 @@ async def test_router_splits_mixed_batches_and_restores_order():
 
 @pytest.mark.asyncio
 async def test_mixed_batch_uses_live_scripted_policy_endpoint_and_produces_trainable_actions(
-    tmp_path, trusted_workplace_checkout, workplace_import
+    tmp_path, trusted_workplace_checkout, workplace_import, workplace_source_row
 ):
     pytest.importorskip("harbor")
     from tokenizers import Tokenizer, models, pre_tokenizers
@@ -396,9 +394,7 @@ async def test_mixed_batch_uses_live_scripted_policy_endpoint_and_produces_train
         tmp_path / "workplace",
         trusted_provider_sources={"workplace": trusted_workplace_checkout},
     )
-    source_row = json.loads(
-        next(resource.content for resource in specification.resources if resource.path == "source-row.json")
-    )
+    source_row = json.loads(workplace_source_row)
     gold = source_row["ground_truth"][0]
     requests = []
 
