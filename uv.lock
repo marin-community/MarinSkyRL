@@ -38,8 +38,7 @@ overrides = [
     { name = "flashinfer-cubin", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1", index = "https://flashinfer.ai/whl" },
     { name = "flashinfer-python", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1" },
     { name = "fsspec", specifier = "==2026.4.0" },
-    { name = "marin-finestore", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ffinestore&rev=e9bcb610e49d550d098b9d75965584d8d34d3818" },
-    { name = "marin-rigging", extras = ["prometheus", "secrets"], specifier = "==0.2.123.dev35633925924" },
+    { name = "marin-finestore", url = "https://github.com/marin-community/marin/archive/376d12598c668477959703275aaba709a9e056b9.tar.gz", subdirectory = "lib/finestore" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'never'" },
     { name = "opentelemetry-api", marker = "sys_platform != 'linux'" },
     { name = "opentelemetry-api", marker = "sys_platform == 'linux'", specifier = "==1.44.0" },
@@ -2786,7 +2785,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "fsspec" },
     { name = "gcsfs" },
-    { name = "marin-rigging", extra = ["prometheus", "secrets"] },
+    { name = "marin-rigging" },
     { name = "protobuf", version = "6.33.6", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "pyarrow" },
@@ -2813,11 +2812,19 @@ wheels = [
 [[package]]
 name = "marin-finestore"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ffinestore&rev=e9bcb610e49d550d098b9d75965584d8d34d3818#e9bcb610e49d550d098b9d75965584d8d34d3818" }
+source = { url = "https://github.com/marin-community/marin/archive/376d12598c668477959703275aaba709a9e056b9.tar.gz", subdirectory = "lib/finestore" }
 dependencies = [
-    { name = "marin-rigging", extra = ["prometheus", "secrets"] },
+    { name = "marin-rigging" },
     { name = "pyarrow" },
     { name = "pydantic" },
+]
+sdist = { hash = "sha256:a13a2aa59954449552ec33dc4b9c0aeb8d53bf49048e9963acedfff5dd45eabf" }
+
+[package.metadata]
+requires-dist = [
+    { name = "marin-rigging", specifier = ">=0.2.82.dev31904388897" },
+    { name = "pyarrow", specifier = ">=23.0.0" },
+    { name = "pydantic", specifier = ">=2.0" },
 ]
 
 [[package]]
@@ -2839,7 +2846,7 @@ dependencies = [
     { name = "marin-finelog-server" },
     { name = "marin-finestore" },
     { name = "marin-iris-native" },
-    { name = "marin-rigging", extra = ["prometheus", "secrets"] },
+    { name = "marin-rigging" },
     { name = "pydantic" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "pyqwest" },
@@ -2941,7 +2948,7 @@ dependencies = [
     { name = "marin-finestore" },
     { name = "marin-iris" },
     { name = "marin-iris-native" },
-    { name = "marin-rigging", extra = ["prometheus", "secrets"] },
+    { name = "marin-rigging", extra = ["secrets"] },
     { name = "math-verify" },
     { name = "ninja" },
     { name = "nvidia-ml-py" },
@@ -3014,7 +3021,7 @@ megatron = [
     { name = "transformer-engine-torch", version = "2.11.0", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
 telemetry = [
-    { name = "marin-rigging", extra = ["prometheus", "secrets"] },
+    { name = "marin-rigging", extra = ["prometheus"] },
     { name = "memray", marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "ray", extra = ["default"] },
 ]
@@ -3049,7 +3056,7 @@ analysis = [
 ]
 dev = [
     { name = "litellm" },
-    { name = "marin-rigging", extra = ["prometheus", "secrets"] },
+    { name = "marin-rigging", extra = ["prometheus"] },
     { name = "marin-style" },
     { name = "matplotlib" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
