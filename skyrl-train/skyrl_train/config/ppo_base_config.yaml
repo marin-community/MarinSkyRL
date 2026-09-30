@@ -367,6 +367,7 @@ trainer:
     extra_trainer_modes: []
     filtered_replay: {keep_fraction: null}
     rescore_prefix_cache: "off"
+    reread_again: false
 
 generator:
   model_name: ${trainer.policy.model.path}

@@ -360,11 +360,13 @@ class InferenceEngineClient(InferenceEngineInterface):
         student_topk_indices: List[Optional[List[List[int]]]] = [None for _ in range(n)]
         behavior_topk_logprobs: List[Optional[List[List[float]]]] = [None for _ in range(n)]
         prefix_cache_hit_tokens: List[Optional[int]] = [None for _ in range(n)]
+        routed_experts: List[Optional[np.ndarray]] = [None for _ in range(n)]
         # a bit hacky for now
         add_resp_logprobs = False
         add_prompt_logprobs = False
         add_student_topk = False
         add_prefix_cache_hit_tokens = False
+        add_routed_experts = False
 
         for indices, result in zip(indices_list, results):
             selected_ids = result.get("student_topk_indices")
@@ -380,7 +382,14 @@ class InferenceEngineClient(InferenceEngineInterface):
                 if len(cached) != len(indices):
                     raise ValueError("Inference engine cache-hit rows must align with responses")
                 add_prefix_cache_hit_tokens = True
+            routes = result.get("routed_experts")
+            if routes is not None:
+                if len(routes) != len(indices):
+                    raise ValueError("Inference engine route rows must align with responses")
+                add_routed_experts = True
             for local_idx, original_idx in enumerate(indices):
+                if routes is not None:
+                    routed_experts[original_idx] = routes[local_idx]
                 responses[original_idx] = result["responses"][local_idx]
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
                 response_ids[original_idx] = result["response_ids"][local_idx]
@@ -416,6 +425,8 @@ class InferenceEngineClient(InferenceEngineInterface):
             if any(value is None for value in prefix_cache_hit_tokens):
                 raise ValueError("Inference engine omitted cache-hit counts for part of the batch")
             output["prefix_cache_hit_tokens"] = prefix_cache_hit_tokens
+        if add_routed_experts:
+            output["routed_experts"] = routed_experts
         return output
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> List[OnlineEagleResult]:

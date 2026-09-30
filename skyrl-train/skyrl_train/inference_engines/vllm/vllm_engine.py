@@ -7,6 +7,7 @@ from typing import List, Any, Dict, Optional, Tuple, Iterator, AsyncGenerator
 from dataclasses import asdict, dataclass, fields as _dataclass_fields, replace
 from loguru import logger
 from http import HTTPStatus
+import numpy as np
 import ray
 import torch
 import asyncio
@@ -1459,6 +1460,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         behavior_topk_logprobs: List[List[List[float]]] = []
         all_prompt_logprobs: Optional[List] = None
         prefix_cache_hit_tokens: list[int] = []
+        routed_experts: list[np.ndarray | None] = []
         params_by_prompt = sampling_params if isinstance(sampling_params, list) else [sampling_params] * len(outputs)
         if len(params_by_prompt) != len(outputs):
             raise ValueError("vLLM sampling parameters do not align with output rows")
@@ -1472,6 +1474,8 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             responses.append(resp.text)
             stop_reasons.append(resp.finish_reason)
             response_ids.append(resp.token_ids)
+            # [prompt + response - 1, layer, top_k] when the engine captures routes.
+            routed_experts.append(getattr(resp, "routed_experts", None))
             _logprobs = None
             selected_ids = []
             selected_scores = []
@@ -1533,6 +1537,8 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             result["student_topk_indices"] = student_topk_indices
             result["behavior_topk_logprobs"] = behavior_topk_logprobs
         result["prefix_cache_hit_tokens"] = prefix_cache_hit_tokens
+        if any(routes is not None for routes in routed_experts):
+            result["routed_experts"] = routed_experts
         return result
 
     def get_model_max_len(self) -> int:

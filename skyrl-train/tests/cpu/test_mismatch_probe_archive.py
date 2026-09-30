@@ -6,6 +6,7 @@ import pytest
 import ray
 import torch
 from finestore import mismatch_probe as mismatch
+from finestore.reader import ReadView
 from tokenizers import Tokenizer, models
 from transformers import PreTrainedTokenizerFast
 
@@ -25,6 +26,7 @@ from skyrl_train.trainer import RayPPOTrainer
 class _InferenceEndpoint:
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
+        self.route_offset = 0
 
     async def reset_prefix_cache(self):
         pass
@@ -37,6 +39,14 @@ class _InferenceEndpoint:
                 for sequence in request["prompt_token_ids"]
             ],
             "prefix_cache_hit_tokens": [0 for _ in request["prompt_token_ids"]],
+            # Each input token t routes to experts (t + offset) % 8 and (t + offset + 1) % 8.
+            "routed_experts": [
+                np.asarray(
+                    [[[(token + self.route_offset) % 8, (token + self.route_offset + 1) % 8]] for token in sequence],
+                    dtype=np.int32,
+                )
+                for sequence in request["prompt_token_ids"]
+            ],
             "student_topk_indices": [
                 [[params["logprob_token_ids"][0]]] for params in request["sampling_params_per_prompt"]
             ],
@@ -50,6 +60,7 @@ class _InferenceEndpoint:
 class _PolicyEndpoint:
     def __init__(self):
         self.prompt_routes_by_mode = {}
+        self.response_routes_by_mode = {}
         self.actor_infos = [
             SimpleNamespace(rank=MeshRank(dp=dp, sp=0, tp=0, pp=0, world_size=2, dp_size=2, pp_size=1))
             for dp in range(2)
@@ -62,6 +73,7 @@ class _PolicyEndpoint:
             raise ValueError(method)
         width = data.metadata["response_length"]
         self.prompt_routes_by_mode[data.metadata["probe_mode"]] = data["rollout_prompt_routed_experts"].clone()
+        self.response_routes_by_mode[data.metadata["probe_mode"]] = data["rollout_routed_experts"].clone()
         probabilities = torch.log_softmax(torch.arange(32, dtype=torch.float32), dim=0)
         outputs = []
         for dp in range(2):
@@ -93,6 +105,11 @@ class _PolicyEndpoint:
         return outputs
 
 
+def chained_scores(cfg) -> list[mismatch.ScoreRow]:
+    view = ReadView(cfg.trainer.mismatch_probe.archive_uri)
+    return [mismatch.ScoreRow.model_validate(row) for row in view.scan(mismatch.SCORES_TABLE).to_pylist()]
+
+
 @pytest.mark.asyncio
 async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_path, monkeypatch):
     uri = str(tmp_path / "probe")
@@ -107,7 +124,8 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     cfg.trainer.mismatch_probe.prompts.count = 3
     cfg.trainer.mismatch_probe.prompts.samples_per_prompt = 1
     cfg.trainer.policy.megatron_config.moe_router_replay = True
-    cfg.trainer.mismatch_probe.extra_trainer_modes = ["router_replay", "router_replay_response"]
+    cfg.trainer.mismatch_probe.extra_trainer_modes = ["router_replay", "router_replay_response", "reread_replay"]
+    cfg.trainer.mismatch_probe.reread_again = True
     cfg.trainer.algorithm.advantage_estimator = "uniform"
     cfg.trainer.algorithm.use_tis = False
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
@@ -225,3 +243,33 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     assert replayed[1, :, 0].tolist() == [[0, 0], [0, 0], [1, 7]]
     for mode in ("native", "repeat", "router_replay_response"):
         assert not trainer.policy_model.prompt_routes_by_mode[mode].any()
+
+    # The cache-off re-read of sample 0 reads prefix [3, 4, 7, 9, 11]; re-read replay places its routes on
+    # the left-padded prompt axis and on response inputs 0..2, leaving the final response token native.
+    reread_prompt = trainer.policy_model.prompt_routes_by_mode["reread_replay"]
+    reread_response = trainer.policy_model.response_routes_by_mode["reread_replay"]
+    assert reread_prompt[0, :, 0].tolist() == [[0, 0], [3, 4], [4, 5]]
+    assert reread_response[0, :, 0].tolist() == [[7, 0], [1, 2], [3, 4], [0, 0]]
+    rereads = {row.sample_id: row for row in chained_scores(cfg) if row.scorer == "vllm.rescore" and row.update == 0}
+    agains = [row for row in chained_scores(cfg) if row.scorer == "vllm.rescore_again" and row.update == 0]
+    assert len(rereads) == len(agains) == 3
+    assert rereads["sample-0"].expert_choices_shape == [5, 1, 2]
+
+    # Reusing the chained archive freezes its re-read as the prefill reference and replay source.
+    frozen = read_frozen_probe(cfg.trainer.mismatch_probe.archive_uri).rereads
+    assert sorted(frozen) == sorted(row.sample_id for row in probes)
+    assert frozen["sample-0"].logprobs == rereads["sample-0"].logprobs
+    trainer.inference_engine_client.route_offset = 2
+    cfg.trainer.mismatch_probe.reuse_probe = cfg.trainer.mismatch_probe.archive_uri
+    cfg.trainer.mismatch_probe.archive_uri = str(tmp_path / "frozen-reference")
+    cfg.trainer.mismatch_probe.score_after_updates = [0]
+    trainer.global_step = 0
+    callback = MismatchProbeCallback(cfg)
+    await callback.on_train_begin_async(TrainerState(0, 0, 9, 9), TrainerControl(), trainer=trainer)
+    callback.on_train_end(TrainerState(0, 0, 9, 9), TrainerControl(), trainer=trainer)
+    # The fresh re-read now routes differently, but re-read replay still uses the frozen reference.
+    assert trainer.policy_model.prompt_routes_by_mode["reread_replay"][0, :, 0].tolist() == [[0, 0], [3, 4], [4, 5]]
+    frozen_rows = [row for row in chained_scores(cfg) if row.scorer == "vllm.rescore_frozen"]
+    assert {row.sample_id: row.expert_choices for row in frozen_rows} == {
+        sample: row.expert_choices for sample, row in rereads.items()
+    }

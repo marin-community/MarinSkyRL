@@ -21,6 +21,10 @@ CACHE_BOTH = "both"
 PROBE_CACHE_MODES = frozenset({CACHE_OFF, CACHE_ON, CACHE_BOTH})
 GENERATION_SCORER = "vllm.generate"
 RESCORE_SCORER = "vllm.rescore"
+# A second cache-off re-read in the same job: vLLM's own run-to-run floor.
+RESCORE_AGAIN_SCORER = "vllm.rescore_again"
+# The reused source archive's update-0 cache-off re-read, the frozen prefill reference.
+FROZEN_RESCORE_SCORER = "vllm.rescore_frozen"
 TRAINER_SCORER = "trainer"
 
 
@@ -119,6 +123,10 @@ def validate_mismatch_probe_config(
         topk = megatron.get("moe_router_topk")
         if topk is not None and topk < 2:
             raise ValueError("trainer.mismatch_probe replay modes require an MoE router with top-k >= 2")
+    if any(TRAINER_MODES[mode].route_source == "reread" for mode in modes) and cache_mode == CACHE_ON:
+        raise ValueError("trainer.mismatch_probe re-read replay modes require a cache-off re-read")
+    if not isinstance(probe.get("reread_again", False), bool):
+        raise ValueError("trainer.mismatch_probe.reread_again must be a boolean")
     if any(TRAINER_MODES[mode].requires_keep_fraction for mode in modes):
         fraction = (probe.get("filtered_replay") or {}).get("keep_fraction")
         validate_replay_keep_fraction(fraction, "trainer.mismatch_probe.filtered_replay.keep_fraction")

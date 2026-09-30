@@ -21,7 +21,9 @@ from skyrl_train.config.mismatch_probe import (
     CACHE_BOTH,
     CACHE_OFF,
     CACHE_ON,
+    FROZEN_RESCORE_SCORER,
     GENERATION_SCORER,
+    RESCORE_AGAIN_SCORER,
     RESCORE_SCORER,
     TRAINER_SCORER,
     rescore_label,
@@ -93,6 +95,36 @@ def _encode_routes(routes: torch.Tensor | None, length: int) -> EncodedRoutes:
     return EncodedRoutes(value.tobytes(), list(value.shape), str(value.dtype))
 
 
+def _reread_routes(output, rows) -> list[np.ndarray | None]:
+    """Return each cache-off re-read's full-sequence routes, or ``None`` when the engine captured none."""
+    routes = output.get("routed_experts")
+    if routes is None:
+        return [None] * len(rows)
+    if len(routes) != len(rows):
+        raise ValueError("vLLM re-read returned routes for a different number of prefixes")
+    result = []
+    for row, route in zip(rows, routes, strict=True):
+        expected = len(row.prompt_token_ids) + len(row.vllm_output_ids) - 1
+        if route is None or route.ndim != 3 or route.shape[0] != expected:
+            raise ValueError(f"vLLM re-read routes for {row.sample_id} do not cover prompt and response inputs")
+        result.append(np.ascontiguousarray(route.astype(np.uint8 if route.max(initial=0) <= 255 else np.int32)))
+    return result
+
+
+def _reread_route_tensors(rows, sources, response_like: torch.Tensor, prompt_width: int):
+    """Place full-sequence re-read routes on the trainer's response and left-padded prompt axes."""
+    batch, response_width, layers, top_k = response_like.shape
+    response = torch.zeros_like(response_like)
+    prompt = torch.zeros((batch, prompt_width, layers, top_k), dtype=response_like.dtype)
+    for position, (row, route) in enumerate(zip(rows, sources, strict=True)):
+        values = torch.as_tensor(route, dtype=response_like.dtype)
+        prompt_length = len(row.prompt_token_ids)
+        prompt[position, prompt_width - prompt_length :] = values[:prompt_length]
+        # Rows after the prompt are the response inputs 0 .. R-2; the final response token feeds no score.
+        response[position, : len(row.vllm_output_ids) - 1] = values[prompt_length:]
+    return response, prompt
+
+
 def _reorder_batch(batch: TrainingInputBatch, order: list[int]) -> TrainingInputBatch:
     index = torch.tensor(order, dtype=torch.long)
     reordered = TrainingInputBatch({key: value[index] if value is not None else None for key, value in batch.items()})
@@ -150,6 +182,10 @@ class ProbeCollector:
         self.scored_global_steps: dict[int, int] = {}
         self.tokenizer_fingerprint: str | None = None
         self.cache_hit_tokens: dict[str, int] = {}
+        # Cache-off re-read routes per update, [prompt + response - 1, layer, top_k] per sample.
+        self.reread_routes: dict[int, list[np.ndarray]] = {}
+        # The reused source's prefill reference rows, keyed by sample.
+        self.frozen_rereads: dict[str, mismatch.ScoreRow] = {}
 
     async def _generate(self, trainer):
         if trainer.eval_dataset is None:
@@ -209,6 +245,7 @@ class ProbeCollector:
         ):
             raise ValueError("reuse_probe prompt groups do not match this recipe")
         self.source_manifest = manifest
+        self.frozen_rereads = source.rereads
         self.probes = rows
         self.probe_hash = manifest.probe_hash
         routes = []
@@ -391,8 +428,11 @@ class ProbeCollector:
         rows = self.probes
         cache_setting = self.spec.rescore_prefix_cache
         cache_modes = (CACHE_OFF, CACHE_ON) if cache_setting == CACHE_BOTH else (cache_setting,)
+        passes = [(cache_mode, RESCORE_SCORER) for cache_mode in cache_modes]
+        if self.spec.get("reread_again", False) and CACHE_OFF in cache_modes:
+            passes.append((CACHE_OFF, RESCORE_AGAIN_SCORER))
         result = []
-        for cache_mode in cache_modes:
+        for cache_mode, scorer in passes:
             if cache_mode == CACHE_OFF:
                 await trainer.inference_engine_client.reset_prefix_cache()
                 prefixes = [row.prompt_token_ids + row.vllm_output_ids[:-1] for row in rows]
@@ -442,7 +482,7 @@ class ProbeCollector:
                 for row in rows:
                     chosen.append(candidates[offset : offset + len(row.vllm_output_ids)])
                     offset += len(row.vllm_output_ids)
-            label = rescore_label(update, cache_mode)
+            label = rescore_label(update, cache_mode) + (":again" if scorer == RESCORE_AGAIN_SCORER else "")
             self.timing[f"{label}/seconds"] = duration
             cache_hits = output.get("prefix_cache_hit_tokens")
             if cache_hits is None or len(cache_hits) != len(prefixes):
@@ -450,19 +490,25 @@ class ProbeCollector:
             self.cache_hit_tokens[label] = sum(cache_hits)
             if cache_mode == CACHE_OFF and self.cache_hit_tokens[label]:
                 raise ValueError("cache-off re-read unexpectedly used cached prefix tokens")
-            for row, values in zip(rows, chosen, strict=True):
+            routes = _reread_routes(output, rows) if cache_mode == CACHE_OFF else [None] * len(rows)
+            if scorer == RESCORE_SCORER and cache_mode == CACHE_OFF and routes[0] is not None:
+                self.reread_routes[update] = routes
+            for row, values, route in zip(rows, chosen, routes, strict=True):
                 if len(values) != len(row.vllm_output_ids) or not all(math.isfinite(value) for value in values):
                     raise ValueError(f"vLLM re-read returned incomplete or nonfinite scores for {row.sample_id}")
                 result.append(
                     mismatch.ScoreRow(
                         probe_hash=self.probe_hash,
                         sample_id=row.sample_id,
-                        scorer=RESCORE_SCORER,
+                        scorer=scorer,
                         update=update,
                         weights_hash=self.weights[update],
                         cache_mode=cache_mode,
                         logprobs=values,
                         forward_seconds=duration / len(rows),
+                        expert_choices=None if route is None else route.tobytes(),
+                        expert_choices_shape=None if route is None else list(route.shape),
+                        expert_choices_dtype=None if route is None else str(route.dtype),
                     )
                 )
         return result
@@ -535,6 +581,24 @@ class ProbeCollector:
             *(["rollout_prompt_routed_experts"] if prompt_route_tensor is not None else []),
         ]
         modes = (NATIVE_MODE, REPEAT_MODE, *self.spec.extra_trainer_modes)
+        reread_tensors = None
+        if any(TRAINER_MODES[mode].route_source == "reread" for mode in modes):
+            if route_tensor is None:
+                raise ValueError("re-read replay modes require captured generation routes for the replay layout")
+            if update == 0 and self.frozen_rereads:
+                sources = [
+                    np.frombuffer(
+                        self.frozen_rereads[row.sample_id].expert_choices,
+                        dtype=self.frozen_rereads[row.sample_id].expert_choices_dtype,
+                    ).reshape(self.frozen_rereads[row.sample_id].expert_choices_shape)
+                    for row in rows
+                ]
+            elif update in self.reread_routes:
+                sources = self.reread_routes[update]
+            else:
+                raise ValueError(f"re-read replay at update {update} has no captured re-read routes")
+            prompt_width = training_input["sequences"].shape[1] - route_tensor.shape[1]
+            reread_tensors = _reread_route_tensors(rows, sources, route_tensor, prompt_width)
         result = []
         for mode in modes:
             repeat_layout = TRAINER_MODES[mode].repeat_layout
@@ -545,6 +609,8 @@ class ProbeCollector:
                 data["rollout_routed_experts"] = torch.zeros_like(route_tensor)
             if not TRAINER_MODES[mode].replays_prompt and prompt_route_tensor is not None:
                 data["rollout_prompt_routed_experts"] = torch.zeros_like(prompt_route_tensor)
+            if TRAINER_MODES[mode].route_source == "reread":
+                data["rollout_routed_experts"], data["rollout_prompt_routed_experts"] = reread_tensors
             if repeat_layout:
                 data = _reorder_batch(data, order + list(range(n, data.batch_size)))
             micro_batch_size = self.batch_layout.repeat_micro_batch_size if repeat_layout else None
@@ -665,6 +731,17 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
 
         scores = rescore_rows + trainer_rows
         if update == 0:
+            scores.extend(
+                probe.frozen_rereads[row.sample_id].model_copy(
+                    update={
+                        "scorer": FROZEN_RESCORE_SCORER,
+                        "probe_hash": probe.probe_hash,
+                        "weights_hash": probe.weights[0],
+                    }
+                )
+                for row in probe.probes
+                if probe.frozen_rereads
+            )
             for row, values in zip(probe.probes, probe.generation_scores, strict=True):
                 scores.append(
                     mismatch.ScoreRow(

@@ -9,7 +9,7 @@ from finestore import mismatch_probe as mismatch
 from finestore.reader import ReadView
 from finestore.store import DataStore
 
-from skyrl_train.config.mismatch_probe import GENERATION_SCORER
+from skyrl_train.config.mismatch_probe import CACHE_OFF, FROZEN_RESCORE_SCORER, GENERATION_SCORER, RESCORE_SCORER
 
 COMPLETE_STATUS = mismatch.ArchiveStatus.COMPLETE
 BUILDING_STATUS = mismatch.ArchiveStatus.BUILDING
@@ -22,6 +22,8 @@ class FrozenProbeSource:
     manifest: mismatch.ManifestRow
     probes: list[mismatch.ProbeRow]
     generations: dict[str, mismatch.ScoreRow]
+    # The source's prefill reference: its own frozen copy when it reused a probe, else its cache-off re-read.
+    rereads: dict[str, mismatch.ScoreRow]
 
 
 class MismatchArchive:
@@ -67,4 +69,13 @@ def read_frozen_probe(uri: str) -> FrozenProbeSource:
     probes.sort(key=lambda row: row.batch_position)
     if any(row.probe_hash != manifests[0].probe_hash for row in probes):
         raise ValueError("reuse_probe source probe hashes do not match the manifest")
-    return FrozenProbeSource(manifests[0], probes, generations)
+    rereads = {}
+    for scorer in (RESCORE_SCORER, FROZEN_RESCORE_SCORER):
+        rows = {
+            row.sample_id: row
+            for row in scores
+            if row.scorer == scorer and row.update == 0 and row.cache_mode == CACHE_OFF
+        }
+        if len(rows) == len(probes):
+            rereads = rows
+    return FrozenProbeSource(manifests[0], probes, generations, rereads)

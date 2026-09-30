@@ -14,6 +14,8 @@ FILTERED_REPLAY_MODE = "router_replay_filtered"
 RESPONSE_REPLAY_MODE = "router_replay_response"
 NATIVE_AGAIN_MODE = "native_again"
 REPEAT_REPLAY_MODE = "repeat_replay"
+REREAD_REPLAY_MODE = "reread_replay"
+REPEAT_REREAD_REPLAY_MODE = "repeat_reread_replay"
 
 
 class ProbeWorker(Protocol):
@@ -28,10 +30,8 @@ def _replay(worker: ProbeWorker, settings: Mapping[str, Any]) -> AbstractContext
     controller = worker.model.router_replay
     if controller is None:
         raise ValueError("router replay probe mode requires an installed controller")
-    mode = (
-        REPLAY_MODE if settings["probe_mode"] in (RESPONSE_REPLAY_MODE, REPEAT_REPLAY_MODE) else settings["probe_mode"]
-    )
-    return controller.scoring_mode(mode, settings["probe_keep_fraction"])
+    filtered = TRAINER_MODES[settings["probe_mode"]].requires_keep_fraction
+    return controller.scoring_mode(FILTERED_REPLAY_MODE if filtered else REPLAY_MODE, settings["probe_keep_fraction"])
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,9 @@ class ModeSpec:
     replays_prompt: bool = True
     # True scores the batch in reversed order with larger micro-batches, the batch-layout control.
     repeat_layout: bool = False
+    # "generation" replays the routes vLLM chose while sampling; "reread" replays the routes of
+    # vLLM's cache-off prefill re-read of the same tokens.
+    route_source: str = "generation"
 
 
 TRAINER_MODES: dict[str, ModeSpec] = {
@@ -51,6 +54,8 @@ TRAINER_MODES: dict[str, ModeSpec] = {
     REPEAT_MODE: ModeSpec(_native, replays_prompt=False, repeat_layout=True),
     REPLAY_MODE: ModeSpec(_replay, requires_routes=True),
     REPEAT_REPLAY_MODE: ModeSpec(_replay, requires_routes=True, repeat_layout=True),
+    REREAD_REPLAY_MODE: ModeSpec(_replay, requires_routes=True, route_source="reread"),
+    REPEAT_REREAD_REPLAY_MODE: ModeSpec(_replay, requires_routes=True, repeat_layout=True, route_source="reread"),
     RESPONSE_REPLAY_MODE: ModeSpec(_replay, requires_routes=True, replays_prompt=False),
     FILTERED_REPLAY_MODE: ModeSpec(_replay, requires_routes=True, requires_keep_fraction=True),
 }
