@@ -67,7 +67,7 @@ from skyrl_train.utils.profiler import Profiler
 from marinskyrl.runtime_options import WeightSyncTransport
 from skyrl_train.weight_sync.expert_block.sender import ExpertBlockSender
 from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode
-from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor, MegatronWeightExtractor
+from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor, mapping_hf_names
 from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 
 
@@ -478,23 +478,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         # Initialize weight extractor
         self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
-        # TODO(haochen): Now bucketing is only enabled for the CUDA IPC
-        # transfer strategy, we can enable it for other strategies as well.
         model_type = self.strategy.hf_config.model_type
         validate_weight_sync_mode(model_type, fuse_weights=bool(self.cfg.generator.fuse_weights))
-        if self.use_cuda_ipc:
-            self.weight_extractor = BucketedMegatronWeightExtractor(
-                bridge=self.bridge,
-                actor_module=self.actor_module,
-                model_type=model_type,
-                bucket_size_threshold_GB=self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB,
-            )
-        else:
-            self.weight_extractor = MegatronWeightExtractor(
-                bridge=self.bridge,
-                actor_module=self.actor_module,
-                model_type=model_type,
-            )
+        self.weight_extractor = BucketedMegatronWeightExtractor(
+            bridge=self.bridge,
+            actor_module=self.actor_module,
+            model_type=model_type,
+            bucket_size_threshold_GB=self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB,
+        )
 
         self.empty_cuda_cache = self.cfg.trainer.policy.megatron_config.empty_cuda_cache
 
@@ -668,31 +659,29 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         # Extract weights using the initialized extractor
         if not self.use_cuda_ipc:
-            # Broadcast path: one chunk per parameter
-            # NOTE: need to optimize this to use buckets for non-colocated weight sync as well
+            # Broadcast one bucket per engine RPC and training-rank barrier. The
+            # receiver still broadcasts each tensor in its original order.
             for chunk in self.weight_extractor.extract_weights(generator_dtype):
-                # Each chunk contains one parameter
-                assert len(chunk) == 1
-                name = chunk.names[0]
-                tensor = chunk.tensors[0]
-
                 if torch.distributed.get_rank() == 0:
                     update_weight_task = asyncio.create_task(
                         inference_engine_client.update_named_weights(
                             {
-                                "names": [name],
-                                "dtypes": [chunk.dtypes[0]],
-                                "shapes": [list(tensor.shape)],
+                                "names": chunk.names,
+                                "dtypes": chunk.dtypes,
+                                "shapes": chunk.shapes,
                             }
                         )
                     )
 
-                # Broadcast weights from training rank 0 to inference engine ranks via the update group
-                def broadcast_tensor(tensor):
-                    if torch.distributed.get_rank() == 0:
-                        torch.distributed.broadcast(tensor.data, 0, group=self._model_update_group)
+                # Broadcast weights from trainer rank 0 to serving ranks via
+                # the update group, in the same order as the receiver request.
+                if torch.distributed.get_rank() == 0:
 
-                await asyncio.to_thread(broadcast_tensor, tensor)
+                    def broadcast_bucket():
+                        for tensor in chunk.tensors:
+                            torch.distributed.broadcast(tensor.data, 0, group=self._model_update_group)
+
+                    await asyncio.to_thread(broadcast_bucket)
                 if torch.distributed.get_rank() == 0:
                     await update_weight_task
                 torch.distributed.barrier()
@@ -769,7 +758,31 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         wanted = set(names)
         is_rank0 = torch.distributed.get_rank() == 0
         weights = {}
-        for name, tensor in self.bridge.export_hf_weights(self.actor_module, show_progress=False):
+        tasks = self.bridge.get_conversion_tasks(self.actor_module)
+        task_names = [mapping_hf_names(task.mapping) for task in tasks]
+        known_names = set().union(*task_names)
+        requested_names = sorted(wanted)
+        # Bridge orders peer tasks by local expert index. If any EP rank needs
+        # a task, every peer must run it to enter the same gathers.
+        # Append name matches so unknown requests fail on every peer before export.
+        selection = torch.tensor(
+            [bool(wanted.intersection(names)) for names in task_names]
+            + [name in known_names for name in requested_names],
+            dtype=torch.uint8,
+            device=torch.cuda.current_device(),
+        )
+        if mpu.get_expert_model_parallel_world_size() > 1:
+            torch.distributed.all_reduce(
+                selection, op=torch.distributed.ReduceOp.MAX, group=mpu.get_expert_model_parallel_group()
+            )
+        selected, found = selection.split([len(tasks), len(requested_names)])
+        missing = [name for name, matches in zip(requested_names, found.tolist(), strict=True) if not matches]
+        if missing:
+            raise KeyError(f"missing Grug state entries: {missing}")
+        tasks = [task for task, keep in zip(tasks, selected.tolist(), strict=True) if keep]
+        for name, tensor in self.bridge.export_hf_weights(
+            self.actor_module, show_progress=False, conversion_tasks=tasks
+        ):
             if is_rank0 and name in wanted:
                 weights[name] = tensor.detach().to("cpu", dtype=torch.float32).contiguous()
         missing = wanted.difference(weights) if is_rank0 else set()
