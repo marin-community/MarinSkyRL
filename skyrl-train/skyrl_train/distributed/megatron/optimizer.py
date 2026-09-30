@@ -25,7 +25,7 @@ from transformer_engine.pytorch.optimizers import multi_tensor_applier, multi_te
 
 
 def use_transformer_engine_gradient_kernels() -> None:
-    """Use native kernels without gradient-sized Torch scratch buffers."""
+    """Select native TE norm and clipping kernels for this process."""
     # Remove when MCore's grouped import handles TE 2.11's missing
     # multi_tensor_scale_tensor without discarding the available kernels.
     clip_grads.multi_tensor_applier = multi_tensor_applier
