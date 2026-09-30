@@ -75,10 +75,14 @@ class MetricSeries:
     bounds: MetricBound | None = None
     trend: SeriesTrend | None = None
     occurrence: MetricOccurrence | None = None
+    at_step: int | Literal["first", "last"] | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in ("train", "eval") or self.min_observations < 1:
             raise ValueError("metric series requires train or eval and a positive min_observations")
+        if self.at_step is not None and self.at_step not in ("first", "last"):
+            if isinstance(self.at_step, bool) or not isinstance(self.at_step, int) or self.at_step < 0:
+                raise ValueError("at_step requires a non-negative step, first or last")
 
 
 @dataclass(frozen=True)
@@ -125,6 +129,7 @@ def load_spec(path: Path) -> GateSpec:
                 bounds=MetricBound(**value["bounds"]) if "bounds" in value else None,
                 trend=SeriesTrend(**value["trend"]) if "trend" in value else None,
                 occurrence=MetricOccurrence(**value["occurrence"]) if "occurrence" in value else None,
+                at_step=value.get("at_step"),
             )
             for value in raw.get("metric_series", ())
         ),
@@ -212,6 +217,12 @@ def check_log_patterns(log_text: str, spec: GateSpec) -> list[str]:
 
 def _metric_series_failures(steps: list[StepMetrics], requirement: MetricSeries) -> list[str]:
     kind_steps = [step for step in steps if step.kind == requirement.kind]
+    if isinstance(requirement.at_step, int):
+        kind_steps = [step for step in kind_steps if step.step == requirement.at_step]
+    elif requirement.at_step == "first":
+        kind_steps = kind_steps[:1]
+    elif requirement.at_step == "last":
+        kind_steps = kind_steps[-1:]
     observed = [step for step in kind_steps if requirement.metric in step.values]
     if not observed and not requirement.required:
         return []

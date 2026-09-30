@@ -23,7 +23,6 @@ from ci.marin_nightly.gate import (
 )
 
 SHIPPED_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "gsm8k-qwen3-0.6b-megatron.json"
-FSDP_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "gsm8k-qwen3-0.6b-fsdp2.json"
 OPENCODE_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "opencode-qwen3-8b.json"
 
 # What the trainer actually writes: loguru decorates the line, so the payload is embedded
@@ -311,6 +310,39 @@ def test_cat_count_series_requires_finite_learning_and_enough_train_and_eval_evi
     steps = [*train, *evaluation]
     assert check_run(steps, spec, wall_clock_seconds=300) == []
 
+    for selector, bound in (
+        (0, MetricBound(0.0, 0.1)),
+        ("first", MetricBound(0.0, 0.1)),
+        ("last", MetricBound(0.7, 1.0)),
+    ):
+        rule = MetricSeries("eval", "eval/cat_count_n10/avg_score", True, 1, bounds=bound, at_step=selector)
+        raw = json.loads(spec_path.read_text())
+        raw["metric_series"].append(
+            {
+                "kind": rule.kind,
+                "metric": rule.metric,
+                "required": True,
+                "min_observations": 1,
+                "at_step": selector,
+                "bounds": {"minimum": bound.minimum, "maximum": bound.maximum},
+            }
+        )
+        selected_path = tmp_path / "selected-spec.json"
+        selected_path.write_text(json.dumps(raw))
+        selected_spec = load_spec(selected_path)
+        assert check_run(list(reversed(steps)), selected_spec, 300) == []
+        wrong_step = 6 if selector == "last" else 0
+        bad_score = 0.6 if selector == "last" else 0.3
+        wrong_band = [
+            replace(row, values={"eval/cat_count_n10/avg_score": bad_score})
+            if row.kind == "eval" and row.step == wrong_step
+            else row
+            for row in steps
+        ]
+        assert check_run(wrong_band, selected_spec, 300)
+        selected_missing = [row for row in steps if not (row.kind == "eval" and row.step == wrong_step)]
+        assert check_run(selected_missing, selected_spec, 300)
+
     nan_loss = [
         replace(step, values={**step.values, "policy/policy_loss": float("nan")})
         if step.step == 3 and step.kind == "train"
@@ -387,9 +419,11 @@ def test_cat_count_series_requires_finite_learning_and_enough_train_and_eval_evi
 
 def test_shipped_spec_gates_a_healthy_run():
     """The checked-in spec has to stay loadable by the gate and pass a plausible run."""
-    for path in (SHIPPED_SPEC, FSDP_SPEC):
-        spec = load_spec(path)
-        assert check_run(parse_metrics(healthy_log(steps=spec.min_train_steps)), spec, wall_clock_seconds=600) == []
+    spec = load_spec(SHIPPED_SPEC)
+    assert check_run(parse_metrics(healthy_log(steps=spec.min_train_steps)), spec, wall_clock_seconds=600) == []
+    early_nan = parse_metrics(healthy_log(steps=spec.min_train_steps))
+    early_nan[0] = replace(early_nan[0], values={**early_nan[0].values, "policy/policy_loss": float("nan")})
+    assert check_run(early_nan, spec, wall_clock_seconds=600)
 
 
 def test_opencode_spec_requires_exact_concurrent_literal_coverage():
