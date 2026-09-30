@@ -188,22 +188,24 @@ def test_eval_payloads_do_not_count_as_training_steps(spec):
     assert check_run([StepMetrics("eval", 0, {"eval/exact": float("nan")})], eval_spec, 300) != []
 
 
-@pytest.mark.parametrize("rewards,window", [([0.25] * 4, 2), ([1e308] * 9 + [0.5], 5)])
-def test_insufficient_reward_improvement_fails_the_trend_gate(rewards, window):
-    failures = check_run(parse_metrics(reward_log(rewards)), trend_spec(window=window), wall_clock_seconds=300)
-    assert len(failures) == 1
-
-
-@pytest.mark.parametrize("rewards", [[0.05, 0.06, 0.20, 0.22], [-1e308, -1e308, 1e308, 1e308]])
-def test_rising_reward_passes_the_trend_gate(rewards):
-    failures = check_run(parse_metrics(reward_log(rewards)), trend_spec(), wall_clock_seconds=300)
-    assert failures == []
-
-
-def test_trend_gate_fails_when_there_are_too_few_steps_to_judge():
-    spec = trend_spec(window=5, min_improvement=0.03, min_train_steps=1)
-    failures = check_run(parse_metrics(reward_log([0.25, 0.25, 0.25])), spec, wall_clock_seconds=300)
-    assert any("expected at least 10 for its trend" in failure for failure in failures)
+@pytest.mark.parametrize(
+    "rewards,window,expected_pass,expected_message",
+    [
+        ([0.25] * 4, 2, False, "rose by"),
+        ([1e308] * 9 + [0.5], 5, False, "rose by"),
+        ([0.05, 0.06, 0.20, 0.22], 2, True, ""),
+        ([-1e308, -1e308, 1e308, 1e308], 2, True, ""),
+        ([0.25] * 3, 5, False, "expected at least 10 for its trend"),
+    ],
+)
+def test_reward_trend_gate(rewards, window, expected_pass, expected_message):
+    failures = check_run(
+        parse_metrics(reward_log(rewards)), trend_spec(window=window, min_train_steps=1), wall_clock_seconds=300
+    )
+    assert (failures == []) is expected_pass
+    if not expected_pass:
+        assert len(failures) == 1
+        assert expected_message in failures[0]
 
 
 def test_duplicate_payloads_do_not_count_as_completed_steps(spec):

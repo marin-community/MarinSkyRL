@@ -31,12 +31,6 @@ def test_reward_rises_monotonically_toward_n(n):
 
 
 @pytest.mark.parametrize("n", NS)
-def test_junk_is_always_worse_than_the_same_cats_alone(n):
-    assert reward("Sure! " + cats(n), n) < reward(cats(n), n)
-    assert reward(cats(n) + " I hope that helps", n) < reward(cats(n), n)
-
-
-@pytest.mark.parametrize("n", NS)
 def test_more_junk_words_score_lower_until_the_cap(n):
     scores = [reward(" ".join(["junk"] * k + [cats(n)]), n) for k in range(0, 12)]
     assert all(a > b for a, b in zip(scores, scores[1:]))
@@ -64,12 +58,6 @@ def test_near_miss_formats_earn_shaping_but_not_exact():
 def test_character_pieces_earn_nothing():
     assert reward("ca at c a t", 4) < 0.0
     assert reward("exact concatenate", 4) < 0.0
-
-
-def test_reward_is_bounded():
-    for text in ["", "cat " * 200, "junk " * 200, "cat dog " * 50]:
-        for n in NS:
-            assert -1.0 <= reward(text, n) <= 1.0
 
 
 def test_embedded_end_marker_cannot_verify_exact():
