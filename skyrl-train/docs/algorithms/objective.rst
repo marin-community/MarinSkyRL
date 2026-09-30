@@ -38,6 +38,10 @@ Paths are relative to ``skyrl-train/skyrl_train/``.
      - Counts each row's denominators once per optimizer step, then turns per-token values into the step value. Data weights set the denominator; correction and route weights only scale the numerator
      - ``objective/reduction.py``
      - ``WeightCounts``, ``StepCounts``, ``step_counts``, ``reduce_to_step``
+   * - Off-policy correction
+     - Per-token weights from the old-policy / rollout-policy ratio. They multiply the policy row only
+     - ``objective/correction.py``
+     - ``compute_correction``, ``CorrectionResult``; presets ``tis``, ``icepop``, ``seq_mask_tis``, ``outlier_mask``
    * - Teacher signal
      - A sampled teacher log-probability becomes an advantage. A top-K teacher distribution becomes the teacher row
      - ``objective/teacher.py``
@@ -53,7 +57,7 @@ Paths are relative to ``skyrl-train/skyrl_train/``.
    * - Declarations and checks
      - Torch-free, so the launcher runs them before submission; the same checks run again at start-up
      - ``config/objective_spec.py``
-     - ``RatioAnchor``, ``LossSpec``, ``BUILTIN_LOSS_SPECS``, ``LossReduction``, ``TopKLossParams``, ``resolve_objective_config``, ``validate_objective``
+     - ``RatioAnchor``, ``LossSpec``, ``BUILTIN_LOSS_SPECS``, ``LossReduction``, ``TopKLossParams``, ``resolve_objective_config``, ``validate_objective``; ``OffPolicyCorrection``
    * - Non-finite steps
      - On Megatron, skips an optimizer step whose gradients are NaN or infinite on any rank; fails after too many in a row
      - ``distributed/megatron/nonfinite_steps.py``
@@ -73,6 +77,7 @@ Where each part runs
 
    #. The forward pass gives the old policy's log probabilities.
    #. REPLACE mode masks the tokens that have no teacher evidence.
+   #. ``compute_correction`` computes the policy correction weights.
    #. The advantage estimator computes the environment advantages.
    #. ``teacher_advantages`` adds the sampled teacher signal to the advantages.
 
@@ -95,15 +100,19 @@ All keys are under ``trainer.algorithm``, unless shown otherwise.
      - Keys
    * - Policy loss and averaging
      - ``policy_loss_type``, ``loss_reduction``, ``advantage_estimator``
+   * - Correction
+     - ``off_policy_correction`` (a preset name, or ``none``)
    * - Teacher
      - ``distillation.objective``, ``distillation.reward_mode`` (``add`` or ``replace``), ``distillation.coefficient``, ``distillation.advantage_clip``
    * - KL and entropy
      - ``use_kl_loss``, ``kl_loss_coef``, ``kl_estimator_type``, ``use_entropy_loss``, ``entropy_loss_coef``
    * - Non-finite steps
      - ``trainer.policy.max_consecutive_nonfinite_steps``
+   * - A whole algorithm
+     - ``config_groups.algorithm_recipe``: ``grpo``, ``dapo``, ``dr_grpo``, ``gspo``, ``cispo``, ``opd``, ``mopd``
 
-For the full rules, see the detailed sections below and :doc:`opd`
-for teacher deployment and routing.
+For the full rules, see the detailed sections below,
+the :doc:`objective_guide`, and :doc:`opd` for teacher deployment and routing.
 
 
 Averaging over an optimizer step
