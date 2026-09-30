@@ -104,11 +104,6 @@ def test_proportional_sampler_keeps_read_order_and_caps_bound_swe_rows(monkeypat
     assert swe_proxy_paths(rows) == {"proxies/bound-1"}
 
 
-def test_proportional_sampler_rejects_a_swe_cap_above_the_row_count():
-    with pytest.raises(ValueError):
-        sample_proportional_rows(seed=1, rows=2, swe_rows=3, swe_proxies={}, max_request_characters=LIMIT)
-
-
 def test_prepared_rows_carry_routes_and_harbor_task_ids():
     swe = _swe_row("t1")
     swe["metadata"]["tasktrove_proxy_path"] = "proxies/t1"

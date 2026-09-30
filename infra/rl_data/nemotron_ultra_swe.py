@@ -27,7 +27,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download
 
-from infra.rl_data.sources import NEMOTRON_ULTRA_REVISION, NEMOTRON_ULTRA_RL_DATASET, NEMOTRON_ULTRA_SWE_AGENT
+from infra.rl_data.sources import (
+    NEMOTRON_ULTRA_REVISION,
+    NEMOTRON_ULTRA_RL_DATASET,
+    NEMOTRON_ULTRA_SWE_AGENT,
+    TASKTROVE_PROXY_PATH_KEY,
+)
 
 TASKTROVE_DATASET = "open-thoughts/TaskTrove"
 TASKTROVE_REVISION = "131d8a8470c7a81113baac898c0c232db3f5ae31"
@@ -264,7 +269,7 @@ def bind_tasktrove_swe_proxies(
             raise ValueError("TaskTrove proxy index contains an invalid path")
         bound = copy.deepcopy(row)
         metadata = bound["metadata"]
-        metadata["tasktrove_proxy_path"] = path
+        metadata[TASKTROVE_PROXY_PATH_KEY] = path
         yield bound
 
 
@@ -889,7 +894,7 @@ def _load_blend_swe_proxy_paths(revision: str, proxies: Mapping[SWEProxyKey, Map
                 if not isinstance(agent_ref, Mapping) or agent_ref.get("name") != NEMOTRON_ULTRA_SWE_AGENT:
                     continue
                 metadata = row["metadata"]
-                paths.add(str(metadata["tasktrove_proxy_path"]))
+                paths.add(str(metadata[TASKTROVE_PROXY_PATH_KEY]))
     return paths
 
 

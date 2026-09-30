@@ -3,8 +3,8 @@
 # nodes, two EP8 rollout nodes, and one pinned EP8 teacher node per Snowball expert.
 #
 # The sample (infra/rl_data/nemotron_ultra_mopd_subset.py --rows) routes every generator of the
-# blend except the Harbor SWE agent, so rows keep their teacher_route column and the stock shuffle
-# preserves the mix of the remaining generators.
+# blend, so rows keep their teacher_route column and the stock shuffle preserves the blend's mix;
+# --swe-rows 0 leaves out the Harbor SWE agent's rows.
 # grading: skip lets judge-backed rows train without a judge; the distillation loss ignores the
 # reward. ns_tools and Lean rows execute in the in-cluster NeMo Skills sandbox. Build the sample
 # with --swe-rows 0. Harbor SWE rows need a launch with controller ingress, so the Daytona

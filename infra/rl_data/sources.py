@@ -123,6 +123,8 @@ NEMOTRON_ULTRA_RLVR2_AGENTS = NEMOTRON_ULTRA_RLVR1_AGENTS | {
     "structured_outputs_v3_simple_agent",
 }
 NEMOTRON_ULTRA_SWE_AGENT = "swe_pivot_single_step_tool_use_with_argument_comparison_agent"
+# Row metadata key naming the TaskTrove proxy task bound to a Harbor SWE row.
+TASKTROVE_PROXY_PATH_KEY = "tasktrove_proxy_path"
 # The MOPD blend adds one generator whose verifier has not been ported; rows using it are
 # accepted by the source and rejected by the environment, so subsets must exclude it.
 NEMOTRON_ULTRA_MOPD_AGENTS = NEMOTRON_ULTRA_RLVR2_AGENTS | {"indirect_prompt_injection_simple_agent"}
@@ -245,7 +247,7 @@ def _prepare_nemotron_ultra(
     # The stored schema name is historical: snapshot-backed SWE rows use the
     # exact TaskTrove archive path as their Harbor task identifier.
     terminal_bench_task_id = (
-        metadata.get("tasktrove_proxy_path", instance_id) if isinstance(metadata, Mapping) else None
+        metadata.get(TASKTROVE_PROXY_PATH_KEY, instance_id) if isinstance(metadata, Mapping) else None
     )
     if _NEMOTRON_PLACEHOLDER_KEY in example:
         raise ValueError("Nemotron Ultra math placeholder was not restored before row preparation.")

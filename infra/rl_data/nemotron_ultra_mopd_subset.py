@@ -39,6 +39,7 @@ from infra.rl_data.sources import (
     NEMOTRON_ULTRA_REVISION,
     NEMOTRON_ULTRA_RL_DATASET,
     NEMOTRON_ULTRA_SWE_AGENT,
+    TASKTROVE_PROXY_PATH_KEY,
     PreparedRow,
     load_nemotron_ultra_placeholder_sources,
     nemotron_ultra_mopd_source,
@@ -205,7 +206,7 @@ def prepare_subset_rows(rows: list[dict[str, Any]]) -> list[PreparedRow]:
 
 def swe_proxy_paths(rows: list[dict[str, Any]]) -> set[str]:
     return {
-        row["metadata"]["tasktrove_proxy_path"] for row in rows if row["agent_ref"]["name"] == NEMOTRON_ULTRA_SWE_AGENT
+        row["metadata"][TASKTROVE_PROXY_PATH_KEY] for row in rows if row["agent_ref"]["name"] == NEMOTRON_ULTRA_SWE_AGENT
     }
 
 
