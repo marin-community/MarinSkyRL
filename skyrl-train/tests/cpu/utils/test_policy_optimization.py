@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import yaml
 
+from marinskyrl.distillation import compile_distillation_plan_from_config
 from cloud.iris.launch_config import load_launch_config
 from cloud.iris.tests.test_launch_config import _raw_config
 from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, GroupSelectionResult
@@ -569,7 +570,8 @@ def test_algorithm_recipe_launch_drives_policy_value_and_gradient(tmp_path: Path
         }
     path = tmp_path / "recipe.yaml"
     path.write_text(yaml.safe_dump(raw))
-    config = load_launch_config(path).skyrl.trainer.algorithm
+    launch_config = load_launch_config(path).skyrl
+    config = launch_config.trainer.algorithm
     if recipe == "dapo":
         raw["skyrl"]["trainer"]["algorithm"]["dynamic_sampling"] = {"type": None}
         path.write_text(yaml.safe_dump(raw))
@@ -579,15 +581,17 @@ def test_algorithm_recipe_launch_drives_policy_value_and_gradient(tmp_path: Path
         assert selection.evaluate(group) is GroupSelectionResult.KEEP
 
     mask = torch.tensor([[1.0, 0.0], [1.0, 1.0]])
-    old = torch.full_like(mask, -2.0)
+    old = torch.full_like(mask, -12.0 if teacher_recipe else -2.0)
     current = (old + torch.tensor([[1.1, 1.1], [1.25, 1.25]]).log()).requires_grad_()
     if teacher_recipe:
+        plan = compile_distillation_plan_from_config(launch_config)
+        assert plan is not None
         advantages, _ = teacher_advantages(
-            old + torch.tensor([[-1.0, 0.0], [1.0, 1.0]]),
+            old + torch.tensor([[-9.0, 0.0], [9.0, 9.0]]),
             old,
             mask.bool(),
             torch.ones_like(mask),
-            None,
+            plan.advantage_clip,
         )
     else:
         advantages, _ = compute_advantages_and_returns(
@@ -619,7 +623,7 @@ def test_algorithm_recipe_launch_drives_policy_value_and_gradient(tmp_path: Path
         loss_scale=1,
         report_scale=1,
     )
-    scale = 1.0 if teacher_recipe or recipe == "dr_grpo" else 1 / (math.sqrt(2) + 1e-6)
+    scale = {"opd": 9.0, "mopd": 5.0, "dr_grpo": 1.0}.get(recipe, 1 / (math.sqrt(2) + 1e-6))
     denominator = {"grpo": 2, "dapo": 3, "dr_grpo": 16, "gspo": 2, "cispo": 3, "opd": 3, "mopd": 2}[recipe]
     upper = {"grpo": 1.2, "dr_grpo": 1.2, "gspo": 1.0004}.get(recipe, 1.25)
     second_weight = 1.0 if recipe in {"grpo", "gspo", "mopd"} else 2.0

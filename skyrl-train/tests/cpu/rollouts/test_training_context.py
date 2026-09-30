@@ -461,7 +461,7 @@ async def test_writer_requires_behavior_evidence_only_at_trainable_tokens(ray_mo
     policy = RolloutContentPolicy(
         GroupAdmissionPolicy(
             GroupAdvantageInvariant.no_group_advantage(physical_group_size=2),
-            rollout_logprobs_required=True,
+            rollout_logprobs_required=missing_field == "rollout_logprobs",
             student_topk_width=2,
         ),
         GroupSelectionPolicy(None),
@@ -479,6 +479,8 @@ async def test_writer_requires_behavior_evidence_only_at_trainable_tokens(ray_mo
             np.full((2, 2), np.nan, dtype=np.float32),
         ],
     )
+    if missing_field != "rollout_logprobs":
+        batch["rollout_logprobs"] = None
     try:
         await buffer.publish.remote(1)
         lease = await buffer.acquire_lease.remote()
