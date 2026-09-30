@@ -234,7 +234,10 @@ class RolloutWorkerPool:
             self._eval_worker_count = len(self._actors)
             await self._routing.wait_for(lambda: not any(self._pending))
         results = await asyncio.gather(
-            *(actor.start_eval_session.remote(run_name=run_name, eval_step=eval_step) for actor in self._actors),
+            *(
+                actor.start_eval_session.remote(run_name=run_name, eval_step=eval_step, val_set_name=None)
+                for actor in self._actors
+            ),
             return_exceptions=True,
         )
         if any(isinstance(result, BaseException) for result in results):

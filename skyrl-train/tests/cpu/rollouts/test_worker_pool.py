@@ -57,7 +57,7 @@ class _SessionWorker(_Worker):
             calls.append((name, f"task {task.prompt['uid']}"))
             return 0, None
 
-        async def start_eval_session(**_kwargs):
+        async def start_eval_session(*, run_name: str, eval_step: int, val_set_name: str | None):
             calls.append((name, "start_eval"))
 
         async def stop_eval_session():
