@@ -130,9 +130,9 @@ def _successful_trajectory_output() -> AgentLoopOutput:
             generated_token_count=1,
             prompt_token_ids=(11,),
             response_token_ids=(12,),
-            behavior_logprobs=(-0.5,),
-            student_topk_indices=((12, 13),),
-            behavior_topk_logprobs=((-0.5, -1.5),),
+            behavior_logprobs=np.asarray([-0.5], dtype=np.float32),
+            student_topk_indices=np.asarray([[12, 13]], dtype=np.int32),
+            behavior_topk_logprobs=np.asarray([[-0.5, -1.5]], dtype=np.float32),
         ),
         verification=VerificationResult.verified(1.0, passed=True),
         reward=RewardResult(unshaped_reward=1.0, optimization_reward=1.0, token_rewards=(1.0,)),
@@ -176,9 +176,11 @@ async def test_whole_trajectory_collector_masks_one_agent_loop_failure(generator
     assert batch["response_ids"] == [[12], [0]]
     assert batch["rewards"] == [[1.0], [0.0]]
     assert batch["loss_masks"] == [[1], [0]]
-    assert batch["rollout_logprobs"] == [[-0.5], [0.0]]
-    assert batch["student_topk_indices"] == [[[12, 13]], [[-1, -1]]]
-    assert batch["behavior_topk_logprobs"][1] == [[0.0, 0.0]]
+    np.testing.assert_allclose(batch["rollout_logprobs"][0], [-0.5])
+    np.testing.assert_allclose(batch["rollout_logprobs"][1], [0.0])
+    np.testing.assert_array_equal(batch["student_topk_indices"][0], [[12, 13]])
+    np.testing.assert_array_equal(batch["student_topk_indices"][1], [[-1, -1]])
+    np.testing.assert_array_equal(batch["behavior_topk_logprobs"][1], [[0.0, 0.0]])
     assert batch["exclude_from_baseline"] == [False, False]
     assert batch["exception_types"] == [None, "AgentTimeoutError"]
     assert batch["error_treatments"] == [None, "zero"]
@@ -223,7 +225,7 @@ async def test_gym_terminal_error_retains_only_completed_turn(
     output = await runner.agent_loop([{"role": "user", "content": "question"}], "test", {}, 8, 512)
 
     assert output.evidence.response_token_ids[:2] == (10, 12)
-    assert output.evidence.behavior_logprobs[:2] == (-0.1, -0.2)
+    np.testing.assert_allclose(output.evidence.behavior_logprobs[:2], [-0.1, -0.2])
     np.testing.assert_array_equal(output.evidence.routed_experts[:2], [[[1, 2]], [[3, 4]]])
     assert output.evidence.generated_token_count == 2
     assert output.verification.score == 1.0
@@ -708,7 +710,7 @@ async def test_agent_loop_handles_backend_rendered_prefix_across_structured_tool
     assert output.evidence.prompt_token_ids == (11, 12)
     assert output.evidence.response_token_ids == (*expected_response_ids, EOS)
     assert output.loss_mask == expected_mask
-    assert output.evidence.behavior_logprobs == pytest.approx(expected_logprobs)
+    np.testing.assert_allclose(output.evidence.behavior_logprobs, expected_logprobs)
     assert output.reward.token_rewards == pytest.approx(expected_token_rewards)
     assert output.token_provenance == expected_provenance
     assert output.reward.optimization_reward == 1.0
@@ -773,6 +775,7 @@ async def test_terminal_assembly_masks_unsampled_tokens(
     assert output.loss_mask == expected_mask
     assert output.reward.token_rewards == tuple(expected_rewards)
     assert output.reward.optimization_reward == 1.0
+    assert output.evidence.behavior_logprobs is not None
     assert len(output.evidence.behavior_logprobs) == len(expected_ids)
     sampled_trainable_logprobs = [
         logprob
@@ -858,7 +861,7 @@ async def test_multi_turn_assembly_aligns_per_token_fields_across_observations(
     gap = len(observation_ids)
     assert output["response_ids"] == [[10, EOS][:first_turn] + observation_ids + [20, EOS]]
     assert output["loss_masks"] == [[1] * first_turn + [0] * gap + [1, 1]]
-    assert output["rollout_logprobs"] == [[-0.1, -0.2][:first_turn] + [0.0] * gap + [-0.3, -0.4]]
+    np.testing.assert_allclose(output["rollout_logprobs"][0], [-0.1, -0.2][:first_turn] + [0.0] * gap + [-0.3, -0.4])
     expected_rewards = [0.0] * (first_turn + gap + 2)
     expected_rewards[first_turn - 1] = 0.3
     expected_rewards[-1] = 1.7
@@ -871,10 +874,13 @@ async def test_multi_turn_assembly_aligns_per_token_fields_across_observations(
         output["rollout_routed_experts"][0],
         [[[1, 2]], [[3, 4]]] + [[[0, 0]]] * gap + [[[5, 6]], [[7, 8]]],
     )
-    assert output["student_topk_indices"] == [[[11, 12], [13, 14]] + [[-1, -1]] * gap + [[21, 22], [23, 24]]]
-    assert output["behavior_topk_logprobs"] == [
-        [[-0.1, -2.0], [-0.2, -1.9]] + [[0.0, 0.0]] * gap + [[-0.3, -1.8], [-0.4, -1.7]]
-    ]
+    np.testing.assert_array_equal(
+        output["student_topk_indices"][0], [[11, 12], [13, 14]] + [[-1, -1]] * gap + [[21, 22], [23, 24]]
+    )
+    np.testing.assert_allclose(
+        output["behavior_topk_logprobs"][0],
+        [[-0.1, -2.0], [-0.2, -1.9]] + [[0.0, 0.0]] * gap + [[-0.3, -1.8], [-0.4, -1.7]],
+    )
     output["trajectory_ids"] = [TrajectoryID("tool-trajectory", 0)]
     work = build_teacher_scoring_work(
         output,
@@ -923,7 +929,10 @@ async def test_postprocessed_action_replaces_response_and_keeps_only_aligned_log
     output = await runner.run(single_prompt_request())
 
     assert output["response_ids"] == [tokenizer.encode(postprocessed_action, add_special_tokens=False) + [EOS]]
-    assert output["rollout_logprobs"] == ([[-0.1] * len(sampled_ids) + [0.0]] if keeps_logprobs else None)
+    if keeps_logprobs:
+        np.testing.assert_allclose(output["rollout_logprobs"][0], [-0.1] * len(sampled_ids) + [0.0])
+    else:
+        assert output["rollout_logprobs"] is None
 
 
 @pytest.mark.asyncio
@@ -988,7 +997,7 @@ async def test_agent_loop_initial_prompt_over_budget_returns_empty_rollout(
     assert len(output.evidence.prompt_token_ids) > max_input_length
     assert list(output.evidence.response_token_ids) == []
     assert output.loss_mask == []
-    assert list(output.evidence.behavior_logprobs) == []
+    assert output.evidence.behavior_logprobs is not None and output.evidence.behavior_logprobs.size == 0
     assert output.reward.optimization_reward == 0.0
     assert output.reward.token_rewards == (None if retokenize_chat_history else ())
     assert output.evidence.stop_reason == "length"

@@ -56,10 +56,7 @@ class WholeTrajectoryProjection:
         responses = [list(output.evidence.response_token_ids) for output in outputs]
         rewards = projected_rewards(outputs, responses)
         loss_masks = _loss_masks(outputs, responses, self._cfg, self._tokenizer)
-        candidate_logprobs = [
-            None if output.evidence.behavior_logprobs is None else list(output.evidence.behavior_logprobs)
-            for output in outputs
-        ]
+        candidate_logprobs = [output.evidence.behavior_logprobs for output in outputs]
         get_logprobs = _logprobs_requested(request, self._cfg)
         rollout_logprobs = (
             candidate_logprobs if get_logprobs and all(x is not None for x in candidate_logprobs) else None
@@ -124,14 +121,7 @@ class StepWiseTrajectoryProjection:
                 is_last_step.append(step_index == len(trajectory) - 1)
 
         get_logprobs = _logprobs_requested(request, self._cfg)
-        rollout_logprobs = (
-            [
-                None if step.evidence.behavior_logprobs is None else list(step.evidence.behavior_logprobs)
-                for step in steps
-            ]
-            if get_logprobs
-            else None
-        )
+        rollout_logprobs = [step.evidence.behavior_logprobs for step in steps] if get_logprobs else None
 
         rollout_metrics = get_rollout_metrics(responses, rewards, successes=_verification_successes(steps))
         rollout_metrics.update(_token_provenance_metrics(steps))
@@ -214,7 +204,8 @@ def attach_student_topk(
     captured = [output.evidence.student_topk_indices for output in outputs]
     if not any(rows is not None for rows in captured):
         return
-    width = next((len(row) for rows in captured if rows is not None for row in rows if row), 0)
+    template = next((rows for rows in captured if rows is not None and len(rows)), None)
+    width = 0 if template is None else template.shape[1]
     if width <= 0:
         raise ValueError("student top-K evidence has no candidate width")
     indices = []
@@ -224,13 +215,13 @@ def attach_student_topk(
         if evidence.student_topk_indices is None:
             if any(mask):
                 raise ValueError("student top-K evidence is missing for a trainable trajectory")
-            indices.append([[INVALID_TOPK_INDEX] * width for _ in response])
-            scores.append([[0.0] * width for _ in response])
+            indices.append(np.full((len(response), width), INVALID_TOPK_INDEX, dtype=template.dtype))
+            scores.append(np.zeros((len(response), width), dtype=np.float32))
             continue
-        if any(len(row) != width for row in evidence.student_topk_indices):
+        if evidence.student_topk_indices.shape[1] != width:
             raise ValueError("student top-K evidence widths must agree across trajectories")
-        indices.append([list(row) for row in evidence.student_topk_indices])
-        scores.append([list(row) for row in evidence.behavior_topk_logprobs])
+        indices.append(evidence.student_topk_indices)
+        scores.append(evidence.behavior_topk_logprobs)
     batch["student_topk_indices"] = indices
     batch["behavior_topk_logprobs"] = scores
 
