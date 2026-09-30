@@ -23,6 +23,12 @@ from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optim
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
 
+class _MegatronParamScheduler(OptimizerParamScheduler):
+    def load_state_dict(self, state_dict: dict) -> None:
+        self.num_steps = 0
+        super().load_state_dict(state_dict)
+
+
 def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict) -> OptimizerConfig:
     # megatron-core only recognizes 'adam' / 'sgd' as standard optimizers (anything
     # else routes to `_get_megatron_emerging_optimizer`, which raises
@@ -108,7 +114,7 @@ def get_megatron_optimizer_param_scheduler(
     ):
         lr_warmup_steps = int(config.lr_warmup_steps_ratio * lr_decay_steps)
 
-    opt_param_scheduler = OptimizerParamScheduler(
+    opt_param_scheduler = _MegatronParamScheduler(
         optimizer,
         init_lr=config.get("lr_warmup_init", 0.0),
         max_lr=config.lr,
