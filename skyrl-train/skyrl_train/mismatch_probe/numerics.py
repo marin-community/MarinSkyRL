@@ -3,7 +3,8 @@
 Compiled vLLM runs Grug through Inductor, which keeps each fused elementwise chain in fp32 and rounds
 to bf16 once when it stores the result. The Megatron trainer runs op by op and rounds after most
 operations. Each flag up to ``final_norm_fp32`` makes one chain compute in fp32 and round once, as
-compiled vLLM does; the last two reproduce vLLM's attention kernel and its expert-parallel addition order:
+compiled vLLM does; the others reproduce vLLM's kernels (attention, dense GEMMs, routed experts) and its
+expert-parallel addition order:
 
 - ``gated_norm``: ``norm(x) * sigmoid(gate)``;
 - ``qk_rope``: q/k RMS norm, RoPE with the bf16 cos/sin table, and the query scale: k rounds once, q's
@@ -21,7 +22,13 @@ compiled vLLM does; the last two reproduce vLLM's attention kernel and its exper
   split counts); the backward stays the trainer's cuDNN attention;
 - ``ep_sum``: each token's routed expert outputs are added as vLLM's expert-parallel combine adds them,
   per vLLM EP rank in fp32, then across ranks in bf16 in NCCL's ring order for the token's vLLM
-  data-parallel rank (router replay supplies that rank).
+  data-parallel rank (router replay supplies that rank);
+- ``vllm_gemm``: the dense projections run as compiled vLLM issues them, one ``torch.mm`` each in vLLM's
+  shapes (q, k and v separately, the head-gate projection padded to 24 outputs, the shared expert's gate
+  and up separately), instead of Transformer Engine's fused GEMMs;
+- ``vllm_experts``: the routed experts' values come from vLLM's fused-MoE Triton kernels with vLLM's
+  configs (route weight inside the fp32 down-projection accumulator, one rounding); the backward stays
+  the trainer's grouped-GEMM experts. It replaces ``route_weight``.
 
 Probe modes set flags for one scoring forward. The process default is the current trainer numerics, or
 the set named by ``trainer.mismatch_probe.train_numerics``, which then applies to training too.
@@ -47,6 +54,8 @@ class GrugNumerics:
     final_norm_fp32: bool = False
     fa3_attention: bool = False
     ep_sum: bool = False
+    vllm_gemm: bool = False
+    vllm_experts: bool = False
 
 
 NUMERICS_FLAGS = tuple(field.name for field in fields(GrugNumerics))

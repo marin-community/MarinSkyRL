@@ -55,7 +55,12 @@ from skyrl_train.models.grug_rounding import (
     swiglu_single_rounding,
     xsa_and_gate_single_rounding,
 )
-from skyrl_train.models.grug_vllm_kernels import fa3_attention_sbhd, vllm_ep_combine
+from skyrl_train.models.grug_vllm_kernels import (
+    fa3_attention_sbhd,
+    vllm_ep_combine,
+    vllm_expert_outputs,
+    vllm_qkv_projection,
+)
 from skyrl_train.models.grug_moe import (
     GRUG_ATTN_GATE_SCALE,
     GRUG_GATED_NORM_RANK,
@@ -78,6 +83,8 @@ def _first_present(preferred: torch.Tensor | None, fallback: torch.Tensor | None
 # pipeline parallelism several micro-batches are in flight and a stage's last residual has no reader, so a
 # freed tensor's ``id()`` can come back for an unrelated tensor, which must not receive the entry.
 _RESIDUAL_FP32: dict[int, tuple[weakref.ref, torch.Tensor]] = {}
+# Compiled vLLM pads a GEMM's output width to a multiple of this many columns (the 20-head gate becomes 24).
+VLLM_GEMM_OUTPUT_ALIGNMENT = 8
 
 
 def _hand_off(receiver: torch.Tensor, unrounded: torch.Tensor) -> None:
@@ -147,8 +154,13 @@ def _install_route_weight_hooks(experts: TEGroupedMLP) -> None:
     """Apply route weights after the fp32 down projection when ``route_weight`` is active."""
     stored: dict[str, object] = {}
 
+    def active() -> bool:
+        # ``vllm_experts`` computes the weighted down projection in vLLM's kernel and replaces this flag.
+        numerics = active_numerics()
+        return numerics.route_weight and not numerics.vllm_experts
+
     def unit_probs(module, args, kwargs):
-        if not active_numerics().route_weight:
+        if not active():
             return None
         if module._with_fused_impl:
             raise NotImplementedError("route_weight numerics require the unfused grouped-MLP path")
@@ -157,7 +169,7 @@ def _install_route_weight_hooks(experts: TEGroupedMLP) -> None:
         return (hidden, tokens_per_expert, torch.ones_like(probs)), kwargs
 
     def weighted_output(module, args, output):
-        if not active_numerics().route_weight:
+        if not active():
             return None
         activation = args[0]
         weights = [getattr(module, f"weight{index}") for index in range(module.num_gemms)]
@@ -168,6 +180,89 @@ def _install_route_weight_hooks(experts: TEGroupedMLP) -> None:
 
     experts.register_forward_pre_hook(unit_probs, with_kwargs=True)
     experts.linear_fc2.register_forward_hook(weighted_output)
+
+
+def _install_vllm_experts_hooks(experts: TEGroupedMLP) -> None:
+    """Take the routed experts' values from vLLM's fused-MoE kernels when ``vllm_experts`` is active.
+
+    The kernels compute each dispatched row (one token-expert slot) as vLLM does, with the route weight inside
+    the down projection's fp32 accumulator. With gradients enabled the trainer's grouped-GEMM experts also run
+    and carry the gradient under the kernels' bytes through the exact-zero ``x - x.detach()``; a scoring forward
+    without gradients runs the kernels alone.
+    """
+    grouped_forward = experts.forward
+
+    def forward(permuted_local_hidden_states, tokens_per_expert, permuted_probs):
+        if not active_numerics().vllm_experts:
+            return grouped_forward(permuted_local_hidden_states, tokens_per_expert, permuted_probs)
+        if any(linear.tp_size != 1 or linear.use_bias for linear in (experts.linear_fc1, experts.linear_fc2)):
+            raise NotImplementedError("vllm_experts numerics need unsharded, bias-free expert projections")
+        with torch.no_grad():
+            value = vllm_expert_outputs(
+                permuted_local_hidden_states,
+                tokens_per_expert.tolist(),
+                permuted_probs,
+                [getattr(experts.linear_fc1, f"weight{index}") for index in range(experts.linear_fc1.num_gemms)],
+                [getattr(experts.linear_fc2, f"weight{index}") for index in range(experts.linear_fc2.num_gemms)],
+            )
+        if not torch.is_grad_enabled():
+            return value, None
+        reference, bias = grouped_forward(permuted_local_hidden_states, tokens_per_expert, permuted_probs)
+        return value + (reference - reference.detach()), bias
+
+    experts.forward = forward
+
+
+def _vllm_gemm(linear: nn.Module, compute) -> None:
+    """Run ``linear`` (a Transformer Engine linear) as ``compute(x)`` when ``vllm_gemm`` is active.
+
+    ``compute`` issues ``torch.mm`` in compiled vLLM's shapes on the module's own weight, so autograd gives the
+    weight its gradient; Megatron's gradient hooks add it to the parameter's main gradient as for any
+    parameter Transformer Engine did not already accumulate.
+    """
+    te_forward = linear.forward
+
+    def forward(x, *args, **kwargs):
+        if not active_numerics().vllm_gemm:
+            return te_forward(x, *args, **kwargs)
+        if args or kwargs or linear.tp_size != 1 or linear.use_bias:
+            raise NotImplementedError("vllm_gemm numerics need an unsharded, bias-free projection of one input")
+        return compute(x), None
+
+    linear.forward = forward
+
+
+def _install_vllm_gemm_attention_hooks(attention: "GrugSelfAttention") -> None:
+    """Compiled vLLM's attention projections: q, k and v as three GEMMs, the head gate padded to 24 outputs."""
+    qkv = attention.linear_qkv
+    groups = attention.num_query_groups_per_partition
+    head_dim = attention.hidden_size_per_attention_head
+    query_width = attention.num_attention_heads_per_partition // groups * head_dim
+    gate = attention.attn_gate
+
+    def head_gate(x: torch.Tensor) -> torch.Tensor:
+        # Inductor pads the gate projection's 20 outputs to a multiple of 8 with zero rows (fusion map, M-rope:1119).
+        heads = gate.weight.shape[0]
+        padded = torch.cat(
+            (gate.weight, gate.weight.new_zeros(-heads % VLLM_GEMM_OUTPUT_ALIGNMENT, gate.weight.shape[1]))
+        )
+        return F.linear(x, padded)[..., :heads].contiguous()
+
+    _vllm_gemm(qkv, lambda x: vllm_qkv_projection(x, qkv.weight, groups, query_width, head_dim))
+    _vllm_gemm(gate, head_gate)
+    _vllm_gemm(attention.linear_proj, lambda x: F.linear(x, attention.linear_proj.weight))
+
+
+def _install_vllm_gemm_shared_hooks(shared: SharedExpertMLP) -> None:
+    """Compiled vLLM's shared expert: gate and up projections as two GEMMs, then the down projection."""
+    fc1, fc2 = shared.linear_fc1, shared.linear_fc2
+
+    def gate_and_up(x: torch.Tensor) -> torch.Tensor:
+        gate_weight, up_weight = fc1.weight.chunk(2, dim=0)
+        return torch.cat((F.linear(x, gate_weight), F.linear(x, up_weight)), dim=-1)
+
+    _vllm_gemm(fc1, gate_and_up)
+    _vllm_gemm(fc2, lambda x: F.linear(x, fc2.weight))
 
 
 def _install_fa3_attention_hooks(attention: "GrugSelfAttention") -> None:
@@ -258,10 +353,13 @@ def install_numerics_hooks(root: nn.Module) -> None:
     for module in root.modules():
         if isinstance(module, SharedExpertMLP):
             _install_shared_swiglu_hooks(module)
+            _install_vllm_gemm_shared_hooks(module)
         if isinstance(module, TEGroupedMLP):
             _install_route_weight_hooks(module)
+            _install_vllm_experts_hooks(module)
         if isinstance(module, GrugSelfAttention):
             _install_fa3_attention_hooks(module)
+            _install_vllm_gemm_attention_hooks(module)
         if isinstance(module, TransformerLayer) and isinstance(module.pre_mlp_layernorm, GrugGatedRMSNorm):
             # The residual hooks wrap the EP combine, so the fp32 residual reads the combine's value.
             _install_ep_combine_hooks(module)
