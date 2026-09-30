@@ -199,7 +199,7 @@ def test_tokenize_matches_chat_prompt_ids_for_auto_content_format(ray_init_fixtu
             model=MODEL,
             num_inference_engines=1,
             sleep_level=1,
-            engine_init_kwargs={"custom_chat_template_chat_completion_path": str(chat_template)},
+            engine_init_kwargs={"chat_template": chat_template.read_text(encoding="utf-8")},
         )
 
         def run_server():

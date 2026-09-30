@@ -1,19 +1,4 @@
-"""Decide whether a nightly SkyRL training run is healthy, from its log alone.
-
-The trainer mirrors every tracker payload to stdout as a ``WANDB_MIRROR`` line (see
-``RayPPOTrainer._log_metrics_stdout``), so a run's metrics survive in its log without
-wandb, a checkpoint, or cluster access. This reads that log and checks the run against a
-spec: enough training steps completed, the metrics that must exist are there and finite,
-the ones with a meaningful range are inside it, and the run finished inside its
-wall-clock budget.
-
-The gate is deliberately coarse. It answers "does the user-facing training path still
-work end to end", not "is the model any good" -- a two-step run of a 0.6B policy has no
-signal about quality, and a reward floor above zero would just be flaky.
-
-    python -m ci.marin_nightly.gate --log run.log \
-        --spec ci/marin_nightly/specs/gsm8k-qwen3-0.6b-megatron.json --wall-clock-seconds 900
-"""
+"""Check a SkyRL training log against its run spec."""
 
 import argparse
 import json
@@ -22,6 +7,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 # `WANDB_MIRROR kind=train step=2 metrics={"policy/policy_loss": 0.1, ...}`, embedded in a
 # loguru line, so the prefix is matched loosely and the JSON object runs to end of line.
@@ -53,15 +39,50 @@ class MetricBound:
 
 
 @dataclass(frozen=True)
-class RewardTrend:
-    """A behavioural check: a metric's mean over the last ``window`` steps must exceed its mean
-    over the first ``window`` by at least ``min_improvement``. This is what makes the gate test
-    learning rather than just liveness -- a run that generates and scores but never improves
-    (broken advantages, a dead optimizer, weights that never sync back) stays flat and fails it."""
+class MetricOccurrence:
+    """Require at least ``minimum_count`` observations strictly above or below a threshold."""
 
-    metric: str
+    minimum_count: int
+    comparison: Literal["above", "below"]
+    threshold: float
+
+    def __post_init__(self) -> None:
+        if self.comparison not in ("above", "below") or self.minimum_count < 1:
+            raise ValueError("occurrence requires above or below and a positive minimum_count")
+
+
+@dataclass(frozen=True)
+class SeriesTrend:
+    """Compare the first and last windows of one metric series."""
+
     window: int
     min_improvement: float
+
+    def __post_init__(self) -> None:
+        if self.window < 1:
+            raise ValueError("trend window must be positive")
+
+
+@dataclass(frozen=True)
+class MetricSeries:
+    """Evidence required from one metric in one tracker payload stream."""
+
+    kind: str
+    metric: str
+    required: bool
+    min_observations: int
+    finite_every_step: bool = False
+    bounds: MetricBound | None = None
+    trend: SeriesTrend | None = None
+    occurrence: MetricOccurrence | None = None
+    at_step: int | Literal["first", "last"] | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("train", "eval") or self.min_observations < 1:
+            raise ValueError("metric series requires train or eval and a positive min_observations")
+        if self.at_step is not None and self.at_step not in ("first", "last"):
+            if isinstance(self.at_step, bool) or not isinstance(self.at_step, int) or self.at_step < 0:
+                raise ValueError("at_step requires a non-negative step, first or last")
 
 
 @dataclass(frozen=True)
@@ -81,23 +102,37 @@ class GateSpec:
     finite_metrics: tuple[str, ...]
     bounds: dict[str, MetricBound]
     max_wall_clock_seconds: float
-    reward_trend: RewardTrend | None = None
     required_log_patterns: dict[str, LogPatternBound] | None = None
+    metric_series: tuple[MetricSeries, ...] = ()
 
 
 def load_spec(path: Path) -> GateSpec:
     raw = json.loads(path.read_text())
-    trend = raw.get("reward_trend")
+    if "reward_trend" in raw:
+        raise ValueError(f"{path}: reward_trend must be expressed in metric_series")
     return GateSpec(
         min_train_steps=raw["min_train_steps"],
         finite_metrics=tuple(raw["finite_metrics"]),
         bounds={k: MetricBound(v["minimum"], v["maximum"]) for k, v in raw["bounds"].items()},
         max_wall_clock_seconds=raw["max_wall_clock_seconds"],
-        reward_trend=RewardTrend(trend["metric"], trend["window"], trend["min_improvement"]) if trend else None,
         required_log_patterns={
             name: LogPatternBound(value["pattern"], value["minimum"], value.get("maximum"))
             for name, value in raw.get("required_log_patterns", {}).items()
         },
+        metric_series=tuple(
+            MetricSeries(
+                kind=value["kind"],
+                metric=value["metric"],
+                required=value["required"],
+                min_observations=value["min_observations"],
+                finite_every_step=value.get("finite_every_step", False),
+                bounds=MetricBound(**value["bounds"]) if "bounds" in value else None,
+                trend=SeriesTrend(**value["trend"]) if "trend" in value else None,
+                occurrence=MetricOccurrence(**value["occurrence"]) if "occurrence" in value else None,
+                at_step=value.get("at_step"),
+            )
+            for value in raw.get("metric_series", ())
+        ),
     )
 
 
@@ -122,39 +157,47 @@ def _is_finite(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def _distinct_steps(steps: list[StepMetrics]) -> tuple[list[StepMetrics], list[str]]:
+    by_key: dict[tuple[str, int], StepMetrics] = {}
+    failures = []
+    for step in steps:
+        if step.kind not in (TRAIN, "eval"):
+            continue
+        key = (step.kind, step.step)
+        prior = by_key.get(key)
+        if prior is not None and json.dumps(prior.values, sort_keys=True) != json.dumps(step.values, sort_keys=True):
+            failures.append(f"conflicting {step.kind} payloads at step {step.step}")
+        by_key[key] = step
+    return sorted(by_key.values(), key=lambda item: (item.kind, item.step)), failures
+
+
 def check_run(steps: list[StepMetrics], spec: GateSpec, wall_clock_seconds: float) -> list[str]:
     """Check a parsed run against the spec. Returns one message per violation, empty if healthy."""
-    failures = []
+    distinct_steps, failures = _distinct_steps(steps)
 
     if wall_clock_seconds > spec.max_wall_clock_seconds:
         failures.append(f"run took {wall_clock_seconds:.0f}s, over the {spec.max_wall_clock_seconds:.0f}s budget")
 
-    train_steps = [s for s in steps if s.kind == TRAIN]
+    train_steps = [s for s in distinct_steps if s.kind == TRAIN]
     if len(train_steps) < spec.min_train_steps:
         failures.append(f"logged {len(train_steps)} training steps, expected at least {spec.min_train_steps}")
-    if not train_steps:
-        return failures
+    if train_steps:
+        final = train_steps[-1]
+        for name in spec.finite_metrics:
+            if name not in final.values:
+                failures.append(f"step {final.step} did not log {name}")
+            elif not _is_finite(final.values[name]):
+                failures.append(f"step {final.step} logged {name}={final.values[name]!r}, which is not finite")
 
-    # The last step is the one that has to be healthy: an early step can look fine while the
-    # run degrades into NaN later.
-    final = train_steps[-1]
-    for name in spec.finite_metrics:
-        if name not in final.values:
-            failures.append(f"step {final.step} did not log {name}")
-        elif not _is_finite(final.values[name]):
-            failures.append(f"step {final.step} logged {name}={final.values[name]!r}, which is not finite")
+        for name, bound in spec.bounds.items():
+            value = final.values.get(name)
+            if not _is_finite(value):
+                continue
+            if not bound.minimum <= value <= bound.maximum:
+                failures.append(f"step {final.step} logged {name}={value}, outside [{bound.minimum}, {bound.maximum}]")
 
-    for name, bound in spec.bounds.items():
-        value = final.values.get(name)
-        if not _is_finite(value):
-            continue  # already reported by the finiteness check if it was required
-        if not bound.minimum <= value <= bound.maximum:
-            failures.append(f"step {final.step} logged {name}={value}, outside [{bound.minimum}, {bound.maximum}]")
-
-    if spec.reward_trend is not None:
-        trend_failure = _reward_trend_failure(train_steps, spec.reward_trend)
-        if trend_failure is not None:
-            failures.append(trend_failure)
+    for requirement in spec.metric_series:
+        failures.extend(_metric_series_failures(distinct_steps, requirement))
 
     return failures
 
@@ -172,23 +215,73 @@ def check_log_patterns(log_text: str, spec: GateSpec) -> list[str]:
     return failures
 
 
-def _reward_trend_failure(train_steps: list[StepMetrics], trend: RewardTrend) -> str | None:
-    """Return a message if the metric did not climb by ``min_improvement`` from the first
-    ``window`` steps to the last, or None if it did (or there are too few steps to judge, which
-    the min_train_steps check already covers)."""
-    series = [s.values.get(trend.metric) for s in train_steps]
-    series = [v for v in series if _is_finite(v)]
-    if len(series) < 2 * trend.window:
-        return None
-    early = sum(series[: trend.window]) / trend.window
-    late = sum(series[-trend.window :]) / trend.window
-    if late - early >= trend.min_improvement:
-        return None
-    return (
-        f"{trend.metric} rose by {late - early:+.4f} over the run (first {trend.window} steps "
-        f"mean {early:.4f}, last {trend.window} mean {late:.4f}), expected at least "
-        f"+{trend.min_improvement:.4f} -- the policy is not learning"
-    )
+def _metric_series_failures(steps: list[StepMetrics], requirement: MetricSeries) -> list[str]:
+    kind_steps = [step for step in steps if step.kind == requirement.kind]
+    if isinstance(requirement.at_step, int):
+        kind_steps = [step for step in kind_steps if step.step == requirement.at_step]
+    elif requirement.at_step == "first":
+        kind_steps = kind_steps[:1]
+    elif requirement.at_step == "last":
+        kind_steps = kind_steps[-1:]
+    observed = [step for step in kind_steps if requirement.metric in step.values]
+    if not observed and not requirement.required:
+        return []
+
+    failures = []
+    values: list[float] = []
+    for step in kind_steps:
+        value = step.values.get(requirement.metric)
+        if requirement.metric not in step.values:
+            if requirement.finite_every_step:
+                failures.append(f"{requirement.kind} step {step.step} did not log {requirement.metric}")
+            continue
+        if not _is_finite(value):
+            failures.append(f"{requirement.kind} step {step.step} logged nonfinite {requirement.metric}={value!r}")
+            continue
+        values.append(value)
+        if requirement.bounds is not None and not requirement.bounds.minimum <= value <= requirement.bounds.maximum:
+            failures.append(
+                f"{requirement.kind} step {step.step} logged {requirement.metric}={value}, "
+                f"outside [{requirement.bounds.minimum}, {requirement.bounds.maximum}]"
+            )
+
+    if len(values) < requirement.min_observations:
+        failures.append(
+            f"{requirement.kind} {requirement.metric} has {len(values)} finite observations, "
+            f"expected at least {requirement.min_observations}"
+        )
+
+    if requirement.trend is not None:
+        trend = requirement.trend
+        if len(values) < 2 * trend.window:
+            failures.append(
+                f"{requirement.kind} {requirement.metric} has {len(values)} finite observations, "
+                f"expected at least {2 * trend.window} for its trend"
+            )
+        else:
+            early = math.fsum(value / trend.window for value in values[: trend.window])
+            late = math.fsum(value / trend.window for value in values[-trend.window :])
+            improvement = late - early
+            if not math.isfinite(early) or not math.isfinite(late) or improvement < trend.min_improvement:
+                failures.append(
+                    f"{requirement.kind} {requirement.metric} rose by {improvement:+.4f}, "
+                    f"expected at least +{trend.min_improvement:.4f}"
+                )
+
+    if requirement.occurrence is not None:
+        occurrence = requirement.occurrence
+        count = sum(
+            value > occurrence.threshold if occurrence.comparison == "above" else value < occurrence.threshold
+            for value in values
+        )
+        if count < occurrence.minimum_count:
+            failures.append(
+                f"{requirement.kind} {requirement.metric} has {count} observations "
+                f"{occurrence.comparison} {occurrence.threshold}, "
+                f"expected at least {occurrence.minimum_count}"
+            )
+
+    return failures
 
 
 def main() -> int:
@@ -209,7 +302,8 @@ def main() -> int:
     failures = check_run(steps, spec, args.wall_clock_seconds)
     failures.extend(check_log_patterns(log_text, spec))
 
-    train_steps = [s for s in steps if s.kind == TRAIN]
+    distinct_steps, _ = _distinct_steps(steps)
+    train_steps = [s for s in distinct_steps if s.kind == TRAIN]
     print(f"parsed {len(train_steps)} training steps from {args.log} in {args.wall_clock_seconds:.0f}s")
     if train_steps:
         print(f"final step {train_steps[-1].step}: {json.dumps(train_steps[-1].values, sort_keys=True)}")

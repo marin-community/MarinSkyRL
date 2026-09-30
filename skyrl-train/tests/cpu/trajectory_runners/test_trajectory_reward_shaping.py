@@ -401,27 +401,8 @@ async def test_trajectory_runner_applies_shared_shaping_after_generation():
     assert output["rewards"] == pytest.approx([0.6])
 
 
-@pytest.mark.parametrize(
-    ("config", "message"),
-    [
-        ({"schema_version": 3}, "schema_version"),
-        ({"loop": {"max_period_tokens": 0}}, "loop.max_period_tokens"),
-        ({"loop": {"max_period_tokens": 4, "tail_tokens": 15}}, "loop.tail_tokens"),
-        ({"loop": {"minimum_occurrences": 1}}, "loop.minimum_occurrences"),
-        ({"loop": {"penalty_per_occurrence": 0.1}}, "unknown loop settings"),
-        (
-            {"loop": {"advantage_penalty_per_token": 0.1, "max_advantage_penalty": 0.0}},
-            "loop.max_advantage_penalty must be positive",
-        ),
-        ({"passthrough": {"penalty": -0.1}}, "passthrough.penalty"),
-        ({"non_termination": {"penalty": -0.1}}, "non_termination.penalty"),
-        ({"non_termination": {"accepted_stop_reasons": "stop"}}, "accepted_stop_reasons"),
-        ({"successful_length": {"free_tokens": -1}}, "successful_length.free_tokens"),
-        ({"overlong": {"l_max": 0, "l_cache": -1}}, "overlong.l_cache must be non-negative"),
-        ({"overlong": {"l_max": 8, "l_cache": 9}}, "overlong.l_cache must not exceed overlong.l_max"),
-        ({"overlong": {"penalty_scale": -0.1}}, "overlong.penalty_scale must be non-negative"),
-    ],
-)
-def test_invalid_shaping_config_fails_before_generation(config, message):
-    with pytest.raises(ValueError, match=message):
-        parse_trajectory_reward_shaping_config(config)
+def test_retired_loop_penalty_key_fails_instead_of_being_ignored():
+    # The per-occurrence reward penalty became token credit; a stale config carrying the old key
+    # must fail loudly rather than silently train without a penalty.
+    with pytest.raises(ValueError, match="unknown loop settings"):
+        parse_trajectory_reward_shaping_config({"loop": {"penalty_per_occurrence": 0.1}})

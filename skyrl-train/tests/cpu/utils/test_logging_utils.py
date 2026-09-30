@@ -1,98 +1,27 @@
-"""
-uv run --isolated --group dev --extra cpu pytest tests/cpu/utils/test_logging_utils.py
-"""
-
 import pytest
+from loguru import logger
 
-from skyrl_train.utils.logging_utils import (
-    BASE_PROMPT_COLOR,
-    NEGATIVE_RESPONSE_COLOR,
-    POSITIVE_RESPONSE_COLOR,
-    _color_block_format_and_kwargs,
-    log_example,
-)
+from skyrl_train.utils.logging_utils import log_example
 
 
-class StubLogger:
-    """Minimal logger stub capturing calls to .opt().info()."""
-
-    def __init__(self) -> None:
-        self.last_message = None
-        self.last_args = None
-        self.last_kwargs = None
-
-    def opt(self, **kwargs):
-        # In real loguru this returns a new logger; here we just ignore options.
-        return self
-
-    def info(self, msg, *args, **kwargs):
-        self.last_message = msg
-        self.last_args = args
-        self.last_kwargs = kwargs
+@pytest.fixture
+def records():
+    captured = []
+    sink_id = logger.add(captured.append, format="{level}|{message}", colorize=False)
+    yield captured
+    logger.remove(sink_id)
 
 
-def test_color_block_format_and_kwargs_single_line():
-    fmt, kwargs = _color_block_format_and_kwargs("hello", "red", "p")
+def test_log_example_logs_braces_and_markup_verbatim(records):
+    """Model text containing str.format braces and loguru color tags must not be interpreted (#781)."""
+    prompt = [{"role": "user", "content": "fill {answer} in <red>bold</red>"}]
+    response = "def f():\n    return {'a': 1} </green> {0}"
 
-    assert fmt == "<red>{p0}</red>"
-    assert kwargs == {"p0": "hello"}
+    log_example(logger, prompt=prompt, response=response, reward=[0.25, 0.5])
 
-
-def test_color_block_format_and_kwargs_multi_line():
-    text = "line1\nline2"
-    fmt, kwargs = _color_block_format_and_kwargs(text, "blue", "x")
-
-    assert fmt == "<blue>{x0}</blue>\n<blue>{x1}</blue>"
-    assert kwargs == {"x0": "line1", "x1": "line2"}
-
-
-@pytest.mark.parametrize(
-    "reward,expected_color",
-    [
-        (None, NEGATIVE_RESPONSE_COLOR),
-        (0.0, NEGATIVE_RESPONSE_COLOR),
-        (-1.0, NEGATIVE_RESPONSE_COLOR),
-        (0.1, POSITIVE_RESPONSE_COLOR),
-        ([0.1, 0.2], POSITIVE_RESPONSE_COLOR),
-    ],
-)
-def test_log_example_uses_expected_colors_and_reward_string(reward, expected_color):
-    logger = StubLogger()
-
-    prompt = [{"role": "user", "content": "line1\nline2"}]
-    response = "out1\nout2"
-
-    log_example(logger, prompt=prompt, response=response, reward=reward)
-
-    # Basic structure checks
-    assert logger.last_message.startswith("Example:\n  Input: ")
-    assert "Output (Total Reward: {reward}):" in logger.last_message
-
-    # Placeholder keys from helper should be present
-    assert "p0" in logger.last_kwargs
-    assert "r0" in logger.last_kwargs
-
-    # Prompt lines kept as-is
-    assert logger.last_kwargs["p0"] == "[{'role': 'user', 'content': 'line1\\nline2'}]"
-
-    # Response lines kept as-is
-    assert logger.last_kwargs["r0"] == "out1"
-    assert logger.last_kwargs["r1"] == "out2"
-
-    # Reward formatting
-    reward_str = logger.last_kwargs["reward"]
-    if reward is None:
-        assert reward_str == "N/A"
-    else:
-        # log_example normalizes rewards to a single float
-        if isinstance(reward, list):
-            expected_val = float(sum(reward))
-        else:
-            expected_val = float(reward)
-        assert pytest.approx(float(reward_str), rel=1e-6) == expected_val
-
-    # Color tags should appear in the format string with the correct colors
-    assert f"<{BASE_PROMPT_COLOR}>" in logger.last_message
-    assert f"</{BASE_PROMPT_COLOR}>" in logger.last_message
-    assert f"<{expected_color}>" in logger.last_message
-    assert f"</{expected_color}>" in logger.last_message
+    assert len(records) == 1
+    level, message = records[0].rstrip("\n").split("|", 1)
+    assert level == "INFO"
+    assert str(prompt) in message
+    assert "def f():\n    return {'a': 1} </green> {0}" in message
+    assert "0.7500" in message

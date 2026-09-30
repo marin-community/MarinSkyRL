@@ -8,17 +8,12 @@ import ray
 from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizerBase
 
-from skyrl_train.rollouts.workers import WorkerShard
+from skyrl_train.rollouts.workers import WorkerShard, detached_config
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 
 DEFAULT_CONCURRENT_TRIALS = 16
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", None)
-
-
-def _detached(config: DictConfig) -> DictConfig:
-    """Return a serializable copy without OmegaConf parent references."""
-    return OmegaConf.create(OmegaConf.to_container(config, resolve=True))
 
 
 def configured_concurrent_trials(terminal_bench_config: DictConfig) -> int:
@@ -58,9 +53,9 @@ class HarborRunnerSpec:
     @classmethod
     def from_config(cls, config: DictConfig) -> HarborRunnerSpec:
         return cls(
-            config=_detached(config),
-            runner_config=_detached(config.generator),
-            terminal_bench_config=_detached(config.terminal_bench_config),
+            config=detached_config(config),
+            runner_config=detached_config(config.generator),
+            terminal_bench_config=detached_config(config.terminal_bench_config),
         )
 
     def build(self, tokenizer: PreTrainedTokenizerBase, shard: WorkerShard) -> TrajectoryRunner:

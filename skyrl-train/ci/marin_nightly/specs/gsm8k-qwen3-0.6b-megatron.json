@@ -10,17 +10,41 @@
     "observed": "2026-09-10, cw-rno2a, one H100, 30 steps: 883s end to end, median train_step 7.92s, mean 8.09s, max 10.8s."
   },
   "min_train_steps": 30,
-  "finite_metrics": [
-    "policy/policy_loss",
-    "policy/final_loss",
-    "policy/policy_entropy",
-    "reward/avg_raw_reward"
-  ],
-  "bounds": {
-    "reward/avg_raw_reward": {
-      "minimum": 0.0,
-      "maximum": 1.0
+  "finite_metrics": [],
+  "bounds": {},
+  "max_wall_clock_seconds": 1800,
+  "metric_series": [
+    {
+      "kind": "train",
+      "metric": "policy/policy_loss",
+      "required": true,
+      "min_observations": 30,
+      "finite_every_step": true
+    },
+    {
+      "kind": "train",
+      "metric": "policy/final_loss",
+      "required": true,
+      "min_observations": 30,
+      "finite_every_step": true
+    },
+    {
+      "kind": "train",
+      "metric": "policy/policy_entropy",
+      "required": true,
+      "min_observations": 30,
+      "finite_every_step": true
+    },
+    {
+      "kind": "train",
+      "metric": "reward/avg_raw_reward",
+      "required": true,
+      "min_observations": 30,
+      "finite_every_step": true,
+      "bounds": {
+        "minimum": 0.0,
+        "maximum": 1.0
+      }
     }
-  },
-  "max_wall_clock_seconds": 1800
+  ]
 }
