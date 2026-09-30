@@ -94,6 +94,42 @@ def test_forward_teacher_entry_clip_caps_only_positive_contributions():
     torch.testing.assert_close(student.grad, torch.tensor([[[0.0, -0.4]]]))
 
 
+@pytest.mark.parametrize("objective", ["sparse_reverse_kl", "sparse_jsd"])
+@pytest.mark.parametrize("teacher_dtype", [torch.float32, torch.float64])
+def test_teacher_tail_survives_float32_retained_mass_rounding(objective, teacher_dtype):
+    teacher = torch.tensor([0.0, -20.0, -23.0], dtype=teacher_dtype).log_softmax(-1)[:2]
+    retained_mass = teacher.float().exp().sum().reshape(1, 1)
+    assert retained_mass.item() == 1.0
+    logits = torch.tensor([[[0.2, -0.5, 0.1]]], requires_grad=True)
+    reference_logits = logits.detach().double().requires_grad_()
+    indices = torch.tensor([[[0, 1]]])
+    evidence = TeacherTopKInput(
+        indices, teacher.reshape(1, 1, 2), retained_mass, torch.ones(1, 1, dtype=torch.bool), torch.ones(1, 1)
+    )
+    result = topk_teacher_loss(
+        evidence,
+        student_topk_logprobs(logits, indices),
+        TopKLossParams(DistillationObjectiveKind(objective), 0.2, 0.2, 3, jsd_beta=0.3),
+        vocabulary_size=3,
+    )
+    target_support = teacher.double().exp()
+    target_tail = max(1 - math.fsum(target_support.tolist()), 1e-12)
+    target = torch.cat((target_support, torch.tensor([target_tail], dtype=torch.float64)))
+    student = reference_logits.softmax(-1)
+    if objective == "sparse_reverse_kl":
+        expected = (student * (student.log() - target.log())).sum()
+    else:
+        mixture = 0.3 * target + 0.7 * student
+        expected = (0.3 * target * (target.log() - mixture.log())).sum()
+        expected += (0.7 * student * (student.log() - mixture.log())).sum()
+    assert torch.isfinite(result.values).all()
+    torch.testing.assert_close(result.values.double().squeeze(), expected, rtol=1e-5, atol=2e-7)
+    result.values.sum().backward()
+    expected.backward()
+    assert torch.isfinite(logits.grad).all()
+    torch.testing.assert_close(logits.grad.double(), reference_logits.grad, rtol=1e-5, atol=2e-7)
+
+
 def test_student_selected_surrogate_matches_independent_clipped_values_and_gradient():
     current = torch.tensor([[[0.2, 0.5], [torch.nan, torch.nan]]]).log().requires_grad_()
     behavior = torch.tensor([[[0.1, 0.1], [torch.nan, torch.nan]]]).log()
