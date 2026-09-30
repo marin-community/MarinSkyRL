@@ -110,7 +110,8 @@ from skyrl_train.utils.utils import (
     policy_force_cvd_mask_enabled,
 )
 
-from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.config.objective_spec import rollout_logprobs_required
+from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
@@ -1623,8 +1624,9 @@ class RayPPOTrainer:
 
             trajectory_batch = concatenate_trajectory_batches(
                 [group.trajectory_batch for group in groups],
-                require_rollout_logprobs=policy_loss_requires_rollout_logprobs(
-                    self.cfg.trainer.algorithm.policy_loss_type
+                require_rollout_logprobs=rollout_logprobs_required(
+                    self.cfg.trainer.algorithm,
+                    loss_spec=PolicyLossRegistry.spec(self.cfg.trainer.algorithm.policy_loss_type),
                 ),
                 tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
             )
@@ -2063,9 +2065,11 @@ class RayPPOTrainer:
             response_span_tags,
             num_experts,
         )
-        behavior_logprobs_required = policy_loss_requires_rollout_logprobs(self.cfg.trainer.algorithm.policy_loss_type)
+        behavior_logprobs_required = rollout_logprobs_required(
+            self.cfg.trainer.algorithm, loss_spec=PolicyLossRegistry.spec(self.cfg.trainer.algorithm.policy_loss_type)
+        )
         if behavior_logprobs_required and rollout_logprobs_tensor is None:
-            raise ValueError("rollout_logprobs are required for behavior_clip policy loss")
+            raise ValueError("rollout_logprobs are required for the selected policy objective")
 
         # sanity check for tis
         #

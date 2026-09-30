@@ -12,7 +12,6 @@ from omegaconf import DictConfig
 
 from marinskyrl.runtime_options import PolicyLossType
 from skyrl_train.tensor_math import masked_mean, safe_exp_delta
-from skyrl_train.config.objective_spec import LossSpec, RatioAnchor
 from skyrl_train.utils.algorithm_registry import register_policy_loss
 
 
@@ -104,14 +103,14 @@ def _tis_weights(inputs: PolicyLossInputs, config: DictConfig) -> torch.Tensor |
     return safe_exp_delta(inputs.old_log_probs - inputs.rollout_log_probs).clamp(max=config.tis_imp_ratio_cap)
 
 
-@register_policy_loss(PolicyLossType.REGULAR, LossSpec(RatioAnchor.OLD))
+@register_policy_loss(PolicyLossType.REGULAR)
 def ppo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     """Return the pessimistic clipped policy surrogate against the old policy."""
     values, metrics = _ppo_terms(inputs, config)
     return _token_loss(values * _tis_weights(inputs, config), inputs, metrics)
 
 
-@register_policy_loss(PolicyLossType.DUAL_CLIP, LossSpec(RatioAnchor.OLD))
+@register_policy_loss(PolicyLossType.DUAL_CLIP)
 def dual_clip_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     """Bound the clipped surrogate for negative advantages by the dual-clip ratio."""
     values, metrics = _ppo_terms(inputs, config)
@@ -120,19 +119,19 @@ def dual_clip_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> Token
     return _token_loss(values * _tis_weights(inputs, config), inputs, metrics)
 
 
-@register_policy_loss(PolicyLossType.IMPORTANCE_SAMPLING, LossSpec(RatioAnchor.OLD))
+@register_policy_loss(PolicyLossType.IMPORTANCE_SAMPLING)
 def importance_sampling_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     """Return the unclipped importance-weighted advantage against the old policy."""
     ratio = safe_exp_delta(inputs.log_probs - inputs.old_log_probs)
     return _token_loss(-ratio * inputs.advantages, inputs, {})
 
 
-@register_policy_loss(PolicyLossType.SFT, LossSpec(RatioAnchor.NONE, advantage_linear=False))
+@register_policy_loss(PolicyLossType.SFT)
 def sft_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     return _token_loss(-inputs.log_probs, inputs, {})
 
 
-@register_policy_loss(PolicyLossType.BEHAVIOR_CLIP, LossSpec(RatioAnchor.ROLLOUT))
+@register_policy_loss(PolicyLossType.BEHAVIOR_CLIP)
 def behavior_clipped_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     """Return pessimistic PPO clipping against the policy that generated each token."""
     if inputs.rollout_log_probs is None:
@@ -158,7 +157,7 @@ def behavior_clipped_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -
     )
 
 
-@register_policy_loss(PolicyLossType.SAPO, LossSpec(RatioAnchor.OLD))
+@register_policy_loss(PolicyLossType.SAPO)
 def sapo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     """Return the sigmoid-gated advantage with sign-dependent SAPO temperature."""
     ratio = safe_exp_delta(inputs.log_probs - inputs.old_log_probs)
@@ -167,7 +166,7 @@ def sapo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     return _token_loss(-gate * inputs.advantages, inputs, {})
 
 
-@register_policy_loss(PolicyLossType.GSPO, LossSpec(RatioAnchor.OLD, sequence_level=True))
+@register_policy_loss(PolicyLossType.GSPO)
 def gspo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     """Return GSPO-token clipping with a detached sequence ratio and token gradients."""
     sequence_delta = masked_mean(inputs.log_probs - inputs.old_log_probs, inputs.loss_mask, dim=-1).unsqueeze(-1)
@@ -188,7 +187,7 @@ def gspo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     )
 
 
-@register_policy_loss(PolicyLossType.CISPO, LossSpec(RatioAnchor.OLD))
+@register_policy_loss(PolicyLossType.CISPO)
 def compute_policy_loss_cispo(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     """Weight log-likelihood gradients by a detached, clipped importance ratio."""
     ratio = safe_exp_delta(inputs.log_probs - inputs.old_log_probs)
@@ -203,7 +202,7 @@ def compute_policy_loss_cispo(inputs: PolicyLossInputs, config: DictConfig) -> T
     )
 
 
-@register_policy_loss(PolicyLossType.CLIP_COV, LossSpec(RatioAnchor.OLD, row_local=False))
+@register_policy_loss(PolicyLossType.CLIP_COV)
 def compute_policy_loss_clip_cov(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     """Suppress sampled covariance-band tokens in the PPO surrogate."""
     advantages, log_probs, loss_mask = inputs.advantages, inputs.log_probs, inputs.loss_mask
@@ -239,7 +238,7 @@ def compute_policy_loss_clip_cov(inputs: PolicyLossInputs, config: DictConfig) -
     )
 
 
-@register_policy_loss(PolicyLossType.KL_COV, LossSpec(RatioAnchor.OLD, row_local=False, advantage_linear=False))
+@register_policy_loss(PolicyLossType.KL_COV)
 def compute_policy_loss_kl_cov(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     """Add the absolute log-ratio penalty on the largest covariance tokens."""
     advantages, log_probs = inputs.advantages, inputs.log_probs

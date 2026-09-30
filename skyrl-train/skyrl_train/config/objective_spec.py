@@ -61,38 +61,30 @@ class TopKLossParams:
     eps_clip_high: float
     clip_ratio_c: float
 
-    @classmethod
-    def from_config(cls, config: DictConfig) -> "TopKLossParams":
-        return cls(
-            DistillationObjectiveKind(config.objective),
-            float(config.eps_clip_low),
-            float(config.eps_clip_high),
-            float(config.clip_ratio_c),
-        )
+
+def topk_loss_params(algorithm: DictConfig) -> TopKLossParams:
+    """Compute the teacher-loss parameters from an active top-K objective config."""
+    return TopKLossParams(
+        DistillationObjectiveKind(algorithm.distillation.objective),
+        float(algorithm.eps_clip_low),
+        float(algorithm.eps_clip_high),
+        float(algorithm.clip_ratio_c),
+    )
 
 
-def resolve_objective_config(cfg: DictConfig, *, loss_spec: LossSpec | None = None) -> None:
-    """Materialize objective contracts as primitive config for driver and worker transport."""
-    algorithm = cfg.trainer.algorithm
+def rollout_logprobs_required(algorithm: DictConfig, *, loss_spec: LossSpec | None = None) -> bool:
+    """Compute whether active policy rows require behavior-policy log probabilities."""
     spec = loss_spec or BUILTIN_LOSS_SPECS.get(algorithm.policy_loss_type)
     if spec is None:
         raise ValueError(f"policy loss {algorithm.policy_loss_type!r} requires a runtime LossSpec")
-    plan = compile_distillation_plan_from_config(cfg)
-    topk = plan is not None and plan.objective is not DistillationObjectiveKind.SAMPLED_REVERSE_KL
-    algorithm.resolved_topk_loss_params = (
-        {
-            "objective": plan.objective.value,
-            "eps_clip_low": float(algorithm.eps_clip_low),
-            "eps_clip_high": float(algorithm.eps_clip_high),
-            "clip_ratio_c": float(algorithm.clip_ratio_c),
-        }
-        if topk
-        else None
-    )
-    policy_trains = not (topk and plan.reward_mode is DistillationRewardMode.REPLACE)
-    algorithm.resolved_rollout_logprobs_required = bool(
-        policy_trains and (spec.anchor is RatioAnchor.ROLLOUT or algorithm.use_tis)
-    )
+    distillation = algorithm.get("distillation")
+    if (
+        distillation is not None
+        and distillation.objective != DistillationObjectiveKind.SAMPLED_REVERSE_KL
+        and distillation.reward_mode == DistillationRewardMode.REPLACE
+    ):
+        return False
+    return spec.anchor is RatioAnchor.ROLLOUT or bool(algorithm.use_tis)
 
 
 def validate_objective(cfg: DictConfig, *, loss_spec: LossSpec | None = None) -> None:

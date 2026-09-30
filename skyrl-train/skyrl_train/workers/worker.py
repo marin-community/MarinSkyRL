@@ -46,7 +46,7 @@ from skyrl_train.utils.importance_ratio_diagnostics import (
 from skyrl_train.learner_memory import LearnerCudaMetrics
 from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.telemetry import WORKER_ROLE, ProcessTelemetry, TelemetryConfig
-from skyrl_train.config.objective_spec import TopKLossParams
+from skyrl_train.config.objective_spec import topk_loss_params
 from skyrl_train.objective.objective import TopKTeacherBatch, build_objective_micro_batch, compute_policy_objective
 from skyrl_train.objective.reduction import StepCounts, policy_data_weights, step_counts
 from skyrl_train.distillation import student_topk_logprobs
@@ -1163,7 +1163,7 @@ class PolicyWorkerBase(Worker):
                 teacher = TopKTeacherBatch(
                     experience.distillation,
                     sparse_student_logprobs,
-                    TopKLossParams.from_config(self.cfg.trainer.algorithm.resolved_topk_loss_params),
+                    topk_loss_params(self.cfg.trainer.algorithm),
                 )
             batch = build_objective_micro_batch(
                 action_log_probs=action_log_probs,

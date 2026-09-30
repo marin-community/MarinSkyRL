@@ -185,12 +185,8 @@ def run_scaling_rank(rank, world_size, cp_size, teacher, rendezvous):
         with open_dict(algorithm):
             algorithm.max_seq_len = 8
         if teacher:
-            algorithm.resolved_topk_loss_params = {
-                "objective": "sparse_forward_kl",
-                "eps_clip_low": 0.2,
-                "eps_clip_high": 0.2,
-                "clip_ratio_c": 3.0,
-            }
+            with open_dict(algorithm):
+                algorithm.distillation = {"objective": "sparse_forward_kl"}
         wrapper = MegatronModelWrapper(config, [ddp], policy_loss_fn=importance_sampling_policy_loss)
         batch = objective_batch(model.logits.weight, teacher)
         dp_size = mpu.get_data_parallel_world_size(with_context_parallel=False)
