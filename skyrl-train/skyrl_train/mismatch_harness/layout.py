@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
@@ -81,6 +82,7 @@ EXPERT_SWEEP_FILLER_TOKENS = (0, 1, 7, 64, 300, 1024, 4096)
 ATTENTION_SWEEP_LENGTHS = (0, 4, 84, 212, 300, 613, 724, 1748)
 ATTENTION_SWEEP_BATCHES = (1, 2, 4, 8)
 LOGPROB_CHUNK = 1024
+DENSE_PROBE_ROWS = 16
 
 
 @dataclass(frozen=True)
@@ -477,6 +479,78 @@ def gemm_sweeps(layer, reference: Mapping[str, torch.Tensor], lm_head: torch.Ten
     return sweeps
 
 
+def row_classes(fn: Callable[[torch.Tensor], torch.Tensor], rows: torch.Tensor, max_rows: int, generator) -> list:
+    """Row counts ``16..max_rows`` grouped by the bytes ``fn`` gives the same 16 leading rows of the call.
+
+    Every call holds the same 16 probed rows first and the same filler rows after them, so only the row count
+    changes. Returns runs ``[first_count, last_count, class]``; class 0 is the bytes at 16 rows, and two counts
+    share a class exactly when the probed rows' outputs are byte-identical (the GEMM sums them in the same order).
+    """
+    filler = filler_rows(rows, max_rows, generator)
+    filler[:DENSE_PROBE_ROWS] = rows[:DENSE_PROBE_ROWS]
+    classes: dict[bytes, int] = {}
+    runs: list[list[int]] = []
+    for count in range(DENSE_PROBE_ROWS, max_rows + 1):
+        output = fn(filler[:count])[:DENSE_PROBE_ROWS].contiguous()
+        key = hashlib.sha256(output.view(torch.uint8).cpu().numpy().tobytes()).digest()
+        label = classes.setdefault(key, len(classes))
+        if runs and runs[-1][2] == label and runs[-1][1] == count - 1:
+            runs[-1][1] = count
+        else:
+            runs.append([count, count, label])
+    return runs
+
+
+def dense_gemm_classes(layer, reference: Mapping[str, torch.Tensor], lm_head: torch.Tensor, max_rows: int, generator):
+    """``row_classes`` of every projection the trainer (Transformer Engine) or compiled vLLM (``torch.mm``) runs."""
+    attention, shared, router = layer.self_attention, layer.mlp.shared_experts, layer.mlp.router
+    attention_in, mlp_in = reference["attention_norm"], reference["mlp_norm"]
+    groups = attention.num_query_groups_per_partition
+    head_dim = attention.hidden_size_per_attention_head
+    query_width = attention.num_attention_heads_per_partition // groups * head_dim
+    qkv = attention.linear_qkv.weight.view(groups, query_width + 2 * head_dim, -1)
+    gate = attention.attn_gate.weight
+    half = shared.linear_fc1.weight.shape[0] // 2
+
+    def te(module):
+        return lambda x: _first(module(x.unsqueeze(1))).squeeze(1)
+
+    def mm(weight):
+        weight = weight.contiguous()
+        return lambda x: torch.mm(x, weight.t())
+
+    functions = {
+        "TE attn_gate (N=20)": (te(attention.attn_gate), attention_in),
+        "torch.mm attn_gate (N=24 padded)": (
+            mm(torch.cat((gate, gate.new_zeros(-gate.shape[0] % 8, gate.shape[1])))),
+            attention_in,
+        ),
+        "TE qkv": (te(attention.linear_qkv), attention_in),
+        "torch.mm q": (mm(qkv[:, :query_width].reshape(-1, qkv.shape[-1])), attention_in),
+        "torch.mm k": (mm(qkv[:, query_width : query_width + head_dim].reshape(-1, qkv.shape[-1])), attention_in),
+        "TE o_proj": (te(attention.linear_proj), reference["xsa_gate"]),
+        "torch.mm o": (mm(attention.linear_proj.weight), reference["xsa_gate"]),
+        "TE shared_fc1": (te(shared.linear_fc1), mlp_in),
+        "torch.mm shared_gate": (mm(shared.linear_fc1.weight[:half]), mlp_in),
+        "TE shared_fc2": (te(shared.linear_fc2), reference["shared_act"]),
+        "torch.mm shared_down": (mm(shared.linear_fc2.weight), reference["shared_act"]),
+        "router bf16->fp32 (default)": (lambda x: router.gating(x.unsqueeze(1)).squeeze(1), mlp_in),
+        "torch.mm lm_head": (mm(lm_head), reference["next_attention_norm"]),
+    }
+    weight = router.weight.float()
+    previous = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    try:
+        with torch.no_grad():
+            result = {name: row_classes(fn, rows, max_rows, generator) for name, (fn, rows) in functions.items()}
+            result["router fp32 (router_gemm)"] = row_classes(
+                lambda x: F.linear(x.float(), weight), mlp_in, max_rows, generator
+            )
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = previous
+    return result
+
+
 def expert_sweep(layer, reference: Mapping[str, torch.Tensor], routes: torch.Tensor, numerics, generator) -> dict:
     """The probed tokens' routed-expert rows among other tokens' rows, as the expert row counts change."""
     experts = layer.mlp.experts
@@ -604,6 +678,9 @@ def main() -> None:
     parser.add_argument("--input-from", action="append", default=[], help="LAYER=SOURCE: run LAYER on SOURCE's input")
     parser.add_argument("--numerics", action="append", default=[], help="[label=]comma-separated flags")
     parser.add_argument("--sweep-layers", type=int, nargs="*", default=[0, 3])
+    parser.add_argument(
+        "--dense-max-rows", type=int, default=0, help="also classify every GEMM row count up to this (0: off)"
+    )
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=1234)
     args = parser.parse_args()
@@ -654,6 +731,10 @@ def main() -> None:
                     }
                     if not flags:
                         sweeps["gemm"] = gemm_sweeps(layer, reference, lm_head, generator)
+                        if args.dense_max_rows:
+                            sweeps["gemm_classes"] = dense_gemm_classes(
+                                layer, reference, lm_head, args.dense_max_rows, generator
+                            )
                     entry["sweeps"][label] = sweeps
             results["layers"][str(layer_index)] = entry
             del layer, next_norm
