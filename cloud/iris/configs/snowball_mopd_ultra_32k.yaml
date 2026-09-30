@@ -7,8 +7,8 @@
 # preserves the mix of the remaining generators.
 # grading: skip lets judge-backed rows train without a judge; the distillation loss ignores the
 # reward. ns_tools and Lean rows execute in the in-cluster NeMo Skills sandbox. Build the sample
-# with --swe-rows 0: no Harbor SWE trial has completed under this recipe yet, and one needs the
-# launch document's controller ingress so the Daytona sandbox can reach the rollout engines.
+# with --swe-rows 0. Harbor SWE rows need a launch with controller ingress, so the Daytona
+# sandbox can reach the rollout engines, and are validated separately.
 #
 # Pass the student with --model-path (open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92
 # pinned to a commit) and the sample's train.parquet with --train-data.
