@@ -8,7 +8,8 @@ For each layer and numerics set, on one GPU with the layer's real weights and a 
   forward runs without gradients and again during the backward, router replay serving the recompute
   from its FIFO) gives the same output and gradients as the plain forward and backward;
 - the gradients stay close to the trainer's default numerics (relative L2 distance of the input
-  gradient and of every parameter gradient), since each flag keeps a default backward.
+  gradient and of every parameter gradient), since each flag keeps a default backward. Every run replays the
+  experts the default run chose, so a near-tie routing flip cannot move a whole expert's gradient.
 
 Example::
 
@@ -49,15 +50,30 @@ def _relative(left: torch.Tensor, right: torch.Tensor) -> float:
     return ((left.float() - right.float()).norm() / right.float().norm().clamp_min(1e-30)).item()
 
 
-def run_layer(layer, hidden, grad, rotary_pos_emb, flags, *, recompute: bool, with_grad: bool = True):
-    """Output, input gradient and parameter gradients of one forward (and backward) of the layer."""
+def default_routes(layer, hidden, rotary_pos_emb) -> torch.Tensor:
+    """The experts the layer's router picks for each token at default numerics, ``[tokens, top_k]``."""
+    kept = {}
+    handle = layer.mlp.router.register_forward_hook(lambda module, args, output: kept.update(map=output[1]))
+    try:
+        with torch.no_grad():
+            clear_numerics_handoffs()
+            layer(hidden_states=hidden, attention_mask=None, rotary_pos_emb=rotary_pos_emb)
+    finally:
+        handle.remove()
+        clear_numerics_handoffs()
+    routing_map = kept["map"]
+    return routing_map.nonzero()[:, 1].view(routing_map.shape[0], layer.mlp.router.topk)
+
+
+def run_layer(layer, hidden, grad, rotary_pos_emb, flags, routes, *, recompute: bool, with_grad: bool = True):
+    """Output, input gradient and parameter gradients of one forward (and backward) of the layer on ``routes``."""
     router = layer.mlp.router
     tokens = hidden.shape[0] * hidden.shape[1]
     controller = MegatronRouterReplay([0], recompute_enabled=recompute)
     router.router_replay = LayerReplayHandle(controller, 0)
     controller.begin_forward(
-        {0: torch.zeros(tokens, router.topk, dtype=torch.long, device="cuda")},
-        torch.zeros(tokens, dtype=torch.bool, device="cuda"),
+        {0: routes},
+        torch.ones(tokens, dtype=torch.bool, device="cuda"),
         record_recompute=recompute,
         vllm_expert_parallel=VllmExpertParallel(torch.full((tokens,), HOME_RANK, device="cuda"), EP_SIZE),
     )
@@ -111,12 +127,15 @@ def main() -> None:
             load_hf_weights(layer, f"decoder.layers.{index}.", weights)
             layer.train()
             rotary_pos_emb = rotary(args.tokens)
-            reference = run_layer(layer, hidden, grad, rotary_pos_emb, {}, recompute=False)
+            routes = default_routes(layer, hidden, rotary_pos_emb)
+            reference = run_layer(layer, hidden, grad, rotary_pos_emb, {}, routes, recompute=False)
             entry = {}
             for label, flags in variants.items():
-                plain = run_layer(layer, hidden, grad, rotary_pos_emb, flags, recompute=False)
-                scored = run_layer(layer, hidden, grad, rotary_pos_emb, flags, recompute=False, with_grad=False)
-                checkpointed = run_layer(layer, hidden, grad, rotary_pos_emb, flags, recompute=True)
+                plain = run_layer(layer, hidden, grad, rotary_pos_emb, flags, routes, recompute=False)
+                scored = run_layer(layer, hidden, grad, rotary_pos_emb, flags, routes, recompute=False, with_grad=False)
+                checkpointed = run_layer(layer, hidden, grad, rotary_pos_emb, flags, routes, recompute=True)
+                relative = {name: _relative(plain[2][name], reference[2][name]) for name in reference[2]}
+                worst = max(relative, key=relative.get)
                 entry[label] = {
                     "no_grad_output_equal": bool(torch.equal(plain[0], scored[0])),
                     "recompute_output_equal": bool(torch.equal(plain[0], checkpointed[0])),
@@ -125,9 +144,13 @@ def main() -> None:
                         _relative(checkpointed[2][name], plain[2][name]) for name in plain[2]
                     ),
                     "input_grad_relative_to_default": _relative(plain[1], reference[1]),
-                    "param_grad_max_relative_to_default": max(
-                        _relative(plain[2][name], reference[2][name]) for name in reference[2]
-                    ),
+                    "param_grad_max_relative_to_default": relative[worst],
+                    "param_grad_max_relative_name": worst,
+                    "param_grad_median_relative_to_default": sorted(relative.values())[len(relative) // 2],
+                    "output_byte_equal_to_default": (plain[0].view(torch.int16) == reference[0].view(torch.int16))
+                    .float()
+                    .mean()
+                    .item(),
                     "grads_finite": bool(
                         torch.isfinite(plain[1]).all() and all(torch.isfinite(g).all() for g in plain[2].values())
                     ),
