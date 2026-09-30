@@ -98,7 +98,7 @@ def _encode_routes(routes: torch.Tensor | None, length: int) -> EncodedRoutes:
 
 
 # Timed forward + backward repetitions per mode, after one warmup pass.
-TIMING_REPETITIONS = 3
+TIMING_REPETITIONS = 10
 
 
 def _reread_routes(output, rows) -> list[np.ndarray | None]:
