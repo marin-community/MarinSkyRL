@@ -197,9 +197,9 @@ def vllm_ep_combine(
     rank when the ranks' token counts differ) adds the rank partials in bf16 from ``home + 1`` round to
     ``home``; a rank that owns none of the token's experts adds an exact zero.
 
-    The permuted row of a token-expert pair is the count of lower experts' rows plus the count of earlier
-    tokens routed to the same expert, which a cumulative sum of ``routing_map`` gives without waiting on the
-    device. On CUDA one Triton kernel adds every token's slots (``grug_ep_combine_kernel``).
+    The permuted rows run by expert, then by token, so a token-expert pair's row is the number of selected
+    pairs at or before it in that order, less one: one cumulative sum over the expert-major routing map, which
+    never waits on the device. On CUDA one Triton kernel adds every token's slots (``grug_ep_combine_kernel``).
     """
     tokens, experts = routing_map.shape
     top_k = selected.shape[1]
@@ -209,14 +209,13 @@ def vllm_ep_combine(
         raise ValueError(f"{permuted.shape[0]} permuted rows for {tokens} tokens of {top_k} slots")
     if tokens == 0:
         return permuted.new_empty(0, permuted.shape[1])
-    earlier = routing_map.cumsum(0, dtype=torch.int32)
-    first_row = earlier[-1].cumsum(0, dtype=torch.int32) - earlier[-1]
+    pairs_through = routing_map.t().contiguous().view(-1).cumsum(0, dtype=torch.int32).view(experts, tokens)
     if permuted.is_cuda:
         from skyrl_train.models.grug_ep_combine_kernel import ep_combine
 
-        return ep_combine(permuted, selected.long(), home_ranks.long(), earlier, first_row, ep_size)
+        return ep_combine(permuted, selected.long(), home_ranks.long(), pairs_through, ep_size)
     selected = selected.long()
-    slot_rows = first_row[selected] + earlier.gather(1, selected) - 1
+    slot_rows = pairs_through[selected, torch.arange(tokens).view(-1, 1)] - 1
     ring_positions = (selected // (experts // ep_size) - home_ranks.long().view(-1, 1) - 1) % ep_size
     values = permuted[slot_rows].float()
     total = torch.zeros(tokens, permuted.shape[1], dtype=torch.float32, device=permuted.device)

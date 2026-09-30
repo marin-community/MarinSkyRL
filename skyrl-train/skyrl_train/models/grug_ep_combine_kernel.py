@@ -18,13 +18,12 @@ def _ep_combine_kernel(
     permuted_ptr,
     selected_ptr,
     home_ranks_ptr,
-    earlier_ptr,
-    first_row_ptr,
+    pairs_through_ptr,
     output_ptr,
     hidden,
     permuted_stride,
     selected_stride,
-    earlier_stride,
+    pairs_through_stride,
     output_stride,
     TOP_K: tl.constexpr,
     EP_SIZE: tl.constexpr,
@@ -45,7 +44,7 @@ def _ep_combine_kernel(
         for slot in tl.static_range(TOP_K):
             expert = tl.load(selected_ptr + token * selected_stride + slot)
             if (expert // EXPERTS_PER_RANK + EP_SIZE - 1 - home) % EP_SIZE == position:
-                row = tl.load(first_row_ptr + expert) + tl.load(earlier_ptr + token * earlier_stride + expert) - 1
+                row = tl.load(pairs_through_ptr + expert * pairs_through_stride + token) - 1
                 value = tl.load(permuted_ptr + row.to(tl.int64) * permuted_stride + columns, mask=in_row, other=0.0)
                 partial += value.to(tl.float32)
         total = (total + partial.to(rounded).to(tl.float32)).to(rounded).to(tl.float32)
@@ -56,34 +55,32 @@ def ep_combine(
     permuted: torch.Tensor,
     selected: torch.Tensor,
     home_ranks: torch.Tensor,
-    earlier: torch.Tensor,
-    first_row: torch.Tensor,
+    pairs_through: torch.Tensor,
     ep_size: int,
 ) -> torch.Tensor:
-    """``[tokens, hidden]`` combine of ``permuted``'s rows; ``earlier`` and ``first_row`` locate each slot's row.
+    """``[tokens, hidden]`` combine of ``permuted``'s rows, whose order ``pairs_through`` gives.
 
-    ``earlier[t, e]`` counts the tokens up to ``t`` routed to expert ``e`` and ``first_row[e]`` is expert ``e``'s
-    first permuted row, so slot ``(t, e)`` is row ``first_row[e] + earlier[t, e] - 1``.
+    ``pairs_through[e, t]`` counts the selected token-expert pairs up to ``(e, t)`` in expert-major order, so
+    slot ``(t, e)`` is permuted row ``pairs_through[e, t] - 1``.
     """
     tokens, top_k = selected.shape
-    experts = earlier.shape[1]
+    experts = pairs_through.shape[0]
     hidden = permuted.shape[1]
     permuted = permuted.contiguous()
     selected = selected.contiguous()
-    earlier = earlier.contiguous()
+    pairs_through = pairs_through.contiguous()
     output = permuted.new_empty(tokens, hidden)
     grid = (tokens, triton.cdiv(hidden, HIDDEN_BLOCK))
     _ep_combine_kernel[grid](
         permuted,
         selected,
         home_ranks.contiguous(),
-        earlier,
-        first_row.contiguous(),
+        pairs_through,
         output,
         hidden,
         permuted.stride(0),
         selected.stride(0),
-        earlier.stride(0),
+        pairs_through.stride(0),
         output.stride(0),
         TOP_K=top_k,
         EP_SIZE=ep_size,
