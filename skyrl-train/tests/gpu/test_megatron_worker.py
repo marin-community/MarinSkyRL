@@ -61,7 +61,8 @@ def test_native_adamw_recipe_matches_torch_weight_updates(megatron_overrides):
             "lr": 0.03,
             "weight_decay": 0.2,
             "max_grad_norm": 0.0,
-            "num_warmup_steps": 0,
+            "num_warmup_steps": 2,
+            "lr_warmup_init": 0.006,
             "adam_betas": [0.7, 0.8],
             "optimizer_kwargs": {"eps": 1e-3},
         }
@@ -71,9 +72,14 @@ def test_native_adamw_recipe_matches_torch_weight_updates(megatron_overrides):
             kwargs.update(adam_beta1=0.6, adam_beta2=0.75, adam_eps=2e-3)
             betas, epsilon = (0.6, 0.75), 2e-3
         optimizer = get_megatron_optimizer([model], init_megatron_optim_config(recipe, kwargs))
-        get_megatron_optimizer_param_scheduler(optimizer, OmegaConf.create(recipe), num_training_steps=3)
+        scheduler = get_megatron_optimizer_param_scheduler(optimizer, OmegaConf.create(recipe), num_training_steps=3)
         adamw = torch.optim.AdamW(reference.parameters(), lr=0.03, betas=betas, eps=epsilon, weight_decay=0.2)
-        for amplitude in (0.125, -0.25, 0.5):
+        for step, (amplitude, learning_rate) in enumerate(zip((0.125, -0.25, 0.5), (0.006, 0.018, 0.03), strict=True)):
+            if step == 1:
+                saved_scheduler = scheduler.state_dict()
+                scheduler.step(1)
+                scheduler.load_state_dict(saved_scheduler)
+            adamw.param_groups[0]["lr"] = learning_rate
             for parameter, expected in zip(model.parameters(), reference.parameters(), strict=True):
                 gradient = torch.linspace(-amplitude, amplitude, parameter.numel(), device="cuda").reshape_as(parameter)
                 parameter.grad = gradient.clone()
@@ -84,6 +90,7 @@ def test_native_adamw_recipe_matches_torch_weight_updates(megatron_overrides):
             assert success
             for parameter, expected in zip(model.parameters(), reference.parameters(), strict=True):
                 torch.testing.assert_close(parameter, expected, rtol=1e-6, atol=1e-6)
+            scheduler.step(1)
     finally:
         parallel_state.destroy_model_parallel()
         torch.distributed.destroy_process_group()
