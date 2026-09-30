@@ -537,16 +537,17 @@ class ProbeCollector:
         modes = (NATIVE_MODE, REPEAT_MODE, *self.spec.extra_trainer_modes)
         result = []
         for mode in modes:
-            order = self.batch_layout.repeat_order if mode == REPEAT_MODE else self.batch_layout.native_order
+            repeat_layout = TRAINER_MODES[mode].repeat_layout
+            order = self.batch_layout.repeat_order if repeat_layout else self.batch_layout.native_order
             data = training_input.select(["sequences", "attention_mask", *route_keys], ["response_length"])
             data["probe_row_indices"] = torch.arange(data.batch_size, dtype=torch.long)
             if not TRAINER_MODES[mode].requires_routes and route_tensor is not None:
                 data["rollout_routed_experts"] = torch.zeros_like(route_tensor)
             if not TRAINER_MODES[mode].replays_prompt and prompt_route_tensor is not None:
                 data["rollout_prompt_routed_experts"] = torch.zeros_like(prompt_route_tensor)
-            if mode == REPEAT_MODE:
+            if repeat_layout:
                 data = _reorder_batch(data, order + list(range(n, data.batch_size)))
-            micro_batch_size = self.batch_layout.repeat_micro_batch_size if mode == REPEAT_MODE else None
+            micro_batch_size = self.batch_layout.repeat_micro_batch_size if repeat_layout else None
             fraction = (
                 float(self.spec.filtered_replay.keep_fraction) if TRAINER_MODES[mode].requires_keep_fraction else None
             )
