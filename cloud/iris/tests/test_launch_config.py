@@ -105,9 +105,7 @@ def _raw_config() -> dict[str, Any]:
 
 def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) -> None:
     path = tmp_path / "resolved-launch.yaml"
-    raw = _raw_config()
-    raw["skyrl"]["trainer"]["callbacks"] = [{"type": "checkpoint", "save_steps": 2}]
-    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    path.write_text(yaml.safe_dump(_raw_config(), sort_keys=False))
 
     config = load_launch_config(path)
 

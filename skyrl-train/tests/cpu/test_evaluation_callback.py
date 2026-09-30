@@ -4,7 +4,8 @@ import pytest
 import yaml
 from pathlib import Path
 
-from cloud.iris.rl_config_translation import parse_rl_config
+from cloud.iris.launch_config import LaunchTopology
+from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_config
 from skyrl_train.callbacks.base import TrainerControl, TrainerState
 from skyrl_train.callbacks.builtin import EvaluationCallback, create_callback_from_config
 
@@ -34,7 +35,10 @@ async def test_iris_evaluation_callback_stops_when_group_reward_improves(tmp_pat
     ]
     path = tmp_path / "evaluation.yaml"
     path.write_text(yaml.safe_dump(raw))
-    callback = create_callback_from_config(parse_rl_config(str(path)).trainer["callbacks"][0])
+    config = compose_skyrl_config(
+        parse_rl_config(str(path)), {}, LaunchTopology(num_nodes=1, gpus_per_node=8, gpu_variant="H100")
+    ).config
+    callback = create_callback_from_config(config.trainer.callbacks[0])
     control = TrainerControl()
     for step, scores, expected_reward, expected_stop in [(0, (0.1, 0.3), 0.2, False), (5, (0.6, 0.8), 0.7, True)]:
         metrics = {"eval/cat_count_n1/avg_score": scores[0], "eval/cat_count_n2/avg_score": scores[1]}
