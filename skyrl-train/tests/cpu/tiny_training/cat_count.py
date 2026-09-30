@@ -43,6 +43,7 @@ def cat_count_config(
     staleness: int = 0,
     resume: bool = False,
     eval_interval: int | None = None,
+    seed: int = 0,
 ) -> DictConfig:
     """Run counting with the real rollout pool, objective, evaluation and checkpoint callbacks."""
     return OmegaConf.merge(
@@ -56,7 +57,7 @@ def cat_count_config(
                 ],
             },
             "trainer": {
-                "seed": 0,
+                "seed": seed,
                 "debug_mode": "off",
                 "placement": {"colocate_all": False, "policy_num_gpus_per_node": 1},
                 "policy": {"model": {"path": str(model)}, "optimizer_config": {"lr": 1e-4, "weight_decay": 0.0}},
@@ -69,7 +70,8 @@ def cat_count_config(
                 },
                 "rollout_buffer": {"max_staleness_steps": staleness, "max_in_flight": 8, "object_store_root": None},
                 "train_batch_size": 8,
-                "policy_mini_batch_size": 4,
+                "policy_mini_batch_size": 8,
+                "update_epochs_per_batch": 2,
                 "micro_train_batch_size_per_gpu": 8,
                 "micro_forward_batch_size_per_gpu": 8,
                 "use_sample_packing": False,

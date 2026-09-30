@@ -5,6 +5,7 @@ trajectory runners, and weight-sync protocol can run end to end on a tiny Huggin
 """
 
 import asyncio
+import hashlib
 import os
 from typing import Any
 
@@ -202,7 +203,8 @@ class CPUInferenceEngine(InferenceEngineInterface):
     """
 
     def __init__(self, model_path: str, seed: int):
-        torch.manual_seed(seed)
+        self.seed = seed
+        self.request_count = 0
         self.model = AutoModelForCausalLM.from_pretrained(model_path, dtype=torch.float32).eval()
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.eos_token_id = self.model.config.eos_token_id
@@ -218,8 +220,13 @@ class CPUInferenceEngine(InferenceEngineInterface):
         await self._resumed.wait()
         sampling_params = input_batch["sampling_params"]
         _check_sampling_params(sampling_params)
+        prompts = input_batch["prompt_token_ids"]
+        session_ids = input_batch.get("session_ids") or [None] * len(prompts)
         results = await asyncio.gather(
-            *(self._generate_one(prompt_ids, sampling_params) for prompt_ids in input_batch["prompt_token_ids"])
+            *(
+                self._generate_one(prompt_ids, sampling_params, session_id)
+                for prompt_ids, session_id in zip(prompts, session_ids, strict=True)
+            )
         )
         return InferenceEngineOutput(
             responses=[self.tokenizer.decode(ids, skip_special_tokens=True) for ids, _, _ in results],
@@ -231,11 +238,19 @@ class CPUInferenceEngine(InferenceEngineInterface):
             prompt_logprobs=None,
         )
 
-    async def _generate_one(self, prompt_ids, sampling_params):
+    async def _generate_one(self, prompt_ids, sampling_params, session_id):
         if self._decoder is None:
             self._decoder = asyncio.get_running_loop().create_task(self._decode_loop())
         future = asyncio.get_running_loop().create_future()
-        self._pending.append((list(prompt_ids), dict(sampling_params), future))
+        if session_id is None:
+            session_id = self.request_count
+            self.request_count += 1
+        seed = sampling_params.get("seed")
+        if seed is None:
+            seed = self.seed
+        identity = repr((seed, session_id, list(prompt_ids))).encode()
+        generator = torch.Generator().manual_seed(int.from_bytes(hashlib.sha256(identity).digest()[:8], "big"))
+        self._pending.append((list(prompt_ids), dict(sampling_params), future, generator))
         self._wake.set()
         return await future
 
@@ -253,28 +268,28 @@ class CPUInferenceEngine(InferenceEngineInterface):
             groups = {}
             for item in batch:
                 sampling_params = item[1]
-                key = (float(sampling_params["temperature"]), int(sampling_params.get("min_tokens", 0)))
+                key = (float(sampling_params["temperature"]), int(sampling_params.get("min_tokens", 1)))
                 groups.setdefault(key, []).append(item)
             for (temperature, min_tokens), items in groups.items():
                 try:
                     results = await self._decode_batch(items, temperature, min_tokens)
-                    for (_, _, future), result in zip(items, results):
+                    for (_, _, future, _), result in zip(items, results):
                         if not future.done():
                             future.set_result(result)
                 except Exception as error:  # noqa: BLE001
-                    for _, _, future in items:
+                    for _, _, future, _ in items:
                         if not future.done():
                             future.set_exception(error)
 
     async def _decode_batch(self, items, temperature, min_tokens):
         batch_size = len(items)
-        max_response_tokens = [int(sampling_params["max_tokens"]) for _, sampling_params, _ in items]
-        prompt_lengths = [len(prompt_ids) for prompt_ids, _, _ in items]
+        max_response_tokens = [int(sampling_params["max_tokens"]) for _, sampling_params, _, _ in items]
+        prompt_lengths = [len(prompt_ids) for prompt_ids, _, _, _ in items]
         prompt_width = max(prompt_lengths)
         pad_token_id = self.model.config.pad_token_id or 0
         input_ids = torch.full((batch_size, prompt_width), pad_token_id, dtype=torch.long)
         attention_mask = torch.zeros((batch_size, prompt_width), dtype=torch.long)
-        for index, (prompt_ids, _, _) in enumerate(items):
+        for index, (prompt_ids, _, _, _) in enumerate(items):
             input_ids[index, prompt_width - len(prompt_ids) :] = torch.tensor(prompt_ids)
             attention_mask[index, prompt_width - len(prompt_ids) :] = 1
         response_ids = [[] for _ in range(batch_size)]
@@ -303,7 +318,10 @@ class CPUInferenceEngine(InferenceEngineInterface):
                 token_ids = logits.argmax(-1)
             else:
                 log_probs = torch.log_softmax(logits / temperature, -1)
-                token_ids = torch.multinomial(log_probs.exp(), 1).squeeze(-1)
+                token_ids = torch.full((batch_size,), pad_token_id, dtype=torch.long)
+                for index, (_, _, _, generator) in enumerate(items):
+                    if live_sequences[index]:
+                        token_ids[index] = torch.multinomial(log_probs[index].exp(), 1, generator=generator)[0]
             token_logprobs = log_probs.gather(-1, token_ids[:, None]).squeeze(-1)
             for index in range(batch_size):
                 if not live_sequences[index]:

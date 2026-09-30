@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import hashlib
 import json
 import math
@@ -13,7 +14,7 @@ import skyrl_gym
 import skyrl_train
 import torch
 import zstandard
-from examples.cat_count.cpu_canary import pretrain
+from examples.cat_count.cpu_canary import PROMPT, pretrain
 from skyrl_train.config.trajectory_runner_capabilities import (
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
@@ -23,6 +24,7 @@ from skyrl_train.utils import validate_cfg
 from skyrl_train.utils.algorithm_registry import AdvantageEstimatorRegistry
 
 from tests.cpu.tiny_training.cat_count import FAST_STEPS, cat_count_config, flipped_grpo
+from tests.cpu.tiny_training.cpu_backend import CPUInferenceEngine
 from tests.cpu.tiny_training.experiment import (
     LOGICAL_CPUS,
     LOGICAL_GPUS,
@@ -38,17 +40,22 @@ pytestmark = pytest.mark.slow
 def cat_count_policy(pytestconfig) -> Path:
     # pytest's cache is portable and reusable across CI invocations; this fixture does no RL.
     parameters = argparse.Namespace(steps=3000, lr=3e-4, width=128, layers=2, seed=0)
-    identity = hashlib.sha256(json.dumps(vars(parameters), sort_keys=True).encode()).hexdigest()[:16]
+    script = Path(pretrain.__code__.co_filename).read_bytes()
+    identity = hashlib.sha256(script + json.dumps(vars(parameters), sort_keys=True).encode()).hexdigest()[:16]
     directory = Path(pytestconfig.cache.mkdir("cat_count_policy")) / f"llama-{identity}"
     parameters.out = directory
     if not all((directory / name).exists() for name in ("model.safetensors", "config.json", "tokenizer.json")):
         torch.set_num_threads(1)
+        started = time.perf_counter()
         pretrain(parameters)
+        print(f"CAT_COUNT_PRETRAIN cache=cold seconds={time.perf_counter() - started:.3f} identity={identity}")
+    else:
+        print(f"CAT_COUNT_PRETRAIN cache=warm identity={identity}")
     return directory
 
 
-@pytest.fixture(scope="module")
-def cat_count_session(monkeypatch_module):
+@pytest.fixture
+def cat_count_session(monkeypatch):
     repository = Path(__file__).resolve().parents[3]
     assert Path(skyrl_train.__file__).resolve().is_relative_to(repository / "skyrl-train")
     assert Path(skyrl_gym.__file__).resolve().is_relative_to(repository / "skyrl-gym")
@@ -77,7 +84,7 @@ def cat_count_session(monkeypatch_module):
         "SKYRL_EXECUTION_UID": "cat-count-cpu-attempt",
     }
     for key, value in telemetry_env.items():
-        monkeypatch_module.setenv(key, value)
+        monkeypatch.setenv(key, value)
     ray.init(
         num_cpus=LOGICAL_CPUS,
         num_gpus=LOGICAL_GPUS,
@@ -97,12 +104,6 @@ def cat_count_session(monkeypatch_module):
         thread.join()
 
 
-@pytest.fixture(scope="module")
-def monkeypatch_module():
-    with pytest.MonkeyPatch.context() as patch:
-        yield patch
-
-
 def train(
     root: Path,
     model: Path,
@@ -112,8 +113,11 @@ def train(
     staleness: int = 0,
     resume: bool = False,
     eval_interval: int | None = None,
+    seed: int = 0,
 ):
-    cfg = cat_count_config(root, model, steps=steps, staleness=staleness, resume=resume, eval_interval=eval_interval)
+    cfg = cat_count_config(
+        root, model, steps=steps, staleness=staleness, resume=resume, eval_interval=eval_interval, seed=seed
+    )
     if flipped:
         cfg.trainer.algorithm.advantage_estimator = "cat_count_flipped_grpo"
     validate_cfg(cfg)
@@ -129,9 +133,68 @@ def scores(records):
     return [(row["eval/train/avg_score"], row["eval/heldout/avg_score"]) for row in evaluations]
 
 
-def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_policy, cat_count_session):
-    positive = train(tmp_path / "positive", cat_count_policy)
-    negative = train(tmp_path / "negative", cat_count_policy, flipped=True)
+@pytest.mark.asyncio
+async def test_cpu_sampling_preserves_trajectory_rng_and_minimum_tokens(cat_count_policy):
+    engine = CPUInferenceEngine(str(cat_count_policy), seed=0)
+    tokenizer = engine.tokenizer
+    prompt = tokenizer.apply_chat_template(
+        [
+            {
+                "role": "user",
+                "content": PROMPT.format(N=7),
+            }
+        ],
+        tokenize=True,
+        add_generation_prompt=True,
+    )
+    sampling = {"temperature": 1.0, "max_tokens": 64, "min_tokens": 0, "logprobs": 0}
+    try:
+        batch = await engine.generate(
+            {"prompt_token_ids": [prompt] * 3, "session_ids": ["a", "b", "c"], "sampling_params": sampling}
+        )
+        reordered = await asyncio.gather(
+            *(
+                engine.generate({"prompt_token_ids": [prompt], "session_ids": [identity], "sampling_params": sampling})
+                for identity in ("c", "b", "a")
+            )
+        )
+        for index, result in enumerate(reversed(reordered)):
+            assert result["response_ids"][0] == batch["response_ids"][index]
+            assert result["response_logprobs"][0] == pytest.approx(batch["response_logprobs"][index], abs=1e-5)
+        assert len({tuple(ids) for ids in batch["response_ids"]}) > 1
+
+        eos_prompt = tokenizer.apply_chat_template(
+            [
+                {
+                    "role": "user",
+                    "content": PROMPT.format(N=1),
+                }
+            ],
+            tokenize=True,
+            add_generation_prompt=True,
+        ) + tokenizer.encode("cat", add_special_tokens=False)
+        for minimum in (0, None, 3):
+            params = {"temperature": 0.0, "max_tokens": 8, "logprobs": 0}
+            if minimum is not None:
+                params["min_tokens"] = minimum
+            result = await engine.generate(
+                {"prompt_token_ids": [eos_prompt], "session_ids": ["eos"], "sampling_params": params}
+            )
+            ids = result["response_ids"][0]
+            if minimum == 0:
+                assert ids == [tokenizer.eos_token_id]
+            else:
+                assert len(ids) >= (minimum or 1)
+                assert tokenizer.eos_token_id not in ids[: minimum or 1]
+            assert all(math.isfinite(value) for value in result["response_logprobs"][0])
+    finally:
+        await engine.teardown()
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_policy, cat_count_session, seed):
+    positive = train(tmp_path / "positive", cat_count_policy, seed=seed)
+    negative = train(tmp_path / "negative", cat_count_policy, flipped=True, seed=seed)
     before, after = scores(positive)
     negative_before, negative_after = scores(negative)
     assert before == negative_before
@@ -156,7 +219,9 @@ def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_po
         row["name"] == "training_metric_value" and row["attributes"].get("metric") == "environment/exact"
         for row in cat_count_session
     )
-    print(f"CAT_COUNT_CPU paired_scores positive={before}->{after} negative={negative_before}->{negative_after}")
+    print(
+        f"CAT_COUNT_CPU seed={seed} paired_scores positive={before}->{after} negative={negative_before}->{negative_after}"
+    )
 
 
 @pytest.mark.nightly
