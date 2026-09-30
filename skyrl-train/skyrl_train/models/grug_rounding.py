@@ -9,6 +9,12 @@ import torch.nn.functional as F
 from skyrl_train.models.grug_moe import GRUG_ATTN_GATE_SCALE, GRUG_XSA_EPS
 
 
+def rms_norm_single_rounding(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """vLLM's RMSNorm on an fp32 input: ``x * rsqrt(mean(x^2) + eps) * weight`` in fp32, rounded once."""
+    variance = x.pow(2).mean(dim=-1, keepdim=True)
+    return (x * torch.rsqrt(variance + eps) * weight.float()).to(weight.dtype)
+
+
 def gated_norm_product_fp32(normalized: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
     """``norm(x) * sigmoid(gate)`` in fp32 from the bf16 norm output and gate projection, unrounded."""
     return normalized.float() * torch.sigmoid(gate.float())

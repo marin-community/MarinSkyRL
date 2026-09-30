@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from skyrl_train.models.grug_moe import GRUG_XSA_EPS
 from skyrl_train.models.grug_rounding import (
     gated_norm_product_fp32,
+    rms_norm_single_rounding,
     rotate_neox_fp32,
     swiglu_single_rounding,
     weighted_down_projection_single_rounding,
@@ -84,3 +85,14 @@ def test_route_weight_multiplies_the_fp32_down_projection_before_one_rounding():
         [(part @ weight.float().t()).to(torch.bfloat16) for part, weight in zip(weighted_first, weights, strict=True)]
     )
     assert not torch.equal(result, current)
+
+
+def test_rms_norm_of_an_unrounded_residual_rounds_once_like_compiled_vllm():
+    residual = _bf16(16, 64, seed=20).float() + _bf16(16, 64, seed=21).float()
+    weight = _bf16(64, seed=22)
+    # vLLM's native RMSNorm with Inductor's cast elision: fp32 variance, rsqrt and weight, one rounding.
+    variance = residual.pow(2).mean(dim=-1, keepdim=True)
+    expected = (residual * torch.rsqrt(variance + 1e-6) * weight.float()).to(torch.bfloat16)
+    assert torch.equal(rms_norm_single_rounding(residual, weight, 1e-6), expected)
+    rounded_first = residual.to(torch.bfloat16).float()
+    assert not torch.equal(rms_norm_single_rounding(rounded_first, weight, 1e-6), expected)
