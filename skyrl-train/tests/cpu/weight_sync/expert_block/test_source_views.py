@@ -83,7 +83,7 @@ def test_expert_sources_are_the_whole_gate_up_and_down_matrices_of_the_ranks_own
 
 
 def test_split_schema_expert_mappings_use_the_expert_schedule():
-    # The current Hero checkpoint exposes expert 2 as separate HF tensors.
+    # Split-schema mappings expose each expert as separate HF tensors.
     prefix = "model.layers.0.mlp.experts.2"
     latent_size = HIDDEN - 1
     fc1 = torch.arange(2 * INTERMEDIATE * latent_size, dtype=torch.bfloat16).reshape(2 * INTERMEDIATE, latent_size)
