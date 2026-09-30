@@ -14,6 +14,7 @@ from marinskyrl.distillation import (
     DistillationRewardMode,
     compile_distillation_plan_from_config,
 )
+from skyrl_train.dynamic_sampling import DynamicSamplingType
 
 
 class RatioAnchor(StrEnum):
@@ -88,7 +89,9 @@ class OffPolicyCorrection:
     def from_config(cls, config: DictConfig) -> "OffPolicyCorrection":
         rules = []
         for rule in config.rules:
-            kind = rule["kind"]
+            kind = rule.get("kind")
+            if kind not in {"token", "sequence"}:
+                raise ValueError("off_policy_correction rule kind must be token or sequence; set kind on every rule")
             allowed = {"kind", "action", "low", "high"}
             if kind == "sequence":
                 allowed.add("aggregate")
@@ -232,6 +235,11 @@ def validate_objective(cfg: DictConfig) -> None:
             raise ValueError(
                 f"trainer.algorithm.{key} is unsupported; configure trainer.algorithm.off_policy_correction"
             )
+    if (
+        algorithm.dynamic_sampling.max_mean_reward is not None
+        and algorithm.dynamic_sampling.type != DynamicSamplingType.FILTER
+    ):
+        raise ValueError("dynamic_sampling.max_mean_reward requires dynamic_sampling.type=filter")
     try:
         reduction = LossReduction(algorithm.loss_reduction)
     except ValueError as error:

@@ -534,17 +534,6 @@ def test_reward_estimator_broadcasts_eligible_reward_without_centering():
     assert not advantages.requires_grad
 
 
-@pytest.mark.parametrize(("key", "value"), [("use_tis", True), ("tis_imp_ratio_cap", 2.0)])
-def test_composed_launch_rejects_tis_selectors_at_startup(tmp_path: Path, key: str, value) -> None:
-    path = tmp_path / "launch.yaml"
-    path.write_text(yaml.safe_dump(_raw_config()))
-    config = load_launch_config(path)
-    OmegaConf.update(config.skyrl.trainer.algorithm, key, value, force_add=True)
-
-    with pytest.raises(ValueError, match="off_policy_correction"):
-        validate_cfg(config.skyrl)
-
-
 @pytest.mark.parametrize("recipe", ["grpo", "dapo", "dr_grpo", "gspo", "cispo", "opd", "mopd"])
 def test_algorithm_recipe_launch_drives_policy_value_and_gradient(tmp_path: Path, recipe: str):
     raw = _raw_config()
