@@ -8,6 +8,7 @@ import pytest
 import hydra
 import torch
 import os
+import posixpath
 from uuid import uuid4
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
@@ -38,7 +39,7 @@ def get_test_actor_config(strategy: str, optimizer_checkpoint_sharding_type: str
     checkpoint_prefix = os.environ.get("MARIN_TEMP_PREFIX", os.environ.get("MARIN_PREFIX", ""))
     if not checkpoint_prefix.startswith("s3://"):
         raise ValueError("Run the Megatron checkpoint test on Iris with CoreWeave object storage configured")
-    cfg.trainer.ckpt_path = f"{checkpoint_prefix.rstrip('/')}/tests/megatron-checkpoint/{uuid4().hex}"
+    cfg.trainer.ckpt_path = posixpath.join(checkpoint_prefix, "tests", "megatron-checkpoint", uuid4().hex)
     cfg.trainer.export_path = cfg.trainer.ckpt_path
     cfg.trainer.logger = "console"
 
@@ -119,10 +120,10 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, optimizer_checkpoint_s
         actor_group.backload_to_gpu()
 
         # check that relevant files are saved
-        huggingface_dir = os.path.join(checkpoint_path, "huggingface")
+        huggingface_dir = posixpath.join(checkpoint_path, "huggingface")
         expected_files = ["config.json", "generation_config.json", "tokenizer.json"]
         for file in expected_files:
-            assert io.exists(os.path.join(huggingface_dir, file)), f"File {file} not found in huggingface directory"
+            assert io.exists(posixpath.join(huggingface_dir, file)), f"File {file} not found in huggingface directory"
 
         # Step 3: Do second training step and record results
         run_one_training_step(actor_group, train_batch_2)

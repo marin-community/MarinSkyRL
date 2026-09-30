@@ -140,8 +140,7 @@ Failures and worker exits release reservations. The checkpoint format is unchang
 This bounds admitted read scratch, not total pod RSS. Model and optimizer
 destinations, restored non-tensor state, metadata, allocator caches, Ray's object
 store, and Megatron's subsequent replica exchange remain outside the budget.
-Leave room for these allocations in the pod's host-memory limit. The old
-`SKYRL_MEGATRON_LOCAL_DCP_LOAD_SLOTS` reader-count setting is retired.
+Leave room for these allocations in the pod's host-memory limit.
 
 Serial reads can take longer than the default collective deadline. Set
 `trainer.distributed.worker_collective_timeout_seconds` before starting workers;

@@ -13,16 +13,15 @@ import time
 from loguru import logger
 from torch.distributed.checkpoint import FileSystemReader, LoadPlan, LoadPlanner
 from torch.distributed.checkpoint.filesystem import _StorageInfo
-from torch.distributed.checkpoint.metadata import Metadata, TensorStorageMetadata
+from torch.distributed.checkpoint.metadata import Metadata, MetadataIndex, TensorStorageMetadata
 from torch.futures import Future
 
 
 class PodCheckpointReadBudget:
     """Admit decoded checkpoint records across processes sharing a pod's /tmp.
 
-    A reservation owns a flock, so the kernel releases it on process exit. The
-    admission mutex protects publication and reclamation of reservation files.
-    Records larger than the budget fail before reading instead of waiting forever.
+    Reservations release after failure or process exit. Oversized records fail
+    before reading. All readers sharing the directory must use the same budget.
     """
 
     def __init__(self, memory_bytes: int, directory: Path | None = None) -> None:
@@ -31,6 +30,26 @@ class PodCheckpointReadBudget:
         self.memory_bytes = memory_bytes
         self.directory = directory or Path(tempfile.gettempdir()) / "skyrl-megatron-dcp-read-memory"
         self.directory.mkdir(exist_ok=True)
+        self.admission_path = self.directory / "admission.lock"
+
+    def _reserved_bytes(self, reservation_path: Path) -> int:
+        used_bytes = 0
+        for path in self.directory.glob("*.reservation"):
+            if path == reservation_path:
+                continue
+            with path.open("r+") as peer:
+                try:
+                    fcntl.flock(peer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    contents = peer.read().split()
+                    if contents:
+                        budget, amount = map(int, contents)
+                        if budget != self.memory_bytes:
+                            raise ValueError("Megatron checkpoint readers in one pod need the same budget")
+                        used_bytes += amount
+                else:
+                    path.unlink()
+        return used_bytes
 
     @contextmanager
     def reserve(self, memory_bytes: int) -> Generator[None, None, None]:
@@ -40,32 +59,19 @@ class PodCheckpointReadBudget:
                 f"of {self.memory_bytes}; increase trainer.distributed.megatron_checkpoint_load_memory_gib"
             )
         waiting_since = time.monotonic()
-        with (self.directory / "admission.lock").open("a+") as admission:
+        with self.admission_path.open("a+") as admission:
             fcntl.flock(admission, fcntl.LOCK_EX)
+            # Publish only locked files: a peer must not reclaim a new reservation
+            # between its creation and acquiring the process-lifetime lock.
             reservation = tempfile.NamedTemporaryFile(dir=self.directory, suffix=".reservation", delete=False)
             fcntl.flock(reservation, fcntl.LOCK_EX)
         with reservation:
             reservation_path = Path(reservation.name)
             try:
                 while True:
-                    with (self.directory / "admission.lock").open("a+") as admission:
+                    with self.admission_path.open("a+") as admission:
                         fcntl.flock(admission, fcntl.LOCK_EX)
-                        used_bytes = 0
-                        for path in self.directory.glob("*.reservation"):
-                            if path == reservation_path:
-                                continue
-                            with path.open("r+") as peer:
-                                try:
-                                    fcntl.flock(peer, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                                except BlockingIOError:
-                                    contents = peer.read().split()
-                                    if contents:
-                                        budget, amount = map(int, contents)
-                                        if budget != self.memory_bytes:
-                                            raise ValueError("Megatron checkpoint readers in one pod need the same budget")
-                                        used_bytes += amount
-                                else:
-                                    path.unlink()
+                        used_bytes = self._reserved_bytes(reservation_path)
                         if used_bytes + memory_bytes <= self.memory_bytes:
                             reservation.write(f"{self.memory_bytes} {memory_bytes}".encode())
                             reservation.flush()
@@ -82,7 +88,7 @@ class PodCheckpointReadBudget:
                         time.monotonic() - acquired_at,
                     )
             finally:
-                with (self.directory / "admission.lock").open("a+") as admission:
+                with self.admission_path.open("a+") as admission:
                     fcntl.flock(admission, fcntl.LOCK_EX)
                     reservation_path.unlink()
 
@@ -93,7 +99,7 @@ class BudgetedCheckpointReader(FileSystemReader):
     def __init__(self, path: str, budget: PodCheckpointReadBudget) -> None:
         super().__init__(path)
         self.budget = budget
-        self.record_memory: dict = {}
+        self.record_memory: dict[MetadataIndex, int] = {}
         self.storage_read_seconds = 0.0
         self.decode_copy_seconds = 0.0
         self.admission_wait_seconds = 0.0
@@ -148,8 +154,11 @@ class BudgetedCheckpointReader(FileSystemReader):
                 serialized_bytes += self.storage_data[item.storage_index].length
         logger.info(
             "DCP records={} serialized_bytes={} storage_read={:.3f}s decode_copy={:.3f}s admission_wait={:.3f}s",
-            len(plan.items), serialized_bytes, self.storage_read_seconds,
-            self.decode_copy_seconds, self.admission_wait_seconds,
+            len(plan.items),
+            serialized_bytes,
+            self.storage_read_seconds,
+            self.decode_copy_seconds,
+            self.admission_wait_seconds,
         )
         future: Future[None] = Future()
         future.set_result(None)
