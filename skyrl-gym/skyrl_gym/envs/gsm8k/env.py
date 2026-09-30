@@ -1,4 +1,4 @@
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ground_truth_from_extras
 from skyrl_gym.envs.gsm8k import utils
 from typing import Dict, Any
 from omegaconf import DictConfig
@@ -13,10 +13,7 @@ class GSM8kEnv(BaseTextEnv):
     def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
         super().__init__()
 
-        reward_spec = extras.get("reward_spec") or extras.get("reward_model")
-        assert reward_spec is not None, "reward_spec (or reward_model) field is required"
-        assert "ground_truth" in reward_spec, "ground_truth is required in reward_spec field"
-        self.ground_truth = reward_spec["ground_truth"]
+        self.ground_truth = ground_truth_from_extras(extras)
         self.reward_method = env_config.get("reward_method", "strict")
         self.stop_reason = None
 
