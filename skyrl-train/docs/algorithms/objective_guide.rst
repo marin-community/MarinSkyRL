@@ -145,7 +145,7 @@ Set ``trainer.algorithm.loss_reduction``; formulas and examples are in
    * - ``token_mean``
      - Give each eligible data-weighted token equal weight.
    * - ``sequence_mean``
-     - Give each nonempty response equal weight; required for sequence-level policy credit.
+     - Give each nonempty response equal weight.
    * - ``seq_mean_token_sum_norm``
      - Normalize response sums by the configured total sequence length for Dr.GRPO.
    * - ``seq_mean_token_sum_norm_global``
@@ -479,8 +479,10 @@ All top-K objectives require student TP=CP=sequence parallelism=1, sample
 packing disabled, local vLLM teachers and identical teacher/student vocabularies.
 Keep each teacher's supported inference geometry. The student-selected surrogate
 also requires exact sampled completion tokens and generator ``logprobs`` equal
-to every teacher's K; it preserves configured sampling, including nucleus
-probability 0.99 in native Open-MOPD. Deployment requirements are in :doc:`opd`.
+to every teacher's K. The teacher-only REPLACE setup preserves configured
+sampling, including nucleus probability 0.99 in native Open-MOPD. An active
+rollout-anchored or corrected policy term requires temperature-only sampling.
+Deployment requirements are in :doc:`opd`.
 
 .. _objective/reduction.py: https://github.com/marin-community/MarinSkyRL/blob/main/skyrl-train/skyrl_train/objective/reduction.py
 .. _objective/correction.py: https://github.com/marin-community/MarinSkyRL/blob/main/skyrl-train/skyrl_train/objective/correction.py
