@@ -268,6 +268,36 @@ def test_composed_launch_rejects_tis_selectors(tmp_path: Path, key: str, value) 
             },
             "at most one truncate",
         ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "truncate", "hig": 2}],
+            },
+            "hig",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "clamp", "high": 2}],
+            },
+            "action",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [
+                    {"kind": "sequence", "aggregate": "average", "action": "mask", "high": 2}
+                ],
+            },
+            "aggregate",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "truncate", "high": "2.0"}],
+            },
+            "high",
+        ),
         ({"algorithm.dynamic_sampling.max_mean_reward": 0.9}, "requires dynamic_sampling.type=filter"),
         ({"algorithm.dynamic_sampling.max_mean_reward": 0.9, "algorithm.dynamic_sampling.type": "filter"}, None),
     ],

@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from omegaconf import DictConfig, OmegaConf
+from omegaconf.errors import OmegaConfBaseException
 
 from marinskyrl.distillation import (
     DistillationObjectiveKind,
@@ -71,16 +72,16 @@ class SequenceAggregate(StrEnum):
 @dataclass(frozen=True)
 class TokenRule:
     action: CorrectionAction
-    low: float | None
-    high: float | None
+    low: float | int | None = None
+    high: float | int | None = None
 
 
 @dataclass(frozen=True)
 class SequenceRule:
     aggregate: SequenceAggregate
     action: CorrectionAction
-    low: float | None
-    high: float | None
+    low: float | int | None = None
+    high: float | int | None = None
 
 
 @dataclass(frozen=True)
@@ -95,21 +96,20 @@ class OffPolicyCorrection:
             kind = rule.get("kind")
             if kind not in {"token", "sequence"}:
                 raise ValueError("off_policy_correction rule kind must be token or sequence; set kind on every rule")
-            allowed = {"kind", "action", "low", "high"}
-            if kind == "sequence":
-                allowed.add("aggregate")
-            unknown = set(rule) - allowed
-            if unknown:
-                raise ValueError(f"unknown off_policy_correction rule fields: {sorted(unknown)}")
-            action = CorrectionAction(rule["action"])
-            low, high = rule.get("low"), rule.get("high")
+            fields = OmegaConf.to_container(rule, resolve=True)
+            del fields["kind"]
+            for name, enum in (("action", CorrectionAction), ("aggregate", SequenceAggregate)):
+                value = fields.get(name)
+                if isinstance(value, str):
+                    fields[name] = {member.value: member for member in enum}.get(value, value)
+            schema = TokenRule if kind == "token" else SequenceRule
+            try:
+                parsed = OmegaConf.to_object(OmegaConf.merge(OmegaConf.structured(schema), fields))
+            except OmegaConfBaseException as error:
+                raise ValueError(f"invalid off_policy_correction {kind} rule: {error}") from error
+            action, low, high = parsed.action, parsed.low, parsed.high
             for bound in (low, high):
-                if bound is not None and (
-                    isinstance(bound, bool)
-                    or not isinstance(bound, (int, float))
-                    or not math.isfinite(bound)
-                    or bound <= 0
-                ):
+                if bound is not None and (not math.isfinite(bound) or bound <= 0):
                     raise ValueError("off_policy_correction bounds must be positive finite numbers")
             if low is not None and high is not None and low > high:
                 raise ValueError("off_policy_correction requires low <= high")
@@ -117,15 +117,13 @@ class OffPolicyCorrection:
                 raise ValueError("off_policy_correction truncate requires high and low=null")
             if action is CorrectionAction.MASK and low is None and high is None:
                 raise ValueError("off_policy_correction mask requires low or high")
-            if kind == "token":
-                rules.append(TokenRule(action, low, high))
-            elif kind == "sequence":
-                aggregate = SequenceAggregate(rule["aggregate"])
-                if aggregate is SequenceAggregate.EXTREME_TOKEN and action is not CorrectionAction.MASK:
-                    raise ValueError("off_policy_correction extreme_token requires action=mask")
-                rules.append(SequenceRule(aggregate, action, low, high))
-            else:
-                raise ValueError("off_policy_correction rule kind must be token or sequence")
+            if (
+                isinstance(parsed, SequenceRule)
+                and parsed.aggregate is SequenceAggregate.EXTREME_TOKEN
+                and action is not CorrectionAction.MASK
+            ):
+                raise ValueError("off_policy_correction extreme_token requires action=mask")
+            rules.append(parsed)
         if sum(rule.action is CorrectionAction.TRUNCATE for rule in rules) > 1:
             raise ValueError("off_policy_correction permits at most one truncate rule")
         return cls(str(config.name), tuple(rules))

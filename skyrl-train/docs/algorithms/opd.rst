@@ -37,9 +37,9 @@ cannot provide the required prompt logprobs.
 Choosing the teacher objective
 ------------------------------
 
-See :doc:`objective_guide` for teacher formulas, ADD and REPLACE requirements,
-recipe selection, worked OPD/MOPD setups and objective metrics.
-:doc:`objective` describes how evidence becomes policy credit or a teacher row.
+See :doc:`objective_guide` for teacher options, ADD and REPLACE setups,
+recipe selection and worked OPD/MOPD setups.
+:doc:`objective` describes how evidence becomes policy credit or a teacher term.
 
 Routing and residency
 ---------------------
