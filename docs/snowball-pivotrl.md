@@ -170,10 +170,19 @@ Check the first PivotRL training step's retention archive before a full run:
 
 ```bash
 uv run python -m infra.rl_data.pivot_report "$FIRST_TRAIN_STEP_ARCHIVE" --check-geometry
-uv run python -m infra.rl_data.pivot_report "$ONE_CHECKPOINT_HELDOUT_ARCHIVES"
-uv run python -m infra.rl_data.pivot_report "$PIVOTRL_HELDOUT_ARCHIVES" --reference "$SFT_HELDOUT_ARCHIVES"
+uv run python -m infra.rl_data.pivot_report "$ONE_CHECKPOINT_HELDOUT_ARCHIVES" \
+  --heldout-parquet "$SWE_VALIDATION_PARQUET" "$TERMINAL_VALIDATION_PARQUET"
+uv run python -m infra.rl_data.pivot_report "$PIVOTRL_HELDOUT_ARCHIVES" --reference "$SFT_HELDOUT_ARCHIVES" \
+  --heldout-parquet "$SWE_VALIDATION_PARQUET" "$TERMINAL_VALIDATION_PARQUET"
 uv run python -m infra.rl_data.pivot_report "$TRAINING_ARCHIVES" --exposure
 ```
+
+Accuracy commands require the prepared validation parquet files. Before computing
+intervals, the reporter checks every expected source row appears exactly once at
+one checkpoint. Missing rows, unexpected rows, repeated predictions, and verifier
+infrastructure errors stop reporting. Input-overflow exclusions are counted separately
+from verified outcomes; they are not incorrect answers. Paired differences require
+identical verified rows in both arms.
 
 Exposure reports distinguish unique source rows, prefix visits, and responses per
 row. Their token totals describe retained trajectories before the final loss-budget

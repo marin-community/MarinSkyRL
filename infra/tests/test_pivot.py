@@ -9,7 +9,7 @@ from datasets import Dataset
 
 from infra.rl_data.pivot import adapt_row, filter_candidates, heldout_trajectories
 from infra.rl_data.pivot_publish import publish_artifacts
-from infra.rl_data.pivot_report import summarize, summarize_exposure, check_rollout_geometry, compare
+from infra.rl_data.pivot_report import summarize, summarize_exposure, check_rollout_geometry, compare, heldout_cohort
 
 
 def swe_row(index):
@@ -207,3 +207,30 @@ def test_filter_resolves_retry_history_without_counting_errors_as_failures(tmp_p
     assert profiles[0]["student_profile"]["mean"] == .25
     assert manifest["selected_rows"] == 1
     assert manifest["error_excluded_rows"] == 0
+
+
+
+def test_heldout_report_requires_the_complete_cohort_and_discloses_context_exclusions():
+    rows = [adapt_row(swe_row(i), "swe", i, "validation") for i in range(4)]
+    records = [retained(row, 0, int(i >= 2)) for i, row in enumerate(rows)]
+    records[-1]["verification_result"] = {
+        "status": "unavailable", "reason": "initial prompt exceeds the model input limit"
+    }
+    cohort = heldout_cohort(list(reversed(records)), rows)
+    assert cohort.coverage["swe"] == {
+        "expected_examples": 4, "verified_examples": 3, "context_excluded_examples": 1
+    }
+    assert summarize(cohort.verified, bootstrap_samples=100)["swe"]["accuracy"] == pytest.approx(1 / 3)
+    with pytest.raises(ValueError, match="Incomplete heldout coverage"):
+        heldout_cohort(records[:-1], rows)
+    records[-1]["verification_result"] = {"status": "error", "reason": "HTTP 500"}
+    with pytest.raises(ValueError, match="Incomplete heldout verification"):
+        heldout_cohort(records, rows)
+
+
+def test_heldout_report_rejects_rows_from_mixed_checkpoint_steps():
+    rows = [adapt_row(swe_row(i), "swe", i, "validation") for i in range(2)]
+    records = [retained(row, 0, 1) for row in rows]
+    records[1]["global_step"] += 1
+    with pytest.raises(ValueError, match="exactly one checkpoint"):
+        heldout_cohort(records, rows)
