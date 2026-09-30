@@ -36,7 +36,8 @@ def differentiable_approx_kl(
     log_probs: torch.Tensor,
     log_probs_base: torch.Tensor,
     loss_mask: Optional[torch.Tensor] = None,
-    kl_estimator_type: str = KLEstimator.K3_UNBIASED_GRADIENT.value,
+    *,
+    kl_estimator_type: str,
 ) -> torch.Tensor:
     """Return per-token KL estimates with the selected value and gradient convention."""
     estimator = KLEstimator(kl_estimator_type)
@@ -65,7 +66,8 @@ def compute_approx_kl(
     log_probs: torch.Tensor,
     log_probs_base: torch.Tensor,
     loss_mask: Optional[torch.Tensor] = None,
-    kl_estimator_type: str = KLEstimator.K3_UNBIASED_GRADIENT.value,
+    *,
+    kl_estimator_type: str,
 ) -> torch.Tensor:
     """Compute approximate KL without gradients for metrics and reward shaping.
 

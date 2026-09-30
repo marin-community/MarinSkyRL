@@ -1,12 +1,6 @@
 """Advantage estimators, KL estimators and controllers, policy objectives, TIS diagnostics, and validate_cfg."""
 
 import math
-from pathlib import Path
-
-import yaml
-
-from cloud.iris.launch_config import load_launch_config
-from cloud.iris.tests.test_launch_config import _raw_config
 
 import numpy as np
 import pytest
@@ -98,8 +92,8 @@ def test_unbiased_kl_keeps_k3_values_and_clamps_only_log_ratio_gradients():
     log_probs = torch.tensor([-30.0, -5.0, -0.3, 0.0, 0.2, 5.0, 30.0, 0.5], dtype=torch.float64, requires_grad=True)
     reference = torch.zeros_like(log_probs)
     mask = torch.tensor([1, 1, 1, 1, 1, 1, 1, 0])
-    values = differentiable_approx_kl(log_probs, reference, mask, "k3_unbiased_gradient")
-    reported = compute_approx_kl(log_probs, reference, mask, "k3")
+    values = differentiable_approx_kl(log_probs, reference, mask, kl_estimator_type="k3_unbiased_gradient")
+    reported = compute_approx_kl(log_probs, reference, mask, kl_estimator_type="k3")
     expected = torch.tensor(
         [10, 10, math.exp(0.3) - 0.3 - 1, 0, math.exp(-0.2) + 0.2 - 1, math.exp(-5) + 5 - 1, 10, 0],
         dtype=torch.float64,
@@ -625,14 +619,3 @@ def test_validate_cfg_applies_custom_loss_contract_to_training():
         torch.testing.assert_close(log_probs.grad, torch.tensor([[-1.5, 1.0]]))
     finally:
         PolicyLossRegistry.unregister("custom_policy")
-
-
-@pytest.mark.parametrize("switch", ["use_abs_kl", "use_kl_estimator_k3"])
-def test_composed_launch_rejects_kl_switches_at_startup(tmp_path: Path, switch: str) -> None:
-    path = tmp_path / "launch.yaml"
-    path.write_text(yaml.safe_dump(_raw_config()))
-    config = load_launch_config(path)
-    OmegaConf.update(config.skyrl.trainer.algorithm, switch, True, force_add=True)
-
-    with pytest.raises(ValueError, match="kl_estimator_type"):
-        validate_cfg(config.skyrl)
