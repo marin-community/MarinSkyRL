@@ -41,6 +41,10 @@ def test_ep_combine_adds_rank_partials_in_the_ring_order_of_each_token_home_rank
     home = torch.randint(0, ep_size, (tokens,), generator=generator)
     # Wide magnitudes so that the order of the bf16 additions changes the result.
     values = torch.randn(tokens, num_experts, hidden, generator=generator) * torch.logspace(-2, 2, num_experts)[:, None]
+    # Token 3's slots all sit on rank 0 and cancel in fp32: in slot order (2^24 + 1) - 2^24 is 0, in reverse
+    # order (1 - 2^24) + 2^24 is 1, so the rank's partial must follow the slot order.
+    selected[3] = torch.tensor([0, 1, 2, 3])
+    values[3, :4] = torch.tensor([2.0**24, 1.0, -(2.0**24), 0.0])[:, None]
     values = values.to(torch.bfloat16)
     routing_map = torch.zeros(tokens, num_experts, dtype=torch.bool).scatter(1, selected, True)
     pairs = routing_map.t().nonzero()

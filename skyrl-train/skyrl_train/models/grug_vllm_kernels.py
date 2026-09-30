@@ -196,33 +196,37 @@ def vllm_ep_combine(
     owns, in slot order, to an fp32 zero and rounds once. NCCL's ring reduce-scatter (a ring reduce per
     rank when the ranks' token counts differ) adds the rank partials in bf16 from ``home + 1`` round to
     ``home``; a rank that owns none of the token's experts adds an exact zero.
+
+    The permuted row of a token-expert pair is the count of lower experts' rows plus the count of earlier
+    tokens routed to the same expert, which a cumulative sum of ``routing_map`` gives without waiting on the
+    device. On CUDA one Triton kernel adds every token's slots (``grug_ep_combine_kernel``).
     """
     tokens, experts = routing_map.shape
     top_k = selected.shape[1]
     if experts % ep_size:
         raise ValueError(f"{experts} experts do not split over {ep_size} vLLM EP ranks")
-    pairs = routing_map.t().nonzero()
-    if pairs.shape[0] != permuted.shape[0]:
-        raise ValueError(f"{permuted.shape[0]} permuted rows for {pairs.shape[0]} selected (token, expert) pairs")
-    row_of = torch.full((tokens, experts), -1, dtype=torch.long, device=permuted.device)
-    row_of[pairs[:, 1], pairs[:, 0]] = torch.arange(pairs.shape[0], device=permuted.device)
-    slot_rows = row_of.gather(1, selected.long())
-    if (slot_rows < 0).any():
-        raise ValueError("ep_sum slot order names an expert the routing map did not select")
-    ring_position = (selected.long() // (experts // ep_size) - home_ranks.long().view(-1, 1) - 1) % ep_size
-    # A stable order by ring position keeps vLLM's slot order inside each rank's partial.
-    order = torch.sort(ring_position * top_k + torch.arange(top_k, device=selected.device), dim=1).indices
-    position, rows = ring_position.gather(1, order), slot_rows.gather(1, order)
-    zero = torch.zeros(tokens, permuted.shape[1], dtype=torch.float32, device=permuted.device)
-    total = zero.to(permuted.dtype)
-    partial = zero + permuted[rows[:, 0]].float()
-    for slot in range(1, top_k):
-        value = permuted[rows[:, slot]].float()
-        new_rank = (position[:, slot] != position[:, slot - 1]).view(-1, 1)
-        closed = (total.float() + partial.to(permuted.dtype).float()).to(permuted.dtype)
-        total = torch.where(new_rank, closed, total)
-        partial = torch.where(new_rank, zero + value, partial + value)
-    return (total.float() + partial.to(permuted.dtype).float()).to(permuted.dtype)
+    if permuted.shape[0] != tokens * top_k:
+        raise ValueError(f"{permuted.shape[0]} permuted rows for {tokens} tokens of {top_k} slots")
+    if tokens == 0:
+        return permuted.new_empty(0, permuted.shape[1])
+    earlier = routing_map.cumsum(0, dtype=torch.int32)
+    first_row = earlier[-1].cumsum(0, dtype=torch.int32) - earlier[-1]
+    if permuted.is_cuda:
+        from skyrl_train.models.grug_ep_combine_kernel import ep_combine
+
+        return ep_combine(permuted, selected.long(), home_ranks.long(), earlier, first_row, ep_size)
+    selected = selected.long()
+    slot_rows = first_row[selected] + earlier.gather(1, selected) - 1
+    ring_positions = (selected // (experts // ep_size) - home_ranks.long().view(-1, 1) - 1) % ep_size
+    values = permuted[slot_rows].float()
+    total = torch.zeros(tokens, permuted.shape[1], dtype=torch.float32, device=permuted.device)
+    for position in range(ep_size):
+        partial = torch.zeros_like(total)
+        for slot in range(top_k):
+            on_rank = (ring_positions[:, slot] == position).view(-1, 1)
+            partial = torch.where(on_rank, partial + values[:, slot], partial)
+        total = (total + partial.to(permuted.dtype).float()).to(permuted.dtype).float()
+    return total.to(permuted.dtype)
 
 
 def vllm_expert_outputs(

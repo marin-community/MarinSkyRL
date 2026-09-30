@@ -327,23 +327,35 @@ def _install_ep_combine_hooks(layer: TransformerLayer) -> None:
     """Add the routed expert outputs in vLLM's expert-parallel order when ``ep_sum`` is active.
 
     The value comes from ``vllm_ep_combine``; the gradient is the trainer's own unpermute (each slot's
-    gradient is the token's output gradient in both), through the same exact-zero difference.
+    gradient is the token's output gradient in both), through the exact-zero ``x - x.detach()``. A forward
+    without gradients skips the trainer's unpermute.
+
+    Full recompute's second forward of a one-layer unit takes the trainer's unpermute alone: that forward
+    only rebuilds the layer's graph for its backward, and the layer uses the routed output only in sums and
+    casts (the shared expert and the residuals), whose gradients do not depend on the summands' values. The
+    gradients equal those of a forward that also runs the combine; the layer's output, the first forward's,
+    keeps the combine's bytes.
     """
     dispatcher = layer.mlp.token_dispatcher
     router = layer.mlp.router
     unpermute = dispatcher.combine_postprocess
 
     def combine_postprocess(permuted):
-        output = unpermute(permuted)
         if not active_numerics().ep_sum:
-            return output
+            return unpermute(permuted)
         if dispatcher.shared_experts is not None:
             raise NotImplementedError("ep_sum numerics expect the shared expert outside the dispatcher")
         selected, expert_parallel = router.take_ep_route()
-        combined = vllm_ep_combine(
-            permuted, dispatcher.routing_map, selected, expert_parallel.dp_ranks, expert_parallel.ep_size
-        ).view_as(output)
-        return combined.detach() + (output - output.detach())
+        if _recomputing_one_layer(layer.config):
+            return unpermute(permuted)
+        with torch.no_grad():
+            combined = vllm_ep_combine(
+                permuted, dispatcher.routing_map, selected, expert_parallel.dp_ranks, expert_parallel.ep_size
+            ).view(dispatcher.hidden_shape)
+        if not torch.is_grad_enabled():
+            return combined
+        output = unpermute(permuted)
+        return combined + (output - output.detach())
 
     dispatcher.combine_postprocess = combine_postprocess
 
