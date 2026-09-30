@@ -28,6 +28,7 @@ from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec_for_ba
 from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.moe.router import TopKRouter
+from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import (
     TransformerBlock,
@@ -39,9 +40,17 @@ from megatron.core.transformer.transformer_layer import TransformerLayer, Transf
 from megatron.core.typed_torch import apply_module
 from torch import nn
 
+from skyrl_train.mismatch_probe.numerics import active_numerics
+from skyrl_train.models.grug_rounding import (
+    gated_norm_product_fp32,
+    rotate_neox_fp32,
+    swiglu_single_rounding,
+    xsa_and_gate_single_rounding,
+)
 from skyrl_train.models.grug_moe import (
     GRUG_ATTN_GATE_SCALE,
     GRUG_GATED_NORM_RANK,
+    GRUG_QK_RMS_NORM_EPS,
     GRUG_ROUTER_RENORM_EPS,
     GRUG_ROUTING_RENORM_SUM,
     GRUG_XSA_EPS,
@@ -55,11 +64,36 @@ def _first_present(preferred: torch.Tensor | None, fallback: torch.Tensor | None
     return fallback if preferred is None else preferred
 
 
+# Unrounded gated-norm products awaiting the router, keyed by the bf16 tensor handed to the MoE layer.
+_ROUTER_FP32_INPUTS: dict[int, torch.Tensor] = {}
+
+
+def _install_shared_swiglu_hooks(shared: SharedExpertMLP) -> None:
+    """Recompute the shared expert's activation with one rounding when ``shared_swiglu`` is active."""
+    stored: dict[str, torch.Tensor] = {}
+
+    def keep_fc1_output(module, args, output):
+        stored["fc1"] = output[0] if isinstance(output, tuple) else output
+
+    def replace_fc2_input(module, args):
+        fc1_output = stored.pop("fc1", None)
+        if not active_numerics().shared_swiglu:
+            return None
+        if fc1_output is None:
+            raise RuntimeError("shared_swiglu requires the shared expert's fc1 output")
+        return (swiglu_single_rounding(fc1_output), *args[1:])
+
+    shared.linear_fc1.register_forward_hook(keep_fc1_output)
+    shared.linear_fc2.register_forward_pre_hook(replace_fc2_input)
+
+
 class GrugGatedRMSNorm(nn.Module):
     """RMSNorm followed by Grug's low-rank sigmoid gate: ``norm(x) * sigmoid(up(silu(down(norm(x)))))``."""
 
     def __init__(self, config: TransformerConfig, hidden_size: int, eps: float):
         super().__init__()
+        # True on the pre-MLP norm, whose output the router reads.
+        self.feeds_router = False
         self.norm = TENorm(config=config, hidden_size=hidden_size, eps=eps)
         device = torch.cuda.current_device()
         self.down_proj = nn.Linear(
@@ -74,8 +108,15 @@ class GrugGatedRMSNorm(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         normalized = self.norm(hidden_states)
-        gate = torch.sigmoid(self.up_proj(F.silu(self.down_proj(normalized))))
-        return normalized * gate
+        gate = self.up_proj(F.silu(self.down_proj(normalized)))
+        numerics = active_numerics()
+        if not numerics.gated_norm:
+            return normalized * torch.sigmoid(gate)
+        product = gated_norm_product_fp32(normalized, gate)
+        output = product.to(normalized.dtype)
+        if numerics.router_input and self.feeds_router:
+            _ROUTER_FP32_INPUTS[id(output)] = product
+        return output
 
 
 class GrugQKNorm(nn.Module):
@@ -85,6 +126,10 @@ class GrugQKNorm(nn.Module):
         super().__init__()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if active_numerics().qk_rope:
+            # The attention forward rounds once after RoPE and the query scale.
+            fp32 = hidden_states.float()
+            return fp32 * torch.rsqrt(fp32.square().mean(dim=-1, keepdim=True) + GRUG_QK_RMS_NORM_EPS)
         return grug_rms_norm_no_weight(hidden_states)
 
 
@@ -141,22 +186,33 @@ class GrugSelfAttention(SelfAttention):
         if is_thd:
             query, key, value = query.squeeze(1), key.squeeze(1), value.squeeze(1)
 
-        if rotary_pos_emb is not None and not self.skip_rope:
-            if not isinstance(rotary_pos_emb, tuple):
-                rotary_pos_emb = (rotary_pos_emb,) * 2
-            q_pos_emb, k_pos_emb = rotary_pos_emb
-            cu_seqlens_q = cu_seqlens_kv = None
+        if active_numerics().qk_rope:
             if is_thd:
-                cu_seqlens_q = _first_present(packed_seq_params.cu_seqlens_q_padded, packed_seq_params.cu_seqlens_q)
-                cu_seqlens_kv = _first_present(packed_seq_params.cu_seqlens_kv_padded, packed_seq_params.cu_seqlens_kv)
-            query = apply_rotary_pos_emb(
-                query, q_pos_emb, config=self.config, cu_seqlens=cu_seqlens_q, cp_group=self.pg_collection.cp
-            )
-            key = apply_rotary_pos_emb(
-                key, k_pos_emb, config=self.config, cu_seqlens=cu_seqlens_kv, cp_group=self.pg_collection.cp
-            )
+                raise NotImplementedError("qk_rope numerics support unpacked sequences only")
+            if rotary_pos_emb is not None and not self.skip_rope:
+                q_pos_emb, k_pos_emb = rotary_pos_emb if isinstance(rotary_pos_emb, tuple) else (rotary_pos_emb,) * 2
+                query, key = rotate_neox_fp32(query, q_pos_emb), rotate_neox_fp32(key, k_pos_emb)
+            query = (query.float() * self.query_scale).to(value.dtype)
+            key = key.to(value.dtype)
+        else:
+            if rotary_pos_emb is not None and not self.skip_rope:
+                if not isinstance(rotary_pos_emb, tuple):
+                    rotary_pos_emb = (rotary_pos_emb,) * 2
+                q_pos_emb, k_pos_emb = rotary_pos_emb
+                cu_seqlens_q = cu_seqlens_kv = None
+                if is_thd:
+                    cu_seqlens_q = _first_present(packed_seq_params.cu_seqlens_q_padded, packed_seq_params.cu_seqlens_q)
+                    cu_seqlens_kv = _first_present(
+                        packed_seq_params.cu_seqlens_kv_padded, packed_seq_params.cu_seqlens_kv
+                    )
+                query = apply_rotary_pos_emb(
+                    query, q_pos_emb, config=self.config, cu_seqlens=cu_seqlens_q, cp_group=self.pg_collection.cp
+                )
+                key = apply_rotary_pos_emb(
+                    key, k_pos_emb, config=self.config, cu_seqlens=cu_seqlens_kv, cp_group=self.pg_collection.cp
+                )
 
-        query = query * self.query_scale
+            query = query * self.query_scale
 
         # Grug is causal-only and the trainer removes left padding, so right-padded keys sit after
         # every valid query and the causal (or causal sliding-window) mask alone is exact.
@@ -182,12 +238,18 @@ class GrugSelfAttention(SelfAttention):
                 packed_seq_params=packed_seq_params,
             )
 
-        core_attn_out = self._apply_xsa(core_attn_out, value)
-        if is_thd:
-            core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
-
         gate, _ = self.attn_gate(hidden_states)
-        core_attn_out = self._apply_head_gate(core_attn_out, gate)
+        if active_numerics().xsa_gate:
+            if is_thd:
+                raise NotImplementedError("xsa_gate numerics support unpacked sequences only")
+            core_attn_out = xsa_and_gate_single_rounding(
+                core_attn_out, value, gate, self.hidden_size_per_attention_head
+            )
+        else:
+            core_attn_out = self._apply_xsa(core_attn_out, value)
+            if is_thd:
+                core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
+            core_attn_out = self._apply_head_gate(core_attn_out, gate)
         output, bias = apply_module(self.linear_proj)(core_attn_out)
         return output, bias
 
@@ -261,7 +323,14 @@ class GrugTopKRouter(TopKRouter):
 
     def forward(self, input: torch.Tensor, padding_mask: torch.Tensor | None = None):
         self._maintain_float32_expert_bias()
-        logits = self.gating(input)
+        if active_numerics().router_input:
+            fp32_input = _ROUTER_FP32_INPUTS.pop(id(input), None)
+            if fp32_input is None:
+                raise RuntimeError("router_input requires the fp32 gated-norm product of this MoE input")
+            # Compiled vLLM runs an fp32 GEMM on fp32 router weights holding the bf16 values.
+            logits = F.linear(fp32_input, self.weight.float())
+        else:
+            logits = self.gating(input)
         return self.routing(logits, padding_mask)
 
 
@@ -270,6 +339,11 @@ class GrugGPTModel(GPTModel):
 
     def __init__(self, config: TransformerConfig, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
+        for module in self.modules():
+            if isinstance(module, SharedExpertMLP):
+                _install_shared_swiglu_hooks(module)
+            if isinstance(module, TransformerLayer) and isinstance(module.pre_mlp_layernorm, GrugGatedRMSNorm):
+                module.pre_mlp_layernorm.feeds_router = True
         if self.pre_process:
             self.embed_norm = GrugGatedRMSNorm(
                 config=config, hidden_size=config.hidden_size, eps=config.layernorm_epsilon

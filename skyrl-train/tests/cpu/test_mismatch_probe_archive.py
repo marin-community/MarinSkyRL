@@ -83,9 +83,7 @@ class _PolicyEndpoint:
         if method == "probe_time_training_pass":
             self.timed_modes.append(data.metadata["probe_mode"])
             repetitions = data.metadata["probe_timing_repetitions"]
-            return [
-                {"seconds": [0.5 + dp] * repetitions, "peak_memory_bytes": 100 * (dp + 1)} for dp in range(2)
-            ]
+            return [{"seconds": [0.5 + dp] * repetitions, "peak_memory_bytes": 100 * (dp + 1)} for dp in range(2)]
         if method != "probe_forward":
             raise ValueError(method)
         width = data.metadata["response_length"]

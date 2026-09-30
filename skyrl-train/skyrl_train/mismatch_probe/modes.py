@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+from skyrl_train.mismatch_probe.numerics import NUMERICS_FLAGS, grug_numerics
 
 NATIVE_MODE = "native"
 REPEAT_MODE = "repeat"
@@ -63,3 +65,27 @@ TRAINER_MODES: dict[str, ModeSpec] = {
     RESPONSE_REPLAY_MODE: ModeSpec(_replay, requires_routes=True, replays_prompt=False),
     FILTERED_REPLAY_MODE: ModeSpec(_replay, requires_routes=True, requires_keep_fraction=True),
 }
+
+# Candidate rounding points (see ``mismatch_probe/numerics.py``), each scored under re-read replay (the
+# prefill metric) and under native routing (route agreement); ``all_rounding`` enables every flag.
+ALL_ROUNDING = "all_rounding"
+_NUMERICS_CANDIDATES = {
+    **{flag: {flag: True, **({"gated_norm": True} if flag == "router_input" else {})} for flag in NUMERICS_FLAGS},
+    ALL_ROUNDING: dict.fromkeys(NUMERICS_FLAGS, True),
+}
+
+
+def _with_numerics(base: Callable, flags: Mapping[str, bool]):
+    @contextmanager
+    def scope(worker: ProbeWorker, settings: Mapping[str, Any]) -> Iterator[None]:
+        with grug_numerics(**flags), base(worker, settings):
+            yield
+
+    return scope
+
+
+for _candidate, _flags in _NUMERICS_CANDIDATES.items():
+    TRAINER_MODES[f"{REREAD_REPLAY_MODE}+{_candidate}"] = ModeSpec(
+        _with_numerics(_replay, _flags), requires_routes=True, route_source="reread"
+    )
+    TRAINER_MODES[f"{NATIVE_MODE}+{_candidate}"] = ModeSpec(_with_numerics(_native, _flags), replays_prompt=False)
