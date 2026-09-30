@@ -3,12 +3,14 @@
 from collections.abc import Sequence
 from typing import NamedTuple
 
+import numpy as np
+
 from skyrl_train.distillation import INVALID_TOPK_INDEX
 
 
 class AlignedStudentTopK(NamedTuple):
-    indices: tuple[tuple[int, ...], ...]
-    topk_logprobs: tuple[tuple[float, ...], ...]
+    indices: np.ndarray
+    topk_logprobs: np.ndarray
 
 
 def align_student_topk(
@@ -27,7 +29,7 @@ def align_student_topk(
         raise ValueError("student top-K alignment requires response IDs and loss mask to have equal length")
     if len(generated_ids) != len(candidate_ids) or len(candidate_scores) != len(candidate_ids):
         raise ValueError("student top-K candidate rows must align with generated IDs")
-    if not candidate_ids:
+    if len(candidate_ids) == 0:
         return None
     if list(generated_ids) != [token_id for token_id, keep in zip(response_ids, loss_mask, strict=True) if keep]:
         return None
@@ -38,15 +40,15 @@ def align_student_topk(
         len(ids) != width or len(scores) != width for ids, scores in zip(candidate_ids, candidate_scores, strict=True)
     ):
         raise ValueError("student top-K candidate widths must agree across tokens")
-    aligned_ids = []
-    aligned_scores = []
-    generated_index = 0
-    for keep in loss_mask:
-        if keep:
-            aligned_ids.append(tuple(candidate_ids[generated_index]))
-            aligned_scores.append(tuple(candidate_scores[generated_index]))
-            generated_index += 1
-        else:
-            aligned_ids.append((INVALID_TOPK_INDEX,) * width)
-            aligned_scores.append((0.0,) * width)
-    return AlignedStudentTopK(tuple(aligned_ids), tuple(aligned_scores))
+    candidate_ids_array = np.asarray(candidate_ids, dtype=np.int64)
+    id_dtype = (
+        np.int32
+        if candidate_ids_array.min() >= np.iinfo(np.int32).min and candidate_ids_array.max() <= np.iinfo(np.int32).max
+        else np.int64
+    )
+    aligned_ids = np.full((len(response_ids), width), INVALID_TOPK_INDEX, dtype=id_dtype)
+    aligned_scores = np.zeros((len(response_ids), width), dtype=np.float32)
+    generated_positions = np.flatnonzero(loss_mask)
+    aligned_ids[generated_positions] = candidate_ids_array
+    aligned_scores[generated_positions] = np.asarray(candidate_scores, dtype=np.float32)
+    return AlignedStudentTopK(aligned_ids, aligned_scores)
