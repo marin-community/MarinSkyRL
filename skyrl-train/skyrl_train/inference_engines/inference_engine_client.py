@@ -44,6 +44,30 @@ import numpy as np
 
 ABORT_FINISH_REASON = "abort"
 
+
+def _route_rows(rows: Any, response_length: int) -> np.ndarray:
+    """Keep generated-token routes in the array form consumed by rollout code."""
+    try:
+        result = np.asarray(rows)
+    except (TypeError, ValueError) as error:
+        raise ValueError("routed_experts must be uniform integer rows") from error
+    if response_length == 0 and result.size == 0:
+        return np.empty((0, 0, 0), dtype=np.uint8)
+    if (
+        result.ndim != 3
+        or result.shape[0] != response_length
+        or result.shape[1] == 0
+        or result.shape[2] == 0
+        or not np.issubdtype(result.dtype, np.integer)
+        or np.any(result < 0)
+        or np.any(result > np.iinfo(np.uint32).max)
+    ):
+        raise ValueError("routed_experts must be nonnegative integer rows aligned with response tokens")
+    maximum = int(result.max())
+    dtype = np.uint8 if maximum <= 255 else np.uint16 if maximum <= 65535 else np.uint32
+    return result.astype(dtype, copy=False)
+
+
 # Cap on the session -> engine memo so it cannot grow unbounded across a long run.
 # Sessions are evicted LRU once the cap is exceeded (a re-appearing evicted session
 # is simply re-assigned by load, which is harmless).
@@ -356,7 +380,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         stop_reasons: list[str] = [""] * n
         response_logprobs: List[Optional[List[float]]] = [None for _ in range(n)]
         response_ids: List[List[int]] = [[] for _ in range(n)]
-        routed_experts: List[Optional[List[List[List[int]]]]] = [None for _ in range(n)]
+        routed_experts: List[Optional[np.ndarray]] = [None for _ in range(n)]
         prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
         student_topk_indices: List[Optional[List[List[int]]]] = [None for _ in range(n)]
         behavior_topk_logprobs: List[Optional[List[List[float]]]] = [None for _ in range(n)]
@@ -385,9 +409,9 @@ class InferenceEngineClient(InferenceEngineInterface):
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
                 response_ids[original_idx] = result["response_ids"][local_idx]
                 if captured_routes is not None:
-                    if len(captured_routes[local_idx]) != len(response_ids[original_idx]):
-                        raise ValueError("Inference engine routed-expert tokens must align with response tokens")
-                    routed_experts[original_idx] = captured_routes[local_idx]
+                    routed_experts[original_idx] = _route_rows(
+                        captured_routes[local_idx], len(response_ids[original_idx])
+                    )
                 if result.get("response_logprobs", None):
                     add_resp_logprobs = True
                     response_logprobs[original_idx] = result["response_logprobs"][local_idx]
@@ -491,7 +515,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         accum_response_logprobs: List[float] = []
         accum_student_topk_indices: List[List[int]] = []
         accum_behavior_topk_logprobs: List[List[float]] = []
-        accum_routed_experts: List[List[List[int]]] = []
+        accum_routed_experts: List[np.ndarray] = []
         saw_student_topk: Optional[bool] = None
         saw_routed_experts: Optional[bool] = None
         stop_reason: str = ABORT_FINISH_REASON
@@ -582,9 +606,13 @@ class InferenceEngineClient(InferenceEngineInterface):
                 raise ValueError("Inference engine omitted routed experts for part of a response")
             saw_routed_experts = has_routes
             if has_routes:
-                if len(captured_routes) != 1 or len(captured_routes[0]) != len(new_response_ids):
-                    raise ValueError("Inference engine routed-expert tokens must align with response tokens")
-                accum_routed_experts.extend(captured_routes[0])
+                if len(captured_routes) != 1:
+                    raise ValueError("Inference engine routed-expert rows must align with responses")
+                rows = _route_rows(captured_routes[0], len(new_response_ids))
+                if rows.size:
+                    if accum_routed_experts and rows.shape[1:] != accum_routed_experts[0].shape[1:]:
+                        raise ValueError("Inference engine routed-expert geometry changed during retry")
+                    accum_routed_experts.append(rows)
 
             # 3.5 Accumulate outputs
             accum_response_ids.extend(new_response_ids)
@@ -613,7 +641,11 @@ class InferenceEngineClient(InferenceEngineInterface):
             output["student_topk_indices"] = [accum_student_topk_indices]
             output["behavior_topk_logprobs"] = [accum_behavior_topk_logprobs]
         if saw_routed_experts:
-            output["routed_experts"] = [accum_routed_experts]
+            output["routed_experts"] = [
+                np.concatenate(accum_routed_experts, axis=0)
+                if accum_routed_experts
+                else np.empty((0, 0, 0), dtype=np.uint8)
+            ]
         return output
 
     async def _chat_completion_with_retry(

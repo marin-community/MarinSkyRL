@@ -424,7 +424,7 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
         assert out["responses"][i] == expected_texts[i]
         assert out["response_ids"][i] == [i, i]
         assert out["stop_reasons"][i] == "stop"
-        assert out["routed_experts"][i] == [[[i, i + 1]], [[i + 2, i + 3]]]
+        np.testing.assert_array_equal(out["routed_experts"][i], [[[i, i + 1]], [[i + 2, i + 3]]])
     if session_ids is not None:
         observed = [session_id for engine in engines for batch in engine.inputs for session_id in batch["session_ids"]]
         assert sorted(observed) == sorted(session_ids)
@@ -1041,7 +1041,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, tokenizer, 
     assert out["response_ids"] == [expected_final_response_ids]
     assert out["stop_reasons"] == ["stop"]
     assert out["response_logprobs"] == [[-0.1, -0.2, -0.3, -0.4]]
-    assert out["routed_experts"] == [[[[3, 4]], [[5, 6]], [[7, 8]], [[9, 10]]]]
+    np.testing.assert_array_equal(out["routed_experts"][0], [[[3, 4]], [[5, 6]], [[7, 8]], [[9, 10]]])
 
 
 @pytest.mark.asyncio
