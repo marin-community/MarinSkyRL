@@ -42,4 +42,6 @@ Multiply tokens/GPU-second by 3,600 to obtain tokens/GPU-hour. For a short job, 
 
 For short Snowball H100 math RL, start by evaluating the historical **32 learner + 8 serving GPU** example and its [exact shape and evidence](performance-megatron.md#worked-task-short-snowball-math-rl-on-h100). Check warm learner wait and server activity together. If wait is already negligible, retain the serving allocation and inspect training/scoring/publication. If wait grows with high queues or preemptions, use the [vLLM diagnosis table](performance-vllm.md#read-the-signals-together).
 
+**This is a sizing candidate, not a currently runnable Marin recipe.** Marin's normal Snowball entrypoint fixes 128 prompts × four answers and still emits removed async settings. Its recipe and runtime translation need an update before a dry run can validate the worked 256 × eight task. See the [current launcher gap](performance-megatron.md#worked-task-short-snowball-math-rl-on-h100).
+
 For other tasks, select the closest measured row in the two guides. Cells without matching evidence are **unknown**. Keep a proposed probe smaller than the work it might save: state the decision, use a fixed small bank, and include startup cost before allocating GPUs.
