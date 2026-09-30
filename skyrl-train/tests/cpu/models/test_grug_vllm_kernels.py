@@ -8,6 +8,7 @@ from skyrl_train.models.grug_vllm_kernels import (
     Fa3Request,
     expert_weight_offsets,
     fa3_split_counts,
+    fixed_rows_linear,
     vllm_ep_combine,
     vllm_qkv_projection,
 )
@@ -111,3 +112,12 @@ def test_expert_weight_offsets_address_each_expert_from_the_lowest_addressed_wei
     with pytest.raises(ValueError, match="whole"):
         expert_weight_offsets([base, misaligned], base)
 
+
+@pytest.mark.parametrize("rows", [4, 15, 64])
+def test_fixed_rows_linear_computes_every_row_in_calls_of_the_given_size(rows):
+    generator = torch.Generator().manual_seed(0)
+    # Small integers keep the products and sums exact, so only a lost or misplaced row can differ.
+    x = torch.randint(-3, 4, (3, 5, 8), generator=generator).float()
+    weight = torch.randint(-3, 4, (6, 8), generator=generator).float()
+
+    assert torch.equal(fixed_rows_linear(x, weight, rows), torch.nn.functional.linear(x, weight))

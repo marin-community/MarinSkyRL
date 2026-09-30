@@ -28,7 +28,9 @@ expert-parallel addition order:
   and up separately), instead of Transformer Engine's fused GEMMs;
 - ``vllm_experts``: the routed experts' values come from vLLM's fused-MoE Triton kernels with vLLM's
   configs (route weight inside the fp32 down-projection accumulator, one rounding); the backward stays
-  the trainer's grouped-GEMM experts. It replaces ``route_weight``.
+  the trainer's grouped-GEMM experts. It replaces ``route_weight``;
+- ``router_rows``: the fp32 router GEMM (``router_gemm``'s) runs in calls of a full vLLM prefill step's
+  8,192 rows, so its summation order does not follow the micro-batch size.
 
 Probe modes set flags for one scoring forward. The process default is the current trainer numerics, or
 the set named by ``trainer.mismatch_probe.train_numerics``, which then applies to training too.
@@ -56,6 +58,7 @@ class GrugNumerics:
     ep_sum: bool = False
     vllm_gemm: bool = False
     vllm_experts: bool = False
+    router_rows: bool = False
 
 
 NUMERICS_FLAGS = tuple(field.name for field in fields(GrugNumerics))
