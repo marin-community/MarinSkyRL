@@ -32,8 +32,20 @@ RUN_TIMEOUT_SECONDS = 300
 def cat_count_policy(pytestconfig) -> Path:
     # pytest's cache is portable and reusable across CI invocations; this fixture does no RL.
     parameters = argparse.Namespace(steps=3000, lr=3e-4, width=128, layers=2, seed=0)
-    script = Path(pretrain.__code__.co_filename).read_bytes()
-    identity = hashlib.sha256(script + json.dumps(vars(parameters), sort_keys=True).encode()).hexdigest()[:16]
+    repository = Path(__file__).resolve().parents[3]
+    sources = (
+        "skyrl-train/examples/cat_count/cpu_canary.py",
+        "skyrl-gym/skyrl_gym/envs/cat_count/reward.py",
+        "skyrl-train/tests/cpu/test_cat_count_cpu_canary.py",
+        "pyproject.toml",
+        "skyrl-gym/pyproject.toml",
+        "uv.lock",
+    )
+    digest = hashlib.sha256(json.dumps(vars(parameters), sort_keys=True).encode())
+    for source in sources:
+        digest.update(source.encode())
+        digest.update((repository / source).read_bytes())
+    identity = digest.hexdigest()[:16]
     directory = Path(pytestconfig.cache.mkdir("cat_count_policy")) / f"llama-{identity}"
     parameters.out = directory
     if not all((directory / name).exists() for name in ("model.safetensors", "config.json", "tokenizer.json")):
@@ -201,7 +213,9 @@ async def test_cpu_sampling_preserves_trajectory_rng_and_minimum_tokens(cat_coun
         await engine.teardown()
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2])
+@pytest.mark.parametrize(
+    "seed", [0, pytest.param(1, marks=pytest.mark.nightly), pytest.param(2, marks=pytest.mark.nightly)]
+)
 def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_policy, cat_count_session, runs, seed):
     positive = train(runs, tmp_path / "positive", cat_count_policy, seed=seed)
     negative = train(runs, tmp_path / "negative", cat_count_policy, flipped=True, seed=seed)
