@@ -85,6 +85,8 @@ jobs:
           path: .pytest_cache/d/cat_count_policy
           key: cat-count-policy-${{ runner.os }}-${{ hashFiles('skyrl-train/examples/cat_count/cpu_canary.py', 'uv.lock') }}
       - name: Run cpu tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
         run: uv run --frozen pytest skyrl-train/tests/cpu/ -m "not nightly" -n auto --dist loadgroup
 
   skyrl_train_macos_install:
