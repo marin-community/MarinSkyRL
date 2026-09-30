@@ -39,6 +39,7 @@ class RolloutEvidence:
     student_topk_indices: np.ndarray | None = None
     behavior_topk_logprobs: np.ndarray | None = None
     routed_experts: np.ndarray | None = None
+    prompt_routed_experts: np.ndarray | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -65,6 +66,9 @@ class RolloutEvidence:
         if self.routed_experts is not None:
             if len(self.routed_experts) != len(self.response_token_ids):
                 raise ValueError("routed_experts must align with response_token_ids")
+        if self.prompt_routed_experts is not None:
+            if len(self.prompt_routed_experts) != len(self.prompt_token_ids):
+                raise ValueError("prompt_routed_experts must align with prompt_token_ids")
 
 
 class VerificationStatus(StrEnum):

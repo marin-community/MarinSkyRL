@@ -49,6 +49,7 @@ class _InferenceEndpoint:
 
 class _PolicyEndpoint:
     def __init__(self):
+        self.prompt_routes_by_mode = {}
         self.actor_infos = [
             SimpleNamespace(rank=MeshRank(dp=dp, sp=0, tp=0, pp=0, world_size=2, dp_size=2, pp_size=1))
             for dp in range(2)
@@ -60,6 +61,7 @@ class _PolicyEndpoint:
         if method != "probe_forward":
             raise ValueError(method)
         width = data.metadata["response_length"]
+        self.prompt_routes_by_mode[data.metadata["probe_mode"]] = data["rollout_prompt_routed_experts"].clone()
         probabilities = torch.log_softmax(torch.arange(32, dtype=torch.float32), dim=0)
         outputs = []
         for dp in range(2):
@@ -105,6 +107,7 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     cfg.trainer.mismatch_probe.prompts.count = 3
     cfg.trainer.mismatch_probe.prompts.samples_per_prompt = 1
     cfg.trainer.policy.megatron_config.moe_router_replay = True
+    cfg.trainer.mismatch_probe.extra_trainer_modes = ["router_replay", "router_replay_response"]
     cfg.trainer.algorithm.advantage_estimator = "uniform"
     cfg.trainer.algorithm.use_tis = False
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
@@ -125,6 +128,11 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
         "loss_masks": [[1] * 4 for _ in range(3)],
         "rollout_logprobs": [np.asarray([-0.125, -2.75, -1.5, -0.5], dtype=np.float32) for _ in range(3)],
         "rollout_routed_experts": [routes.copy() for _ in range(3)],
+        "rollout_prompt_routed_experts": [
+            np.asarray([[[3, 4]], [[5, 6]]], dtype=np.uint8),
+            np.asarray([[[1, 7]]], dtype=np.uint8),
+            np.asarray([[[2, 3]], [[4, 5]], [[6, 7]]], dtype=np.uint8),
+        ],
     }
     prompt_ids = [f"prompt-{i}" for i in range(3)]
     sample_ids = [f"sample-{i}" for i in range(3)]
@@ -135,6 +143,9 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     assert not collector.training_input["loss_mask"][-1].any()
     for row in probes:
         assert row.route_valid_mask == [[True], [False], [True], [False]]
+    for row, expected in zip(probes, trajectory["rollout_prompt_routed_experts"], strict=True):
+        archived = np.frombuffer(row.prompt_routed_experts, dtype=row.prompt_routed_experts_dtype)
+        np.testing.assert_array_equal(archived.reshape(row.prompt_routed_experts_shape), expected)
     weights_hash = "sha256:" + hashlib.sha256(("0" * 64).encode()).hexdigest()
     generation = [
         mismatch.ScoreRow(
@@ -208,3 +219,9 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     assert chained.manifest.starting_global_step == 7
     assert chained.probes == probes
     assert chained.generations == source.generations
+    # Prompt positions replay only in full router replay; native and response-only scorings route them natively.
+    replayed = trainer.policy_model.prompt_routes_by_mode["router_replay"]
+    assert replayed[0, :, 0].tolist() == [[0, 0], [3, 4], [5, 6]]
+    assert replayed[1, :, 0].tolist() == [[0, 0], [0, 0], [1, 7]]
+    for mode in ("native", "repeat", "router_replay_response"):
+        assert not trainer.policy_model.prompt_routes_by_mode[mode].any()

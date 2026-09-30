@@ -225,6 +225,7 @@ class MegatronWorker:
                     if "rollout_routed_experts" in micro.keys()
                     else None,
                     probe_row_indices=micro.get("probe_row_indices"),
+                    rollout_prompt_routed_experts=micro.get("rollout_prompt_routed_experts"),
                 )
             )
 
@@ -329,6 +330,7 @@ class MegatronWorker:
                 position_ids=micro.position_ids,
                 num_actions=micro.num_actions,
                 rollout_routed_experts=micro.rollout_routed_experts,
+                rollout_prompt_routed_experts=micro.rollout_prompt_routed_experts,
             )
             for micro in micro_buffer
         ]
@@ -610,6 +612,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         distillation=experience.distillation,
                         global_loss_denom=(experience.metadata or {}).get(GLOBAL_LOSS_DENOM_METADATA_KEY),
                         rollout_routed_experts=experience.rollout_routed_experts,
+                        rollout_prompt_routed_experts=experience.rollout_prompt_routed_experts,
                     )
                 )
 

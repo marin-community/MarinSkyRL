@@ -22,14 +22,8 @@ def decode_routed_experts(routes: str, expected_rows: int) -> np.ndarray:
     return rows
 
 
-def normalize_routed_experts(routes: str, prompt_ids: list[int], response_ids: list[int]) -> np.ndarray:
-    """Return response routes, with a sentinel for the final unforwarded token.
-
-    vLLM's encoded array starts at the first prompt token and ends at the
-    penultimate generated token. The last generated token has no forward pass.
-    """
-    expected = len(prompt_ids) + len(response_ids) - 1
-    rows = decode_routed_experts(routes, expected)
+def _validated_route_rows(routes: str, prompt_ids: list[int], response_ids: list[int]) -> np.ndarray:
+    rows = decode_routed_experts(routes, len(prompt_ids) + len(response_ids) - 1)
     if (
         rows.ndim != 3
         or rows.shape[1] == 0
@@ -39,15 +33,29 @@ def normalize_routed_experts(routes: str, prompt_ids: list[int], response_ids: l
         or np.any(rows > np.iinfo(np.uint32).max)
     ):
         raise ValueError("routed_experts must have [token, layer, expert] nonnegative integer shape")
-    response_rows = rows[len(prompt_ids) :]
-    dtype = (
-        np.uint8
-        if not response_rows.size or response_rows.max() <= 255
-        else np.min_scalar_type(int(response_rows.max()))
-    )
-    result = np.empty((len(response_ids), *rows.shape[1:]), dtype=dtype)
+    return rows
+
+
+def _compact(rows: np.ndarray) -> np.ndarray:
+    dtype = np.uint8 if not rows.size or rows.max() <= 255 else np.min_scalar_type(int(rows.max()))
+    return rows.astype(dtype, copy=False)
+
+
+def normalize_routed_experts(routes: str, prompt_ids: list[int], response_ids: list[int]) -> np.ndarray:
+    """Return response routes, with a sentinel for the final unforwarded token.
+
+    vLLM's encoded array starts at the first prompt token and ends at the
+    penultimate generated token. The last generated token has no forward pass.
+    """
+    response_rows = _compact(_validated_route_rows(routes, prompt_ids, response_ids)[len(prompt_ids) :])
+    result = np.empty((len(response_ids), *response_rows.shape[1:]), dtype=response_rows.dtype)
     if not response_ids:
         return result
     result[:-1] = response_rows
     result[-1] = 0
     return result
+
+
+def prompt_routed_experts(routes: str, prompt_ids: list[int], response_ids: list[int]) -> np.ndarray:
+    """Return the experts vLLM selected for each prompt token, one row per prompt token."""
+    return _compact(_validated_route_rows(routes, prompt_ids, response_ids)[: len(prompt_ids)])

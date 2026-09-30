@@ -45,6 +45,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
 from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
 from skyrl_train.dataset.preprocess import (
     collate_response_token_channel,
+    collate_prompt_routed_experts,
     convert_prompts_responses_to_batch_tensors,
 )
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC, validate_distillation_attachment
@@ -2014,6 +2015,9 @@ class RayPPOTrainer:
         # (the field is never even passed to the collator nor set on the batch).
         moe_router_replay = moe_router_replay_requested(self.cfg)
         routed_experts = trajectory_batch.get("rollout_routed_experts", None) if moe_router_replay else None
+        prompt_routed_experts = (
+            trajectory_batch.get("rollout_prompt_routed_experts", None) if routed_experts is not None else None
+        )
         # Deterministic dtype for the rollout_routed_experts transport tensor:
         # resolve the model's expert count once (memoized) and pass it to the
         # collator so the narrowed dtype is keyed on num_experts (max possible id),
@@ -2117,6 +2121,10 @@ class RayPPOTrainer:
         # exactly the same keys as today (TensorBatch.__eq__ compares key sets).
         if rollout_routed_experts_tensor is not None:
             training_input["rollout_routed_experts"] = rollout_routed_experts_tensor
+            if prompt_routed_experts is not None:
+                training_input["rollout_prompt_routed_experts"] = collate_prompt_routed_experts(
+                    prompt_routed_experts, prompt_ids, num_experts
+                )
         training_input.update(distillation_tensors)
         # Stage B (F5/F4): attach the per-token shaping channel + span tags ONLY
         # when present, so the flag-off batch dict has exactly the same keys as
@@ -2495,8 +2503,9 @@ class RayPPOTrainer:
         # Gated on presence: flag-off (8B / no router-replay) batches never carry
         # this key, so the selected key set is byte-identical to before.
         fwd_keys = ["sequences", "attention_mask"]
-        if "rollout_routed_experts" in training_input.keys():
-            fwd_keys.append("rollout_routed_experts")
+        for key in ("rollout_routed_experts", "rollout_prompt_routed_experts"):
+            if key in training_input.keys():
+                fwd_keys.append(key)
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
         data_fwd_pass.metadata["global_step"] = self.global_step
 

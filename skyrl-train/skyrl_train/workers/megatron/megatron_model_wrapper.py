@@ -55,6 +55,7 @@ class MegatronForwardMicroBatch:
     num_actions: int
     rollout_routed_experts: Optional[torch.Tensor] = None
     probe_row_indices: Optional[torch.Tensor] = None
+    rollout_prompt_routed_experts: Optional[torch.Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,7 @@ class MegatronPolicyMicroBatch:
     global_loss_denom: Optional[float]
     distillation: Optional[DistillationInput] = None
     rollout_routed_experts: Optional[torch.Tensor] = None
+    rollout_prompt_routed_experts: Optional[torch.Tensor] = None
 
 
 class MegatronModelWrapper:
@@ -190,6 +192,7 @@ class MegatronModelWrapper:
         num_actions: int,
         layer_indices: tuple[int, ...],
         probe_row_indices: Optional[torch.Tensor] = None,
+        rollout_prompt_routed_experts: Optional[torch.Tensor] = None,
     ):
         """Build per-layer router targets in the exact token order the routers see.
 
@@ -218,7 +221,9 @@ class MegatronModelWrapper:
         )
 
         device = sequences.device
-        dense, mask_BS = dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions)
+        dense, mask_BS = dense_replay_targets(
+            rollout_routed_experts, batch_size, seq_len, num_actions, rollout_prompt_routed_experts
+        )
         response_BS = torch.zeros_like(mask_BS)
         response_BS[:, seq_len - response_len :] = True
         probe_positions = None
@@ -284,6 +289,7 @@ class MegatronModelWrapper:
         probe_row_indices: Optional[torch.Tensor] = None,
         num_actions: Optional[int] = None,
         record_recompute: bool = False,
+        rollout_prompt_routed_experts: Optional[torch.Tensor] = None,
     ):
         """Run the shared packed or left-unpadded Megatron model boundary.
 
@@ -303,7 +309,13 @@ class MegatronModelWrapper:
                 id(model), self.router_replay.local_layer_indices
             )
             targets = self._build_router_replay_targets(
-                sequences, attention_mask, rollout_routed_experts, num_actions, layer_indices, probe_row_indices
+                sequences,
+                attention_mask,
+                rollout_routed_experts,
+                num_actions,
+                layer_indices,
+                probe_row_indices,
+                rollout_prompt_routed_experts,
             )
             self.router_replay.begin_forward(
                 targets.per_layer,
@@ -391,6 +403,7 @@ class MegatronModelWrapper:
                 rollout_routed_experts=batch.rollout_routed_experts,
                 probe_row_indices=batch.probe_row_indices,
                 num_actions=batch.num_actions,
+                rollout_prompt_routed_experts=batch.rollout_prompt_routed_experts,
             )
 
             return outputs, partial(collection_func, data=batch, packed_seq_params=packed_seq_params)
@@ -547,6 +560,7 @@ class MegatronModelWrapper:
                 rollout_routed_experts=batch.rollout_routed_experts,
                 num_actions=batch.num_actions,
                 record_recompute=True,
+                rollout_prompt_routed_experts=batch.rollout_prompt_routed_experts,
             )
 
             return outputs, partial(loss_func, data=batch, packed_seq_params=packed_seq_params)

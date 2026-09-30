@@ -440,3 +440,18 @@ class TestDenseReplayTargets:
                 )
                 assert torch.equal(row[:, :], rollout[b, t])
                 assert mask[b, prompt_start + t].item() == (not row_is_sentinel)
+
+    def test_prompt_routes_replay_captured_prompt_positions_and_leave_padding_native(self):
+        rollout = torch.tensor([[[[1, 2]], [[3, 4]]], [[[5, 6]], [[0, 0]]]])
+        # Left-padded prompt axis: sample 0 has a one-token prompt, sample 1 a two-token prompt.
+        prompt = torch.tensor([[[[0, 0]], [[7, 1]]], [[[2, 5]], [[6, 3]]]])
+
+        full, mask = dense_replay_targets(rollout, 2, 4, 2, prompt)
+
+        assert full[:, :, 0].tolist() == [
+            [[0, 0], [7, 1], [1, 2], [3, 4]],
+            [[2, 5], [6, 3], [5, 6], [0, 0]],
+        ]
+        assert mask.tolist() == [[False, True, True, True], [True, True, True, False]]
+        with pytest.raises(ValueError, match="prompt routes have shape"):
+            dense_replay_targets(rollout, 2, 4, 2, prompt[:, 1:])

@@ -66,16 +66,17 @@ def require_scalar_num_actions(num_actions) -> None:
         )
 
 
-def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions):
+def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions, prompt_routed_experts=None):
     """Build the dense per-position replay target and mask, layout-agnostic.
 
     ``rollout_routed_experts`` is ``[B, response_len, L, K]`` on the response
-    axis. Returns ``(full, mask)`` where ``full`` is a ``[B, seq_len, L, K]``
-    long tensor sentinel-filled outside the response window and ``mask`` is a
-    ``[B, seq_len]`` bool tensor True only on response positions whose captured
-    row is non-sentinel (a row is sentinel iff all K captured experts equal
-    ``SENTINEL_EXPERT_ID``). Prompt / pad / sentinel rows fall through to
-    native routing.
+    axis. ``prompt_routed_experts``, when given, is ``[B, seq_len - response_len,
+    L, K]`` on the left-padded prompt axis. Returns ``(full, mask)`` where
+    ``full`` is a ``[B, seq_len, L, K]`` long tensor sentinel-filled where no
+    route was captured and ``mask`` is a ``[B, seq_len]`` bool tensor True only
+    on positions whose captured row is non-sentinel (a row is sentinel iff all K
+    captured experts equal ``SENTINEL_EXPERT_ID``). Pad and sentinel rows, and
+    prompt rows when no prompt routes are given, fall through to native routing.
     """
     require_scalar_num_actions(num_actions)
     device = rollout_routed_experts.device
@@ -86,13 +87,17 @@ def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_action
 
     full = torch.full((batch_size, seq_len, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)
     full[:, seq_len - response_len : seq_len, :, :] = captured
+    if prompt_routed_experts is not None:
+        prompt_len = seq_len - response_len
+        if tuple(prompt_routed_experts.shape) != (batch_size, prompt_len, L, K):
+            raise ValueError(
+                f"router_replay prompt routes have shape {tuple(prompt_routed_experts.shape)}; "
+                f"expected {(batch_size, prompt_len, L, K)}"
+            )
+        full[:, :prompt_len, :, :] = prompt_routed_experts.to(device=device, dtype=torch.long)
 
-    response_pos = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
-    response_pos[:, seq_len - response_len : seq_len] = True
-    # non-sentinel per [B, seq_len, L]; collapse over L: a position is valid
-    # for replay only where every layer carries real data, then AND with response_pos.
-    non_sentinel = (full != SENTINEL_EXPERT_ID).any(dim=-1).all(dim=-1)  # [B, seq_len]
-    return full, response_pos & non_sentinel
+    # A position is valid for replay only where every layer carries real data.
+    return full, (full != SENTINEL_EXPERT_ID).any(dim=-1).all(dim=-1)
 
 
 # The all-K-sentinel capture convention is only unambiguous when native top-k

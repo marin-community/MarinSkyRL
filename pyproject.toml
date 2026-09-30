@@ -180,7 +180,7 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 override-dependencies = [
-    "marin-finestore @ https://github.com/marin-community/marin/archive/376d12598c668477959703275aaba709a9e056b9.tar.gz#subdirectory=lib/finestore",
+    "marin-finestore @ https://github.com/marin-community/marin/archive/5224396ac1815f2bba8863b5b6ccf45c2b6cb7f6.tar.gz#subdirectory=lib/finestore",
     # Megatron Bridge declares this native extension but does not import or use it.
     "fast-hadamard-transform ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",

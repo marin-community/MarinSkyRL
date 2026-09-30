@@ -394,6 +394,7 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
     assert output["behavior_topk_logprobs"] == [[[-0.1, -0.2], [-0.1, -0.2]]]
     np.testing.assert_array_equal(output["routed_experts"][0], [[[4, 7]], [[0, 0]]])
     assert output["routed_experts"][0].dtype == np.uint8
+    np.testing.assert_array_equal(output["prompt_routed_experts"][0], [[[1, 2]], [[3, 4]]])
 
 
 @pytest.mark.asyncio

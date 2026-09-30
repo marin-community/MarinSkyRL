@@ -222,6 +222,14 @@ class ProbeCollector:
                 routes.append(decoded.copy())
         if any(route is None for route in routes) and any(route is not None for route in routes):
             raise ValueError("reuse_probe source mixes captured and missing routed-expert rows")
+        prompt_routes = [
+            None
+            if row.prompt_routed_experts is None
+            else np.frombuffer(row.prompt_routed_experts, dtype=row.prompt_routed_experts_dtype)
+            .reshape(row.prompt_routed_experts_shape)
+            .copy()
+            for row in rows
+        ]
         self.generation_scores = [np.asarray(generations[row.sample_id].logprobs, dtype=np.float32) for row in rows]
         trajectory = {
             "prompt_token_ids": [row.prompt_token_ids for row in rows],
@@ -230,6 +238,11 @@ class ProbeCollector:
             "loss_masks": [[int(value) for value in row.loss_mask] for row in rows],
             "rollout_logprobs": self.generation_scores,
             "rollout_routed_experts": routes if all(route is not None for route in routes) else None,
+            **(
+                {"rollout_prompt_routed_experts": prompt_routes}
+                if all(route is not None for route in prompt_routes)
+                else {}
+            ),
             "stop_reasons": ["reused"] * len(rows),
             "rollout_metrics": None,
         }
@@ -300,6 +313,12 @@ class ProbeCollector:
                 )
                 if self.source_manifest is not None:
                     route_valid_mask = self.probes[position].route_valid_mask
+            prompt_routes = training_input.get("rollout_prompt_routed_experts")
+            encoded_prompt_routes = (
+                EncodedRoutes(None, None, None)
+                if prompt_routes is None
+                else _encode_routes(prompt_routes[position, prompt_width - len(trainer_prompt) :], len(trainer_prompt))
+            )
             advantage = None
             if self.source_manifest is None:
                 valid = training_input["loss_mask"][position, :response_length].bool()
@@ -326,6 +345,9 @@ class ProbeCollector:
                     routed_experts_shape=encoded_routes.shape,
                     routed_experts_dtype=encoded_routes.dtype,
                     route_valid_mask=route_valid_mask,
+                    prompt_routed_experts=encoded_prompt_routes.data,
+                    prompt_routed_experts_shape=encoded_prompt_routes.shape,
+                    prompt_routed_experts_dtype=encoded_prompt_routes.dtype,
                 )
             )
         digest = probe_hash(
@@ -507,17 +529,21 @@ class ProbeCollector:
         rows = self.probes
         n = len(rows)
         route_tensor = training_input.get("rollout_routed_experts")
+        prompt_route_tensor = training_input.get("rollout_prompt_routed_experts")
+        route_keys = [
+            *(["rollout_routed_experts"] if route_tensor is not None else []),
+            *(["rollout_prompt_routed_experts"] if prompt_route_tensor is not None else []),
+        ]
         modes = (NATIVE_MODE, REPEAT_MODE, *self.spec.extra_trainer_modes)
         result = []
         for mode in modes:
             order = self.batch_layout.repeat_order if mode == REPEAT_MODE else self.batch_layout.native_order
-            data = training_input.select(
-                ["sequences", "attention_mask", *(["rollout_routed_experts"] if route_tensor is not None else [])],
-                ["response_length"],
-            )
+            data = training_input.select(["sequences", "attention_mask", *route_keys], ["response_length"])
             data["probe_row_indices"] = torch.arange(data.batch_size, dtype=torch.long)
             if not TRAINER_MODES[mode].requires_routes and route_tensor is not None:
                 data["rollout_routed_experts"] = torch.zeros_like(route_tensor)
+            if not TRAINER_MODES[mode].replays_prompt and prompt_route_tensor is not None:
+                data["rollout_prompt_routed_experts"] = torch.zeros_like(prompt_route_tensor)
             if mode == REPEAT_MODE:
                 data = _reorder_batch(data, order + list(range(n, data.batch_size)))
             micro_batch_size = self.batch_layout.repeat_micro_batch_size if mode == REPEAT_MODE else None

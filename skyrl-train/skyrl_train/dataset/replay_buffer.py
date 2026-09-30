@@ -74,6 +74,9 @@ class Experience:
     metadata: Optional[Dict[str, Any]] = None
     # MoE router-replay (R3) field — present only when moe_router_replay is on.
     rollout_routed_experts: Optional[Integer[torch.Tensor, "batch response_len L K"]] = None
+    # Prompt-position routes on the left-padded prompt axis; absent when the rollout
+    # captured none, so prompt positions route natively.
+    rollout_prompt_routed_experts: Optional[Integer[torch.Tensor, "batch prompt_len L K"]] = None
     # Stage D (F7) per-token span tags (SPAN_THINK==1) — present only when the
     # token-reward channel is on; used to down-weight <think> tokens in the loss.
     response_span_tags: Optional[Integer[torch.Tensor, "batch response_len"]] = None
@@ -101,6 +104,8 @@ class Experience:
             self.rollout_logprobs = to(self.rollout_logprobs, device)
         if self.rollout_routed_experts is not None:
             self.rollout_routed_experts = to(self.rollout_routed_experts, device)
+        if self.rollout_prompt_routed_experts is not None:
+            self.rollout_prompt_routed_experts = to(self.rollout_prompt_routed_experts, device)
         if self.response_span_tags is not None:
             self.response_span_tags = to(self.response_span_tags, device)
         if self.distillation is not None:
@@ -127,6 +132,8 @@ class Experience:
             self.rollout_logprobs = self.rollout_logprobs.pin_memory()
         if self.rollout_routed_experts is not None:
             self.rollout_routed_experts = self.rollout_routed_experts.pin_memory()
+        if self.rollout_prompt_routed_experts is not None:
+            self.rollout_prompt_routed_experts = self.rollout_prompt_routed_experts.pin_memory()
         if self.response_span_tags is not None:
             self.response_span_tags = self.response_span_tags.pin_memory()
         if self.distillation is not None:

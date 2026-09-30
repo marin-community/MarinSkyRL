@@ -924,6 +924,12 @@ def concatenate_trajectory_batches(
     }
     if rollout_routed_experts_concat is not None:
         result["rollout_routed_experts"] = rollout_routed_experts_concat
+        # Prompt routes are kept only when every batch captured them; otherwise
+        # every prompt position routes natively.
+        if all(output.get("rollout_prompt_routed_experts") is not None for output in trajectory_batches):
+            result["rollout_prompt_routed_experts"] = sum(
+                [output["rollout_prompt_routed_experts"] for output in trajectory_batches], []
+            )
     if selected_topk_concat is not None:
         result["student_topk_indices"] = selected_topk_concat
         result["behavior_topk_logprobs"] = behavior_topk_concat

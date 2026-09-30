@@ -374,6 +374,8 @@ class TrainingInput(TypedDict, total=False):
     # TensorBatch._check_consistency only validates dim-0, so 4-D is accepted.
     # Consumed in Stage 2 (replay), not here.
     rollout_routed_experts: Optional[Integer[torch.Tensor, "batch_size seq_len L K"]]
+    # Prompt-position routes, [batch, prompt_len, L, K] on the left-padded prompt axis.
+    rollout_prompt_routed_experts: Optional[Integer[torch.Tensor, "batch_size prompt_len L K"]]
     # Loop-behavior reward shaping (Stage B / F5): per-token additive shaping
     # channel, SEPARATE from `rewards` (the RLOO-N outcome term). Default all-zeros
     # and present ONLY when trainer.algorithm.enable_token_reward_channel is True,
@@ -445,6 +447,7 @@ class TrainingBatchIterator(Iterator[Experience]):
                 teacher_on_student_logprobs=batch.get("teacher_on_student_logprobs"),
             ),
             rollout_routed_experts=batch.get("rollout_routed_experts"),
+            rollout_prompt_routed_experts=batch.get("rollout_prompt_routed_experts"),
             response_span_tags=batch.get("response_span_tags"),
             info={},
             metadata=batch.metadata,

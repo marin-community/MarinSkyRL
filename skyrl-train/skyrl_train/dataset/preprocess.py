@@ -38,10 +38,13 @@ def _collate_routed_experts_from_arrays(
     routed_experts: List[np.ndarray],
     max_output_len: int,
     num_experts: Optional[int],
+    *,
+    left_pad: bool = False,
 ) -> "torch.Tensor":
-    """Build a dense ``[B, response, layer, top_k]`` routed-expert tensor.
+    """Build a dense ``[B, tokens, layer, top_k]`` routed-expert tensor.
 
-    Response rows are right-padded with zeroes in the final tensor dtype.
+    Rows are right-padded with zeroes in the final tensor dtype, or left-padded
+    when ``left_pad`` is set (the prompt axis of the training sequences).
     """
     if any(rows.ndim != 3 for rows in routed_experts):
         raise ValueError("routed_experts must contain [token, layer, top_k] arrays")
@@ -67,8 +70,28 @@ def _collate_routed_experts_from_arrays(
     out = np.zeros((len(routed_experts), max_output_len, layers, top_k), dtype=numpy_dtype)
     for index, rows in enumerate(routed_experts):
         count = min(len(rows), max_output_len)
-        out[index, :count, : rows.shape[1], : rows.shape[2]] = rows[:count]
+        start = max_output_len - count if left_pad else 0
+        out[index, start : start + count, : rows.shape[1], : rows.shape[2]] = rows[:count]
     return torch.from_numpy(out)
+
+
+def collate_prompt_routed_experts(
+    prompt_routed_experts: List[np.ndarray],
+    prompts: List[List[int]],
+    num_experts: Optional[int],
+) -> "torch.Tensor":
+    """Build ``[B, prompt_len, layer, top_k]`` prompt routes aligned with the left-padded prompts.
+
+    Each row holds the experts vLLM selected for that prompt token; padding rows are
+    all zeroes, which router replay treats as native routing.
+    """
+    if len(prompt_routed_experts) != len(prompts):
+        raise ValueError("prompt_routed_experts must have one entry per prompt")
+    for rows, prompt in zip(prompt_routed_experts, prompts, strict=True):
+        if len(rows) != len(prompt):
+            raise ValueError("prompt_routed_experts must align with prompt token IDs")
+    max_input_len = max(len(prompt) for prompt in prompts)
+    return _collate_routed_experts_from_arrays(prompt_routed_experts, max_input_len, num_experts, left_pad=True)
 
 
 def _verify_inputs(

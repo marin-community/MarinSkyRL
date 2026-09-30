@@ -432,6 +432,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         collect_logprobs = current_sampling_params.get("logprobs", None) is not None
         rollout_logprobs: Optional[List[float]] = [] if collect_logprobs else None
         rollout_routes: np.ndarray | None = None
+        prompt_routes: np.ndarray | None = None
         route_sentinel: np.ndarray | None = None
         requested_logprobs = current_sampling_params.get("logprobs")
         collect_topk = isinstance(requested_logprobs, int) and requested_logprobs > 0
@@ -519,6 +520,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 if not per_step_rewards:
                     input_ids = rendered_prompt_ids[0]
                     initial_prompt_length = len(input_ids)
+                    prompt_routes_batch = engine_output.get("prompt_routed_experts")
+                    prompt_routes = prompt_routes_batch[0] if prompt_routes_batch is not None else None
             stop_reason = engine_output["stop_reasons"][0]
             assistant_messages = engine_output.get("assistant_messages")
             assistant_message = assistant_messages[0] if assistant_messages is not None else None
@@ -912,6 +915,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             student_topk_indices=None if selected is None else selected.indices,
             behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
             routed_experts=rollout_routes,
+            prompt_routed_experts=(
+                prompt_routes
+                if rollout_routes is not None and prompt_routes is not None and len(prompt_routes) == len(prompt_ids)
+                else None
+            ),
             metadata=({"terminal_exception_type": disposition.exception_type} if terminal_error is not None else {}),
         )
         reward_result = RewardResult(

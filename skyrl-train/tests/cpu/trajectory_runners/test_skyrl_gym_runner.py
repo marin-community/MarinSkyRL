@@ -549,6 +549,7 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
         "stop_reasons": ["tool_calls"],
         "response_logprobs": [[-0.1, -0.2]],
         "routed_experts": [np.asarray([[[1, 2]], [[3, 4]]], dtype=np.uint8)],
+        "prompt_routed_experts": [np.asarray([[[5, 6]], [[7, 8]], [[2, 9]]], dtype=np.uint8)],
         "prompt_logprobs": None,
         "assistant_messages": [assistant_message],
         "token_provenance": "engine",
@@ -580,6 +581,7 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
     assert output.evidence.prompt_token_ids == (11, 12, 13)
     assert output.evidence.response_token_ids == (21, 22)
     np.testing.assert_array_equal(output.evidence.routed_experts, [[[1, 2]], [[3, 4]]])
+    np.testing.assert_array_equal(output.evidence.prompt_routed_experts, [[[5, 6]], [[7, 8]], [[2, 9]]])
 
 
 @pytest.mark.asyncio

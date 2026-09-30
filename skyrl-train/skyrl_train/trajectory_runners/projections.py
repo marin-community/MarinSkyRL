@@ -192,6 +192,11 @@ def attach_routed_experts(
             raise ValueError("routed_experts must align with response token IDs")
         projected.append(np.zeros((len(response), *shape), dtype=dtype) if routes is None else routes)
     batch["rollout_routed_experts"] = projected
+    prompt_routes = [output.evidence.prompt_routed_experts for output in outputs]
+    # Prompt positions are replayed only when every row captured them; otherwise
+    # they route natively, as rows without captured routes do.
+    if all(routes is not None and routes.shape[1:] == shape for routes in prompt_routes):
+        batch["rollout_prompt_routed_experts"] = prompt_routes
 
 
 def attach_student_topk(

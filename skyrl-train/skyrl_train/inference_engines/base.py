@@ -61,6 +61,8 @@ class InferenceEngineOutput(TypedDict):
     prompt_ids: NotRequired[List[List[int]]]
     assistant_messages: NotRequired[List[Dict[str, Any]]]
     routed_experts: NotRequired[List[np.ndarray | None]]
+    # Experts selected for each prompt token, one row per prompt token.
+    prompt_routed_experts: NotRequired[List[np.ndarray | None]]
 
 
 class NamedWeightsUpdateRequest(TypedDict):

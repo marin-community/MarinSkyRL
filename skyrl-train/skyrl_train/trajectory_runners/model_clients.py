@@ -21,7 +21,7 @@ from skyrl_train.inference_engines.chat_template import (
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.response_topk import select_chat_response_topk
 from skyrl_train.trajectory_runners.types import TokenProvenance
-from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
+from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts, prompt_routed_experts
 
 
 # The per-turn output limit, as the trainer config (`max_generate_length`) and vLLM (`max_tokens`) spell it. Chat
@@ -67,14 +67,21 @@ class _ChatResult:
     stop_reason: str
     assistant_message: dict[str, Any]
     routed_experts: np.ndarray | None = None
+    prompt_routed_experts: np.ndarray | None = None
 
 
-def _choice_routed_experts(choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]) -> np.ndarray | None:
+def _choice_routed_experts(
+    choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Return the response routes and the prompt routes vLLM captured for one choice."""
     provider_fields = choice.get("provider_specific_fields") or {}
     routes = choice.get("routed_experts", provider_fields.get("routed_experts"))
     if routes is None:
-        return None
-    return normalize_routed_experts(routes, prompt_ids, response_ids)
+        return None, None
+    return (
+        normalize_routed_experts(routes, prompt_ids, response_ids),
+        prompt_routed_experts(routes, prompt_ids, response_ids),
+    )
 
 
 def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
@@ -96,6 +103,7 @@ def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
         output["behavior_topk_logprobs"] = selected_scores
     if any(result.routed_experts is not None for result in results):
         output["routed_experts"] = [result.routed_experts for result in results]
+        output["prompt_routed_experts"] = [result.prompt_routed_experts for result in results]
     return output
 
 
@@ -290,7 +298,7 @@ class DirectModelClient:
                 text,
                 choice["finish_reason"],
                 message,
-                _choice_routed_experts(choice, prompt_ids, response_ids),
+                *_choice_routed_experts(choice, prompt_ids, response_ids),
             )
 
         results = await asyncio.gather(
