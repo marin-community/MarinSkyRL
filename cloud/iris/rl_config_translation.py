@@ -548,7 +548,7 @@ def parse_rl_config(
     # Resolve relative paths in config sections to absolute paths so they work
     # regardless of the working directory at runtime. Skip data.train_data /
     # data.val_data as they may be HF repo IDs.
-    trainer = resolve_paths_in_dict(trainer, skip_keys={"policy.model.path"})
+    trainer = resolve_paths_in_dict(trainer, skip_keys={"policy.model.path", "callbacks.metric_groups"})
     generator = resolve_paths_in_dict(generator)
 
     parse_speculative_decoding_config(
@@ -601,7 +601,9 @@ def parse_checkpoint_export_config(
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: RL config must contain a mapping at the document root")
 
-    trainer = resolve_paths_in_dict(copy.deepcopy(raw.get("trainer", {})), skip_keys={"policy.model.path"})
+    trainer = resolve_paths_in_dict(
+        copy.deepcopy(raw.get("trainer", {})), skip_keys={"policy.model.path", "callbacks.metric_groups"}
+    )
     trainer.setdefault("policy", {}).setdefault("model", {})["path"] = model_override
     return ParsedCheckpointExportConfig(
         config_path=path,
