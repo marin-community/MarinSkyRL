@@ -372,6 +372,8 @@ trainer:
     capture_layers: []
     # Modes whose forward + backward on the probe batch is timed after scoring (zero advantages).
     timing_modes: []
+    # Numerics set (a mismatch_probe/modes.py NUMERICS_CANDIDATES name) the policy trains and scores under by default.
+    train_numerics: null
 
 generator:
   model_name: ${trainer.policy.model.path}

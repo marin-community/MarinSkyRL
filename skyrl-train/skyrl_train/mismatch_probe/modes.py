@@ -97,7 +97,7 @@ def _enabled(*flags: str) -> dict[str, bool]:
     return dict.fromkeys(flags, True)
 
 
-_NUMERICS_CANDIDATES = {
+NUMERICS_CANDIDATES = {
     **{flag: {flag: True} for flag in NUMERICS_FLAGS},
     COMPILED_STACK: _enabled(*_COMPILED_STACK_FLAGS),
     COMPILED_STACK_ALL: _enabled(*_COMPILED_STACK_FLAGS, "route_weight"),
@@ -117,6 +117,16 @@ def _with_numerics(base: Callable, flags: Mapping[str, bool]):
     return scope
 
 
+@contextmanager
+def probe_mode_scope(worker: ProbeWorker, settings: Mapping[str, Any]) -> Iterator[None]:
+    """Scope of ``settings["probe_mode"]`` from the trainer's own numerics, whatever the process default."""
+    with (
+        grug_numerics(**dict.fromkeys(NUMERICS_FLAGS, False)),
+        TRAINER_MODES[settings["probe_mode"]].context(worker, settings),
+    ):
+        yield
+
+
 # The compiled stacks on generation-route replay, comparable with the replay rows against generation.
 for _candidate in (
     COMPILED_STACK,
@@ -126,10 +136,10 @@ for _candidate in (
     VLLM_KERNEL_STACK,
 ):
     TRAINER_MODES[f"{REPLAY_MODE}+{_candidate}"] = ModeSpec(
-        _with_numerics(_replay, _NUMERICS_CANDIDATES[_candidate]), requires_routes=True
+        _with_numerics(_replay, NUMERICS_CANDIDATES[_candidate]), requires_routes=True
     )
 
-for _candidate, _flags in _NUMERICS_CANDIDATES.items():
+for _candidate, _flags in NUMERICS_CANDIDATES.items():
     TRAINER_MODES[f"{REREAD_REPLAY_MODE}+{_candidate}"] = ModeSpec(
         _with_numerics(_replay, _flags), requires_routes=True, route_source="reread"
     )
