@@ -39,3 +39,34 @@ def test_async_smoke_matches_the_sync_baseline_geometry_and_prompt_count():
     # One optimizer update per step in both schedules, so equal steps mean equal prompts.
     for key in ("train_batch_size", "policy_mini_batch_size", "max_steps"):
         assert async_config["trainer"][key] == sync_config["trainer"][key]
+
+
+SWE_SYNC_CONFIG = CONFIGS / "snowball_mopd_ultra_32k_swe_smoke.yaml"
+SWE_ASYNC_CONFIG = CONFIGS / "snowball_mopd_ultra_async_32k_swe_smoke.yaml"
+
+
+def test_swe_smokes_route_every_row_to_harbor_and_pass_trainer_validation():
+    for config_path in (SWE_SYNC_CONFIG, SWE_ASYNC_CONFIG):
+        parsed = parse_rl_config(str(config_path), model_override=STUDENT)
+        compiled = compose_skyrl_config(
+            parsed,
+            {"job_name": "mopd-swe-smoke-test", "experiments_dir": "/tmp/exp", "num_nodes": 7},
+            SimpleNamespace(gpus_per_node=8),
+        )
+
+        # Validation imports flash_attn when the recipe enables it, and CPU CI has no GPU build.
+        compiled.config.trainer.flash_attn = False
+        validate_cfg(compiled.config)
+        assert compiled.config.get("terminal_bench_config")
+        assert set(compiled.config.teacher_routing.opd.routes) == {"swe"}
+
+
+def test_async_swe_smoke_matches_the_sync_swe_smoke_geometry_and_prompt_count():
+    async_config = yaml.safe_load(SWE_ASYNC_CONFIG.read_text())
+    sync_config = yaml.safe_load(SWE_SYNC_CONFIG.read_text())
+
+    assert derive_role_plan(async_config) == derive_role_plan(sync_config)
+    assert async_config["teachers"] == sync_config["teachers"]
+    assert async_config["terminal_bench"] == sync_config["terminal_bench"]
+    for key in ("train_batch_size", "policy_mini_batch_size", "max_steps"):
+        assert async_config["trainer"][key] == sync_config["trainer"][key]
