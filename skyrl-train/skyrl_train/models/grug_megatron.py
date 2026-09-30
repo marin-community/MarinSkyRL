@@ -184,6 +184,18 @@ def _install_route_weight_hooks(experts: TEGroupedMLP) -> None:
     experts.linear_fc2.register_forward_hook(weighted_output)
 
 
+def _recomputing_one_layer(config: TransformerConfig) -> bool:
+    """True in full activation recompute's second forward of a checkpointed unit that holds one layer.
+
+    Megatron re-runs each checkpointed unit's forward inside the autograd engine's backward, where the engine's
+    graph task is set. A unit is one layer under ``recompute_method`` ``block``, or ``uniform`` with one layer.
+    """
+    one_layer_units = config.recompute_granularity == "full" and (
+        config.recompute_method == "block" or config.recompute_num_layers == 1
+    )
+    return one_layer_units and torch.is_grad_enabled() and torch._C._current_graph_task_id() != -1
+
+
 def _install_vllm_experts_hooks(experts: TEGroupedMLP) -> None:
     """Take the routed experts' values from vLLM's fused-MoE kernels when ``vllm_experts`` is active.
 
@@ -191,11 +203,17 @@ def _install_vllm_experts_hooks(experts: TEGroupedMLP) -> None:
     the down projection's fp32 accumulator. With gradients enabled the trainer's grouped-GEMM experts also run
     and carry the gradient under the kernels' bytes through the exact-zero ``x - x.detach()``; a scoring forward
     without gradients runs the kernels alone.
+
+    Full recompute's second forward of a one-layer unit runs the grouped-GEMM experts alone: that forward only
+    rebuilds the layer's graph for its backward, and the layer uses the experts' output only in sums (the
+    combine, the shared expert and the residuals), whose gradients do not depend on the summands' values. The
+    gradients equal those of a forward that also runs the kernels; the layer's output, the first forward's,
+    keeps the kernels' bytes.
     """
     grouped_forward = experts.forward
 
     def forward(permuted_local_hidden_states, tokens_per_expert, permuted_probs):
-        if not active_numerics().vllm_experts:
+        if not active_numerics().vllm_experts or _recomputing_one_layer(experts.config):
             return grouped_forward(permuted_local_hidden_states, tokens_per_expert, permuted_probs)
         if any(linear.tp_size != 1 or linear.use_bias for linear in (experts.linear_fc1, experts.linear_fc2)):
             raise NotImplementedError("vllm_experts numerics need unsharded, bias-free expert projections")
