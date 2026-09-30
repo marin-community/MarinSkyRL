@@ -5,6 +5,7 @@ import pytest
 import os
 import gzip
 import json
+import threading
 from zipfile import ZipFile
 from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationResult
@@ -14,6 +15,7 @@ from skyrl_train.trajectory_runners.base import TrajectoryRunner
 from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request, select_request_rows
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, parse_trajectory_retention_config
 from marinskyrl.pivot_history import load_profile_history
+import marinskyrl.pivot_history as pivot_history
 
 
 class ProfilingRunner(TrajectoryRunner):
@@ -258,6 +260,54 @@ async def test_profile_resume_skips_saved_samples_and_continues_retry_history(tm
     assert len(history.samples) == 3
     with pytest.raises(ValueError, match="same frozen initial policy"):
         load_profile_history(str(tmp_path), "org/policy", "another-revision")
+
+
+@pytest.mark.parametrize("first_score", [0, 1])
+def test_parallel_history_keeps_first_commit_when_later_archive_finishes_first(tmp_path, monkeypatch, first_score):
+    for order, score in enumerate((first_score, 1 - first_score), start=1):
+        record = {
+            "record_id": str(order),
+            "phase": "eval",
+            "global_step": 0,
+            "provenance": {
+                "model_path": "org/policy",
+                "model_source_identity": "revision",
+                "model_version_step": 0,
+                "resume_path": None,
+            },
+            "trajectory": {
+                "repetition_id": 0,
+                "environment_extras": {"extra_info": {"source_id": "source", "profiling_attempt": 0}},
+            },
+            "verification_result": {"status": "verified", "score": score},
+            "disposition": {"exception_type": None},
+            "reward": {"outcome": score, "shaped": score},
+            "prompt_tokens": 2,
+            "response_tokens": 1,
+        }
+        path = tmp_path / f"{order}.zip"
+        with ZipFile(path, "w") as archive:
+            archive.writestr("manifest.json", json.dumps({"records": [{"record_id": str(order), "profiling": record}]}))
+        os.utime(path, (order, order))
+
+    later_finished = threading.Event()
+    read_archive = pivot_history._read_archive
+
+    def read_later_first(filesystem, path):
+        if path.endswith("1.zip"):
+            assert later_finished.wait(timeout=5), "History reads did not overlap"
+        records = read_archive(filesystem, path)
+        if path.endswith("2.zip"):
+            later_finished.set()
+        return records
+
+    monkeypatch.setattr(pivot_history, "_read_archive", read_later_first)
+    history = load_profile_history(str(tmp_path), "org/policy", "revision", read_concurrency=2)
+    assert history.samples[("source", 0, 0)]["verification_result"]["score"] == first_score
+    assert history.discarded_record_ids == ["2"]
+    assert history.attempts == 2
+    assert history.prompt_tokens == 4
+    assert history.response_tokens == 2
 
 
 def test_profile_history_reads_existing_archives_without_compact_index(tmp_path):

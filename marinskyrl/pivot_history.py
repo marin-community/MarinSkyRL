@@ -2,7 +2,9 @@
 
 from dataclasses import dataclass, field
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from itertools import batched
 import gzip
 import json
 from io import BytesIO
@@ -69,12 +71,37 @@ def profile_sample_outcome(record: dict[str, Any]) -> tuple[float | None, str | 
     return float(score), None
 
 
-def load_profile_history(uri: str, model_path: str, model_revision: str) -> ProfileHistory:
+def _read_archive(filesystem, path: str) -> list[dict[str, Any]]:
+    with filesystem.open(path, "rb", block_size=65536, cache_type="none") as source, ZipFile(source) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+    summaries = {entry["record_id"]: entry.get("profiling") for entry in manifest["records"]}
+    if any(record is None for record in summaries.values()):
+        # Read legacy archives once rather than fetching every gzip member separately.
+        with filesystem.open(path, "rb") as source:
+            payload = source.read()
+        with ZipFile(BytesIO(payload)) as archive:
+            for entry in manifest["records"]:
+                if summaries[entry["record_id"]] is None:
+                    summaries[entry["record_id"]] = profile_record_summary(
+                        json.loads(gzip.decompress(archive.read(entry["entry"])))
+                    )
+    records = []
+    for entry in manifest["records"]:
+        record = summaries[entry["record_id"]]
+        if record["record_id"] != entry["record_id"]:
+            raise ValueError("Profiling index does not match its retained record")
+        records.append(record)
+    return records
+
+
+def load_profile_history(uri: str, model_path: str, model_revision: str, read_concurrency: int = 8) -> ProfileHistory:
     """Keep the first committed draw for each slot; discard later preemption replays.
 
     New archives carry compact profiling entries. Existing archives are read once
     to recover the same fields. Both paths validate the frozen policy identity.
     """
+    if not isinstance(read_concurrency, int) or read_concurrency < 1:
+        raise ValueError("Profiling history read concurrency must be positive")
     history = ProfileHistory()
     filesystem, root = filesystem_and_path(uri)
     if not filesystem.exists(root):
@@ -90,49 +117,39 @@ def load_profile_history(uri: str, model_path: str, model_revision: str) -> Prof
         return timestamp, path
 
     archives = sorted((path for path in files if path.endswith(".zip")), key=archive_order)
-    for path in archives:
-        history.archives.append(path)
-        with filesystem.open(path, "rb", block_size=65536, cache_type="none") as source, ZipFile(source) as archive:
-            manifest = json.loads(archive.read("manifest.json"))
-        summaries = {entry["record_id"]: entry.get("profiling") for entry in manifest["records"]}
-        if any(record is None for record in summaries.values()):
-            # Migrate one batch archive at a time. Reading each gzip member over
-            # separate remote range requests makes old campaigns expensive to resume.
-            with filesystem.open(path, "rb") as source:
-                payload = source.read()
-            with ZipFile(BytesIO(payload)) as archive:
-                for entry in manifest["records"]:
-                    if summaries[entry["record_id"]] is None:
-                        summaries[entry["record_id"]] = profile_record_summary(
-                            json.loads(gzip.decompress(archive.read(entry["entry"])))
-                        )
-        for entry in manifest["records"]:
-            record = summaries[entry["record_id"]]
-            if record["record_id"] != entry["record_id"]:
-                raise ValueError("Profiling index does not match its retained record")
-            provenance = record["provenance"]
-            if (
-                provenance["model_path"] != model_path
-                or provenance["model_source_identity"] != model_revision
-                or provenance["model_version_step"] != 0
-                or provenance.get("resume_path") is not None
-                or record["phase"] != "eval"
-                or record["global_step"] != 0
-            ):
-                raise ValueError("Profiling resume requires the same frozen initial policy")
-            profile_sample_outcome(record)
-            extra = record["trajectory"]["environment_extras"]["extra_info"]
-            attempt = extra["profiling_attempt"]
-            if not isinstance(attempt, int) or attempt < 0:
-                raise ValueError("Invalid retained profiling attempt")
-            key = (extra["source_id"], record["trajectory"]["repetition_id"], attempt)
-            history.attempts += 1
-            history.prompt_tokens += record["prompt_tokens"]
-            history.response_tokens += record["response_tokens"]
-            if key in history.samples:
-                if profile_sample_outcome(history.samples[key])[1] == "infrastructure_error":
-                    raise ValueError("Ambiguous repeated infrastructure-error attempt; cannot resume automatically")
-                history.discarded_record_ids.append(record["record_id"])
-                continue
-            history.samples[key] = record
+    # Bound both concurrent reads and buffered results. map yields in submission
+    # order, preserving the first committed draw even if later reads finish first.
+    with ThreadPoolExecutor(max_workers=read_concurrency) as executor:
+        for paths in batched(archives, read_concurrency):
+            records_by_archive = executor.map(lambda path: _read_archive(filesystem, path), paths)
+            for path, records in zip(paths, records_by_archive, strict=True):
+                history.archives.append(path)
+                for record in records:
+                    provenance = record["provenance"]
+                    if (
+                        provenance["model_path"] != model_path
+                        or provenance["model_source_identity"] != model_revision
+                        or provenance["model_version_step"] != 0
+                        or provenance.get("resume_path") is not None
+                        or record["phase"] != "eval"
+                        or record["global_step"] != 0
+                    ):
+                        raise ValueError("Profiling resume requires the same frozen initial policy")
+                    profile_sample_outcome(record)
+                    extra = record["trajectory"]["environment_extras"]["extra_info"]
+                    attempt = extra["profiling_attempt"]
+                    if not isinstance(attempt, int) or attempt < 0:
+                        raise ValueError("Invalid retained profiling attempt")
+                    key = (extra["source_id"], record["trajectory"]["repetition_id"], attempt)
+                    history.attempts += 1
+                    history.prompt_tokens += record["prompt_tokens"]
+                    history.response_tokens += record["response_tokens"]
+                    if key in history.samples:
+                        if profile_sample_outcome(history.samples[key])[1] == "infrastructure_error":
+                            raise ValueError(
+                                "Ambiguous repeated infrastructure-error attempt; cannot resume automatically"
+                            )
+                        history.discarded_record_ids.append(record["record_id"])
+                        continue
+                    history.samples[key] = record
     return history
