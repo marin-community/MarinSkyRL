@@ -125,7 +125,7 @@ Megatron training restore accepts CoreWeave `s3://` checkpoints in untransformed
 (off-cluster) or `cwlota.com` (in-cluster). Other sources fail before loading.
 
 `trainer.distributed.megatron_checkpoint_load_memory_gib` sets one temporary-read
-budget shared by all worker processes in a pod (16 GiB by default). For example,
+budget shared by all worker processes in a pod (24 GiB by default). For example,
 set it to `32` in a Hero launch to admit up to 32 GiB of estimated record scratch.
 All readers must share the pod's temporary directory and the same budget.
 
