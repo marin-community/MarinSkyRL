@@ -12,6 +12,7 @@ from skyrl_train.config.router_replay import validate_replay_keep_fraction
 from skyrl_train.mismatch_probe.modes import (
     NATIVE_MODE,
     REPEAT_MODE,
+    NUMERICS_CANDIDATES,
     TRAINER_MODES,
 )
 
@@ -133,6 +134,9 @@ def validate_mismatch_probe_config(
         raise ValueError("trainer.mismatch_probe native_capture requires capture_layers")
     if any(isinstance(layer, bool) or not isinstance(layer, int) or layer < 0 for layer in capture_layers):
         raise ValueError("trainer.mismatch_probe.capture_layers must be non-negative layer indices")
+    train_numerics = probe.get("train_numerics")
+    if train_numerics is not None and train_numerics not in NUMERICS_CANDIDATES:
+        raise ValueError(f"trainer.mismatch_probe.train_numerics must be one of {sorted(NUMERICS_CANDIDATES)}")
     if not isinstance(probe.get("reread_again", False), bool):
         raise ValueError("trainer.mismatch_probe.reread_again must be a boolean")
     if any(TRAINER_MODES[mode].requires_keep_fraction for mode in modes):

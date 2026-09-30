@@ -17,12 +17,13 @@ operations. Each flag makes one chain compute in fp32 and round once, as compile
   (the unrounded embedding gated-norm product for layer 0) and normalizes the rounded residual;
 - ``final_norm_fp32``: the final norm normalizes the unrounded residual sum.
 
-Probe modes set flags for one scoring forward; the flags default to the current trainer numerics.
+Probe modes set flags for one scoring forward. The process default is the current trainer numerics, or
+the set named by ``trainer.mismatch_probe.train_numerics``, which then applies to training too.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
 
@@ -48,13 +49,24 @@ def active_numerics() -> GrugNumerics:
     return _active
 
 
+def _check_flags(flags: Mapping[str, bool]) -> None:
+    unknown = set(flags) - set(NUMERICS_FLAGS)
+    if unknown:
+        raise ValueError(f"unknown Grug numerics flags: {sorted(unknown)}")
+
+
+def set_default_numerics(flags: Mapping[str, bool]) -> None:
+    """Make ``flags`` this process's numerics for every forward and backward outside a probe mode."""
+    global _active
+    _check_flags(flags)
+    _active = GrugNumerics(**flags)
+
+
 @contextmanager
 def grug_numerics(**flags: bool) -> Iterator[GrugNumerics]:
     """Enable the named rounding points for the duration of the block."""
     global _active
-    unknown = set(flags) - set(NUMERICS_FLAGS)
-    if unknown:
-        raise ValueError(f"unknown Grug numerics flags: {sorted(unknown)}")
+    _check_flags(flags)
     updated = replace(_active, **flags)
     previous, _active = _active, updated
     try:

@@ -35,7 +35,8 @@ from skyrl_train.distributed.megatron.optimizer import (
 from skyrl_train.distributed.megatron.remote_model import install_remote_hf_state
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.mismatch_probe.capture import capture_layer_regions, write_capture
-from skyrl_train.mismatch_probe.modes import TRAINER_MODES
+from skyrl_train.mismatch_probe.modes import NUMERICS_CANDIDATES, TRAINER_MODES, probe_mode_scope
+from skyrl_train.mismatch_probe.numerics import set_default_numerics
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
 from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.training_batch import (
@@ -273,7 +274,7 @@ class MegatronWorker:
         rng_state = MegatronStrategy.get_rng_state()
         rng_tracker = get_cuda_rng_tracker()
         tracker_states = copy.deepcopy(rng_tracker.get_states())
-        scope = TRAINER_MODES[mode].context(self, data.metadata)
+        scope = probe_mode_scope(self, data.metadata)
         capture = data.metadata.get("probe_capture") or {}
         capture_rank = (
             mpu.get_data_parallel_rank() == 0
@@ -351,7 +352,7 @@ class MegatronWorker:
             )
         seconds = []
         try:
-            with TRAINER_MODES[mode].context(self, data.metadata):
+            with probe_mode_scope(self, data.metadata):
                 self.model.train()
                 torch.cuda.reset_peak_memory_stats()
                 for repetition in range(repetitions + 1):
@@ -582,6 +583,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def init_model(self, model_path, num_training_steps: int = 1e9):
         """Initialize the model, optimizer, and scheduler for the policy worker."""
         self._initialize_policy_modules(model_path, mode=_MegatronInitMode.TRAINING)
+        train_numerics = self.cfg.trainer.mismatch_probe.get("train_numerics")
+        if train_numerics:
+            set_default_numerics(NUMERICS_CANDIDATES[train_numerics])
 
         # create profiler
         if self.cfg.trainer.policy.megatron_config.torch_profiler_config.enable:

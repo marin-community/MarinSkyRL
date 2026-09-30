@@ -75,7 +75,7 @@ TRAINER_MODES: dict[str, ModeSpec] = {
 # except ``route_weight``, whose fp32 per-expert projection is slow; ``compiled_stack_all`` adds it.
 COMPILED_STACK = "compiled_stack"
 COMPILED_STACK_ALL = "compiled_stack_all"
-_NUMERICS_CANDIDATES = {
+NUMERICS_CANDIDATES = {
     **{flag: {flag: True} for flag in NUMERICS_FLAGS},
     COMPILED_STACK: {flag: flag != "route_weight" for flag in NUMERICS_FLAGS},
     COMPILED_STACK_ALL: dict.fromkeys(NUMERICS_FLAGS, True),
@@ -91,13 +91,23 @@ def _with_numerics(base: Callable, flags: Mapping[str, bool]):
     return scope
 
 
+@contextmanager
+def probe_mode_scope(worker: ProbeWorker, settings: Mapping[str, Any]) -> Iterator[None]:
+    """Scope of ``settings["probe_mode"]`` from the trainer's own numerics, whatever the process default."""
+    with (
+        grug_numerics(**dict.fromkeys(NUMERICS_FLAGS, False)),
+        TRAINER_MODES[settings["probe_mode"]].context(worker, settings),
+    ):
+        yield
+
+
 # The compiled stacks on generation-route replay, comparable with the replay rows against generation.
 for _candidate in (COMPILED_STACK, COMPILED_STACK_ALL):
     TRAINER_MODES[f"{REPLAY_MODE}+{_candidate}"] = ModeSpec(
-        _with_numerics(_replay, _NUMERICS_CANDIDATES[_candidate]), requires_routes=True
+        _with_numerics(_replay, NUMERICS_CANDIDATES[_candidate]), requires_routes=True
     )
 
-for _candidate, _flags in _NUMERICS_CANDIDATES.items():
+for _candidate, _flags in NUMERICS_CANDIDATES.items():
     TRAINER_MODES[f"{REREAD_REPLAY_MODE}+{_candidate}"] = ModeSpec(
         _with_numerics(_replay, _flags), requires_routes=True, route_source="reread"
     )
