@@ -359,7 +359,7 @@ Algorithm Configuration
   - ``sft``: Negative log likelihood on eligible response tokens, independent of advantages; see the `objective usage guide`_.
   - Custom policy losses can be registered with the ``PolicyLossRegistry``
 
-.. _objective usage guide: https://github.com/marin-community/MarinSkyRL/blob/main/skyrl-train/docs/algorithms/objective_guide.rst
+.. _objective usage guide: https://github.com/marin-community/MarinSkyRL/blob/a6d4fa540c813096979300bc853284eff8eac37e/skyrl-train/docs/algorithms/objective_guide.rst
 
 - ``algorithm.loss_reduction``: Type of loss reduction to use. Options include:
 
