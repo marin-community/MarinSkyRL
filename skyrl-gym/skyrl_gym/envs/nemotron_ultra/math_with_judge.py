@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from sympy import exp, simplify
 
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_answer_text, final_verdict, last_boxed_answer
+from skyrl_gym.envs.nemotron_ultra.judge import DEFAULT_JUDGE_MAX_TOKENS, IncompleteJudgeResponse
 
 from math_verify import grader, parse
 from math_verify.errors import TimeoutException
@@ -23,7 +24,7 @@ from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 
 
 class Judge(Protocol):
-    def generate(self, messages: list[dict[str, str]], *, max_tokens: int = 8192) -> str: ...
+    def generate(self, messages: list[dict[str, str]], *, max_tokens: int = DEFAULT_JUDGE_MAX_TOKENS) -> str: ...
 
 
 _JUDGE_SYSTEM = """Please act as an impartial judge and evaluate the equivalence of the solutions given by two AI assistants to the mathematical problem displayed below. You will be given AI assistant A's answer and AI assistant B's answer. Your job is to evaluate whether assistant A's answer is equivalent to assistant B's answer.
@@ -120,14 +121,23 @@ def symbolic_math_reward(
         receiving.close()
 
 
+_JUDGE_TOKEN_BUDGETS = (DEFAULT_JUDGE_MAX_TOKENS, 2 * DEFAULT_JUDGE_MAX_TOKENS)
+
+
 def _judge_equal(judge: Judge, question: str, first: str, second: str) -> tuple[bool, str]:
-    output = judge.generate(
-        [
-            {"role": "system", "content": _JUDGE_SYSTEM},
-            {"role": "user", "content": _JUDGE_PROMPT.format(question=question, first=first, second=second)},
-        ]
-    )
-    return final_verdict(output, {"[[A=B]]", "[[A!=B]]"}) == "[[A=B]]", output
+    messages = [
+        {"role": "system", "content": _JUDGE_SYSTEM},
+        {"role": "user", "content": _JUDGE_PROMPT.format(question=question, first=first, second=second)},
+    ]
+    incomplete: IncompleteJudgeResponse | None = None
+    for max_tokens in _JUDGE_TOKEN_BUDGETS:
+        try:
+            output = judge.generate(messages, max_tokens=max_tokens)
+        except IncompleteJudgeResponse as error:
+            incomplete = error
+            continue
+        return final_verdict(output, {"[[A=B]]", "[[A!=B]]"}) == "[[A=B]]", output
+    raise incomplete
 
 
 def grade_math(

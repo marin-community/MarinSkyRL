@@ -957,30 +957,3 @@ class HarborConfigBuilder:
     def model_info(self) -> Dict[str, Any]:
         """Get the model_info dict for external use."""
         return self._model_info.copy()
-
-
-# =============================================================================
-# Utility functions
-# =============================================================================
-
-
-def get_exposed_harbor_fields() -> Dict[str, list[str]]:
-    """
-    Get a summary of all exposed Harbor fields for documentation.
-
-    Returns:
-        Dict mapping section names to lists of field names.
-    """
-    return {section_name: list(schema.get_all_field_names()) for section_name, schema in HARBOR_SCHEMA.items()}
-
-
-def print_harbor_schema() -> None:
-    """Print the current Harbor schema for debugging."""
-    print("SkyRL Terminal Bench - Exposed Harbor Fields")
-    print("=" * 50)
-    for section_name, schema in HARBOR_SCHEMA.items():
-        print(f"\n{section_name.upper()}:")
-        for yaml_key, mapping in schema.fields.items():
-            field_type = " (kwargs)" if mapping.field_type == "kwargs" else ""
-            default = f" [default: {mapping.default}]" if mapping.default is not None else ""
-            print(f"  - {yaml_key} -> {mapping.harbor_field}{field_type}{default}")

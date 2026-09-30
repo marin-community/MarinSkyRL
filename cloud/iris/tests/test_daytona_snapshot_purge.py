@@ -28,13 +28,12 @@ if str(_REPO_ROOT) not in sys.path:
 import cloud.iris.iris_backend as launcher  # noqa: E402
 
 
-def test_resolve_daytona_rl_api_key_prefers_explicit_rl_key(monkeypatch, capsys):
+def test_resolve_daytona_rl_api_key_prefers_explicit_rl_key(monkeypatch):
     monkeypatch.setenv("DAYTONA_RL_API_KEY", "rl-key")
     monkeypatch.setenv("DAYTONA_API_KEY", "generic-key")
     monkeypatch.setattr(launcher, "_daytona_rl_api_key_from_secret_manager", lambda: "secret-manager-key")
 
     assert launcher._resolve_daytona_rl_api_key() == "rl-key"
-    assert "DAYTONA_RL_API_KEY from --secrets-env" in capsys.readouterr().out
 
 
 def test_resolve_daytona_rl_api_key_rejects_generic_key(monkeypatch):

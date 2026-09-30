@@ -7,6 +7,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 from uuid import uuid4
 
+import numpy as np
+
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import REASONING_DELIMITERS, final_answer_text
 
 from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInput, InferenceEngineOutput
@@ -22,7 +24,10 @@ from skyrl_train.trajectory_runners.types import TokenProvenance
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 
 
-_CHAT_SAMPLING_EXCLUSIONS = frozenset({"max_generate_length", "logprobs", "stop"})
+# The per-turn output limit, as the trainer config (`max_generate_length`) and vLLM (`max_tokens`) spell it. Chat
+# requests carry it only as `max_completion_tokens`, which vLLM prefers over `max_tokens`.
+_OUTPUT_LIMIT_KEYS = ("max_generate_length", "max_tokens")
+_CHAT_SAMPLING_EXCLUSIONS = frozenset({*_OUTPUT_LIMIT_KEYS, "logprobs", "stop"})
 
 
 class ModelClientOutput(InferenceEngineOutput):
@@ -61,12 +66,10 @@ class _ChatResult:
     text: str
     stop_reason: str
     assistant_message: dict[str, Any]
-    routed_experts: list[list[list[int]]] | None = None
+    routed_experts: np.ndarray | None = None
 
 
-def _choice_routed_experts(
-    choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]
-) -> list[list[list[int]]] | None:
+def _choice_routed_experts(choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]) -> np.ndarray | None:
     provider_fields = choice.get("provider_specific_fields") or {}
     routes = choice.get("routed_experts", provider_fields.get("routed_experts"))
     if routes is None:
@@ -178,8 +181,10 @@ class DirectModelClient:
             result.pop("tools", None)
         if "max_output_tokens" in result:
             result["max_completion_tokens"] = result.pop("max_output_tokens")
-        if "max_generate_length" in sampling_params:
-            configured_max = int(sampling_params["max_generate_length"])
+        for key in _OUTPUT_LIMIT_KEYS:
+            if sampling_params.get(key) is None:
+                continue
+            configured_max = int(sampling_params[key])
             requested_max = result.get("max_completion_tokens")
             result["max_completion_tokens"] = (
                 configured_max if requested_max is None else min(configured_max, int(requested_max))

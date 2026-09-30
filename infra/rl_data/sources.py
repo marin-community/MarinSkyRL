@@ -67,7 +67,7 @@ _HENDRYCKS_MATH_SUBJECTS = (
     "precalculus",
 )
 _ASDIV_XML_URL = "https://raw.githubusercontent.com/chaochun/nlu-asdiv-dataset/{revision}/dataset/ASDiv.xml"
-_PLAIN_NUMERIC_ANSWER = re.compile(r"^-?\d+(?:\.\d+)?(?:/\d+)?$")
+_PLAIN_NUMERIC_ANSWER = re.compile(r"^-?\d+(?:\.\d+)?(?:/\d+)?$|^-?\d+:-?\d+$")
 
 
 PreparedRow = dict[str, Any]
@@ -469,7 +469,7 @@ def _boxed_answer(solution: str) -> str:
 def _plain_numeric_answer(answer: Any) -> str:
     normalized = str(answer).split("(", 1)[0].strip().replace(",", "")
     if not _PLAIN_NUMERIC_ANSWER.fullmatch(normalized):
-        raise ValueError("answer is not a plain number or fraction.")
+        raise ValueError("answer is not a plain number, fraction, or ratio.")
     if normalized.endswith(".0"):
         return normalized[: -len(".0")]
     return normalized
