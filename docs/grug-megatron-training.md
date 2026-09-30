@@ -1,5 +1,8 @@
 # Grug Megatron training
 
+For task-based Snowball/Hero sizing, telemetry and tuning, start with the
+[performance task chooser](performance.md).
+
 `trainer.strategy=megatron` trains Grug through Megatron-Core with pipeline
 parallelism as the primary geometry. Snowball's 26 layers split evenly across
 PP2 or PP13; TP must stay at one because the model has five KV heads, and

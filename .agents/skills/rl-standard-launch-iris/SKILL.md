@@ -5,6 +5,9 @@ description: Validate, submit, and observe standard MarinSkyRL training on Iris 
 
 # Launch standard RL on Iris
 
+For Snowball or Hero resource sizing and performance diagnosis, start with the
+[task chooser](../../../docs/performance.md).
+
 Read the selected configuration and current `cloud.iris.iris_backend` interface. Resolve the runtime profile,
 resources, retries, names, capacity, and artifact destinations at execution time.
 
