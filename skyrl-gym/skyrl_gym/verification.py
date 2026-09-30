@@ -140,6 +140,17 @@ class VerificationResult:
         )
 
 
+def normalized_verifier_score(result: VerificationResult) -> float:
+    """Scale a verified score to [0, 1] using its declared native bounds."""
+    if result.status is not VerificationStatus.VERIFIED or result.score is None:
+        raise ValueError("A verified score is required for normalization")
+    minimum = float(result.diagnostics.get("score_min", 0.0))
+    maximum = float(result.diagnostics.get("score_max", 1.0))
+    if not math.isfinite(minimum) or not math.isfinite(maximum) or maximum <= minimum:
+        raise ValueError("Verifier score range must be finite and increasing")
+    return min(1.0, max(0.0, (result.score - minimum) / (maximum - minimum)))
+
+
 @dataclass(frozen=True)
 class RewardResult:
     """Raw verifier outcome and the reward channels derived from it."""

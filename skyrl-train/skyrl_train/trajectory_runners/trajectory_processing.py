@@ -43,7 +43,7 @@ from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
-from skyrl_gym.verification import VerificationResult, VerificationStatus
+from skyrl_gym.verification import VerificationResult, VerificationStatus, normalized_verifier_score
 
 
 BATCH_ERROR_METRIC_PREFIX = "generate/errors/"
@@ -697,6 +697,29 @@ def get_outcome_rewards(trajectory_batch: TrajectoryBatch) -> List[float]:
             )
         return [float(reward) for reward in unshaped_rewards]
     return [NormalizedReward.from_output(reward).outcome for reward in rewards]
+
+
+def normalized_verifier_scores(trajectory_batch: TrajectoryBatch) -> List[float | None] | None:
+    """Return bounded task scores, including zero for verifier failures.
+
+    A verifier may declare its native score range in diagnostics. This keeps
+    GenRM's 1–5 ratings comparable with 0–1 verifiers in cross-task averages,
+    while leaving the optimization rewards and raw verifier scores intact.
+    """
+    results = trajectory_batch.get("verification_results")
+    if results is None:
+        return None
+    if len(results) != len(trajectory_batch["rewards"]):
+        raise ValueError("verification_results must have one entry per reward")
+    scores: List[float | None] = []
+    for result in results:
+        if result is None or result.status is VerificationStatus.SKIPPED:
+            scores.append(None)
+        elif result.status is not VerificationStatus.VERIFIED:
+            scores.append(0.0)
+        else:
+            scores.append(normalized_verifier_score(result))
+    return scores
 
 
 def graded_row_indices(trajectory_batch: TrajectoryBatch) -> List[int]:

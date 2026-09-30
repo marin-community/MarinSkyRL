@@ -12,6 +12,7 @@ from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
     get_metrics_from_trajectory_batch,
+    normalized_verifier_scores,
     prepare_trajectory_request,
 )
 from skyrl_train.trajectory_runners.base import (
@@ -176,6 +177,12 @@ def _calculate_eval_metrics(
             f"eval/all/pass_at_{samples_per_prompt}": overall_pass_at_n,
         }
     )
+    verifier_scores = normalized_verifier_scores(batch)
+    if verifier_scores:
+        scored = [score for score in verifier_scores if score is not None]
+        metrics["eval/all/verifier_score_coverage"] = len(scored) / len(verifier_scores)
+        if scored:
+            metrics["eval/all/avg_verifier_score"] = sum(scored) / len(scored)
     metrics.update({f"eval/all/{key}": value for key, value in evaluation_response_metrics(batch).items()})
     return metrics
 
