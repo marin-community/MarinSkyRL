@@ -29,6 +29,7 @@ import numpy as np
 from finestore import mismatch_probe as mismatch
 from finestore.reader import ReadView
 from omegaconf import open_dict
+from safetensors.torch import load_file
 
 import pytest
 import ray
@@ -245,8 +246,25 @@ def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path, la
         }
         assert any(a.logprobs != b.logprobs for a, b in zip(by_mode["native"], by_mode["router_replay"], strict=True))
         assert any(np.frombuffer(row.replacement_mask, dtype=bool).any() for row in by_mode["router_replay_filtered"])
+        before_update, after_update = tmp_path / "before-update", tmp_path / "after-update"
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        ray.get(policy.async_run_ray_method("pass_through", "save_hf_model", str(before_update), tokenizer))
         _train_step(policy, padded)
-        assert before != ray.get(policy.async_run_ray_method("pass_through", "probe_weights_digest"))
+        ray.get(policy.async_run_ray_method("pass_through", "save_hf_model", str(after_update), tokenizer))
+        before_parameters = {
+            name: tensor
+            for shard in before_update.glob("*.safetensors")
+            for name, tensor in load_file(shard).items()
+            if name.endswith(".weight")
+        }
+        after_parameters = {
+            name: tensor
+            for shard in after_update.glob("*.safetensors")
+            for name, tensor in load_file(shard).items()
+            if name.endswith(".weight")
+        }
+        assert before_parameters and before_parameters.keys() == after_parameters.keys()
+        assert any(not torch.equal(tensor, after_parameters[name]) for name, tensor in before_parameters.items())
     finally:
         ray.shutdown()
 
