@@ -42,6 +42,13 @@ Python extras cannot replace a base CPU Torch wheel with a CUDA wheel, so `cpu` 
 exclusive wheel profiles. GPU training selects the `megatron` and `vllm` extras from the frozen root lock.
 Iris installs this profile before launch. The `cpu` profile remains on Torch 2.11.0.
 
+Iris training and checkpoint export select `IRIS_TASK_IMAGE` in
+[the runtime environment](cloud/iris/runtime_environment.py). Update that value to a published
+multi-architecture `iris-task` manifest digest after verifying its Python patch version on every
+selected architecture. Validate frozen-profile installation, two-node H100 Ray admission, and
+checkpoint export with the selected image before publishing the digest; GPU dependency versions
+come from `uv.lock`.
+
 The walkthrough below reproduces the original OpenThoughts-Agent v1 release (kept here for reference), i.e.:
 - Using [open-thoughts/OpenThinker-Agent-v1-SFT](https://huggingface.co/open-thoughts/OpenThinker-Agent-v1-SFT) as base
 - GRPO with the data [open-thoughts/OpenThoughts-Agent-v1-RL](https://huggingface.co/datasets/open-thoughts/OpenThoughts-Agent-v1-RL), while

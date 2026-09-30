@@ -360,58 +360,93 @@ def _mask_sum_policy_loss(
 
 @pytest.mark.parametrize("loss_reduction", ["token_mean", "seq_mean_token_sum_norm_global"])
 def test_policy_objective_scheduler_and_caller_scaling_have_gradient_parity(loss_reduction):
+    OLD = torch.full((4, 5), -1.0, dtype=torch.float64)
+    CURRENT = torch.tensor(
+        [
+            [-1.12, -0.78, -1.04, -0.65, -1.18],
+            [-0.86, -1.24, -1.08, -1.00, -1.00],
+            [-1.05, -0.91, -1.27, -0.96, -1.00],
+            [-0.72, -1.13, -1.00, -1.00, -1.00],
+        ],
+        dtype=torch.float64,
+    )
+    BASE = torch.full((4, 5), -0.94, dtype=torch.float64)
+    ADVANTAGES = torch.tensor(
+        [
+            [0.7, -0.4, 0.9, -0.6, 0.3],
+            [-0.8, 0.5, -0.3, 0.0, 0.0],
+            [0.4, -0.9, 0.6, -0.2, 0.0],
+            [-0.7, 0.8, 0.0, 0.0, 0.0],
+        ],
+        dtype=torch.float64,
+    )
+    MASK = torch.tensor(
+        [
+            [1, 1, 1, 1, 1],
+            [1, 1, 1, 0, 0],
+            [1, 1, 1, 1, 0],
+            [1, 1, 0, 0, 0],
+        ],
+        dtype=torch.float64,
+    )
+
     config = OmegaConf.create(
         {
+            "policy_loss_type": "regular",
             "loss_reduction": loss_reduction,
+            "max_seq_len": 5,
+            "eps_clip_low": 0.2,
+            "eps_clip_high": 0.2,
+            "clip_ratio_c": 3.0,
             "think_token_weight": 1.0,
             "use_entropy_loss": False,
             "entropy_loss_coef": 0.0,
-            "use_kl_loss": False,
-            "kl_loss_coef": 0.0,
-            "kl_estimator_type": "k1",
+            "use_kl_loss": True,
+            "kl_loss_coef": 0.001,
+            "kl_estimator_type": "k3",
             "use_tis": False,
-            "tis_imp_ratio_cap": 2.0,
+            "tis_imp_ratio_cap": -1.0,
         }
     )
-    accumulation_steps = 3
-    common = {
-        "old_action_log_probs": torch.zeros(1, 2),
-        "base_action_log_probs": None,
-        "advantages": torch.ones(1, 2),
-        "loss_mask": torch.ones(1, 2),
-        "rollout_logprobs": None,
-        "response_span_tags": None,
-        "token_entropy": torch.zeros(1, 2),
-        "config": config,
-        "policy_loss_fn": _mask_sum_policy_loss,
-        "accumulation_steps": accumulation_steps,
-        "global_loss_denom": 12.0,
-    }
-
-    caller_log_probs = torch.tensor([[1.0, 2.0]], requires_grad=True)
-    caller = compute_policy_objective(
-        action_log_probs=caller_log_probs,
-        scaling=LossScaling.CALLER,
-        **common,
-    )
-    caller.optimization_loss.backward()
-
-    scheduler_log_probs = torch.tensor([[1.0, 2.0]], requires_grad=True)
-    scheduler = compute_policy_objective(
-        action_log_probs=scheduler_log_probs,
-        scaling=LossScaling.MEGATRON_PIPELINE,
-        **common,
-    )
-    (scheduler.optimization_loss / accumulation_steps).backward()
-
-    torch.testing.assert_close(scheduler_log_probs.grad, caller_log_probs.grad, rtol=0, atol=0)
-    assert caller.unscaled_loss.item() == pytest.approx(3.0)
-    assert scheduler.unscaled_loss.item() == pytest.approx(3.0)
-    expected_caller_loss = 3.0 if loss_reduction == "seq_mean_token_sum_norm_global" else 1.0
-    expected_scheduler_loss = 9.0 if loss_reduction == "seq_mean_token_sum_norm_global" else 3.0
-    assert caller.optimization_loss.item() == pytest.approx(expected_caller_loss)
-    assert scheduler.optimization_loss.item() == pytest.approx(expected_scheduler_loss)
-    assert "global_loss_denom" not in config
+    expected_actions = CURRENT.clone().requires_grad_()
+    ratio = (expected_actions - OLD).exp()
+    policy_tokens = -torch.minimum(ratio * ADVANTAGES, ratio.clamp(0.8, 1.2) * ADVANTAGES)
+    delta = BASE - expected_actions
+    kl_tokens = delta.exp() - delta - 1
+    if loss_reduction == "token_mean":
+        policy = ((policy_tokens * MASK).sum(dim=1) / MASK.sum(dim=1)).mean()
+    else:
+        policy = (policy_tokens * MASK).sum() / 20
+    expected = policy + 0.001 * ((kl_tokens * MASK).sum(dim=1) / MASK.sum(dim=1)).mean()
+    expected_grad = torch.autograd.grad(expected, expected_actions)[0]
+    for scaling in (LossScaling.CALLER, LossScaling.MEGATRON_PIPELINE):
+        actions = CURRENT.clone().requires_grad_()
+        objectives = []
+        for row in range(4):
+            objective = compute_policy_objective(
+                action_log_probs=actions[row : row + 1],
+                old_action_log_probs=OLD[row : row + 1],
+                base_action_log_probs=BASE[row : row + 1],
+                advantages=ADVANTAGES[row : row + 1],
+                loss_mask=MASK[row : row + 1],
+                rollout_logprobs=None,
+                response_span_tags=None,
+                token_entropy=torch.zeros_like(actions[row : row + 1]),
+                config=config,
+                policy_loss_fn=ppo_policy_loss,
+                accumulation_steps=4,
+                scaling=scaling,
+                global_loss_denom=20.0,
+            )
+            objectives.append(objective.optimization_loss)
+        actual = torch.stack(objectives).sum()
+        if scaling is LossScaling.MEGATRON_PIPELINE:
+            actual = actual / 4
+        gradient = torch.autograd.grad(actual, actions)[0]
+        torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-8)
+        torch.testing.assert_close(gradient, expected_grad, rtol=1e-6, atol=1e-8)
+        assert torch.count_nonzero(gradient[MASK == 0]) == 0
+        assert torch.count_nonzero(gradient[MASK != 0]) > 0
 
 
 def test_policy_objective_applies_think_weight_before_policy_loss():
