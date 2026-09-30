@@ -33,6 +33,7 @@ from skyrl_train.distributed.megatron.direct_checkpoint import DirectS3TorchDist
 from skyrl_train.io import io
 from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore
 from skyrl_train.mismatch_harness.expert_parallel import ReduceOrder
+from skyrl_train.mismatch_harness.fa3_check import fa3_split_check
 from skyrl_train.mismatch_harness.harness import (
     LayerReplay,
     RowLayout,
@@ -52,6 +53,7 @@ from skyrl_train.mismatch_harness.regions import POST_ATTENTION_ROLES, PRE_ATTEN
 from skyrl_train.mismatch_harness.replay import load_module
 from skyrl_train.mismatch_harness.report import render_markdown
 from skyrl_train.mismatch_harness.trainer_side import (
+    VllmStep,
     build_gated_norm,
     build_layer,
     gated_norm_regions,
@@ -63,6 +65,7 @@ from skyrl_train.mismatch_harness.trainer_side import (
 )
 from skyrl_train.mismatch_probe.numerics import grug_numerics
 from skyrl_train.models.grug_megatron import NormRole, clear_numerics_handoffs
+from skyrl_train.models.grug_vllm_kernels import Fa3Request, fa3_split_counts
 from skyrl_train.mismatch_harness.vllm_side import (
     GrugShape,
     Requests,
@@ -301,6 +304,10 @@ def run_vllm(
     return {name: value[:tokens] if isinstance(value, torch.Tensor) else value for name, value in regions.items()}
 
 
+# A variant flag that turns ``fa3_attention`` on without vLLM's split counts (the trainer's call runs unsplit).
+FA3_UNSPLIT = "fa3_unsplit"
+
+
 def parse_variants(texts: list[str]) -> dict[str, dict[str, bool]]:
     """Trainer variants from ``[label=]flag,flag`` texts; the label defaults to the flag list."""
     variants: dict[str, dict[str, bool]] = {"baseline": {}}
@@ -308,6 +315,27 @@ def parse_variants(texts: list[str]) -> dict[str, dict[str, bool]]:
         label, _, flags = text.rpartition("=")
         variants[label or flags] = {flag: True for flag in flags.split(",") if flag}
     return variants
+
+
+def numerics_flags(flags: dict[str, bool]) -> dict[str, bool]:
+    """A variant's ``grug_numerics`` flags (``fa3_unsplit`` means ``fa3_attention``)."""
+    numerics = {flag: value for flag, value in flags.items() if flag != FA3_UNSPLIT}
+    if flags.get(FA3_UNSPLIT):
+        numerics["fa3_attention"] = True
+    return numerics
+
+
+def vllm_step(flags: dict[str, bool], layout: RowLayout, shape: GrugShape, layer: int, args) -> VllmStep:
+    """vLLM's FA3 split count for each harness sequence in the step the harness replays, and the EP placement."""
+    splits = None
+    if not flags.get(FA3_UNSPLIT):
+        splits = fa3_split_counts(
+            [Fa3Request(length, length) for length in layout.lengths],
+            kv_heads=shape.kv_heads,
+            query_heads_per_kv_head=shape.heads // shape.kv_heads,
+            window=None if shape.is_long(layer) else shape.sliding_window,
+        )
+    return VllmStep(fa3_splits=splits, home_rank=args.home_rank, ep_size=args.ep_size)
 
 
 def parse_input_sources(texts: list[str]) -> dict[int, int]:
@@ -387,6 +415,7 @@ def main() -> None:
         rotary = rotary_embedding(provider).cuda()
         cos_sin = cos_sin_cache(shape)
         generator = torch.Generator(device="cuda").manual_seed(args.seed)
+        results["fa3_split_check"] = fa3_split_check(shape, generator)
         variants = parse_variants(args.numerics)
         input_sources = parse_input_sources(args.input_from)
         for layer in args.layers:
@@ -491,7 +520,15 @@ def main() -> None:
                 trainer_run = (
                     baseline
                     if not flags
-                    else run_layer(layer_module, layer_input, rotary, next_norm=next_norm, numerics=flags)
+                    else run_layer(
+                        layer_module,
+                        layer_input,
+                        rotary,
+                        next_norm=next_norm,
+                        numerics=numerics_flags(flags),
+                        lengths=layout.lengths,
+                        vllm_step=vllm_step(flags, layout, shape, layer, args),
+                    )
                 )
                 trainer = trainer_region_tensors(trainer_run.tensors, layout, shape, trainer_run.next_norm)
                 isolated = run_vllm(
@@ -575,7 +612,7 @@ def embedding_check(
     by_variant = {}
     for label, flags in variants.items():
         clear_numerics_handoffs()
-        with grug_numerics(**flags):
+        with grug_numerics(**numerics_flags(flags)):
             embedded = gated_norm_regions(embed_norm, embeddings)["out"]
             layer0 = gated_norm_regions(input_norm, embedded)
         clear_numerics_handoffs()

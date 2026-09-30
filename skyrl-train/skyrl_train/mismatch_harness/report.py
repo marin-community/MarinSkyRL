@@ -63,6 +63,46 @@ def lowest_disagreeing_region(chained: Mapping[str, Mapping], floor: Mapping[str
     return None
 
 
+def fa3_check_lines(check: Mapping | None) -> list[str]:
+    """Tables for ``fa3_check.fa3_split_check``: vLLM's step call against one-request and trainer calls."""
+    if not check:
+        return []
+    lines = [
+        "## FA3 split counts and the trainer's FA3 call (random inputs)",
+        "",
+        "Each row is one request of a synthetic prefill step run as vLLM calls FA3 (paged cache, split cap 32 on "
+        "steps of at most 512 tokens, FA3's heuristic above). `splits` is `fa3_split_counts`. Columns give the "
+        "byte-equal fraction of the request's rows against the step: FA3 on the request alone with that split "
+        "count, the trainer's contiguous-key call with that split count, and the trainer's call unsplit.",
+        "",
+        "| step | window | tokens | splits | alone, paged | trainer, planned | trainer, unsplit |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for row in check["steps"]:
+        lines.append(
+            f"| {row['step']} | {row['window']} | {row['tokens']} | {row['splits']} | "
+            f"{row['paged_alone_equal_fraction']:.4f} | {row['trainer_planned_equal_fraction']:.4f} | "
+            f"{row['trainer_unsplit_equal_fraction']:.4f} |"
+        )
+    lines += [
+        "",
+        "Second prefill chunk (rows from `chunk start` on, earlier keys cached) against the whole sequence in the "
+        "trainer's unsplit call:",
+        "",
+        "| tokens | chunk start | window | chunk splits | byte-equal | before the window binds | past it |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for row in check["chunks"]:
+        before = row.get("equal_fraction_before_window")
+        past = row.get("equal_fraction_past_window")
+        lines.append(
+            f"| {row['tokens']} | {row['chunk_start']} | {row['window']} | {row['chunk_splits']} | "
+            f"{row['equal_fraction']:.4f} | {'–' if before is None else f'{before:.4f}'} | "
+            f"{'–' if past is None else f'{past:.4f}'} |"
+        )
+    return [*lines, ""]
+
+
 def render_markdown(results: Mapping) -> str:
     lines = ["# Trainer vs compiled vLLM, region by region", ""]
     arguments = results["arguments"]
@@ -84,6 +124,7 @@ def render_markdown(results: Mapping) -> str:
         "Inductor's autotuner picks at run time.",
         "",
     ]
+    lines += fa3_check_lines(results.get("fa3_split_check"))
     for layer, result in results["layers"].items():
         lines += [f"## Layer {layer}", ""]
         variants = _variants(result)

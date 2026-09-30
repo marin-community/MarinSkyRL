@@ -10,8 +10,8 @@ region with vLLM.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +35,8 @@ from skyrl_train.models.grug_megatron import (
     install_numerics_hooks,
 )
 from skyrl_train.models.grug_megatron_bridge import GrugMoeBridge
+from skyrl_train.models.grug_vllm_kernels import fa3_attention_plan
+from skyrl_train.models.megatron_router_replay import LayerReplayHandle, MegatronRouterReplay, VllmExpertParallel
 
 POLICY_CONFIG = Path(__file__).resolve().parents[1] / "config" / "megatron_config" / "policy.yaml"
 ATTENTION_BACKEND = "fused"
@@ -129,6 +131,16 @@ def _to_device(weights):
 
 
 @dataclass(frozen=True)
+class VllmStep:
+    """What the trainer's vLLM-kernel numerics need about vLLM's step: FA3 split counts and EP placement."""
+
+    fa3_splits: Sequence[int] | None
+    """Each sequence's FA3 split count; ``None`` runs the trainer's FA3 call unsplit."""
+    home_rank: int
+    ep_size: int
+
+
+@dataclass(frozen=True)
 class TrainerRegions:
     """Tensors the trainer layer produced, sequence-major ``[S, B, ...]`` as Megatron holds them."""
 
@@ -148,13 +160,17 @@ def run_layer(
     *,
     next_norm: GrugGatedRMSNorm,
     numerics: Mapping[str, bool],
+    lengths: Sequence[int] | None = None,
+    vllm_step: VllmStep | None = None,
 ) -> TrainerRegions:
     """Run the layer on ``hidden_states`` ``[S, B, H]`` and record every region boundary.
 
     The capture module's own hooks record the probe regions (so their names and hook points match the
     archived capture); the extra hooks here record the tensors inside each region that compiled vLLM
     also stores. ``next_norm`` runs on the layer's output inside the same numerics, so a residual the
-    numerics keep in fp32 reaches it as it would reach the next layer.
+    numerics keep in fp32 reaches it as it would reach the next layer. ``vllm_step`` supplies what the
+    ``fa3_attention`` and ``ep_sum`` numerics take from vLLM's step: with ``ep_sum`` a router replay
+    controller (armed with no captured routes, so routing stays native) serves every row the home rank.
     """
     records: dict[str, torch.Tensor] = {}
 
@@ -218,22 +234,44 @@ def run_layer(
     hook_output(shared.linear_fc2, "shared_down")
 
     rotary_pos_emb = rotary(hidden_states.shape[0])
+    controller = None
+    if numerics.get("ep_sum"):
+        if vllm_step is None:
+            raise ValueError("ep_sum numerics need vLLM's home rank and EP size")
+        rows = hidden_states.shape[0] * hidden_states.shape[1]
+        controller = MegatronRouterReplay([0], recompute_enabled=False)
+        router.router_replay = LayerReplayHandle(controller, 0)
+        controller.begin_forward(
+            {0: torch.zeros(rows, router.topk, dtype=torch.long, device=hidden_states.device)},
+            torch.zeros(rows, dtype=torch.bool, device=hidden_states.device),
+            vllm_expert_parallel=VllmExpertParallel(
+                torch.full((rows,), vllm_step.home_rank, dtype=torch.long, device=hidden_states.device),
+                vllm_step.ep_size,
+            ),
+        )
+    plan = nullcontext()
+    if numerics.get("fa3_attention") and vllm_step is not None and vllm_step.fa3_splits is not None:
+        plan = fa3_attention_plan(vllm_step.fa3_splits, lengths)
     clear_numerics_handoffs()
     try:
         with (
             torch.no_grad(),
             grug_numerics(**numerics),
+            plan,
             capture_layer_regions(
                 [SimpleNamespace(decoder=SimpleNamespace(layers=[layer]))], [layer.layer_number - 1], "", enabled=True
             ) as captured,
         ):
             output, _ = layer(hidden_states=hidden_states, attention_mask=None, rotary_pos_emb=rotary_pos_emb)
+            if controller is not None:
+                controller.end_forward()
             next_regions = gated_norm_regions(next_norm, output)
     finally:
         for handle in handles:
             handle.remove()
         # The numerics hooks may have wrapped these per instance; put back what was there.
         router.routing = routing
+        router.router_replay = None
         dispatcher.combine_postprocess = combine_postprocess
         clear_numerics_handoffs()
     regions = {name: tensor.cuda() for name, tensor in next(iter(captured.values())).items()}
