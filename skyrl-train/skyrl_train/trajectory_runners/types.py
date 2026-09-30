@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
+from typing import Any, Dict, List, Literal, NotRequired, Optional, TypedDict, Union
 
 import numpy as np
 
@@ -89,6 +89,8 @@ class TrajectoryBatch(TypedDict):
 
     Raw outcomes remain separate from optimization rewards. Optional diagnostic
     channels are absent unless their corresponding feature is active.
+    ``env_metrics`` and ``env_classes`` are present together or both absent;
+    when present, each has one entry per trajectory row.
     """
 
     prompt_token_ids: List[List[int]]
@@ -110,6 +112,8 @@ class TrajectoryBatch(TypedDict):
     error_treatments: Optional[List[Optional[str]]]
     server_errors: Optional[List[Optional[Dict[str, Any]]]]
     rollout_metrics: Optional[Dict[str, Any]]
+    env_metrics: NotRequired[List[Dict[str, Any]]]
+    env_classes: NotRequired[List[str]]
     rollout_logprobs: Optional[List[np.ndarray]]
     student_topk_indices: Optional[List[np.ndarray]]
     behavior_topk_logprobs: Optional[List[np.ndarray]]
