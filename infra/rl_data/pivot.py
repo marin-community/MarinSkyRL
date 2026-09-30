@@ -192,10 +192,10 @@ def filter_candidates(
 
     Input is SkyRL trajectory-retention JSONL from a generate-only run over candidates.
     Every candidate must have the requested number of distinct attempts from the
-    same frozen model at step zero. Exclude groups with failed attempts from selection.
+    same frozen model at step zero. Resolve retries and exclude unresolved failures.
     """
     candidates = Dataset.from_parquet(str(artifacts / "candidates.parquet"))
-    groups: dict[str, dict[int, ProfileOutcome]] = {}
+    attempts: dict[str, dict[int, dict[int, ProfileOutcome]]] = {}
     digest = hashlib.sha256()
     for rollout in iter_records(rollouts):
         digest.update(json.dumps(rollout, sort_keys=True).encode())
@@ -223,18 +223,28 @@ def filter_candidates(
             or verification["score"] != outcome
         ):
             raise ValueError("Profiling requires unshaped binary outcomes")
-        group = groups.setdefault(identity, {})
-        if repetition in group:
-            raise ValueError("Duplicate profiling repetition")
+        group = attempts.setdefault(identity, {}).setdefault(repetition, {})
+        attempt = rollout["trajectory"]["environment_extras"]["extra_info"].get("profiling_attempt", 0)
+        if not isinstance(attempt, int) or attempt < 0 or attempt in group:
+            raise ValueError("Duplicate or invalid profiling attempt")
         exclusion = "context_window" if excluded else "infrastructure_error" if failed else None
-        group[repetition] = ProfileOutcome(None if exclusion else outcome, exclusion)
+        group[attempt] = ProfileOutcome(None if exclusion else outcome, exclusion)
+    groups: dict[str, dict[int, ProfileOutcome]] = {}
+    for identity, repetitions in attempts.items():
+        groups[identity] = {}
+        for repetition, history in repetitions.items():
+            if sorted(history) != list(range(len(history))):
+                raise ValueError("Incomplete profiling attempt history")
+            if any(history[i].exclusion != "infrastructure_error" for i in range(len(history) - 1)):
+                raise ValueError("Profiling must not retry a verified or context-excluded sample")
+            groups[identity][repetition] = history[len(history) - 1]
     if set(groups) != {row["extra_info"]["source_id"] for row in candidates}:
         raise ValueError("Profiling must cover every candidate, with no validation rows")
     selected, statistics = [], []
     for index, row in enumerate(candidates):
         identity = row["extra_info"]["source_id"]
         group = groups[identity]
-        if len(group) != samples_per_prefix:
+        if set(group) != set(range(samples_per_prefix)):
             raise ValueError(f"Incomplete profiling group for {identity}")
         errors = sum(value.exclusion == "infrastructure_error" for value in group.values())
         context_exclusions = sum(value.exclusion == "context_window" for value in group.values())
@@ -278,6 +288,9 @@ def filter_candidates(
         "context_excluded_rows": sum(item["exclusion"] == "context_window" for item in statistics),
         "error_excluded_rows": sum(item["exclusion"] == "infrastructure_error" for item in statistics),
         "error_actions": sum(item["errors"] for item in statistics),
+        "profile_attempts": sum(len(history) for group in attempts.values() for history in group.values()),
+        "recovered_actions": sum(len(history) > 1 and history[max(history)].exclusion is None
+                                 for group in attempts.values() for history in group.values()),
         "verified_rows": len(eligible),
         "random_control": {
             "seed": random_seed, "sampling": "uniform_without_replacement",

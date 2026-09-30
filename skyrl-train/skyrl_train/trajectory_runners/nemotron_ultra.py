@@ -17,19 +17,8 @@ from skyrl_train.trajectory_runners.base import (
     run_rollout_task,
 )
 from skyrl_train.trajectory_runners.harbor.dataset import TerminalBenchTaskDataset
-from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
+from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches, select_request_rows
 from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink, retain_trajectories
-
-
-def _select_rows(batch: TrajectoryRequestBatch, indices: list[int]) -> TrajectoryRequestBatch:
-    size = len(batch["prompts"])
-    selected: dict[str, Any] = {}
-    for key, value in batch.items():
-        if isinstance(value, list) and len(value) == size:
-            selected[key] = [value[index] for index in indices]
-        else:
-            selected[key] = value
-    return selected  # type: ignore[return-value]
 
 
 def _ultra_metadata(extras: dict[str, Any]) -> dict[str, Any]:
@@ -175,11 +164,11 @@ class NemotronUltraTrajectoryRouter:
         jobs = []
         index_groups: list[list[int]] = []
         if gym_indices:
-            gym_batch = _select_rows(input_batch, gym_indices)
+            gym_batch = select_request_rows(input_batch, gym_indices)
             jobs.append(self.gym_runner.run(gym_batch, disable_tqdm=disable_tqdm))
             index_groups.append(gym_indices)
         if harbor_indices:
-            harbor_batch = _select_rows(input_batch, harbor_indices)
+            harbor_batch = select_request_rows(input_batch, harbor_indices)
             harbor_batch["prompts"] = [
                 self.task_paths[_swe_instance_id(env_extras[index]).casefold()]  # type: ignore[union-attr]
                 for index in harbor_indices

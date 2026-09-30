@@ -205,3 +205,14 @@ Keep the policy's OOD suite untouched until checkpoint and hyperparameters are f
 The prepared artifacts and recipes do not establish GPU startup success, first-rollout
 geometry, filtered counts, training completion, or evaluation scores; those require
 the corresponding runs and their retained evidence.
+
+
+Profiling retries failed requests up to `generator.pivot_profiling_max_retries` (default 2).
+Successful and context-excluded requests are never resampled. Each retained attempt carries
+`extra_info.profiling_attempt`, keeping the original source row and repetition ID. Filtering
+validates the complete attempt history and uses the terminal verified outcome once, regardless
+of archive order. Exhausted failures remain excluded from both training pools and are reported;
+they never become zero rewards. Profiling token counts include all returned attempts, and the
+summary reports recovered and unresolved samples separately. A fatal runner or retention error
+still propagates: retries apply to retained per-request failures, including a batch in which every
+request failed, and do not conceal programming errors or loss of the inference engines.

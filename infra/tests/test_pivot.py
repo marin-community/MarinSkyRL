@@ -186,3 +186,24 @@ def test_exposure_distinguishes_unique_rows_visits_and_response_multiplicity():
     assert result["responses_per_source_row"] == {row["extra_info"]["source_id"]: 32}
     with pytest.raises(ValueError, match="Duplicate"):
         summarize_exposure([*records, records[0]])
+
+
+def test_filter_resolves_retry_history_without_counting_errors_as_failures(tmp_path):
+    row = adapt_row(swe_row(0), "swe", 0, "train")
+    Dataset.from_list([row]).to_parquet(str(tmp_path / "candidates.parquet"))
+    (tmp_path / "manifest.json").write_text('{"release_rows": 1}')
+    records = [retained(row, i, int(i == 1)) for i in range(4)]
+    failed = retained(row, 0, 0)
+    failed["verification_result"] = {"status": "error", "score": None}
+    failed["disposition"] = {"exception_type": "ModelServerError"}
+    records[0]["trajectory"]["environment_extras"]["extra_info"] = dict(row["extra_info"], profiling_attempt=1)
+    # Recovery may be archived before the original failure; resolve by attempt ID.
+    records.append(failed)
+    path = tmp_path / "rollouts.jsonl"
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    manifest = filter_candidates(tmp_path, tmp_path / "filtered", difficulty_threshold=.5,
+                                 rollouts=path, profile_policy="student@immutable", profile_revision="revision", samples_per_prefix=4)
+    profiles = Dataset.from_parquet(str(tmp_path / "filtered/profiled_candidates.parquet"))
+    assert profiles[0]["student_profile"]["mean"] == .25
+    assert manifest["selected_rows"] == 1
+    assert manifest["error_excluded_rows"] == 0
