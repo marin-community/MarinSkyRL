@@ -1,43 +1,110 @@
 Policy objective architecture
 =============================
 
-The policy worker minimizes a sum of globally normalized objective rows:
+The RL objective at a glance
+----------------------------
+
+The policy worker minimizes one loss per optimizer step:
 
 .. math::
 
-   L = \mathrm{loss\_scale}\left[
-       R_{\rm policy}(\ell_{\rm policy})
-       + \beta R_{\rm KL}(\ell_{\rm KL})
-       - \eta R_{\rm entropy}(H)
-       + R_{\rm teacher}(\ell_{\rm teacher})\right].
+   L = \mathrm{loss\_scale}\left[\mathrm{policy} + \beta\,\mathrm{KL}
+       - \eta\,\mathrm{entropy} + \mathrm{teacher}\right].
 
-``trainer.algorithm.kl_loss_coef`` sets :math:`\beta` and
-``entropy_loss_coef`` sets :math:`\eta`; ``use_kl_loss`` and
-``use_entropy_loss`` enable their respective terms. A top-K teacher adds the
-teacher row. Chosen-token teacher evidence enters the policy advantages.
+Each bracketed term is a *row*. A row starts as one value per response token.
+It is then averaged over the whole optimizer step, across every microbatch
+and data-parallel rank. This averaging does not depend on how the batch is
+split; the covariance losses can still depend on microbatch statistics.
+``loss_scale`` undoes how Megatron and DDP combine the microbatches and ranks.
 
-The modules below are relative to ``skyrl-train/skyrl_train/``.
+What it is made of, and where it lives
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Paths are relative to ``skyrl-train/skyrl_train/``.
 
 .. list-table::
    :header-rows: 1
-   :widths: 30 70
+   :widths: 14 30 24 32
 
-   * - Module
-     - Responsibility
-   * - ``config/objective_spec.py``
-     - Torch-free loss contracts, reduction names, resolved configuration and launch checks.
-   * - ``objective/losses.py``
-     - Policy formulas returning ``TokenLoss`` with one value per response token.
-   * - ``objective/reduction.py``
-     - Data weights, optimizer-step counts and reduction of each microbatch's contribution.
-   * - ``objective/teacher.py``
-     - Detached chosen-token advantages and differentiable top-K teacher losses.
-   * - ``objective/objective.py``
-     - Row composition, coefficients, backward scaling and reported values.
-   * - ``utils/policy_math.py``
-     - KL estimators and advantage normalization.
-   * - ``distributed/megatron/nonfinite_steps.py``
-     - Synchronized optimizer decisions for non-finite gradients.
+   * - Part
+     - What it does
+     - Module
+     - Main objects
+   * - Policy loss
+     - One value per token from the current policy, the old policy, the rollout policy and the advantages. It never averages and never corrects
+     - ``objective/losses.py``
+     - ``PolicyLossInputs``, ``TokenLoss``; the losses ``regular``, ``dual_clip``, ``importance_sampling``, ``behavior_clip``, ``gspo``, ``cispo``, ``sapo``, ``clip_cov``, ``kl_cov``, ``sft``
+   * - Averaging
+     - Counts each row's denominators once per optimizer step, then turns per-token values into the step value. Data weights set the denominator; correction and route weights only scale the numerator
+     - ``objective/reduction.py``
+     - ``WeightCounts``, ``StepCounts``, ``step_counts``, ``reduce_to_step``
+   * - Teacher signal
+     - A sampled teacher log-probability becomes an advantage. A top-K teacher distribution becomes the teacher row
+     - ``objective/teacher.py``
+     - ``teacher_advantages``, ``topk_teacher_loss``
+   * - KL and entropy
+     - Regularizers against the reference model, and for exploration
+     - ``utils/policy_math.py``
+     - ``differentiable_approx_kl``
+   * - Composition
+     - Builds one micro-batch's inputs, computes the loss above, and reports each row as its step value
+     - ``objective/objective.py``
+     - ``ObjectiveMicroBatch``, ``ObjectiveRows``, ``PolicyObjective``, ``compute_policy_objective``, ``megatron_loss_scale``
+   * - Declarations and checks
+     - Torch-free, so the launcher runs them before submission; the same checks run again at start-up
+     - ``config/objective_spec.py``
+     - ``RatioAnchor``, ``LossSpec``, ``BUILTIN_LOSS_SPECS``, ``LossReduction``, ``TopKLossParams``, ``resolve_objective_config``, ``validate_objective``
+   * - Non-finite steps
+     - On Megatron, skips an optimizer step whose gradients are NaN or infinite on any rank; fails after too many in a row
+     - ``distributed/megatron/nonfinite_steps.py``
+     - ``NonfiniteStepAction``, ``OptimizerStepResult``, ``nonfinite_step_action``
+   * - Names
+     - Maps each ``policy_loss_type`` to its function
+     - ``utils/algorithm_registry.py``
+     - ``PolicyLossType`` (from ``marinskyrl.runtime_options``), ``register_policy_loss``
+
+Where each part runs
+~~~~~~~~~~~~~~~~~~~~
+
+1. **At launch.** ``validate_objective`` rejects contradictory or ignored
+   settings, both before the job is submitted and when the driver starts.
+
+2. **On the driver, once per training batch** (``trainer.py``):
+
+   #. The forward pass gives the old policy's log probabilities.
+   #. REPLACE mode masks the tokens that have no teacher evidence.
+   #. The advantage estimator computes the environment advantages.
+   #. ``teacher_advantages`` adds the sampled teacher signal to the advantages.
+
+3. **On the worker, once per optimizer step:**
+
+   #. ``step_counts`` (one all-reduce).
+   #. ``compute_policy_objective`` for each microbatch.
+   #. The optimizer step, which applies, skips or fails.
+
+How to choose each part
+~~~~~~~~~~~~~~~~~~~~~~~
+
+All keys are under ``trainer.algorithm``, unless shown otherwise.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Part
+     - Keys
+   * - Policy loss and averaging
+     - ``policy_loss_type``, ``loss_reduction``, ``advantage_estimator``
+   * - Teacher
+     - ``distillation.objective``, ``distillation.reward_mode`` (``add`` or ``replace``), ``distillation.coefficient``, ``distillation.advantage_clip``
+   * - KL and entropy
+     - ``use_kl_loss``, ``kl_loss_coef``, ``kl_estimator_type``, ``use_entropy_loss``, ``entropy_loss_coef``
+   * - Non-finite steps
+     - ``trainer.policy.max_consecutive_nonfinite_steps``
+
+For the full rules, see the detailed sections below and :doc:`opd`
+for teacher deployment and routing.
+
 
 Averaging over an optimizer step
 --------------------------------
