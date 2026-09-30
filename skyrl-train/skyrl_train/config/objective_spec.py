@@ -1,7 +1,7 @@
 """Torch-free contracts for policy objectives and their configuration."""
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -15,6 +15,8 @@ from marinskyrl.distillation import (
     compile_distillation_plan_from_config,
 )
 from skyrl_train.dynamic_sampling import DynamicSamplingType
+
+from marinskyrl.runtime_options import AdvantageEstimator, PolicyLossType
 
 
 class RatioAnchor(StrEnum):
@@ -33,16 +35,16 @@ class LossSpec:
 
 BUILTIN_LOSS_SPECS: Mapping[str, LossSpec] = MappingProxyType(
     {
-        "regular": LossSpec(RatioAnchor.OLD),
-        "dual_clip": LossSpec(RatioAnchor.OLD),
-        "gspo": LossSpec(RatioAnchor.OLD, sequence_level=True),
-        "cispo": LossSpec(RatioAnchor.OLD),
-        "sapo": LossSpec(RatioAnchor.OLD),
-        "clip_cov": LossSpec(RatioAnchor.OLD, row_local=False),
-        "kl_cov": LossSpec(RatioAnchor.OLD, row_local=False, advantage_linear=False),
-        "importance_sampling": LossSpec(RatioAnchor.OLD),
-        "behavior_clip": LossSpec(RatioAnchor.ROLLOUT),
-        "sft": LossSpec(RatioAnchor.NONE, advantage_linear=False),
+        PolicyLossType.REGULAR: LossSpec(RatioAnchor.OLD),
+        PolicyLossType.DUAL_CLIP: LossSpec(RatioAnchor.OLD),
+        PolicyLossType.GSPO: LossSpec(RatioAnchor.OLD, sequence_level=True),
+        PolicyLossType.CISPO: LossSpec(RatioAnchor.OLD),
+        PolicyLossType.SAPO: LossSpec(RatioAnchor.OLD),
+        PolicyLossType.CLIP_COV: LossSpec(RatioAnchor.OLD, row_local=False),
+        PolicyLossType.KL_COV: LossSpec(RatioAnchor.OLD, row_local=False, advantage_linear=False),
+        PolicyLossType.IMPORTANCE_SAMPLING: LossSpec(RatioAnchor.OLD),
+        PolicyLossType.BEHAVIOR_CLIP: LossSpec(RatioAnchor.ROLLOUT),
+        PolicyLossType.SFT: LossSpec(RatioAnchor.NONE, advantage_linear=False),
     }
 )
 
@@ -180,28 +182,12 @@ class TopKLossParams:
         )
 
 
-def _loss_spec(algorithm: DictConfig) -> LossSpec | None:
-    name = algorithm.policy_loss_type
-    if name in BUILTIN_LOSS_SPECS:
-        return BUILTIN_LOSS_SPECS[name]
-    resolved = algorithm.get("resolved_loss_spec")
-    if resolved is None:
-        return None
-    return LossSpec(
-        anchor=RatioAnchor(resolved.anchor),
-        sequence_level=resolved.sequence_level,
-        row_local=resolved.row_local,
-        advantage_linear=resolved.advantage_linear,
-    )
-
-
-def resolve_objective_config(cfg: DictConfig) -> None:
+def resolve_objective_config(cfg: DictConfig, *, loss_spec: LossSpec | None = None) -> None:
     """Materialize objective contracts as primitive config for driver and worker transport."""
     algorithm = cfg.trainer.algorithm
-    spec = _loss_spec(algorithm)
+    spec = loss_spec or BUILTIN_LOSS_SPECS.get(algorithm.policy_loss_type)
     if spec is None:
         raise ValueError(f"policy loss {algorithm.policy_loss_type!r} requires a runtime LossSpec")
-    algorithm.resolved_loss_spec = {**asdict(spec), "anchor": spec.anchor.value}
     correction = _configured_correction(algorithm)
     plan = compile_distillation_plan_from_config(cfg)
     topk = plan is not None and plan.objective is not DistillationObjectiveKind.SAMPLED_REVERSE_KL
@@ -224,7 +210,7 @@ def resolve_objective_config(cfg: DictConfig) -> None:
     )
 
 
-def validate_objective(cfg: DictConfig) -> None:
+def validate_objective(cfg: DictConfig, *, loss_spec: LossSpec | None = None) -> None:
     """Reject objective settings that cannot affect the selected training rows correctly."""
     limit = cfg.trainer.policy.max_consecutive_nonfinite_steps
     if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
@@ -246,7 +232,7 @@ def validate_objective(cfg: DictConfig) -> None:
         raise ValueError(
             f"invalid loss_reduction: {algorithm.loss_reduction}; choose one of {list(LossReduction)}"
         ) from error
-    spec = _loss_spec(algorithm)
+    spec = loss_spec or BUILTIN_LOSS_SPECS.get(algorithm.policy_loss_type)
     correction = _configured_correction(algorithm)
     plan = compile_distillation_plan_from_config(cfg)
     topk = plan is not None and plan.objective is not DistillationObjectiveKind.SAMPLED_REVERSE_KL
@@ -278,7 +264,7 @@ def validate_objective(cfg: DictConfig) -> None:
         raise ValueError("think_token_weight != 1 requires trainer.algorithm.enable_token_reward_channel=true")
     if plan is None:
         return
-    if not topk and algorithm.policy_loss_type == "sft":
+    if not topk and algorithm.policy_loss_type == PolicyLossType.SFT:
         raise ValueError(
             "sampled_reverse_kl requires a policy loss that consumes advantages; sft ignores teacher credit"
         )
@@ -314,7 +300,7 @@ def validate_objective(cfg: DictConfig) -> None:
     if plan.reward_mode is DistillationRewardMode.REPLACE:
         if spec is not None and not spec.advantage_linear:
             raise ValueError("distillation reward_mode=replace requires an advantage-linear policy loss")
-        if algorithm.advantage_estimator != "uniform":
+        if algorithm.advantage_estimator != AdvantageEstimator.UNIFORM:
             raise ValueError("distillation reward_mode=replace requires advantage_estimator=uniform")
         if (
             algorithm.use_kl_in_reward

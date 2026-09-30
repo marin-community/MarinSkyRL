@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 
 import torch
+
+from marinskyrl.distillation import DistillationRewardMode
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.config.objective_spec import LossReduction, TopKLossParams
@@ -97,7 +99,10 @@ def compute_policy_objective(
     report_scale: float,
 ) -> PolicyObjective:
     """Compose globally normalized rows with separate backward and reporting scales."""
-    teacher_only = batch.teacher is not None and OmegaConf.select(config, "distillation.reward_mode") == "replace"
+    teacher_only = (
+        batch.teacher is not None
+        and OmegaConf.select(config, "distillation.reward_mode") == DistillationRewardMode.REPLACE
+    )
     policy = TokenLoss(batch.policy.log_probs * 0, {}) if teacher_only else loss(batch.policy, config)
     assert policy.values.shape == batch.policy.log_probs.shape
     common = {"max_seq_len": counts.max_seq_len, "nonzero_advantage_rows": counts.nonzero_advantage_rows}

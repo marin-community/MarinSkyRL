@@ -255,10 +255,6 @@ def main() -> None:
     parser.add_argument("--checkpoint-interval", type=int, default=-1, help="-1 saves no checkpoints")
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--model", type=Path, help="a tiny policy directory from build_tiny_policy")
-    parser.add_argument("--dp-size", type=int, default=1)
-    parser.add_argument("--micro-batch-size", type=int, default=8)
-    parser.add_argument("--max-in-flight", type=int, default=8)
-    parser.add_argument("--dump-data-batch", action="store_true")
     args = parser.parse_args()
     model_dir = args.model or build_tiny_policy(args.root / "model")
     cfg = tiny_training_config(
@@ -268,10 +264,6 @@ def main() -> None:
         args.shape,
         max_steps=args.steps,
         checkpoint_interval=args.checkpoint_interval,
-        dp_size=args.dp_size,
-        micro_batch_size=args.micro_batch_size,
-        max_in_flight=args.max_in_flight,
-        dump_data_batch=args.dump_data_batch,
     )
     run_tiny_training(cfg)
 

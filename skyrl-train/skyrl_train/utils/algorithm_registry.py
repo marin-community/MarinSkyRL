@@ -6,7 +6,6 @@ licensed under Apache 2.0.
 
 from __future__ import annotations
 
-from enum import StrEnum
 from functools import wraps
 from dataclasses import dataclass
 from typing import Callable, Union
@@ -14,7 +13,7 @@ from typing import Callable, Union
 import ray
 from loguru import logger
 
-from marinskyrl.runtime_options import AdvantageEstimator
+from marinskyrl.runtime_options import AdvantageEstimator, PolicyLossType
 from skyrl_train.config.objective_spec import BUILTIN_LOSS_SPECS, LossSpec
 from skyrl_train.utils.function_registry import BaseFunctionRegistry
 
@@ -73,19 +72,6 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
     def unregister(cls, name: str):
         super().unregister(name)
         cls._group_contracts.pop(name, None)
-
-
-class PolicyLossType(StrEnum):
-    REGULAR = "regular"
-    DUAL_CLIP = "dual_clip"
-    BEHAVIOR_CLIP = "behavior_clip"
-    GSPO = "gspo"
-    CISPO = "cispo"
-    CLIP_COV = "clip_cov"
-    KL_COV = "kl_cov"
-    SAPO = "sapo"
-    SFT = "sft"
-    IMPORTANCE_SAMPLING = "importance_sampling"
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):

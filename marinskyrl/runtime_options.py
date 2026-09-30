@@ -37,3 +37,16 @@ class AdvantageEstimator(StrEnum):
     REINFORCE_PP = "reinforce++"
     UNIFORM = "uniform"
     REWARD = "reward"
+
+
+class PolicyLossType(StrEnum):
+    REGULAR = "regular"
+    DUAL_CLIP = "dual_clip"
+    BEHAVIOR_CLIP = "behavior_clip"
+    GSPO = "gspo"
+    CISPO = "cispo"
+    CLIP_COV = "clip_cov"
+    KL_COV = "kl_cov"
+    SAPO = "sapo"
+    SFT = "sft"
+    IMPORTANCE_SAMPLING = "importance_sampling"

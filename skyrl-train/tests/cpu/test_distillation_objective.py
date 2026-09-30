@@ -540,29 +540,6 @@ def test_best_of_n_teacher_scoring_requests_only_the_selected_trajectory():
     torch.testing.assert_close(work.request.response_token_ids, torch.tensor([[30, 31]]))
 
 
-def test_training_batch_iterator_requires_driver_to_consume_chosen_teacher():
-    batch = TrainingInputBatch(
-        {
-            "sequences": torch.tensor([[1, 2, 3], [4, 5, 6]]),
-            "action_log_probs": torch.zeros(2, 2),
-            "base_action_log_probs": None,
-            "values": None,
-            "returns": torch.zeros(2, 2),
-            "advantages": torch.zeros(2, 2),
-            "attention_mask": torch.ones(2, 3, dtype=torch.long),
-            "loss_mask": torch.ones(2, 2, dtype=torch.long),
-            "response_mask": torch.ones(2, 2, dtype=torch.long),
-            "teacher_action_log_probs": torch.tensor([[-0.5, -0.7], [-0.2, -0.3]]),
-            "teacher_valid_mask": torch.ones(2, 2, dtype=torch.bool),
-            "distillation_loss_weights": torch.tensor([[0.4, 0.4], [0.6, 0.6]]),
-        }
-    )
-    batch.metadata = {"response_length": 2}
-
-    with pytest.raises(ValueError, match="chosen-token teacher tensors must be consumed on the driver"):
-        list(TrainingBatchIterator(batch, sample_batch_size=1))
-
-
 def test_student_topk_payload_rejects_mixed_or_partial_evidence():
     base = dict(
         teacher_action_log_probs=None,

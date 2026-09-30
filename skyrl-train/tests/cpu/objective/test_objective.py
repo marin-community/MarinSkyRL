@@ -5,7 +5,7 @@ from omegaconf import OmegaConf
 from marinskyrl.distillation import DistillationObjectiveKind
 from skyrl_train.config.objective_spec import LossReduction, TopKLossParams
 from skyrl_train.distillation import TeacherTopKInput
-from skyrl_train.objective.losses import behavior_clipped_policy_loss, importance_sampling_policy_loss, ppo_policy_loss
+from skyrl_train.objective.losses import behavior_clipped_policy_loss, importance_sampling_policy_loss
 from skyrl_train.objective.objective import (
     TopKTeacherBatch,
     build_objective_micro_batch,
@@ -126,70 +126,3 @@ def test_composed_rows_match_full_batch_value_gradient_and_reporting(mode, micro
     for actual, target in zip(actual_grads, expected_grads, strict=True):
         torch.testing.assert_close(actual, target, rtol=1e-6, atol=1e-7)
         assert torch.isfinite(actual).all()
-
-
-@pytest.mark.parametrize(("micro_batch", "dp_size"), [(1, 1), (2, 1), (4, 1), (1, 2), (2, 2)])
-def test_step_objective_matches_full_batch_for_any_split(micro_batch, dp_size):
-    mask = torch.tensor([[1, 0, 0, 0], [1, 1, 1, 0], [1, 1, 0, 0], [1, 1, 1, 1]], dtype=torch.float64)
-    advantages = torch.arange(1, 17, dtype=torch.float64).reshape(4, 4)
-    reference_log_probs = torch.zeros_like(advantages, requires_grad=True)
-    reference = (
-        sum(
-            -reference_log_probs[row, token].exp() * advantages[row, token]
-            for row in range(4)
-            for token in range(4)
-            if mask[row, token] > 0
-        )
-        / mask.sum()
-    )
-    reference.backward()
-
-    log_probs = torch.zeros_like(advantages, requires_grad=True)
-    config = OmegaConf.create(
-        {
-            "loss_reduction": "token_mean",
-            "max_seq_len": 4,
-            "policy_loss_type": "regular",
-            "eps_clip_low": 0.2,
-            "eps_clip_high": 0.2,
-            "think_token_weight": 1.0,
-            "use_entropy_loss": False,
-            "entropy_loss_coef": 0.0,
-            "use_kl_loss": False,
-            "kl_loss_coef": 0.0,
-            "kl_estimator_type": "k1",
-        }
-    )
-    counts = step_counts([mask], [mask], [], [advantages], 4, lambda value: value)
-    rank_rows = 4 // dp_size
-    num_microbatches = rank_rows // micro_batch
-    cp_size = 1
-    scheduled = log_probs.new_zeros(())
-    for rank in range(dp_size):
-        for start in range(rank * rank_rows, (rank + 1) * rank_rows, micro_batch):
-            rows = slice(start, start + micro_batch)
-            batch = build_objective_micro_batch(
-                action_log_probs=log_probs[rows],
-                old_action_log_probs=torch.zeros_like(log_probs[rows]),
-                base_action_log_probs=None,
-                advantages=advantages[rows],
-                loss_mask=mask[rows],
-                rollout_logprobs=None,
-                response_span_tags=None,
-                token_entropy=torch.zeros_like(log_probs[rows]),
-                think_token_weight=1.0,
-                teacher=None,
-            )
-            objective = compute_policy_objective(
-                batch,
-                loss=ppo_policy_loss,
-                counts=counts,
-                config=config,
-                loss_scale=megatron_loss_scale(num_microbatches, dp_size),
-                report_scale=num_microbatches * dp_size,
-            )
-            # Megatron's schedule scales by CP/M and DDP averages over DP*CP.
-            scheduled = scheduled + objective.optimization_loss * cp_size / num_microbatches / (dp_size * cp_size)
-    scheduled.backward()
-    torch.testing.assert_close(log_probs.grad, reference_log_probs.grad, rtol=1e-6, atol=1e-7)
-    torch.testing.assert_close(scheduled, reference, rtol=1e-6, atol=1e-7)

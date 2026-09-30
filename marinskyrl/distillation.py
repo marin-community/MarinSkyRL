@@ -643,7 +643,7 @@ def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan 
     )
     coefficient = _positive_float(distillation, "coefficient", "trainer.algorithm.distillation")
     advantage_clip = (
-        _nonnegative_float(distillation, "advantage_clip", "trainer.algorithm.distillation")
+        _positive_float(distillation, "advantage_clip", "trainer.algorithm.distillation")
         if distillation.get("advantage_clip") is not None
         else None
     )

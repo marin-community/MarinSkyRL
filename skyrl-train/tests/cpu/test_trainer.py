@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import ray
 import torch
 from omegaconf import OmegaConf
 
@@ -21,7 +22,7 @@ from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.rollouts.context import TrainingContextState
 from skyrl_train.rollouts.loader import PromptLoaderState
 from skyrl_train.trainer import CheckpointSnapshot, RayPPOTrainer
-from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.objective.losses import PolicyLossInputs, ppo_policy_loss
 from skyrl_train.config.objective_spec import LossReduction
@@ -50,6 +51,21 @@ class _CapturingPolicyGroup:
             return [object()]
         if method_name == "empty_cache":
             return []
+        raise AssertionError(f"Unexpected policy method: {method_name}")
+
+
+class _ForwardPolicyGroup:
+    actor_infos = [SimpleNamespace(rank=MeshRank(dp=0, sp=0, tp=0, pp=0, world_size=1, dp_size=1, pp_size=1))]
+
+    def async_run_ray_method(self, dispatch_type, method_name, **kwargs):
+        if method_name == "barrier_all":
+            return [ray.put(None)]
+        if method_name == "empty_cache":
+            return []
+        if method_name == "forward":
+            data = kwargs["data"]
+            output = torch.zeros(len(data["sequences"]), data.metadata["response_length"])
+            return [ray.put(TrainingOutputBatch({"output": output}))]
         raise AssertionError(f"Unexpected policy method: {method_name}")
 
 
@@ -538,6 +554,32 @@ def test_grpo_loop_credit_is_token_local_when_every_group_member_has_the_same_ou
         nonzero_advantage_rows=counts.nonzero_advantage_rows,
     )
     assert policy_loss.item() == pytest.approx(expected_policy_loss)
+
+
+def test_replace_mode_rejects_batch_without_teacher_evidence(ray_init, dummy_config, local_distillation_config):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = local_distillation_config(dummy_config)
+    trainer.cfg.trainer.algorithm.distillation.reward_mode = "replace"
+    trainer.distillation_plan = compile_distillation_plan_from_config(trainer.cfg)
+    trainer.policy_model = _ForwardPolicyGroup()
+    trainer.ref_model = None
+    trainer.critic_model = None
+    trainer.colocate_all = False
+    trainer.global_step = 1
+    trainer.all_timings = {}
+    trainer._training_metrics_enabled = False
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[1, 2, 3]]),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+            "loss_mask": torch.ones(1, 2),
+            "rollout_logprobs": None,
+        }
+    )
+    batch.metadata = {"response_length": 2}
+
+    with pytest.raises(ValueError, match="replace requires teacher evidence on every training batch"):
+        asyncio.run(trainer._run_training(batch))
 
 
 @pytest.mark.parametrize("reward_mode", ["add", "replace"])

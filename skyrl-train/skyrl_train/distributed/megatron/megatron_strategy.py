@@ -166,18 +166,13 @@ class MegatronStrategy(DistributedStrategy):
     def backward(self, loss: torch.Tensor, model, optimizer: optim.Optimizer, **kwargs) -> None:
         raise NotImplementedError()
 
-    @torch.no_grad()
-    def optimizer_step(
+    def _all_ranks_finite_grad_norm(
         self,
         optimizer: optim.Optimizer,
-        model,
-        scheduler,
-        name="model",
-        consecutive_nonfinite_steps: int = 0,
-        max_consecutive_nonfinite_steps: int | None = None,
-        **kwargs,
-    ) -> OptimizerStepResult:
-        """Apply prepared gradients only when all training ranks can take a finite step."""
+        consecutive_nonfinite_steps: int,
+        max_consecutive_nonfinite_steps: int | None,
+    ) -> float | None:
+        """Return the finite norm, clear gradients on a skip, or raise when the skip allowance is exhausted."""
         found_inf = bool(optimizer.prepare_grads())
         flag = torch.tensor(int(found_inf), device=self.collective_device())
         dist.all_reduce(flag, op=dist.ReduceOp.MAX)
@@ -195,6 +190,25 @@ class MegatronStrategy(DistributedStrategy):
                     f"nonfinite policy gradients after {consecutive_nonfinite_steps} consecutive skipped steps; "
                     f"max_consecutive_nonfinite_steps={max_consecutive_nonfinite_steps}"
                 )
+            return None
+        return grad_norm
+
+    @torch.no_grad()
+    def optimizer_step(
+        self,
+        optimizer: optim.Optimizer,
+        model,
+        scheduler,
+        name="model",
+        consecutive_nonfinite_steps: int = 0,
+        max_consecutive_nonfinite_steps: int | None = None,
+        **kwargs,
+    ) -> OptimizerStepResult:
+        """Apply prepared gradients only when all training ranks can take a finite step."""
+        grad_norm = self._all_ranks_finite_grad_norm(
+            optimizer, consecutive_nonfinite_steps, max_consecutive_nonfinite_steps
+        )
+        if grad_norm is None:
             return OptimizerStepResult(grad_norm=None, applied=False)
 
         should_skip_update = False
@@ -219,7 +233,7 @@ class MegatronStrategy(DistributedStrategy):
                     ),
                 )
             should_skip_update |= grad_norm > child.config.grad_norm_skip_threshold
-        flag.fill_(int(should_skip_update))
+        flag = torch.tensor(int(should_skip_update), device=self.collective_device())
         dist.all_reduce(flag, op=dist.ReduceOp.MAX)
         applied = False if flag.item() else bool(optimizer.step_with_ready_grads())
         if applied:
