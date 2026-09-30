@@ -35,7 +35,7 @@ import gc
 import hashlib
 import json
 import tempfile
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -479,29 +479,34 @@ def gemm_sweeps(layer, reference: Mapping[str, torch.Tensor], lm_head: torch.Ten
     return sweeps
 
 
-def row_classes(fn: Callable[[torch.Tensor], torch.Tensor], rows: torch.Tensor, max_rows: int, generator) -> list:
-    """Row counts ``16..max_rows`` grouped by the bytes ``fn`` gives the same 16 leading rows of the call.
+def row_classes(
+    fn: Callable[[torch.Tensor], torch.Tensor], rows: torch.Tensor, counts: Sequence[int], generator
+) -> list:
+    """The row counts ``counts`` (ascending, at least 16) grouped by the bytes ``fn`` gives the same 16 leading rows.
 
     Every call holds the same 16 probed rows first and the same filler rows after them, so only the row count
-    changes. Returns runs ``[first_count, last_count, class]``; class 0 is the bytes at 16 rows, and two counts
-    share a class exactly when the probed rows' outputs are byte-identical (the GEMM sums them in the same order).
+    changes. Returns runs ``[first_count, last_count, class]`` of neighbouring entries of ``counts``; class 0 is the
+    bytes at the first count, and two counts share a class exactly when the probed rows' outputs are byte-identical
+    (the GEMM sums them in the same order).
     """
-    filler = filler_rows(rows, max_rows, generator)
+    filler = filler_rows(rows, max(counts), generator)
     filler[:DENSE_PROBE_ROWS] = rows[:DENSE_PROBE_ROWS]
     classes: dict[bytes, int] = {}
     runs: list[list[int]] = []
-    for count in range(DENSE_PROBE_ROWS, max_rows + 1):
+    for count in counts:
         output = fn(filler[:count])[:DENSE_PROBE_ROWS].contiguous()
         key = hashlib.sha256(output.view(torch.uint8).cpu().numpy().tobytes()).digest()
         label = classes.setdefault(key, len(classes))
-        if runs and runs[-1][2] == label and runs[-1][1] == count - 1:
+        if runs and runs[-1][2] == label:
             runs[-1][1] = count
         else:
             runs.append([count, count, label])
     return runs
 
 
-def dense_gemm_classes(layer, reference: Mapping[str, torch.Tensor], lm_head: torch.Tensor, max_rows: int, generator):
+def dense_gemm_classes(
+    layer, reference: Mapping[str, torch.Tensor], lm_head: torch.Tensor, counts: Sequence[int], generator
+):
     """``row_classes`` of every projection the trainer (Transformer Engine) or compiled vLLM (``torch.mm``) runs."""
     attention, shared, router = layer.self_attention, layer.mlp.shared_experts, layer.mlp.router
     attention_in, mlp_in = reference["attention_norm"], reference["mlp_norm"]
@@ -542,9 +547,9 @@ def dense_gemm_classes(layer, reference: Mapping[str, torch.Tensor], lm_head: to
     torch.backends.cuda.matmul.allow_tf32 = False
     try:
         with torch.no_grad():
-            result = {name: row_classes(fn, rows, max_rows, generator) for name, (fn, rows) in functions.items()}
+            result = {name: row_classes(fn, rows, counts, generator) for name, (fn, rows) in functions.items()}
             result["router fp32 (router_gemm)"] = row_classes(
-                lambda x: F.linear(x.float(), weight), mlp_in, max_rows, generator
+                lambda x: F.linear(x.float(), weight), mlp_in, counts, generator
             )
     finally:
         torch.backends.cuda.matmul.allow_tf32 = previous
@@ -679,8 +684,10 @@ def main() -> None:
     parser.add_argument("--numerics", action="append", default=[], help="[label=]comma-separated flags")
     parser.add_argument("--sweep-layers", type=int, nargs="*", default=[0, 3])
     parser.add_argument(
-        "--dense-max-rows", type=int, default=0, help="also classify every GEMM row count up to this (0: off)"
+        "--dense-max-rows", type=int, default=0, help="also classify GEMM row counts up to this (0: off)"
     )
+    parser.add_argument("--dense-min-rows", type=int, default=DENSE_PROBE_ROWS)
+    parser.add_argument("--dense-step", type=int, default=1, help="classify every this many row counts")
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=1234)
     args = parser.parse_args()
@@ -732,9 +739,8 @@ def main() -> None:
                     if not flags:
                         sweeps["gemm"] = gemm_sweeps(layer, reference, lm_head, generator)
                         if args.dense_max_rows:
-                            sweeps["gemm_classes"] = dense_gemm_classes(
-                                layer, reference, lm_head, args.dense_max_rows, generator
-                            )
+                            counts = range(args.dense_min_rows, args.dense_max_rows + 1, args.dense_step)
+                            sweeps["gemm_classes"] = dense_gemm_classes(layer, reference, lm_head, counts, generator)
                     entry["sweeps"][label] = sweeps
             results["layers"][str(layer_index)] = entry
             del layer, next_norm
