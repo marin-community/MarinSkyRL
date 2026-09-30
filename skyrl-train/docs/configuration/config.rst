@@ -218,10 +218,12 @@ Some rules for configuring these parameters:
 - ``world_size % (pp_size * ep_size * etp_size) == 0``
     - This means that ``ep_size * etp_size`` can scale independently of ``tp_size * cp_size``, and can go across data parallel ranks.
 
-Precision-aware AdamW with CPU offload supports full FP32 master weights and
-moments with BF16 gradients. Use ``optimizer_config_kwargs.store_param_remainders=false``
-and ``optimizer_checkpoint_sharding_type=dp_reshardable``. See
-``docs/grug-megatron-training.md`` for the configuration and validation scope.
+Precision-aware AdamW and CPU optimizer offload are opt-in. Checkpoint
+restoration repairs the native hybrid optimizer's state bindings and Adam step
+counters. The focused regression uses BF16 gradients, FP32 masters and moments,
+and ``dp_reshardable`` checkpoints. See the
+`Grug training guide <https://github.com/marin-community/MarinSkyRL/blob/main/docs/grug-megatron-training.md>`_
+for offload considerations and configuration references.
 
 
 Optimizer Configuration

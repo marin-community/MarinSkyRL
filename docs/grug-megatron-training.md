@@ -34,27 +34,17 @@ Hero parameter families, packed training, repeated updates, and checkpoint
 continuation; passing it alone does not establish full-Hero capacity or parity
 with Levanter.
 
-Precision-aware AdamW accepts BF16 gradients and retains FP32 master weights
-and moments. To offload half its state to CPU, set these fields under
-`trainer.policy.megatron_config`:
+CPU optimizer offload moves Adam updates and optimizer state to CPU, adding
+host memory use and transfers each update. Choose the offload fraction using
+GPU memory, host memory and update time measurements on the target machines. See the
+[MSRL defaults](../skyrl-train/skyrl_train/config/megatron_config/policy.yaml) and
+[Megatron's parameter definitions](https://github.com/NVIDIA/Megatron-LM/blob/core_v0.18.0/megatron/core/optimizer/optimizer_config.py#L344).
 
-```yaml
-ddp_config:
-  grad_reduce_in_fp32: false
-optimizer_checkpoint_sharding_type: dp_reshardable
-optimizer_config_kwargs:
-  use_precision_aware_optimizer: true
-  store_param_remainders: false
-  optimizer_cpu_offload: true
-  optimizer_offload_fraction: 0.5
-  overlap_cpu_optimizer_d2h_h2d: false
-```
-
-CPU offload requires host memory for master weights, moments and staged
-gradients. The checkpoint loader restores those tensors and Adam step counters
-through the native hybrid optimizer. The tiny worker regression compares two
-updates after resume with uninterrupted training; it does not qualify
-reduced-precision optimizer state or full-Hero capacity.
+Checkpoint restoration rebinds the native hybrid optimizer's moments, FP32
+master weights and Adam step counters. The tiny worker regression compares two
+updates after resume with uninterrupted training, using BF16 gradients, FP32
+masters and moments, and `dp_reshardable` checkpoints. That format requires the
+same tensor, pipeline, context and expert geometry when resuming.
 
 The port lives in two modules:
 
