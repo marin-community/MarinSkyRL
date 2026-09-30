@@ -44,18 +44,25 @@ set a measured minimum observation count. A `trend` compares the first and last
 `window` finite observations; too few observations fail. An `occurrence` requires
 `minimum_count` values strictly `above` or `below` its `threshold`.
 
+A learning requirement pairs a trend with a required initial observation:
+
 ```json
-{
-  "kind": "train",
-  "metric": "environment/exact_n10",
-  "required": true,
-  "min_observations": 20,
-  "trend": {"window": 5, "min_improvement": 0.2}
-}
+[
+  {"kind": "eval", "metric": "eval/train/avg_score", "required": true,
+   "min_observations": 1, "at_step": 0},
+  {"kind": "eval", "metric": "eval/train/avg_score", "required": true,
+   "min_observations": 2, "trend": {"window": 1, "min_improvement": 0.2}}
+]
 ```
 
-Set the observation count and trend margin from a complete run. This example
-shows the schema; it is not a CatCountCanary gate threshold.
+The first row requires the step-0 baseline. The second requires a reward gain
+of at least 0.2 from that baseline. CatCountCanary has separate async and sync
+specs; their provenance records the recipe, seeds, margin and step cap. The
+launcher's early-stop margin equals the spec's trend margin.
+
+A negative `min_improvement`, such as -0.1, permits a decrease of at most 0.1.
+Top-level `finite_metrics` and `bounds` are optional final-step checks;
+`metric_series` expresses requirements across the run.
 
 ## Two Ray instances cannot share a node
 

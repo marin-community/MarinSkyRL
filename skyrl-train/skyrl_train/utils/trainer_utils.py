@@ -236,9 +236,9 @@ def evaluation_response_metrics(trajectory_batch: TrajectoryBatch) -> Dict[str, 
         for environment in environments:
             indices = [i for i, name in enumerate(trajectory_batch["env_classes"]) if name == environment]
             subset = {
-                key: [values[i] for i in indices]
-                for key, values in trajectory_batch.items()
-                if isinstance(values, list)
+                key: [trajectory_batch[key][i] for i in indices]
+                for key in ("response_ids", "rewards", "env_metrics", "env_classes", "verification_results")
+                if trajectory_batch.get(key) is not None
             }
             rollout_metrics = get_rollout_metrics(
                 subset["response_ids"],
@@ -247,9 +247,7 @@ def evaluation_response_metrics(trajectory_batch: TrajectoryBatch) -> Dict[str, 
                 subset["env_classes"],
                 verification_results=subset.get("verification_results"),
             )
-            prefix = ENVIRONMENT_METRIC_PREFIX
-            if len(environments) > 1:
-                prefix = f"{prefix}{environment}/"
+            prefix = f"{ENVIRONMENT_METRIC_PREFIX}{environment}/"
             metrics.update(
                 {
                     f"{prefix}{key.removeprefix(ENVIRONMENT_METRIC_PREFIX)}": value

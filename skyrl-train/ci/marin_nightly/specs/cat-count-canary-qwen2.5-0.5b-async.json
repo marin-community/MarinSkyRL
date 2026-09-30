@@ -1,0 +1,136 @@
+{
+  "provenance": {
+    "what": "CatCount learning through Megatron with pretrained Qwen2.5-0.5B-Instruct.",
+    "status": "Local preparation; final seed measurements must fill calibrated numbers before publication.",
+    "lane": "async",
+    "runtime_sha": "1f130218e56590075363d59cd94fb97c292d65e0",
+    "learning_rate": 2e-06,
+    "batch_size": 64,
+    "micro_batch": 16,
+    "update_epochs_per_batch": 2,
+    "seeds": [
+      17,
+      23,
+      31,
+      47
+    ],
+    "early_stop_margin": 0.2,
+    "margin_contract": "The launcher stop_on_improvement margin equals this spec min_improvement.",
+    "step_cap_rule": "Worst first crossing over four final seeds plus five steps."
+  },
+  "min_train_steps": 5,
+  "max_wall_clock_seconds": 7200,
+  "metric_series": [
+    {
+      "kind": "eval",
+      "metric": "eval/train/avg_score",
+      "required": true,
+      "min_observations": 1,
+      "at_step": 0,
+      "bounds": {
+        "minimum": 0.45,
+        "maximum": 0.7
+      }
+    },
+    {
+      "kind": "eval",
+      "metric": "eval/train/avg_score",
+      "required": true,
+      "min_observations": 2,
+      "trend": {
+        "window": 1,
+        "min_improvement": 0.2
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "policy/policy_loss",
+      "required": true,
+      "min_observations": 5,
+      "finite_every_step": true
+    },
+    {
+      "kind": "train",
+      "metric": "policy/final_loss",
+      "required": true,
+      "min_observations": 5,
+      "finite_every_step": true
+    },
+    {
+      "kind": "train",
+      "metric": "policy/policy_entropy",
+      "required": true,
+      "min_observations": 5,
+      "finite_every_step": true
+    },
+    {
+      "kind": "train",
+      "metric": "reward/zero_std_group_fraction",
+      "required": true,
+      "min_observations": 5,
+      "finite_every_step": true,
+      "occurrence": {
+        "minimum_count": 1,
+        "comparison": "above",
+        "threshold": 0
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "policy/ppo_clip_ratio",
+      "required": true,
+      "min_observations": 5,
+      "finite_every_step": true,
+      "occurrence": {
+        "minimum_count": 1,
+        "comparison": "above",
+        "threshold": 0
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "policy/ppo_ratio_exact_unit_fraction",
+      "required": true,
+      "min_observations": 5,
+      "finite_every_step": true,
+      "occurrence": {
+        "minimum_count": 1,
+        "comparison": "below",
+        "threshold": 1
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "policy/mismatch/pooled/log_ratio_abs_mean",
+      "required": true,
+      "min_observations": 5,
+      "finite_every_step": true,
+      "bounds": {
+        "minimum": 0,
+        "maximum": 0.2
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "async/staleness_mean",
+      "required": true,
+      "min_observations": 5,
+      "finite_every_step": true,
+      "occurrence": {
+        "minimum_count": 1,
+        "comparison": "above",
+        "threshold": 0
+      }
+    }
+  ],
+  "required_log_patterns": {
+    "successful_head_completion": {
+      "pattern": "Training done!",
+      "minimum": 1
+    },
+    "telemetry": {
+      "pattern": "\\[telemetry\\] .* run_id=",
+      "minimum": 1
+    }
+  }
+}

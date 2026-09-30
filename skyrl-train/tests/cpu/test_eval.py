@@ -125,8 +125,8 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkey
         "eval/all/pass_at_1": 0.5,
         "eval/all/environment/gsm8k/truncated": 1.0,
         "eval/all/environment/custom_env/truncated": 0.0,
-        "eval/dataset_a/environment/truncated": 1.0,
-        "eval/dataset_b/environment/truncated": 0.0,
+        "eval/dataset_a/environment/gsm8k/truncated": 1.0,
+        "eval/dataset_b/environment/custom_env/truncated": 0.0,
     }
 
     for key, expected_value in expected_metrics.items():

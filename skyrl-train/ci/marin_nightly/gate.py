@@ -19,6 +19,7 @@ METRIC_LINE = re.compile(r"WANDB_MIRROR kind=(?P<kind>\w+) step=(?P<step>\d+) me
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 TRAIN = "train"
+EVAL = "eval"
 
 
 @dataclass(frozen=True)
@@ -67,7 +68,7 @@ class SeriesTrend:
 class MetricSeries:
     """Evidence required from one metric in one tracker payload stream."""
 
-    kind: str
+    kind: Literal["train", "eval"]
     metric: str
     required: bool
     min_observations: int
@@ -78,7 +79,7 @@ class MetricSeries:
     at_step: int | Literal["first", "last"] | None = None
 
     def __post_init__(self) -> None:
-        if self.kind not in ("train", "eval") or self.min_observations < 1:
+        if self.kind not in (TRAIN, EVAL) or self.min_observations < 1:
             raise ValueError("metric series requires train or eval and a positive min_observations")
         if self.at_step is not None and self.at_step not in ("first", "last"):
             if isinstance(self.at_step, bool) or not isinstance(self.at_step, int) or self.at_step < 0:
@@ -108,12 +109,10 @@ class GateSpec:
 
 def load_spec(path: Path) -> GateSpec:
     raw = json.loads(path.read_text())
-    if "reward_trend" in raw:
-        raise ValueError(f"{path}: reward_trend must be expressed in metric_series")
     return GateSpec(
         min_train_steps=raw["min_train_steps"],
-        finite_metrics=tuple(raw["finite_metrics"]),
-        bounds={k: MetricBound(v["minimum"], v["maximum"]) for k, v in raw["bounds"].items()},
+        finite_metrics=tuple(raw.get("finite_metrics", ())),
+        bounds={k: MetricBound(v["minimum"], v["maximum"]) for k, v in raw.get("bounds", {}).items()},
         max_wall_clock_seconds=raw["max_wall_clock_seconds"],
         required_log_patterns={
             name: LogPatternBound(value["pattern"], value["minimum"], value.get("maximum"))
@@ -161,7 +160,7 @@ def _distinct_steps(steps: list[StepMetrics]) -> tuple[list[StepMetrics], list[s
     by_key: dict[tuple[str, int], StepMetrics] = {}
     failures = []
     for step in steps:
-        if step.kind not in (TRAIN, "eval"):
+        if step.kind not in (TRAIN, EVAL):
             continue
         key = (step.kind, step.step)
         prior = by_key.get(key)
@@ -265,7 +264,7 @@ def _metric_series_failures(steps: list[StepMetrics], requirement: MetricSeries)
             if not math.isfinite(early) or not math.isfinite(late) or improvement < trend.min_improvement:
                 failures.append(
                     f"{requirement.kind} {requirement.metric} rose by {improvement:+.4f}, "
-                    f"expected at least +{trend.min_improvement:.4f}"
+                    f"expected at least {trend.min_improvement:+.4f}"
                 )
 
     if requirement.occurrence is not None:

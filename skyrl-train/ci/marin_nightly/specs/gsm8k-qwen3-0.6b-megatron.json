@@ -3,7 +3,7 @@
     "what": "Gate for the nightly single-H100 GRPO run on the Megatron backend: GSM8K, Qwen/Qwen3-0.6B, 30 training steps, tensor and pipeline parallel size 1, colocated vLLM rollouts.",
     "produced_by": "ci/marin_nightly/run_h100.sh, submitted to Iris by .github/workflows/marin-nightly.yaml",
     "why_these_thresholds": [
-      "Structural only: the step count is reached, the listed metrics are present and finite, and mean raw reward stays inside [0, 1] because the gsm8k environment scores each rollout 0 or 1.",
+      "Every training step records finite policy loss, final loss, entropy and mean raw reward. Mean raw reward stays inside [0, 1], the range of GSM8K rollout scores.",
       "max_wall_clock_seconds is 1800, about 2x the 883s observed on cw-rno2a 2026-09-10 over this recipe. It is a hang backstop, not a budget."
     ],
     "tightening": "Set reward-trend bounds after enough Megatron nights establish an observed distribution.",

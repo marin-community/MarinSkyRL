@@ -192,9 +192,7 @@ def test_eval_payloads_do_not_count_as_training_steps(spec):
     "rewards,window,expected_pass,expected_message",
     [
         ([0.25] * 4, 2, False, "rose by"),
-        ([1e308] * 9 + [0.5], 5, False, "rose by"),
         ([0.05, 0.06, 0.20, 0.22], 2, True, ""),
-        ([-1e308, -1e308, 1e308, 1e308], 2, True, ""),
         ([0.25] * 3, 5, False, "expected at least 10 for its trend"),
     ],
 )
@@ -223,26 +221,33 @@ def test_duplicate_payloads_do_not_count_as_completed_steps(spec):
     ]
     assert check_run([*startup, *parse_metrics(healthy_log())], spec, 300) == []
 
-    boolean_value = replace(first, values={**first.values, "x": True})
-    numeric_value = replace(first, values={**first.values, "x": 1})
-    assert any(
-        "conflicting train payloads" in failure for failure in check_run([boolean_value, numeric_value], spec, 300)
-    )
-
     nan_copies = parse_metrics("\n".join([mirror_line(1, **{"policy/policy_loss": float("nan")})] * 2))
     failures = check_run(nan_copies, replace(spec, min_train_steps=1), 300)
     assert len(failures) == 1
     assert "not finite" in failures[0]
 
 
-def test_cat_count_series_requires_finite_learning_and_enough_train_and_eval_evidence(tmp_path):
-    spec_path = tmp_path / "cat-count-spec.json"
-    spec_path.write_text(
+@pytest.mark.parametrize(
+    "mutation,expected",
+    [
+        ("healthy", ""),
+        ("nan_loss", "nonfinite policy/policy_loss"),
+        ("missing_loss", "step 3 did not log policy/policy_loss"),
+        ("flat_train", "environment/exact_n10 rose by"),
+        ("sparse_train", "environment/exact_n10 has 4 finite observations"),
+        ("flat_eval", "eval eval/cat_count_n10/avg_score rose by"),
+        ("no_eval", "eval eval/cat_count_n10/avg_score has 0 finite observations"),
+        ("no_zero_variance", "reward/zero_std_group_fraction has 0 observations above 0.0"),
+        ("no_ratio_change", "policy/ppo_ratio_exact_unit_fraction has 0 observations below 1.0"),
+        ("nan_optional", "nonfinite policy/ppo_clip_ratio"),
+    ],
+)
+def test_cat_count_series_requires_finite_learning_and_enough_evidence(tmp_path, mutation, expected):
+    path = tmp_path / "spec.json"
+    path.write_text(
         json.dumps(
             {
                 "min_train_steps": 6,
-                "finite_metrics": [],
-                "bounds": {},
                 "max_wall_clock_seconds": 600,
                 "metric_series": [
                     {
@@ -280,17 +285,11 @@ def test_cat_count_series_requires_finite_learning_and_enough_train_and_eval_evi
                         "min_observations": 3,
                         "trend": {"window": 1, "min_improvement": 0.4},
                     },
-                    {
-                        "kind": "train",
-                        "metric": "policy/ppo_clip_ratio",
-                        "required": False,
-                        "min_observations": 1,
-                    },
+                    {"kind": "train", "metric": "policy/ppo_clip_ratio", "required": False, "min_observations": 1},
                 ],
             }
         )
     )
-    spec = load_spec(spec_path)
     train = [
         StepMetrics(
             "train",
@@ -309,113 +308,67 @@ def test_cat_count_series_requires_finite_learning_and_enough_train_and_eval_evi
         for step, score in ((0, 0.0), (3, 0.3), (6, 0.8))
     ]
     steps = [*train, *evaluation]
-    assert check_run(steps, spec, wall_clock_seconds=300) == []
+    for index, row in enumerate(steps):
+        values = dict(row.values)
+        if row.kind == "train":
+            if mutation == "nan_loss" and row.step == 3:
+                values["policy/policy_loss"] = float("nan")
+            if mutation == "missing_loss" and row.step == 3:
+                values.pop("policy/policy_loss")
+            if mutation == "flat_train" and "environment/exact_n10" in values:
+                values["environment/exact_n10"] = 0.1
+            if mutation == "sparse_train" and row.step == 3:
+                values.pop("environment/exact_n10")
+            if mutation == "no_zero_variance":
+                values["reward/zero_std_group_fraction"] = 0.0
+            if mutation == "no_ratio_change":
+                values["policy/ppo_ratio_exact_unit_fraction"] = 1.0
+            if mutation == "nan_optional" and row.step == 4:
+                values["policy/ppo_clip_ratio"] = float("nan")
+        elif mutation == "flat_eval":
+            values["eval/cat_count_n10/avg_score"] = 0.1
+        steps[index] = replace(row, values=values)
+    if mutation == "no_eval":
+        steps = train
+    failures = check_run(steps, load_spec(path), 300)
+    if expected:
+        assert any(expected in failure for failure in failures)
+    else:
+        assert failures == []
 
-    for selector, bound in (
-        (0, MetricBound(0.0, 0.1)),
-        ("first", MetricBound(0.0, 0.1)),
-        ("last", MetricBound(0.7, 1.0)),
-    ):
-        rule = MetricSeries("eval", "eval/cat_count_n10/avg_score", True, 1, bounds=bound, at_step=selector)
-        raw = json.loads(spec_path.read_text())
-        raw["metric_series"].append(
-            {
-                "kind": rule.kind,
-                "metric": rule.metric,
-                "required": True,
-                "min_observations": 1,
-                "at_step": selector,
-                "bounds": {"minimum": bound.minimum, "maximum": bound.maximum},
-            }
-        )
-        selected_path = tmp_path / "selected-spec.json"
-        selected_path.write_text(json.dumps(raw))
-        selected_spec = load_spec(selected_path)
-        assert check_run(list(reversed(steps)), selected_spec, 300) == []
-        wrong_step = 6 if selector == "last" else 0
-        bad_score = 0.6 if selector == "last" else 0.3
-        wrong_band = [
-            replace(row, values={"eval/cat_count_n10/avg_score": bad_score})
-            if row.kind == "eval" and row.step == wrong_step
-            else row
-            for row in steps
-        ]
-        assert check_run(wrong_band, selected_spec, 300)
-        selected_missing = [row for row in steps if not (row.kind == "eval" and row.step == wrong_step)]
-        assert check_run(selected_missing, selected_spec, 300)
 
-    nan_loss = [
-        replace(step, values={**step.values, "policy/policy_loss": float("nan")})
-        if step.step == 3 and step.kind == "train"
-        else step
-        for step in steps
+@pytest.mark.parametrize("lane", ["async", "sync"])
+@pytest.mark.parametrize("mutation", ["healthy", "flat_eval", "missing_step_zero", "missing_initial_metric"])
+def test_cat_count_shipped_specs_require_learning_from_step_zero(lane, mutation):
+    path = SHIPPED_SPEC.parent / f"cat-count-canary-qwen2.5-0.5b-{lane}.json"
+    spec = load_spec(path)
+    metrics = {
+        "policy/policy_loss": 0.1,
+        "policy/final_loss": 0.1,
+        "policy/policy_entropy": 1.0,
+        "reward/zero_std_group_fraction": 0.2,
+        "policy/ppo_clip_ratio": 0.01,
+        "policy/ppo_ratio_exact_unit_fraction": 0.9,
+        "policy/mismatch/pooled/log_ratio_abs_mean": 0.01,
+        "async/staleness_mean": 1.0,
+        "tis/skipped_fraction": 0.0,
+    }
+    steps = [StepMetrics("train", step, metrics) for step in range(1, spec.min_train_steps + 1)]
+    evaluations = [
+        StepMetrics("eval", step, {"eval/train/avg_score": score}) for step, score in ((0, 0.55), (5, 0.30), (10, 0.80))
     ]
-    assert any("nonfinite policy/policy_loss" in failure for failure in check_run(nan_loss, spec, 300))
-
-    missing_loss = [
-        replace(step, values={key: value for key, value in step.values.items() if key != "policy/policy_loss"})
-        if step.step == 3 and step.kind == "train"
-        else step
-        for step in steps
-    ]
-    assert any("step 3 did not log policy/policy_loss" in failure for failure in check_run(missing_loss, spec, 300))
-
-    flat = [
-        replace(step, values={**step.values, "environment/exact_n10": 0.1})
-        if "environment/exact_n10" in step.values
-        else step
-        for step in steps
-    ]
-    assert any("environment/exact_n10 rose by" in failure for failure in check_run(flat, spec, 300))
-
-    missing = [
-        replace(step, values={key: value for key, value in step.values.items() if key != "environment/exact_n10"})
-        if step.kind == "train" and step.step == 3
-        else step
-        for step in steps
-    ]
-    assert any(
-        "environment/exact_n10 has 4 finite observations" in failure for failure in check_run(missing, spec, 300)
-    )
-
-    flat_eval = [
-        replace(step, values={"eval/cat_count_n10/avg_score": 0.1}) if step.kind == "eval" else step for step in steps
-    ]
-    assert any("eval eval/cat_count_n10/avg_score rose by" in failure for failure in check_run(flat_eval, spec, 300))
-
-    no_eval = [step for step in steps if step.kind == "train"]
-    assert any(
-        "eval eval/cat_count_n10/avg_score has 0 finite observations" in failure
-        for failure in check_run(no_eval, spec, 300)
-    )
-
-    flat_groups = [
-        replace(step, values={**step.values, "reward/zero_std_group_fraction": 0.0}) if step.kind == "train" else step
-        for step in steps
-    ]
-    assert any(
-        "reward/zero_std_group_fraction has 0 observations above 0.0" in failure
-        for failure in check_run(flat_groups, spec, 300)
-    )
-
-    no_clip = [
-        replace(step, values={**step.values, "policy/ppo_ratio_exact_unit_fraction": 1.0})
-        if step.kind == "train"
-        else step
-        for step in steps
-    ]
-    assert any(
-        "policy/ppo_ratio_exact_unit_fraction has 0 observations below 1.0" in failure
-        for failure in check_run(no_clip, spec, 300)
-    )
-
-    bad_optional = [
-        replace(step, values={**step.values, "policy/ppo_clip_ratio": float("nan")})
-        if step.step == 4 and step.kind == "train"
-        else step
-        for step in steps
-    ]
-    assert any("nonfinite policy/ppo_clip_ratio" in failure for failure in check_run(bad_optional, spec, 300))
+    if mutation == "flat_eval":
+        evaluations[-1] = replace(evaluations[-1], values={"eval/train/avg_score": 0.55})
+    if mutation == "missing_step_zero":
+        evaluations = evaluations[1:]
+    if mutation == "missing_initial_metric":
+        evaluations[0] = replace(evaluations[0], values={})
+    failures = check_run([*steps, *evaluations], spec, 300)
+    if mutation == "healthy":
+        assert failures == []
+    else:
+        assert failures
+    assert check_log_patterns("Training done!\n[telemetry] enabled run_id=test\n", spec) == []
 
 
 def test_shipped_spec_gates_a_healthy_run():

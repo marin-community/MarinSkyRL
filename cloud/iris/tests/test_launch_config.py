@@ -9,10 +9,14 @@ from typing import Any
 import pytest
 import yaml
 
-
 from cloud.iris import training_driver
-from cloud.iris.launch_config import load_launch_config, validate_launch_config
-from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
+from cloud.iris.launch_config import LaunchTopology, load_launch_config, validate_launch_config
+from cloud.iris.rl_config_translation import (
+    RL_CONFIG_PAYLOAD_ENV,
+    compose_skyrl_config,
+    materialize_launch_config,
+    parse_rl_config,
+)
 
 
 def _raw_config() -> dict[str, Any]:
@@ -201,3 +205,17 @@ def test_task_materializes_the_forwarded_launch_document(tmp_path: Path) -> None
 
     assert path == str(destination)
     assert destination.read_bytes() == contents
+
+
+def test_evaluation_metric_names_survive_iris_path_resolution(tmp_path: Path) -> None:
+    raw = yaml.safe_load((Path(__file__).resolve().parents[1] / "configs/qwen_megatron_smoke.yaml").read_text())
+    groups = {"eval/train/avg_score": ["eval/cat_count_n1/avg_score", "eval/cat_count_n2/avg_score"]}
+    raw["trainer"]["callbacks"] = [{"type": "evaluation", "metric_groups": groups}]
+    path = tmp_path / "evaluation.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    config = compose_skyrl_config(
+        parse_rl_config(str(path)), {}, LaunchTopology(num_nodes=1, gpus_per_node=8, gpu_variant="H100")
+    ).config
+
+    assert config.trainer.callbacks[0].metric_groups == groups
