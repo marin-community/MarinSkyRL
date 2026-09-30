@@ -321,7 +321,7 @@ Algorithm Configuration
         type: null # filter (DAPO) or null
         max_sample_batches: 30 # inspect at most this many batches of candidate groups per step, -1 for no limit
       
-      # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
+      # Detached rollout correction for OLD-anchored policy rows
       off_policy_correction: null
       off_policy_correction_rules: null
 

@@ -236,6 +236,10 @@ The `correction source`_ and `preset source`_ specify these exact weights.
      - Product of rule weights, with at most one ratio-bearing truncate rule.
      - Express measured token/sequence thresholds. Rules require inspection of retained data and mean weights; they are not automatically unbiased.
 
+For ICEPOP, a ratio above 5 contributes to both ``policy/correction/truncated_fraction``
+and ``policy/correction/masked_fraction``: its ratio cap and outlier mask both apply.
+The final weight is zero. These fractions describe each rule, so they are not disjoint.
+
 For example, this custom correction combines a geometric sequence mask and a
 token ratio cap. These keys are under ``trainer.algorithm``:
 
@@ -438,11 +442,6 @@ divergences and ``student_selected_topk`` for the surrogate. ``advantage_clip``
 applies only to chosen-token evidence. Teacher/student token-ID vocabularies
 must match exactly. Deployment, tokenizer fingerprints and endpoint requirements
 are in :doc:`opd`.
-
-KL estimators
--------------
-
-See the `KL estimator section <https://github.com/marin-community/MarinSkyRL/blob/bf7b385b0b0bd0df7905fd3dfac3ca70b742ea43/skyrl-train/docs/algorithms/objective.rst#kl-estimator>`_ for estimator values, gradient conventions and clamp limits.
 
 Recipes and complete setups
 ---------------------------
@@ -715,7 +714,7 @@ teacher evidence and group admission.
 
    * - Error or requirement
      - Remedy
-   * - An objective key is unsupported (for example ``use_tis``, ``tis_imp_ratio_cap``, ``stale_clip_eps``, ``z_clip`` or ``stale_min``).
+   * - An objective key is unsupported.
      - Use ``off_policy_correction`` and supported policy-loss settings; supply no unsupported keys.
    * - Asynchronous OLD-anchored training has null correction.
      - Select a preset, custom rules or explicit ``none``.
@@ -732,29 +731,29 @@ teacher evidence and group admission.
    * - Teacher evidence kind does not match the objective.
      - Use ``chosen_token``, ``topk_distribution`` or ``student_selected_topk`` as specified above; top-K evidence requires positive ``top_k``.
    * - Invalid distillation coefficient or optional parameters.
-     - Use a positive finite coefficient; nonnegative finite ``advantage_clip`` only for sampled reverse KL and ``entry_clip`` only for sparse forward KL; ``0 < jsd_beta < 1`` only for sparse JSD.
+     - Use a positive finite coefficient; positive finite ``advantage_clip`` only for sampled reverse KL and ``entry_clip`` only for sparse forward KL; ``0 < jsd_beta < 1`` only for sparse JSD.
    * - Unsupported teacher runtime or tokenizer mismatch.
      - Apply :doc:`opd`'s backend, placement, endpoint and exact vocabulary requirements.
    * - Invalid group minimum or incomplete exact-physical group.
      - Match ``n_samples_per_prompt`` to the estimator contract; for RLOO-N choose minimum 2 through the physical group size.
    * - Invalid dynamic sampling thresholds or missing unshaped rewards.
-     - Use finite nonnegative ``min_reward_std``, finite/null ``max_mean_reward``, and provide raw outcomes for ``informative_on: unshaped``.
+     - Use finite nonnegative ``min_reward_std``, finite/null ``max_mean_reward`` with ``type: filter``, and provide raw outcomes for ``informative_on: unshaped``.
 
-.. _policy loss source: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/skyrl-train/skyrl_train/objective/losses.py
-.. _reduction source: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/skyrl-train/skyrl_train/objective/reduction.py
-.. _correction source: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/skyrl-train/skyrl_train/objective/correction.py
-.. _preset source: https://github.com/marin-community/MarinSkyRL/tree/5abd5fddb4381a963e23c76aa2c08768c6d95184/skyrl-train/skyrl_train/config/off_policy_correction
-.. _advantage source: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/skyrl-train/skyrl_train/utils/advantage_estimators.py
-.. _group filter source: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/skyrl-train/skyrl_train/dynamic_sampling.py
-.. _teacher loss source: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/skyrl-train/skyrl_train/objective/teacher.py
-.. _teacher configuration source: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/marinskyrl/distillation.py
-.. _recipe source: https://github.com/marin-community/MarinSkyRL/tree/17cc1863a40c467b05dd78cce245d00e1242048c/skyrl-train/skyrl_train/config/algorithm_recipe
-.. _single-teacher smoke source: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/cloud/iris/configs/snowball_opd_math_smoke.yaml
-.. _multi-teacher smoke source: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/cloud/iris/configs/snowball_mopd_ultra_smoke.yaml
+.. _policy loss source: https://github.com/marin-community/MarinSkyRL/blob/main/skyrl-train/skyrl_train/objective/losses.py
+.. _reduction source: https://github.com/marin-community/MarinSkyRL/blob/main/skyrl-train/skyrl_train/objective/reduction.py
+.. _correction source: https://github.com/marin-community/MarinSkyRL/blob/main/skyrl-train/skyrl_train/objective/correction.py
+.. _preset source: https://github.com/marin-community/MarinSkyRL/tree/main/skyrl-train/skyrl_train/config/off_policy_correction
+.. _advantage source: https://github.com/marin-community/MarinSkyRL/blob/main/skyrl-train/skyrl_train/utils/advantage_estimators.py
+.. _group filter source: https://github.com/marin-community/MarinSkyRL/blob/main/skyrl-train/skyrl_train/dynamic_sampling.py
+.. _teacher loss source: https://github.com/marin-community/MarinSkyRL/blob/main/skyrl-train/skyrl_train/objective/teacher.py
+.. _teacher configuration source: https://github.com/marin-community/MarinSkyRL/blob/main/marinskyrl/distillation.py
+.. _recipe source: https://github.com/marin-community/MarinSkyRL/tree/main/skyrl-train/skyrl_train/config/algorithm_recipe
+.. _single-teacher smoke source: https://github.com/marin-community/MarinSkyRL/blob/main/cloud/iris/configs/snowball_opd_math_smoke.yaml
+.. _multi-teacher smoke source: https://github.com/marin-community/MarinSkyRL/blob/main/cloud/iris/configs/snowball_mopd_ultra_smoke.yaml
 .. _DeepSeekMath: https://arxiv.org/abs/2402.03300
 .. _DAPO: https://arxiv.org/abs/2503.14476
 .. _Understanding R1-Zero-Like Training: https://arxiv.org/abs/2503.20783
 .. _Back to Basics: https://arxiv.org/abs/2402.14740
 .. _REINFORCE++: https://arxiv.org/abs/2501.03262
 
-.. _launch document schema: https://github.com/marin-community/MarinSkyRL/blob/5abd5fddb4381a963e23c76aa2c08768c6d95184/cloud/iris/launch_config.py
+.. _launch document schema: https://github.com/marin-community/MarinSkyRL/blob/main/cloud/iris/launch_config.py

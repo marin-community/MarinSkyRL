@@ -306,7 +306,6 @@ class RayPPOTrainer:
         self.all_timings = {}
         self.all_startup_timings = {}
         self._checkpoint_save_failures = 0.0
-        # Whether the last converted batch lacked rollout logprobs, and the run's TIS skip counts.
         self._shutdown_complete = False
         self._restored_rollout_state: TrainingContextState | None = None
         self.global_step = 0
