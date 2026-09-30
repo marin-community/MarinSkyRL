@@ -6,8 +6,10 @@
 # Build a fresh sample with --swe-rows 0, as in snowball_mopd_ultra_32k.yaml.
 # Harbor SWE trials are excluded until external model ingress is validated. The SWE
 # teacher still scores non-Harbor generators; ns_tools and Lean use the in-cluster sandbox.
-# Reserve more than 512 GB host RAM per node: the 32K checkpoint exceeded that limit.
+# The 512 GB allocation failed at checkpoint save. This floor adds headroom; a complete
+# 32K checkpoint at 768 GB is still pending GPU validation.
 entrypoint: standard
+minimum_host_memory: 768GB
 
 context_budget:
   # Chosen-token scoring needs one position beyond the student window.
