@@ -8,7 +8,7 @@ from infra.rl_data.nemotron_ultra_mopd_subset import (
     prepare_subset_rows,
     routed_agent,
     sample_proportional_rows,
-    sample_raw_subset_rows,
+    sample_per_agent_rows,
     subset_manifest,
     swe_proxy_paths,
 )
@@ -70,7 +70,7 @@ def test_per_agent_sampler_skips_unbound_swe_rows_and_is_deterministic(monkeypat
     monkeypatch.setattr(SAMPLER, fake_range_rows)
 
     def sample():
-        return sample_raw_subset_rows(
+        return sample_per_agent_rows(
             seed=7, rows_per_agent=2, swe_proxies={}, max_request_characters=LIMIT, max_ranges=48
         )
 

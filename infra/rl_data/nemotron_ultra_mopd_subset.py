@@ -128,7 +128,7 @@ def _routed_rows(
         yield row["agent_ref"]["name"], dict(row)
 
 
-def sample_raw_subset_rows(
+def sample_per_agent_rows(
     *,
     seed: int,
     rows_per_agent: int,
@@ -273,7 +273,7 @@ def main() -> None:
         )
         sampling = {"mode": "proportional", "rows": args.rows, "swe_rows": args.swe_rows, **bounds}
     else:
-        rows = sample_raw_subset_rows(seed=args.seed, rows_per_agent=args.rows_per_agent, swe_proxies=swe_proxies, **bounds)
+        rows = sample_per_agent_rows(seed=args.seed, rows_per_agent=args.rows_per_agent, swe_proxies=swe_proxies, **bounds)
         sampling = {"mode": "per_agent", "rows_per_agent": args.rows_per_agent, **bounds}
     if any(_PLACEHOLDER_KEY in row for row in rows):
         placeholder_sources = load_nemotron_ultra_placeholder_sources()
