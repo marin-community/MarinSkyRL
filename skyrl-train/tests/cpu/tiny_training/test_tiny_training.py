@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 import torch
+from transformers import AutoModelForCausalLM
 
 from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY
-from skyrl_train.training_batch import TrainingInputBatch
-from tests.cpu.tiny_training.cpu_backend import CHECKPOINT_FILE_TEMPLATE
-from tests.cpu.tiny_training.fixed_batch import run_fixed_update
+from tests.cpu.tiny_training.cpu_backend import CHECKPOINT_FILE_TEMPLATE, CausalLMPolicy
+from tests.cpu.tiny_training.fixed_batch import fixed_training_batch, run_fixed_update
 from skyrl_train.rollouts.payloads import ROLLOUT_OBJECT_SUFFIX
 from tests.cpu.tiny_training import experiment
 from tests.cpu.tiny_training.experiment import (
@@ -129,6 +129,15 @@ def test_async_training_resumes_with_committed_groups(runs: ForkServerContext, t
 
 
 def test_one_step_is_independent_of_micro_batch_size(runs: ForkServerContext, tmp_path: Path, tiny_policy: Path):
+    batch = fixed_training_batch(str(tiny_policy))
+    model = CausalLMPolicy(AutoModelForCausalLM.from_pretrained(tiny_policy, dtype=torch.float32))
+    log_probs = model(batch["sequences"], num_actions=4, attention_mask=batch["attention_mask"])
+    ratios = (log_probs - batch["action_log_probs"]).exp()
+    loss = -(ratios * batch["advantages"] * batch["loss_mask"]).sum() / batch["loss_mask"].sum()
+    loss.backward()
+    reference_norm = torch.linalg.vector_norm(
+        torch.stack([parameter.grad.norm() for parameter in model.parameters() if parameter.grad is not None])
+    ).item()
     roots = [tmp_path / "micro_8", tmp_path / "micro_4"]
     for root, micro_batch_size in zip(roots, [8, 4], strict=True):
         run = runs.Process(target=run_fixed_update, args=(root, tiny_policy, micro_batch_size))
@@ -139,19 +148,10 @@ def test_one_step_is_independent_of_micro_batch_size(runs: ForkServerContext, tm
             run.join()
             pytest.fail(f"the update did not finish within {RUN_TIMEOUT_SECONDS} seconds")
         assert run.exitcode == 0
-    batches = [
-        TrainingInputBatch().load(root / "exports/dumped_data/global_step_1_training_input.pkl") for root in roots
-    ]
-    assert batches[0].keys() == batches[1].keys()
-    for key, tensor in batches[0].items():
-        if tensor is None:
-            assert batches[1][key] is None
-        else:
-            torch.testing.assert_close(
-                tensor, batches[1][key], rtol=0, atol=0, msg=f"nondeterministic rollouts in {key}"
-            )
-    lengths = batches[0]["loss_mask"].sum(-1)
-    assert lengths.min() < lengths.max()
+    norms = [torch.load(root / "train_status.pt", weights_only=False)["raw_grad_norm"] for root in roots]
+    for norm in norms:
+        torch.testing.assert_close(norm, reference_norm, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(norms[0], norms[1], rtol=1e-5, atol=1e-6)
     for rank in range(2):
         states = [
             torch.load(
