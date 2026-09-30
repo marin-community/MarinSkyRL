@@ -318,7 +318,6 @@ class MegatronWorker:
         cost does not depend on the forward numerics. Returns per-repetition seconds (after one
         warmup) and the peak allocated memory, measured on this rank.
         """
-        mode = data.metadata["probe_mode"]
         repetitions = int(data.metadata["probe_timing_repetitions"])
         micro_size = self.cfg.trainer.micro_train_batch_size_per_gpu
         module_modes = [(module, module.training) for chunk in self.actor_module for module in chunk.modules()]
