@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
+from skyrl_gym.envs.registration import registry
 
 from skyrl_train.evaluate import evaluate
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryBatch
@@ -65,7 +66,8 @@ class DummyRunner(TrajectoryRunner):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
+async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkeypatch):
+    monkeypatch.setitem(registry, "custom_env", registry["gsm8k"])
     cfg = configure_eval(dummy_config, tmp_path)
 
     prompts_batch = [
@@ -77,7 +79,7 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
         },
         {
             "prompt": [{"role": "user", "content": "question-2"}],
-            "env_class": "cat_count",
+            "env_class": "custom_env",
             "env_extras": {"data_source": "dataset/b"},
             "uid": "uid-2",
         },
@@ -91,7 +93,7 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
         "loss_masks": [[1], [1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": None,
-        "env_classes": ["gsm8k", "cat_count"],
+        "env_classes": ["gsm8k", "custom_env"],
         "env_metrics": [{"truncated": 1}, {"truncated": 0}],
     }
     runner = DummyRunner(trajectory_batch)
@@ -122,7 +124,7 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
         "eval/all/avg_score": 0.5,
         "eval/all/pass_at_1": 0.5,
         "eval/all/environment/gsm8k/truncated": 1.0,
-        "eval/all/environment/cat_count/truncated": 0.0,
+        "eval/all/environment/custom_env/truncated": 0.0,
         "eval/dataset_a/environment/truncated": 1.0,
         "eval/dataset_b/environment/truncated": 0.0,
     }
@@ -133,6 +135,6 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     assert len(runner.seen_inputs) == 1
     seen_batch = runner.seen_inputs[0]
     assert seen_batch["prompts"] == [prompt["prompt"] for prompt in prompts_batch]
-    assert seen_batch["env_classes"] == ["gsm8k", "cat_count"]
+    assert seen_batch["env_classes"] == ["gsm8k", "custom_env"]
     assert seen_batch["env_extras"] == [prompt["env_extras"] for prompt in prompts_batch]
     assert seen_batch["batch_metadata"].training_phase == "eval"
