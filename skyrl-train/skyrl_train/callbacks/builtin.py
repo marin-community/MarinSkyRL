@@ -20,6 +20,7 @@ Supports two configuration styles:
 
 import asyncio
 import contextlib
+import math
 import os
 from typing import Any, Dict, List, Optional, Type
 
@@ -161,16 +162,15 @@ class DistillationTokenBudgetCallback(TrainerCallback):
 
 @register_callback("evaluation")
 class EvaluationCallback(TrainerCallback):
-    """
-    Callback for running evaluation at regular intervals.
-
-    This replaces the inline `eval_interval` logic in the training loop.
-    Evaluation runs on the validation dataset and logs metrics.
+    """Schedule evaluations and stop after configured gains over the first evaluation.
 
     Args:
-        eval_steps: Run evaluation every N steps. Set to -1 or 0 to disable.
-        eval_on_train_end: Whether to run evaluation when training ends.
-        eval_before_train: Whether to run evaluation before training starts.
+        eval_steps: Evaluate every N completed steps; non-positive values disable evaluation.
+        eval_on_train_end: Evaluate the final policy.
+        eval_before_train: Evaluate the initial policy.
+        additional_evaluations: Named sampling overrides passed to the trainer's evaluator.
+        metric_groups: Output metric names mapped to source metrics whose mean is reported.
+        stop_on_improvement: Metrics and required gains, all of which must be reached to stop.
     """
 
     def __init__(
@@ -178,10 +178,53 @@ class EvaluationCallback(TrainerCallback):
         eval_steps: int = 5,
         eval_on_train_end: bool = True,
         eval_before_train: bool = True,
+        additional_evaluations: Dict[str, Dict[str, Any]] | None = None,
+        metric_groups: Dict[str, List[str]] | None = None,
+        stop_on_improvement: Dict[str, float] | None = None,
     ):
         self.eval_steps = eval_steps
         self.eval_on_train_end = eval_on_train_end
         self.eval_before_train = eval_before_train
+        self.additional_evaluations = additional_evaluations or {}
+        self.metric_groups = metric_groups or {}
+        self.stop_on_improvement = stop_on_improvement or {}
+        self._initial_values: Dict[str, float] = {}
+        self._initial_step: int | None = None
+        if any(not name.isidentifier() for name in self.additional_evaluations):
+            raise ValueError("additional evaluation names must be identifiers")
+        if any(not keys for keys in self.metric_groups.values()):
+            raise ValueError("evaluation metric groups must be nonempty")
+        if any(not math.isfinite(value) or value < 0 for value in self.stop_on_improvement.values()):
+            raise ValueError("evaluation improvement margins must be finite and non-negative")
+
+    error_behavior = "raise"
+
+    async def on_evaluate_async(
+        self, state: TrainerState, control: TrainerControl, *, metrics: Dict[str, float], trainer, **kwargs
+    ) -> TrainerControl:
+        for name, parameters in self.additional_evaluations.items():
+            additional = await trainer.eval(val_set_name=name, **parameters)
+            metrics.update({key.replace("eval/", f"eval/{name}/", 1): value for key, value in additional.items()})
+        for name, members in self.metric_groups.items():
+            metrics[name] = math.fsum(metrics[member] / len(members) for member in members)
+            if not math.isfinite(metrics[name]):
+                raise ValueError(f"nonfinite evaluation metric group {name}")
+        if not self.stop_on_improvement:
+            return control
+        if self._initial_step is None:
+            self._initial_values = {name: metrics[name] for name in self.stop_on_improvement}
+            self._initial_step = state.global_step
+        improvements = {name: metrics[name] - initial for name, initial in self._initial_values.items()}
+        for name, improvement in improvements.items():
+            if not math.isfinite(improvement):
+                raise ValueError(f"nonfinite evaluation improvement for {name}")
+            metrics[f"{name}_improvement"] = improvement
+        if state.global_step > self._initial_step and all(
+            improvements[name] >= margin for name, margin in self.stop_on_improvement.items()
+        ):
+            logger.info("Evaluation improvement reached at step {}: {}", state.global_step, improvements)
+            control.should_training_stop = True
+        return control
 
     def on_train_begin(
         self,

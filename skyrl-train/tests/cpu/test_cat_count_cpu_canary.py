@@ -16,6 +16,8 @@ import skyrl_gym
 import skyrl_train
 import torch
 import zstandard
+from omegaconf import OmegaConf
+from skyrl_train.evaluate import evaluation_dump_dir
 from examples.cat_count.cpu_canary import PROMPT, pretrain
 
 from tests.cpu.tiny_training.cat_count import FAST_STEPS, cat_count_config, run_cat_count
@@ -101,10 +103,13 @@ def train(
     resume: bool = False,
     eval_interval: int | None = None,
     seed: int = 0,
+    callbacks: list[dict] | None = None,
 ):
     cfg = cat_count_config(
         root, model, steps=steps, staleness=staleness, resume=resume, eval_interval=eval_interval, seed=seed
     )
+    if callbacks is not None:
+        OmegaConf.update(cfg, "trainer.callbacks", callbacks, force_add=True)
     if flipped:
         cfg.trainer.algorithm.advantage_estimator = "cat_count_flipped_grpo"
     worker_env = {key: os.environ[key] for key in ("SKYRL_TELEMETRY_ENDPOINT", "SKYRL_RUN_ID", "SKYRL_EXECUTION_UID")}
@@ -226,6 +231,64 @@ def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_po
     )
     print(
         f"CAT_COUNT_CPU seed={seed} paired_scores positive={before}->{after} negative={negative_before}->{negative_after}"
+    )
+
+
+def test_cat_count_evaluation_stops_at_reward_gain_and_preserves_sampled_results(
+    tmp_path, cat_count_policy, cat_count_session, runs
+):
+    records = train(
+        runs,
+        tmp_path,
+        cat_count_policy,
+        eval_interval=2,
+        callbacks=[
+            {"type": "checkpoint", "save_steps": 2},
+            {
+                "type": "evaluation",
+                "eval_steps": 2,
+                "additional_evaluations": {
+                    "sampled": {
+                        "sampling_params": {"temperature": 1.0},
+                        "n_samples_per_prompt": 8,
+                    }
+                },
+                "metric_groups": {"eval/reporting/avg_score": ["eval/train/avg_score", "eval/heldout/avg_score"]},
+                "stop_on_improvement": {"eval/train/avg_score": 0.1},
+            },
+        ],
+    )
+    training = [row for row in records if "policy/raw_grad_norm" in row]
+    final_step = int(training[-1]["trainer/global_step"])
+    assert 0 < final_step < FAST_STEPS
+    evaluations = [row for row in records if "eval/train/avg_score" in row]
+    assert [int(row["step"]) for row in evaluations] == [0, *range(2, final_step + 1, 2)]
+    for row in evaluations:
+        assert row["eval/reporting/avg_score"] == pytest.approx(
+            (row["eval/train/avg_score"] + row["eval/heldout/avg_score"]) / 2
+        )
+    assert evaluations[-1]["eval/train/avg_score_improvement"] >= 0.1
+    assert all(row["eval/train/avg_score_improvement"] < 0.1 for row in evaluations[:-1])
+    greedy_rows = [
+        json.loads(line)
+        for line in (Path(evaluation_dump_dir(str(tmp_path / "exports"), 0)) / "train.jsonl").read_text().splitlines()
+    ]
+    sampled_rows = [
+        json.loads(line)
+        for line in (Path(evaluation_dump_dir(str(tmp_path / "exports/sampled"), 0)) / "train.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert len(sampled_rows) == 8 * len(greedy_rows)
+    for prefix, rows in (("eval/train", greedy_rows), ("eval/sampled/train", sampled_rows)):
+        exact = sum((sum(row["score"]) if isinstance(row["score"], list) else row["score"]) == 1.0 for row in rows)
+        assert evaluations[0][f"{prefix}/environment/exact"] == pytest.approx(exact / len(rows))
+    checkpoint = torch.load(tmp_path / f"ckpts/global_step_{final_step}/policy/rank_0.pt", weights_only=False)
+    assert {state["step"].item() for state in checkpoint["optimizer"]["state"].values()} == {2 * final_step}
+    assert any(
+        row["name"] == "training_metric_value"
+        and row["attributes"].get("metric") == "eval/sampled/train/environment/exact"
+        for row in cat_count_session
     )
 
 

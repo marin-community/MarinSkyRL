@@ -12,11 +12,13 @@ import torch
 from torch.utils.data import Dataset, Subset
 from skyrl_train.trajectory_runners.trajectory_processing import (
     get_metrics_from_trajectory_batch,
+    get_rollout_metrics,
 )
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import DEFAULT_ACCEPTED_STOP_REASONS
 from transformers import AutoTokenizer
 from skyrl_train.io import io
+from skyrl_train.metric_names import ENVIRONMENT_METRIC_PREFIX
 from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.checkpoint_listing import extract_step_from_path, list_checkpoint_dirs
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
@@ -222,13 +224,24 @@ def async_step_metrics(
 
 
 def evaluation_response_metrics(trajectory_batch: TrajectoryBatch) -> Dict[str, float]:
-    """Evaluation response lengths, stop reasons and score contributions per evaluated response."""
+    """Return response lengths, stop reasons, score contributions and environment metrics."""
     lengths = [len(tokens) for tokens in trajectory_batch["response_ids"]]
     count = len(lengths)
     if not count:
         raise ValueError("Evaluation response metrics require a nonempty batch")
     stops = trajectory_batch.get("stop_reasons")
     metrics = {key.removeprefix("consumed/"): value for key, value in consumed_stop_metrics(stops, count).items()}
+    if trajectory_batch.get("env_metrics") is not None:
+        rollout_metrics = get_rollout_metrics(
+            trajectory_batch["response_ids"],
+            trajectory_batch["rewards"],
+            trajectory_batch["env_metrics"],
+            trajectory_batch["env_classes"],
+            verification_results=trajectory_batch.get("verification_results"),
+        )
+        metrics.update(
+            {key: value for key, value in rollout_metrics.items() if key.startswith(ENVIRONMENT_METRIC_PREFIX)}
+        )
     metrics.update(
         response_tokens=float(sum(lengths)),
         response_tokens_mean=sum(lengths) / count,
