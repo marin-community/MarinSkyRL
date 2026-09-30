@@ -125,6 +125,11 @@ def validate_mismatch_probe_config(
             raise ValueError("trainer.mismatch_probe replay modes require an MoE router with top-k >= 2")
     if any(TRAINER_MODES[mode].route_source == "reread" for mode in modes) and cache_mode == CACHE_ON:
         raise ValueError("trainer.mismatch_probe re-read replay modes require a cache-off re-read")
+    capture_layers = list(probe.get("capture_layers") or [])
+    if any(TRAINER_MODES[mode].captures_layers for mode in modes) and not capture_layers:
+        raise ValueError("trainer.mismatch_probe native_capture requires capture_layers")
+    if any(isinstance(layer, bool) or not isinstance(layer, int) or layer < 0 for layer in capture_layers):
+        raise ValueError("trainer.mismatch_probe.capture_layers must be non-negative layer indices")
     if not isinstance(probe.get("reread_again", False), bool):
         raise ValueError("trainer.mismatch_probe.reread_again must be a boolean")
     if any(TRAINER_MODES[mode].requires_keep_fraction for mode in modes):

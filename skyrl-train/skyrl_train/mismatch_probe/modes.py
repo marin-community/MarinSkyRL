@@ -15,6 +15,7 @@ RESPONSE_REPLAY_MODE = "router_replay_response"
 NATIVE_AGAIN_MODE = "native_again"
 REPEAT_REPLAY_MODE = "repeat_replay"
 REREAD_REPLAY_MODE = "reread_replay"
+NATIVE_CAPTURE_MODE = "native_capture"
 REPEAT_REREAD_REPLAY_MODE = "repeat_reread_replay"
 
 
@@ -46,11 +47,14 @@ class ModeSpec:
     # "generation" replays the routes vLLM chose while sampling; "reread" replays the routes of
     # vLLM's cache-off prefill re-read of the same tokens.
     route_source: str = "generation"
+    # True records the trainer's per-region activations at trainer.mismatch_probe.capture_layers.
+    captures_layers: bool = False
 
 
 TRAINER_MODES: dict[str, ModeSpec] = {
     NATIVE_MODE: ModeSpec(_native, replays_prompt=False),
     NATIVE_AGAIN_MODE: ModeSpec(_native, replays_prompt=False),
+    NATIVE_CAPTURE_MODE: ModeSpec(_native, replays_prompt=False, captures_layers=True),
     REPEAT_MODE: ModeSpec(_native, replays_prompt=False, repeat_layout=True),
     REPLAY_MODE: ModeSpec(_replay, requires_routes=True),
     REPEAT_REPLAY_MODE: ModeSpec(_replay, requires_routes=True, repeat_layout=True),

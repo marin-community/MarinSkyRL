@@ -33,6 +33,7 @@ from skyrl_train.distributed.megatron.optimizer import (
 )
 from skyrl_train.distributed.megatron.remote_model import install_remote_hf_state
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
+from skyrl_train.mismatch_probe.capture import capture_layer_regions, write_capture
 from skyrl_train.mismatch_probe.modes import TRAINER_MODES
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
 from skyrl_train.timing_observability import PhaseBreakdown
@@ -272,11 +273,33 @@ class MegatronWorker:
         rng_tracker = get_cuda_rng_tracker()
         tracker_states = copy.deepcopy(rng_tracker.get_states())
         scope = TRAINER_MODES[mode].context(self, data.metadata)
+        capture = data.metadata.get("probe_capture") or {}
+        capture_rank = (
+            mpu.get_data_parallel_rank() == 0
+            and mpu.get_tensor_model_parallel_rank() == 0
+            and mpu.get_context_parallel_rank() == 0
+        )
         try:
-            with scope:
+            with (
+                scope,
+                capture_layer_regions(
+                    self.actor_module, capture.get("layers", ()), capture.get("uri", ""), enabled=capture_rank
+                ) as captured,
+            ):
                 if controller is not None:
                     controller.take_probe_observations()
                 output = self.forward(data, probe_micro_batch_size=micro_batch_size)
+                if captured:
+                    first = micro_batch_size or self.cfg.trainer.micro_forward_batch_size_per_gpu
+                    write_capture(
+                        f"{capture['uri']}/pp-{mpu.get_pipeline_model_parallel_rank()}.pt",
+                        captured,
+                        {
+                            "sequences": data["sequences"][:first].cpu(),
+                            "attention_mask": data["attention_mask"][:first].cpu(),
+                            "probe_row_indices": data["probe_row_indices"][:first].cpu(),
+                        },
+                    )
                 output.metadata = dict(output.metadata)
                 output.metadata["probe_routes"] = controller.take_probe_observations() if controller is not None else []
                 return output

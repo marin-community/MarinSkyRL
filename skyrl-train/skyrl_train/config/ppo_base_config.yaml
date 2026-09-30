@@ -368,6 +368,8 @@ trainer:
     filtered_replay: {keep_fraction: null}
     rescore_prefix_cache: "off"
     reread_again: false
+    # 0-based layers whose region activations native_capture records for the parity harness.
+    capture_layers: []
 
 generator:
   model_name: ${trainer.policy.model.path}

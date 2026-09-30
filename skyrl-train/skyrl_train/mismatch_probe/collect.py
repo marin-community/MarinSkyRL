@@ -641,6 +641,11 @@ class ProbeCollector:
             fraction = (
                 float(self.spec.filtered_replay.keep_fraction) if TRAINER_MODES[mode].requires_keep_fraction else None
             )
+            if TRAINER_MODES[mode].captures_layers:
+                data.metadata["probe_capture"] = {
+                    "uri": f"{self.archive_uri.rstrip('/')}-trainer-capture/update-{update}/{mode}",
+                    "layers": list(self.spec.get("capture_layers") or ()),
+                }
             data.metadata.update(
                 probe_mode=mode,
                 probe_keep_fraction=fraction,
