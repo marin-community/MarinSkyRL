@@ -135,7 +135,7 @@ def export_tensors(model_dir: Path) -> dict[str, torch.Tensor]:
 
 # Rank r > 0 scores the capture's prompt reversed and cut by this many tokens per rank, so the ranks'
 # steps differ in content and length.
-OTHER_RANK_SHORTENING = 100
+OTHER_RANK_SHORTENING = 50
 
 
 def rank_prompts(token_ids: list[int], dp_size: int) -> list[list[int]]:
