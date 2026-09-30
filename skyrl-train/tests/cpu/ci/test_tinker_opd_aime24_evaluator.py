@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -96,51 +97,39 @@ def test_validate_sampling_defaults_rejects_transitive_sdk_drift() -> None:
 
 
 @pytest.mark.parametrize(
-    ("num_examples", "num_errors", "num_truncated", "expected_message"),
+    ("max_examples", "num_samples", "num_examples", "num_errors", "num_truncated", "expected_message"),
     [
-        (29, 0, 0, "expected 30 scored samples, found 29"),
-        (30, 1, 0, "encountered 1 sampling errors"),
-        (30, 0, 2, "encountered 2 truncated responses"),
+        (None, 1, 29, 0, 0, "expected 30 scored samples, found 29"),
+        (None, 1, 30, 1, 0, "encountered 1 sampling errors"),
+        (None, 1, 30, 0, 2, "encountered 2 truncated responses"),
+        # A smoke run is complete once it scores max_examples x num_samples samples.
+        (2, 4, 8, 0, 0, None),
     ],
 )
-def test_validate_comparable_result_rejects_incomplete_evaluation(
+def test_validate_comparable_result_requires_complete_evaluation(
+    max_examples: int | None,
+    num_samples: int,
     num_examples: int,
     num_errors: int,
     num_truncated: int,
-    expected_message: str,
+    expected_message: str | None,
 ) -> None:
     config = evaluator.EvaluationConfig(
         checkpoint="tinker://released/sampler_weights/final",
         save_dir="artifacts/eval",
-        max_examples=None,
-        num_samples=1,
+        max_examples=max_examples,
+        num_samples=num_samples,
         concurrency=8,
     )
 
-    with pytest.raises(RuntimeError, match=expected_message):
+    outcome = nullcontext() if expected_message is None else pytest.raises(RuntimeError, match=expected_message)
+    with outcome:
         evaluator.validate_comparable_result(
             config,
             num_examples=num_examples,
             num_errors=num_errors,
             num_truncated=num_truncated,
         )
-
-
-def test_validate_comparable_result_accounts_for_smoke_limit_and_sample_count() -> None:
-    config = evaluator.EvaluationConfig(
-        checkpoint="tinker://released/sampler_weights/final",
-        save_dir="artifacts/eval",
-        max_examples=2,
-        num_samples=4,
-        concurrency=8,
-    )
-
-    evaluator.validate_comparable_result(
-        config,
-        num_examples=8,
-        num_errors=0,
-        num_truncated=0,
-    )
 
 
 def test_claim_output_rejects_reused_prefix() -> None:

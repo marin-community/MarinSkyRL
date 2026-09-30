@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Mapping, Protocol, Sequence
 
+import numpy as np
+
 
 _INITIAL_ADMISSION_STALL_TIMEOUT = 1800.0
 _MINIMUM_ADMISSION_STALL_TIMEOUT = 600.0
@@ -249,13 +251,13 @@ def _inspect_group(group: GeneratedGroup) -> _GroupFacts:
         for row_index, (response, loss_mask, logprobs) in enumerate(
             zip(response_ids, loss_masks, rollout_logprobs, strict=True)
         ):
-            if not isinstance(logprobs, Sequence) or len(response) != len(logprobs):
+            if not isinstance(logprobs, np.ndarray) or logprobs.ndim != 1:
+                raise ValueError(f"rollout_logprobs row {row_index} must be a one-dimensional array")
+            if len(response) != len(logprobs):
                 raise ValueError(
                     f"rollout_logprobs row {row_index} must align with response_ids, "
-                    f"got {len(logprobs) if isinstance(logprobs, Sequence) else 'non-sequence'} and {len(response)}"
+                    f"got {len(logprobs)} and {len(response)}"
                 )
-            if any(bool(mask) and logprob is None for mask, logprob in zip(loss_mask, logprobs, strict=True)):
-                has_trainable_rollout_logprobs = False
 
     return _GroupFacts(
         physical_count=len(final_indices),

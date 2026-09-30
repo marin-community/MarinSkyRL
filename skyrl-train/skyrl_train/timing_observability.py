@@ -81,6 +81,14 @@ class PhaseBreakdown:
         finally:
             self._durations[phase] = self._durations.get(phase, 0.0) + self.clock() - started
 
+    def durations(self) -> dict[str, float]:
+        """Each entered phase's accumulated seconds."""
+        return dict(self._durations)
+
+    def add(self, phase: str, seconds: float) -> None:
+        """Count time spent in a phase measured elsewhere, such as in another process."""
+        self._durations[phase] = self._durations.get(phase, 0.0) + seconds
+
     def publish(self, *, clock_domain: str, attributes: Mapping[str, str]) -> float:
         """Record the root, each entered phase under its parent and the residual; return the root's duration."""
         if not self.enabled:

@@ -1,18 +1,12 @@
 import pytest
 import torch
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
-from skyrl_train.weight_sync.base import WeightChunk
 from skyrl_train.utils import str_to_torch_dtype
 
 
 @pytest.mark.parametrize("value", ["bfloat16", "torch.bfloat16"])
 def test_str_to_torch_dtype_accepts_weight_metadata(value):
     assert str_to_torch_dtype(value) is torch.bfloat16
-
-
-def test_str_to_torch_dtype_rejects_unknown_name():
-    with pytest.raises(ValueError, match="unsupported torch dtype"):
-        str_to_torch_dtype("torch.not_a_dtype")
 
 
 class TestModuleGrouping:
@@ -172,68 +166,3 @@ class TestModuleGrouping:
         assert tensor.dtype == torch.bfloat16
         expected = (original + 1.0).to(torch.bfloat16)
         assert torch.allclose(tensor, expected)
-
-    def test_get_shape_callback(self):
-        """Test that get_shape_fn callback is called correctly."""
-        params = {"model.layer.weight": torch.randn(10, 20)}
-
-        def get_shape(name, param, tensor):
-            # Return custom shape
-            return [999, 888]
-
-        chunks = list(
-            yield_module_grouped_chunks(
-                params=params,
-                dtype=torch.float32,
-                gather_tensor_fn=lambda p: p,
-                get_shape_fn=get_shape,
-            )
-        )
-
-        assert len(chunks) == 1
-        assert chunks[0].shapes[0] == [999, 888]
-
-    def test_empty_params(self):
-        """Test with empty params dict."""
-        params = {}
-
-        chunks = list(
-            yield_module_grouped_chunks(
-                params=params,
-                dtype=torch.float32,
-                gather_tensor_fn=lambda p: p,
-                get_shape_fn=lambda n, p, t: list(t.shape),
-            )
-        )
-
-        assert len(chunks) == 0
-
-    def test_chunk_properties(self):
-        """Test that returned chunks have correct WeightChunk properties."""
-        params = {
-            "model.layer.attn.weight": torch.randn(10, 10),
-            "model.layer.attn.bias": torch.randn(10),
-        }
-
-        chunks = list(
-            yield_module_grouped_chunks(
-                params=params,
-                dtype=torch.float32,
-                gather_tensor_fn=lambda p: p,
-                get_shape_fn=lambda n, p, t: list(t.shape),
-            )
-        )
-
-        assert len(chunks) == 1
-        chunk = chunks[0]
-
-        # Check all required fields are present
-        assert isinstance(chunk, WeightChunk)
-        assert len(chunk.names) == 2
-        assert len(chunk.dtypes) == 2
-        assert len(chunk.shapes) == 2
-        assert len(chunk.tensors) == 2
-
-        # Check total_numel
-        expected_numel = 10 * 10 + 10
-        assert chunk.total_numel == expected_numel

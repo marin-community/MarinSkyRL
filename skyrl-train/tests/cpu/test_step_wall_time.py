@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock
 import pytest
 from omegaconf import OmegaConf
 
-from skyrl_train.timing_observability import STEP_WALL_PHASES, StepWallTime, phase_timing_observations
+from skyrl_train.timing_observability import (
+    STEP_WALL_PHASES,
+    StepWallTime,
+    phase_timing_observations,
+    publish_step_timings,
+)
 from skyrl_train.trainer import RayPPOTrainer
 
 
@@ -66,6 +71,9 @@ def test_step_end_checkpoint_and_evaluation_are_distinct_exclusive_phases():
     trainer.eval_dataset = object()
     trainer.all_timings = {}
     trainer.all_metrics = {}
+    trainer.global_step = 4
+    trainer._training_metrics_enabled = False
+    trainer.tracker = SimpleNamespace(log=lambda metrics, **kwargs: None)
 
     async def callback(event, _state, current_control, **_kwargs):
         clock.advance(1)
@@ -148,3 +156,48 @@ def test_invalid_budgets_and_excess_wall_time_are_rejected():
     clock.advance(2)
     with pytest.raises(ValueError, match="exceed"):
         wall.finish(1)
+
+
+class RecordingSink:
+    def __init__(self):
+        self.published = []
+
+    def publish(self, observations, step):
+        self.published.append((observations, step))
+
+
+def test_overlapping_async_spans_remain_inclusive_instead_of_claiming_exclusive_time():
+    observations = phase_timing_observations({"step": 4.0, "generate": 3.0, "run_training": 3.0})
+
+    assert {item.name: item.duration_seconds for item in observations} == {
+        "step": 4.0,
+        "generate": 3.0,
+        "run_training": 3.0,
+    }
+    assert {item.name: item.parent for item in observations} == {
+        "step": None,
+        "generate": "step",
+        "run_training": "step",
+    }
+
+
+def test_unknown_spans_are_not_published():
+    sink = RecordingSink()
+
+    publish_step_timings({"step": 2.0, "something_new": 1.0}, step=7, sinks=(sink,))
+
+    [(observations, step)] = sink.published
+    assert [item.name for item in observations] == ["step"]
+    assert step == 7
+
+
+def test_post_step_work_is_published_under_the_step_root():
+    observations = phase_timing_observations(
+        {"step": 10.0, "eval": 3.0, "save_checkpoints": 2.0, "cleanup_old_checkpoints": 0.5}
+    )
+
+    by_name = {item.name: item for item in observations}
+    assert by_name["eval"].parent == "step"
+    assert by_name["save_checkpoints"].parent == "step"
+    assert by_name["cleanup_old_checkpoints"].parent == "save_checkpoints"
+    assert {item.root for item in observations} == {"step"}

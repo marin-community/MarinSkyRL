@@ -80,11 +80,24 @@ jobs:
         run: uv sync --frozen --group dev --group harbor-test --extra cpu --extra telemetry
       - name: Check the lockfile is current
         run: uv lock --check
+      - uses: actions/cache@v5
+        with:
+          path: .pytest_cache/d/cat_count_policy
+          key: cat-count-policy-${{ runner.os }}-${{ hashFiles('skyrl-train/examples/cat_count/cpu_canary.py', 'skyrl-train/tests/cpu/test_cat_count_cpu_canary.py', 'uv.lock') }}
       - name: Run cpu tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
+        run: uv run --frozen pytest skyrl-train/tests/cpu/ -m "not slow and not nightly" -n auto --dist loadgroup
+      - name: Run existing Ray training tests serially
+        env:
+          PYTHONPATH: ${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
         run: |
-          uv run --frozen pytest skyrl-train/tests/cpu/ \
-            --deselect skyrl-train/tests/cpu/inf_engines/test_inference_engine_client.py::test_generate_retry_no_gen_finish \
-            --deselect skyrl-train/tests/cpu/test_trainer.py::test_ppo_train_batch_calculations
+          nproc
+          uv run --frozen pytest skyrl-train/tests/cpu/ --ignore=skyrl-train/tests/cpu/test_cat_count_cpu_canary.py -m "slow and not nightly" -n 0
+      - name: Check CatCount learning on three seeds
+        env:
+          PYTHONPATH: ${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
+        run: uv run --frozen pytest skyrl-train/tests/cpu/test_cat_count_cpu_canary.py -m "not nightly" -n 0 -s --durations=10
 
   skyrl_train_macos_install:
     runs-on: macos-15
