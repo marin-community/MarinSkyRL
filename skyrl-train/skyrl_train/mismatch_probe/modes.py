@@ -89,8 +89,8 @@ _COMPILED_STACK_FLAGS = (
     "final_norm_fp32",
 )
 _KERNEL_FLAGS = ("fa3_attention", "ep_sum")
-# ``ep_sum`` needs each row's vLLM data-parallel rank, which the probe knows only for its re-reads.
-_NEEDS_REREAD_PLACEMENT = "ep_sum"
+# ``ep_sum`` needs each row's vLLM data-parallel rank, which the probe knows for replay modes only.
+_NEEDS_PLACEMENT = "ep_sum"
 
 
 def _enabled(*flags: str) -> dict[str, bool]:
@@ -118,7 +118,13 @@ def _with_numerics(base: Callable, flags: Mapping[str, bool]):
 
 
 # The compiled stacks on generation-route replay, comparable with the replay rows against generation.
-for _candidate in (COMPILED_STACK, COMPILED_STACK_ALL, f"{COMPILED_STACK}+fa3_attention"):
+for _candidate in (
+    COMPILED_STACK,
+    COMPILED_STACK_ALL,
+    f"{COMPILED_STACK}+fa3_attention",
+    f"{COMPILED_STACK}+ep_sum",
+    VLLM_KERNEL_STACK,
+):
     TRAINER_MODES[f"{REPLAY_MODE}+{_candidate}"] = ModeSpec(
         _with_numerics(_replay, _NUMERICS_CANDIDATES[_candidate]), requires_routes=True
     )
@@ -127,5 +133,5 @@ for _candidate, _flags in _NUMERICS_CANDIDATES.items():
     TRAINER_MODES[f"{REREAD_REPLAY_MODE}+{_candidate}"] = ModeSpec(
         _with_numerics(_replay, _flags), requires_routes=True, route_source="reread"
     )
-    if not _flags.get(_NEEDS_REREAD_PLACEMENT):
+    if not _flags.get(_NEEDS_PLACEMENT):
         TRAINER_MODES[f"{NATIVE_MODE}+{_candidate}"] = ModeSpec(_with_numerics(_native, _flags), replays_prompt=False)
