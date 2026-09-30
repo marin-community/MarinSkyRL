@@ -17,7 +17,6 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from megatron.bridge import AutoBridge
 from megatron.core import parallel_state
 from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
@@ -28,7 +27,12 @@ from omegaconf import OmegaConf
 import skyrl_train.models.grug_megatron_bridge  # noqa: F401  (registers the Grug bridge)
 from skyrl_train.mismatch_probe.capture import capture_layer_regions
 from skyrl_train.mismatch_probe.numerics import grug_numerics
-from skyrl_train.models.grug_megatron import GrugGatedRMSNorm, grug_layer_spec, install_numerics_hooks
+from skyrl_train.models.grug_megatron import (
+    GrugGatedRMSNorm,
+    clear_numerics_handoffs,
+    grug_layer_spec,
+    install_numerics_hooks,
+)
 from skyrl_train.models.grug_megatron_bridge import GrugMoeBridge
 
 POLICY_CONFIG = Path(__file__).resolve().parents[1] / "config" / "megatron_config" / "policy.yaml"
@@ -125,6 +129,8 @@ class TrainerRegions:
     """Tensors the trainer layer produced, sequence-major ``[S, B, ...]`` as Megatron holds them."""
 
     tensors: dict[str, torch.Tensor]
+    next_norm: dict[str, torch.Tensor]
+    """The next layer's input norm (or the final norm) on this layer's output, under the same numerics."""
 
 
 def _first(value):
@@ -136,13 +142,15 @@ def run_layer(
     hidden_states: torch.Tensor,
     rotary: RotaryEmbedding,
     *,
+    next_norm: GrugGatedRMSNorm,
     numerics: Mapping[str, bool],
 ) -> TrainerRegions:
     """Run the layer on ``hidden_states`` ``[S, B, H]`` and record every region boundary.
 
     The capture module's own hooks record the probe regions (so their names and hook points match the
     archived capture); the extra hooks here record the tensors inside each region that compiled vLLM
-    also stores.
+    also stores. ``next_norm`` runs on the layer's output inside the same numerics, so a residual the
+    numerics keep in fp32 reaches it as it would reach the next layer.
     """
     records: dict[str, torch.Tensor] = {}
 
@@ -159,7 +167,7 @@ def run_layer(
         handles.append(module.register_forward_pre_hook(lambda m, args: keep(name, args[0])))
 
     for prefix, norm in (("attn", layer.input_layernorm), ("mlp", layer.pre_mlp_layernorm)):
-        hook_output(norm.norm, f"{prefix}_rms")
+        hook_input(norm.down_proj, f"{prefix}_rms")
         hook_output(norm.down_proj, f"{prefix}_gate_down")
         hook_input(norm.up_proj, f"{prefix}_gate_act")
         hook_output(norm.up_proj, f"{prefix}_gate_up")
@@ -206,6 +214,7 @@ def run_layer(
     hook_output(shared.linear_fc2, "shared_down")
 
     rotary_pos_emb = rotary(hidden_states.shape[0])
+    clear_numerics_handoffs()
     try:
         with (
             torch.no_grad(),
@@ -215,14 +224,17 @@ def run_layer(
             ) as captured,
         ):
             output, _ = layer(hidden_states=hidden_states, attention_mask=None, rotary_pos_emb=rotary_pos_emb)
+            next_regions = gated_norm_regions(next_norm, output)
     finally:
         for handle in handles:
             handle.remove()
-        del router.routing
-        del dispatcher.combine_postprocess
+        # The numerics hooks may have wrapped these per instance; put back what was there.
+        router.routing = routing
+        dispatcher.combine_postprocess = combine_postprocess
+        clear_numerics_handoffs()
     regions = {name: tensor.cuda() for name, tensor in next(iter(captured.values())).items()}
     keep("layer_output", output)
-    return TrainerRegions(tensors={**records, **regions})
+    return TrainerRegions(tensors={**records, **regions}, next_norm=next_regions)
 
 
 def rotary_embedding(provider) -> RotaryEmbedding:
@@ -239,12 +251,23 @@ def rotary_embedding(provider) -> RotaryEmbedding:
     )
 
 
-def gated_norm_regions(norm: torch.nn.Module, hidden_states: torch.Tensor) -> dict[str, torch.Tensor]:
-    """A Grug gated norm's intermediate tensors: norm, down, SiLU, up, gated output."""
-    with torch.no_grad():
-        normalized = norm.norm(hidden_states)
-        down = norm.down_proj(normalized)
-        act = F.silu(down)
-        up = norm.up_proj(act)
-        out = normalized * torch.sigmoid(up)
-    return {"rms": normalized, "gate_down": down, "gate_act": act, "gate_up": up, "out": out}
+def gated_norm_regions(norm: GrugGatedRMSNorm, hidden_states: torch.Tensor) -> dict[str, torch.Tensor]:
+    """A Grug gated norm's intermediate tensors (norm, down, SiLU, up, gated output) under the active numerics."""
+    kept: dict[str, torch.Tensor] = {}
+
+    def keep(name: str, tensor: torch.Tensor) -> None:
+        kept[name] = tensor.detach().clone()
+
+    handles = [
+        norm.down_proj.register_forward_pre_hook(lambda module, args: keep("rms", args[0])),
+        norm.down_proj.register_forward_hook(lambda module, args, output: keep("gate_down", output)),
+        norm.up_proj.register_forward_pre_hook(lambda module, args: keep("gate_act", args[0])),
+        norm.up_proj.register_forward_hook(lambda module, args, output: keep("gate_up", output)),
+    ]
+    try:
+        with torch.no_grad():
+            out = norm(hidden_states)
+    finally:
+        for handle in handles:
+            handle.remove()
+    return {**kept, "out": out}

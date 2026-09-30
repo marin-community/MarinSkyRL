@@ -361,7 +361,12 @@ def main() -> None:
             layer_module = build_layer(provider, layer)
             load_hf_weights(layer_module, f"decoder.layers.{layer}.", weights)
             layer_input = regions["input"].cuda()
-            baseline = run_layer(layer_module, layer_input, rotary, numerics={})
+            next_norm = build_gated_norm(provider)
+            if layer + 1 < shape.layers:
+                load_hf_weights(next_norm, f"decoder.layers.{layer + 1}.input_layernorm.", weights)
+            else:
+                load_hf_weights(next_norm, "decoder.final_layernorm.", weights)
+            baseline = run_layer(layer_module, layer_input, rotary, next_norm=next_norm, numerics={})
             reproduction = {}
             for region in CAPTURE_REGIONS:
                 ours, theirs = baseline.tensors[region], regions[region].cuda()
@@ -371,11 +376,6 @@ def main() -> None:
                     reproduction[region] = compare(
                         ours.reshape(ours.shape[0], -1), theirs.reshape(theirs.shape[0], -1)
                     ).to_json()
-            next_norm = build_gated_norm(provider)
-            if layer + 1 < shape.layers:
-                load_hf_weights(next_norm, f"decoder.layers.{layer + 1}.input_layernorm.", weights)
-            else:
-                load_hf_weights(next_norm, "decoder.final_layernorm.", weights)
             bias = layer_module.mlp.router.expert_bias.detach().float().clone()
             export_bias = weights[f"model.layers.{layer}.mlp.router.bias"].float()
             replay = LayerReplay(
@@ -454,9 +454,12 @@ def main() -> None:
             for text in args.numerics:
                 variants[text] = {flag: True for flag in text.split(",") if flag}
             for label, flags in variants.items():
-                trainer_run = baseline if not flags else run_layer(layer_module, layer_input, rotary, numerics=flags)
-                next_regions = gated_norm_regions(next_norm, trainer_run.tensors["output"])
-                trainer = trainer_region_tensors(trainer_run.tensors, layout, shape, next_regions)
+                trainer_run = (
+                    baseline
+                    if not flags
+                    else run_layer(layer_module, layer_input, rotary, next_norm=next_norm, numerics=flags)
+                )
+                trainer = trainer_region_tensors(trainer_run.tensors, layout, shape, trainer_run.next_norm)
                 isolated = run_vllm(
                     replay,
                     layout,
