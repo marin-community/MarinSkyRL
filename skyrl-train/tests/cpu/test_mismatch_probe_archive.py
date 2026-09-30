@@ -17,7 +17,7 @@ from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.inference_engines.vllm_teacher_oracle import tokenizer_vocabulary_fingerprint
 from skyrl_train.mismatch_probe.archive import MismatchArchive, read_frozen_probe
-from skyrl_train.mismatch_probe.collect import ProbeCollector
+from skyrl_train.mismatch_probe.collect import TIMING_REPETITIONS, ProbeCollector
 from skyrl_train.mismatch_probe.callback import MismatchProbeCallback
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
 from skyrl_train.training_batch import TrainingOutputBatch
@@ -315,7 +315,7 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     assert trainer.policy_model.dp_ranks_by_mode["reread_replay"].tolist() == [0, 0, 1, 0]
     timing = json.loads(read_frozen_probe(cfg.trainer.mismatch_probe.archive_uri).manifest.timing_json)
     # The slowest data-parallel rank sets each repetition's pass time.
-    assert timing["training_pass@0:reread_replay/seconds"] == [1.5, 1.5, 1.5]
+    assert timing["training_pass@0:reread_replay/seconds"] == [1.5] * TIMING_REPETITIONS
     assert timing["training_pass@0:native/peak_memory_bytes"] == 200
     frozen_rows = [row for row in chained_scores(cfg) if row.scorer == "vllm.rescore_frozen"]
     assert {row.sample_id: row.expert_choices for row in frozen_rows} == {
