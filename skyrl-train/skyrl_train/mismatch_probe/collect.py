@@ -265,7 +265,9 @@ class ProbeCollector:
             if encoded_routes.shape is not None:
                 if len(encoded_routes.shape) != 3 or encoded_routes.shape[0] != response_length:
                     raise ValueError("captured routes must align with the frozen response tokens")
-                route_valid_mask = (routes[position, :response_length] != SENTINEL_EXPERT_ID).any(dim=-1).bool().tolist()
+                route_valid_mask = (
+                    (routes[position, :response_length] != SENTINEL_EXPERT_ID).any(dim=-1).bool().tolist()
+                )
                 if self.source_manifest is not None:
                     route_valid_mask = self.probes[position].route_valid_mask
             advantage = None
@@ -297,8 +299,7 @@ class ProbeCollector:
                 )
             )
         digest = probe_hash(
-            (row.sample_id, row.prompt_token_ids, row.vllm_output_ids, row.response_mask, row.loss_mask)
-            for row in rows
+            (row.sample_id, row.prompt_token_ids, row.vllm_output_ids, row.response_mask, row.loss_mask) for row in rows
         )
         if self.source_manifest is not None and digest != self.probe_hash:
             raise ValueError("reuse_probe token hash changed during trainer collation")
@@ -343,7 +344,7 @@ class ProbeCollector:
             if cache_mode == CACHE_OFF:
                 await trainer.inference_engine_client.reset_prefix_cache()
                 prefixes = [row.prompt_token_ids + row.vllm_output_ids for row in rows]
-                overrides = [{"prompt_logprob_token_ids": [[token] for token in sequence]} for sequence in prefixes]
+                overrides = None
                 sampling = {"prompt_logprobs": 1}
             else:
                 # Cached decode scores require one prefix per frozen response token.
@@ -355,21 +356,21 @@ class ProbeCollector:
                 overrides = [{"logprob_token_ids": [token]} for row in rows for token in row.vllm_output_ids]
                 sampling = {"logprobs": 1}
             started = time.monotonic()
-            output = await trainer.inference_engine_client.generate(
-                {
-                    "prompts": None,
-                    "prompt_token_ids": prefixes,
-                    "sampling_params": {
-                        "max_tokens": 1,
-                        "temperature": 1.0,
-                        "skip_reading_prefix_cache": cache_mode == CACHE_OFF,
-                        "seed": request_seed(int(self.spec.seed), f"reread:{update}:{cache_mode}", 0),
-                        **sampling,
-                    },
-                    "sampling_params_per_prompt": overrides,
-                    "session_ids": None,
-                }
-            )
+            engine_input = {
+                "prompts": None,
+                "prompt_token_ids": prefixes,
+                "sampling_params": {
+                    "max_tokens": 1,
+                    "temperature": 1.0,
+                    "skip_reading_prefix_cache": cache_mode == CACHE_OFF,
+                    "seed": request_seed(int(self.spec.seed), f"reread:{update}:{cache_mode}", 0),
+                    **sampling,
+                },
+                "session_ids": None,
+            }
+            if overrides is not None:
+                engine_input["sampling_params_per_prompt"] = overrides
+            output = await trainer.inference_engine_client.generate(engine_input)
             duration = time.monotonic() - started
             chosen = []
             if cache_mode == CACHE_OFF:
@@ -663,9 +664,7 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
                 probe.metrics[f"update@{update}"][mode] = summary
                 for metric, value in summary.items():
                     trainer.all_metrics[f"mismatch_probe/update_{update}/{mode}/{metric}"] = value
-        trainer.all_metrics[f"mismatch_probe/update_{update}/tokens"] = probe.metrics[f"update@{update}"][
-            "token_count"
-        ]
+        trainer.all_metrics[f"mismatch_probe/update_{update}/tokens"] = probe.metrics[f"update@{update}"]["token_count"]
         trainer.all_metrics[f"mismatch_probe/update_{update}/route_bytes"] = probe.metrics[f"update@{update}"][
             "route_bytes"
         ]
