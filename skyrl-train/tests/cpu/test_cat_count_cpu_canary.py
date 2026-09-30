@@ -21,7 +21,7 @@ from skyrl_train.config.trajectory_runner_capabilities import (
 )
 from skyrl_train.entrypoints.main_base import EntrypointOperation
 from skyrl_train.utils import validate_cfg
-from skyrl_train.utils.algorithm_registry import AdvantageEstimatorRegistry
+from skyrl_train.utils.algorithm_registry import AdvantageEstimatorRegistry, sync_registries
 
 from tests.cpu.tiny_training.cat_count import FAST_STEPS, cat_count_config, flipped_grpo
 from tests.cpu.tiny_training.cpu_backend import CPUInferenceEngine
@@ -91,6 +91,7 @@ def cat_count_session(monkeypatch):
         include_dashboard=False,
         runtime_env={"env_vars": {**WORKER_ENV_VARS, **telemetry_env}},
     )
+    sync_registries()
     AdvantageEstimatorRegistry.register(
         "cat_count_flipped_grpo", flipped_grpo, group_contract=AdvantageEstimatorRegistry.group_contract("grpo")
     )
@@ -162,6 +163,11 @@ async def test_cpu_sampling_preserves_trajectory_rng_and_minimum_tokens(cat_coun
             assert result["response_ids"][0] == batch["response_ids"][index]
             assert result["response_logprobs"][0] == pytest.approx(batch["response_logprobs"][index], abs=1e-5)
         assert len({tuple(ids) for ids in batch["response_ids"]}) > 1
+        for index, identity in enumerate(("a", "b", "c")):
+            singleton = await engine.generate(
+                {"prompt_token_ids": [prompt], "session_ids": [identity], "sampling_params": sampling}
+            )
+            assert singleton["response_ids"][0] == batch["response_ids"][index]
 
         eos_prompt = tokenizer.apply_chat_template(
             [
@@ -173,6 +179,11 @@ async def test_cpu_sampling_preserves_trajectory_rng_and_minimum_tokens(cat_coun
             tokenize=True,
             add_generation_prompt=True,
         ) + tokenizer.encode("cat", add_special_tokens=False)
+        mixed = await engine.generate(
+            {"prompt_token_ids": [eos_prompt, prompt], "session_ids": ["eos-short", "a"], "sampling_params": sampling}
+        )
+        assert mixed["response_ids"][0] == [tokenizer.eos_token_id]
+        assert mixed["response_ids"][1] == batch["response_ids"][0]
         for minimum in (0, None, 3):
             params = {"temperature": 0.0, "max_tokens": 8, "logprobs": 0}
             if minimum is not None:
