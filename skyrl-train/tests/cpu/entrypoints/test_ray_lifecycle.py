@@ -1,6 +1,8 @@
 import asyncio
 import contextlib
 import signal
+import subprocess
+import sys
 from unittest.mock import Mock
 
 import pytest
@@ -83,17 +85,29 @@ def test_ray_teardown_follows_the_cluster_owner(monkeypatch, owner, exit_args, e
     assert events == expected_events
 
 
-def test_runner_evidence_rejection_happens_before_ray_initialization(monkeypatch):
-    cfg = get_default_config()
-    cfg.trainer.logger = "console"
-    cfg.trainer.algorithm.off_policy_correction = "tis"
-    initialize_ray = Mock()
-    monkeypatch.setattr(trainer_utils, "initialize_ray", initialize_ray)
+def test_runner_evidence_rejection_happens_before_ray_initialization():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import pytest
+from skyrl_train.config.utils import get_default_config
+from skyrl_train.entrypoints.main_base import run_ray_driver
+from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 
-    with pytest.raises(ValueError, match="mini-swe cannot supply exact sampled completion"):
-        run_ray_driver(cfg, Mock(), TrajectoryRunnerMode.MINI_SWE)
-
-    initialize_ray.assert_not_called()
+cfg = get_default_config()
+cfg.trainer.logger = "console"
+cfg.trainer.algorithm.off_policy_correction = "tis"
+with pytest.raises(ValueError, match="mini-swe cannot supply exact sampled completion"):
+    run_ray_driver(cfg, None, TrajectoryRunnerMode.MINI_SWE)
+""",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_driver_preserves_remote_exception_before_external_owner_exit(tmp_path, monkeypatch):

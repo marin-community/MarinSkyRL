@@ -348,18 +348,17 @@ Algorithm Configuration
 - ``algorithm.policy_loss_type``: Type of policy loss to use. Options include:
 
   - ``regular``: Vanilla PPO loss with token-level importance sampling
-  - ``importance_sampling``: Unclipped advantage-weighted loss with the current-to-old policy ratio; see the `objective usage guide`_.
+  - ``importance_sampling``: Unclipped advantage-weighted loss with the current-to-old policy ratio; see the :doc:`objective usage guide </algorithms/objective_guide>`.
   - ``dual_clip``: Dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_
   - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements the "GSPO-token" variant from the paper and requires ``algorithm.loss_reduction=sequence_mean``.
   - ``clip_cov``: Clip-Cov combines standard PPO clipping with covariance-based correction masking for improved stability. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
   - ``kl_cov``: KL-Cov applies KL regularization to tokens selected based on covariance values. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
   - ``cispo``: Clipped Importance Sampling Weight Policy Optimization (CISPO) proposed in `MiniMax-M1 <https://arxiv.org/abs/2506.13585>`_.
-  - ``sapo``: Smooth sigmoid-gated policy loss with separate positive- and negative-advantage temperatures; see the `objective usage guide`_.
-  - ``behavior_clip``: PPO clipping against the sampling policy, with a dual bound for negative advantages; see the `objective usage guide`_.
-  - ``sft``: Negative log likelihood on eligible response tokens, independent of advantages; see the `objective usage guide`_.
+  - ``sapo``: Smooth sigmoid-gated policy loss with separate positive- and negative-advantage temperatures; see the :doc:`objective usage guide </algorithms/objective_guide>`.
+  - ``behavior_clip``: PPO clipping against the sampling policy, with a dual bound for negative advantages; see the :doc:`objective usage guide </algorithms/objective_guide>`.
+  - ``sft``: Negative log likelihood on eligible response tokens, independent of advantages; see the :doc:`objective usage guide </algorithms/objective_guide>`.
   - Custom policy losses can be registered with the ``PolicyLossRegistry``
 
-.. _objective usage guide: https://github.com/marin-community/MarinSkyRL/blob/main/skyrl-train/docs/algorithms/objective_guide.rst
 
 - ``algorithm.loss_reduction``: Type of loss reduction to use. Options include:
 
