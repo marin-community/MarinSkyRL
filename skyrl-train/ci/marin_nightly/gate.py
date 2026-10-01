@@ -41,15 +41,15 @@ class MetricBound:
 
 @dataclass(frozen=True)
 class MetricOccurrence:
-    """Require at least ``minimum_count`` observations strictly above or below a threshold."""
+    """Require at least ``minimum_count`` observations satisfying a threshold."""
 
     minimum_count: int
-    comparison: Literal["above", "below"]
+    comparison: Literal["above", "below", "at_least"]
     threshold: float
 
     def __post_init__(self) -> None:
-        if self.comparison not in ("above", "below") or self.minimum_count < 1:
-            raise ValueError("occurrence requires above or below and a positive minimum_count")
+        if self.comparison not in ("above", "below", "at_least") or self.minimum_count < 1:
+            raise ValueError("occurrence requires above, below or at_least and a positive minimum_count")
 
 
 @dataclass(frozen=True)
@@ -77,6 +77,7 @@ class MetricSeries:
     trend: SeriesTrend | None = None
     occurrence: MetricOccurrence | None = None
     at_step: int | Literal["first", "last"] | None = None
+    through_step: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in (TRAIN, EVAL) or self.min_observations < 1:
@@ -129,6 +130,7 @@ def load_spec(path: Path) -> GateSpec:
                 trend=SeriesTrend(**value["trend"]) if "trend" in value else None,
                 occurrence=MetricOccurrence(**value["occurrence"]) if "occurrence" in value else None,
                 at_step=value.get("at_step"),
+                through_step=value.get("through_step"),
             )
             for value in raw.get("metric_series", ())
         ),
@@ -222,6 +224,8 @@ def _metric_series_failures(steps: list[StepMetrics], requirement: MetricSeries)
         kind_steps = kind_steps[:1]
     elif requirement.at_step == "last":
         kind_steps = kind_steps[-1:]
+    if requirement.through_step is not None:
+        kind_steps = [step for step in kind_steps if step.step <= requirement.through_step]
     observed = [step for step in kind_steps if requirement.metric in step.values]
     if not observed and not requirement.required:
         return []
@@ -270,7 +274,13 @@ def _metric_series_failures(steps: list[StepMetrics], requirement: MetricSeries)
     if requirement.occurrence is not None:
         occurrence = requirement.occurrence
         count = sum(
-            value > occurrence.threshold if occurrence.comparison == "above" else value < occurrence.threshold
+            (
+                value >= occurrence.threshold
+                if occurrence.comparison == "at_least"
+                else value > occurrence.threshold
+                if occurrence.comparison == "above"
+                else value < occurrence.threshold
+            )
             for value in values
         )
         if count < occurrence.minimum_count:

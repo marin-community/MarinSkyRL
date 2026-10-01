@@ -118,7 +118,7 @@ REJECTED = [
             mode,
             None,
             {
-                **NO_TIS,
+                **NO_ROLLOUT_LOGPROBS,
                 "trainer.callbacks": [
                     {
                         "type": "evaluation",

@@ -169,7 +169,7 @@ class EvaluationSamplingConfig:
 
 @register_callback("evaluation")
 class EvaluationCallback(TrainerCallback):
-    """Schedule evaluations and stop after configured gains over the first evaluation.
+    """Schedule evaluations and stop when configured score requirements are met.
 
     Args:
         eval_steps: Evaluate every N completed steps; non-positive values disable evaluation.
@@ -177,7 +177,7 @@ class EvaluationCallback(TrainerCallback):
         eval_before_train: Evaluate the initial policy.
         additional_evaluations: Named sampling overrides passed to the trainer's evaluator.
         metric_groups: Output metric names mapped to source metrics whose mean is reported.
-        stop_on_improvement: Metrics and required gains, all of which must be reached to stop.
+        stop_when: Metrics mapped to minimum scores or gains over the initial evaluation.
     """
 
     def __init__(
@@ -187,7 +187,7 @@ class EvaluationCallback(TrainerCallback):
         eval_before_train: bool = True,
         additional_evaluations: Dict[str, Dict[str, Any]] | None = None,
         metric_groups: Dict[str, List[str]] | None = None,
-        stop_on_improvement: Dict[str, float] | None = None,
+        stop_when: Dict[str, Dict[str, float]] | None = None,
     ):
         self.eval_steps = eval_steps
         self.eval_on_train_end = eval_on_train_end
@@ -196,15 +196,18 @@ class EvaluationCallback(TrainerCallback):
             name: EvaluationSamplingConfig(**parameters) for name, parameters in (additional_evaluations or {}).items()
         }
         self.metric_groups = metric_groups or {}
-        self.stop_on_improvement = stop_on_improvement or {}
+        self.stop_when = stop_when or {}
         self._initial_values: Dict[str, float] = {}
         self._initial_step: int | None = None
         if any(not name.isidentifier() for name in self.additional_evaluations):
             raise ValueError("additional evaluation names must be identifiers")
         if any(not keys for keys in self.metric_groups.values()):
             raise ValueError("evaluation metric groups must be nonempty")
-        if any(not math.isfinite(value) or value < 0 for value in self.stop_on_improvement.values()):
-            raise ValueError("evaluation improvement margins must be finite and non-negative")
+        for requirement in self.stop_when.values():
+            if set(requirement) not in ({"minimum"}, {"min_improvement"}):
+                raise ValueError("evaluation stop requires exactly minimum or min_improvement")
+            if not math.isfinite(next(iter(requirement.values()))):
+                raise ValueError("evaluation stop thresholds must be finite")
 
     error_behavior = "raise"
 
@@ -222,10 +225,10 @@ class EvaluationCallback(TrainerCallback):
             metrics[name] = math.fsum(metrics[member] / len(members) for member in members)
             if not math.isfinite(metrics[name]):
                 raise ValueError(f"nonfinite evaluation metric group {name}")
-        if not self.stop_on_improvement:
+        if not self.stop_when:
             return control
         if self._initial_step is None:
-            self._initial_values = {name: metrics[name] for name in self.stop_on_improvement}
+            self._initial_values = {name: metrics[name] for name in self.stop_when}
             self._initial_step = state.global_step
         improvements = {name: metrics[name] - initial for name, initial in self._initial_values.items()}
         for name, improvement in improvements.items():
@@ -233,9 +236,12 @@ class EvaluationCallback(TrainerCallback):
                 raise ValueError(f"nonfinite evaluation improvement for {name}")
             metrics[f"{name}_improvement"] = improvement
         if state.global_step > self._initial_step and all(
-            improvements[name] >= margin for name, margin in self.stop_on_improvement.items()
+            metrics[name] >= requirement["minimum"]
+            if "minimum" in requirement
+            else improvements[name] >= requirement["min_improvement"]
+            for name, requirement in self.stop_when.items()
         ):
-            logger.info("Evaluation improvement reached at step {}: {}", state.global_step, improvements)
+            logger.info("Evaluation stop requirements reached at step {}", state.global_step)
             control.should_training_stop = True
         return control
 

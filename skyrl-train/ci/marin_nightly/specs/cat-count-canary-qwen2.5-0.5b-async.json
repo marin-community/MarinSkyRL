@@ -13,43 +13,45 @@
       31,
       47
     ],
-    "early_stop_margin": 0.2,
-    "margin_contract": "The launcher stop_on_improvement margin equals this spec min_improvement.",
-    "step_cap_rule": "about 1.5× worst crossing across four seeds, rounded to the eval interval",
+    "step_cap_rule": "Fixed 30-step cap; sampled evaluation every five steps; first score >=0.65 stops training.",
     "marin_sha": "c57ae7b8de8a905dcd89f1b021e1ec351e534001",
-    "first_crossing_steps": [
-      20,
-      35,
-      15,
-      45
-    ],
-    "step_cap": 70,
+    "step_cap": 30,
     "staleness": 2,
     "eval_interval": 5,
-    "log_ratio_observed_maximum": 0.5917172267140303
+    "log_ratio_observed_maximum": 0.5917172267140303,
+    "seed": 17,
+    "sampled_score_threshold": 0.65,
+    "initial_score_band": [
+      0.1,
+      0.45
+    ],
+    "healthy_minimum_peak_margin": 0.095273,
+    "failing_maximum_peak_margin": -0.115285
   },
   "min_train_steps": 5,
-  "max_wall_clock_seconds": 3600,
+  "max_wall_clock_seconds": 1200,
   "metric_series": [
     {
       "kind": "eval",
-      "metric": "eval/train/avg_score",
+      "metric": "eval/sampled/train/avg_score",
       "required": true,
       "min_observations": 1,
       "at_step": 0,
       "bounds": {
-        "minimum": 0.45,
-        "maximum": 0.7
+        "minimum": 0.1,
+        "maximum": 0.45
       }
     },
     {
       "kind": "eval",
-      "metric": "eval/train/avg_score",
+      "metric": "eval/sampled/train/avg_score",
       "required": true,
       "min_observations": 2,
-      "trend": {
-        "window": 1,
-        "min_improvement": 0.2
+      "through_step": 30,
+      "occurrence": {
+        "minimum_count": 1,
+        "comparison": "at_least",
+        "threshold": 0.65
       }
     },
     {
@@ -152,6 +154,17 @@
       "bounds": {
         "minimum": 0,
         "maximum": 1
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "policy/dp_weight_checksum_mismatch",
+      "required": true,
+      "min_observations": 5,
+      "finite_every_step": true,
+      "bounds": {
+        "minimum": 0,
+        "maximum": 0
       }
     }
   ],

@@ -234,7 +234,7 @@ def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_po
                     "sampled": {"sampling_params": {"temperature": 1.0, "seed": 42}, "n_samples_per_prompt": 8}
                 },
                 "metric_groups": {"eval/reporting/avg_score": ["eval/train/avg_score", "eval/heldout/avg_score"]},
-                "stop_on_improvement": {"eval/reporting/avg_score": 0.1},
+                "stop_when": {"eval/reporting/avg_score": {"min_improvement": 0.1}},
             },
         ],
     )

@@ -342,10 +342,12 @@ def test_cat_count_series_requires_finite_learning_and_enough_evidence(tmp_path,
         assert failures == []
 
 
-@pytest.mark.parametrize("lane", ["async", "sync"])
-@pytest.mark.parametrize("mutation", ["healthy", "flat_eval", "missing_step_zero", "missing_initial_metric"])
-def test_cat_count_shipped_specs_require_learning_from_step_zero(lane, mutation):
-    path = SHIPPED_SPEC.parent / f"cat-count-canary-qwen2.5-0.5b-{lane}.json"
+@pytest.mark.parametrize(
+    "mutation",
+    ["healthy", "flat_eval", "late_crossing", "dp_divergence", "missing_step_zero", "missing_initial_metric"],
+)
+def test_cat_count_shipped_specs_require_learning_from_step_zero(mutation):
+    path = SHIPPED_SPEC.parent / "cat-count-canary-qwen2.5-0.5b-async.json"
     spec = load_spec(path)
     metrics = {
         "policy/policy_loss": 0.1,
@@ -356,17 +358,22 @@ def test_cat_count_shipped_specs_require_learning_from_step_zero(lane, mutation)
         "policy/ppo_ratio_exact_unit_fraction": 0.9,
         "policy/mismatch/pooled/log_ratio_abs_mean": 0.01,
         "async/staleness_mean": 1.0,
-        "tis/skipped_fraction": 0.0,
+        "policy/dp_weight_checksum_mismatch": 0.0,
         "environment/exact_n10": 0.5,
         "environment/exact_n20": 0.25,
         "policy/rollout_train_prob_diff_mean": 1.003,
     }
     steps = [StepMetrics("train", step, metrics) for step in range(1, max(10, spec.min_train_steps) + 1)]
     evaluations = [
-        StepMetrics("eval", step, {"eval/train/avg_score": score}) for step, score in ((0, 0.55), (5, 0.30), (10, 0.80))
+        StepMetrics("eval", step, {"eval/sampled/train/avg_score": score})
+        for step, score in ((0, 0.25), (5, 0.30), (10, 0.65))
     ]
     if mutation == "flat_eval":
-        evaluations[-1] = replace(evaluations[-1], values={"eval/train/avg_score": 0.55})
+        evaluations[-1] = replace(evaluations[-1], values={"eval/sampled/train/avg_score": 0.25})
+    if mutation == "late_crossing":
+        evaluations[-1] = replace(evaluations[-1], step=35)
+    if mutation == "dp_divergence":
+        steps[1] = replace(steps[1], values={**metrics, "policy/dp_weight_checksum_mismatch": 1.0})
     if mutation == "missing_step_zero":
         evaluations = evaluations[1:]
     if mutation == "missing_initial_metric":
