@@ -7,10 +7,15 @@ NONE of this is reached, so the legacy path stays byte-identical.
 The controller path replaces the pinggy tunnel with the native iris
 capability-URL scheme that shipped in marin #6857 (``/proxy/t/*``): the co-located
 vLLM (or the RecordProxy in the literal combo) is registered with the iris
-controller under ``ENDPOINT_ACCESS_LINK``, then a scoped capability token is
-minted for it and carried IN THE URL PATH:
+controller under ``ENDPOINT_ACCESS_LINK``, then the task's own controller mints a
+capability URL that carries a scoped token IN THE URL PATH:
 
-    api_base = https://<ingress_host>/proxy/t/<token>/<encoded_endpoint>/v1
+    api_base = <capability_url>/v1
+
+On a CoreWeave child with ``federation_public_parent`` set, ``<capability_url>`` is
+``https://iris.oa.dev/proxy/t/cluster=<cluster>/<token>/<encoded_endpoint>`` and the
+public parent relays it back to the child. The federated path below instead mints at
+the parent and builds ``https://<ingress_host>/proxy/t/<token>/<encoded_endpoint>/v1``.
 
 Possession of the URL is the credential — there is NO auth header, and the
 sandbox-facing ``api_key`` is an unused dummy (installed OpenAI-compatible agents
@@ -23,8 +28,8 @@ TOKEN LIFETIME. The controller clamps a minted token to
 ``MAX_ENDPOINT_TOKEN_TTL_SECONDS`` = 24h (``DEFAULT`` = 1h). The endpoint
 REGISTRATION is separately lease-renewed for the whole run (see
 :class:`ControllerEndpointRegistration`); only the token expires. So the api_base
-is resolved through :func:`capability_api_base`, which mints a 24h token, caches
-it worker-side keyed by endpoint name, and re-mints when within
+is resolved through :func:`capability_api_base`, which mints a 24h capability URL,
+caches it worker-side keyed by endpoint name, and re-mints when within
 ``TOKEN_REFRESH_MARGIN_SECONDS`` of expiry.
 
 INJECTION CADENCE (important). The launchers bake the resolved api_base into the
@@ -590,7 +595,7 @@ class _FederatedTokenState:
 
 
 class FederatedCapabilityTokenCache:
-    """Parent-minting analog of :class:`CapabilityTokenCache`.
+    """Parent-minting analog of :class:`CapabilityUrlCache`, caching tokens rather than URLs.
 
     On the first ``token_for`` for an endpoint it waits (once) for FederationSync to
     mirror the endpoint onto the parent, then mints at the PARENT and caches the token,
