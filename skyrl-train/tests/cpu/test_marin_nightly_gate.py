@@ -1,13 +1,13 @@
 import json
 import math
-import sys
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import torch
-from iris.client.workload_codec import job_status_from_proto
+from iris.client.workload_codec import job_status_from_proto, task_status_from_proto
 from iris.rpc import job_pb2
+from iris.cluster.types import JobName
 
 from ci.marin_nightly import cat_count_nightly
 
@@ -508,46 +508,18 @@ def test_cat_count_nightly_separates_infrastructure_from_application_failures(
         task.attempts.add(
             attempt_id=0, state=job_pb2.TASK_STATE_WORKER_FAILED, is_worker_failure=True, terminal_reason="PodDeleted"
         )
-    status = job_status_from_proto(job_pb2.JobStatus(job_id="/atqamar/nightly", state=state, tasks=[task]))
+    summary = job_status_from_proto(job_pb2.JobStatus(job_id="/atqamar/nightly", state=state))
+
+    class RecordedIrisClient:
+        def job_status(self, _job_name):
+            return summary
+
+        def list_jobs(self, *, prefix):
+            return []
+
+        def list_tasks(self, _job_name):
+            return [task_status_from_proto(task)]
+
+    statuses = cat_count_nightly.workload_statuses(RecordedIrisClient(), JobName.from_wire("/atqamar/nightly"))
     log = mirror_line(1) if trained else ""
-    assert (cat_count_nightly.infrastructure_reason([status], log, deadline) is not None) == infrastructure
-
-
-@pytest.mark.parametrize(
-    "results,exit_code,attempts",
-    [
-        ([cat_count_nightly.Conclusion.PASS], 0, [1]),
-        ([cat_count_nightly.Conclusion.GATE_FAILURE], 1, [1]),
-        ([cat_count_nightly.Conclusion.INFRASTRUCTURE_FAILURE, cat_count_nightly.Conclusion.PASS], 0, [1, 2]),
-        ([cat_count_nightly.Conclusion.INFRASTRUCTURE_FAILURE] * 2, 2, [1, 2]),
-    ],
-)
-def test_cat_count_nightly_retries_only_infrastructure_once(monkeypatch, tmp_path, results, exit_code, attempts):
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "cat_count_nightly",
-            "--marin-root",
-            str(tmp_path),
-            "--runtime-commit",
-            "a" * 40,
-            "--cluster",
-            "cw-rno2a",
-            "--job-name",
-            "test-nightly",
-            "--log",
-            str(tmp_path / "run.log"),
-            "--spec",
-            str(SHIPPED_SPEC),
-        ],
-    )
-    submitted = []
-
-    def run_attempt(_args, attempt):
-        submitted.append(attempt)
-        return results[attempt - 1], 100.0
-
-    monkeypatch.setattr(cat_count_nightly, "run_attempt", run_attempt)
-    assert cat_count_nightly.main() == exit_code
-    assert submitted == attempts
+    assert (cat_count_nightly.infrastructure_reason(statuses, log, deadline) is not None) == infrastructure

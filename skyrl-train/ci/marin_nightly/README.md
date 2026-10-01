@@ -3,9 +3,8 @@
 The nightly runs GSM8K GRPO on one H100, synchronous OPD on four H100s,
 Grug Megatron training on four H100s, and the asynchronous CatCount learning
 canary on four H100s. OpenCode is a separate manual workflow.
-All policy updates use Megatron and the frozen root environment. The GSM8K run is
-scored against a checked-in spec; the other lanes exercise teacher scoring, Grug
-training and weight sync, and agentic rollout coverage.
+All policy updates use Megatron and the frozen root environment. GSM8K and CatCount are scored against checked-in specs; the other nightly lanes
+exercise teacher scoring, Grug training and weight sync.
 
 | file | role |
 | --- | --- |

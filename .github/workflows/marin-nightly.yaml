@@ -59,9 +59,6 @@ jobs:
             log: grug-megatron.log
           - lane: cat-count-h100
             target_cluster: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
-            cpu: 4
-            memory: 16GB
-            iris_timeout: 1200
             workflow_timeout_minutes: 55
             task_script: skyrl-train/ci/marin_nightly/run_cat_count_h100.sh
             log: cat-count-nightly.log

@@ -137,6 +137,8 @@ class MetricGate:
                 failures.append(
                     GateFailure(FailureKind.NONFINITE, f"nonfinite value {value!r}", self.metric, self.kind, row.step)
                 )
+        if failures:
+            return failures
         values = series.finite_values()
         if len(values) < self.min_observations:
             failures.append(
@@ -280,21 +282,9 @@ def check_run(steps: list[StepMetrics], spec: GateSpec, wall_clock_seconds: floa
                 stream=MetricKind.TRAIN,
             )
         )
-    if train:
-        final = train[-1]
-        for metric in spec.finite_metrics:
-            if metric not in final.values:
-                failures.append(
-                    GateFailure(FailureKind.MISSING_METRIC, "metric missing", metric, final.kind, final.step)
-                )
-            elif not _is_finite(final.values[metric]):
-                failures.append(GateFailure(FailureKind.NONFINITE, "nonfinite value", metric, final.kind, final.step))
-        for metric, bound in spec.bounds.items():
-            value = final.values.get(metric)
-            if _is_finite(value) and not bound.contains(value):
-                failures.append(
-                    GateFailure(FailureKind.BOUNDS, f"{value} outside {bound}", metric, final.kind, final.step)
-                )
+    for metric in dict.fromkeys((*spec.finite_metrics, *spec.bounds)):
+        requirement = MetricGate(MetricKind.TRAIN, metric, 1, bounds=spec.bounds.get(metric), step="last")
+        failures.extend(requirement.check(requirement.series(rows)))
     for requirement in spec.metric_gates:
         failures.extend(requirement.check(requirement.series(rows)))
     return failures
