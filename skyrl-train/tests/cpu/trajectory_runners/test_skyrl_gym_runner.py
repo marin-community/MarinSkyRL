@@ -259,7 +259,7 @@ async def test_gym_server_failure_is_masked_with_safe_diagnostics(generator_cfg,
     ]
     assert batch["verification_results"][1].diagnostics == {
         "exception_type": "ModelServerError",
-        "error_category": "constrained_decoding",
+        "model_server_error_category": "constrained_decoding",
         "request_id": "request-123",
         "status_code": 500,
     }

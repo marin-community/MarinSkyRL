@@ -225,7 +225,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         diagnostics = {"exception_type": exception_type}
         if isinstance(error, ModelServerError):
             diagnostics.update(
-                error_category=error.category,
+                model_server_error_category=error.category,
                 request_id=error.request_id,
                 status_code=error.status_code,
             )
@@ -880,7 +880,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             diagnostics = {**verification.diagnostics, "exception_type": exception_type}
             if isinstance(terminal_error, ModelServerError):
                 diagnostics.update(
-                    error_category=terminal_error.category,
+                    model_server_error_category=terminal_error.category,
                     request_id=terminal_error.request_id,
                     status_code=terminal_error.status_code,
                 )

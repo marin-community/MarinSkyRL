@@ -218,3 +218,28 @@ def test_whole_trajectory_projection_carries_environment_rates_into_async_batch(
     unverified_only = filter_trajectory_batch(mixed, [3])
     assert unverified_only["rollout_metrics"]["generate/avg_tokens_non_zero_rewards"] == 3.0
     assert unverified_only["rollout_metrics"]["generate/avg_tokens_zero_rewards"] == 0.0
+
+
+def test_projection_preserves_verifier_errors_separately_from_model_server_errors():
+    verifier_error = VerificationResult.error(
+        "verifier failed", diagnostics={"error_category": "infrastructure", "error_type": "VerifierRuntimeError"}
+    )
+    server_error = VerificationResult.error(
+        "model server failed",
+        diagnostics={
+            "model_server_error_category": "context_overflow",
+            "request_id": "request-123",
+            "status_code": 400,
+        },
+    )
+    outputs = [replace(_step([3], 0.0), verification=error) for error in (verifier_error, server_error)]
+
+    batch = WholeTrajectoryProjection(_config(), _Tokenizer()).project(
+        outputs, {"env_classes": None, "sampling_params": {"logprobs": True}}
+    )
+
+    assert batch["verification_results"] == [verifier_error, server_error]
+    assert batch["server_errors"] == [
+        None,
+        {"category": "context_overflow", "request_id": "request-123", "status_code": 400},
+    ]
