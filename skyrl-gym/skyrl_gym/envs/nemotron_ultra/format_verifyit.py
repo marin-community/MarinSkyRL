@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import json
 import re
-import tempfile
-from pathlib import Path
 from typing import Any
 
 
 def _line_regex(text: str, params: dict) -> tuple[bool, str]:
-    text = json.loads(text)
     patterns = [re.compile(pattern) for pattern in params["verify_regex"]]
     matching_lines = sum(any(pattern.search(line) for pattern in patterns) for line in text.split("\n"))
     minimum = params["verify_min_matches"]
@@ -19,7 +16,6 @@ def _line_regex(text: str, params: dict) -> tuple[bool, str]:
 
 
 def _markers(text: str, params: dict) -> tuple[bool, str]:
-    text = json.loads(text)
     expected = params["expected_markers"]
     missing = [marker for marker in expected if marker not in text]
     expected_set = set(expected)
@@ -43,9 +39,8 @@ def _markers(text: str, params: dict) -> tuple[bool, str]:
 def _grade_format_ifeval(text: str, verifier: dict[str, Any]) -> tuple[float, dict[str, Any]]:
     """Validate task parameters before asking IFEval to evaluate the candidate."""
     try:
-        from verifyit.grade import Status, run
-        from verifyit.modes.ifeval import CONSTRAINTS
-        from verifyit.spec import Constraint, IfevalSpec, render_spec
+        from verifyit.modes.grade_ifeval import grade_ifeval_candidate
+        from verifyit.spec import Constraint, EmptyOutputPolicy, IfevalSpec
     except ImportError:
         return 0.0, {
             "error_type": "verification_error",
@@ -87,10 +82,6 @@ def _grade_format_ifeval(text: str, verifier: dict[str, Any]) -> tuple[float, di
             raise ValueError("Format policy must contain a nonempty constraint")
         for pattern in patterns:
             re.compile(pattern)
-        existing = CONSTRAINTS.get(name)
-        if existing is not None and existing is not check:
-            raise ValueError("Format constraint registry collision")
-        CONSTRAINTS[name] = check
     except (ValueError, TypeError, re.error):
         return 0.0, {
             "error_type": "schema_error",
@@ -98,20 +89,11 @@ def _grade_format_ifeval(text: str, verifier: dict[str, Any]) -> tuple[float, di
         }
 
     try:
-        with tempfile.TemporaryDirectory(prefix="skyrl-format-") as temporary:
-            root = Path(temporary)
-            spec = IfevalSpec(
-                constraints=(Constraint(name, params),),
-                output=str(root / "response.txt"),
-            )
-            (root / "verifier.toml").write_text(render_spec(spec))
-            (root / "response.txt").write_text(json.dumps(text))
-            verdict = run(root / "verifier.toml", root)
-        if verdict.status is not Status.SCORED:
-            return 0.0, {
-                "error_type": "verification_error",
-                "error_message": "Format verifier did not produce a scored result",
-            }
+        verdict = grade_ifeval_candidate(
+            IfevalSpec((Constraint(name, params),), empty_output=EmptyOutputPolicy.GRADE),
+            text,
+            registry={name: check},
+        )
         detail = json.loads(verdict.detail["constraints"][0]["detail"])
         return verdict.reward, detail
     except Exception:
@@ -122,14 +104,11 @@ def _grade_format_ifeval(text: str, verifier: dict[str, Any]) -> tuple[float, di
 
 
 def grade_format_verifyit(text: str, verifier: dict[str, Any], timeout: float = 5.0) -> tuple[float, dict[str, Any]]:
-    """Bound the trusted IFEval regex evaluation using ScriptSpec process cleanup."""
+    """Bound source-format checks with the shared process deadline."""
     import math
-    import shlex
-    import sys
 
     try:
-        from verifyit.grade import Status, run
-        from verifyit.spec import ScriptSpec, render_spec
+        from verifyit.bounded import call_bounded
 
         if (
             isinstance(timeout, bool)
@@ -141,89 +120,9 @@ def grade_format_verifyit(text: str, verifier: dict[str, Any], timeout: float = 
                 "error_type": "schema_error",
                 "error_message": "Invalid format verification deadline",
             }
-        with tempfile.TemporaryDirectory(prefix="skyrl-format-runtime-") as temporary:
-            root = Path(temporary)
-            (root / "input.json").write_text(json.dumps({"text": text, "verifier": verifier}))
-            (root / "checker.sh").write_text(
-                "#!/bin/sh\nexec "
-                + shlex.quote(sys.executable)
-                + " "
-                + shlex.quote(str(Path(__file__).resolve()))
-                + " --check "
-                + shlex.quote(str(root / "input.json"))
-                + "\n"
-            )
-            spec = ScriptSpec(path="checker.sh", timeout=timeout, verdict_file="format-verdict.json")
-            (root / "verifier.toml").write_text(render_spec(spec))
-            verdict = run(root / "verifier.toml", root)
-        if verdict.status is not Status.SCORED:
-            category = "schema_error" if verdict.status is Status.INVALID_TASK else "verification_error"
-            return 0.0, {
-                "error_type": category,
-                "error_message": "Format verifier failed or exceeded its deadline",
-            }
-        return verdict.reward, verdict.detail["source_feedback"]
+        return call_bounded(_grade_format_ifeval, text, verifier, timeout=timeout)
     except Exception:
         return 0.0, {
             "error_type": "verification_error",
             "error_message": "Format verification failed",
         }
-
-
-def _main() -> None:
-    import dataclasses
-    import os
-    import sys
-    from enum import Enum
-
-    def plain(value):
-        if dataclasses.is_dataclass(value):
-            return plain(dataclasses.asdict(value))
-        if isinstance(value, Enum):
-            return value.value
-        if isinstance(value, dict):
-            return {key: plain(item) for key, item in value.items()}
-        if isinstance(value, (tuple, list)):
-            return [plain(item) for item in value]
-        return value
-
-    payload = json.loads(Path(sys.argv[2]).read_text())
-    calls = []
-    active = {}
-
-    def observe(frame, event, arg):
-        if frame.f_code.co_name != "grade" or not frame.f_code.co_filename.endswith("/verifyit/modes/grade_ifeval.py"):
-            return
-        if event == "call":
-            item = {
-                "path": frame.f_code.co_filename,
-                "spec": plain(frame.f_locals["spec"]),
-            }
-            calls.append(item)
-            active[id(frame)] = item
-        elif event == "return" and id(frame) in active:
-            active.pop(id(frame))["verdict"] = plain(arg)
-
-    sys.setprofile(observe)
-    try:
-        reward, feedback = _grade_format_ifeval(payload["text"], payload["verifier"])
-    finally:
-        sys.setprofile(None)
-    category = feedback.get("error_type")
-    status = (
-        "invalid_task"
-        if category == "schema_error"
-        else "infra_error"
-        if category == "verification_error"
-        else "scored"
-    )
-    verdict = {
-        "status": status,
-        "reward": reward,
-        "detail": {"source_feedback": feedback, "ifeval_calls": calls},
-    }
-    (Path(os.environ["VERIFYIT_LOGS_DIR"]) / "format-verdict.json").write_text(json.dumps(verdict, allow_nan=False))
-
-
-if __name__ == "__main__":
-    _main()
