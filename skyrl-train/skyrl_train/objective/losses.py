@@ -11,6 +11,8 @@ import torch
 from omegaconf import DictConfig
 
 from marinskyrl.runtime_options import PolicyLossType
+from skyrl_train.ftpo import FTPOInputs, ftpo_loss
+from skyrl_train.config.ftpo import ftpo_config
 from skyrl_train.tensor_math import masked_mean, safe_exp_delta
 from skyrl_train.utils.algorithm_registry import register_policy_loss
 
@@ -22,6 +24,7 @@ class PolicyLossInputs:
     rollout_log_probs: torch.Tensor | None
     advantages: torch.Tensor
     loss_mask: torch.Tensor
+    ftpo: FTPOInputs | None = None
 
 
 @dataclass(frozen=True)
@@ -248,3 +251,13 @@ def compute_policy_loss_kl_cov(inputs: PolicyLossInputs, config: DictConfig) -> 
         penalty_mask[selected] = 1
         values = values + penalty_mask.reshape_as(values) * config.kl_cov.ppo_kl_coef * delta.abs()
     return _token_loss(values, inputs, {})
+
+
+@register_policy_loss(PolicyLossType.FTPO)
+def ftpo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
+    """Optimize chosen alternatives at detected loop boundaries."""
+    params = ftpo_config(config)
+    if inputs.ftpo is None or params is None:
+        raise ValueError("FTPO requires candidate masks and raw reference logits")
+    values, metrics = ftpo_loss(inputs.ftpo, params)
+    return TokenLoss(values, metrics)

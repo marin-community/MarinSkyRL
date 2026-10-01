@@ -9,6 +9,7 @@ import torch
 from jaxtyping import Float, Integer
 
 from skyrl_train.dataset.replay_buffer import Experience
+from skyrl_train.ftpo import FTPOTargets
 from skyrl_train.distillation import distillation_input_from_tensors
 
 DictType = TypeVar("DictType")
@@ -366,6 +367,8 @@ class TrainingInput(TypedDict, total=False):
     student_topk_indices: Optional[Integer[torch.Tensor, "batch_size seq_len top_k"]]
     behavior_topk_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len top_k"]]
     teacher_on_student_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len top_k"]]
+    ftpo_chosen_mask: Optional[Integer[torch.Tensor, "batch_size seq_len top_k"]]
+    ftpo_reference_logits: Optional[Float[torch.Tensor, "batch_size vocab"]]
     teacher_valid_mask: Optional[Integer[torch.Tensor, "batch_size seq_len"]]
     distillation_loss_weights: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     # MoE router-replay capture rail (Stage 1): per-token expert-selection indices
@@ -438,7 +441,9 @@ class TrainingBatchIterator(Iterator[Experience]):
             num_actions=batch.metadata["response_length"],
             rollout_logprobs=batch.get("rollout_logprobs"),
             correction_weights=batch.get("correction_weights"),
-            distillation=distillation_input_from_tensors(
+            distillation=None
+            if "ftpo_chosen_mask" in batch
+            else distillation_input_from_tensors(
                 teacher_action_log_probs=batch.get("teacher_action_log_probs"),
                 teacher_topk_indices=batch.get("teacher_topk_indices"),
                 teacher_topk_logprobs=batch.get("teacher_topk_logprobs"),
@@ -449,6 +454,13 @@ class TrainingBatchIterator(Iterator[Experience]):
                 behavior_topk_logprobs=batch.get("behavior_topk_logprobs"),
                 teacher_on_student_logprobs=batch.get("teacher_on_student_logprobs"),
             ),
+            ftpo=FTPOTargets(
+                batch["student_topk_indices"],
+                batch["ftpo_chosen_mask"] & (batch["loss_mask"] > 0).unsqueeze(-1),
+                batch["ftpo_reference_logits"],
+            )
+            if "ftpo_chosen_mask" in batch
+            else None,
             rollout_routed_experts=batch.get("rollout_routed_experts"),
             response_span_tags=batch.get("response_span_tags"),
             info={},

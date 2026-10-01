@@ -14,6 +14,7 @@ from jaxtyping import Float, Integer
 import torch
 import torch.nn.functional as F
 
+from skyrl_train.ftpo import FTPOTargets
 from skyrl_train.distillation import TopKEvidence
 
 
@@ -78,6 +79,7 @@ class Experience:
     # token-reward channel is on; used to down-weight <think> tokens in the loss.
     response_span_tags: Optional[Integer[torch.Tensor, "batch response_len"]] = None
     distillation: Optional[TopKEvidence] = None
+    ftpo: FTPOTargets | None = None
     correction_weights: Optional[Float[torch.Tensor, "batch response_len"]] = None
 
     @torch.no_grad()
@@ -106,6 +108,8 @@ class Experience:
             self.rollout_routed_experts = to(self.rollout_routed_experts, device)
         if self.response_span_tags is not None:
             self.response_span_tags = to(self.response_span_tags, device)
+        if self.ftpo is not None:
+            self.ftpo = self.ftpo.to(device)
         if self.distillation is not None:
             self.distillation = self.distillation.to(device)
 
@@ -134,6 +138,8 @@ class Experience:
             self.rollout_routed_experts = self.rollout_routed_experts.pin_memory()
         if self.response_span_tags is not None:
             self.response_span_tags = self.response_span_tags.pin_memory()
+        if self.ftpo is not None:
+            self.ftpo = self.ftpo.pin_memory()
         if self.distillation is not None:
             self.distillation = self.distillation.pin_memory()
         return self
