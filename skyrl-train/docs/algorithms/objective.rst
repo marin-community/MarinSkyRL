@@ -49,7 +49,7 @@ Paths are relative to ``skyrl-train/skyrl_train/``.
    * - KL and entropy
      - Regularizers against the reference model, and for exploration
      - ``utils/policy_math.py``
-     - ``differentiable_approx_kl``
+     - ``differentiable_approx_kl``; ``KLEstimator`` (declared in ``config/objective_spec.py``)
    * - Composition
      - Builds one micro-batch's inputs, computes the loss above, and reports each term as its step value
      - ``objective/objective.py``
@@ -330,3 +330,97 @@ shape as its input log probabilities. Do not average within that function.
 dependence on microbatch statistics and zero-advantage behavior. These
 declarations determine which configurations are valid before training starts. See
 :doc:`custom_algorithms` for the registration example.
+
+.. _objective-kl-estimator:
+
+KL estimator
+------------
+
+The reference regularizer targets reverse KL,
+:math:`D_{\rm KL}(p\Vert q)=\mathbb{E}_{a\sim p}[\log p(a)-\log q(a)]`,
+where :math:`p` is the current policy and :math:`q` the frozen reference. For a
+sampled action let :math:`r=q(a)/p(a)`, :math:`\delta=\log p(a)-\log q(a)`
+and :math:`g=\nabla_\theta\log p(a)`. The following expectations assume fresh
+samples from :math:`p`, a fixed context, common support and inactive clamps.
+Autograd treats sampled actions as fixed.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 12 18 22 18 30
+
+   * - Estimator
+     - Per-token value
+     - Expected value
+     - Per-token gradient
+     - Expected gradient
+   * - ``k1``
+     - :math:`-\log r=\delta`
+     - Reverse KL; individual values may be negative.
+     - :math:`g`
+     - Zero.
+   * - ``k2``
+     - :math:`\tfrac12(\log r)^2`
+     - Nonnegative, biased approximation to reverse KL.
+     - :math:`\delta g`
+     - :math:`\nabla D_{\rm KL}(p\Vert q)`.
+   * - ``k3``
+     - :math:`r-1-\log r`
+     - Reverse KL; nonnegative per token.
+     - :math:`(1-r)g`
+     - :math:`\nabla D_{\rm KL}(q\Vert p)` (forward KL).
+   * - ``abs``
+     - :math:`|\delta|`
+     - Absolute log-ratio penalty, not a KL estimate.
+     - :math:`\operatorname{sign}(\delta)g`
+     - Gradient of the sampled absolute penalty; no KL-gradient identity.
+   * - ``k3_unbiased_gradient``
+     - :math:`\operatorname{sg}(k3)+k2-\operatorname{sg}(k2)`
+     - The k3 value.
+     - :math:`\delta g`
+     - :math:`\nabla D_{\rm KL}(p\Vert q)`.
+
+For k3 autograd, :math:`\mathbb{E}_p[g]=0` and
+:math:`\mathbb{E}_p[rg]=\mathbb{E}_q[g]`, so the expected gradient is
+:math:`-\mathbb{E}_q[g]=\nabla D_{\rm KL}(q\Vert p)`.
+A reverse-KL derivative must also differentiate the sampling distribution:
+
+.. math::
+
+   \nabla\mathbb{E}_p[k3]
+   =\mathbb{E}_p[(1-r)g+k3\,g]
+   =\mathbb{E}_p[\delta g]
+   =\nabla D_{\rm KL}(p\Vert q).
+
+``k3_unbiased_gradient`` uses a detached k3 value with the k2 gradient to supply
+that coefficient. It is the default for the KL loss and for value-only metrics
+and reward penalties. The latter run without gradients and receive the k3
+value. `verl's KL implementation
+<https://verl.readthedocs.io/en/latest/_modules/verl/trainer/ppo/core_algos.html#kl_penalty>`_
+calls the value/gradient construction ``k3+``; the SkyRL configuration name is
+``k3_unbiased_gradient``.
+
+Configure the estimator explicitly when selecting a different convention:
+
+.. code-block:: yaml
+
+   trainer:
+     algorithm:
+       use_kl_loss: true
+       kl_loss_coef: 0.001
+       kl_estimator_type: k3_unbiased_gradient
+
+``kl_estimator_type`` accepts exactly the five table entries. Use ``k3`` when
+its direct autograd convention is intentional, ``k2`` when its biased reported
+value is acceptable, ``k1`` for the signed sampled log ratio, and ``abs`` for an
+absolute penalty. ``use_kl_estimator_k3`` and ``use_abs_kl`` are unsupported
+configuration keys; select the estimator by name. Unknown names and unsupported
+keys fail before job submission and at runtime validation.
+
+Both k3 variants clamp :math:`\log(q/p)` to [-20, 20] and the reported k3 value
+to [-10, 10]. For ``k3_unbiased_gradient`` the k2 backward term uses that clamped
+log ratio but has no value clamp: its gradient remains active when only the k3
+output saturates, and is zero beyond the log-ratio clamp. Explicit ``k2`` uses
+the unclamped log difference. These numerical clamps limit the unbiased-gradient
+statement, as do stale/off-policy samples and context-distribution changes.
+The estimator name does not promise an unbiased full-training-objective gradient
+under those conditions. The implementation is in ``utils/policy_math.py``.

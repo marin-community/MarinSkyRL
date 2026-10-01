@@ -21,6 +21,14 @@ from skyrl_train.dynamic_sampling import DynamicSamplingType
 from marinskyrl.runtime_options import AdvantageEstimator, PolicyLossType
 
 
+class KLEstimator(StrEnum):
+    K1 = "k1"
+    ABS = "abs"
+    K2 = "k2"
+    K3 = "k3"
+    K3_UNBIASED_GRADIENT = "k3_unbiased_gradient"
+
+
 class RatioAnchor(StrEnum):
     OLD = "old"
     ROLLOUT = "rollout"
@@ -196,6 +204,15 @@ def validate_objective(cfg: DictConfig, *, loss_spec: LossSpec | None = None) ->
     if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
         raise ValueError("trainer.policy.max_consecutive_nonfinite_steps must be null or an integer >= 1")
     algorithm = cfg.trainer.algorithm
+    for key in ("use_abs_kl", "use_kl_estimator_k3"):
+        if key in algorithm:
+            raise ValueError(f"trainer.algorithm.{key} is unsupported; configure trainer.algorithm.kl_estimator_type")
+    try:
+        KLEstimator(algorithm.kl_estimator_type)
+    except ValueError as error:
+        raise ValueError(
+            f"invalid kl_estimator_type: {algorithm.kl_estimator_type}; choose one of {list(KLEstimator)}"
+        ) from error
     for key in ("use_tis", "tis_imp_ratio_cap"):
         if key in algorithm:
             raise ValueError(
