@@ -26,12 +26,12 @@ TRAINER_SCORER = "trainer"
 
 def rescore_label(update: int, cache_mode: str) -> str:
     """Name a vLLM score group by update and prefix-cache mode."""
-    return f"vllm.rescore@{update}" if cache_mode == CACHE_OFF else f"vllm.rescore@{update}:{cache_mode}"
+    return f"{RESCORE_SCORER}@{update}" if cache_mode == CACHE_OFF else f"{RESCORE_SCORER}@{update}:{cache_mode}"
 
 
 def trainer_label(update: int, mode: str) -> str:
     """Name a Megatron score group by update and routing mode."""
-    return f"trainer@{update}:{mode}"
+    return f"{TRAINER_SCORER}@{update}:{mode}"
 
 
 def validate_mismatch_probe_config(
