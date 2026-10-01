@@ -171,10 +171,15 @@ def create_ray_wrapped_inference_engines_from_config(
             engine_init_kwargs["async_scheduling"] = False
             engine_init_kwargs["weight_transfer_config"] = {"backend": "runai_streamer"}
 
+    requested_logprobs = [cfg.generator.sampling_params.logprobs, cfg.generator.eval_sampling_params.logprobs]
+    for callback in cfg.trainer.get("callbacks") or []:
+        if callback.get("type") == "evaluation":
+            requested_logprobs.extend(
+                (profile.get("sampling_params") or {}).get("logprobs")
+                for profile in (callback.get("additional_evaluations") or {}).values()
+            )
     requested_logprobs = [
-        value
-        for value in (cfg.generator.sampling_params.logprobs, cfg.generator.eval_sampling_params.logprobs)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        value for value in requested_logprobs if isinstance(value, int) and not isinstance(value, bool) and value > 0
     ]
 
     role = InferenceEngineRoleConfig(
@@ -703,6 +708,8 @@ def run_ray_driver(
         failure: Exception | None = None
         try:
             exit_code = supervisor.wait(entrypoint.remote(cfg))
+            if exit_code in (None, 0) and operation is EntrypointOperation.TRAIN:
+                logger.info("Training done!")
         except Exception as e:
             log_exception_as_text(failure_message, e)
             receipt = write_exception_receipt(

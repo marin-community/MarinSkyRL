@@ -12,7 +12,7 @@ training and weight sync, and agentic rollout coverage.
 | `run_opd_h100.sh` | run synchronous OPD with separate policy, rollout, and teacher roles |
 | `run_grug_megatron.sh` | run Grug parity, training, and serving gates on four H100s |
 | `run_opencode.sh` | submit and gate the federated OpenCode RL canary |
-| `gate.py` | score the GSM8K run against its spec |
+| `gate.py` | score a training run against its spec |
 | `specs/gsm8k-qwen3-0.6b-megatron.json` | GSM8K gate thresholds and provenance |
 | `specs/opencode-qwen3-8b.json` | OpenCode continuation and policy update thresholds |
 
@@ -25,11 +25,48 @@ metrics are recoverable from its log alone — no wandb, no checkpoint, no clust
 WANDB_MIRROR kind=train step=2 metrics={"policy/policy_loss": 0.41, "reward/avg_raw_reward": 0.25, ...}
 ```
 
-`gate.py` parses those, takes the **final** training step (a run can look healthy for a
-step and then degrade into NaN), and checks it against the spec: the step count was
-reached, the required metrics are present and finite, the bounded ones are inside their
-range, and the run finished inside its wall-clock budget. It exits non-zero with one line
-per violation. `tests/cpu/test_marin_nightly_gate.py` covers it.
+`gate.py` parses those, counts distinct training steps, and checks the final payload
+against the spec's required metrics and bounds. A spec can also require evidence across
+the run: finite values at every step, minimum observation counts, first-to-last-window
+improvement, and a minimum number of observations above or below a threshold. Training and evaluation
+payloads are separate streams. `at_step` selects a numbered step, `first`, or
+`last` before checking a series; a required selected observation must exist. Duplicate payloads for one stream and step count once;
+conflicting copies fail. The gate exits non-zero with one line per violation.
+`tests/cpu/test_marin_nightly_gate.py` covers it.
+
+## Metric series rules
+
+`metric_series` entries name a `kind` (`train` or `eval`) and a metric. Each entry
+states `required` and `min_observations`. A missing optional metric is ignored; a
+metric that appears is checked for finite values. `finite_every_step` also requires
+the metric in every payload of that kind. Sparse per-N metrics omit that field and
+set a measured minimum observation count. A `trend` compares the first and last
+`window` finite observations; too few observations fail. An `occurrence` requires
+`minimum_count` values `above`, `below` or inclusively `at_least` its `threshold`.
+`through_step` limits observations to that completed step or earlier.
+
+A learning requirement pairs a trend with a required initial observation:
+
+```json
+[
+  {"kind": "eval", "metric": "eval/train/avg_score", "required": true,
+   "min_observations": 1, "at_step": 0},
+  {"kind": "eval", "metric": "eval/train/avg_score", "required": true,
+   "min_observations": 2, "trend": {"window": 1, "min_improvement": 0.2}}
+]
+```
+
+The first row requires the step-0 baseline. The second requires a reward gain
+of at least0.2 from that baseline. CatCountCanary's async spec uses sampled
+training-prompt evaluations instead: initial reward in[0.10,0.45] atstep0,
+then at leastone score >=0.65 throughstep30. The launcher stops at the first
+qualifying sampled evaluation. Its spec also requires post-optimizer
+`policy/dp_weight_checksum_mismatch`=0 at every training step. Sync is a
+manual launcher option outside the canary and CI.
+
+A negative `min_improvement`, such as -0.1, permits a decrease of at most 0.1.
+Top-level `finite_metrics` and `bounds` are optional final-step checks;
+`metric_series` expresses requirements across the run.
 
 ## Two Ray instances cannot share a node
 

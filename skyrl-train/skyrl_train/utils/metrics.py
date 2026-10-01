@@ -6,6 +6,7 @@ from operator import itemgetter
 # How a step combines its optimizer windows' values; every other metric takes the mean.
 METRIC_REDUCTION: dict[str, Callable[[Sequence[float]], float]] = {
     "log_ratio_abs_max": max,
+    "dp_weight_checksum_mismatch": max,
     "log_ratio_diagnostics_failed": max,
     "n_tokens_dp_gt_1pct": sum,
     "n_tokens_dp_gt_10pct": sum,

@@ -1169,17 +1169,27 @@ async def test_genrm_failed_rollouts_keep_their_failure_and_never_enter_comparis
 
 
 @pytest.mark.asyncio
-async def test_cat_count_preserves_sampled_evidence_and_verification(generator_cfg, skyrl_gym_cfg, tokenizer):
-    generator_cfg.use_conversation_multi_turn = True
+@pytest.mark.parametrize("custom_template", [False, True], ids=["default-chat", "configured-token-path"])
+async def test_cat_count_preserves_sampled_evidence_and_verification(
+    generator_cfg, skyrl_gym_cfg, tokenizer, custom_template
+):
+    generator_cfg.use_conversation_multi_turn = not custom_template
     generator_cfg.sampling_params.logprobs = 0
     prompt = [{"role": "user", "content": "Reply with the word cat exactly 2 times."}]
-    prompt_ids = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, return_dict=False)
+    if custom_template:
+        generator_cfg.chat_template.name_or_path = "qwen2_5_with_generation_tag_simplified"
+        prompt_ids = tokenizer.encode(
+            "<|im_start|>user\nReply with the word cat exactly 2 times.<|im_end|>\n<|im_start|>assistant\n",
+            add_special_tokens=False,
+        )
+    else:
+        prompt_ids = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, return_dict=False)
     model_client = AsyncMock()
     model_client.generate.return_value = {
         "responses": ["cat cat"],
-        "response_ids": [[21, 22]],
+        "response_ids": [[21, 22, EOS]],
         "stop_reasons": ["stop"],
-        "response_logprobs": [[-0.1, -0.2]],
+        "response_logprobs": [[-0.1, -0.2, -0.3]],
         "token_provenance": "engine",
     }
     runner = SkyRLGymTrajectoryRunner(
@@ -1198,9 +1208,9 @@ async def test_cat_count_preserves_sampled_evidence_and_verification(generator_c
     )
 
     assert batch["prompt_token_ids"] == [prompt_ids]
-    assert batch["response_ids"] == [[21, 22]]
-    np.testing.assert_allclose(batch["rollout_logprobs"][0], [-0.1, -0.2])
-    assert batch["rewards"] == [[0.0, 1.0]]
-    assert batch["loss_masks"] == [[1, 1]]
+    assert batch["response_ids"] == [[21, 22, EOS]]
+    np.testing.assert_allclose(batch["rollout_logprobs"][0], [-0.1, -0.2, -0.3])
+    assert batch["rewards"] == [[0.0, 0.0, 1.0]]
+    assert batch["loss_masks"] == [[1, 1, 1]]
     assert batch["verification_results"][0].passed is True
     assert batch["env_metrics"][0]["exact_n2"] == 1.0
