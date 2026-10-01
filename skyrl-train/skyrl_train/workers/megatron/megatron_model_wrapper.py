@@ -13,8 +13,11 @@ from megatron.core.distributed import finalize_model_grads
 from skyrl_train.distributed.megatron.model_utils import (
     from_parallel_logits_to_logprobs,
     from_parallel_logits_to_logprobs_packed_sequences,
+    vllm_prompt_logprobs,
     vocab_parallel_entropy,
 )
+from skyrl_train.mismatch_probe.numerics import active_numerics
+from skyrl_train.models.grug_rounding import vllm_value
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl_train.distillation import DistillationInput, student_topk_logprobs
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay, VllmExpertParallel
@@ -152,6 +155,8 @@ class MegatronModelWrapper:
         if self.use_sample_packing:
             if packed_seq_params is None:
                 raise ValueError("Packed sequence parameters are required when sample packing is enabled.")
+            if active_numerics().vllm_log_softmax:
+                raise NotImplementedError("vllm_log_softmax numerics support unpacked sequences only")
             packed_sequences = pack_padded_tokens(sequences, attention_mask, packed_seq_params)
             return from_parallel_logits_to_logprobs_packed_sequences(
                 logits,
@@ -167,16 +172,26 @@ class MegatronModelWrapper:
             )
 
         compact_sequences = compact_left_padded_tokens(sequences, attention_mask)
-        compact_logprobs = from_parallel_logits_to_logprobs(
-            logits,
-            compact_sequences,
-            vocab_start_index=tp_rank * logits.shape[-1],
-            vocab_end_index=(tp_rank + 1) * logits.shape[-1],
-            tp_group=tp_group,
-            inference_only=not self.actor_module[0].training,
-            cp_group=None,
-            chunk_size=self._logprob_chunk_size,
-        )
+
+        def trainer_logprobs() -> torch.Tensor:
+            return from_parallel_logits_to_logprobs(
+                logits,
+                compact_sequences,
+                vocab_start_index=tp_rank * logits.shape[-1],
+                vocab_end_index=(tp_rank + 1) * logits.shape[-1],
+                tp_group=tp_group,
+                inference_only=not self.actor_module[0].training,
+                cp_group=None,
+                chunk_size=self._logprob_chunk_size,
+            )
+
+        if active_numerics().vllm_log_softmax:
+            if mpu.get_tensor_model_parallel_world_size() != 1:
+                raise NotImplementedError("vllm_log_softmax numerics need the unsharded vocabulary (TP 1)")
+            value = vllm_prompt_logprobs(logits, compact_sequences, self._logprob_chunk_size)
+            compact_logprobs = vllm_value(value, trainer_logprobs)
+        else:
+            compact_logprobs = trainer_logprobs()
         return scatter_token_values(compact_logprobs, attention_mask, drop_last=True)
 
     def _token_entropies(self, logits: torch.Tensor, attention_mask: torch.Tensor, packed_seq_params) -> torch.Tensor:

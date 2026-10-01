@@ -11,6 +11,7 @@ from skyrl_train.models.grug_rounding import (
     rms_norm_single_rounding,
     rotate_neox_fp32,
     swiglu_single_rounding,
+    vllm_value,
     weighted_down_projection_single_rounding,
     xsa_and_gate_single_rounding,
 )
@@ -105,6 +106,20 @@ def test_input_norm_takes_variance_from_the_unrounded_sum_and_normalizes_the_rou
     weight = _bf16(64, seed=32)
     # Compiled vLLM (fusion map, triton_red_fused_add_rms_norm): sum of squares from the unrounded
     # residual, then the stored bf16 residual times that rsqrt times the weight, rounded once.
-    scale = torch.rsqrt(unrounded.pow(2).mean(dim=-1, keepdim=True) + 1e-6)
-    expected = (rounded.float() * scale * weight.float()).to(torch.bfloat16)
-    assert torch.equal(rms_norm_hybrid(rounded, unrounded, weight, 1e-6), expected)
+    variance = unrounded.pow(2).mean(dim=-1, keepdim=True)
+    expected = (rounded.float() * torch.rsqrt(variance + 1e-6) * weight.float()).to(torch.bfloat16)
+    assert torch.equal(rms_norm_hybrid(rounded, variance, weight, 1e-6), expected)
+
+
+def test_vllm_value_keeps_the_kernels_bytes_and_takes_the_trainers_gradient():
+    source = _bf16(8, 4, seed=40).requires_grad_()
+    reference = source * 3
+    # A kernel value that differs from the reference in its last bits, and holds -0.0, which ``x + 0`` would turn to +0.
+    kernel = (reference.detach().float() * (1 + 2**-9)).to(torch.bfloat16)
+    kernel[0, 0] = -0.0
+    value = vllm_value(kernel, lambda: reference)
+    assert torch.equal(value.view(torch.int16), kernel.view(torch.int16))
+    value.backward(torch.ones_like(value))
+    assert torch.equal(source.grad, torch.full_like(source, 3))
+    with torch.no_grad():
+        assert vllm_value(kernel, lambda: reference) is kernel

@@ -19,6 +19,7 @@ Megatron-Core settings chosen by ``GrugModelProvider`` in
 
 import math
 import weakref
+from dataclasses import dataclass
 from enum import StrEnum
 
 import torch
@@ -29,6 +30,7 @@ from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
 from megatron.core.models.common.embeddings.rope_utils import apply_rotary_pos_emb
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec_for_backend
+from megatron.core.tensor_parallel.random import is_checkpointing
 from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.moe.experts import TEGroupedMLP
@@ -46,6 +48,7 @@ from megatron.core.typed_torch import apply_module
 from torch import nn
 
 from skyrl_train.mismatch_probe.numerics import active_numerics
+from skyrl_train.models import grug_inductor_kernels as vllm_inductor
 from skyrl_train.models.grug_rounding import (
     gated_norm_product_fp32,
     rms_norm_hybrid,
@@ -53,6 +56,7 @@ from skyrl_train.models.grug_rounding import (
     weighted_down_projection_single_rounding,
     rotate_neox_fp32,
     swiglu_single_rounding,
+    vllm_value,
     xsa_and_gate_single_rounding,
 )
 from skyrl_train.models.grug_vllm_kernels import (
@@ -80,26 +84,108 @@ def _first_present(preferred: torch.Tensor | None, fallback: torch.Tensor | None
     return fallback if preferred is None else preferred
 
 
-# Unrounded residual sums (and the embedding's unrounded gated-norm product) awaiting the next norm,
-# keyed by the bf16 tensor that norm receives. Each entry keeps a weak reference to that tensor: under
-# pipeline parallelism several micro-batches are in flight and a stage's last residual has no reader, so a
-# freed tensor's ``id()`` can come back for an unrelated tensor, which must not receive the entry.
-_RESIDUAL_FP32: dict[int, tuple[weakref.ref, torch.Tensor]] = {}
+@dataclass(frozen=True)
+class ResidualSum:
+    """The bf16 tensors a layer adds in fp32 to form its output, ``residual + (routed + shared)``, before rounding."""
+
+    residual: torch.Tensor
+    routed: torch.Tensor
+    shared: torch.Tensor
+
+    def unrounded(self) -> torch.Tensor:
+        return self.residual.detach().float() + (self.routed.detach().float() + self.shared.detach().float())
+
+    def square_sum(self, weight: torch.Tensor) -> torch.Tensor:
+        """Compiled vLLM's per-row sum of squares of the unrounded sum, from its fused residual-add and norm kernel."""
+        return vllm_inductor.residual_square_sum(self.residual, self.routed, self.shared, weight)[1]
+
+
+@dataclass(frozen=True)
+class GatedProduct:
+    """The embedding gated norm's bf16 norm output and gate logits; its output is ``normalized * sigmoid(gate)``."""
+
+    normalized: torch.Tensor
+    gate: torch.Tensor
+
+    def unrounded(self) -> torch.Tensor:
+        return gated_norm_product_fp32(self.normalized.detach(), self.gate.detach())
+
+    def square_sum(self, weight: torch.Tensor) -> torch.Tensor:
+        """Compiled vLLM's per-row sum of squares of the unrounded product, from its fused product and norm kernel."""
+        return vllm_inductor.gated_product_square_sum(self.normalized, self.gate, weight)[1]
+
+
+HandOff = ResidualSum | GatedProduct
+
+# What formed each bf16 tensor a norm will read (a layer's output, the embedding norm's output), keyed by that
+# tensor. Each entry keeps a weak reference to the tensor: under pipeline parallelism several micro-batches are in
+# flight and a stage's last residual has no reader, so a freed tensor's ``id()`` can come back for an unrelated
+# tensor, which must not receive the entry.
+_HAND_OFFS: dict[int, tuple[weakref.ref, HandOff]] = {}
+# Per input norm, the statistic it took from its hand-off in a checkpoint unit's first forward, with a weak reference
+# to the norm's input. Full activation recompute reruns the unit inside the backward on ``detach()`` copies of its
+# inputs: new tensor objects with the same storage, which the hand-off cannot reach, so the recompute reads the
+# statistic here by storage.
+_RECOMPUTE_STATISTICS: dict[int, list[tuple[weakref.ref, torch.Tensor | None]]] = {}
 # Compiled vLLM pads a GEMM's output width to a multiple of this many columns (the 20-head gate becomes 24).
 VLLM_GEMM_OUTPUT_ALIGNMENT = 8
 
 
-def _hand_off(receiver: torch.Tensor, unrounded: torch.Tensor) -> None:
-    for key in [key for key, (ref, _) in _RESIDUAL_FP32.items() if ref() is None]:
-        del _RESIDUAL_FP32[key]
-    _RESIDUAL_FP32[id(receiver)] = weakref.ref(receiver), unrounded
+def _hand_off(receiver: torch.Tensor, parts: HandOff) -> None:
+    for key in [key for key, (ref, _) in _HAND_OFFS.items() if ref() is None]:
+        del _HAND_OFFS[key]
+    _HAND_OFFS[id(receiver)] = weakref.ref(receiver), parts
 
 
-def _take_hand_off(receiver: torch.Tensor) -> torch.Tensor | None:
-    entry = _RESIDUAL_FP32.pop(id(receiver), None)
+def _take_hand_off(receiver: torch.Tensor) -> HandOff | None:
+    entry = _HAND_OFFS.pop(id(receiver), None)
     if entry is None or entry[0]() is not receiver:
         return None
     return entry[1]
+
+
+class CheckpointPass(StrEnum):
+    """Which forward of Megatron's full activation recompute is running, if any."""
+
+    NONE = "none"
+    FIRST = "first"
+    RECOMPUTE = "recompute"
+
+
+def checkpoint_pass() -> CheckpointPass:
+    """The first forward of a checkpoint unit runs without gradients; its recompute inside the backward with them."""
+    if not is_checkpointing():
+        return CheckpointPass.NONE
+    return CheckpointPass.RECOMPUTE if torch.is_grad_enabled() else CheckpointPass.FIRST
+
+
+def _same_storage(left: torch.Tensor, right: torch.Tensor) -> bool:
+    return (
+        left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
+        and left.storage_offset() == right.storage_offset()
+        and left.shape == right.shape
+    )
+
+
+def _keep_for_recompute(norm: nn.Module, receiver: torch.Tensor, statistic: torch.Tensor | None) -> None:
+    entries = [(ref, kept) for ref, kept in _RECOMPUTE_STATISTICS.get(id(norm), []) if ref() is not None]
+    entries.append((weakref.ref(receiver), statistic))
+    _RECOMPUTE_STATISTICS[id(norm)] = entries
+
+
+def _take_for_recompute(norm: nn.Module, receiver: torch.Tensor) -> torch.Tensor | None:
+    entries = _RECOMPUTE_STATISTICS.get(id(norm), [])
+    for index, (ref, statistic) in enumerate(entries):
+        original = ref()
+        if original is not None and _same_storage(original, receiver):
+            del entries[index]
+            return statistic
+    raise RuntimeError("an input norm's recompute found no statistic from its checkpoint unit's first forward")
+
+
+def _variance_with_gradient(variance: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
+    """The unrounded sum's ``variance``, differentiated as the variance of the bf16 input it was rounded to."""
+    return vllm_value(variance, lambda: hidden_states.float().pow(2).mean(dim=-1, keepdim=True))
 
 
 def _install_residual_hooks(layer: TransformerLayer) -> None:
@@ -108,7 +194,7 @@ def _install_residual_hooks(layer: TransformerLayer) -> None:
 
     def active() -> bool:
         numerics = active_numerics()
-        return numerics.mlp_residual or numerics.input_norm_variance or numerics.final_norm_fp32
+        return numerics.mlp_residual or numerics.input_norm_variance or numerics.final_norm_fp32 or numerics.vllm_norms
 
     def keep_residual(module, args):
         if active():
@@ -134,16 +220,14 @@ def _install_residual_hooks(layer: TransformerLayer) -> None:
         if not active():
             return None
         numerics = active_numerics()
-        routed, shared = stored.pop("routed"), stored.pop("shared")
+        parts = ResidualSum(stored.pop("residual"), stored.pop("routed"), stored.pop("shared"))
         # Compiled vLLM: h + (routed + shared) in fp32; the trainer rounds routed + shared first.
-        unrounded = stored["residual"].float() + (routed.float() + shared.float())
-        if numerics.mlp_residual:
-            hidden = unrounded.to(output[0].dtype)
+        if numerics.mlp_residual or numerics.vllm_norms:
+            hidden = (parts.residual.float() + (parts.routed.float() + parts.shared.float())).to(output[0].dtype)
         else:
-            hidden = (stored["residual"].float() + (routed + shared).float()).to(output[0].dtype)
-        stored.pop("residual")
-        if numerics.input_norm_variance or numerics.final_norm_fp32:
-            _hand_off(hidden, unrounded)
+            hidden = (parts.residual.float() + (parts.routed + parts.shared).float()).to(output[0].dtype)
+        if numerics.input_norm_variance or numerics.final_norm_fp32 or numerics.vllm_norms:
+            _hand_off(hidden, parts)
         return (hidden, *output[1:])
 
     layer.pre_mlp_layernorm.register_forward_pre_hook(keep_residual)
@@ -327,23 +411,35 @@ def _install_ep_combine_hooks(layer: TransformerLayer) -> None:
     """Add the routed expert outputs in vLLM's expert-parallel order when ``ep_sum`` is active.
 
     The value comes from ``vllm_ep_combine``; the gradient is the trainer's own unpermute (each slot's
-    gradient is the token's output gradient in both), through the same exact-zero difference.
+    gradient is the token's output gradient in both), through the exact-zero ``x - x.detach()``. A forward
+    without gradients skips the trainer's unpermute.
+
+    Full recompute's second forward of a one-layer unit takes the trainer's unpermute alone: that forward
+    only rebuilds the layer's graph for its backward, and the layer uses the routed output only in sums and
+    casts (the shared expert and the residuals), whose gradients do not depend on the summands' values. The
+    gradients equal those of a forward that also runs the combine; the layer's output, the first forward's,
+    keeps the combine's bytes.
     """
     dispatcher = layer.mlp.token_dispatcher
     router = layer.mlp.router
     unpermute = dispatcher.combine_postprocess
 
     def combine_postprocess(permuted):
-        output = unpermute(permuted)
         if not active_numerics().ep_sum:
-            return output
+            return unpermute(permuted)
         if dispatcher.shared_experts is not None:
             raise NotImplementedError("ep_sum numerics expect the shared expert outside the dispatcher")
         selected, expert_parallel = router.take_ep_route()
-        combined = vllm_ep_combine(
-            permuted, dispatcher.routing_map, selected, expert_parallel.dp_ranks, expert_parallel.ep_size
-        ).view_as(output)
-        return combined.detach() + (output - output.detach())
+        if _recomputing_one_layer(layer.config):
+            return unpermute(permuted)
+        with torch.no_grad():
+            combined = vllm_ep_combine(
+                permuted, dispatcher.routing_map, selected, expert_parallel.dp_ranks, expert_parallel.ep_size
+            ).view(dispatcher.hidden_shape)
+        if not torch.is_grad_enabled():
+            return combined
+        output = unpermute(permuted)
+        return combined + (output - output.detach())
 
     dispatcher.combine_postprocess = combine_postprocess
 
@@ -388,12 +484,13 @@ def install_numerics_hooks(root: nn.Module) -> None:
 
 
 def clear_numerics_handoffs() -> None:
-    """Drop the fp32 tensors the numerics hooks hand from one module to the next.
+    """Drop the hand-offs the numerics hooks pass from one module to the next within a forward.
 
-    Each forward starts empty: a pipeline stage's last residual has no reader, and the entries are keyed
-    by ``id()`` of tensors that a later forward may reuse.
+    Each forward starts empty: a pipeline stage's last residual has no reader, and the entries are keyed by ``id()``
+    of tensors that a later forward may reuse. The statistics kept for recompute stay: under pipeline parallelism a
+    micro-batch's backward, and its recompute, runs after later micro-batches' forwards.
     """
-    _RESIDUAL_FP32.clear()
+    _HAND_OFFS.clear()
 
 
 class NormRole(StrEnum):
@@ -426,26 +523,100 @@ class GrugGatedRMSNorm(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         numerics = active_numerics()
-        unrounded = _take_hand_off(hidden_states)
-        if unrounded is not None:
-            # The hand-off may come from a no-grad checkpointed forward; keep its values and take the
-            # gradient through the bf16 residual so the loss still reaches the layers before this norm.
-            # ``x - x.detach()`` is exactly zero, so the values are unchanged bit for bit.
-            residual = hidden_states.float()
-            unrounded = unrounded.detach() + (residual - residual.detach())
-        if unrounded is not None and self.role is NormRole.INPUT and numerics.input_norm_variance:
-            normalized = rms_norm_hybrid(hidden_states, unrounded, self.norm.weight, self.eps)
-        elif unrounded is not None and self.role is NormRole.FINAL and numerics.final_norm_fp32:
-            normalized = rms_norm_single_rounding(unrounded, self.norm.weight, self.eps)
+        weight = self.norm.weight
+        if self.role is NormRole.INPUT:
+            normalized = self._input_norm(hidden_states, numerics)
+        elif self.role is NormRole.FINAL:
+            normalized = self._final_norm(hidden_states, numerics)
+        elif numerics.vllm_norms and self.role is NormRole.EMBEDDING:
+            value = vllm_inductor.embedding_norm(hidden_states, weight).view_as(hidden_states)
+            normalized = vllm_value(value, lambda: self.norm(hidden_states))
+        elif numerics.vllm_norms:
+            value = vllm_inductor.rms_norm(hidden_states, weight).view_as(hidden_states)
+            normalized = vllm_value(value, lambda: self.norm(hidden_states))
         else:
             normalized = self.norm(hidden_states)
         gate = self.up_proj(F.silu(self.down_proj(normalized)))
-        product = gated_norm_product_fp32(normalized, gate)
-        output = product.to(normalized.dtype) if numerics.gated_norm else normalized * torch.sigmoid(gate)
-        if self.role is NormRole.EMBEDDING and numerics.input_norm_variance:
+        if numerics.vllm_norms:
+            value = vllm_inductor.gated_product(normalized, gate).view_as(normalized)
+            output = vllm_value(value, lambda: gated_norm_product_fp32(normalized, gate).to(normalized.dtype))
+        elif numerics.gated_norm:
+            output = gated_norm_product_fp32(normalized, gate).to(normalized.dtype)
+        else:
+            output = normalized * torch.sigmoid(gate)
+        if self.role is NormRole.EMBEDDING and (numerics.input_norm_variance or numerics.vllm_norms):
             # Layer 0's input norm takes its variance from the unrounded embedding gated-norm product.
-            _hand_off(output, product)
+            _hand_off(output, GatedProduct(normalized, gate))
         return output
+
+    def _input_norm(self, hidden_states: torch.Tensor, numerics) -> torch.Tensor:
+        """A layer's input norm: compiled vLLM takes the variance from the unrounded sum that formed its input."""
+        if not (numerics.input_norm_variance or numerics.vllm_norms):
+            return self.norm(hidden_states)
+        weight = self.norm.weight
+        statistic = self._input_statistic(hidden_states, numerics)
+        if statistic is None:
+            # No hand-off reaches a pipeline stage's first layer: normalize the rounded input by its own variance.
+            if not numerics.vllm_norms:
+                return self.norm(hidden_states)
+            value = vllm_inductor.rms_norm(hidden_states, weight).view_as(hidden_states)
+            return vllm_value(value, lambda: self.norm(hidden_states))
+        if not numerics.vllm_norms:
+            variance = _variance_with_gradient(statistic, hidden_states)
+            return rms_norm_hybrid(hidden_states, variance, weight, self.eps)
+        value = vllm_inductor.rms_norm_from_square_sum(hidden_states, statistic, weight).view_as(hidden_states)
+        variance = (statistic / hidden_states.shape[-1]).view(*hidden_states.shape[:-1], 1)
+        return vllm_value(
+            value,
+            lambda: rms_norm_hybrid(hidden_states, _variance_with_gradient(variance, hidden_states), weight, self.eps),
+        )
+
+    def _input_statistic(self, hidden_states: torch.Tensor, numerics) -> torch.Tensor | None:
+        """The input norm's statistic of the unrounded sum: its variance, or compiled vLLM's sum of squares.
+
+        A checkpoint unit's first forward keeps what it computed for the recompute, which cannot reach the hand-off.
+        """
+        phase = checkpoint_pass()
+        parts = _take_hand_off(hidden_states)
+        if parts is None and phase is CheckpointPass.RECOMPUTE:
+            return _take_for_recompute(self, hidden_states)
+        statistic = None
+        if parts is not None:
+            with torch.no_grad():
+                if numerics.vllm_norms:
+                    statistic = parts.square_sum(self.norm.weight)
+                else:
+                    statistic = parts.unrounded().pow(2).mean(dim=-1, keepdim=True)
+        if phase is CheckpointPass.FIRST:
+            _keep_for_recompute(self, hidden_states, statistic)
+        return statistic
+
+    def _final_norm(self, hidden_states: torch.Tensor, numerics) -> torch.Tensor:
+        """The final norm: compiled vLLM normalizes the last layer's unrounded sum."""
+        parts = _take_hand_off(hidden_states)
+        if parts is None or not (numerics.final_norm_fp32 or numerics.vllm_norms):
+            return self.norm(hidden_states)
+        if not isinstance(parts, ResidualSum):
+            raise RuntimeError("the final norm's input must come from a decoder layer's residual sum")
+        # The hand-off may come from a no-grad checkpointed forward; keep its values and take the gradient
+        # through the bf16 residual so the loss still reaches the layers before this norm. ``x - x.detach()``
+        # is exactly zero, so the values are unchanged bit for bit.
+        residual = hidden_states.float()
+
+        def reference() -> torch.Tensor:
+            unrounded = parts.unrounded() + (residual - residual.detach())
+            return rms_norm_single_rounding(unrounded, self.norm.weight, self.eps)
+
+        if not numerics.vllm_norms:
+            return reference()
+        value = vllm_inductor.final_norm(parts.residual, parts.routed, parts.shared, self.norm.weight)
+        return vllm_value(value.view_as(hidden_states), reference)
+
+
+def qk_norm_fp32(hidden_states: torch.Tensor) -> torch.Tensor:
+    """Grug's weightless q/k RMS norm per head in fp32, unrounded."""
+    fp32 = hidden_states.float()
+    return fp32 * torch.rsqrt(fp32.square().mean(dim=-1, keepdim=True) + GRUG_QK_RMS_NORM_EPS)
 
 
 class GrugQKNorm(nn.Module):
@@ -455,10 +626,13 @@ class GrugQKNorm(nn.Module):
         super().__init__()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if active_numerics().qk_rope:
+        numerics = active_numerics()
+        if numerics.vllm_qk:
+            # The attention forward runs compiled vLLM's q/k norm, RoPE and query scale on the raw projections.
+            return hidden_states
+        if numerics.qk_rope:
             # The attention forward rounds once after RoPE and the query scale.
-            fp32 = hidden_states.float()
-            return fp32 * torch.rsqrt(fp32.square().mean(dim=-1, keepdim=True) + GRUG_QK_RMS_NORM_EPS)
+            return qk_norm_fp32(hidden_states)
         return grug_rms_norm_no_weight(hidden_states)
 
 
@@ -523,18 +697,15 @@ class GrugSelfAttention(SelfAttention):
         if is_thd:
             query, key, value = query.squeeze(1), key.squeeze(1), value.squeeze(1)
 
-        if active_numerics().qk_rope:
+        numerics = active_numerics()
+        if numerics.vllm_qk:
+            if is_thd:
+                raise NotImplementedError("vllm_qk numerics support unpacked sequences only")
+            query, key = self._vllm_query_key(query, key, rotary_pos_emb)
+        elif numerics.qk_rope:
             if is_thd:
                 raise NotImplementedError("qk_rope numerics support unpacked sequences only")
-            if rotary_pos_emb is not None and not self.skip_rope:
-                q_pos_emb, k_pos_emb = rotary_pos_emb if isinstance(rotary_pos_emb, tuple) else (rotary_pos_emb,) * 2
-                rotary_dim = q_pos_emb.shape[-1]
-                query = rotate_neox_fp32(query, q_pos_emb)
-                # The rotated half of q is stored once before the scale; the pass-through half is not.
-                query = torch.cat((query[..., :rotary_dim].to(value.dtype).float(), query[..., rotary_dim:]), dim=-1)
-                key = rotate_neox_fp32(key, k_pos_emb)
-            query = (query.float() * self.qk_mult * self.qk_mult_scale).to(value.dtype)
-            key = key.to(value.dtype)
+            query, key = self._rounded_query_key(query, key, rotary_pos_emb, value.dtype)
         else:
             if rotary_pos_emb is not None and not self.skip_rope:
                 if not isinstance(rotary_pos_emb, tuple):
@@ -580,7 +751,15 @@ class GrugSelfAttention(SelfAttention):
             )
 
         gate, _ = self.attn_gate(hidden_states)
-        if active_numerics().xsa_gate:
+        if numerics.vllm_xsa:
+            if is_thd:
+                raise NotImplementedError("vllm_xsa numerics support unpacked sequences only")
+            attention = core_attn_out
+            xsa = vllm_inductor.xsa_head_gate(attention, value, gate).view_as(attention)
+            core_attn_out = vllm_value(
+                xsa, lambda: xsa_and_gate_single_rounding(attention, value, gate, self.hidden_size_per_attention_head)
+            )
+        elif numerics.xsa_gate:
             if is_thd:
                 raise NotImplementedError("xsa_gate numerics support unpacked sequences only")
             core_attn_out = xsa_and_gate_single_rounding(
@@ -593,6 +772,46 @@ class GrugSelfAttention(SelfAttention):
             core_attn_out = self._apply_head_gate(core_attn_out, gate)
         output, bias = apply_module(self.linear_proj)(core_attn_out)
         return output, bias
+
+    def _rounded_query_key(
+        self, query: torch.Tensor, key: torch.Tensor, rotary_pos_emb, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compiled vLLM's rounding points for the fp32-normalized q and k: RoPE with the bf16 table, then the scale.
+
+        k rounds once. q's rotated half is stored once before the scale and rounds again after it; its pass-through
+        half rounds once.
+        """
+        if rotary_pos_emb is not None and not self.skip_rope:
+            q_pos_emb, k_pos_emb = rotary_pos_emb if isinstance(rotary_pos_emb, tuple) else (rotary_pos_emb,) * 2
+            rotary_dim = q_pos_emb.shape[-1]
+            query = rotate_neox_fp32(query, q_pos_emb)
+            query = torch.cat((query[..., :rotary_dim].to(dtype).float(), query[..., rotary_dim:]), dim=-1)
+            key = rotate_neox_fp32(key, k_pos_emb)
+        return (query.float() * self.qk_mult * self.qk_mult_scale).to(dtype), key.to(dtype)
+
+    def _vllm_query_key(
+        self, query: torch.Tensor, key: torch.Tensor, rotary_pos_emb
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compiled vLLM's q/k norm, RoPE and query scale on the raw ``[S, B, heads, dim]`` projections.
+
+        The values come from vLLM's Inductor kernels; with gradients enabled they are differentiated as the
+        ``qk_rope`` chain, which computes the same values up to rounding.
+        """
+        if (self.qk_mult, self.qk_mult_scale) != vllm_inductor.QUERY_FACTORS:
+            raise NotImplementedError(f"vllm_qk kernels were compiled for query factors {vllm_inductor.QUERY_FACTORS}")
+        sequence, batch = query.shape[:2]
+        if rotary_pos_emb is not None and not self.skip_rope:
+            positions = torch.arange(sequence, device=query.device).repeat_interleave(batch)
+            vllm_query, vllm_key = vllm_inductor.query_key_rope(query, key, positions, self.config.rotary_base)
+        else:
+            vllm_query, vllm_key = vllm_inductor.query_key_full(query, key)
+        vllm_query, vllm_key = vllm_query.view_as(query), vllm_key.view_as(key)
+        if not torch.is_grad_enabled():
+            return vllm_query, vllm_key
+        reference_query, reference_key = self._rounded_query_key(
+            qk_norm_fp32(query), qk_norm_fp32(key), rotary_pos_emb, query.dtype
+        )
+        return vllm_value(vllm_query, lambda: reference_query), vllm_value(vllm_key, lambda: reference_key)
 
     def _apply_xsa(self, core_attn_out: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
         """Remove each head's component along its (GQA-expanded) value vector."""
