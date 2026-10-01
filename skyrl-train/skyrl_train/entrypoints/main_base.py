@@ -708,6 +708,8 @@ def run_ray_driver(
         failure: Exception | None = None
         try:
             exit_code = supervisor.wait(entrypoint.remote(cfg))
+            if exit_code in (None, 0) and operation is EntrypointOperation.TRAIN:
+                logger.info("Training done!")
         except Exception as e:
             log_exception_as_text(failure_message, e)
             receipt = write_exception_receipt(
