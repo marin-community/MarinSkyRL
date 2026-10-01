@@ -595,7 +595,7 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
 
 @pytest.mark.asyncio
 async def test_gsm8k_probe_rollout_retains_served_tokens_and_scores(tokenizer, generator_cfg, skyrl_gym_cfg):
-    skyrl_gym_cfg.gsm8k = {"chat_completion_params": {}}
+    skyrl_gym_cfg.gsm8k = {"structured_chat": True}
     generator_cfg.require_exact_chat_transport = True
     generator_cfg.sampling_params.logprobs = 0
     model_client = engine_returning(
