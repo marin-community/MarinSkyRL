@@ -217,9 +217,7 @@ class MegatronWorker:
                     position_ids=position_ids,
                     num_actions=num_actions,
                     ftpo_chosen_mask=micro.get("ftpo_chosen_mask"),
-                    rollout_routed_experts=micro["rollout_routed_experts"]
-                    if "rollout_routed_experts" in micro.keys()
-                    else None,
+                    rollout_routed_experts=micro.routed_experts_tensor(),
                 )
             )
 
@@ -514,9 +512,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def _ppo_train_impl(self, train_data, timing: PhaseBreakdown) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
         self._drain_r3_decentral_stagger(train_data)
-        if self.model.router_replay is not None and (
-            "rollout_routed_experts" not in train_data.keys() or train_data["rollout_routed_experts"] is None
-        ):
+        if self.model.router_replay is not None and train_data.routed_experts is None:
             raise ValueError("moe_router_replay is on but the batch carries no rollout_routed_experts")
         dataloader = TrainingBatchIterator(train_data, self.cfg.trainer.micro_train_batch_size_per_gpu)
 

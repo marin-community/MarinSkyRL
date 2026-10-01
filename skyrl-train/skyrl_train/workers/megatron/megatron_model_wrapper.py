@@ -222,7 +222,7 @@ class MegatronModelWrapper:
         device = sequences.device
         dense, mask_BS = dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions)
         response_BS = torch.zeros_like(mask_BS)
-        response_BS[:, seq_len - response_len :] = True
+        response_BS[:, seq_len - num_actions :] = True
 
         if self.use_sample_packing:
             # The routes tensor is ours, not the pipeline's input: always run the

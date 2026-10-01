@@ -64,9 +64,9 @@ def require_scalar_num_actions(num_actions) -> None:
 def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions):
     """Build the dense per-position replay target and mask, layout-agnostic.
 
-    ``rollout_routed_experts`` is ``[B, response_len, L, K]`` on the response
-    axis. Returns ``(full, mask)`` where ``full`` is a ``[B, seq_len, L, K]``
-    long tensor sentinel-filled outside the response window and ``mask`` is a
+    ``rollout_routed_experts`` is ``[B, local_response_len, L, K]`` and starts at
+    the beginning of the global ``num_actions`` response window. Returns ``(full, mask)``.
+    ``full`` is a ``[B, seq_len, L, K]`` long tensor sentinel-filled outside the response window and ``mask`` is a
     ``[B, seq_len]`` bool tensor True only on response positions whose captured
     row is non-sentinel (a row is sentinel iff all K captured experts equal
     ``SENTINEL_EXPERT_ID``). Prompt / pad / sentinel rows fall through to
@@ -77,13 +77,13 @@ def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_action
     captured = rollout_routed_experts.to(dtype=torch.long)
     B, response_len, L, K = captured.shape
     assert B == batch_size, f"router_replay batch mismatch: {B} vs {batch_size}"
-    assert response_len == num_actions, f"router_replay response_len {response_len} != num_actions {num_actions}"
+    assert response_len <= num_actions, f"router_replay response_len {response_len} exceeds num_actions {num_actions}"
 
     full = torch.full((batch_size, seq_len, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)
-    full[:, seq_len - response_len : seq_len, :, :] = captured
+    full[:, seq_len - num_actions : seq_len - num_actions + response_len, :, :] = captured
 
     response_pos = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
-    response_pos[:, seq_len - response_len : seq_len] = True
+    response_pos[:, seq_len - num_actions : seq_len] = True
     # non-sentinel per [B, seq_len, L]; collapse over L: a position is valid
     # for replay only where every layer carries real data, then AND with response_pos.
     non_sentinel = (full != SENTINEL_EXPERT_ID).any(dim=-1).all(dim=-1)  # [B, seq_len]
@@ -435,5 +435,5 @@ def validate_replay_geometry(
         raise ValueError(
             f"router replay: rollout_routed_experts carries an expert id outside [0, num_experts={num_experts})"
         )
-    if response_len != num_actions:
-        raise ValueError(f"router replay: response_len={response_len} != num_actions={num_actions}")
+    if response_len > num_actions:
+        raise ValueError(f"router replay: response_len={response_len} exceeds num_actions={num_actions}")

@@ -86,7 +86,7 @@ def _cpu_snapshot(batch: TrainingInputBatch) -> TrainingInputBatch:
         key: None if value is None else value.detach().to(device="cpu").contiguous().clone()
         for key, value in batch.items()
     }
-    snapshot = TrainingInputBatch(tensors)
+    snapshot = TrainingInputBatch(tensors, routed_expert_rows=copy.deepcopy(batch.routed_expert_rows))
     snapshot.metadata = copy.deepcopy(batch.metadata)
     return snapshot
 
