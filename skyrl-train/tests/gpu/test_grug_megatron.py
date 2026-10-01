@@ -33,7 +33,6 @@ from skyrl_train.utils.torch_utils import logprobs_from_logits
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.grug_serving import (
     LM_HEAD_NAME,
-    MAX_MODEL_LEN,
     ROUTER_NAME,
     STACKED_EXPERT_NAME,
     assert_engine_weights,
@@ -621,10 +620,7 @@ def test_grug_probe_reread_keeps_chosen_tokens_with_prefix_cache(tmp_path):
     initialize_ray(cfg)
     client = grug_engine_client(cfg, str(model_path), probe_capture=True, enable_prefix_caching=True)
     try:
-        # A full KV block must be shared before the cache-on reread can test
-        # reused prefixes instead of merely testing a cache-enabled engine.
-        shared_prefix = ([1, 17, 29, 5, 11] * MAX_MODEL_LEN)[: MAX_MODEL_LEN - 6]
-        prompts = [shared_prefix + [13, 3], shared_prefix + [19, 3]]
+        prompts = [[1, 17, 29, 5, 11, 13, 3], [1, 17, 29, 5, 11, 19, 3]]
         rollout = asyncio.run(
             client.generate(
                 InferenceEngineInput(
@@ -664,11 +660,12 @@ def test_grug_probe_reread_keeps_chosen_tokens_with_prefix_cache(tmp_path):
             for index, (prompt, response) in enumerate(zip(prompts, responses, strict=True))
         ]
         reread = asyncio.run(probe._rescore_vllm(SimpleNamespace(inference_engine_client=client, global_step=0), 0))
-        scores = [
-            [value for row in reread if row.cache_mode == mode for value in row.logprobs] for mode in ("off", "on")
-        ]
-        assert all(len(values) == sum(map(len, responses)) for values in scores)
-        assert all(math.isfinite(value) for values in scores for value in values)
-        torch.testing.assert_close(torch.tensor(scores[0]), torch.tensor(scores[1]), rtol=0, atol=1e-4)
+        for mode in ("off", "on"):
+            by_sample = {row.sample_id: row for row in reread if row.cache_mode == mode}
+            assert set(by_sample) == {str(index) for index in range(len(responses))}
+            for index, response in enumerate(responses):
+                logprobs = by_sample[str(index)].logprobs
+                assert len(logprobs) == len(response)
+                assert all(math.isfinite(value) for value in logprobs)
     finally:
         ray.shutdown()

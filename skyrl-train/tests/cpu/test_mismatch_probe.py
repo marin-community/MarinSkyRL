@@ -63,7 +63,7 @@ class _PolicyEndpoint:
         outputs = []
         for dp in range(2):
             start, end = dp * data.batch_size // 2, (dp + 1) * data.batch_size // 2
-            targets = data["rollout_routed_experts"][start:end].reshape(-1, 2)
+            targets = data[start:end].routed_experts_tensor().reshape(-1, 2)
             positions = torch.stack(
                 (
                     data["probe_row_indices"][start:end].repeat_interleave(width),

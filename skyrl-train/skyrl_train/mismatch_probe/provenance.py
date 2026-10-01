@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib.metadata
 import json
-import os
 import platform
-import re
-import tomllib
 from dataclasses import asdict
-from pathlib import Path
 
 import torch
 from finestore.rl import mismatch_probe as mismatch
@@ -27,21 +22,6 @@ def software_provenance(probe, trainer) -> dict[str, str | None]:
         except importlib.metadata.PackageNotFoundError:
             return None
 
-    lock_bytes = None
-    runtime_checkout = os.environ.get("SKYRL_HOME")
-    if runtime_checkout is not None:
-        candidate = Path(runtime_checkout) / "uv.lock"
-        if candidate.is_file():
-            lock_bytes = candidate.read_bytes()
-    vllm_commit = None
-    if lock_bytes is not None:
-        locked = tomllib.loads(lock_bytes.decode())
-        package = next((item for item in locked.get("package", []) if item.get("name") == "vllm"), None)
-        source = (package or {}).get("source", {})
-        source_text = str(source.get("git", ""))
-        matched = re.search(r"[0-9a-f]{40}", source_text)
-        if matched:
-            vllm_commit = matched.group()
     if probe.tokenizer_fingerprint is None:
         probe.tokenizer_fingerprint = tokenizer_vocabulary_fingerprint(trainer.inference_engine_client.tokenizer)
     return {
@@ -51,8 +31,6 @@ def software_provenance(probe, trainer) -> dict[str, str | None]:
         "marinskyrl_version": version("marinskyrl"),
         "marin_finestore_version": version("marin-finestore"),
         "vllm_version": version("vllm"),
-        "vllm_commit": vllm_commit,
-        "skyrl_lock_sha256": hashlib.sha256(lock_bytes).hexdigest() if lock_bytes is not None else None,
     }
 
 

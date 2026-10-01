@@ -36,8 +36,8 @@ import ray
 import torch
 from transformers import AutoTokenizer
 
+from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
-from tests.gpu.test_grug_megatron import NUM_EXPERTS, NUM_LAYERS, _write_tiny_checkpoint
 from skyrl_train.mismatch_probe.collect import BatchLayout, ProbeCollector
 from skyrl_train.mismatch_probe.archive import MismatchArchive
 from skyrl_train.trainer import RayPPOTrainer
@@ -46,6 +46,9 @@ from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.router_replay_fixtures import random_unique_routes
 from tests.gpu.test_grug_megatron import (
+    NUM_EXPERTS,
+    NUM_LAYERS,
+    _write_tiny_checkpoint,
     RESPONSE_LENGTH,
     _config,
     _padded_batch,
@@ -112,6 +115,12 @@ def test_all_placeholder_replay_matches_flag_off_at_same_weights(tmp_path, packi
     cfg_off.trainer.policy.megatron_config.moe_router_replay = False
     pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
     empty = _routed_batch(pad_token_id, captured=False)
+    dense_routes = empty.pop("rollout_routed_experts")
+    empty.routed_expert_rows = RoutedExpertRows(
+        tuple(row[: int(mask.sum())].numpy() for row, mask in zip(dense_routes, empty["response_mask"], strict=True)),
+        empty.metadata["response_length"],
+        NUM_EXPERTS,
+    )
     without_routes = empty.select(["sequences", "attention_mask"], ["response_length"])
     scores = []
     for cfg, batch in ((cfg_off, without_routes), (cfg_on, empty)):
@@ -185,6 +194,12 @@ def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path, la
                 route_valid_mask=(routes != 0).any(-1).tolist(),
             )
         )
+    dense_routes = batch.pop("rollout_routed_experts")
+    batch.routed_expert_rows = RoutedExpertRows(
+        tuple(row[: int(mask.sum())].numpy() for row, mask in zip(dense_routes, batch["response_mask"], strict=True)),
+        width,
+        NUM_EXPERTS,
+    )
     batch.metadata["uids"] = [row.prompt_id for row in probes]
     initialize_ray(cfg)
     try:
@@ -211,8 +226,7 @@ def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path, la
             native_micro_batch_size=cfg.trainer.micro_forward_batch_size_per_gpu,
             repeat_micro_batch_size=4,
             collated_bytes=sum(value.numel() * value.element_size() for value in padded.values()),
-            collated_route_bytes=padded["rollout_routed_experts"].numel()
-            * padded["rollout_routed_experts"].element_size(),
+            collated_route_bytes=padded.routed_experts.nbytes,
             nonzero_advantage_samples=int((padded["advantages"].abs().sum(dim=1) > 0).sum()),
         )
         scores = collector._trainer_scores(trainer, 0)

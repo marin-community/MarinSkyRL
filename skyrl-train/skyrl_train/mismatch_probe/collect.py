@@ -86,16 +86,15 @@ class BatchLayout:
     nonzero_advantage_samples: int
 
 
-def _encode_routes(routes: torch.Tensor | None, length: int) -> EncodedRoutes:
+def _encode_routes(routes: np.ndarray | None, length: int) -> EncodedRoutes:
     if routes is None:
         return EncodedRoutes(None, None, None)
-    value = routes[:length].contiguous().cpu().numpy()
+    value = np.ascontiguousarray(routes[:length])
     return EncodedRoutes(value.tobytes(), list(value.shape), str(value.dtype))
 
 
 def _reorder_batch(batch: TrainingInputBatch, order: list[int]) -> TrainingInputBatch:
-    index = torch.tensor(order, dtype=torch.long)
-    reordered = TrainingInputBatch({key: value[index] if value is not None else None for key, value in batch.items()})
+    reordered = TrainingInputBatch.cat([batch[index] for index in order])
     reordered.metadata = dict(batch.metadata)
     if "uids" in reordered.metadata:
         reordered.metadata["uids"] = [batch.metadata["uids"][i] for i in order]
@@ -267,11 +266,6 @@ class ProbeCollector:
             trainer.group_advantage_invariant = original_contract
             trainer.all_metrics = original_metrics
 
-        routes = training_input.routed_experts_tensor()
-        training_input.routed_expert_rows = None
-        if routes is not None:
-            training_input["rollout_routed_experts"] = routes
-
         response_width = training_input["response_mask"].shape[1]
         prompt_width = training_input["sequences"].shape[1] - response_width
         padded_count = len(training_input["sequences"]) - len(sample_ids)
@@ -287,15 +281,14 @@ class ProbeCollector:
             trainer_response = training_input["sequences"][
                 position, prompt_width : prompt_width + response_length
             ].tolist()
-            routes = training_input.get("rollout_routed_experts")
-            encoded_routes = _encode_routes(None if routes is None else routes[position], response_length)
+            route_rows = training_input.routed_expert_rows
+            routes = None if route_rows is None else route_rows.rows[position]
+            encoded_routes = _encode_routes(routes, response_length)
             route_valid_mask = None
             if encoded_routes.shape is not None:
                 if len(encoded_routes.shape) != 3 or encoded_routes.shape[0] != response_length:
                     raise ValueError("captured routes must align with the frozen response tokens")
-                route_valid_mask = (
-                    (routes[position, :response_length] != SENTINEL_EXPERT_ID).any(dim=-1).bool().tolist()
-                )
+                route_valid_mask = (routes[:response_length] != SENTINEL_EXPERT_ID).any(axis=-1).tolist()
                 if self.source_manifest is not None:
                     route_valid_mask = self.probes[position].route_valid_mask
             advantage = None
@@ -357,12 +350,7 @@ class ProbeCollector:
             collated_bytes=sum(
                 value.numel() * value.element_size() for value in training_input.values() if value is not None
             ),
-            collated_route_bytes=(
-                0
-                if training_input.get("rollout_routed_experts") is None
-                else training_input["rollout_routed_experts"].numel()
-                * training_input["rollout_routed_experts"].element_size()
-            ),
+            collated_route_bytes=0 if training_input.routed_experts is None else training_input.routed_experts.nbytes,
             nonzero_advantage_samples=(
                 0
                 if training_input.get("advantages") is None
@@ -499,18 +487,18 @@ class ProbeCollector:
         training_input = self.training_input
         rows = self.probes
         n = len(rows)
-        route_tensor = training_input.get("rollout_routed_experts")
+        route_rows = training_input.routed_expert_rows
         modes = (NATIVE_MODE, REPEAT_MODE, *self.spec.extra_trainer_modes)
         result = []
         for mode in modes:
             order = self.batch_layout.repeat_order if mode == REPEAT_MODE else self.batch_layout.native_order
             data = training_input.select(
-                ["sequences", "attention_mask", *(["rollout_routed_experts"] if route_tensor is not None else [])],
+                ["sequences", "attention_mask", *(["rollout_routed_experts"] if route_rows is not None else [])],
                 ["response_length"],
             )
             data["probe_row_indices"] = torch.arange(data.batch_size, dtype=torch.long)
-            if not TRAINER_MODES[mode].requires_routes and route_tensor is not None:
-                data["rollout_routed_experts"] = torch.zeros_like(route_tensor)
+            if not TRAINER_MODES[mode].requires_routes and route_rows is not None:
+                data.routed_expert_rows = replace(route_rows, rows=tuple(np.zeros_like(row) for row in route_rows.rows))
             if mode == REPEAT_MODE:
                 data = _reorder_batch(data, order + list(range(n, data.batch_size)))
             micro_batch_size = self.batch_layout.repeat_micro_batch_size if mode == REPEAT_MODE else None
